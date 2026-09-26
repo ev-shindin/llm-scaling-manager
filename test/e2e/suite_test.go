@@ -583,6 +583,67 @@ func expectKEDAExternalMetricWired(g Gomega, namespace, scaleTargetDeployment st
 		scaleTargetDeployment, carried)
 }
 
+// rewireAnnotation is written by nudgeScaledObject purely to change the object.
+const rewireAnnotation = "e2e.llm-d.ai/rewire"
+
+// ensureKEDAExternalMetricWired waits for KEDA to carry WVA's external metric on
+// the HPA, and makes KEDA re-derive it if it did not.
+//
+// KEDA builds the HPA's metric list once, from the external scaler's
+// GetMetricSpec, when it first reconciles a ScaledObject, and rebuilds it only
+// when the ScaledObject itself changes. If the scaler cannot be reached at that
+// instant the HPA is created carrying no metrics at all, the API server defaults
+// it to Resource/cpu, and nothing ever replaces it -- the HPA then scales on a
+// CPU metric this cluster has no metrics-server for, so the target cannot move
+// whatever WVA recommends.
+//
+// Holding the leader lease does not close that window, which is why
+// waitForWVALeadership is not enough on its own. Measured in CI on 2026-09-26:
+// WVA acquired the lease at 08:43:15 and the spec created the ScaledObject at
+// 08:43:22, but KEDA's first call to reach the scaler landed at 08:43:27 -- its
+// gRPC channel was still re-establishing after the restart replaced the pod
+// behind the Service. The HPA created inside those five seconds stayed on the
+// CPU default for the whole 120 s budget, and the spec failed reporting
+// spec.metrics as [Resource] while WVA published desired=2 every cycle.
+//
+// So rather than guess KEDA's reconnect backoff, recover from it: touching an
+// annotation is a ScaledObject change, which is precisely what makes KEDA
+// re-derive the metrics. The nudge fires once, only if the metric is still
+// missing after KEDA has had longer than that reconnect takes.
+func ensureKEDAExternalMetricWired(namespace, modelSvcName, scaleTargetDeployment string) {
+	const nudgeAfter = 30 * time.Second
+
+	soName := fixtures.ScaledObjectNameFor(modelSvcName)
+	start := time.Now()
+	nudged := false
+
+	Eventually(func(g Gomega) {
+		if !nudged && time.Since(start) > nudgeAfter {
+			// A failed nudge is not a spec failure: it is retried on the next
+			// poll, and the assertion below still names the real cause if the
+			// metric never appears.
+			if err := nudgeScaledObject(namespace, soName); err == nil {
+				nudged = true
+			}
+		}
+		expectKEDAExternalMetricWired(g, namespace, scaleTargetDeployment)
+	}, 180*time.Second, time.Duration(cfg.PollIntervalSec)*time.Second).Should(Succeed())
+}
+
+// nudgeScaledObject writes a changing annotation so KEDA reconciles the
+// ScaledObject and re-derives its HPA's metrics.
+func nudgeScaledObject(namespace, name string) error {
+	so := &kedav1alpha1.ScaledObject{}
+	if err := crClient.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, so); err != nil {
+		return err
+	}
+	if so.Annotations == nil {
+		so.Annotations = map[string]string{}
+	}
+	so.Annotations[rewireAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+	return crClient.Update(ctx, so)
+}
+
 func expectWVADesiredReplicasConsumed(g Gomega, namespace, scaleTargetDeployment string) {
 	hpaList, err := k8sClient.AutoscalingV2().HorizontalPodAutoscalers(namespace).List(ctx, metav1.ListOptions{})
 	g.Expect(err).NotTo(HaveOccurred())

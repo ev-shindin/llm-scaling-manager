@@ -528,13 +528,12 @@ var _ = Describe("Multi-analyzer engine scale-up (saturation-driven, throughput 
 		// Before the assertion below, not as part of it: a Deployment that never
 		// grows reads the same whether WVA recommended nothing or KEDA never wired
 		// the metric that carries the recommendation. This spec restarts WVA and
-		// registers the ScaledObject seconds later, which is exactly the shape
-		// that once left the HPA on the CPU default for the whole timeout (see
-		// waitForWVALeadership). Measured at 20-35 s on kind; 120 s is generous.
-		Eventually(func(g Gomega) {
-			expectKEDAExternalMetricWired(g, cfg.LLMDNamespace, modelDecodeDeployment)
-		}, 120*time.Second, time.Duration(cfg.PollIntervalSec)*time.Second).
-			Should(Succeed())
+		// registers the ScaledObject seconds later, which is exactly the shape that
+		// leaves the HPA on the CPU default -- a window holding the leader lease
+		// does not close, and one KEDA never reconsiders on its own. See
+		// ensureKEDAExternalMetricWired, which recovers from it rather than waiting
+		// it out.
+		ensureKEDAExternalMetricWired(cfg.LLMDNamespace, modelSvcName, modelDecodeDeployment)
 
 		By("Asserting KEDA actuates scale-up above MinReplicas")
 		// Faked kv-cache-usage=0.9 > scaleUpThreshold=0.85 deterministically drives a
