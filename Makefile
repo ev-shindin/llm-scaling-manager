@@ -155,6 +155,16 @@ BENCHMARK_MONITORING ?= true
 # Collect results by streaming a gzipped tar over exec instead of kubectl cp.
 # See the note on the benchmark-run recipe for why this defaults on.
 BENCHMARK_FAST_COLLECT ?= true
+# Where the replica sampler and the controller log tail write while a run is in
+# flight. Keyed by namespace: two runs in different namespaces used to share one
+# path and interleave their snapshots into a file that then failed to parse.
+BENCHMARK_CAPTURE_DIR ?= /tmp
+BENCHMARK_SAMPLES     ?= $(BENCHMARK_CAPTURE_DIR)/wva_replica_samples-$(BENCHMARK_NAMESPACE).json
+BENCHMARK_WVA_LOG     ?= $(BENCHMARK_CAPTURE_DIR)/wva_controller_tail-$(BENCHMARK_NAMESPACE).log
+# Passed to both captures so the cluster they watch is explicit rather than
+# inherited. Empty means "whatever KUBECONFIG says", which is the old behaviour.
+BENCHMARK_KUBE_CONTEXT ?=
+BENCHMARK_CAPTURE_CTX   = $(if $(BENCHMARK_KUBE_CONTEXT),--context $(BENCHMARK_KUBE_CONTEXT),)
 # Skip the chained smoketest after standup.
 #
 # For a MULTI-MODEL stack, which routes by PATH PREFIX. The smoketest's
@@ -2041,10 +2051,11 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 	@# namespace runs no launchers.
 	@bash hack/benchmark/fma_placement.sh verify $(BENCHMARK_NAMESPACE) \
 		"$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml"
-	@rm -f /tmp/wva_replica_samples.json /tmp/wva_replica_samples.json.pid
-	@bash hack/benchmark/sample_replicas.sh start $(BENCHMARK_NAMESPACE) /tmp/wva_replica_samples.json || true
-	@rm -f /tmp/wva_controller_tail.log /tmp/wva_controller_tail.log.pid /tmp/wva_controller_tail.log.stderr
-	@bash hack/benchmark/tail_wva_logs.sh start $(BENCHMARK_NAMESPACE) /tmp/wva_controller_tail.log || true
+	@rm -f $(BENCHMARK_SAMPLES) $(BENCHMARK_SAMPLES).pid $(BENCHMARK_SAMPLES).owner
+	@# --force because this recipe has just removed the file, so it owns the path.
+	@bash hack/benchmark/sample_replicas.sh $(BENCHMARK_CAPTURE_CTX) --force start $(BENCHMARK_NAMESPACE) $(BENCHMARK_SAMPLES) || true
+	@rm -f $(BENCHMARK_WVA_LOG) $(BENCHMARK_WVA_LOG).pid $(BENCHMARK_WVA_LOG).stderr $(BENCHMARK_WVA_LOG).owner
+	@bash hack/benchmark/tail_wva_logs.sh $(BENCHMARK_CAPTURE_CTX) --force start $(BENCHMARK_NAMESPACE) $(BENCHMARK_WVA_LOG) || true
 	@# Collect the results tree as a gzipped tar over exec rather than with
 	@# kubectl cp. The harness ships both paths and defaults to cp, which on a
 	@# large tree either runs for hours or drops: its own source puts cp at
@@ -2067,16 +2078,16 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 	@# Stopped and filed even when the run above failed -- a run that errored in a
 	@# post-processing step still produced measurements worth reading, and every
 	@# FMA run so far has ended that way.
-	@bash hack/benchmark/sample_replicas.sh stop /tmp/wva_replica_samples.json || true
-	@bash hack/benchmark/tail_wva_logs.sh stop $(BENCHMARK_NAMESPACE) /tmp/wva_controller_tail.log || true
+	@bash hack/benchmark/sample_replicas.sh stop $(BENCHMARK_SAMPLES) $(BENCHMARK_NAMESPACE) || true
+	@bash hack/benchmark/tail_wva_logs.sh stop $(BENCHMARK_NAMESPACE) $(BENCHMARK_WVA_LOG) || true
 	@LATEST=$$(ls -td $(BENCHMARK_WORKSPACE)/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
-	if [ -n "$$LATEST" ] && [ -s /tmp/wva_replica_samples.json ]; then \
+	if [ -n "$$LATEST" ] && [ -s $(BENCHMARK_SAMPLES) ]; then \
 		mkdir -p "$$LATEST/metrics/processed"; \
-		cp /tmp/wva_replica_samples.json "$$LATEST/metrics/processed/wva_replica_samples.json"; \
+		cp $(BENCHMARK_SAMPLES) "$$LATEST/metrics/processed/wva_replica_samples.json"; \
 		echo "Replica samples filed in $$LATEST/metrics/processed/wva_replica_samples.json"; \
 	fi; \
-	if [ -n "$$LATEST" ] && [ -s /tmp/wva_controller_tail.log ]; then \
-		cp /tmp/wva_controller_tail.log "$$LATEST/wva_controller.log"; \
+	if [ -n "$$LATEST" ] && [ -s $(BENCHMARK_WVA_LOG) ]; then \
+		cp $(BENCHMARK_WVA_LOG) "$$LATEST/wva_controller.log"; \
 		echo "WVA controller log tail filed in $$LATEST/wva_controller.log"; \
 	fi
 	@echo ""
@@ -2475,6 +2486,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# preStop hooks pod-wide, or reporting an unreadable workload as healthy all
 	@# parse perfectly and are all wrong about a running cluster.
 	@bash hack/check-workload-gaps.sh
+	@echo "Checking the benchmark capture helpers..."
+	@# Executes them against a stub kubectl. A capture that replaces the run
+	@# already on disk, or that watches a cluster nobody named, parses perfectly
+	@# -- and both have cost data here.
+	@bash hack/check-benchmark-capture.sh
 	@echo "Checking model identification..."
 	@# Same shape as the check above, on the parsers that name the model every
 	@# ScaledObject is written for. `bash -n` sees none of it: a --served-model-name
