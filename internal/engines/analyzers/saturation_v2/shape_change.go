@@ -89,6 +89,19 @@ type shapeMemo struct {
 	arrivingAnchor float64
 	// changedAt is when the outstanding change was raised, zero when none is.
 	changedAt time.Time
+	// lastChangedAt is when a change was last DECLARED, whether or not a hold
+	// was raised for it. It is never cleared by the backstop and never by
+	// settleFleetShape, because it answers a different question from changedAt:
+	// "has the shape moved recently", not "is the fleet being withheld".
+	//
+	// The two must not be conflated. A hold of zero -- DisableShapeChangeHold,
+	// or ShapeChangeHoldSeconds deliberately set low -- leaves changedAt unset
+	// on every cycle, so anything keyed on it sees a shape change for exactly
+	// the one cycle the tracker declares it and nothing afterwards. The derived
+	// mu's divisor needs the whole post-switch window (analyzer.go's muDivisor
+	// comment), so it reads this instead and keeps working when an operator
+	// turns the hold off.
+	lastChangedAt time.Time
 	// gaveUpAt is when the backstop last gave up on a hold, zero when none has
 	// been given up on since the fleet last measured itself. A new hold is not
 	// raised within holdFor of it, so a workload that drifts without settling
@@ -184,7 +197,7 @@ func servedPromptLength(replicas []domain.ReplicaMetrics) float64 {
 // the two, which is the burst again. A role with no window gets no floor and
 // answers to occupancy, which is the documented behaviour for a fleet that has
 // never been seen saturated.
-func saturatedCompletionRate(rm domain.ReplicaMetrics, role string, fleetOutput float64) (float64, bool) {
+func saturatedCompletionRate(rm domain.ReplicaMetrics, role string, fleetOutput, ileff float64) (float64, bool) {
 	// Prefill emits about one token per request -- its work is the prompt, not
 	// the generation -- so tokens over an output length is not its completion
 	// rate and would read three orders of magnitude low. It keeps the
@@ -194,6 +207,29 @@ func saturatedCompletionRate(rm domain.ReplicaMetrics, role string, fleetOutput 
 	// tokens per second, from prompt_tokens_total keyed by input length, which
 	// the collector does not gather today (item 1 of the proposal).
 	if canonicalRole(role) == domain.RolePrefill {
+		// Prompt tokens per second, converted to the requests/s the floor
+		// divides by at the shape now arriving. This is the figure the
+		// paragraph above said the collector did not gather; it does now
+		// (QueryPrefillComputedTokenRate), and it is better than the
+		// prompt_tokens_total that paragraph named because it counts only
+		// tokens actually COMPUTED -- a prefix the cache held cost prefill
+		// nothing.
+		//
+		// Why the unit matters, measured on run PK: at 1, 2 and 10 prefill
+		// replicas the request rate read 4.75, 4.62 and 4.50 req/s while the
+		// token rate went 138,875 -> 933,750. A request rate under overload is
+		// the rate the fleet is being SERVED at, not a capacity, so dividing
+		// by it sizes the fleet by its own current size.
+		//
+		// ileff, not the raw prompt length, for the same reason the counter
+		// excludes cached tokens: they are the same discount, applied to the
+		// two sides of the division.
+		if rm.PrefillComputedTokenRate > 0 && ileff > 0 {
+			return rm.PrefillComputedTokenRate / ileff, true
+		}
+		// No token rate: SGLang, or a vLLM too old to publish the counter.
+		// The request rate is what this always used, and is still better than
+		// no window at all.
 		return rm.RequestRate, rm.RequestRate > 0
 	}
 	if rm.GenerationTokenRate <= 0 || fleetOutput <= 0 {
@@ -367,6 +403,10 @@ func (a *SaturationAnalyzer) noteFleetShape(namespace, modelID string, in, out f
 		// crossing repeats a wait already known not to finish. settleFleetShape
 		// clears this, so a fleet that DOES measure itself is free to hold
 		// again immediately for a genuinely new transition.
+		// Recorded on EVERY declared change and before the hold's own
+		// conditions, so it survives a hold of zero. This is the clock the mu
+		// divisor reads; changedAt below is the hold's.
+		memo.lastChangedAt = now
 		ready := memo.gaveUpAt.IsZero() || now.Sub(memo.gaveUpAt) >= holdFor
 		if holdFor > 0 && memo.changedAt.IsZero() && ready {
 			memo.changedAt = now
@@ -463,6 +503,31 @@ func (a *SaturationAnalyzer) settleFleetShape(namespace, modelID string, ownRead
 
 // fleetShapeState reports the stable output length the keys are built from
 // and whether a change is outstanding, without observing anything.
+// shapeChangedWithin reports whether this model's fleet shape was last declared
+// changed within the given window, independently of whether a hold was raised.
+//
+// Separate from the outstanding-hold flag on purpose. An operator who sets
+// DisableShapeChangeHold leaves changedAt unset for ever, so a caller keyed on
+// the hold sees one cycle of shape change and then none -- which would put the
+// derived mu's divisor back on the [5m] mean for the whole straggler window the
+// short window exists to cover, silently, through a flag documented as only
+// turning off the fleet hold.
+//
+// False when the model has no memo or has never declared a change.
+func (a *SaturationAnalyzer) shapeChangedWithin(namespace, modelID string,
+	window time.Duration, now time.Time) bool {
+	if window <= 0 {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	memo, ok := a.fleetShape[namespace+"|"+modelID]
+	if !ok || memo.lastChangedAt.IsZero() {
+		return false
+	}
+	return now.Sub(memo.lastChangedAt) < window
+}
+
 func (a *SaturationAnalyzer) fleetShapeState(namespace, modelID string) (out, in float64, outstanding bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

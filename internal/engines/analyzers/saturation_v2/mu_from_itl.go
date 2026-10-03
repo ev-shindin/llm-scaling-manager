@@ -184,9 +184,16 @@ func pricingK(cfg *config.ScalingPolicy) float64 {
 // C is the engine's whole KV capacity, not k1. k1 is already C times the
 // analyzer's KV threshold, and itl.Sequences applies k itself, so passing k1
 // would apply a threshold twice.
+// avgOutput is the output length mu is divided by, passed in rather than taken
+// from fleet: it must be the SHORT-window figure, while the shape keeps the [5m]
+// one every other consumer shares. A count-weighted mean over five minutes is
+// dominated by the previous shape's long stragglers for five minutes after they
+// stop arriving -- measured decaying 3750 -> 250 across one 6000 -> 250 switch --
+// and the divisor is where that error reaches mu undamped. KVreq, by contrast,
+// is ILeff + OL/2 and barely moves: at a 20k prompt the same error shifts it
+// about 1.5%.
 func deriveMu(model itl.Model, params *capacity.EngineParams,
-	totalKvTokens int64, fleet shape.Shape, kPrice float64) derivedMu {
-	avgOutput := fleet.AvgOutputTokens
+	totalKvTokens int64, fleet shape.Shape, kPrice float64, avgOutput float64) derivedMu {
 	if model.IsZero() || !(avgOutput > 0) || !(fleet.KVreq > 0) {
 		return derivedMu{}
 	}

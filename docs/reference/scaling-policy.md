@@ -251,6 +251,56 @@ These parameters apply when `analyzerName: "saturation"` is set or when the `ana
 
 > `scaleUpThreshold` and `scaleDownBoundary` are honored only for saturation on this branch; see the `multi-analyzer-threshold` PR for the universal post-step that calibrates RC/SC across all analyzers.
 
+### Expected output length
+
+This one is **not** a ConfigMap field. It is set on the ScaledObject, beside
+`modelID`, and a `defaultOutputTokens` key in this ConfigMap is ignored:
+
+```yaml
+triggers:
+  - type: external-push
+    metadata:
+      scalerAddress: wva-external-scaler.<wva-namespace>.svc.cluster.local:9090
+      modelID: ibm/granite-13b
+      defaultOutputTokens: "6000"
+```
+
+The scaling manager prices each request waiting in the router queue at the
+generation length it expects that request to produce: a queued request owes the
+decode role `O` tokens of work, and that is what makes a growing queue worth
+ordering capacity for. `O` is the first of these that is a positive number:
+
+| source | what it is |
+| --- | --- |
+| the fleet's own reading | the output length the running replicas are averaging over their recent completions |
+| the fleet's last known shape | the stable shape the throughput keys are built from, which carries the figure across a gap in readings |
+| `defaultOutputTokens` | this key |
+| the built-in default | 512 tokens |
+
+Set it when the deployment's generations are materially longer than a chat
+completion. Until a replica has completed a generation there is no reading to
+use — the first cycles after a restart, after a scale from zero, or after the
+arriving traffic changes shape — and the built-in 512 under-states a
+6000-token workload by a factor of twelve. A queue priced low is a queue that
+does not order, and that is paid in time-to-first-token.
+
+It is a seed for that window only. The fleet's own measurement displaces it as
+soon as one exists, so a figure of the right order is what matters and an exact
+one buys nothing.
+
+**Why the trigger and not this ConfigMap.** The figure is a fact about one
+workload's traffic, not a threshold a class of workloads shares — a
+fleet-wide generation length is already what the built-in 512 is. It sits beside
+`replicaStartSeconds`, the other per-workload seed, for the same reason.
+
+**When a model's variants disagree.** A model under P/D has a ScaledObject per
+role, so the key can be written twice. The **largest** figure wins, and the
+disagreement is logged with every figure that was named. Largest, because only
+one role generates tokens: a prefill trigger carrying nothing must not pull
+decode's figure down to the built-in fallback, and under-pricing a queue is the
+failure the key exists to fix. Writing it on one variant and leaving it off the
+others is the simplest way to get this right.
+
 ### Default Configuration
 
 Since v0.9.0 the shipped `default` entry selects **V2** (token/capacity-based) via
@@ -762,6 +812,7 @@ triggers:
 | `default` entry | the ConfigMap's `default` key | fleet-wide fallback |
 | named tier | the variant's `scalingPolicy`, else `default.defaultPolicy` | a class of workloads |
 | per-model override | an entry whose body names this model | one model in one namespace |
+| trigger metadata | per-workload seeds on the ScaledObject, e.g. `defaultOutputTokens` | one workload |
 
 `defaultPolicy` is read from the `default` entry only: a fallback chosen by a tier
 or by a per-model entry would be that entry choosing for everyone but itself.

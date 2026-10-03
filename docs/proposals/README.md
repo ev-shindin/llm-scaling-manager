@@ -55,6 +55,12 @@ Read the review first; the implementation design says what was built.
 - **[Scale-from-zero: the missing signal](scale-from-zero-missing-signal.md)** —
   why a parked model needs a push, and where it comes from.
 - **[Priority scoping](priority-scoping.md)** — parked. Read before redesigning.
+- **[A release the swap can survive](managed-keda-behavior.md)** — measured: a
+  ten-replica release takes 420 s under a 300 s stabilization window, so a role
+  waiting on GPUs another role has been told to free waits that long. Proposes
+  shortening that one field, on the shrinking target only, through the
+  `wvaOwnership` opt-in. Also records what the same run does **not** show, and
+  the plateau that was wrongly blamed on it.
 
 - **[WVA as a KEDA external scaler: the argument](wva-external-scaler-proposal.md)**
   — the shorter framing of the same design: compute the target, let KEDA
@@ -75,6 +81,25 @@ Read the review first; the implementation design says what was built.
   the count WVA derives capacity from means "Pods that reported metrics", is
   used as though it meant "Pods taking traffic", and the gap produced three
   symptoms investigated as unrelated bugs.
+
+Traffic shape and the units capacity is priced in — read the per-token economy
+last; it is the unit change that makes the other two land.
+
+- **[Traffic shape shifts](shape-shift-treatment.md)** — what a shape change
+  does physically, what the analyzer sees late, and the four directions with
+  which rows are measured and which are predicted. Derives decode's mu from the
+  ITL line so a shift reprices on the cycle it is observed.
+- **[Prefill capacity from a fitted TTFT model](prefill-ttft-model.md)** —
+  prefill has no throughput ceiling today. Fits `TTFT(T) = A*T + B` so `1/A` is
+  the replica's prefill token ceiling, obtainable without driving it into
+  saturation.
+- **[A per-token economy](per-token-economy.md)** — the reference for every
+  component and formula in the saturation analyzer, and the argument for making
+  tokens the native unit of demand and capacity on both roles. Both documents
+  above convert their result back into requests per second at the boundary;
+  this one deletes that conversion, which is what the stale-shape hold, the
+  output-length bucket keys and prefill's dropped backlog all depend on.
+  Measures the `I`-up direction the shape-shift table lists as unrun.
 
 ## Product and lifecycle
 

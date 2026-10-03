@@ -304,6 +304,11 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 	// replicas.
 	avgITL := data.avgITL
 	avgServiceTime := data.avgServiceTime
+	// TTFT is a timing metric like the two above and gets the same treatment:
+	// a not-Ready pod's reading is discarded, and the uptime bound below
+	// applies to it as well. A first-token latency longer than the pod has
+	// existed is the same impossibility as a service time longer than it.
+	avgTTFT := data.avgTTFT
 	if !ready {
 		// At DEFAULT, not DEBUG. The incident this guards against was
 		// visible only as a moved demand floor; now that both layers
@@ -312,7 +317,7 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		// shipped default of -v=2, so a DEBUG line would be invisible in
 		// exactly the run that needs it. Logged only when there was
 		// something to drop, so a normally-starting pod stays quiet.
-		if data.avgITL > 0 || data.avgServiceTime > 0 {
+		if data.avgITL > 0 || data.avgServiceTime > 0 || data.avgTTFT > 0 {
 			logger.V(logging.DEFAULT).Info("dropping timing metrics from a not-Ready pod",
 				"pod", podName,
 				"namespace", namespace,
@@ -322,6 +327,7 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		}
 		avgITL = 0
 		avgServiceTime = 0
+		avgTTFT = 0
 	}
 	// Second guard, independent of readiness: no request can have taken
 	// longer than the Pod reporting it has been running.
@@ -369,28 +375,46 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 			avgServiceTime = 0
 		}
 	}
+	// The same bound on TTFT, for the same reason: a first-token latency the
+	// pod cannot have measured is a pipeline artefact, and it would otherwise
+	// become a point in the prefill model's fit.
+	if avgTTFT > 0 {
+		if uptime, known := c.podUptime(ctx, namespace, podName, collectedAt); known &&
+			uptime >= minUptimeForServiceTimeBound && avgTTFT > uptime.Seconds() {
+			logger.V(logging.DEFAULT).Info("dropping a TTFT longer than the pod has existed",
+				"pod", podName,
+				"namespace", namespace,
+				"variant", vaName,
+				"avgTTFT", avgTTFT,
+				"podUptimeSeconds", uptime.Seconds())
+			avgTTFT = 0
+		}
+	}
 	metric := domain.ReplicaMetrics{
-		PodName:               podName,
-		ModelID:               modelID,
-		Namespace:             namespace,
-		VariantName:           vaName,
-		FromWarmPool:          fromWarmPool,
-		Ready:                 ready,
-		StartSeconds:          c.podStartSeconds(ctx, namespace, podName),
-		KvCacheUsage:          kvUsage,
-		QueueLength:           queueLen,
-		NumGpuBlocks:          data.numGpuBlocks,
-		BlockSize:             data.blockSize,
-		TotalKvCapacityTokens: totalKvCapacityTokens,
-		TokensInUse:           tokensInUse,
-		AvgOutputTokens:       data.avgOutputTokens,
-		AvgInputTokens:        data.avgInputTokens,
-		PrefixCacheHitRate:    data.prefixCacheHitRate,
-		AvgITL:                avgITL,
-		AvgServiceTime:        avgServiceTime,
-		GenerationTokenRate:   data.generationTokenRate,
-		KvUsageInstant:        data.kvUsageInstant,
-		RequestRate:           data.requestRate,
+		PodName:                  podName,
+		ModelID:                  modelID,
+		Namespace:                namespace,
+		VariantName:              vaName,
+		FromWarmPool:             fromWarmPool,
+		Ready:                    ready,
+		StartSeconds:             c.podStartSeconds(ctx, namespace, podName),
+		KvCacheUsage:             kvUsage,
+		QueueLength:              queueLen,
+		NumGpuBlocks:             data.numGpuBlocks,
+		BlockSize:                data.blockSize,
+		TotalKvCapacityTokens:    totalKvCapacityTokens,
+		TokensInUse:              tokensInUse,
+		AvgOutputTokens:          data.avgOutputTokens,
+		AvgOutputTokensRecent:    data.avgOutputTokensRecent,
+		AvgInputTokens:           data.avgInputTokens,
+		PrefixCacheHitRate:       data.prefixCacheHitRate,
+		AvgITL:                   avgITL,
+		AvgTTFT:                  avgTTFT,
+		PrefillComputedTokenRate: data.prefillComputedTokenRate,
+		AvgServiceTime:           avgServiceTime,
+		GenerationTokenRate:      data.generationTokenRate,
+		KvUsageInstant:           data.kvUsageInstant,
+		RequestRate:              data.requestRate,
 		Metadata: &domain.ReplicaMetricsMetadata{
 			CollectedAt:     collectedAt,
 			Age:             freshnessAge,

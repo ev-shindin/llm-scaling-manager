@@ -82,7 +82,7 @@ var _ = Describe("deriveMu against run P", func() {
 	It("agrees with the mu the fleet measured, where it measured one", func() {
 		// Phase 1 saturated, so the floor had a reading of its own to compare
 		// against: it used 1.27 requests a second for the whole phase.
-		got := deriveMu(runPModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), kRunP)
+		got := deriveMu(runPModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), kRunP, 6000)
 		Expect(got.ok).To(BeTrue())
 		Expect(got.rate).To(BeNumerically("~", 1.27, 0.15),
 			"a derived mu that disagrees with a measured one is not describing this card")
@@ -93,7 +93,7 @@ var _ = Describe("deriveMu against run P", func() {
 		// times the request rate per replica. The floor went on using 1.31 --
 		// the phase 1 figure -- for all nineteen minutes, and held 6-7 replicas
 		// at 1.2% KV utilisation and an empty queue.
-		got := deriveMu(runPModel, tracedParams, tracedKv, shape.New(8000, 1000, 0), kRunP)
+		got := deriveMu(runPModel, tracedParams, tracedKv, shape.New(8000, 1000, 0), kRunP, 1000)
 		Expect(got.ok).To(BeTrue())
 		Expect(got.rate).To(BeNumerically("~", 3.89, 0.2))
 
@@ -109,7 +109,7 @@ var _ = Describe("deriveMu", func() {
 	It("reproduces the mu the fleet measured for itself under the first shape", func() {
 		// 1000-token prompts, 6000-token generations. Saturated, the fleet
 		// recorded 1.4292 and 1.5429 requests a second across the two runs.
-		got := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), tracedK)
+		got := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), tracedK, 6000)
 		Expect(got.ok).To(BeTrue())
 		Expect(got.rate).To(BeNumerically("~", 1.49, 0.12),
 			"the model has to land where the hardware did, or it is not describing it")
@@ -120,7 +120,7 @@ var _ = Describe("deriveMu", func() {
 		// over-provisioned for this and never saturated under it, so no reading
 		// was ever taken -- the floor went on using the first shape's figure
 		// for the remaining nineteen minutes of the run.
-		got := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(8000, 1000, 0), tracedK)
+		got := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(8000, 1000, 0), tracedK, 1000)
 		Expect(got.ok).To(BeTrue())
 		Expect(got.rate).To(BeNumerically(">", 3.0))
 		Expect(6.0/got.rate).To(BeNumerically("<", 2.5),
@@ -132,12 +132,46 @@ var _ = Describe("deriveMu", func() {
 		// prefix cache has an effective prompt length of zero and a footprint
 		// of OL/2 alone. That is a real shape, not a missing one, and it holds
 		// more sequences per replica than the same workload uncached.
-		cached := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 1.0), tracedK)
-		plain := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), tracedK)
+		cached := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 1.0), tracedK, 6000)
+		plain := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), tracedK, 6000)
 		Expect(cached.ok).To(BeTrue())
 		Expect(cached.seqs).To(BeNumerically(">", plain.seqs),
 			"a cached prompt leaves room for more resident sequences")
 		Expect(cached.rate).To(BeNumerically(">", plain.rate))
+	})
+
+	It("divides by the divisor it is given, not by the shape's own output length", func() {
+		// The whole point of the parameter. mu = seqs / (ITL * OL), and the two
+		// output lengths differ for the few minutes after a shape change: the
+		// shape carries the [5m] count-weighted mean, which decayed
+		// 3750 -> 2814 -> 2382 -> 2278 -> 2136 -> 250 per decode pod across one
+		// 6000 -> 250 switch, while the arriving work was 250 throughout.
+		//
+		// Measured consequence of getting it wrong: a derived mu of 1.399 req/s
+		// and a floor asking 11.56 replicas where the demand implied 1.
+		fleet := shape.New(20000, 250, 0)
+
+		stale := deriveMu(tracedModel, tracedParams, tracedKv, fleet, tracedK, 1000)
+		fresh := deriveMu(tracedModel, tracedParams, tracedKv, fleet, tracedK, 250)
+		Expect(stale.ok).To(BeTrue())
+		Expect(fresh.ok).To(BeTrue())
+
+		// Only the divisor moved, so seqs and the token rate are identical and
+		// the rates differ by exactly the ratio of the two divisors.
+		Expect(fresh.seqs).To(Equal(stale.seqs), "seqs must not depend on the divisor")
+		Expect(fresh.tokenSec).To(Equal(stale.tokenSec), "nor the token rate")
+		Expect(fresh.rate).To(BeNumerically("~", stale.rate*4, 1e-9),
+			"1000/250 = 4x: a divisor 4x too high understates mu 4x, and the floor divides lambda by it")
+	})
+
+	It("declines when the divisor is absent, rather than dividing by the shape", func() {
+		// A zero divisor must not silently fall back INSIDE deriveMu: the
+		// caller is the one that knows whether the short window was empty
+		// because the engine does not publish it or because nothing completed,
+		// and it substitutes the [5m] figure there (fleetOutputLengthRecent).
+		// Deciding it here as well would make the fallback invisible.
+		got := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(20000, 250, 0), tracedK, 0)
+		Expect(got.ok).To(BeFalse(), "no divisor is no derived mu")
 	})
 
 	It("is capped by max_num_seqs, which the trace's second phase sat on", func() {
@@ -147,11 +181,11 @@ var _ = Describe("deriveMu", func() {
 		// constant, because it moves with the pricing point: it was ~6,591 when
 		// mu was priced at 0.85 of physical KV and is ~5,273 at the 0.68 the
 		// analyzer actually targets.
-		got := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(100, 100, 0), tracedK)
+		got := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(100, 100, 0), tracedK, 100)
 		Expect(got.ok).To(BeTrue())
 		Expect(got.seqs).To(Equal(float64(tracedParams.MaxNumSeqs)))
 
-		uncapped := deriveMu(tracedModel, &capacity.EngineParams{}, tracedKv, shape.New(100, 100, 0), tracedK)
+		uncapped := deriveMu(tracedModel, &capacity.EngineParams{}, tracedKv, shape.New(100, 100, 0), tracedK, 100)
 		Expect(uncapped.seqs).To(BeNumerically("~", tracedK*float64(tracedKv)/150, 1),
 			"uncapped, it is the cache's own number: kPrice x C / KVreq")
 		Expect(uncapped.seqs).To(BeNumerically(">", 20*float64(tracedParams.MaxNumSeqs)),
@@ -159,21 +193,21 @@ var _ = Describe("deriveMu", func() {
 	})
 
 	It("declines rather than guessing", func() {
-		Expect(deriveMu(itl.Model{}, tracedParams, tracedKv, shape.New(1000, 6000, 0), tracedK).ok).To(BeFalse(),
+		Expect(deriveMu(itl.Model{}, tracedParams, tracedKv, shape.New(1000, 6000, 0), tracedK, 6000).ok).To(BeFalse(),
 			"no fitted model")
-		Expect(deriveMu(tracedModel, tracedParams, 0, shape.New(1000, 6000, 0), tracedK).ok).To(BeFalse(),
+		Expect(deriveMu(tracedModel, tracedParams, 0, shape.New(1000, 6000, 0), tracedK, 6000).ok).To(BeFalse(),
 			"no KV capacity")
-		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 0, 0), tracedK).ok).To(BeFalse(),
+		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 0, 0), tracedK, 0).ok).To(BeFalse(),
 			"no generation length is not a decode shape")
-		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), 0).ok).To(BeFalse(),
+		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), 0, 6000).ok).To(BeFalse(),
 			"a kPrice of zero is not a utilization")
-		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), -0.1).ok).To(BeFalse(),
+		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), -0.1, 6000).ok).To(BeFalse(),
 			"nor is a negative one")
-		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), 1.01).ok).To(BeFalse(),
+		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), 1.01, 6000).ok).To(BeFalse(),
 			"nor is one above full")
-		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.Shape{}, tracedK).ok).To(BeFalse(),
+		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.Shape{}, tracedK, 0).ok).To(BeFalse(),
 			"an empty shape has no footprint to divide the cache by")
-		Expect(deriveMu(itl.Model{A: -1, B: 0.5}, tracedParams, tracedKv, shape.New(1000, 6000, 0), tracedK).ok).To(BeFalse(),
+		Expect(deriveMu(itl.Model{A: -1, B: 0.5}, tracedParams, tracedKv, shape.New(1000, 6000, 0), tracedK, 6000).ok).To(BeFalse(),
 			"a model whose reading at k_sat is not positive")
 	})
 })
@@ -438,6 +472,75 @@ var _ = Describe("throughputKey", func() {
 		Expect(a.throughputKey(model, ns, v, accel, 1, domain.RoleDecode, 1000, 6000, 5)).
 			NotTo(Equal(a.throughputKey(model, ns, v, accel, 1, domain.RoleDecode, 1000, 1000, 5)))
 	})
+
+	// Prefill completes a request after one token and hands the KV to decode,
+	// so the answer's length is not work it does. Keying its throughput by the
+	// fleet's output length split one population of readings across unrelated
+	// buckets: measured on the 1k/6000 -> 30k/250 trace, prefill walked
+	// xlong -> xxlong -> xlong -> medium inside a single phase whose prompt
+	// length never moved, re-learning mu in each and being held to one replica
+	// per cycle while the floor asked for nine.
+	It("keys prefill by prompt length alone, whatever the fleet is generating", func() {
+		const pv = "prefill-v"
+		Expect(a.throughputKey(model, ns, pv, accel, 1, domain.RolePrefill, 30000, 6000, 5)).
+			To(Equal(a.throughputKey(model, ns, pv, accel, 1, domain.RolePrefill, 30000, 250, 5)))
+	})
+
+	It("still separates two prefill shapes that differ in prompt length", func() {
+		const pv = "prefill-v"
+		Expect(a.throughputKey(model, ns, pv, accel, 1, domain.RolePrefill, 1000, 250, 5)).
+			NotTo(Equal(a.throughputKey(model, ns, pv, accel, 1, domain.RolePrefill, 30000, 250, 5)))
+	})
+
+	It("does not collapse decode's output dimension along with prefill's", func() {
+		// The control: the change is scoped to one role. If this ever passes,
+		// decode has lost the bucketing its capacity genuinely depends on.
+		Expect(a.throughputKey(model, ns, v, accel, 1, domain.RoleDecode, 30000, 6000, 5)).
+			NotTo(Equal(a.throughputKey(model, ns, v, accel, 1, domain.RoleDecode, 30000, 250, 5)))
+	})
+})
+
+var _ = Describe("fleetPrefixHitRate", func() {
+	roles := map[string]string{"p": domain.RolePrefill, "d": domain.RoleDecode}
+	pre := func(pod string, hit, rate float64) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{
+			PodName: pod, VariantName: "p", PrefixCacheHitRate: hit, RequestRate: rate,
+		}
+	}
+
+	// The reason this is not fleetAverage. That helper reads a value of zero
+	// as absent, and a hit rate of zero is a reading: a fleet with prefix
+	// caching off reports 0 everywhere, and skipping those would hand the mean
+	// to whichever replica happened to report something.
+	It("counts a zero hit rate as a reading, not as missing", func() {
+		rms := []domain.ReplicaMetrics{pre("a", 0.0, 1), pre("b", 0.8, 1)}
+		Expect(fleetPrefixHitRate(rms, roles)).To(BeNumerically("~", 0.4, 1e-9))
+	})
+
+	It("is one figure for the role, so two replicas cannot split the bucket", func() {
+		// The fault this exists to prevent: with the replica's own rate, these
+		// two land either side of an input-bucket boundary in the SAME cycle.
+		rms := []domain.ReplicaMetrics{pre("a", 0.70, 1), pre("b", 0.80, 1)}
+		rate := fleetPrefixHitRate(rms, roles)
+		Expect(rate).To(BeNumerically("~", 0.75, 1e-9))
+	})
+
+	It("weights by request rate when there is one", func() {
+		rms := []domain.ReplicaMetrics{pre("a", 0.0, 3), pre("b", 1.0, 1)}
+		Expect(fleetPrefixHitRate(rms, roles)).To(BeNumerically("~", 0.25, 1e-9))
+	})
+
+	It("ignores decode replicas: this keys PREFILL's window", func() {
+		rms := []domain.ReplicaMetrics{
+			pre("a", 0.5, 1),
+			{PodName: "d1", VariantName: "d", PrefixCacheHitRate: 1.0, RequestRate: 99},
+		}
+		Expect(fleetPrefixHitRate(rms, roles)).To(BeNumerically("~", 0.5, 1e-9))
+	})
+
+	It("returns 0 when no prefill replica reports, so ILeff is the raw prompt", func() {
+		Expect(fleetPrefixHitRate(nil, roles)).To(Equal(0.0))
+	})
 })
 
 var _ = Describe("the learned ITL baseline", func() {
@@ -570,8 +673,8 @@ var _ = Describe("capacityTokensFor", func() {
 		// two answers differ by more than rounding.
 		fleet := shape.New(1000, 6000, 0)
 		flagged := &capacity.EngineParams{MaxNumSeqs: 256, TotalKvTokensOverride: 4 * tracedKv}
-		got := deriveMu(runPModel, flagged, tracedKv, fleet, tracedK)
-		want := deriveMu(runPModel, tracedParams, tracedKv, fleet, tracedK)
+		got := deriveMu(runPModel, flagged, tracedKv, fleet, tracedK, fleet.AvgOutputTokens)
+		want := deriveMu(runPModel, tracedParams, tracedKv, fleet, tracedK, fleet.AvgOutputTokens)
 		Expect(got.ok).To(BeTrue())
 		Expect(got.rate).To(Equal(want.rate))
 		Expect(got.seqs).To(BeNumerically("<", 256),

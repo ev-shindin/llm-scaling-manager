@@ -28,10 +28,19 @@
 #       ScaledObject; the static count only sets the pre-autoscaling state.
 #
 #   wva.hpa.behavior: scale-up stabilization 0 / period 5,
-#                     scale-down stabilization 300 / period 120
-#       Upstream uses 120/15 in both directions. Fast up, slow down is the
+#                     scale-down stabilization 60 / period 60
+#       Upstream uses 120/15 in both directions. Fast up, slower down is the
 #       deliberate shape: under-provisioning costs TTFT irrecoverably, while
 #       over-provisioning only costs money.
+#
+#       Scale-down was 300/120 and that was too slow to be useful here. The
+#       HPA takes the MAX recommendation over the window, so one high reading
+#       pinned the fleet for five minutes: decode was measured holding ten
+#       replicas through most of a 600 s phase while its own demand had fallen
+#       to one replica's worth. Draining ten took ~540 s against a 600 s
+#       phase. 60/60 drains them in ~240 s and still needs a dip to persist a
+#       full minute. Raise it again for batch workloads whose phases are much
+#       longer than ten minutes.
 #
 # NOT deviations -- restored to upstream when this file was created, because
 # they were leftovers from one comparison run rather than choices:
@@ -147,6 +156,24 @@ scenario:
       images:
         benchmark:
           tag: v0.7.8
+        # PIN THE ROUTER, do not inherit it. Without this the endpoint picker
+        # comes from llm-d-benchmark's own anchor, so a benchmark run here
+        # silently changes router version whenever that moves -- and the
+        # router decides both how requests are spread across replicas and how
+        # the queue the scaling manager reads as demand is bounded. A
+        # benchmark whose router version is not recorded cannot be reproduced.
+        #
+        # v0.11.0 is the first version carrying `noEndpointRequestTTL`, the
+        # separate empty-pool queue-wait budget that every scale-from-zero
+        # waits in, which matters here because this scenario is what exercises
+        # scale-to-zero.
+        #
+        # This scenario is single-role and declares no P/D EndpointPickerConfig
+        # of its own, so the disaggregation plugin migration v0.11.0 required
+        # does not apply to it -- see pd-disaggregation.yaml for that, and
+        # docs/reference/router-configuration.md for the migration itself.
+        routerEndpointPicker:
+          tag: v0.11.0
     # =========================================================================
     # KUSTOMIZE DEPLOY METHOD   (scope: the ENTIRE stack)
     # -------------------------------------------------------------------------
@@ -559,14 +586,33 @@ scenario:
                 value: 100 # 100% = double the current replica count per period
                 periodSeconds: 5 # how often this policy is evaluated
           scaleDown:
-            # Larger window for scale-down avoids thrashing when load
-            # briefly dips. Bump to 300+ for batch workloads where transient
-            # idle is normal.
-            stabilizationWindowSeconds: 300
+            # A scale-down window has to be shorter than the workload's own
+            # timescale or the fleet never acts on a fall in demand.
+            #
+            # Measured on a P/D run at 300 s with a Percent 100 / 120 s
+            # policy -- so the window, not the policy, was the limiter. Once
+            # the controller published a lower target (tgt=3 against curr=10),
+            # the release took 420 s: 5 at +180 s, 2 at +300 s, 1 at +420 s.
+            # The HPA takes the MAX recommendation over the window, so one high
+            # reading pins the fleet for its whole length, and on a 600 s phase
+            # that is a release the phase outlives.
+            #
+            # NOT what held decode at ten before that. For the preceding 346 s
+            # it sat at curr=10 tgt=10 atMax by the controller's own decision,
+            # with the throughput floor re-pricing a 303,206-token demand as
+            # 1,338,789. That is a demand-floor question and shortening this
+            # window does not touch it -- see
+            # docs/proposals/managed-keda-behavior.md section 2.
+            #
+            # 60 s with 50%/60s still requires a dip to persist a full minute
+            # before anything shrinks. Raise it again for batch workloads where
+            # transient idle is normal and a phase lasts much longer than ten
+            # minutes.
+            stabilizationWindowSeconds: 60
             policies:
               - type: Percent
-                value: 100 # = halve the replica count per period
-                periodSeconds: 120
+                value: 50 # remove half the replicas per period
+                periodSeconds: 60
       # vLLM *emulator* service — chart-internal feature for testing WVA
       # without real vLLM pods. We deploy real vLLM via the modelservice
       # chart, so we always disable this. Leave as-is.

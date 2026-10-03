@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
@@ -82,7 +83,21 @@ var logContract = map[string][]string{
 	// baselineLearned says whether B came from this card or from the
 	// bootstrap constant -- the difference between a measured floor and a
 	// guess, and the one that collapsed a fleet on 2026-09-27.
-	"itl-fit":                         {"variant", "tier", "a", "b", "held", "baselineLearned"},
+	"itl-fit": {"variant", "tier", "a", "b", "held", "baselineLearned"},
+	// Every term the derived mu is built from, because the RESULT alone cannot
+	// be attributed to one. A mu wrong by 8x reads identically in the log
+	// whether the fault is the output length it divides by, the sequence count
+	// the KV budget allows, the ITL line, or the pricing point -- and that
+	// ambiguity cost four discarded diagnoses in a single session, each
+	// refuted by the next measurement. seqs and maxNumSeqs are separate so a
+	// binding engine cap is visible rather than inferred.
+	"derived-mu": {
+		"variant", "pod", // join keys
+		"ok", "rate", "seqs", "tokenSec", // the result and its two factors
+		"kPrice", "itlAtKPrice", "itlA", "itlB", "itlZero", // the line and where it is read
+		"avgOutputTokens", "muDivisor", // the shape's [5m] output length beside the short-window one mu is actually divided by
+		"kvReqPerSeq", "replicaKvTokens", "maxNumSeqs", // and the budget
+	},
 	"replica-capacity-skipped":        {"modelID", "namespace", "variant", "reason"},
 	"replica-capacity-store-fallback": {"modelID", "namespace", "variant", "reason"},
 	"variant-capacity-source":         {"modelID", "namespace", "variant", "reason"},
@@ -190,6 +205,129 @@ func TestLogContract_LiveReplicaEmitsCycleFields(t *testing.T) {
 	k2 := requireLogged(t, logs, "k2-decision")
 	assert.Contains(t, k2PriorityLabels, k2["priority"],
 		"priority must be one of the four labels dump_k2_decisions.py legends")
+}
+
+// A decode cycle must report how its derived mu was built. The floor divides
+// lambda by this figure, so a run that cannot see its terms cannot attribute an
+// over-order to one -- the failure this line was added for.
+func TestLogContract_DerivedMuReportsItsTerms(t *testing.T) {
+	ctx, logs := observedCtx(t)
+	analyzer := NewSaturationAnalyzer(capacity.NewStore())
+
+	input := makeAnalyzerInput(
+		[]domain.ReplicaMetrics{
+			makeReplicaMetrics("pod-1", "variant-d", 5000, 16000, 0, 100, 50),
+		},
+		[]domain.VariantReplicaState{
+			{VariantName: "variant-d", Role: domain.RoleDecode, AcceleratorName: "H100",
+				CurrentReplicas: 1, GPUsPerReplica: 1},
+		},
+	)
+
+	_, err := analyzer.Analyze(ctx, input)
+	require.NoError(t, err)
+
+	// Emitted whether or not a model exists yet: "no model" is the answer a
+	// reader most often needs, and gating the line on success would hide it.
+	fields := requireLogged(t, logs, "derived-mu")
+	for _, key := range logContract["derived-mu"] {
+		assert.Contains(t, fields, key,
+			"derived-mu must carry %q: the contract names it and the report reads it by key", key)
+	}
+}
+
+// The divisor is the [5m] mean on a steady shape, and the short window only
+// while a shape change is outstanding.
+//
+// Both halves are measured, not reasoned. The short window averages over
+// requests that have COMPLETED, so a fleet ramping into 6000-token generations
+// reads far below 6000 for the first couple of minutes; dividing by that
+// over-states mu, and an over-stated mu under-orders replicas. Bisected over
+// five runs with everything but the build held constant: the unconditional
+// short window took phase 1 from a 305-request router queue at 33,071 output
+// tok/s to 2,503 at 8,763. The analyzer's muDivisor comment carries the table.
+func TestDerivedMuDivisorFollowsTheShapeChange(t *testing.T) {
+	states := []domain.VariantReplicaState{
+		{VariantName: "variant-d", Role: domain.RoleDecode, AcceleratorName: "H100",
+			CurrentReplicas: 1, GPUsPerReplica: 1},
+	}
+	// avg5m is what AvgOutputTokens carries, avg1m what AvgOutputTokensRecent
+	// does; they differ so the logged divisor identifies which one was used.
+	serving := func(avg5m, avg1m float64) []domain.ReplicaMetrics {
+		rm := makeReplicaMetrics("pod-1", "variant-d", 5000, 16000, 0, 1000, avg5m)
+		rm.AvgOutputTokensRecent = avg1m
+		return []domain.ReplicaMetrics{rm}
+	}
+
+	t.Run("a steady shape divides by the 5m mean", func(t *testing.T) {
+		ctx, logs := observedCtx(t)
+		a := NewSaturationAnalyzer(capacity.NewStore())
+
+		// One cycle: the tracker has no prior shape, so nothing is outstanding.
+		_, err := a.Analyze(ctx, makeAnalyzerInput(serving(6000, 400), states))
+		require.NoError(t, err)
+
+		assert.Equal(t, float64(6000), requireLogged(t, logs, "derived-mu")["muDivisor"],
+			"the 400 is requests that finished early in a ramp, not the length being served")
+	})
+
+	t.Run("an outstanding shape change divides by the short window", func(t *testing.T) {
+		a := NewSaturationAnalyzer(capacity.NewStore())
+
+		// Cycle one anchors the shape at 6000 and declares no change.
+		ctx1, _ := observedCtx(t)
+		_, err := a.Analyze(ctx1, makeAnalyzerInput(serving(6000, 6000), states))
+		require.NoError(t, err)
+
+		// Cycle two: the output length collapses past the tracker's tolerance.
+		// A fresh observer because requireLogged reads the FIRST matching entry,
+		// and cycle one logged one too.
+		ctx2, logs2 := observedCtx(t)
+		_, err = a.Analyze(ctx2, makeAnalyzerInput(serving(3750, 250), states))
+		require.NoError(t, err)
+
+		assert.Equal(t, float64(250), requireLogged(t, logs2, "derived-mu")["muDivisor"],
+			"after a switch the [5m] mean still carries the old shape's stragglers, 3750 here")
+	})
+
+	// DisableShapeChangeHold turns off withholding the FLEET. It must not also
+	// decide which output length mu is divided by.
+	//
+	// Found in review: keying the divisor on the outstanding-hold flag meant
+	// that with the hold off, `changedAt` is never set, so the divisor followed
+	// the short window for exactly the one cycle the tracker declares a change
+	// and reverted to the [5m] mean for the rest of the straggler window --
+	// silently reinstating the over-stated mu, through a flag whose own doc
+	// comment is about the fleet hold. The third cycle below is what
+	// discriminates: no NEW change, hold off, divisor must still be 250.
+	t.Run("the divisor survives the fleet hold being disabled", func(t *testing.T) {
+		holdOff := func(metrics []domain.ReplicaMetrics) domain.AnalyzerInput {
+			in := makeAnalyzerInput(metrics, states)
+			// Asserted, not probed: if Config stops carrying a ScalingPolicy
+			// this test would otherwise run with the hold ENABLED and pass for
+			// the wrong reason, which is the whole failure mode it guards.
+			p, ok := in.Config.(*config.ScalingPolicy)
+			require.True(t, ok, "fixture Config must be a *config.ScalingPolicy, got %T", in.Config)
+			p.DisableShapeChangeHold = true
+			return in
+		}
+		a := NewSaturationAnalyzer(capacity.NewStore())
+
+		ctx0, _ := observedCtx(t)
+		_, err := a.Analyze(ctx0, holdOff(serving(6000, 6000)))
+		require.NoError(t, err)
+
+		ctx1, _ := observedCtx(t)
+		_, err = a.Analyze(ctx1, holdOff(serving(3750, 250)))
+		require.NoError(t, err)
+
+		ctx2, logs2 := observedCtx(t)
+		_, err = a.Analyze(ctx2, holdOff(serving(3750, 250)))
+		require.NoError(t, err)
+
+		assert.Equal(t, float64(250), requireLogged(t, logs2, "derived-mu")["muDivisor"],
+			"a cycle after the change, with the hold off: keyed on the hold this reverted to 3750")
+	})
 }
 
 // The observed tier is the one the report cares most about, and the only one
@@ -482,4 +620,74 @@ func TestLogContract_ThroughputFloorBinds(t *testing.T) {
 	assert.Equal(t, 0.0, last["backlogRequests"], "nothing queued: the floor is the load's alone")
 	assert.Equal(t, floor.BacklogDrainSeconds, last["drainSeconds"])
 	assert.Equal(t, false, last["heldAtFleet"], "two readings of its own: the floor is the load's, not the cap's")
+}
+
+// A cold fleet has completed nothing, so AvgOutputTokens is 0 -- and
+// rate = tokenSec/avgOutput then divides by zero, the derived mu reports
+// not-ok, the demand floor emits nothing, and floor.backlogAtLanding never
+// runs. The projection exists to size for the queue that will have built by the
+// time capacity lands; without a mu it cannot run during the one window it is
+// for.
+//
+// Measured on run QM (2026-10-03): first queued cycle 14:39:44, first
+// throughput-demand-floor line 14:41:59 -- 135 s later, after the router queue
+// had peaked at 522. 38 of the 56 not-ok cycles carried a complete ITL fit and
+// failed on avgOutputTokens alone.
+func TestDerivedMuDivisorFallsBackWhenTheFleetHasCompletedNothing(t *testing.T) {
+	states := []domain.VariantReplicaState{
+		{VariantName: "variant-d", Role: domain.RoleDecode, AcceleratorName: "H100",
+			CurrentReplicas: 1, GPUsPerReplica: 1},
+	}
+	// A loaded replica that has completed nothing: KV in use, a queue, prompts
+	// being served, and no output length to show for it yet.
+	cold := func() []domain.ReplicaMetrics {
+		return []domain.ReplicaMetrics{
+			makeReplicaMetrics("pod-1", "variant-d", 5000, 16000, 7, 1000, 0),
+		}
+	}
+
+	seeded := func(tokens int) domain.AnalyzerInput {
+		in := makeAnalyzerInput(cold(), states)
+		p, ok := in.Config.(*config.ScalingPolicy)
+		require.True(t, ok, "the harness passes a *config.ScalingPolicy")
+		p.DefaultOutputTokens = tokens
+		return in
+	}
+
+	t.Run("the seeded length answers where the fleet has no reading", func(t *testing.T) {
+		ctx, logs := observedCtx(t)
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		_, err := a.Analyze(ctx, seeded(6000))
+		require.NoError(t, err)
+
+		assert.Equal(t, float64(6000), requireLogged(t, logs, "derived-mu")["muDivisor"],
+			"a zero divisor is what stopped the floor -- and the floor is where the "+
+				"router queue is projected over a replica's start time")
+	})
+
+	t.Run("the built-in net answers when nothing is seeded either", func(t *testing.T) {
+		ctx, logs := observedCtx(t)
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		_, err := a.Analyze(ctx, makeAnalyzerInput(cold(), states))
+		require.NoError(t, err)
+
+		assert.Equal(t, DefaultExpectedOutputTokens, requireLogged(t, logs, "derived-mu")["muDivisor"],
+			"512 is a weak answer and a deliberate one; zero is not an answer at all")
+	})
+
+	t.Run("a real reading still wins over the seed", func(t *testing.T) {
+		ctx, logs := observedCtx(t)
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		in := makeAnalyzerInput(
+			[]domain.ReplicaMetrics{makeReplicaMetrics("pod-1", "variant-d", 5000, 16000, 7, 1000, 250)},
+			states)
+		p, ok := in.Config.(*config.ScalingPolicy)
+		require.True(t, ok)
+		p.DefaultOutputTokens = 6000
+		_, err := a.Analyze(ctx, in)
+		require.NoError(t, err)
+
+		assert.Equal(t, float64(250), requireLogged(t, logs, "derived-mu")["muDivisor"],
+			"the seed is for the cold window only; a warm fleet must be unaffected")
+	})
 }

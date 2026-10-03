@@ -12,10 +12,13 @@ const (
 	QueryQueueLength  = "queue_length"
 
 	// V2 queries (token-based capacity analysis)
-	QueryCacheConfigInfo    = "cache_config_info"
-	QueryAvgOutputTokens    = "avg_output_tokens"
-	QueryAvgInputTokens     = "avg_input_tokens"
-	QueryPrefixCacheHitRate = "prefix_cache_hit_rate"
+	QueryCacheConfigInfo = "cache_config_info"
+	QueryAvgOutputTokens = "avg_output_tokens"
+	// QueryAvgOutputTokensRecent is QueryAvgOutputTokens over a short window.
+	// See domain.ReplicaMetrics.AvgOutputTokensRecent for why both exist.
+	QueryAvgOutputTokensRecent = "avg_output_tokens_recent"
+	QueryAvgInputTokens        = "avg_input_tokens"
+	QueryPrefixCacheHitRate    = "prefix_cache_hit_rate"
 
 	// Scheduler flow control queries (model-level, from inference scheduler)
 	QuerySchedulerQueueSize  = "scheduler_queue_size"
@@ -103,6 +106,14 @@ func RegisterSaturationQueries(sourceRegistry *source.SourceRegistry) {
 		Template:    `max by (model_name, instance, pod) (rate(vllm:request_generation_tokens_sum{namespace="{{.namespace}}"}[5m]) / rate(vllm:request_generation_tokens_count{namespace="{{.namespace}}"}[5m]))`,
 		Params:      []string{source.ParamNamespace},
 		Description: "Average output tokens per completed request (5m rate)",
+	})
+
+	registry.MustRegister(source.QueryTemplate{
+		Name:        QueryAvgOutputTokensRecent,
+		Type:        source.QueryTypePromQL,
+		Template:    `max by (model_name, instance, pod) (rate(vllm:request_generation_tokens_sum{namespace="{{.namespace}}"}[1m]) / rate(vllm:request_generation_tokens_count{namespace="{{.namespace}}"}[1m]))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "Mean output tokens per request per pod over a SHORT window, used only as the derived mu divisor (see AvgOutputTokensRecent)",
 	})
 
 	// Average input (prompt) tokens per completed request
@@ -220,6 +231,18 @@ func registerSGLangSaturationQueries(registry *source.QueryList) {
 		Template:    `max by (model_name, instance, pod) (rate(sglang:generation_tokens_histogram_sum{namespace="{{.namespace}}"}[5m]) / rate(sglang:generation_tokens_histogram_count{namespace="{{.namespace}}"}[5m]))`,
 		Params:      []string{source.ParamNamespace},
 		Description: "Average output tokens per completed request (5m rate) (SGLang)",
+	})
+
+	// The same over a SHORT window, the derived mu's divisor only. A
+	// count-weighted mean over [5m] is dominated by the previous shape's long
+	// stragglers for five minutes after they stop arriving; see
+	// domain.ReplicaMetrics.AvgOutputTokensRecent for the measurement.
+	registerForEngine(registry, inferenceengine.EngineSGLang, source.QueryTemplate{
+		Name:        QueryAvgOutputTokensRecent,
+		Type:        source.QueryTypePromQL,
+		Template:    `max by (model_name, instance, pod) (rate(sglang:generation_tokens_histogram_sum{namespace="{{.namespace}}"}[1m]) / rate(sglang:generation_tokens_histogram_count{namespace="{{.namespace}}"}[1m]))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "Mean output tokens per request per pod over a SHORT window, used only as the derived mu divisor (SGLang)",
 	})
 
 	// Average input (prompt) tokens per completed request (5m rate).

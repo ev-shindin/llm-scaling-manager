@@ -600,7 +600,14 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		// waiting in its engine, 200 more at the scheduler. Charged as
 		// residency that was 380 x 7000 = 2.66M tokens on top of the resident
 		// 1.15M -- 4.1 replicas' worth, and the run ordered seven. As a
-		// backlog to drain in 60 s: (6 + 380/60) / 5.4 = 2.28 replicas' worth.
+		// backlog to drain in 60 s it is 1.67 replicas' worth.
+		//
+		// Decode's backlog is its OWN 180, not 380: the scheduler's 200 are
+		// prefill's queue to drain, and they reach decode at prefill's
+		// throughput rather than within decode's drain window. The spec's
+		// subject is backlog-versus-residency and that is unchanged -- 1.67
+		// against the 4.1 a residency charge gives. See the spec below for the
+		// ownership rule itself.
 		in := makeAnalyzerInput(
 			[]domain.ReplicaMetrics{decode("decode-0", 1_158_912, 180, runMu), prefill("prefill-0", 66_183)},
 			states(1, 1))
@@ -614,17 +621,25 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 				decodeP = vc.PerReplicaCapacity
 			}
 		}
-		want := (runLambda + 380.0/floor.BacklogDrainSeconds) / runMu * decodeP
+		want := (runLambda + 180.0/floor.BacklogDrainSeconds) / runMu * decodeP
 		Expect(result.RoleDemand[domain.RoleDecode]).To(BeNumerically("~", want, 1))
-		Expect(result.RoleDemand[domain.RoleDecode] / decodeP).To(BeNumerically("~", 2.28, 0.01))
+		Expect(result.RoleDemand[domain.RoleDecode] / decodeP).To(BeNumerically("~", 1.67, 0.01))
 		Expect(result.TotalDemand).To(BeNumerically("~", result.RoleDemand[domain.RoleDecode]+result.RoleDemand[domain.RolePrefill], 1),
 			"the total moved with decode, and prefill's dropped share was never in it")
 
 		// Negative control: with no mu on record the queues are still charged
-		// as residency, and the same cycle is priced at more than four
-		// replicas. A saturated replica records its mu in the cycle its queue
-		// appears, so the control is one whose completion rate is not
-		// reported (no rate, no reading) rather than a fresh analyzer.
+		// as residency, and the same cycle is priced at MORE replicas than the
+		// backlog pricing above. A saturated replica records its mu in the
+		// cycle its queue appears, so the control is one whose completion rate
+		// is not reported (no rate, no reading) rather than a fresh analyzer.
+		//
+		// The margin is 2.81 against 2.28, and it used to be 4.1 against 2.28.
+		// It narrowed because decode is no longer charged the scheduler
+		// queue's PROMPT: 200 queued requests x 6000 prompt tokens is 1.2M
+		// tokens, about 1.3 replicas at this capacity, and 4.1 - 1.3 = 2.8.
+		// The control still separates the two pricings, by a smaller and
+		// honestly smaller margin -- residency over-prices by 23% here rather
+		// than by 80%.
 		fresh := NewSaturationAnalyzer(capacity.NewStore())
 		ctl := makeAnalyzerInput(
 			[]domain.ReplicaMetrics{decode("decode-0", 1_158_912, 180, 0), prefill("prefill-0", 66_183)},
@@ -633,7 +648,9 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		ctl.SchedulerQueue = in.SchedulerQueue
 		bare, err := fresh.Analyze(ctx, ctl)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(bare.RoleDemand[domain.RoleDecode] / decodeP).To(BeNumerically(">", 4))
+		Expect(bare.RoleDemand[domain.RoleDecode] / decodeP).To(BeNumerically("~", 2.81, 0.01))
+		Expect(bare.RoleDemand[domain.RoleDecode]).To(BeNumerically(">", result.RoleDemand[domain.RoleDecode]),
+			"residency still over-prices the same cycle; that is what the floor is for")
 	})
 
 	It("keeps the resident KV when the backlog term is smaller than it", func() {
@@ -694,6 +711,50 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		}
 		Expect(result.RoleDemand[domain.RolePrefill]).To(BeNumerically("~", (runLambda+200.0/floor.BacklogDrainSeconds)/30*prefillP, 1),
 			"the 200 queued prompts are 3.3 extra req/s against a prefill mu of 30")
+	})
+
+	It("charges the scheduler's standing queue as prefill's backlog, not as every role's", func() {
+		saturate()
+		// A standing scheduler queue of 200 with NOTHING queued in either
+		// role's own engines, so the only backlog anywhere is the scheduler's
+		// and there is no second source the figures could come from.
+		//
+		// It used to be charged to every role: `backlog[role] += eppQueued`
+		// ran once per role, so decode was priced to drain within 60 s a queue
+		// of prompts that had not been prefilled yet. Measured on a P/D run
+		// over all 24 loaded cycles, decode's own engines held 1-8 queued
+		// requests while the floor charged it 1294-3476, and the gap was
+		// identical on both roles. At the worst cycle decode asked for 15.0
+		// replicas, 37 of whose 46 req/s came from a 2224-request queue it
+		// held 6 of.
+		//
+		// A prompt at the scheduler reaches decode only once prefill has
+		// prefilled it, at prefill's throughput, so it is neither decode's to
+		// drain in this window nor decode's to be sized for. The ongoing
+		// arrival is already charged to both roles -- lambda is model-wide --
+		// which is what decode is left with here.
+		in := makeAnalyzerInput(
+			[]domain.ReplicaMetrics{decode("decode-0", 300_000, 0, runMu), prefill("prefill-0", 0)},
+			states(1, 1))
+		in.ArrivalRate = runLambda
+		in.SchedulerQueue = &domain.SchedulerQueueMetrics{QueueSize: 200, QueueBytes: 200 * 6000 * 4}
+		result, err := analyzer.Analyze(ctx, in)
+		Expect(err).NotTo(HaveOccurred())
+		var decodeP float64
+		for _, vc := range result.VariantCapacities {
+			if vc.VariantName == decodeVariant {
+				decodeP = vc.PerReplicaCapacity
+			}
+		}
+		Expect(decodeP).To(BeNumerically(">", 0), "no per-replica capacity: the assertion below would measure nothing")
+		Expect(result.RoleDemand[domain.RoleDecode]).To(BeNumerically("~", runLambda/runMu*decodeP, 1),
+			"decode is priced on lambda alone: the scheduler's queue is not its backlog")
+		// What the broadcast cost, stated as the difference: charging decode the
+		// scheduler's 200 as well put it at (6 + 200/60) / 5.4 = 1.73 replicas
+		// against the 6 / 5.4 = 1.11 the arrival alone asks for.
+		broadcast := (runLambda + 200.0/floor.BacklogDrainSeconds) / runMu
+		Expect(result.RoleDemand[domain.RoleDecode]/decodeP).To(BeNumerically("<", broadcast-0.5),
+			"and well under the ask the broadcast produced")
 	})
 
 	It("leaves a bridge's queue out of the backlog and out of the residency it takes back", func() {

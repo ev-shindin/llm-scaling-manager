@@ -100,6 +100,39 @@ func (p *ChangeReporter) ReportPolicyConflict(ctx context.Context, namespace, mo
 		"policies", policies, "using", chosen)
 }
 
+// ReportOutputSeedConflict warns that one model's variants seeded different
+// expected generation lengths.
+//
+// A model has one queue to price, so it has one expected generation length. Two
+// figures means the operator wrote the number twice and the copies drifted --
+// which is silent otherwise, because the larger one simply wins and keeps
+// winning.
+func (p *ChangeReporter) ReportOutputSeedConflict(ctx context.Context, namespace, modelID string, seeds []int, chosen int) {
+	// Its OWN key. ReportPolicyConflict already uses namespace|modelID, and two
+	// reporters sharing one record overwrite each other every cycle, so each
+	// re-fires forever -- which defeats the one thing this type does.
+	if !p.changed("outputSeed|"+namespace+"|"+modelID, strconv.Itoa(chosen)+"|"+joinInts(seeds)) {
+		return
+	}
+	ctrl.LoggerFrom(ctx).Info(
+		"A model's variants seed different expected generation lengths; pricing its queue at the largest. "+
+			"The figure is the model's, not a role's -- a request owes the same tokens whichever "+
+			"variant serves it -- so give every variant of this model the same defaultOutputTokens, "+
+			"or set it on one and leave the others out.",
+		"namespace", namespace, "modelID", modelID,
+		"seeded", seeds, "using", chosen)
+}
+
+// joinInts renders a deterministic list, so the same set reported in a different
+// order is not mistaken for a change.
+func joinInts(v []int) string {
+	parts := make([]string, 0, len(v))
+	for _, n := range v {
+		parts = append(parts, strconv.Itoa(n))
+	}
+	return strings.Join(parts, ",")
+}
+
 // ReportEffectivePolicy records which tier a model ended up scaling under, once
 // per change. This is the "which value won" readout: with a default entry, a tier
 // and a per-model override all contributing, the resolved thresholds are not
@@ -116,14 +149,16 @@ func (p *ChangeReporter) ReportEffectivePolicy(ctx context.Context, namespace, m
 	ctrl.LoggerFrom(ctx).Info("Effective scaling policy",
 		"namespace", namespace, "modelID", modelID, "scalingPolicy", name,
 		"scaleUpThreshold", cfg.ScaleUpThreshold, "scaleDownBoundary", cfg.ScaleDownBoundary,
-		"kvCacheThreshold", cfg.KvCacheThreshold, "priority", cfg.Priority)
+		"kvCacheThreshold", cfg.KvCacheThreshold, "priority", cfg.Priority,
+		"defaultOutputTokens", cfg.DefaultOutputTokens)
 }
 
 // formatBand renders the fields that make two resolutions meaningfully different,
 // so the readout fires on a real change rather than on a re-parse.
 func formatBand(cfg config.ScalingPolicy) string {
-	return fmt.Sprintf("%.3f|%.3f|%.3f|%.3f",
-		cfg.ScaleUpThreshold, cfg.ScaleDownBoundary, cfg.KvCacheThreshold, cfg.Priority)
+	return fmt.Sprintf("%.3f|%.3f|%.3f|%.3f|%d",
+		cfg.ScaleUpThreshold, cfg.ScaleDownBoundary, cfg.KvCacheThreshold, cfg.Priority,
+		cfg.DefaultOutputTokens)
 }
 
 // joinSorted renders a deterministic list, so a set of policies reported in a

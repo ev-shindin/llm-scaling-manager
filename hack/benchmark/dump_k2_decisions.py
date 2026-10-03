@@ -119,6 +119,7 @@ MESSAGES = {
     "zero-replica-capacity-estimate",
     "itl-window",
     "itl-fit",
+    "derived-mu",
     DECISION_MSG,
 }
 

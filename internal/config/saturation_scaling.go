@@ -77,6 +77,16 @@ type ScalingPolicy struct {
 	// rather than inherit a figure measured somewhere else.
 	ShapeChangeHoldSeconds int `yaml:"shapeChangeHoldSeconds,omitempty"`
 
+	// DefaultOutputTokens is the seeded generation length used to price a queued
+	// request while no replica has measured one. RESOLVED, not configured: it is
+	// folded in from the model's trigger metadata
+	// (registry.DefaultOutputTokensKey), which is why it carries no yaml tag --
+	// a `defaultOutputTokens` key in this ConfigMap is ignored, deliberately, so
+	// there is exactly one place an operator sets it.
+	//
+	// ExpectedOutputTokens states where it sits in the precedence.
+	DefaultOutputTokens int `yaml:"-"`
+
 	// AnalyzerName names the saturation analyzer. "saturation" is the only
 	// built-in value and selects the token-based analyzer, which is also what an
 	// empty value gets — the V1 percentage-based analyzer it used to select was
@@ -705,4 +715,64 @@ func (p ScalingPolicy) ShapeChangeHold(defaultHold time.Duration) (time.Duration
 		return time.Duration(p.ShapeChangeHoldSeconds) * time.Second, true
 	}
 	return defaultHold, true
+}
+
+// ExpectedOutputTokens resolves the generation length a request is priced at,
+// and is the one place the precedence is stated:
+//
+//	measured  -- what the fleet's own replicas report this cycle
+//	recalled  -- what this fleet last knew, carried across an idle period
+//	seeded    -- defaultOutputTokens on this model's ScaledObject triggers
+//	global    -- the caller's constant, a weak net and nothing more
+//
+// A measurement always wins, so this cannot drag a working fleet off its own
+// figures; it only answers where there is otherwise a zero.
+//
+// The global default deserves its name and no more confidence than that. A
+// generic figure for chat completion is a few hundred tokens, which is an order
+// of magnitude below a long chain-of-thought workload, and pricing a queue at
+// 12x too little under-orders. What makes this mechanism work is the per-model
+// value and the recall; the global constant only keeps the arithmetic from
+// being zero.
+//
+// Each candidate is tested with `> 0`, which rejects a NaN where `!= 0` would
+// admit one and make every figure downstream a NaN.
+func (p ScalingPolicy) ExpectedOutputTokens(measured, recalled, globalDefault float64) float64 {
+	if measured > 0 {
+		return measured
+	}
+	if recalled > 0 {
+		return recalled
+	}
+	if p.DefaultOutputTokens > 0 {
+		return float64(p.DefaultOutputTokens)
+	}
+	if globalDefault > 0 {
+		return globalDefault
+	}
+	return 0
+}
+
+// ShapeChangeWindow is how long after a shape change the SHORT-window output
+// mean is still the right divisor for the derived mu.
+//
+// It honours ShapeChangeHoldSeconds, because that figure is already calibrated
+// as "one generation plus the rate window that would record it" and the
+// straggler contamination this covers lasts exactly that long. It deliberately
+// IGNORES DisableShapeChangeHold.
+//
+// That asymmetry is the point. DisableShapeChangeHold turns off withholding the
+// FLEET -- it is documented as an operator's way to stop the hold misbehaving
+// without a new image. Which output length to divide mu by is a different
+// question, and answering it from the hold's state meant that flag silently
+// reverted the divisor to the [5m] mean for the whole post-switch window: a
+// count-weighted five-minute mean carries the previous shape's long outputs for
+// minutes after they stop arriving, and the divisor is where that error reaches
+// mu undamped and under-orders replicas. Measured at 9x the client-side phase-1
+// TTFT when the divisor was wrong in the other direction.
+func (p ScalingPolicy) ShapeChangeWindow(defaultWindow time.Duration) time.Duration {
+	if p.ShapeChangeHoldSeconds > 0 {
+		return time.Duration(p.ShapeChangeHoldSeconds) * time.Second
+	}
+	return defaultWindow
 }

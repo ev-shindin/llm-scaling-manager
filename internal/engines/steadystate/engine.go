@@ -879,8 +879,65 @@ func (e *Engine) resolveModelPolicy(
 	}
 
 	resolved := config.ResolveScalingPolicyForTier(configMap, modelID, namespace, tier)
+
+	// Fold in the seeds the model's triggers carry. The ConfigMap cannot express
+	// these -- they are facts about one workload, not thresholds a class of
+	// workloads shares -- and the trigger is the most specific layer there is, so
+	// it overlays last.
+	if seed, conflicting := e.modelOutputSeed(vas); seed > 0 {
+		resolved.DefaultOutputTokens = seed
+		if len(conflicting) > 1 {
+			e.policies.ReportOutputSeedConflict(ctx, namespace, modelID, conflicting, seed)
+		}
+	}
+
 	e.policies.ReportEffectivePolicy(ctx, namespace, modelID, tier, resolved)
 	return resolved
+}
+
+// modelOutputSeed resolves one expected generation length for a model from the
+// trigger metadata of its variants, and reports every distinct figure they named
+// when they disagree.
+//
+// The LARGEST wins, not the smallest and not the first. A model under P/D has a
+// ScaledObject per role, and only one of those roles generates tokens: a prefill
+// trigger carrying nothing must not pull decode's figure down to the built-in
+// fallback. The asymmetry is the same one the key exists for -- under-pricing a
+// queue is what costs time-to-first-token, and over-pricing it costs a replica.
+//
+// Reading the registry rather than the synthetic VariantAutoscaling spec is
+// deliberate: that CR is being removed, so a spec field added for this would be
+// dead on arrival. The ScaledObject names the variant, so va.Name is the registry
+// key -- see registrySourcedVariants.
+func (e *Engine) modelOutputSeed(
+	vas []llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
+) (int, []int) {
+	if e.Variants == nil {
+		return 0, nil
+	}
+	var named []int
+	best := 0
+	for i := range vas {
+		entry, ok := e.Variants.Get(vas[i].Namespace, vas[i].Name)
+		if !ok {
+			continue
+		}
+		// ParseMeta, not a direct map read: a trigger whose metadata it rejects
+		// has already been skipped everywhere else, and honouring one key off an
+		// otherwise unusable block would give this key its own rules.
+		meta, err := registry.ParseMeta(entry.Metadata)
+		if err != nil || meta.DefaultOutputTokens <= 0 {
+			continue
+		}
+		if !slices.Contains(named, meta.DefaultOutputTokens) {
+			named = append(named, meta.DefaultOutputTokens)
+		}
+		if meta.DefaultOutputTokens > best {
+			best = meta.DefaultOutputTokens
+		}
+	}
+	slices.Sort(named)
+	return best, named
 }
 
 // modelPolicy returns the policy tier a model scales under, plus every distinct

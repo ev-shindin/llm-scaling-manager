@@ -59,3 +59,10 @@ spec:
         # normal value: it means "whatever the cluster's default entry says",
         # which an admin can then change for every workload at once.
         scalingPolicy: "{{SCALING_POLICY}}"
+        # How many tokens one request generates. Optional, and a SEED only: the
+        # fleet's own measurement replaces it as soon as one exists, so a figure
+        # of the right order is what matters. Set it when generations are much
+        # longer than a chat completion -- until a replica has completed one
+        # there is no reading to price a queued request with, and the built-in
+        # fallback is 512 tokens.
+        # defaultOutputTokens: "6000"

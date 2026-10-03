@@ -1,7 +1,11 @@
 package config
 
 import (
+	"math"
+	"testing"
 	"time"
+
+	yaml "gopkg.in/yaml.v3"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -488,5 +492,72 @@ var _ = Describe("ScalingPolicy.ShapeChangeHold", func() {
 		d, on := ScalingPolicy{DisableShapeChangeHold: true, ShapeChangeHoldSeconds: 90}.ShapeChangeHold(fallback)
 		Expect(on).To(BeFalse())
 		Expect(d).To(BeZero())
+	})
+})
+
+func TestExpectedOutputTokensPrecedence(t *testing.T) {
+	// The precedence exists so a working fleet is never dragged off its own
+	// figures by a default, and a cold one is never left pricing a queue at
+	// zero. Each row names which candidate must win and why.
+	configured := ScalingPolicy{DefaultOutputTokens: 6000}
+	none := ScalingPolicy{}
+
+	tests := []struct {
+		name                                    string
+		p                                       ScalingPolicy
+		measured, recalled, globalDefault, want float64
+	}{
+		{"a measurement beats everything", configured, 250, 3000, 512, 250},
+		{"a recalled figure beats configuration", configured, 0, 3000, 512, 3000},
+		{"configuration beats the global net", configured, 0, 0, 512, 6000},
+		{"the global net is the last resort", none, 0, 0, 512, 512},
+		{"nothing at all yields nothing, not a guess", none, 0, 0, 0, 0},
+		// NaN is the case `!= 0` would admit and `> 0` rejects. A NaN output
+		// length makes KVreq, the throughput key and mu's divisor all NaN.
+		{"a NaN measurement is not a measurement", configured, math.NaN(), 0, 512, 6000},
+		{"a NaN recalled figure is not one either", configured, 0, math.NaN(), 512, 6000},
+		{"a negative reading is rejected like a zero", configured, -1, 0, 512, 6000},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.p.ExpectedOutputTokens(tc.measured, tc.recalled, tc.globalDefault)
+			if got != tc.want {
+				t.Fatalf("ExpectedOutputTokens(%v, %v, %v) = %v, want %v",
+					tc.measured, tc.recalled, tc.globalDefault, got, tc.want)
+			}
+		})
+	}
+}
+
+var _ = Describe("defaultOutputTokens", func() {
+
+	// The surface is the ScaledObject trigger, not this ConfigMap. The field
+	// carries `yaml:"-"` so there is exactly one place an operator sets it, and
+	// these specs are what keeps a second one from reappearing: a re-added yaml
+	// tag would make a stale ConfigMap key start winning again, silently.
+	It("is not settable from a policy entry", func() {
+		var p ScalingPolicy
+		Expect(yaml.Unmarshal([]byte("kvCacheThreshold: 0.80\ndefaultOutputTokens: 6000\n"), &p)).To(Succeed())
+		Expect(p.KvCacheThreshold).To(Equal(0.80), "the sibling key still parses")
+		Expect(p.DefaultOutputTokens).To(BeZero(),
+			"a defaultOutputTokens key in the ConfigMap is ignored; it rides trigger metadata")
+	})
+
+	It("is not overlaid by Merge, because no entry can hold one", func() {
+		base := ScalingPolicy{KvCacheThreshold: 0.80, DefaultOutputTokens: 6000}
+		base.Merge(ScalingPolicy{DefaultOutputTokens: 250, KvCacheThreshold: 0.75})
+		Expect(base.KvCacheThreshold).To(Equal(0.75))
+		Expect(base.DefaultOutputTokens).To(Equal(6000),
+			"the resolved seed is folded in after Merge, from the trigger; Merge must not "+
+				"touch it, or a tier would be able to overwrite the figure the trigger set")
+	})
+
+	It("survives ApplyDefaults and Validate as a resolved value", func() {
+		p := ScalingPolicy{KvCacheThreshold: 0.80, QueueLengthThreshold: 5, DefaultOutputTokens: 6000}
+		p.ApplyDefaults()
+		Expect(p.Validate()).To(Succeed())
+		Expect(p.DefaultOutputTokens).To(Equal(6000),
+			"ApplyDefaults must neither invent a length nor discard a resolved one")
+		Expect(p.ExpectedOutputTokens(0, 0, 512)).To(Equal(6000.0))
 	})
 })

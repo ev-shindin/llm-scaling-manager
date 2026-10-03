@@ -48,6 +48,36 @@ const (
 	// Used with VLLMTimeToFirstTokenSecondsSum to calculate TTFT.
 	VLLMTimeToFirstTokenSecondsCount = "vllm:time_to_first_token_seconds_count"
 
+	// VLLMRequestPrefillKVComputedTokensSum is the running total of KV tokens
+	// a replica has actually COMPUTED during prefill. vLLM's own help text:
+	// "Histogram of new KV tokens computed during prefill (excluding cached
+	// tokens)".
+	//
+	// Its rate is prefill's capacity in the unit prefill is bounded by. A
+	// request rate is not: under overload it is the rate the fleet is being
+	// served at, which reads the same at one replica and at ten (measured on
+	// run PK: 4.75, 4.62 and 4.50 req/s at 1, 2 and 10 replicas, while the
+	// token rate went 138,875 to 933,750). Tokens also carry across a shape
+	// change, where a request rate learned at one prompt length is worthless
+	// at another.
+	//
+	// "Excluding cached tokens" is doing real work here: a prefix the cache
+	// already holds costs prefill nothing, so this is the prompt the replica
+	// truly computed, with no hit-rate discount to apply afterwards.
+	//
+	// SGLang has no equivalent. It publishes TTFT and inter-token latency but
+	// no per-stage prefill figure (sgl-project/sglang issue #14303), so a
+	// SGLang prefill variant keeps the request-rate reading.
+	VLLMRequestPrefillKVComputedTokensSum = "vllm:request_prefill_kv_computed_tokens_sum"
+
+	// VLLMRequestPrefillTimeSeconds is the time a request spent in the PREFILL
+	// phase, queue wait excluded (vLLM counts waiting separately, as
+	// request_queue_time_seconds). Collected as a diagnostic beside the token
+	// rate, not as a capacity: with batching, concurrent requests each report
+	// their own prefill duration, so the sum over-counts wall-clock and a
+	// per-request figure understates what the replica does.
+	VLLMRequestPrefillTimeSeconds = "vllm:request_prefill_time_seconds"
+
 	// VLLMTimePerOutputTokenSecondsSum tracks the sum of time per output token across all requests.
 	// Used with VLLMTimePerOutputTokenSecondsCount to calculate ITL (Inter-Token Latency).
 	VLLMTimePerOutputTokenSecondsSum = "vllm:time_per_output_token_seconds_sum"

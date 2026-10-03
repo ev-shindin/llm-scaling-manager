@@ -66,6 +66,7 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 - **[Install methods](reference/install-methods.md)** — installer, kustomize, and per-platform entry points
 - **[The GPU limiter](reference/gpu-limiter.md)** and **[the quota limiter](reference/quota-limiter.md)** — bounding the scaling manager by real accelerators, and by declared caps
 - **[Metrics and health](reference/metrics.md)** · **[Prometheus integration](reference/prometheus.md)**
+- **[Router configuration](reference/router-configuration.md)** — the two router settings that decide what the scaling manager sees: flow control bounds the queue it reads as demand, and the scheduling profiles decide whether the replicas it orders get used
 - **[SGLang backend](reference/sglang-backend.md)** — auto-detected per variant; nothing to configure
 - **[Troubleshooting](reference/troubleshooting.md)**
 

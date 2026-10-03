@@ -152,3 +152,65 @@ func TestWarmPoolCopiesIsParsedAndValidated(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultOutputTokensIsParsedAndValidated(t *testing.T) {
+	// A seed, not a setting -- but a seed the operator typed, so a bad value is
+	// rejected at the trigger that carried it rather than silently treated as
+	// absent. Absent itself is 0, which hands the decision to the fleet's own
+	// reading and then to the built-in fallback.
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want int
+		bad  bool
+	}{
+		{name: "absent", raw: "", want: 0},
+		{name: "a plain figure", raw: "6000", want: 6000},
+		{name: "an explicit zero is absence", raw: "0", want: 0},
+		{name: "not a number", raw: "lots", bad: true},
+		{name: "negative", raw: "-1", bad: true},
+		{name: "fractional tokens", raw: "6000.5", bad: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			md := map[string]string{ModelIDKey: "m"}
+			if tc.raw != "" {
+				md[DefaultOutputTokensKey] = tc.raw
+			}
+			m, err := ParseMeta(md)
+			if tc.bad {
+				if err == nil {
+					t.Fatalf("expected %q to be rejected, got %d", tc.raw, m.DefaultOutputTokens)
+				}
+				if !strings.Contains(err.Error(), DefaultOutputTokensKey) {
+					t.Errorf("the error must name the key, so the operator can act on it: %v", err)
+				}
+				if !strings.Contains(err.Error(), tc.raw) {
+					t.Errorf("the error must quote the value it rejected: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if m.DefaultOutputTokens != tc.want {
+				t.Errorf("defaultOutputTokens: have %d, want %d", m.DefaultOutputTokens, tc.want)
+			}
+		})
+	}
+}
+
+func TestAPoolTriggerCarriesNoOutputSeed(t *testing.T) {
+	// A pool serves no model, so it has no queue to price. The early return
+	// means the key is not even read -- asserted so a later refactor that
+	// moves the parse above it is caught.
+	m, err := ParseMeta(map[string]string{
+		WarmPoolNameKey:        "shared",
+		DefaultOutputTokensKey: "6000",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.DefaultOutputTokens != 0 {
+		t.Errorf("a pool trigger must carry no output seed, have %d", m.DefaultOutputTokens)
+	}
+}

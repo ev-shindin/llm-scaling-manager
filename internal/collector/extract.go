@@ -29,6 +29,7 @@ type podMetricData struct {
 	numGpuBlocks                int64
 	blockSize                   int64
 	avgOutputTokens             float64
+	avgOutputTokensRecent       float64
 	avgOutputTokensTimestamp    time.Time
 	avgInputTokens              float64
 	avgInputTokensTimestamp     time.Time
@@ -37,10 +38,14 @@ type podMetricData struct {
 	hasCacheConfig              bool
 	cacheConfigTimestamp        time.Time
 	// Queueing model fields
-	avgITL                  float64
-	avgITLTimestamp         time.Time
-	avgServiceTime          float64
-	avgServiceTimeTimestamp time.Time
+	avgITL                            float64
+	avgITLTimestamp                   time.Time
+	avgTTFT                           float64
+	avgTTFTTimestamp                  time.Time
+	prefillComputedTokenRate          float64
+	prefillComputedTokenRateTimestamp time.Time
+	avgServiceTime                    float64
+	avgServiceTimeTimestamp           time.Time
 	// Throughput analyzer fields
 	generationTokenRate float64
 	kvUsageInstant      float64
@@ -245,6 +250,29 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 		}
 	}
 
+	// Process the SHORT-window output length, the derived mu's divisor only
+	if result := results[registration.QueryAvgOutputTokensRecent]; result != nil {
+		if !result.HasError() {
+			for _, value := range result.Values {
+				instanceKey, podName, vaName := c.buildInstanceKey(ctx, namespace, value.Labels)
+				if instanceKey == "" {
+					continue
+				}
+
+				if podData[instanceKey] == nil {
+					podData[instanceKey] = &podMetricData{
+						podName: podName,
+						vaName:  vaName,
+					}
+				}
+				// NaN check: rate division by zero produces NaN
+				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) {
+					podData[instanceKey].avgOutputTokensRecent = value.Value
+				}
+			}
+		}
+	}
+
 	// Process average input tokens results (V2)
 	if result := results[registration.QueryAvgInputTokens]; result != nil {
 		if !result.HasError() {
@@ -316,6 +344,59 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 						"instanceKey", instanceKey,
 						"pod", podName,
 						"avgITLSeconds", value.Value)
+				}
+			}
+		}
+	}
+
+	// Process average TTFT results (seconds). Prefill's latency, and the
+	// prefill capacity model's regressand.
+	if result := results[registration.QueryAvgTTFT]; result != nil {
+		if !result.HasError() {
+			for _, value := range result.Values {
+				instanceKey, podName, vaName := c.buildInstanceKey(ctx, namespace, value.Labels)
+				if instanceKey == "" {
+					continue
+				}
+
+				if podData[instanceKey] == nil {
+					podData[instanceKey] = &podMetricData{
+						podName: podName,
+						vaName:  vaName,
+					}
+				}
+				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value > 0 {
+					podData[instanceKey].avgTTFT = value.Value
+					podData[instanceKey].avgTTFTTimestamp = value.Timestamp
+
+					logger.V(logging.DEBUG).Info("Avg TTFT metric",
+						"instanceKey", instanceKey,
+						"pod", podName,
+						"avgTTFTSeconds", value.Value)
+				}
+			}
+		}
+	}
+
+	// Process prefill computed-token rate (tokens/second). Prefill's
+	// capacity unit: a request rate under overload is the rate the fleet
+	// is being served at, and reads the same at one replica and at ten.
+	if result := results[registration.QueryPrefillComputedTokenRate]; result != nil {
+		if !result.HasError() {
+			for _, value := range result.Values {
+				instanceKey, podName, vaName := c.buildInstanceKey(ctx, namespace, value.Labels)
+				if instanceKey == "" {
+					continue
+				}
+				if podData[instanceKey] == nil {
+					podData[instanceKey] = &podMetricData{
+						podName: podName,
+						vaName:  vaName,
+					}
+				}
+				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value > 0 {
+					podData[instanceKey].prefillComputedTokenRate = value.Value
+					podData[instanceKey].prefillComputedTokenRateTimestamp = value.Timestamp
 				}
 			}
 		}

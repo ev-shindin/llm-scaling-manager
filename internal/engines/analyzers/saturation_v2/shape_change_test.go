@@ -561,7 +561,7 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 
 		// The prefill hold first, as the engine runs it: it clamps prefill
 		// into the band, which raises it off 50_000.
-		_, held := holdPrefillDemand(demand, vcs, 0.85, 0.70)
+		_, held := holdPrefillDemand(demand, vcs, 0.85, 0.70, 0)
 		Expect(held).To(BeTrue())
 		afterPrefill := demand[domain.RolePrefill]
 		Expect(afterPrefill).To(BeNumerically(">", 50_000))

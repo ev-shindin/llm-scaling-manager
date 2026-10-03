@@ -23,9 +23,11 @@ var engineSpecificReplicaQueries = []string{
 	registration.QueryQueueLength,
 	registration.QueryCacheConfigInfo,
 	registration.QueryAvgOutputTokens,
+	registration.QueryAvgOutputTokensRecent,
 	registration.QueryAvgInputTokens,
 	registration.QueryPrefixCacheHitRate,
 	registration.QueryAvgITL,
+	registration.QueryAvgTTFT,
 	registration.QueryAvgServiceTime,
 	registration.QueryGenerationTokenRate,
 	registration.QueryKvUsageInstant,
@@ -42,7 +44,18 @@ var engineSpecificReplicaQueries = []string{
 // per-variant figure the throughput analyzer displays falls back to the engine's
 // own completion rate. The extension point stays because the next engine-agnostic
 // per-replica metric belongs here.
-var agnosticReplicaQueries = []string{}
+var agnosticReplicaQueries = []string{
+	// vLLM publishes the prefill computed-token counter; SGLang publishes no
+	// per-stage prefill figure at all (sgl-project/sglang issue #14303). So it
+	// is registered ONCE under its bare name rather than as a per-engine pair:
+	// there is no SGLang template to write, and on an SGLang fleet the query
+	// simply returns no series, which leaves PrefillComputedTokenRate at zero
+	// and saturatedCompletionRate on the request rate it has always used.
+	//
+	// Putting it in EngineSpecificQueries instead would assert a variant that
+	// does not exist, and the parity test says so.
+	registration.QueryPrefillComputedTokenRate,
+}
 
 // unpartitionedReplicaQueries lists the logical replica queries whose series
 // cannot be partitioned by model_name, because they do not carry that label.

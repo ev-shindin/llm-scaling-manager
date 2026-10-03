@@ -99,6 +99,43 @@ scenario:
       images:
         routingSidecar:
           tag: v0.9.0
+        # The router is pinned for the same reason as the sidecar above: it is
+        # otherwise inherited from llm-d-benchmark's own anchor and moves
+        # underneath a reproduction. It matters more than most images, because
+        # the router decides how requests are spread across replicas and how
+        # the queue the scaling manager reads as demand is bounded.
+        #
+        # v0.11.0 because it is the first version carrying
+        # `noEndpointRequestTTL`, the separate empty-pool queue-wait budget
+        # every scale-from-zero waits in. Before it, one budget served both
+        # regimes and no value worked: short enough for a time-to-first-token
+        # objective killed cold starts, long enough for a cold start abandoned
+        # the objective whenever the pool was merely busy.
+        #
+        # THE PD-CONFIG BELOW WAS MIGRATED FOR IT, in three steps, each one a
+        # startup failure found by deploying and reading the error:
+        #
+        #   1. `disagg-headers-handler` is gone. v0.11.0 registers only
+        #      disagg-profile-handler (now disagg.HandlerFactory) and the three
+        #      deciders, so the handler is absorbed rather than renamed and the
+        #      line is simply removed.
+        #   2. `deciderPluginName` was removed; it is `deciders.prefill` now.
+        #      v0.9.0 had warned about exactly this at every startup.
+        #   3. `metrics-data-source` has to be DECLARED. v0.9.0's framework
+        #      injected a working one; v0.11.0's auto-created producer does not
+        #      reach the engines, every endpoint then reads stale, and a stale
+        #      endpoint is scored FULLY SATURATED -- the detector fails closed.
+        #      The symptom is not a crash: a single request against an idle
+        #      fleet took 19-30 s or shed at the TTL with 429.
+        #
+        # Verified on a cluster after the migration: completions in 27-120 ms
+        # (v0.9.0 was 44-113 ms), and 12 requests incremented BOTH roles'
+        # counters by 12, so disaggregation is intact. Check that last part
+        # after any change here -- a broken P/D split does not crash, it
+        # quietly routes everything to one role and the benchmark still looks
+        # plausible. See docs/reference/router-configuration.md.
+        routerEndpointPicker:
+          tag: v0.11.0
 
       vllmCommon:
         # rc enables UCX's RDMA transport (RoCE GPUDirect on this cluster --
@@ -243,17 +280,34 @@ scenario:
               featureGates:
               - flowControl
               plugins:
-              - type: disagg-headers-handler
               - type: always-disagg-pd-decider
               - type: disagg-profile-handler
                 parameters:
-                  deciderPluginName: always-disagg-pd-decider
+                  deciders:
+                    prefill: always-disagg-pd-decider
               - type: prefill-filter
               - type: decode-filter
               - type: prefix-cache-scorer
               - type: queue-scorer
               - type: kv-cache-utilization-scorer
               - type: active-request-scorer
+              - type: metrics-data-source
+                parameters:
+                  scheme: "http"
+                  path: "/metrics"
+                  insecureSkipVerify: true
+              - type: core-metrics-extractor
+              flowControl:
+                # Saturated regime: endpoints exist and are busy.
+                defaultRequestTTL: 30s
+                # Empty-pool regime: every scale-from-zero waits here, and the wait
+                # is a pod start -- measured 60-64 s, so this is ~3x it. The field
+                # does not exist before v0.11.0; that is why the pin moved.
+                noEndpointRequestTTL: 180s
+                priorityBands:
+                  - priority: 0
+                    maxRequests: 2000
+                    maxBytes: 1Gi
               schedulingProfiles:
               - name: prefill
                 plugins:
@@ -267,10 +321,64 @@ scenario:
               - name: decode
                 plugins:
                 - pluginRef: decode-filter
+                # LOAD DECIDES, prefix affinity only breaks ties.
+                #
+                # This was active-request 2 against prefix-cache 3 -- prefix
+                # affinity out-voting load -- from 2026-08-30 until it was
+                # measured. In the phase-1 steady window of one run, ONE decode
+                # replica held 99.3% of the running requests while 80% of them
+                # sat at zero; the ten-pod fleet delivered 11,362 output tok/s
+                # where an evenly loaded nine-pod fleet delivered 36,828. Phase 1
+                # needs 36,000, so that imbalance is the whole difference between
+                # a fleet that keeps up (TTFT 52 ms) and one whose queue grows for
+                # the entire phase (TTFT 74,661 ms).
+                #
+                # Why prefix affinity runs away on this workload: the trace
+                # replays fixed, repeated prompts, so every request scores
+                # highest on whichever pod last served one; that pod's cache gets
+                # warmer and it keeps winning. Cold caches tie and fall through to
+                # load, which is why the fault is intermittent rather than
+                # constant, and why comparing two runs could not find it.
+                #
+                # The weights are NOT a regression -- they are identical in the
+                # balanced runs and the broken ones. They are the hazard that
+                # lets one pod monopolise once its cache is warm. At 1 against
+                # 4 + 2 it cannot.
+                #
+                # Prefill already had two load-aware scorers (queue 2 +
+                # kv-utilisation 2) against prefix 3, and prefill is the role that
+                # never misbehaved. Decode now has the same shape; until
+                # 2026-10-02 it did not, because it had no queue-scorer at all.
+                #
+                # Prefix affinity is kept, not deleted: a multi-turn conversation
+                # really does hit a decode pod's cache. It just must not outrank
+                # load.
+                #
+                # WHY QUEUE OUTRANKS ACTIVE-REQUESTS HERE. active-request-scorer
+                # ranks by vllm:num_requests_running. Preemption moves a request
+                # out of running and back into waiting, so a pod thrashing on KV
+                # reports FEWER running -- it reads as the idlest pod in the fleet
+                # at the exact moment it is in the worst trouble, and the scorer
+                # sends it more. Measured over one run: preemption reached 25.9/s
+                # but on only 1-3 pods of 14, fleet-average KV utilisation never
+                # passed 0.54, and `min(num_requests_running)` was 0 at every
+                # single 2-minute sample -- some pod was always idle. The router
+                # meanwhile held up to 3427 requests with a queue wait p95 of 60s
+                # and scored its own pool saturated at 37.7, because the handful
+                # of pods it was routing to really were jammed.
+                #
+                # num_requests_waiting does not invert that way: a preempted
+                # request lands IN it. It is the only signal that stayed honest
+                # under this load, so it gets the dominant weight and
+                # active-request drops to parity with kv-utilisation.
+                - pluginRef: queue-scorer
+                  weight: 4
                 - pluginRef: active-request-scorer
                   weight: 2
+                - pluginRef: kv-cache-utilization-scorer
+                  weight: 2
                 - pluginRef: prefix-cache-scorer
-                  weight: 3
+                  weight: 1
           resources:
             requests:
               cpu: "4"

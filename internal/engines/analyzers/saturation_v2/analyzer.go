@@ -286,6 +286,10 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	// replica's throughput key (computeReplicaCapacity says why the key is
 	// the fleet's shape and not the replica's).
 	fleetOutput := fleetOutputLength(input.ReplicaMetrics, rolesByVariant)
+	// The prefill side's hit rate, once for the role, for the same reason:
+	// it discounts the prompt length that buckets prefill's throughput key,
+	// and a per-replica figure would split one window between replicas.
+	fleetHitRate := fleetPrefixHitRate(input.ReplicaMetrics, rolesByVariant)
 	// The other axis, and the event. The prompt length arriving reads the
 	// switch within a scrape of it, where the output half waits for a
 	// completion; a change on either says the learned figures describe a
@@ -295,6 +299,65 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	holdFor, _ := satConfig.ShapeChangeHold(ShapeChangeHoldMax)
 	stableOutput, stableInput, shapeChanged := a.noteFleetShape(input.Namespace, input.ModelID,
 		fleetInput, fleetOutput, arriving, arrivingOK, holdFor, logger)
+
+	// The derived mu's divisor. The SHORT window is right only WHILE A SHAPE
+	// CHANGE IS OUTSTANDING, which is the case it was added for: a [5m]
+	// count-weighted mean carries the previous shape's long stragglers for
+	// minutes after they stop arriving -- measured decaying 3750 -> 250 across
+	// one 6000 -> 250 switch -- and the divisor is where that error reaches mu
+	// undamped.
+	//
+	// On a STEADY shape it is wrong, and expensively so. Phase 1 of the
+	// shape-swap trace holds 6000-token generations in flight for about two
+	// minutes before any of them completes, so a [1m] mean over COMPLETED
+	// requests reads far below 6000 while the fleet ramps. rate =
+	// tokenSec/avgOutput then OVER-states mu, and an over-stated mu
+	// UNDER-orders replicas (mu_from_itl.go says so explicitly).
+	//
+	// Bisected over five runs on 2026-10-03, EPP version, EPP config,
+	// max_num_seqs and cluster held identical with the WVA image the only
+	// variable. The unconditional short window took phase 1 from a 305-request
+	// router queue at 33,071 output tok/s to 2,503 at 8,763 -- eight times the
+	// queue for a quarter of the throughput. Every build before it measured
+	// good.
+	//
+	// max(recent, [5m]) is NOT the fix, and that is worth recording because it
+	// is the obvious one: the recent figure is the LOWER of the two in both
+	// cases -- an artefact while ramping, the truth after a switch -- so no
+	// magnitude test can separate them. Whether the shape changed can.
+	// Keyed on shapeChangedWithin, NOT on the outstanding hold. The hold's flag
+	// is zero whenever an operator sets DisableShapeChangeHold, which would
+	// leave this reading the short window for the single cycle the tracker
+	// declares a change and the [5m] mean for the rest of the straggler window
+	// -- reinstating the bug above through a flag documented as only turning
+	// off the fleet hold. ShapeChangeWindow says why the two are separate.
+	// The divisor falls back the same way the queue's price does, and for the
+	// same reason: rate = tokenSec/avgOutput, so a fleet that has completed
+	// nothing divides by ZERO and the derived mu reports not-ok. With no mu the
+	// demand floor emits nothing at all -- and the floor is where the router
+	// queue is projected forward over a replica's start time
+	// (floor.backlogAtLanding). So the one window the projection exists for is
+	// the one window it could not run in.
+	//
+	// Measured on run QM (2026-10-03, shape-swap phase 1): the first queued
+	// cycle was 14:39:44 and the first throughput-demand-floor line 14:41:59 --
+	// 135 s later, by which time the router queue had already peaked at 522 and
+	// begun draining. Of 56 not-ok derived-mu cycles, 38 carried a COMPLETE
+	// ITL fit (itlA 0.0277, itlB 0.0066, itlAtKPrice 0.0254) and failed on
+	// "avgOutputTokens": 0 alone.
+	//
+	// A measurement still wins, so a warm fleet is unaffected; this only answers
+	// where there was otherwise a zero. The error direction is also the safe one
+	// for a seed that is too LARGE: a bigger divisor under-states mu, and an
+	// under-stated mu over-orders during the cold window rather than
+	// under-ordering, which is the failure this is for.
+	muDivisor := satConfig.ExpectedOutputTokens(fleetOutput, stableOutput, DefaultExpectedOutputTokens)
+	if a.shapeChangedWithin(input.Namespace, input.ModelID,
+		satConfig.ShapeChangeWindow(ShapeChangeHoldMax), time.Now()) {
+		if recent := fleetOutputLengthRecent(input.ReplicaMetrics, rolesByVariant); recent > 0 {
+			muDivisor = recent
+		}
+	}
 
 	// One ITL(k) fit per variant per cycle, from readings its replicas report
 	// at whatever load they are at. This is what lets mu be priced for the
@@ -354,12 +417,48 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		itlModel := itlModels[rm.VariantName]
 		engineParams := engineParamsFor(a, input.Namespace, input.ModelID, rm.VariantName)
 		fleetShape := shape.New(fleetInput, fleetOutput, rm.PrefixCacheHitRate)
-		derived := deriveMu(itlModel, engineParams, rm.TotalKvCapacityTokens,
-			fleetShape, pricingK(satConfig))
+		// Only a generating role is priced from the ITL line. ITL is the gap
+		// between two generated tokens, and a prefill replica emits one and
+		// hands the KV to decode, so tokenSec/avgOutput does not describe it.
+		//
+		// This has always held, but only by accident: itlModels above is
+		// populated for RoleDecode alone, so a prefill lookup returned the
+		// zero Model and deriveMu declined on IsZero() 250 lines away, keyed
+		// on the opposite condition. A role-classification slip, or anyone
+		// legitimately extending that population to RoleBoth, would have
+		// started pricing prefill from decode's physics with nothing to say
+		// so. Stated here instead, beside the call it governs.
+		var derived derivedMu
+		if canonicalRole(role) == domain.RoleDecode {
+			kPrice := pricingK(satConfig)
+			derived = deriveMu(itlModel, engineParams, rm.TotalKvCapacityTokens,
+				fleetShape, kPrice, muDivisor)
+			// Every term, because the result alone cannot be attributed to one.
+			// A derived mu that is wrong by 8x looks identical in the log
+			// whether the fault is the output length, the sequence count, the
+			// ITL line or the pricing point -- and that ambiguity cost four
+			// discarded diagnoses in one session. maxNumSeqs is reported
+			// separately from seqs so the cap is visible when it binds.
+			var maxSeqs int64
+			if engineParams != nil {
+				maxSeqs = engineParams.MaxNumSeqs
+			}
+			logger.V(logging.DEFAULT).Info("derived-mu",
+				"variant", rm.VariantName, "pod", rm.PodName,
+				"ok", derived.ok,
+				"rate", derived.rate, "seqs", derived.seqs, "tokenSec", derived.tokenSec,
+				"kPrice", kPrice, "itlAtKPrice", itlModel.ITLAt(kPrice),
+				"itlA", itlModel.A, "itlB", itlModel.B, "itlZero", itlModel.IsZero(),
+				"avgOutputTokens", fleetShape.AvgOutputTokens,
+				"muDivisor", muDivisor,
+				"kvReqPerSeq", fleetShape.KVreq,
+				"replicaKvTokens", rm.TotalKvCapacityTokens,
+				"maxNumSeqs", maxSeqs)
+		}
 		a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq, logger)
 		rc := a.computeReplicaCapacity(rm, satConfig, input.ModelID, input.Namespace, gpuCount,
 			role, accelByVariant[rm.VariantName], stableOutput, fleetOutput, stableInput,
-			derived, downstreamSaturated, logger)
+			fleetHitRate, derived, downstreamSaturated, logger)
 		if rc != nil {
 			replicaCapacities = append(replicaCapacities, *rc)
 		}
@@ -391,7 +490,15 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	}
 
 	// Add scheduler queue demand (requests queued upstream in llm-d flow control).
-	queueDemand := estimateSchedulerQueueDemand(input.SchedulerQueue, input.ReplicaMetrics, rolesByVariant, activeRoles)
+	// Price the queue at an output length the fleet has, recalls, or was told
+	// -- in that order -- so a cold fleet does not value a growing queue at
+	// zero. fleetOutput is this cycle's measurement and wins whenever it
+	// exists; stableOutput is what this fleet last knew and carries across an
+	// idle period; the rest is configuration.
+	expectedOutput := satConfig.ExpectedOutputTokens(fleetOutput, stableOutput, DefaultExpectedOutputTokens)
+	queueMetrics := withExpectedOutputTokens(input.ReplicaMetrics, rolesByVariant, expectedOutput)
+	queueDemand := estimateSchedulerQueueDemand(input.SchedulerQueue, queueMetrics, rolesByVariant, activeRoles,
+		fleetHitRate)
 	totalDemand += queueDemand.total
 	if input.SchedulerQueue != nil {
 		logger.Info("scheduler-queue-demand",
@@ -465,12 +572,17 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	// RoleDemand and TotalDemand keep moving together.
 	if decodeSaturated && roleDemand != nil {
 		scaleUp, scaleDown := satConfig.AnalyzerThresholds(domain.SaturationAnalyzerName)
-		if h, held := holdPrefillDemand(roleDemand, variantCapacities, scaleUp, scaleDown); held {
+		// The scheduler queue's share is exempt: those requests have been
+		// given to no pod and have had no first token, so prefill is what
+		// they are waiting for whatever decode is doing.
+		undispatched := queueDemand.byRole[domain.RolePrefill]
+		if h, held := holdPrefillDemand(roleDemand, variantCapacities, scaleUp, scaleDown, undispatched); held {
 			totalDemand += h.after - h.before
 			logger.Info("prefill-demand-held",
 				"modelID", input.ModelID, "namespace", input.Namespace,
 				"demandBefore", h.before, "demandHeld", h.after, "holdFloor", h.lo, "holdCap", h.hi,
-				"reason", "decode saturated: the KV prefill holds and the queue behind it are decode's backlog; prefill is neither ordered nor released on them")
+				"undispatched", undispatched,
+				"reason", "decode saturated: the KV prefill holds and the queue behind it are decode's backlog; prefill is neither ordered nor released on them, but the scheduler queue's share is not held -- no pod has started those")
 		}
 	}
 
@@ -524,6 +636,12 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// reason shapeKeyOutput is: it buckets the throughput key, and a fleet
 	// whose average wobbles across a boundary must not split its window in two.
 	shapeKeyInput float64,
+	// fleetHitRate is the PREFILL ROLE's prefix-cache hit rate, one figure for
+	// the whole role this cycle. It discounts shapeKeyInput into the prompt
+	// length prefill actually computes. The replica's own rate is deliberately
+	// not used: it would put two replicas of one variant in different input
+	// buckets in the same cycle (fleetPrefixHitRate).
+	fleetHitRate float64,
 	// derived is mu priced from this variant's fitted ITL model, which needs
 	// no saturated cycle and no bucket. It is preferred over the measured
 	// window when present (mu_from_itl.go).
@@ -613,10 +731,25 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// useDerived then preferred over a derived figure that had priced the
 	// change correctly. k2 keeps historyKey unchanged; this is the throughput
 	// key alone, as the shape-shift proposal scopes it.
+	// Prefill is keyed on the prompt tokens it actually has to compute: a
+	// prefix the cache already holds is not work, so the discount that
+	// shape.New applies for KVreq applies to prefill's throughput too. Raw
+	// prompt length would put the same replica in different buckets purely
+	// because the hit rate moved. Decode keeps the raw figure it has always
+	// used -- its capacity is about resident KV, which the shape's KVreq
+	// already discounts on its own path.
+	keyInput := shapeKeyInput
+	if canonicalRole(role) == domain.RolePrefill {
+		keyInput = shape.New(shapeKeyInput, shapeKeyOutput, fleetHitRate).ILeff
+	}
 	throughputKey := a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
-		shapeKeyInput, shapeKeyOutput, config.QueueLengthThreshold)
+		keyInput, shapeKeyOutput, config.QueueLengthThreshold)
 	if k2Priority == capacity.K2SrcObserved && rm.Ready && !rm.FromWarmPool {
-		if mu, ok := saturatedCompletionRate(rm, role, fleetOutput); ok {
+		// keyInput is the effective prompt length this key was built with, so
+		// the token rate is converted to requests/s at the same figure the
+		// window is keyed by -- a rate divided by one shape and stored under
+		// another is the fault the key exists to prevent.
+		if mu, ok := saturatedCompletionRate(rm, role, fleetOutput, keyInput); ok {
 			a.recordSaturatedThroughput(throughputKey, mu)
 		} else {
 			// The replica is full and queued -- the one moment its throughput can
@@ -838,6 +971,31 @@ func useDerived(derivedOK bool, reading throughputReading) bool {
 // produce it, so it cannot be spoofed by a real output bucket.
 const derivedBucket = "derived"
 
+// prefillOutputBucket is the output bucket every prefill throughput reading is
+// recorded under, whatever the fleet is generating.
+//
+// A prefill replica completes its request after the first token and hands the
+// KV to decode, so how long the ANSWER turns out to be is not work it does.
+// Keying its saturated throughput by the fleet's output length therefore
+// splits one population of readings across unrelated buckets, and a shape swap
+// walks it through several of them as the old requests drain.
+//
+// Measured on the 1k/6000 -> 30k/250 trace (run PJ, 2026-09-29): within a
+// single phase whose prompt length never moved, prefill's bucket read xlong,
+// then xxlong, then xlong, then medium, with mu re-learned in each. It had no
+// mu at all for the first nine minutes of traffic, and when the floor wanted
+// about nine replicas it was held to one per cycle -- 1->2->3->4 over two and
+// a half minutes -- until a window finally had samples of its own, then
+// jumped to 10.
+//
+// Not in outputBuckets, so nearestSaturatedThroughput declines to borrow
+// across it. That is the intent: borrowing exists to cover the empty bucket an
+// OUTPUT switch leaves behind, which prefill no longer has. The INPUT bucket
+// stays in the key and still partitions these readings, because prompt length
+// is what a prefill replica's throughput actually depends on -- so an input
+// switch still, correctly, makes prefill re-learn.
+const prefillOutputBucket = "noout"
+
 // throughputKey is historyKey with the fleet's input bucket COMPOSED INTO it --
 // not appended, see the body: a saturated throughput is a property of a replica
 // AND the (I, O) it was measured under, so a reading recorded at one input
@@ -857,10 +1015,17 @@ func (a *SaturationAnalyzer) throughputKey(
 	// input bucket ahead of the output one keeps that parse intact, and makes
 	// a borrow walk output buckets WITHIN an input bucket -- which is what
 	// borrowing should mean anyway.
+	// Prefill is keyed by prompt length alone: the output bucket is a constant
+	// for it, because output length is not work a prefill replica does. See
+	// prefillOutputBucket.
+	outBucket := classifyOutputLength(avgOutput)
+	if canonicalRole(role) == domain.RolePrefill {
+		outBucket = prefillOutputBucket
+	}
 	return fmt.Sprintf("%s|%s|%d|%s|i%s|%s|q%g",
 		modelID, a.stableAccelerator(namespace, variantName, accelerator),
 		gpuCount, canonicalRole(role), classifyInputLength(avgInput),
-		classifyOutputLength(avgOutput), queueThreshold)
+		outBucket, queueThreshold)
 }
 
 // historyKey is the bucket a replica's saturated observations (k2, and the
@@ -1506,6 +1671,54 @@ func estimateCapacityFromParams(params *capacity.EngineParams, avgInput, avgOutp
 // rolesByVariant maps variant name to its P/D role; a variant absent from it
 // is treated as domain.RoleBoth, so a non-disaggregated fleet averages over
 // every replica exactly as before.
+// withExpectedOutputTokens returns replicaMetrics with expected filled in as
+// the output length of every OUTPUT-GENERATING replica that reports none.
+//
+// It exists so the scheduler queue can be priced on the first cycle of load.
+// estimateSchedulerQueueDemand charges the queue Q x avgOutput, and avgOutput
+// is an average over replicas that have COMPLETED something; on a cold fleet
+// none has, so the queue is worth nothing to the role that will generate it.
+// Measured on run QL: decode's share read {"decode":0} for the first two
+// cycles with 141 requests already queued.
+//
+// A COPY, never a mutation of the caller's slice. The input is the analyzer's
+// own AnalyzerInput, read by several other steps in the same cycle, and a
+// replica whose reported output length was quietly rewritten would change what
+// every one of them measured -- including the throughput keys and the shape
+// tracker, which must follow what the fleet actually served.
+//
+// Only replicas that generate output, and only those reporting zero: a prefill
+// replica completes about one token per request, so filling it in would move a
+// figure that is already correct, and a replica with a real reading is not
+// improved by a default.
+//
+// Returns the input unchanged when expected is not positive or nothing needs
+// filling, so the common case allocates nothing.
+func withExpectedOutputTokens(replicaMetrics []domain.ReplicaMetrics,
+	rolesByVariant map[string]string, expected float64) []domain.ReplicaMetrics {
+	if !(expected > 0) {
+		return replicaMetrics
+	}
+	needed := false
+	for _, rm := range replicaMetrics {
+		if !(rm.AvgOutputTokens > 0) && generatesOutput(rm, rolesByVariant) {
+			needed = true
+			break
+		}
+	}
+	if !needed {
+		return replicaMetrics
+	}
+	out := make([]domain.ReplicaMetrics, len(replicaMetrics))
+	copy(out, replicaMetrics)
+	for i := range out {
+		if !(out[i].AvgOutputTokens > 0) && generatesOutput(out[i], rolesByVariant) {
+			out[i].AvgOutputTokens = expected
+		}
+	}
+	return out
+}
+
 func computeModelWorkloadAverages(replicaMetrics []domain.ReplicaMetrics, rolesByVariant map[string]string) (avgInput, avgOutput, avgHitRate float64) {
 	var count, outputCount int
 	for _, rm := range replicaMetrics {
@@ -1575,6 +1788,70 @@ func fleetOutputLength(replicas []domain.ReplicaMetrics, rolesByVariant map[stri
 	return fleetAverage(replicas,
 		func(rm domain.ReplicaMetrics) float64 { return rm.AvgOutputTokens },
 		func(rm domain.ReplicaMetrics) bool { return generatesOutput(rm, rolesByVariant) })
+}
+
+// fleetOutputLengthRecent is fleetOutputLength over the SHORT window, and is
+// the derived mu's divisor (deriveMu) WHILE A SHAPE CHANGE IS OUTSTANDING only.
+//
+// Zero when no generating replica reports the short-window figure -- an engine
+// that does not publish the counter, or a fleet that completed nothing in the
+// last minute.
+//
+// The caller falls back to fleetOutputLength then, and also whenever the shape
+// is steady. That gate is not a precaution; it is a measured requirement. This
+// window averages over requests that have COMPLETED, so on a fleet ramping into
+// long generations it reads far below the length being served, which over-states
+// mu and under-orders replicas. The caller's comment carries the bisect. The
+// [5m] figure is wrong only for the few minutes after a shape change, which is
+// exactly when this one is used.
+func fleetOutputLengthRecent(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string) float64 {
+	return fleetAverage(replicas,
+		func(rm domain.ReplicaMetrics) float64 { return rm.AvgOutputTokensRecent },
+		func(rm domain.ReplicaMetrics) bool { return generatesOutput(rm, rolesByVariant) })
+}
+
+// fleetPrefixHitRate is the prefill side's prefix-cache hit rate as ONE figure
+// for the whole role, request-rate weighted.
+//
+// It is not fleetAverage: that helper skips a value of zero as absent, and a
+// hit rate of zero is a reading, not a missing one -- a fleet with prefix
+// caching off reports 0 on every replica, and skipping those would leave the
+// mean to whichever replica happened to report something.
+//
+// One figure per role per cycle, for the same reason the output length is one
+// figure: it buckets a key. rm.PrefixCacheHitRate is per REPLICA, so using it
+// directly let two replicas of one variant land in different input buckets in
+// the same cycle and split the window the bucket exists to hold together --
+// the exact fault prefillOutputBucket was added to remove, on a new axis.
+//
+// Still not hysteretic: shape.Tracker tracks IL and OL, not this. A fleet
+// whose hit rate drifts across a bucket boundary can therefore still move
+// prefill's window, just not split it between replicas within a cycle.
+func fleetPrefixHitRate(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string) float64 {
+	var weighted, weights, plain float64
+	var n int
+	for _, rm := range replicas {
+		if canonicalRole(rolesByVariant[rm.VariantName]) != domain.RolePrefill {
+			continue
+		}
+		v := rm.PrefixCacheHitRate
+		if v < 0 || v > 1 || math.IsNaN(v) {
+			continue
+		}
+		plain += v
+		n++
+		if rm.RequestRate > 0 {
+			weighted += v * rm.RequestRate
+			weights += rm.RequestRate
+		}
+	}
+	if weights > 0 {
+		return weighted / weights
+	}
+	if n > 0 {
+		return plain / float64(n)
+	}
+	return 0
 }
 
 // rolesFromStates builds the variant-name -> role lookup the per-role helpers
@@ -1687,7 +1964,23 @@ type roleHold struct {
 // anticipated supply is never below supply and the band is never empty in
 // practice. The
 // variants' own demand and utilization are moved with the role figure.
-func holdPrefillDemand(roleDemand map[string]float64, variants []domain.VariantCapacity, scaleUp, scaleDown float64) (roleHold, bool) {
+// undispatched is the scheduler queue's share of prefill demand: requests the
+// gateway is holding that have been given to NO pod. It is the one part of
+// prefill's demand the hold must not clamp, and the distinction is physical.
+//
+// A request whose KV sits on a prefill replica awaiting transfer has already
+// been prefilled and has already produced its first token; what it waits for
+// is decode, and ordering prefill for it buys nothing. A request in the
+// scheduler's queue has been prefilled by nobody. Prefill capacity is exactly
+// what it is waiting for, whatever decode is doing, and until it gets some it
+// has no first token at all.
+//
+// Holding both together is what left prefill at one replica through a
+// 600-deep queue while decode sat at its ceiling: the clamp lands on
+// scaleUp x supply, which is the figure RC = D/scaleUp - anticipated turns
+// into exactly zero, so no amount of queued work could order a replica.
+// Measured on run PM: demand 550,077 clamped to 495,529, RC 0, for 19 cycles.
+func holdPrefillDemand(roleDemand map[string]float64, variants []domain.VariantCapacity, scaleUp, scaleDown, undispatched float64) (roleHold, bool) {
 	const role = domain.RolePrefill
 	before, ok := roleDemand[role]
 	if !ok || scaleUp <= 0 || scaleDown <= 0 {
@@ -1701,6 +1994,14 @@ func holdPrefillDemand(roleDemand map[string]float64, variants []domain.VariantC
 	h.after = min(before, h.hi)
 	if h.lo <= h.hi {
 		h.after = max(h.after, h.lo)
+	}
+	// Never below the undispatched share. The band exists to stop prefill
+	// being ordered or released on DECODE's backlog; work no pod has started
+	// is not that, and clamping it away is what made the queue unable to
+	// order anything. Bounded by `before` so this can only decline to hold
+	// demand that was already there -- it never invents any.
+	if undispatched > h.hi {
+		h.after = max(h.after, min(undispatched, before))
 	}
 	if h.after == before {
 		return h, false
@@ -1851,21 +2152,78 @@ type schedulerQueueDemand struct {
 //	outputTokens = queueSize * avgOutputTokens
 //
 // Role attribution:
-//   - Prefill: inputTokens (prompt KV must be computed and stored)
-//   - Decode:  inputTokens + outputTokens (receives KV transfer + generates output)
+//   - Prefill: inputTokens, discounted by PREFILL's own hit rate (see below)
+//   - Decode:  outputTokens when a prefill role exists, inputTokens +
+//     outputTokens otherwise (see "charging a queue to the role that serves it")
 //   - Both:    inputTokens + outputTokens (handles full request lifecycle)
-//   - Model-level total: inputTokens + outputTokens (unchanged for backward compat)
+//   - Model-level total: inputTokens + outputTokens, EXCEPT where a prefill
+//     role is active, in which case it is prefillInputTokens + outputTokens so
+//     that the per-role charges sum back to it. See the comment above the
+//     `total` assignment; "unchanged for backward compat" is what this used to
+//     say, and it is the premise the split disproved.
 //
 // The prefix cache hit rate reduces expected input token KV demand because
 // a fraction of prompt tokens will hit the prefix cache and reuse existing
 // KV blocks. This does NOT apply to the local engine queue
 // (vllm:num_requests_waiting / sglang:num_queue_reqs) because those requests
 // have not yet had prefix cache lookup performed.
+//
+// prefillHitRate is the PREFILL role's own hit rate (fleetPrefixHitRate), and
+// the prefill role's charge is discounted by it rather than by the model-wide
+// average, BECAUSE THE DIVISOR IS. saturatedCompletionRate prices a prefill
+// replica as PrefillComputedTokenRate / ILeff, where ILeff carries exactly this
+// factor; the quotient is a replica count only if the dividend carries it too.
+// The model-wide average is a different figure over a different set -- every
+// replica with token activity, decode included, unweighted -- so on a P/D fleet
+// the two diverge with the role ratio. At one prefill replica reading 0.8 and
+// nine decode replicas reading 0.0 the average is 0.08: the charge would keep
+// 92% of the prompt while the divisor kept 20% of it, inflating mu fivefold
+// against the demand it is divided into and under-ordering prefill by the same
+// factor -- worse the larger decode grows, which is the fleet this attribution
+// exists for. Passing the one variable to both sides is what makes them cancel;
+// its VALUE does not have to be right for the quotient to be a replica count,
+// and when there is no prefill reading at all both sides fall back to 0
+// together and no discount is taken on either.
+//
+// # Charging a queue to the role that serves it
+//
+// A queued request is ONE backlog, and it used to be charged in full to both
+// roles: prefill got its input tokens and decode got the same input tokens plus
+// the output. That is right in two cases and wrong in a third.
+//
+// It is right with NO DISAGGREGATION. A RoleBoth pod computes the prompt and
+// generates from it, so the whole request is its work and the charge is the
+// work. This branch is unchanged for that case, and for an unknown role.
+//
+// It is also right AT A STEADY SHAPE, even disaggregated -- not because the
+// figure is accurate but because it is consistently inaccurate. mu is learned
+// at the same shape the demand is charged at, so a fixed over-count divides out
+// of demand/mu and the replica count survives it, exactly as the hit rate above
+// does.
+//
+// It breaks on a DISAGGREGATED fleet when the shape turns input-heavy, because
+// then the over-count stops being fixed. At 1000 in / 6000 out the charge is
+// dominated by output, which is decode's real work. After the trace flips to
+// 30000 in / 250 out the input term is 120x the output and swamps it, so decode
+// is sized by prompts it does not compute and cannot hold until prefill has
+// handed them over. Measured on that trace: decode's demand was 96.65% gateway
+// queue charge against 2.74% resident KV, and at the peak cycle it was charged
+// 1.32e8 tokens while holding 3.63e5 -- a factor of 366. It sat at eight
+// replicas whose KV cache was 2% full, with one request waiting, beside a
+// prefill side queueing 249.
+//
+// So the two roles are separated: prefill is charged the tokens it must
+// compute, decode the tokens it must generate. Decode's share of the prompt is
+// not dropped, it is DEFERRED to where it is real -- the resident KV that
+// aggregateRoleDemand already counts from the engines, which rises as prefill
+// actually delivers. The queue is charged once, to the role the queue is
+// waiting on.
 func estimateSchedulerQueueDemand(
 	sq *domain.SchedulerQueueMetrics,
 	replicaMetrics []domain.ReplicaMetrics,
 	rolesByVariant map[string]string,
 	activeRoles map[string]bool,
+	prefillHitRate float64,
 ) schedulerQueueDemand {
 	if sq == nil || (sq.QueueSize == 0 && sq.QueueBytes == 0) {
 		return schedulerQueueDemand{}
@@ -1886,12 +2244,65 @@ func estimateSchedulerQueueDemand(
 	}
 
 	// Apply prefix cache hit rate reduction to input tokens only
+	inputTokensRaw := inputTokens
 	inputTokens *= (1 - avgHitRate)
+
+	// The same reduction at the PREFILL role's own hit rate, for the prefill
+	// charge alone. Clamped the way shape.New clamps the figure the divisor is
+	// built from, so the two cannot disagree about a reading out of range.
+	prefillDiscount := prefillHitRate
+	if math.IsNaN(prefillDiscount) || prefillDiscount < 0 {
+		prefillDiscount = 0
+	}
+	if prefillDiscount > 1 {
+		prefillDiscount = 1
+	}
+	prefillInputTokens := inputTokensRaw * (1 - prefillDiscount)
 
 	// Estimate output tokens (no cache reduction — output must be generated)
 	outputTokens := float64(sq.QueueSize) * avgOutput
 
+	// On a DISAGGREGATED fleet the model total is what the two roles are
+	// charged between them, and it has to be, because the roles are charged
+	// disjoint slices of it and everything downstream now relies on their
+	// summing back to it -- see the note in throughput_floor.go where
+	// heldInModelTotal() used to stand.
+	//
+	// The two prompt figures are not the same number. The total's prompt is
+	// discounted at the model-wide mean hit rate and prefill's charge at
+	// PREFILL's own, which the fleet that motivated this diverges sharply on:
+	// one prefill replica reading 0.8 beside nine decode replicas reading 0.0
+	// gives a mean of 0.08. Left on the mean the total would carry 920,000
+	// tokens of prompt where prefill is charged 200,000 -- a 720,000-token
+	// shortfall between the total and the sum of its roles, owned by nothing,
+	// which is the exact fault the split was made to remove.
+	//
+	// So the total follows the charge, not the other way round. An aggregated
+	// fleet keeps the model-wide figure: there is one role, it is charged the
+	// whole request, and no split has happened to be consistent with.
+	//
+	// The condition is PREFILL ALONE, not prefill-and-decode. It was the pair
+	// at first, and that left the same divergence behind on a smaller fleet:
+	// with a prefill role active and decode absent from activeRoles -- decode
+	// scaled to zero, or simply carrying no VariantCapacity this cycle --
+	// outputTokens is 0 (generatesOutput excludes prefill replicas, so there is
+	// nothing to average), and the total fell back to the mean-discounted
+	// prompt while prefill was still charged the rate-weighted one. The two
+	// figures are then the SAME replicas averaged two different ways, which is
+	// the fault e3218ce3 exists to remove. Two prefill replicas reading 0.9 at
+	// 10 req/s and 0.1 at 1 req/s give a plain mean of 0.50 against a weighted
+	// 0.83: on a 100-request queue of 10,000-token prompts the total read
+	// 500,000 and prefill was charged 172,727, leaving 327,273 tokens -- 65% of
+	// it -- owned by no role.
+	//
+	// Keyed on prefill alone the identity is exact in every shape: with decode
+	// present the total is both charges, with decode absent outputTokens is 0
+	// and the total IS prefill's charge. Decode-only is untouched, because
+	// prefill not being active is what selects the model-wide figure.
 	total := inputTokens + outputTokens
+	if activeRoles[domain.RolePrefill] {
+		total = prefillInputTokens + outputTokens
+	}
 
 	// Build per-role attribution
 	byRole := make(map[string]float64)
@@ -1899,9 +2310,16 @@ func estimateSchedulerQueueDemand(
 		for role := range activeRoles {
 			switch role {
 			case domain.RolePrefill:
-				byRole[domain.RolePrefill] = inputTokens
+				byRole[domain.RolePrefill] = prefillInputTokens
 			case domain.RoleDecode:
-				byRole[domain.RoleDecode] = inputTokens + outputTokens
+				// Disaggregated only when a prefill role is actually active:
+				// a decode-labelled variant running alone still serves whole
+				// requests, so it keeps the full charge.
+				if activeRoles[domain.RolePrefill] {
+					byRole[domain.RoleDecode] = outputTokens
+				} else {
+					byRole[domain.RoleDecode] = inputTokens + outputTokens
+				}
 			default: // domain.RoleBoth or unknown
 				byRole[role] = total
 			}

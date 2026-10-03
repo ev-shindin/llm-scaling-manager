@@ -45,11 +45,12 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		prefillK1      = 919_449.0 // prefillKv x 0.8, truncated
 		prefillKey     = "test-model|H200|1|prefill|short|q5"
 		decodeKey      = "test-model|H200|1|decode|long|q5"
-		// The throughput window is keyed by the FLEET's output length
-		// (fleetOutputLength: the decode rows' 1000 here, `long`), not the
-		// replica's own -- prefill's own average output is ~1 and says
-		// nothing about the shape. The k2 history stays on the own key.
-		prefillMuKey = "test-model|H200|1|prefill|long|q5"
+		// Prefill's throughput window carries NO output bucket: it completes a
+		// request after one token, so the answer's length is not work it does,
+		// and keying by it split one population of readings across unrelated
+		// buckets (prefillOutputBucket). Decode still uses the fleet's output
+		// length, and the k2 history stays on the own key for both.
+		prefillMuKey = "test-model|H200|1|prefill|" + prefillOutputBucket + "|q5"
 	)
 	decode := func(pod string, tokensInUse int64, queue int) domain.ReplicaMetrics {
 		rm := makeReplicaMetrics(pod, decodeVariant, tokensInUse, runKvCapacity, queue, 6000, 1000)
@@ -420,29 +421,29 @@ var _ = Describe("holdPrefillDemand", func() {
 	It("clamps into [scaleDown x supply, scaleUp x anticipated] and says what it did", func() {
 		// supply 200, anticipated 300: the band is [140, 255].
 		rd := map[string]float64{domain.RolePrefill: 900, domain.RoleDecode: 50}
-		h, held := holdPrefillDemand(rd, variants, 0.85, 0.7)
+		h, held := holdPrefillDemand(rd, variants, 0.85, 0.7, 0)
 		Expect(held).To(BeTrue())
 		Expect(h).To(Equal(roleHold{before: 900, after: 255, lo: 140, hi: 255}))
 		Expect(rd[domain.RolePrefill]).To(Equal(255.0))
 		Expect(rd[domain.RoleDecode]).To(Equal(50.0), "another role is not touched")
 
 		rd[domain.RolePrefill] = 10
-		h, held = holdPrefillDemand(rd, variants, 0.85, 0.7)
+		h, held = holdPrefillDemand(rd, variants, 0.85, 0.7, 0)
 		Expect(held).To(BeTrue())
 		Expect(h.after).To(Equal(140.0))
 
 		rd[domain.RolePrefill] = 200
-		_, held = holdPrefillDemand(rd, variants, 0.85, 0.7)
+		_, held = holdPrefillDemand(rd, variants, 0.85, 0.7, 0)
 		Expect(held).To(BeFalse(), "inside the band: nothing to do")
 		Expect(rd[domain.RolePrefill]).To(Equal(200.0))
 	})
 	It("does nothing for a role with no demand entry, no supply, or no thresholds", func() {
-		_, held := holdPrefillDemand(map[string]float64{domain.RoleDecode: 50}, variants, 0.85, 0.7)
+		_, held := holdPrefillDemand(map[string]float64{domain.RoleDecode: 50}, variants, 0.85, 0.7, 0)
 		Expect(held).To(BeFalse())
 		noSupply := []domain.VariantCapacity{{VariantName: "p", Role: domain.RolePrefill, ReplicaCount: 0, PerReplicaCapacity: 100}}
-		_, held = holdPrefillDemand(map[string]float64{domain.RolePrefill: 900}, noSupply, 0.85, 0.7)
+		_, held = holdPrefillDemand(map[string]float64{domain.RolePrefill: 900}, noSupply, 0.85, 0.7, 0)
 		Expect(held).To(BeFalse())
-		_, held = holdPrefillDemand(map[string]float64{domain.RolePrefill: 900}, variants, 0, 0.7)
+		_, held = holdPrefillDemand(map[string]float64{domain.RolePrefill: 900}, variants, 0, 0.7, 0)
 		Expect(held).To(BeFalse())
 	})
 	It("lets the cap win when the band is empty", func() {
@@ -452,11 +453,11 @@ var _ = Describe("holdPrefillDemand", func() {
 		// threshold; the guard is for the helper's own contract.
 		down := []domain.VariantCapacity{{VariantName: "p", Role: domain.RolePrefill, ReplicaCount: 3, PendingReplicas: -1, PerReplicaCapacity: 100}}
 		rd := map[string]float64{domain.RolePrefill: 900}
-		h, held := holdPrefillDemand(rd, down, 0.85, 0.7)
+		h, held := holdPrefillDemand(rd, down, 0.85, 0.7, 0)
 		Expect(held).To(BeTrue())
 		Expect(h.after).To(Equal(170.0), "never an order")
 		rd[domain.RolePrefill] = 10
-		h, held = holdPrefillDemand(rd, down, 0.85, 0.7)
+		h, held = holdPrefillDemand(rd, down, 0.85, 0.7, 0)
 		Expect(held).To(BeFalse(), "and no floor to raise to, so the release stands")
 		Expect(h.after).To(Equal(10.0))
 	})

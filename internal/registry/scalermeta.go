@@ -120,6 +120,35 @@ const (
 	// is wired when the KEDA-driven path replaces that hop. Until then the
 	// analyzer uses its own default, replaced by the first measurement.
 	ReplicaStartSecondsKey = "replicaStartSeconds"
+
+	// DefaultOutputTokensKey seeds how many tokens one request of this model
+	// generates.
+	//
+	// The demand floor prices a request waiting in the router queue at the
+	// generation length it will produce -- a queued request owes the decode role
+	// that many tokens of work, and that is what makes a growing queue worth
+	// ordering capacity for. Until a replica has COMPLETED a generation there is
+	// no reading to price it with, and a queue priced at zero does not order:
+	// measured on the shape-swap benchmark, 141 requests sat in the router queue
+	// through a whole phase while decode's share of them was nothing.
+	//
+	// It is a SEED, not a setting, exactly like replicaStartSeconds: the fleet's
+	// own average output length replaces it the moment one exists, so a figure of
+	// the right order is what matters and an exact one buys nothing. The built-in
+	// fallback is 512 tokens, a generic chat completion -- twelve times short of
+	// this benchmark's 6000, which is why the key exists.
+	//
+	// It rides trigger metadata rather than the scaling-policy ConfigMap because
+	// it is a fact about one workload's traffic, not a threshold a class of
+	// workloads shares: a fleet-wide generation length is already what the
+	// built-in fallback is. Optional; a non-negative whole number.
+	//
+	// A model's variants may each carry one -- there is a ScaledObject per role
+	// under P/D -- and they are resolved to one figure for the model, because the
+	// queue being priced is the model's. The LARGEST wins and a disagreement is
+	// reported: under-pricing a queue is the failure this key exists to fix, so a
+	// prefill trigger that says nothing must not drag decode's figure down.
+	DefaultOutputTokensKey = "defaultOutputTokens"
 )
 
 // DefaultVariantCost matches the default the VariantAutoscaling type carries, so
@@ -147,6 +176,11 @@ type Meta struct {
 	// POINTER because zero is a real setting -- never warm this -- and has to be
 	// distinguishable from "not specified".
 	WarmPoolCopies *int
+	// DefaultOutputTokens is the seeded generation length, or 0 when the trigger
+	// carries none. Not a pointer: zero and absent mean the same thing here --
+	// there is no sense in which a request generates no tokens, so there is
+	// nothing for an explicit 0 to express that absence does not.
+	DefaultOutputTokens int
 }
 
 // ParseMeta validates a trigger's metadata.
@@ -193,12 +227,27 @@ func ParseMeta(metadata map[string]string) (Meta, error) {
 		copies = &n
 	}
 
+	// Validated at the trigger that carried it, for the same reason
+	// warmPoolCopies is: the operator's only view of a rejected value is this
+	// error, so rejecting it later -- or defaulting around it -- would lose the
+	// one diagnostic there is.
+	outputTokens := 0
+	if raw := metadata[DefaultOutputTokensKey]; raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			return Meta{}, fmt.Errorf("trigger metadata %q must be a non-negative whole number of tokens, got %q",
+				DefaultOutputTokensKey, raw)
+		}
+		outputTokens = n
+	}
+
 	return Meta{
-		ModelID:        modelID,
-		VariantCost:    cost,
-		ScalingPolicy:  metadata[ScalingPolicyKey],
-		WarmPool:       metadata[WarmPoolKey],
-		WarmPoolCopies: copies,
+		ModelID:             modelID,
+		VariantCost:         cost,
+		ScalingPolicy:       metadata[ScalingPolicyKey],
+		WarmPool:            metadata[WarmPoolKey],
+		WarmPoolCopies:      copies,
+		DefaultOutputTokens: outputTokens,
 	}, nil
 }
 

@@ -1134,8 +1134,57 @@ var _ = Describe("SaturationAnalyzer", func() {
 		})
 	})
 
+	Describe("pricing a queue before the fleet has completed anything", func() {
+		// Run QL, measured: a cold decode replica reports no output length, so
+		// estimateSchedulerQueueDemand charged the queue Q x 0 and decode's
+		// share logged {"decode":0} for the first two cycles with 141 requests
+		// already waiting. The first order came four cycles in -- 45 s of a
+		// 58 s replica start spent on arithmetic rather than hardware.
+		roles := map[string]string{"decode-v": domain.RoleDecode, "prefill-v": domain.RolePrefill}
+		cold := func() []domain.ReplicaMetrics {
+			d := makeReplicaMetrics("decode-0", "decode-v", 5000, 16000, 0, 1000, 0)
+			p := makeReplicaMetrics("prefill-0", "prefill-v", 1000, 16000, 0, 1000, 0)
+			return []domain.ReplicaMetrics{d, p}
+		}
+		queued := &domain.SchedulerQueueMetrics{QueueSize: 141}
+		active := map[string]bool{domain.RolePrefill: true, domain.RoleDecode: true}
+
+		It("values the queue at nothing for decode when no replica reports an output length", func() {
+			// The negative control, and the bug as it stood.
+			got := estimateSchedulerQueueDemand(queued, cold(), roles, active, 0)
+			Expect(got.byRole[domain.RoleDecode]).To(BeZero(),
+				"this is the measured failure: 141 queued requests worth nothing to the role that must generate them")
+		})
+
+		It("values it at the expected output length once one is supplied", func() {
+			const expected = 6000.0
+			filled := withExpectedOutputTokens(cold(), roles, expected)
+			got := estimateSchedulerQueueDemand(queued, filled, roles, active, 0)
+			Expect(got.byRole[domain.RoleDecode]).To(BeNumerically("~", 141*expected, 1),
+				"the queue is now worth what the role will have to generate")
+		})
+
+		It("fills only output-generating replicas that report nothing, and never mutates the caller's slice", func() {
+			in := cold()
+			filled := withExpectedOutputTokens(in, roles, 6000)
+			Expect(in[0].AvgOutputTokens).To(BeZero(), "the analyzer's own input must be untouched")
+			Expect(filled[0].AvgOutputTokens).To(Equal(6000.0), "decode generates output, and reported none")
+			Expect(filled[1].AvgOutputTokens).To(BeZero(), "prefill completes about one token per request")
+
+			By("leaving a replica that has a real reading alone")
+			measured := cold()
+			measured[0].AvgOutputTokens = 250
+			Expect(withExpectedOutputTokens(measured, roles, 6000)[0].AvgOutputTokens).To(Equal(250.0))
+
+			By("returning the input unchanged when there is nothing to fill")
+			same := withExpectedOutputTokens(measured[:1], roles, 0)
+			Expect(same).To(HaveLen(1))
+			Expect(same[0].AvgOutputTokens).To(Equal(250.0))
+		})
+	})
+
 	Describe("Scheduler queue demand role attribution", func() {
-		It("should attribute inputTokens to prefill and inputTokens+outputTokens to decode", func() {
+		It("should attribute inputTokens to prefill and outputTokens to decode", func() {
 			metrics := []domain.ReplicaMetrics{
 				makeReplicaMetrics("pod-1", "variant-a",
 					5000, 16000, 0, 100, 50),
@@ -1146,17 +1195,23 @@ var _ = Describe("SaturationAnalyzer", func() {
 				QueueBytes: 0, // use count-based estimation only
 			}
 
-			result := estimateSchedulerQueueDemand(sq, metrics, nil, activeRoles)
+			result := estimateSchedulerQueueDemand(sq, metrics, nil, activeRoles, 0)
 
 			// Input: max(0/4=0, 10*100=1000) = 1000 (no cache hit)
 			// Output: 10 * 50 = 500
 			// Total: 1000 + 500 = 1500
 			Expect(result.total).To(Equal(1500.0))
 
-			// Prefill gets inputTokens only
+			// Prefill gets the prompt tokens it must compute.
 			Expect(result.byRole["prefill"]).To(Equal(1000.0))
-			// Decode gets inputTokens + outputTokens
-			Expect(result.byRole["decode"]).To(Equal(1500.0))
+			// Decode gets the tokens it must GENERATE. It used to be charged
+			// the prompt as well -- the same 1000 tokens prefill is charged --
+			// which sized the pair for twice the queue that existed and, once
+			// the shape turned input-heavy, sized decode almost entirely by a
+			// prompt it does not compute.
+			Expect(result.byRole["decode"]).To(Equal(500.0))
+			// The queue is charged once across the pair, not twice.
+			Expect(result.byRole["prefill"] + result.byRole["decode"]).To(Equal(result.total))
 		})
 
 		It("should attribute full demand to 'both' role", func() {
@@ -1170,7 +1225,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 				QueueBytes: 0,
 			}
 
-			result := estimateSchedulerQueueDemand(sq, metrics, nil, activeRoles)
+			result := estimateSchedulerQueueDemand(sq, metrics, nil, activeRoles, 0)
 
 			Expect(result.total).To(Equal(1500.0))
 			Expect(result.byRole["both"]).To(Equal(1500.0))
@@ -1186,7 +1241,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 				QueueBytes: 0,
 			}
 
-			result := estimateSchedulerQueueDemand(sq, metrics, nil, nil)
+			result := estimateSchedulerQueueDemand(sq, metrics, nil, nil, 0)
 
 			Expect(result.total).To(Equal(1500.0))
 			Expect(result.byRole).To(BeEmpty())
@@ -1199,7 +1254,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 			}
 			activeRoles := map[string]bool{"prefill": true, "decode": true}
 
-			result := estimateSchedulerQueueDemand(nil, metrics, nil, activeRoles)
+			result := estimateSchedulerQueueDemand(nil, metrics, nil, activeRoles, 0)
 
 			Expect(result.total).To(Equal(0.0))
 			Expect(result.byRole).To(BeNil())
@@ -1221,17 +1276,19 @@ var _ = Describe("SaturationAnalyzer", func() {
 				QueueBytes: 0,
 			}
 
-			result := estimateSchedulerQueueDemand(sq, metrics, nil, activeRoles)
+			result := estimateSchedulerQueueDemand(sq, metrics, nil, activeRoles, 0.5)
 
 			// Input: 10*100=1000, after cache: 1000*(1-0.5)=500
 			// Output: 10*50=500
 			// Total: 500 + 500 = 1000
 			Expect(result.total).To(Equal(1000.0))
 
-			// Prefill: inputTokens = 500
+			// Prefill: the discounted prompt, 500
 			Expect(result.byRole["prefill"]).To(Equal(500.0))
-			// Decode: inputTokens + outputTokens = 500 + 500 = 1000
-			Expect(result.byRole["decode"]).To(Equal(1000.0))
+			// Decode: the output it generates. The cache discount does not
+			// reach it at all now -- it never applied to output, and the
+			// prompt half is no longer decode's charge.
+			Expect(result.byRole["decode"]).To(Equal(500.0))
 		})
 
 		It("prices a queued request's output from the decode side, not diluted by prefill", func() {
@@ -1248,12 +1305,15 @@ var _ = Describe("SaturationAnalyzer", func() {
 			activeRoles := map[string]bool{domain.RolePrefill: true, domain.RoleDecode: true}
 			sq := &domain.SchedulerQueueMetrics{QueueSize: 213}
 
-			result := estimateSchedulerQueueDemand(sq, metrics, roles, activeRoles)
+			result := estimateSchedulerQueueDemand(sq, metrics, roles, activeRoles, 0)
 
-			// Input: 213 × 6000 from either side; output: 213 × 1000, decode's
-			// figure alone. The old mean gave 213 × 500 = 106,500 here.
+			// Input: 213 × 6000, prefill's charge; output: 213 × 1000, decode's
+			// charge, taken from DECODE's own output length. The old mean gave
+			// 213 × 500 = 106,500 here, which is the dilution this spec exists
+			// to catch and which it still catches: the figure below is 1000 per
+			// request, not 500.
 			Expect(result.byRole[domain.RolePrefill]).To(Equal(213.0 * 6000))
-			Expect(result.byRole[domain.RoleDecode]).To(Equal(213.0*6000 + 213.0*1000))
+			Expect(result.byRole[domain.RoleDecode]).To(Equal(213.0 * 1000))
 			Expect(result.total).To(Equal(213.0*6000 + 213.0*1000))
 
 			// Negative control: with no roles recorded the mean is the old
@@ -1333,20 +1393,32 @@ var _ = Describe("SaturationAnalyzer", func() {
 			Expect(result.RoleDemand).NotTo(BeNil())
 
 			// Scheduler queue: input=max(0, 10*100)=1000, output=10*50=500
-			// Decode role demand: replica(2000) + queue(1500) = 3500
+			// Decode role demand: replica(2000) + queue OUTPUT(500) = 2500.
+			// It was 3500 while decode was also charged the 1000-token prompt
+			// that prefill is charged; the queue is now charged once, to the
+			// role that serves each half.
 			// Prefill role demand: replica(3000) only. Its 1000-token share of
 			// the scheduler queue is attributed (see the log line) and then
 			// dropped by the throughput model while prefill has no saturated
 			// throughput: a prefill replica holds a prompt for its prefill
-			// time plus the hand-off, and a queue at the scheduler is decode's
-			// to drain (throughput_floor.go).
+			// time plus the hand-off (throughput_floor.go).
 			Expect(result.RoleDemand["prefill"]).To(Equal(3000.0))
-			Expect(result.RoleDemand["decode"]).To(Equal(3500.0))
+			Expect(result.RoleDemand["decode"]).To(Equal(2500.0))
 
-			// Model-level total still uses inputTokens+outputTokens (1500)
-			// Replica demand = 3000 + 2000 = 5000
-			// Total = 5000 + 1500 = 6500
-			Expect(result.TotalDemand).To(Equal(6500.0))
+			// Replica demand = 3000 + 2000 = 5000. The queue adds its output
+			// (500) and its prompt (1000); the prompt is then dropped, because
+			// prefill has no saturated throughput and a queue at the scheduler
+			// is not resident work for prefill. It leaves the TOTAL with it now
+			// -- while the queue was charged to both roles the total carried it
+			// as decode's share and dropping prefill's copy changed nothing
+			// here, but the total's prompt tokens are prefill's share now and
+			// no other role is carrying them.
+			// Total = 5000 + 500 = 5500, which is exactly prefill's 3000 plus
+			// decode's 2500.
+			Expect(result.TotalDemand).To(Equal(5500.0))
+			Expect(result.TotalDemand).To(Equal(
+				result.RoleDemand["prefill"]+result.RoleDemand["decode"]),
+				"nothing in the model total is unowned by a role")
 		})
 	})
 

@@ -244,8 +244,10 @@ func bucketOf(key string) string {
 // role the model can price.
 //
 // On a disaggregated fleet each role is floored on its own: the scheduler's
-// arrival rate is every request, and every request passes through both
-// roles, so each must keep up with all of it. The model-level total moves
+// arrival RATE is every request, and every request passes through both roles,
+// so each must keep up with all of it. The queue STANDING at the scheduler is
+// a different quantity and is charged to prefill alone -- see the backlog build
+// below. The model-level total moves
 // with them, by what each role CONTRIBUTES to it -- the role's own figure for
 // every role but prefill, whose scheduler-queue share the total never carried
 // (contributionToTotal). On a non-disaggregated fleet there is no RoleDemand
@@ -254,7 +256,8 @@ func bucketOf(key string) string {
 // eppByRole is the residency charge estimateSchedulerQueueDemand put on the
 // scheduler queue per role, and eppQueued the requests in it. For a role with
 // a mu, both that charge and the engines' own queue charge (LocalQueueDemand)
-// come back out and the queued requests go into the floor as a backlog. For
+// come back out; the engines' own queued requests go into the floor as that
+// role's backlog, and the scheduler's standing queue goes in as prefill's. For
 // prefill without a mu, the scheduler-queue charge is dropped (file header),
 // and that is logged at the per-replica verbosity when it changes the figure:
 // it is the normal state of a P/D fleet, so an INFO line every cycle would be
@@ -299,8 +302,38 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		backlog[role] += float64(rc.QueueLength)
 		residency[role] += float64(rc.LocalQueueDemand)
 	}
+	// The residency charge is per role -- estimateSchedulerQueueDemand already
+	// splits the queue's tokens by the role that serves them.
+	//
+	// The REQUEST COUNT is not, and must not be. A standing queue is a backlog
+	// for the role that serves it FIRST, which on a disaggregated fleet is
+	// prefill: its prompts reach decode only once prefill has prefilled them,
+	// at prefill's throughput, so decode can neither drain them within
+	// drainSeconds nor be sized as though it could. The ongoing arrival is
+	// already charged to every role -- lambda is model-wide and floor.Estimate
+	// applies it to each -- so adding the standing queue on top of it for a
+	// role that cannot receive it yet is a double count, not a safety margin.
+	//
+	// Measured on a P/D run over all 24 loaded cycles: decode's own engines
+	// held 1-8 queued requests while this line charged it 1294-3476, the gap
+	// identical on both roles. At the worst cycle decode's ask was 15.0
+	// replicas, 37 of whose 46 req/s came from a 2224-request queue it held 6
+	// of; its own queue gives 2.98. Across the run the measured demand implied
+	// a mean of 2.18 replicas against the floored figure's 8.36.
+	//
+	// Nothing is left unowned by this. Prefill's measured demand already
+	// carries the queue's tokens through aggregation -- on that run it implied
+	// 481 replicas before the floor cut it to 2 -- so the queue is if anything
+	// over-visible on prefill, and the floor's job there is the cap.
+	queueOwner := domain.RolePrefill
+	if _, split := eppByRole[domain.RolePrefill]; !split {
+		// No prefill role: one role serves the queue end to end and takes it.
+		queueOwner = ""
+	}
 	for role, tokens := range eppByRole {
-		backlog[role] += eppQueued
+		if queueOwner == "" || role == queueOwner {
+			backlog[role] += eppQueued
+		}
 		residency[role] += tokens
 	}
 
@@ -325,19 +358,29 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 
 	// Prefill with no mu: the scheduler queue's prompts are not resident work
 	// for prefill (file header). Only the disaggregated case has a prefill
-	// entry to correct, and only the role figure moves: the model-level total
-	// carries the scheduler queue once, as input + output, which is decode's
-	// share; prefill's input-only share was never in it
-	// (estimateSchedulerQueueDemand).
+	// entry to correct.
+	//
+	// THE MODEL TOTAL MOVES WITH IT, and that is a change. While the queue was
+	// charged to both roles the total carried it once as decode's input +
+	// output, so prefill's input-only share was never in the total and
+	// dropping it from the role alone kept the two consistent. Now each role
+	// is charged the half it serves: the total's input tokens ARE prefill's
+	// share, and no other role is carrying them. Leaving them in the total
+	// while no role claims them makes the total exceed the sum of the roles by
+	// exactly the queue's prompt -- 1.2M tokens on the fixture that caught
+	// this -- which is a model-level demand nothing is responsible for
+	// serving.
 	if roleDemand != nil {
 		if _, priced := tf.ByRole[domain.RolePrefill]; !priced {
 			if share, ok := eppByRole[domain.RolePrefill]; ok && share > 0 {
 				if before, ok := roleDemand[domain.RolePrefill]; ok {
 					roleDemand[domain.RolePrefill] = before - share
+					totalDemand = max(totalDemand-share, 0)
 					logger.V(logging.DEFAULT).Info("scheduler-queue-prefill-share-dropped",
 						"modelID", input.ModelID, "namespace", input.Namespace,
 						"eppQueueSize", eppQueued, "droppedTokens", share,
-						"prefillDemandBefore", before, "prefillDemandAfter", before-share)
+						"prefillDemandBefore", before, "prefillDemandAfter", before-share,
+						"modelTotalAfter", totalDemand)
 				}
 			}
 		}
@@ -392,7 +435,7 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		if roleDemand != nil {
 			roleDemand[role] = want
 		}
-		totalDemand += want - heldInModelTotal(role, measured, eppByRole)
+		totalDemand += want - measured
 	}
 
 	// What the floor did to the MODEL total, which is otherwise emitted
@@ -411,40 +454,28 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	return totalDemand
 }
 
-// heldInModelTotal is the part of a role's PRE-FLOOR demand that the model
-// total actually carries, which is not the same as the role's demand.
+// A NOTE ON WHAT THE MODEL TOTAL HOLDS, and why there is no correction here.
 //
-// estimateSchedulerQueueDemand charges the scheduler queue to prefill as its
-// input tokens and to decode as input + output, while the model total carries
-// the queue once, as input + output -- decode's share. Prefill's input-only
-// share was never in the total (the file header says so, and the
-// scheduler-queue-prefill-share-dropped branch above acts on it by adjusting
-// the role and deliberately not the total). So the per-role demands sum to
-// the total plus that input-token charge, and moving the total by a role's
-// full delta takes out tokens it never held: on a fleet where both roles'
-// demand falls -- the ordinary case once the residency charge comes out and a
-// smaller throughput floor replaces it -- the total goes below zero.
+// There used to be a heldInModelTotal() at this point, subtracting prefill's
+// scheduler-queue share before moving the model total by a role's delta. It
+// existed because the queue was charged to BOTH roles -- prefill got the input
+// tokens and decode got the same input tokens plus the output -- while the
+// model total carried the queue once. The per-role demands therefore summed to
+// the total PLUS one input-token charge, and moving the total by each role's
+// full delta took out tokens it had never held, driving it below zero whenever
+// both roles' demand fell.
 //
-// PRE-floor only, and the distinction is the whole correctness of this file.
-// `measured` comes from aggregateRoleDemand as DemandByRole + the queue's
-// per-role charge, so the charge is still in it additively and can be taken
-// back out. The post-floor `want` is already free of it: `resident` has had
-// residency[role] removed, which includes this very eppByRole[role], and the
-// throughput floor is an independent (lambda + backlog / drain) x P / mu with
-// no queue term at all. Projecting `want` through here as well subtracts the
-// share a second time and the floor below then discards what is left -- which
-// under-sizes the fleet exactly as the double-count did, by a different route.
+// estimateSchedulerQueueDemand now charges each half of a queued request to the
+// role that serves it: the prompt to prefill, the generation to decode. The
+// per-role charges are disjoint slices of the same total, so they sum to it and
+// a role's full delta is exactly what the total held for that role. The
+// correction is not merely unnecessary, it would be wrong -- it would subtract
+// a share the total now genuinely carries.
 //
-// Floored at zero because a role cannot contribute negative demand to the
-// total: the share can exceed what the role was carrying, and what the total
-// then holds for it is nothing, not a credit against the other role.
-func heldInModelTotal(role string, demand float64, eppByRole map[string]float64) float64 {
-	if role != domain.RolePrefill {
-		return demand
-	}
-	return max(demand-eppByRole[domain.RolePrefill], 0)
-}
-
+// PRE-floor `measured` is still the right thing to subtract, and that part has
+// not changed: it comes from aggregateRoleDemand as DemandByRole plus the
+// queue's per-role charge, while the post-floor `want` is an independent
+// (lambda + backlog / drain) x P / mu with no queue term at all.
 // offeredArrivalRate is the model-level arrival rate: the scheduler's, or the
 // completion rate of the replicas that generate output when the scheduler
 // reports none.

@@ -1411,6 +1411,25 @@ benchmark-fma-verify: ## Report where FMA launchers and requesters actually land
 		"$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml"
 
 .PHONY: benchmark-actuation
+benchmark-headroom: ## Refuse a run the cluster cannot hold: fleet at its ceilings vs free CPU/GPU (BENCHMARK_NAMESPACE required; EXCLUDE_NODE=<name> to skip a bad node)
+	@# GPUs are what everyone checks and CPU is what binds -- each engine Pod
+	@# requests 2 CPU, so a 10/10 P/D fleet wants 40 on top of whatever is
+	@# resident, and a GPU is useless to a Pod the scheduler cannot place. One
+	@# run spent 40 minutes with 1 of 10 replicas Running because the headroom a
+	@# GPU-only pre-flight never looked at had gone to another tenant.
+	@#
+	@# Sized from each ScaledObject's maxReplicaCount, not the current replica
+	@# count: a fleet checked at its current size passes and then fails to scale.
+	@#
+	@# Read-only. Exit 1 means it does not fit; exit 2 means the check could not
+	@# be made, which is not a pass.
+	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
+		echo "ERROR: set BENCHMARK_NAMESPACE=<namespace>"; \
+		exit 2; \
+	fi
+	@hack/benchmark/check-fleet-headroom.sh "$(BENCHMARK_NAMESPACE)" \
+		$(if $(EXCLUDE_NODE),--exclude-node $(EXCLUDE_NODE),)
+
 benchmark-actuation: ## Measure how fast capacity arrives after a scale-up (set ACTUATION_TARGET=<deployment>; BENCHMARK_NAMESPACE required)
 	@# The claim FMA makes is that capacity arrives sooner -- not that tokens are
 	@# faster. This measures exactly that and nothing else: scale up, time each
@@ -1451,6 +1470,7 @@ benchmark-scenarios: ## Copy our scenario specs into the llm-d-benchmark clone (
 			if grep -q '__WARM_REPLICAS__' "$$dest"; then \
 				echo "ERROR: unsubstituted token left in $$dest"; exit 1; \
 			fi; \
+			python3 hack/benchmark/render-engine-resources.py "$$dest" --model "$(BENCHMARK_MODEL_ID)" || exit 1; \
 			echo "  installed scenario $$(basename $$f) (WARM_REPLICAS=$(WARM_REPLICAS), gpuMemoryUtilization=$(GPU_MEM_UTIL))"; \
 			n=$$((n+1)); \
 		done; \

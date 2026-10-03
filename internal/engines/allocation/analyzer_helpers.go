@@ -399,6 +399,44 @@ func needsScaleDownForRole(e NamedAnalyzerResult, role string) bool {
 	return true
 }
 
+// roleAtCeiling reports whether every usable variant of role has reached its
+// own MaxReplicas, so the role cannot grow again in this pass no matter what
+// the cluster does.
+//
+// It exists because a RolePickFn reports both of its failures the same way --
+// ("", 0) -- and allocateForModelPaired must tell them apart: a role held back
+// by the GPU budget keeps its partner paired with it, while a role at its
+// administrative ceiling must not block its partner at all. Checked
+// independently of the picker rather than by extending RolePickFn, so both
+// pickers get the distinction without either having to report it.
+//
+// A variant with no MaxReplicas, or one set to zero, is unbounded and means the
+// role is not at a ceiling. A role with no usable variant is not "at a ceiling"
+// either -- there is nothing to be at the ceiling of -- so it stays on the
+// scarcity path, which ends the pass rather than spinning on it.
+func roleAtCeiling(
+	role string,
+	variants []variantRecord,
+	stateMap map[string]domain.VariantReplicaState,
+	targets map[string]int,
+) bool {
+	usable := false
+	for _, vc := range variantsForRole(variants, role) {
+		if vc.PerReplicaCapacity <= 0 {
+			continue
+		}
+		usable = true
+		state := stateMap[vc.VariantName]
+		if state.MaxReplicas == nil || *state.MaxReplicas <= 0 {
+			return false
+		}
+		if targets[vc.VariantName] < *state.MaxReplicas {
+			return false
+		}
+	}
+	return usable
+}
+
 // RolePickFn is the role-generic optimizer variant selector for the unified
 // allocateForModelPaired loop. Called once per role per iteration; returns the
 // chosen variant and its resource cap. Returning ("", 0) signals no variant
@@ -416,6 +454,15 @@ type RolePickFn func(
 // Per iteration: pick one variant per role, size independently, compute
 // Δ_util = min_role util_role, trim to matched joint commit.
 // Arity-1 (roles = ["both"]) reduces to plain per-variant allocation.
+//
+// The commit is joint so a P/D fleet keeps its ratio, and Δ_util is the minimum
+// across roles so no role is over-ordered relative to its partner. But a role
+// with no headroom left -- every variant of it at its own maxReplicas -- is
+// finished, not blocking: it is dropped from the iteration, its unservable
+// remainder is zeroed so the loop can terminate, and the remaining roles are
+// committed without it. Treating it as blocking is what left prefill pinned at
+// one replica through a 1119-deep queue while decode sat at its ceiling
+// (docs/proposals/prefill-starved-by-exhausted-role.md).
 func allocateForModelPaired(
 	ctx context.Context,
 	e *NamedAnalyzerResult,
@@ -432,24 +479,57 @@ func allocateForModelPaired(
 		variantByRole := make(map[string]string, len(roles))
 		capByRole := make(map[string]int, len(roles))
 		prcByRole := make(map[string]float64, len(roles))
+		// picked is the roles this iteration can actually commit to, in the
+		// caller's order.
+		//
+		// A pick can fail for two reasons, and they are not the same thing.
+		//
+		// SCARCITY -- the GPU budget could not fit a replica. The role would
+		// grow if the cluster allowed it, so the pair is kept intact and the
+		// pass ends: spending the last GPUs on one side of a P/D fleet whose
+		// other side cannot follow buys no throughput. That is the behaviour
+		// "should handle GPU exhaustion for one role without affecting the
+		// other" pins down, and it is deliberate.
+		//
+		// CEILING -- every variant of the role is at its own maxReplicas. The
+		// role is FINISHED, not blocking, and will never grow however long the
+		// pass waits. Vetoing its partner is then permanent starvation, not
+		// ratio-preservation. Measured: decode at 9/9 of max 9 left prefill
+		// ordered 1 -> 1 in every cycle of a run while prefill held a queue of
+		// 1119 and its demand floor asked for five replicas, with nine
+		// replicas of prefill headroom unused.
+		// See docs/proposals/prefill-starved-by-exhausted-role.md.
+		picked := make([]string, 0, len(roles))
 		allPicked := true
 		for _, role := range roles {
 			v, capN := pick(role, variants, stateMap, available, targets)
 			if v == "" {
+				if roleAtCeiling(role, variants, stateMap, targets) {
+					// Drop its unservable remainder too, or
+					// anyRoleNeedsScaleUp stays true on it forever and this
+					// loop spins.
+					pickerState[role] = 0
+					continue
+				}
 				allPicked = false
 				break
 			}
 			variantByRole[role] = v
 			capByRole[role] = capN
 			prcByRole[role] = prcFromVCs(variants, v)
+			picked = append(picked, role)
 		}
-		if !allPicked {
+		if !allPicked || len(picked) == 0 {
 			break
 		}
 
-		nByRole := make(map[string]int, len(roles))
-		utilByRole := make(map[string]float64, len(roles))
-		for _, role := range roles {
+		// Every loop below iterates `picked`, never `roles`. An unpicked role
+		// has no entry in prcByRole, so its utilByRole would compute as 0 and
+		// deltaUtil <= 0 would break the loop -- the same starvation by
+		// another route.
+		nByRole := make(map[string]int, len(picked))
+		utilByRole := make(map[string]float64, len(picked))
+		for _, role := range picked {
 			prc := prcByRole[role]
 			n := min(roleBottleneckReplicas(*e, pickerState, role, variantByRole[role]), capByRole[role])
 			nByRole[role] = n
@@ -462,7 +542,7 @@ func allocateForModelPaired(
 		}
 
 		deltaUtil := math.MaxFloat64
-		for _, role := range roles {
+		for _, role := range picked {
 			if utilByRole[role] < deltaUtil {
 				deltaUtil = utilByRole[role]
 			}
@@ -471,9 +551,9 @@ func allocateForModelPaired(
 			break
 		}
 
-		kByRole := make(map[string]int, len(roles))
+		kByRole := make(map[string]int, len(picked))
 		anyPositive := false
-		for _, role := range roles {
+		for _, role := range picked {
 			demand := roleAggRemaining(pickerState, role)
 			prc := prcByRole[role]
 			n := nByRole[role]
@@ -490,7 +570,7 @@ func allocateForModelPaired(
 			break
 		}
 
-		for _, role := range roles {
+		for _, role := range picked {
 			v := variantByRole[role]
 			k := kByRole[role]
 			prc := prcByRole[role]

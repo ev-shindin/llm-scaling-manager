@@ -35,6 +35,19 @@ const (
 	// phase is still running.
 	ShapeChangeHoldMax = 5 * time.Minute
 
+	// DefaultExpectedOutputTokens is the last-resort generation length used to
+	// price a queued request when the fleet has measured none, recalled none,
+	// and the operator has configured none (config.ScalingPolicy's
+	// ExpectedOutputTokens states the precedence).
+	//
+	// 512 is a generic chat-completion length and is deliberately modest: this
+	// constant exists so the arithmetic is not zero, not so that it is right.
+	// A deployment whose generations are materially longer -- the shape-swap
+	// benchmark's phase 1 is 6000 tokens, 12x this -- must set
+	// defaultOutputTokens, because pricing a queue at a twelfth of its real
+	// cost under-orders, and under-ordering is what costs TTFT.
+	DefaultExpectedOutputTokens = 512.0
+
 	// BytesPerToken is the approximate number of bytes per LLM token.
 	// Used to convert scheduler queue bytes to estimated token count.
 	// Based on the OpenAI tiktoken observation that each token corresponds
