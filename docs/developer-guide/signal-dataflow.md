@@ -112,8 +112,13 @@ is wrong. The parameters are here rather than in a catalogue of their own
 because most appear in more than one formula, and the second appearance is
 usually the one that surprises.
 
-Two conventions used throughout: `I` is a prompt length and `O` a generation
+Two conventions used throughout. `I` is a prompt length and `O` a generation
 length, both in tokens per request; `C` is a KV budget in tokens.
+
+And a value that an earlier formula produced is marked **-> produced above**
+with the section that produces it, rather than left for the reader to hunt.
+Those are the ones that carry an error furthest, because they are computed
+once and divided by everywhere.
 
 ### The shape — `signals/shape`
 
@@ -201,6 +206,9 @@ TokenRate              = Sequences / ITL(k)
 | --- | --- | --- | --- |
 | `itl` = `AvgITL` | seconds/token | collector, `inter_token_latency_seconds_sum/count` | the gap between two generated tokens |
 | `k` = `KvUsageInstant` | fraction 0-1 | collector, **instantaneous** `gpu_cache_usage_perc` | the occupancy that sample was taken at |
+| `n` | count | the window | how many `(k, itl)` observations the fit is over; at least `DefaultMinSamples` |
+| `C` | tokens | **-> produced above**, [per-replica capacity](#per-replica-capacity--analyzerssaturation) | the replica's KV budget, `TotalKvCapacityTokens` or the override |
+| `KVreq` | tokens/request | **-> produced above**, [the shape](#the-shape--signalsshape) | what one resident request occupies |
 
 `KvUsageInstant` and `KvCacheUsage` are separate fields on purpose:
 `KvCacheUsage` is a **one-minute maximum**, used by the saturation test, where a
@@ -230,7 +238,11 @@ mu       = tokenSec / avgOutput
 | --- | --- | --- | --- |
 | `kvCacheThreshold` | fraction (0.80) | ConfigMap | as above |
 | `scaleUpThreshold` | fraction (0.85) | ConfigMap | the utilisation above which capacity is required |
-| `avgOutput` | tokens/request | the analyzer's `muDivisor` — see below | the generation length mu is divided by |
+| `C` | tokens | **-> produced above**, [per-replica capacity](#per-replica-capacity--analyzerssaturation) | the KV budget the sequences are drawn from |
+| `KVreq` | tokens/request | **-> produced above**, [the shape](#the-shape--signalsshape) | the per-request footprint `C` is divided by |
+| `S` = `MaxNumSeqs` | requests | **container args** | the admission cap; its SECOND appearance, after k2 |
+| `ITL(kPrice)` | seconds/token | **-> produced above**, [the ITL line](#the-itl-line--signalsitl) | the latency at the pricing occupancy |
+| `avgOutput` | tokens/request | the analyzer's `muDivisor`, resolved just below | the generation length mu is divided by |
 
 `kPrice` is **composed**: `0.80 x 0.85 = 0.68` with the shipped defaults, **not**
 the `0.85` that `k_sat` suggests. `k_sat` is only where the ITL line is
@@ -254,6 +266,8 @@ if shapeChangedWithin(window) and AvgOutputTokensRecent > 0:
 
 | in | unit | from | what it is |
 | --- | --- | --- | --- |
+| `fleetOutput`, `fleetInput` | tokens/request | **-> produced above**, [the shape](#the-shape--signalsshape) | this cycle's `O` and `I`, the fleet's own `[5m]` reading |
+| `stableOutput` | tokens/request | the shape tracker | the last shape this fleet settled on, which carries across an idle period |
 | `AvgOutputTokensRecent` | tokens/request | collector, the same counters over `[1m]` | the generation length arriving now |
 | `AvgInputTokensRecent` | tokens/request | collector, `[1m]` | the prompt length arriving now |
 | `defaultOutputTokens` | tokens | **ScaledObject trigger metadata** | the seed used while no replica has measured one |
@@ -326,6 +340,8 @@ TotalDemand    = SUM vc.TotalDemand + queue charge
 | `QueueBytes` | bytes | EPP scheduler | an independent estimate of the same queue |
 | `BytesPerToken` | 4 | constant | the bytes-to-tokens conversion |
 | `prefillHitRate` | fraction | collector, prefill replicas only | prefill's **own** hit rate, not the fleet mean |
+| `avgInput`, `avgOutput` | tokens/request | **-> produced above**, [the shape](#the-shape--signalsshape), with the seed folded in | what one queued request is priced at |
+| `vc.TotalDemand` | tokens | per variant, from `aggregateByVariant` | each variant's own demand, summed to the model's |
 
 The router's queue is charged separately from a replica's own because the
 distinction is real: `QueueLength` is demand a pod already holds, `QueueSize` is
@@ -348,6 +364,7 @@ SC = max(0, TotalSupply  - TotalDemand / scaleDown)
 
 | in | unit | from | what it is |
 | --- | --- | --- | --- |
+| `perReplica` = `vc.PerReplicaCapacity` | tokens | **-> produced above**, [per-replica capacity](#per-replica-capacity--analyzerssaturation) | the `effective` bound, aggregated per variant; 0 if non-positive or `+Inf` |
 | `ReplicaCount` = `CurrentReplicas` | count | Kubernetes, Deployment/LWS status | ready replicas |
 | `starting` = `PendingReplicas` | count | Kubernetes | replicas on their way |
 | `scaleUp` = `scaleUpThreshold` | fraction (0.85) | ConfigMap | as above |
@@ -388,7 +405,8 @@ implied  = rate / mu
 | `drainSeconds` | 60 | `BacklogDrainSeconds` | the horizon a backlog is priced to drain over |
 | `ready` | count | Kubernetes | replicas already serving |
 | `pending`, `ages` | count, seconds | Kubernetes `PendingReplicas`/`PendingAges` | replicas starting, and how far in |
-| `P` | tokens | the analyzer's per-replica capacity | `effective` from above |
+| `P` | tokens | **-> produced above**, the analyzer's per-replica capacity | `effective` from above |
+| `mu` | requests/s | **-> produced above**, the service rate for this role | what ONE saturated replica completes; the floor divides by it four times below |
 
 Medians, not maxima: one replica draining a batch must not set the role's price.
 
@@ -423,6 +441,9 @@ throughput key: (model, namespace, variant, accelerator, gpus, role, outBucket, 
 | `GPUsPerReplica` | the scale target's pod spec | the same reading means something different at a different GPU count |
 | `Role` | variant labels, via discovery | prefill and decode do different work |
 | `queueLengthThreshold` | ConfigMap (5) | it defines saturation, so changing it re-buckets history |
+| `O` | **-> produced above**, [the shape](#the-shape--signalsshape) | `classifyOutputLength(O)` picks decode's bucket from the table below |
+| `ILeff` | **-> produced above**, [the shape](#the-shape--signalsshape) | prefill's input axis, so a cached prefix does not inflate the key |
+| `model`, `namespace`, `variant` | the analyzer input | identity; a reading belongs to one variant of one model |
 
 Output buckets: short 100, medium 500, long 1500, extra long 3000, very long
 6000 tokens. Prefill is keyed `"noout"` because it emits about one token per
