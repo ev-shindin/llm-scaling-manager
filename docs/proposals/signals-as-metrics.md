@@ -252,6 +252,12 @@ happens.
   answer visible.
 - **The dashboards.** Series are not panels. `make dashboards-check` exists and
   the panels are a separate piece of work.
+- **Historical comparison across a restart** — REVISED. This section called
+  the restart gap honest rather than fixable, and that was wrong: see
+  [learned state across a restart](learned-state-across-restarts.md), which
+  rehydrates the learned figures from these very series. The original text
+  follows.
+
 - **Historical comparison across a restart.** Every signal here is in-memory
   and starts empty; a restart shows a gap, and the ITL families stay absent for
   the ~51 cycles a fit takes. That is honest rather than fixable, and
