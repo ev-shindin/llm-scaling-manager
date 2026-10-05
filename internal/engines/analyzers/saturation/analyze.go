@@ -177,85 +177,46 @@ func (c *cycle) observeFleetShape() {
 // resolvePricing decides the output length the derived mu divides by, and the
 // prompt length it is priced against. They move together or not at all.
 //
-// The derived mu's divisor. The SHORT window is right only WHILE A SHAPE
-// CHANGE IS OUTSTANDING, which is the case it was added for: a [5m]
-// count-weighted mean carries the previous shape's long stragglers for
-// minutes after they stop arriving -- measured decaying 3750 -> 250 across
-// one 6000 -> 250 switch -- and the divisor is where that error reaches mu
-// undamped.
+// The SHORT window is right only WHILE A SHAPE CHANGE IS OUTSTANDING. A [5m]
+// count-weighted mean carries the previous shape's long stragglers for minutes
+// after they stop arriving, and the divisor is where that error reaches mu
+// undamped. On a STEADY shape the short window is wrong the other way: it
+// averages over requests that have COMPLETED, so a fleet ramping into long
+// generations reads far below the length being served, which over-states mu --
+// and an over-stated mu UNDER-orders replicas.
 //
-// On a STEADY shape it is wrong, and expensively so. Phase 1 of the
-// shape-swap trace holds 6000-token generations in flight for about two
-// minutes before any of them completes, so a [1m] mean over COMPLETED
-// requests reads far below 6000 while the fleet ramps. rate =
-// tokenSec/avgOutput then OVER-states mu, and an over-stated mu
-// UNDER-orders replicas (mu_from_itl.go says so explicitly).
+// max(recent, [5m]) is NOT the fix, and that is worth saying because it is the
+// obvious one: the recent figure is the LOWER of the two in both cases -- an
+// artefact while ramping, the truth after a switch -- so no magnitude test can
+// separate them. Whether the shape changed can.
 //
-// Bisected over five runs on 2026-10-03, EPP version, EPP config,
-// max_num_seqs and cluster held identical with the WVA image the only
-// variable. The unconditional short window took phase 1 from a 305-request
-// router queue at 33,071 output tok/s to 2,503 at 8,763 -- eight times the
-// queue for a quarter of the throughput. Every build before it measured
-// good.
+// Keyed on shapeChangedWithin, NOT on the outstanding hold. The hold's flag is
+// zero whenever an operator sets DisableShapeChangeHold, which would leave
+// this reading the short window for the single cycle the tracker declares a
+// change and the [5m] mean for the rest of the straggler window -- reinstating
+// the bug through a flag documented as only turning off the fleet hold.
+// ShapeChangeWindow says why the two are separate.
 //
-// max(recent, [5m]) is NOT the fix, and that is worth recording because it
-// is the obvious one: the recent figure is the LOWER of the two in both
-// cases -- an artefact while ramping, the truth after a switch -- so no
-// magnitude test can separate them. Whether the shape changed can.
-// Keyed on shapeChangedWithin, NOT on the outstanding hold. The hold's flag
-// is zero whenever an operator sets DisableShapeChangeHold, which would
-// leave this reading the short window for the single cycle the tracker
-// declares a change and the [5m] mean for the rest of the straggler window
-// -- reinstating the bug above through a flag documented as only turning
-// off the fleet hold. ShapeChangeWindow says why the two are separate.
-// The divisor falls back the same way the queue's price does, and for the
-// same reason: rate = tokenSec/avgOutput, so a fleet that has completed
-// nothing divides by ZERO and the derived mu reports not-ok. With no mu the
-// demand floor emits nothing at all -- and the floor is where the router
-// queue is projected forward over a replica's start time
-// (floor.backlogAtLanding). So the one window the projection exists for is
-// the one window it could not run in.
+// The divisor falls back to a seed rather than dividing by zero, the same way
+// the queue's price does and for the same reason: rate = tokenSec/avgOutput,
+// so a fleet that has completed nothing divides by ZERO, the derived mu reports
+// not-ok, and with no mu the demand floor emits nothing at all -- in the one
+// window the backlog projection exists for. A measurement always wins, so a
+// warm fleet is unaffected.
 //
-// Measured on run QM (2026-10-03, shape-swap phase 1): the first queued
-// cycle was 14:39:44 and the first throughput-demand-floor line 14:41:59 --
-// 135 s later, by which time the router queue had already peaked at 522 and
-// begun draining. Of 56 not-ok derived-mu cycles, 38 carried a COMPLETE
-// ITL fit (itlA 0.0277, itlB 0.0066, itlAtKPrice 0.0254) and failed on
-// "avgOutputTokens": 0 alone.
+// BOTH HALVES OR NEITHER. deriveMu reads the output length twice: as the
+// divisor, and inside the shape, where KVreq = ILeff + OL/2 sets how many
+// sequences fit. Moving only the divisor leaves the two halves of one division
+// on different timescales, and a swap that raises the generation while dropping
+// the prompt then prices a request larger than either shape ever was. An engine
+// that publishes the short-window output but not the short-window prompt moves
+// the divisor alone, which IS that mismatch -- accepted deliberately, because
+// the alternative is the straggler bug above and that is the larger error by an
+// order of magnitude.
 //
-// A measurement still wins, so a warm fleet is unaffected; this only answers
-// where there was otherwise a zero. The error direction is also the safe one
-// for a seed that is too LARGE: a bigger divisor under-states mu, and an
-// under-stated mu over-orders during the cold window rather than
-// under-ordering, which is the failure this is for.
-//
-// muInput is the prompt length the same mu is priced at, and it moves to
-// the short window with the divisor or not at all.
-//
-// deriveMu reads the output length twice over: once as the divisor of
-// rate = tokenSec/avgOutput, and once inside the shape, where KVreq =
-// ILeff + OL/2 sets how many sequences fit. Moving only the divisor to the
-// short window leaves the two halves of that division on different
-// timescales, which is at its worst exactly here: a swap that raises the
-// generation and drops the prompt has the divisor reach the new output in
-// about a minute while KVreq still carries the old prompt, so the priced
-// request is larger than either shape ever was and mu collapses.
-//
-// Measured on run QS (2026-10-04, 6000/1000 -> 1000/4000, a scenario whose
-// documented answer is 2 decode replicas then 3): across the switch the
-// divisor went 1088 -> 2897 -> 4000 while kvReq lagged 6251 -> 6030 ->
-// 5896 toward a settled 3000, and the derived mu went 5.47 -> 2.12 -> 1.57
-// against the 2.76 it settled at. The floor read replicasImplied 5.77 and
-// the fleet sat at 7 decode replicas for about seven minutes. The router
-// queue was ZERO on every one of those cycles, so none of it was a backlog
-// response -- it was the price.
-//
-// Both halves or neither. If an engine publishes the short-window output
-// but not the short-window prompt the divisor still moves alone, which is
-// this mismatch -- but the alternative is the straggler bug the short
-// window exists for, and that one is the larger error by an order of
-// magnitude (3750 against 250). vLLM and SGLang both publish the pair, so
-// the single-sided path is the engine-has-no-counter case, not a race.
+// Measured: docs/developer-guide/analyzer-evidence.md, "The mu divisor follows
+// the shape change, not the ramp" and "Both halves of the shape move to the
+// short window together".
 func (c *cycle) resolvePricing() {
 	c.muDivisor = c.cfg.ExpectedOutputTokens(c.fleetOutput, c.stableOutput, DefaultExpectedOutputTokens)
 	c.muInput, c.muShortWindow = c.fleetInput, false

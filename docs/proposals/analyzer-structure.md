@@ -1,7 +1,19 @@
 # Structuring the analyzers
 
-**Status:** proposed, nothing built. No behaviour change is intended by any
-stage below; a stage that changes a decision has a bug in it.
+**Status:** stages 1-4 built, stage 5 concluded, stage 6 dropped. No stage
+changed a decision; every one was verified against unchanged spec counts.
+
+| stage | | |
+| --- | --- | --- |
+| 3 — one weighted mean | **built** | `internal/signals/fleet.Mean`, three copies collapsed |
+| 1 — split the grab-bag | **built** | `analyzer.go` 2380 -> 259 lines, eight files |
+| 2 — named stages | **built** | `Analyze` is fifteen lines over eight named stages |
+| 4 — rename the package | **built** | `saturation_v2` -> `saturation` |
+| 5 — move the run narratives | **concluded, mostly declined** | see below; the 35% target was wrong |
+| 6 — shared analyzer skeleton | **dropped** | see below |
+
+`steadystate/engine.go` (2214 lines, 43 declarations) was NOT split. It is the
+same fault as stage 1 and wants the same treatment, as its own change.
 
 The analyzers work. The problem is that reading them is expensive, and that
 cost is now showing up as real defects: three doc comments silently attached to
@@ -166,36 +178,65 @@ alone and last among the mechanical stages, when the diff is otherwise quiet.
 branches, which argues for doing it immediately after a merge window rather
 than before one.
 
-### Stage 5 — move the run narratives
+### Stage 5 — move the run narratives (concluded: mostly declined)
 
-Per file, move measurement accounts into `analyzer-evidence.md` under a heading
-that names the run, leaving the reason and a pointer:
+The idea was that the 52-72% comment ratio was largely *narrative* that could
+be relocated to `analyzer-evidence.md`, leaving the reason and a pointer, and
+that the analyzer files would land near 35%.
 
-```go
-// The divisor follows the short window only while a shape change is
-// outstanding: on a ramping fleet the short window reads below the length
-// being served, which over-states mu and under-orders.
-// Measured: analyzer-evidence.md#the-mu-divisor-window
-```
+**Measured, and the premise was mostly wrong.** One block was a genuine
+narrative appendix: `resolvePricing`'s account of runs QM and QS and the
+five-run bisect, which recounted the evidence *after* the rule had already been
+stated. It moved cleanly — 82 comment lines out of the code, every figure
+preserved in `analyzer-evidence.md` under two new headings — and bought
+`analyze.go` four percentage points, 49% -> 45%.
 
-Target: the analyzer files land under about 35% comment, with nothing of value
-lost — `analyzer-evidence.md` is already 651 lines and is the right home.
+The rest does not separate, and the two clearest cases say why:
 
-This is last because it is the only stage that requires judgement per comment,
-and because it is worthless until the files are small enough to see the effect.
+- `shape_change.go`'s table of *which signal first reads the new shape* (+22 s,
+  +1.5 min, +1.6 min and wrong) **is** the argument for the arriving-prompt
+  signal existing. Move it and what remains is "this is the earliest signal",
+  asserted.
+- `mu_from_itl.go`'s "it reproduces a measurement it was never given, which is
+  the reason to believe it: 1.487 where the fleet measured 1.4292 and 1.5429"
+  **is** the justification for deriving mu at all.
 
-### Stage 6 — a shared analyzer skeleton (optional, decide later)
+These are reasoning *carried in* measurements, not narrative decorating it. The
+test this proposal set — does someone CHANGING the line need it, or only
+someone doubting it — answers "changing" for both. Relocating them would
+convert justified claims into assertions, which is the failure this document
+warned against two sections earlier.
 
-Both analyzers independently implement: average the fleet, resolve a shape,
-price per replica, aggregate by variant and role, hand back a
-`NamedAnalyzerResult`. A shared skeleton would stop a third analyzer
-re-deriving it.
+So the scope narrows to its real extent: **a block that recounts a run after
+the rule is already stated**, which was one block. The 35% target is withdrawn;
+45-50% is what these files are when every load-bearing comment stays, and that
+is not a defect to fix.
 
-Deliberately **last and optional**. There are two analyzers, and two instances
-is thin evidence for an abstraction; a wrong skeleton is worse than a
-duplicated pipeline because it makes the next analyzer fight it. Revisit when a
-third exists, or drop it. `multi-analyzer-pipeline.md` already covers the
-contract, which may be all the sharing that is wanted.
+What remains available, and deliberately not done: `analyzer-evidence.md` is
+now 740 lines and could take the measurement tables out of `shape_change.go`
+and `mu_from_itl.go` **by reference** — the code keeping the figure and the doc
+carrying the full run, so neither side is an assertion. That is duplication
+rather than relocation, and it needs someone to decide whether two copies of a
+number is better or worse than one in the wrong place.
+
+### Stage 6 — a shared analyzer skeleton (dropped)
+
+Both analyzers independently average the fleet, resolve a shape, price per
+replica, aggregate by variant and role, and hand back a `NamedAnalyzerResult`.
+A shared skeleton would stop a third re-deriving it.
+
+**Dropped, not deferred.** The argument against it has not changed and has
+gained a data point: stage 3 showed what the two analyzers actually share —
+one weighted mean — and extracting precisely that, with the callers'
+disagreement expressed as two options, was the whole of the real duplication.
+What is left is a sequence of five calls in a shared order, which is a
+*convention* and is now readable as one in each analyzer; a skeleton would make
+the next analyzer fight it to differ anywhere.
+
+`multi-analyzer-pipeline.md` already specifies the contract an analyzer must
+meet, which is the sharing that has value. Revisit only if a third analyzer
+appears and genuinely wants this shape; the decision recorded here is that two
+instances were not evidence enough.
 
 ## What this costs
 

@@ -642,6 +642,102 @@ effect large enough not to need one -- the EPP scorer weights moved the phase-2
 median from 9 replicas to 3 and serving replicas from 1-of-9 to 9-of-9, which no
 amount of this variance explains.
 
+### The mu divisor follows the shape change, not the ramp
+
+*2026-10-03, runs QJ-QN, five passes with the WVA image the only variable.*
+
+The derived mu divides a token rate by an output length
+(`rate = tokenSec / avgOutput`), so the output length is where an error in the
+shape reaches mu undamped. There are two candidate windows and each is wrong in
+the case the other is right for.
+
+A `[5m]` count-weighted mean is wrong **after a switch**: the previous shape's
+long stragglers dominate the mean for minutes after they stop arriving.
+Measured per decode pod across one 6000 -> 250 output switch, the `[5m]` figure
+decayed 3750 -> 2814 -> 2382 -> 2278 -> 2136 -> 250 while the arriving work was
+250 throughout; the `[1m]` form converged in about a minute.
+
+A `[1m]` mean is wrong **while ramping**. Phase 1 of the shape-swap trace holds
+6000-token generations in flight for about two minutes before any of them
+completes, so a mean over COMPLETED requests reads far below 6000. That
+over-states mu, and an over-stated mu under-orders replicas.
+
+Bisected over five runs with EPP version, EPP config, `max_num_seqs` and the
+cluster held identical. The unconditional short window took phase 1 from a
+305-request router queue at 33,071 output tok/s to **2,503 at 8,763** -- eight
+times the queue for a quarter of the throughput. Every build before it measured
+good.
+
+`max(recent, [5m])` is not the fix, and it is worth recording because it is the
+obvious one: the recent figure is the LOWER of the two in both cases -- an
+artefact while ramping, the truth after a switch -- so no magnitude test
+separates them. Whether the shape changed does.
+
+#### And the divisor must fall back rather than divide by zero
+
+*2026-10-03, run QM, shape-swap phase 1.*
+
+A fleet that has completed nothing has no output length at all, so
+`tokenSec / avgOutput` divides by zero and the derived mu reports not-ok. With
+no mu the demand floor emits nothing -- and the floor is where the router queue
+is projected forward over a replica's start time (`floor.backlogAtLanding`). So
+the one window the projection exists for was the one window it could not run
+in.
+
+The first queued cycle was 14:39:44 and the first `throughput-demand-floor`
+line 14:41:59 -- **135 s later**, by which time the router queue had peaked at
+522 and begun draining. Of 56 not-ok `derived-mu` cycles, 38 carried a complete
+ITL fit (`itlA` 0.0277, `itlB` 0.0066, `itlAtKPrice` 0.0254) and failed on
+`"avgOutputTokens": 0` alone.
+
+A measurement always wins, so a warm fleet is unaffected; the seed answers only
+where there was otherwise a zero. The error direction is the safe one for a
+seed that is too LARGE: a bigger divisor under-states mu, and an under-stated
+mu over-orders during the cold window rather than under-ordering, which is the
+failure this exists for.
+
+### Both halves of the shape move to the short window together
+
+*2026-10-04, run QS, 6000/1000 -> 1000/4000 at 6 req/s, the pd-disaggregation
+well-lit path whose documented answer is 2 decode replicas then 3.*
+
+`deriveMu` reads the output length twice: once as the divisor, and once inside
+the shape, where `KVreq = ILeff + OL/2` decides how many sequences fit. Moving
+only the divisor to the short window leaves the two halves of one division on
+different timescales, and a swap that raises the generation while dropping the
+prompt is the worst case for it -- the divisor reaches the new output in about
+a minute while `KVreq` still carries the old prompt.
+
+With the divisor alone on the short window, across the switch:
+
+| time | mu | divisor | kvReq |
+|---|---|---|---|
+| 08:55:42 | 5.47 | 1088 | 6251 |
+| 08:55:57 | 2.12 | 2897 | 6030 |
+| 08:56:12 | **1.57** | 4000 | 5896 |
+| 08:58:13 | 2.05 | 4000 | 4146 |
+| settled | 2.76 | 4000 | 3000 |
+
+The floor read `replicasImplied` 5.77 and the fleet sat at **7 decode replicas
+for about seven minutes**. The router queue was ZERO on every one of those
+cycles, so none of it was a backlog response -- it was the price. A request
+priced at the new generation on top of the old prompt is larger than either
+real shape: 5017 + 4000/2 = **7017** against a phase-1 6500 and a phase-2 3000.
+
+Paired, the same cycle prices `KVreq` 3000 and mu 3.20. Cold-to-cold against
+QS, the same trace on the paired build (run QT, 2026-10-04) held decode at a
+phase-2 rate of 2.91 replicas against QS's 4.49, peak 3 against 7. The cost is
+real and stated: phase-2 client TTFT went from p50 53.5 / p90 68.9 ms to
+58.9 / 86.6, which is the price of running the documented 3 replicas instead of
+up to 7.
+
+**Both halves or neither.** If an engine publishes the short-window output but
+not the short-window prompt, the divisor still moves alone -- that is this
+mismatch, deliberately accepted, because the alternative is the straggler bug
+above and that is the larger error by an order of magnitude (3750 against 250).
+vLLM and SGLang both publish the pair, so the single-sided path is the
+engine-has-no-counter case, not a race.
+
 ## How to add to this file
 
 One section per decision, with the date, the run identifier and the numbers
