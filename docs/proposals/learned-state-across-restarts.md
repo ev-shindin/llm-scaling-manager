@@ -81,6 +81,7 @@ wants: an eight-field predicate over `Engine`, `GpuMemoryUtilization`,
 
 ```
 engineFingerprint = hash(
+    modelID,                       // NOT in EngineParams -- see below
     Engine, GpuMemoryUtilization, BlockSize, KvCacheDtype,
     TensorParallelSize, NumGpuBlocksOverride, TotalKvTokensOverride,
     EffectiveMaxBatchedTokens,
@@ -89,21 +90,52 @@ engineFingerprint = hash(
 )
 ```
 
+### The model is not in `EngineParams`, and the fingerprint must add it
+
+Worth stating prominently because the first draft of this proposal got it
+wrong. `EngineParams` holds `Engine`, `GpuMemoryUtilization`, `BlockSize`,
+`KvCacheDtype`, `TensorParallelSize`, `NumGpuBlocksOverride`,
+`MaxNumBatchedTokens`, `MaxNumSeqs`, `MaxModelLen`, `EnforceEager`,
+`IsV1Engine`, `ChunkedPrefillEnabled`, `TotalKvTokensOverride` and
+`EffectiveMaxBatchedTokens` — and **nothing that identifies the weights**.
+`KvCacheDtype` is the KV cache's dtype, not the model's; `MaxModelLen` is a
+context-length limit.
+
+So a fingerprint built from `EngineParams` alone would give a 0.6B model and a
+32B model the same identity whenever their launch flags and hardware matched,
+and therefore **the same ITL line** — a quantity that differs by an order of
+magnitude between them. That is not a subtle mis-keying; it is the worst failure
+this design could have, because the ITL line is what the derived mu is built
+from.
+
+`modelID` is therefore part of the fingerprint, not an axis dropped from it. A
+served model path plus revision would be stricter still (two `modelID`s can
+point at different weights across namespaces, and a retune changes ITL without
+changing the name), and is worth taking if discovery can supply it; `modelID`
+is the floor, not the goal.
+
+The general lesson, which applies to every field: the fingerprint is a
+**deliberate list of what capacity and latency are a function of**, not
+"whatever `EngineParams` happens to carry". It is built by naming the physics
+and then checking the struct can supply it — the opposite order from the one
+that produced the error above.
+
 Then key each piece of learned state by what it is actually a function of,
 which is not the same thing for all of them:
 
 | state | should be keyed by | why not more |
 | --- | --- | --- |
-| ITL line `(A, B)` | fingerprint | it is physics: the same build on the same hardware has the same line **whatever shape is arriving**. That is precisely why the derived mu can price a shape the fleet has never saturated under. |
+| ITL line `(A, B)` | fingerprint (which includes `modelID`) | it is physics: the same weights, the same engine build and the same hardware give the same line **whatever shape is arriving**. That is precisely why the derived mu can price a shape the fleet has never saturated under. It is NOT independent of the model — see the section above. |
 | k2 | fingerprint + role + output bucket | capacity is config **and** shape: `k2 = N_steady x (I + O/2)` |
 | throughput window (mu) | fingerprint + role + input and output buckets | a completion rate is per shape |
 | `capacity.Store` record | fingerprint | the record *is* the config plus what was measured for it |
 | stable shape | namespace + model | traffic, not configuration. Unchanged. |
 | accelerator memo | should disappear — the accelerator is **in** the fingerprint |
 
-Dropping `namespace` from the physics-keyed entries is deliberate and is the
-main prize: the same engine build on the same GPU in a different namespace has
-the same ITL line, and today it relearns it.
+What is dropped from the physics-keyed entries is **`namespace` and the variant
+name — not the model**. That is the prize: the same weights and the same engine
+build on the same GPU, deployed again under another name or in another
+namespace, has the same ITL line and today relearns it from scratch.
 
 ### A defect this exposes
 
