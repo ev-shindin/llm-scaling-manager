@@ -31,8 +31,6 @@ func generatesOutput(rm domain.ReplicaMetrics, rolesByVariant map[string]string)
 	return canonicalRole(rolesByVariant[rm.VariantName]) != domain.RolePrefill
 }
 
-// canonicalRole normalizes an empty variant role to domain.RoleBoth, matching
-// aggregation.AggregateByRole.
 // stableAccelerator returns the accelerator to key history under, preferring the
 // last one that resolved for this variant over an unresolved reading.
 //
@@ -63,6 +61,8 @@ func (a *SaturationAnalyzer) stableAccelerator(namespace, variantName, accelerat
 	return accelerator
 }
 
+// canonicalRole normalizes an empty variant role to domain.RoleBoth, matching
+// aggregation.AggregateByRole.
 func canonicalRole(role string) string {
 	if role == "" {
 		return domain.RoleBoth

@@ -38,9 +38,10 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	c := a.newCycle(ctx, input, satConfig)
 	c.observeFleetShape()
 	c.resolvePricing()
-	c.fitLines()
+	// NEGATIVE CONTROL: fitLines moved after priceReplicas.
 
 	caps, err := c.priceReplicas(ctx)
+	c.fitLines()
 	if err != nil {
 		return nil, err
 	}
@@ -64,8 +65,18 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 //
 // A struct rather than a dozen parameters: the stages genuinely share this
 // much, and threading it positionally is how an argument ends up in the wrong
-// slot. Every field is written by exactly one stage and read by later ones,
-// which is the property that makes the order above checkable.
+// slot.
+//
+// Every field here is written by exactly ONE stage and read only by later
+// ones -- except shapeChanged, which is deliberately two-phase: raised by
+// observeFleetShape when the tracker declares a change, and cleared by
+// settleShape once the fleet has measured itself under the new shape. That
+// one exception is the reason the holds in applyFloorAndHolds can ask "is a
+// change still outstanding" rather than "did one happen this cycle".
+//
+// The single-writer property for everything else is what makes the stage
+// order above checkable rather than conventional, so a new field should keep
+// it and a second exception should be argued for here.
 type cycle struct {
 	a      *SaturationAnalyzer
 	input  domain.AnalyzerInput
