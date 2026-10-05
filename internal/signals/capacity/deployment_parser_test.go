@@ -432,13 +432,49 @@ var _ = Describe("IsCapacityCompatible", func() {
 		Expect(p2.IsCapacityCompatible(&p1)).To(BeFalse())
 	})
 
-	It("should ignore non-capacity fields like MaxNumSeqs and MaxModelLen", func() {
+	It("should return false when MaxNumSeqs differs", func() {
+		// S caps N_steady in the k2 derivation and caps the sequence count the
+		// derived mu prices at, so two engines differing only in --max-num-seqs
+		// have a different compute bound AND a different mu. Reusing one's
+		// record for the other mis-sizes a zero-replica variant.
 		p1 := defaultEngineParams()
 		resolveEffectiveMaxBatchedTokens(&p1)
 		p2 := defaultEngineParams()
 		resolveEffectiveMaxBatchedTokens(&p2)
 		p2.MaxNumSeqs = 512
-		p2.MaxModelLen = 16384
+		Expect(p1.MaxNumSeqs).NotTo(Equal(p2.MaxNumSeqs))
+		Expect(p1.IsCapacityCompatible(&p2)).To(BeFalse())
+	})
+
+	It("should return false when MaxModelLen differs on the chunked-prefill path", func() {
+		// MaxModelLen reaches EffectiveMaxBatchedTokens only when chunked
+		// prefill is OFF. With it on -- the V1 default -- the resolver returns
+		// 8192 for both, so the two differ in MaxModelLen and in nothing else
+		// this predicate used to look at. That is the case this pins.
+		p1 := defaultEngineParams()
+		p1.IsV1Engine = true
+		p1.ChunkedPrefillEnabled = true
+		p1.MaxModelLen = 8192
+		resolveEffectiveMaxBatchedTokens(&p1)
+		p2 := defaultEngineParams()
+		p2.IsV1Engine = true
+		p2.ChunkedPrefillEnabled = true
+		p2.MaxModelLen = 131072
+		resolveEffectiveMaxBatchedTokens(&p2)
+
+		Expect(p1.EffectiveMaxBatchedTokens).To(Equal(p2.EffectiveMaxBatchedTokens),
+			"the resolver must hide MaxModelLen here, or this test proves nothing")
+		Expect(p1.IsCapacityCompatible(&p2)).To(BeFalse())
+	})
+
+	It("should still ignore EnforceEager, which changes latency and not capacity", func() {
+		// No CUDA graphs changes the ITL line, so it belongs in a latency key.
+		// It does not change how much KV fits or how many sequences run, so a
+		// capacity record stays reusable across it.
+		p1 := defaultEngineParams()
+		resolveEffectiveMaxBatchedTokens(&p1)
+		p2 := defaultEngineParams()
+		resolveEffectiveMaxBatchedTokens(&p2)
 		p2.EnforceEager = true
 		Expect(p1.IsCapacityCompatible(&p2)).To(BeTrue())
 	})

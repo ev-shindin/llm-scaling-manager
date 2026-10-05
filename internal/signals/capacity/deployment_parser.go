@@ -312,6 +312,23 @@ func applyParam(key, value string, params *EngineParams) {
 // would produce equivalent per-replica capacity (both k1 and k2).
 // Used by Store.FindCompatible to identify variants
 // whose stored capacity can be reused for zero-replica estimation.
+//
+// MaxNumSeqs and MaxModelLen are compared even though neither enters k1,
+// because both enter k2:
+//
+//   - MaxNumSeqs is S, which caps N_steady in the k2 derivation and caps the
+//     sequence count the derived mu prices at. Two engines differing only in
+//     --max-num-seqs have a different compute bound AND a different mu.
+//   - MaxModelLen changes the KV a single sequence can occupy. It reaches
+//     EffectiveMaxBatchedTokens only when chunked prefill is off (see
+//     resolveEffectiveMaxBatchedTokens), so on the V1 path -- where chunked
+//     prefill is the default -- it is otherwise invisible to this predicate.
+//
+// EnforceEager is deliberately NOT compared: no CUDA graphs changes the
+// inter-token latency, and so the ITL line, but it does not change how much
+// KV fits or how many sequences run. A capacity record stays reusable across
+// it. Keying a latency model on these params is a different equality, and it
+// needs this one plus EnforceEager.
 func (p *EngineParams) IsCapacityCompatible(other *EngineParams) bool {
 	if p == nil || other == nil {
 		return false
@@ -323,7 +340,9 @@ func (p *EngineParams) IsCapacityCompatible(other *EngineParams) bool {
 		p.TensorParallelSize == other.TensorParallelSize &&
 		p.NumGpuBlocksOverride == other.NumGpuBlocksOverride &&
 		p.TotalKvTokensOverride == other.TotalKvTokensOverride &&
-		p.EffectiveMaxBatchedTokens == other.EffectiveMaxBatchedTokens
+		p.EffectiveMaxBatchedTokens == other.EffectiveMaxBatchedTokens &&
+		p.MaxNumSeqs == other.MaxNumSeqs &&
+		p.MaxModelLen == other.MaxModelLen
 }
 
 // resolveEffectiveMaxBatchedTokens computes the per-step token budget
