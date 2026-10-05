@@ -3,7 +3,8 @@ package saturation
 import (
 	"context"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -65,11 +66,8 @@ func TestDerivedMuCarriesEveryTerm(t *testing.T) {
 	require.NoError(t, err)
 
 	got := requireLogged(t, logs, "derived-mu")
-	keys := make([]string, 0, len(got))
-	for k := range got {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	keys := slices.Collect(maps.Keys(got))
+	slices.Sort(keys)
 
 	assert.Equal(t, derivedMuFields, keys,
 		"the derived-mu record must carry exactly these terms; a field lost at a "+

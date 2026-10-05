@@ -107,7 +107,7 @@ func computeModelWorkloadAverages(replicaMetrics []domain.ReplicaMetrics, rolesB
 
 // fleetOutputLength is the output length the fleet is serving this cycle: the
 // generating replicas' average output tokens, weighted by their request rate
-// (fleetAverage).
+// (fleet.Mean).
 func fleetOutputLength(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string) float64 {
 	return fleet.Mean(replicas,
 		func(rm domain.ReplicaMetrics) float64 { return rm.AvgOutputTokens },
@@ -137,10 +137,12 @@ func fleetOutputLengthRecent(replicas []domain.ReplicaMetrics, rolesByVariant ma
 // fleetPrefixHitRate is the prefill side's prefix-cache hit rate as ONE figure
 // for the whole role, request-rate weighted.
 //
-// It is not fleetAverage: that helper skips a value of zero as absent, and a
+// It passes fleet.ZeroIsAReading(), where the output and prompt lengths take
+// fleet.Mean's default: that default skips a value of zero as absent, and a
 // hit rate of zero is a reading, not a missing one -- a fleet with prefix
 // caching off reports 0 on every replica, and skipping those would leave the
-// mean to whichever replica happened to report something.
+// mean to whichever replica happened to report something. It also bounds with
+// fleet.Within(0, 1), because a hit rate is a fraction.
 //
 // One figure per role per cycle, for the same reason the output length is one
 // figure: it buckets a key. rm.PrefixCacheHitRate is per REPLICA, so using it

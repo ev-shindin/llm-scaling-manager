@@ -528,10 +528,11 @@ var _ = Describe("fleetPrefixHitRate", func() {
 		}
 	}
 
-	// The reason this is not fleetAverage. That helper reads a value of zero
-	// as absent, and a hit rate of zero is a reading: a fleet with prefix
-	// caching off reports 0 everywhere, and skipping those would hand the mean
-	// to whichever replica happened to report something.
+	// The reason this passes fleet.ZeroIsAReading() rather than taking
+	// fleet.Mean's default. That default reads a value of zero as absent, and a
+	// hit rate of zero is a reading: a fleet with prefix caching off reports 0
+	// everywhere, and skipping those would hand the mean to whichever replica
+	// happened to report something.
 	It("counts a zero hit rate as a reading, not as missing", func() {
 		rms := []domain.ReplicaMetrics{pre("a", 0.0, 1), pre("b", 0.8, 1)}
 		Expect(fleetPrefixHitRate(rms, roles)).To(BeNumerically("~", 0.4, 1e-9))

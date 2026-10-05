@@ -1544,6 +1544,32 @@ var _ = Describe("ThroughputAnalyzer", func() {
 			Expect(ol).To(BeNumerically("~", 400.0, 1e-9))
 		})
 
+		// This call site is deliberately UNBOUNDED, unlike its sibling
+		// saturation.fleetPrefixHitRate, which passes fleet.Within(0, 1).
+		//
+		// Pinned because nothing else distinguishes the two. Adding Within(0,1)
+		// here passed every other test in this block, so the asymmetry was
+		// invisible — and the bounded sibling is the one a future edit is
+		// likely to copy from, since the two now sit side by side calling the
+		// same helper with almost the same option list.
+		//
+		// Unbounded is not an endorsement: it is what the pre-refactor code
+		// did, and bounding it would change a decision on any fleet that
+		// reports out of range. That is a measurement question, not a cleanup,
+		// so the behaviour is preserved and recorded rather than quietly
+		// "fixed".
+		It("leaves an out-of-range hit rate in the mean, unlike the saturation side", func() {
+			metrics := []domain.ReplicaMetrics{
+				{AvgInputTokens: 2000, AvgOutputTokens: 400,
+					PrefixCacheHitRate: 1.4, RequestRate: 1},
+				{AvgInputTokens: 2000, AvgOutputTokens: 400,
+					PrefixCacheHitRate: 0.6, RequestRate: 1},
+			}
+			_, _, hr := averageShapeMetrics(metrics)
+			Expect(hr).To(BeNumerically("~", 1.0, 1e-9),
+				"1.4 is averaged in here; saturation.fleetPrefixHitRate would drop it")
+		})
+
 		// Before stage 3 this function had no per-value guard at all: a NaN hit
 		// rate was folded into its accumulator and poisoned the hit-rate output.
 		// il and ol had separate accumulators and so survived, which is what

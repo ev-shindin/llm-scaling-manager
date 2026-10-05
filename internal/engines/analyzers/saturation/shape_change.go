@@ -152,8 +152,9 @@ func arrivingPromptLength(sq *domain.SchedulerQueueMetrics) (float64, bool) {
 }
 
 // servedPromptLength is the prompt length of what the replicas have been
-// SERVING: the other axis of fleetAverage, so a fresh replica with a handful
-// of completions barely moves it. It lags -- it is an average over completed
+// SERVING: the other axis of the fleet's shape, averaged the same way
+// (fleet.Mean), so a fresh replica with a handful of completions barely moves
+// it. It lags -- it is an average over completed
 // requests -- and it is on the engines' scale, not the queue's.
 func servedPromptLength(replicas []domain.ReplicaMetrics) float64 {
 	return fleet.Mean(replicas,
