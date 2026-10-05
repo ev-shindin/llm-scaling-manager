@@ -122,8 +122,10 @@ last; it is the unit change that makes the other two land.
   the ~8 minutes and 51 itlZero cycles measured on run QT. Two changes that only
   work together: key the learned figures on an ENGINE CONFIG fingerprint rather
   than a variant name (the relation already exists as IsCapacityCompatible, used
-  only as a fallback), and rehydrate from the published metrics at startup.
-  Revises signals-as-metrics.md, which called the restart gap unfixable.
+  only as a fallback), and rehydrate on becoming leader from a write-on-change
+  ConfigMap — NOT from the metrics, which have no writer identity, no honest
+  timestamp and no trust boundary. Revises signals-as-metrics.md, which called
+  the restart gap unfixable.
 
 ## Product and lifecycle
 

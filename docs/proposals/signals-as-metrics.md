@@ -255,7 +255,13 @@ happens.
 - **Historical comparison across a restart** — REVISED. This section called
   the restart gap honest rather than fixable, and that was wrong: see
   [learned state across a restart](learned-state-across-restarts.md), which
-  rehydrates the learned figures from these very series. The original text
+  carries the learned figures across a restart and uses the families below to
+  make the result explicable. It reads them back from a ConfigMap rather than
+  from these series, for a reason that belongs here too: the ServiceMonitor
+  drops `pod` by design, so a `wva_` series has **no writer identity**, and
+  `client_golang` cannot publish a historical timestamp, so a republished value
+  looks new. Publishing a signal is safe; thresholding or reading back a
+  signal WVA itself wrote is the line this document draws. The original text
   follows.
 
 - **Historical comparison across a restart.** Every signal here is in-memory
