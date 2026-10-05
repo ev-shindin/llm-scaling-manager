@@ -9,6 +9,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/fleet"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/floor"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
@@ -155,7 +156,7 @@ func arrivingPromptLength(sq *domain.SchedulerQueueMetrics) (float64, bool) {
 // of completions barely moves it. It lags -- it is an average over completed
 // requests -- and it is on the engines' scale, not the queue's.
 func servedPromptLength(replicas []domain.ReplicaMetrics) float64 {
-	return fleetAverage(replicas,
+	return fleet.Mean(replicas,
 		func(rm domain.ReplicaMetrics) float64 { return rm.AvgInputTokens },
 		func(rm domain.ReplicaMetrics) bool { return !rm.FromWarmPool })
 }
@@ -170,7 +171,7 @@ func servedPromptLength(replicas []domain.ReplicaMetrics) float64 {
 // Zero when no replica reports the short-window figure; the caller then keeps
 // the [5m] shape whole rather than moving half of it.
 func servedPromptLengthRecent(replicas []domain.ReplicaMetrics) float64 {
-	return fleetAverage(replicas,
+	return fleet.Mean(replicas,
 		func(rm domain.ReplicaMetrics) float64 { return rm.AvgInputTokensRecent },
 		func(rm domain.ReplicaMetrics) bool { return !rm.FromWarmPool })
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/fleet"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/floor"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
@@ -1782,59 +1783,11 @@ func computeModelWorkloadAverages(replicaMetrics []domain.ReplicaMetrics, rolesB
 	return avgInput, avgOutput, avgHitRate
 }
 
-// fleetAverage is the rate-weighted mean of value over the replicas include
-// selects: the figure the fleet is actually serving, rather than the mean of
-// what its replicas happen to report.
-//
-// Weighting by request rate is what makes it robust to a fleet that is
-// changing size. A fresh replica whose first completions are the short
-// requests (they finish first) reports a short average at a low rate and
-// barely moves it; a replica with no completions yet reports nothing and does
-// not move it at all. With no rate reported anywhere it is the plain mean, as
-// computeModelWorkloadAverages takes it, and zero when nothing reports the
-// value at all.
-//
-// Both axes of the fleet's shape are this computation (fleetOutputLength,
-// servedPromptLength). The throughput analyzer's averageShapeMetrics is a
-// third instance of it in another package, left alone here.
-//
-// NaN is skipped EXPLICITLY, because `v <= 0` does not skip it: every
-// comparison against NaN is false, so a NaN reading passes that guard and then
-// poisons both accumulators -- one bad replica turns the whole fleet's average
-// into NaN, and every figure priced from it follows, with no reading anywhere
-// that looks wrong. The collector drops NaN and Inf before they reach these
-// fields today, so this is insurance rather than a live fix; it belongs here
-// rather than in each caller because this is where the arithmetic happens, and
-// because a caller that forgets is exactly the case it has to survive.
-func fleetAverage(replicas []domain.ReplicaMetrics, value func(domain.ReplicaMetrics) float64, include func(domain.ReplicaMetrics) bool) float64 {
-	var weighted, weights, plain float64
-	var n int
-	for _, rm := range replicas {
-		v := value(rm)
-		if math.IsNaN(v) || v <= 0 || !include(rm) {
-			continue
-		}
-		plain += v
-		n++
-		if rm.RequestRate > 0 {
-			weighted += v * rm.RequestRate
-			weights += rm.RequestRate
-		}
-	}
-	if weights > 0 {
-		return weighted / weights
-	}
-	if n > 0 {
-		return plain / float64(n)
-	}
-	return 0
-}
-
 // fleetOutputLength is the output length the fleet is serving this cycle: the
 // generating replicas' average output tokens, weighted by their request rate
 // (fleetAverage).
 func fleetOutputLength(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string) float64 {
-	return fleetAverage(replicas,
+	return fleet.Mean(replicas,
 		func(rm domain.ReplicaMetrics) float64 { return rm.AvgOutputTokens },
 		func(rm domain.ReplicaMetrics) bool { return generatesOutput(rm, rolesByVariant) })
 }
@@ -1854,7 +1807,7 @@ func fleetOutputLength(replicas []domain.ReplicaMetrics, rolesByVariant map[stri
 // [5m] figure is wrong only for the few minutes after a shape change, which is
 // exactly when this one is used.
 func fleetOutputLengthRecent(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string) float64 {
-	return fleetAverage(replicas,
+	return fleet.Mean(replicas,
 		func(rm domain.ReplicaMetrics) float64 { return rm.AvgOutputTokensRecent },
 		func(rm domain.ReplicaMetrics) bool { return generatesOutput(rm, rolesByVariant) })
 }
@@ -1877,30 +1830,16 @@ func fleetOutputLengthRecent(replicas []domain.ReplicaMetrics, rolesByVariant ma
 // whose hit rate drifts across a bucket boundary can therefore still move
 // prefill's window, just not split it between replicas within a cycle.
 func fleetPrefixHitRate(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string) float64 {
-	var weighted, weights, plain float64
-	var n int
-	for _, rm := range replicas {
-		if canonicalRole(rolesByVariant[rm.VariantName]) != domain.RolePrefill {
-			continue
-		}
-		v := rm.PrefixCacheHitRate
-		if v < 0 || v > 1 || math.IsNaN(v) {
-			continue
-		}
-		plain += v
-		n++
-		if rm.RequestRate > 0 {
-			weighted += v * rm.RequestRate
-			weights += rm.RequestRate
-		}
-	}
-	if weights > 0 {
-		return weighted / weights
-	}
-	if n > 0 {
-		return plain / float64(n)
-	}
-	return 0
+	return fleet.Mean(replicas,
+		func(rm domain.ReplicaMetrics) float64 { return rm.PrefixCacheHitRate },
+		func(rm domain.ReplicaMetrics) bool {
+			return canonicalRole(rolesByVariant[rm.VariantName]) == domain.RolePrefill
+		},
+		// A hit rate of zero is a reading -- a fleet with prefix caching off
+		// reports it on every replica, and skipping those would leave the mean
+		// to whichever replica happened to report something. Bounded because a
+		// hit rate is a fraction.
+		fleet.ZeroIsAReading(), fleet.Within(0, 1))
 }
 
 // rolesFromStates builds the variant-name -> role lookup the per-role helpers

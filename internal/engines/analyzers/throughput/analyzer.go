@@ -11,6 +11,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/fleet"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
@@ -735,31 +736,21 @@ func groupByVariant(metrics []domain.ReplicaMetrics) map[string][]domain.Replica
 // negative IL or OL are excluded. When all eligible replicas have zero
 // RequestRate, falls back to an unweighted mean.
 func averageShapeMetrics(metrics []domain.ReplicaMetrics) (il, ol, hitRate float64) {
-	var sumIL, sumOL, sumHitRate float64 // weighted accumulators
-	var sumILu, sumOLu, sumHRu float64   // unweighted fallback
-	var totalWeight, count float64
-	for _, m := range metrics {
-		if m.AvgInputTokens <= DefaultMinTokensPerRequest || m.AvgOutputTokens <= DefaultMinTokensPerRequest {
-			continue
-		}
-		count++
-		sumILu += m.AvgInputTokens
-		sumOLu += m.AvgOutputTokens
-		sumHRu += m.PrefixCacheHitRate
-		if m.RequestRate > 0 {
-			sumIL += m.RequestRate * m.AvgInputTokens
-			sumOL += m.RequestRate * m.AvgOutputTokens
-			sumHitRate += m.RequestRate * m.PrefixCacheHitRate
-			totalWeight += m.RequestRate
-		}
+	// One gate for all three, as before: a replica is in the mean only if it
+	// reports both a prompt and a generation length. Its hit rate then counts
+	// even at zero, which is why only that call admits a zero.
+	eligible := func(m domain.ReplicaMetrics) bool {
+		return m.AvgInputTokens > DefaultMinTokensPerRequest &&
+			m.AvgOutputTokens > DefaultMinTokensPerRequest
 	}
-	if count == 0 {
-		return 0, 0, 0
-	}
-	if totalWeight == 0 {
-		return sumILu / count, sumOLu / count, sumHRu / count
-	}
-	return sumIL / totalWeight, sumOL / totalWeight, sumHitRate / totalWeight
+	il = fleet.Mean(metrics,
+		func(m domain.ReplicaMetrics) float64 { return m.AvgInputTokens }, eligible)
+	ol = fleet.Mean(metrics,
+		func(m domain.ReplicaMetrics) float64 { return m.AvgOutputTokens }, eligible)
+	hitRate = fleet.Mean(metrics,
+		func(m domain.ReplicaMetrics) float64 { return m.PrefixCacheHitRate }, eligible,
+		fleet.ZeroIsAReading())
+	return il, ol, hitRate
 }
 
 // filterHealthyForShape returns only the replicas that pass all per-replica
