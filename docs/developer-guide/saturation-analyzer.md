@@ -16,6 +16,9 @@ are not repeated here:
   what it is not invariant to.
 - [Analyzer evidence](analyzer-evidence.md) — the measured runs behind the hold
   rules, the windows and the arrival rate.
+- [Which component owns which number](signal-dataflow.md) — the same formulas
+  arranged by provenance: which component produces each parameter and which
+  consumes it, with the component diagram.
 
 `throughput-analyzer.md` is a **different** analyzer
 (`internal/engines/analyzers/throughput`). It shares vocabulary and almost no
