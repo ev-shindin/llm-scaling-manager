@@ -6,7 +6,7 @@ import "time"
 //
 // It lived in saturation_analyzer.go, which read as though it belonged to one
 // analyzer. It does not: every analyzer that works from measured rows consumes
-// ReplicaMetrics (saturation_v2, throughput), the collector produces it, and the
+// ReplicaMetrics (saturation, throughput), the collector produces it, and the
 // capacity-build step depends on what it carries. A shared type named after one
 // consumer invites exactly the change this split exists to prevent -- a rule
 // written into one analyzer and silently absent from the others.

@@ -18,12 +18,12 @@ Taken at `00c105f4`, non-test Go only:
 
 | file | lines | code | comment | top-level funcs |
 | --- | --- | --- | --- | --- |
-| `saturation_v2/analyzer.go` | 2441 | 1048 | 1283 (52%) | **35** |
+| `saturation/analyzer.go` | 2441 | 1048 | 1283 (52%) | **35** |
 | `steadystate/engine.go` | 2214 | 1264 | 761 (34%) | 43 |
 | `steadystate/engine_v2.go` | 1365 | 755 | 534 (39%) | 35 |
-| `saturation_v2/shape_change.go` | 624 | 228 | 378 (60%) | 11 |
+| `saturation/shape_change.go` | 624 | 228 | 378 (60%) | 11 |
 | `signals/floor/floor.go` | 638 | 234 | 385 (60%) | — |
-| `saturation_v2/throughput_floor.go` | 527 | 225 | 283 (53%) | 9 |
+| `saturation/throughput_floor.go` | 527 | 225 | 283 (53%) | 9 |
 
 Four distinct problems, which want four different fixes:
 
@@ -43,15 +43,15 @@ function, in the place that most needs to be skimmable.
 
 **3. The same computation exists three times.** A request-rate-weighted mean
 with a fallback to the plain mean: `fleetAverage` and `fleetPrefixHitRate` in
-`saturation_v2`, and `averageShapeMetrics` in `analyzers/throughput`.
+`saturation`, and `averageShapeMetrics` in `analyzers/throughput`.
 `fleetAverage`'s own comment says so — *"The throughput analyzer's
 averageShapeMetrics is a third instance of it in another package, left alone
 here."* The three have already diverged: only `fleetPrefixHitRate` treats a
 measured `0` as a reading, and until recently only it rejected NaN.
 
-**4. `saturation_v2` is a misleading name.** There is no `saturation` and no
+**4. `saturation` is a misleading name.** There is no `saturation` and no
 `saturation_v1` — `internal/engines/analyzers/` contains `external/`,
-`saturation_v2/` and `throughput/`. The `_v2` is vestigial, and the name breaks
+`saturation/` and `throughput/`. The `_v2` is vestigial, and the name breaks
 the project's own stated convention twice over: package names should be "short,
 lowercase, single-word", and this one carries an underscore and a version.
 
@@ -83,7 +83,7 @@ first stays.
 
 ### Stage 1 — split the grab-bags (mechanical, no behaviour change)
 
-Split `saturation_v2/analyzer.go`'s 35 functions into files named after what
+Split `saturation/analyzer.go`'s 35 functions into files named after what
 they compute. The grouping falls out of the existing code with no logic moved:
 
 | new file | functions |
@@ -103,7 +103,7 @@ Do the same to `steadystate/engine.go` as a separate change; it is a bigger job
 and does not block this one.
 
 **Verification:** `git diff --stat` shows only moves. Spec counts identical
-(saturation_v2 279, allocation 272/273, config 166). `go build`, `go vet`,
+(saturation 279, allocation 272/273, config 166). `go build`, `go vet`,
 `golangci-lint` clean. This is the stage where a reviewer should be able to
 confirm "nothing changed" quickly, so it must not carry any other edit.
 
@@ -158,7 +158,7 @@ place to get NaN right.
 **Verification:** each call site keeps its current behaviour, proven by a
 negative control per site — flip the option and the site's own test must fail.
 
-### Stage 4 — rename `saturation_v2` to `saturation`
+### Stage 4 — rename `saturation` to `saturation`
 
 A pure rename, no `v1` to collide with. Touches every importer, so it lands
 alone and last among the mechanical stages, when the diff is otherwise quiet.

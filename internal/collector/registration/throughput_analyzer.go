@@ -32,9 +32,9 @@ const (
 	// RequestRateWindow is the range the per-pod completion rate is taken
 	// over (rate(...[RequestRateWindow])). The saturation analyzer spaces
 	// the readings it counts as samples of that rate by the same interval
-	// (saturation_v2.ThroughputSampleSpacing): two readings this far apart
+	// (saturation.ThroughputSampleSpacing): two readings this far apart
 	// share no scrape, closer ones share most of them. Change the two
-	// together; a test in saturation_v2 holds them equal.
+	// together; a test in saturation holds them equal.
 	RequestRateWindow = "1m"
 
 	// QueryGenerationTokenRate is the query name for the observed generation

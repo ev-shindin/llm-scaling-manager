@@ -106,7 +106,7 @@ demand moves.
   `policy/switch_test.go`, `policy/intent_test.go`, `retained_pass_test.go`,
   `retained_stay_log_test.go`, `switch_test.go`, `switch_storm_test.go`,
   `internal/decision/awake_test.go`, and
-  `internal/engines/analyzers/saturation_v2/warmpool_bridge_test.go` — covering
+  `internal/engines/analyzers/saturation/warmpool_bridge_test.go` — covering
   the pressure comparison, the tie-break, interval preemption, and the switch
   storm that an earlier version of this rule produced.
 - Benchmark: `hack/benchmark/scenarios/guides/variants/v2-retained-switch.yaml`;

@@ -80,7 +80,7 @@ over it via shared free functions in `internal/engines/allocation/`.
 
 | Concept | Definition |
 |---|---|
-| **Analyzer** | Implementation of `interfaces.Analyzer`. Examples: saturation (kv-token capacity, package `saturation_v2`), throughput (RPS/ITL-derived). |
+| **Analyzer** | Implementation of `interfaces.Analyzer`. Examples: saturation (kv-token capacity, package `saturation`), throughput (RPS/ITL-derived). |
 | **`VariantCapacity`** | Per-variant primitives: `ReplicaCount`, `PendingReplicas`, `PerReplicaCapacity` (analyzer-specific units), `Role`, `TotalDemand`, and the warm-pool trio `WarmPoolReplicas` / `WarmPoolPerReplicaCapacity` / `WarmPoolCapacity`. `Cost` and `AcceleratorName` are **not** on this struct — the optimizer reads them from `VariantMetadata`. |
 | **`AnalyzerResult`** | Per-(model, analyzer) output: the pure (D, P) signal — `VariantCapacities[]`, `TotalDemand`, `RoleDemand`. It has **no** supply or scaling-signal fields; those live on `NamedAnalyzerResult` and are the builder's. |
 | **`RoleCapacity`** | Per-role aggregate within an `AnalyzerResult`: `TotalSupply`, `TotalDemand`, `TotalAnticipatedSupply`, `RequiredCapacity` / `SpareCapacity` (engine-written). Used for P/D disaggregated models only. |
@@ -124,7 +124,7 @@ metrics under the variant it serves, and the collector flags those rows
   pool 0.90, workload 0.95), so less of the GPU is KV cache.
 
 An analyzer that reads replica rows must therefore exclude `FromWarmPool` rows
-from its per-replica maths. `saturation_v2` splits them and reports the bridge's
+from its per-replica maths. `saturation` splits them and reports the bridge's
 own reading; `throughput` filters them via `ownReplicasOnly`; `external` needs
 nothing, because its `P` is a constant target from config and it never reads
 replica rows.

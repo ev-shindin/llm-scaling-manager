@@ -16,7 +16,7 @@ instead of two compounding ones, without losing any expressible behaviour.
 V2 treats it as a ceiling on usable KV:
 
 ```go
-// internal/engines/analyzers/saturation_v2/analyzer.go
+// internal/engines/analyzers/saturation/analyzer.go
 k1 := int64(float64(rm.TotalKvCapacityTokens) * config.KvCacheThreshold)
 ```
 
@@ -67,7 +67,7 @@ release, then delete.
 
 ## Call sites to remove
 
-- `internal/engines/analyzers/saturation_v2/analyzer.go` — `k1` (~:155), the
+- `internal/engines/analyzers/saturation/analyzer.go` — `k1` (~:155), the
   fallback (~:230/:238), `estimateStoredCapacity` (~:400, :489)
 - `internal/config/saturation_scaling.go` — field, `DefaultKvCacheThreshold`,
   `ApplyDefaults`, `Merge`, and both `Validate` rules (range, and

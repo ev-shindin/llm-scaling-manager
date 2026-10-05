@@ -188,7 +188,7 @@ func SumTotalDemand(vcs []domain.VariantCapacity) float64 {
 
 // AggregateByRole groups vcs by role and computes ScopeTotals for each group.
 // An empty or blank role string is canonicalized to domain.RoleBoth,
-// consistent with saturation_v2's role normalization.
+// consistent with saturation's role normalization.
 func AggregateByRole(vcs []domain.VariantCapacity) map[string]ScopeTotals {
 	result := make(map[string]ScopeTotals)
 	for _, vc := range vcs {

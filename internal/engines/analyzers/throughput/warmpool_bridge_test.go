@@ -11,7 +11,7 @@ import (
 
 // A BRIDGE IS NOT ONE OF THE VARIANT'S REPLICAS, IN THIS ANALYZER EITHER.
 //
-// The rule is the same one saturation_v2 follows, and it has to hold here for the
+// The rule is the same one saturation follows, and it has to hold here for the
 // same reason: the capacity-build step computes supply as replicas x P, counting
 // replicas from the scale target -- which a lent warm pool Pod is not part of. A
 // bridge left in this analyzer's per-replica maths would price the counted

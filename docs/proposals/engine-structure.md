@@ -19,7 +19,7 @@ the package's own directory):
 |---|---|---|---|
 | `engines/steadystate` | 4,148 | 6 | `engine.go` (2,158) + `engine_v2.go` (1,358): the reconcile driver, and with it the analyzer runner, the capacity builder, the optimizer caller, the sticky scale-down, the inventory gate, the blocked-reason metric, the policy report, the decision writer and the actuation call. Imports **24** internal packages directly (29 transitively). |
 | `engines/allocation` | 4,464 (+884 in `multi_backup`) | 17 | two optimizers, five limiters and their factory, quota and Kueue inventories, GPU budgets, rescale, and `analyzer_helpers.go`; imports 11 internal packages (config, kueue, gpunodes, accelerator, metrics among them) |
-| `engines/analyzers/saturation_v2` | 3,336 | 8 | `analyzer.go` (1,663): k1/k2 capacity learning, occupancy demand, scheduler-queue attribution, prefill holds, the throughput windows; `throughput_floor.go` (675): the backlog-by-throughput floor and its hold/order rules. Imports `engines/allocation` for two string constants, `allocation.ReasonError` and `allocation.ReasonNoData`. |
+| `engines/analyzers/saturation` | 3,336 | 8 | `analyzer.go` (1,663): k1/k2 capacity learning, occupancy demand, scheduler-queue attribution, prefill holds, the throughput windows; `throughput_floor.go` (675): the backlog-by-throughput floor and its hold/order rules. Imports `engines/allocation` for two string constants, `allocation.ReasonError` and `allocation.ReasonNoData`. |
 | `engines/analyzers/throughput` | 1,555 | 7 | a second analyzer with its own shape tracker, observation window, ITL model, sanity report and queue pricing |
 | `engines/scalefromzero` | 2,274 | 6 | a second engine (scale-from-zero), 20 internal imports including `allocation`, `decision`, `registry`, `datastore` |
 | `collector` (+ 5 sub-packages) | 2,177 (+2,812) | 5 | `replica_metrics.go` (1,508): queries, per-pod collapse, attribution, freshness, in one file; one call into `decision` (`decision.BridgeVariant`) |
@@ -39,16 +39,16 @@ Four structural problems, each with a cost that has already been paid:
    asking "where is the decision made" reads both. Every policy added this
    quarter -- sticky scale-down, the conceded-supply gate, holds -- went in
    here because there was nowhere else.
-2. **Two analyzers, one problem, two vocabularies.** `saturation_v2` and
+2. **Two analyzers, one problem, two vocabularies.** `saturation` and
    `throughput` each implement a workload shape, a per-variant state, a
    rolling window, a throughput model and a queue pricing. The three
    shape-switch defects of 2026-09-20 (#84, #85, the drain burst) are all in
-   `saturation_v2`'s throughput model -- a max-window of requests per
+   `saturation`'s throughput model -- a max-window of requests per
    second under output-length buckets -- while `throughput` next to it
    carries a model that has none of those failure modes (below). Nobody
    chose one; each was extended where the last fix landed.
 3. **Layering is not a rule.** An analyzer imports the optimizer package
-   (`saturation_v2` → `allocation`, for two reason strings) -- the one
+   (`saturation` → `allocation`, for two reason strings) -- the one
    import that runs against the order below; the collector reads a decision
    output (the warm pool's lending) straight from the decision store to
    attribute Pods -- downward as an import, a cycle as a pipeline; and the
@@ -123,7 +123,7 @@ Rules that make it stay this way:
   `plan` imports only `domain` and `decision`: `allocation` today
   legitimately reads `config`, `kueue`, `gpunodes`, `accelerator` and
   `metrics`, and will keep doing so. What it forbids is the one upward edge
-  that existed on `main` (`saturation_v2` → `allocation`, reported by the
+  that existed on `main` (`saturation` → `allocation`, reported by the
   check there and gone in #88) and any new one. The collector's read of
   the decision store is downward by this order and was removed in #88 for
   the other reason: collecting must not read a decision output directly.
@@ -148,7 +148,7 @@ Rules that make it stay this way:
 `engines/analyzers/throughput` already has the representation the
 shape-shift proposal asks for:
 
-| concept | `throughput` (TA) | `saturation_v2` (V2) | keep |
+| concept | `throughput` (TA) | `saturation` (V2) | keep |
 |---|---|---|---|
 | workload shape | `ShapeTracker`: `(IL, OL, hit rate)` per variant, a change declared when either moves past a tolerance; the observation window is cleared on a change, the hardware baseline is kept | six output-length buckets, per replica (per role since #85), no `IL` | **TA's**, made per role and fed the early signals (arriving `IL` from EPP queue bytes) |
 | throughput model | `ITL(k) = A·k + B`, `k` = KV utilization: Tier-1 OLS over the window, Tier-2 pins `B` (hardware) when the fit cannot be trusted; `μ_dec(k*)` in tokens/s; verified against the observed generation-token rate (GPS mismatch clears the window) | max-window of saturated **requests/s** per bucket; borrow the nearest bucket when empty | **TA's**: continuous in load, no buckets, no borrowing, and a drain does not burst tokens/s |
@@ -310,7 +310,7 @@ p95 or target path has changed behaviour and stops).
    `rollingAverage`, the capacity store (k1/k2, history, eviction) and the
    floor's arithmetic (`estimateThroughputDemand`, `medianFloat`,
    `throughputFloor` and its terms, with `ReplicaCapacity`, the per-replica
-   record they take) out of `saturation_v2`, into `internal/signals` with
+   record they take) out of `saturation`, into `internal/signals` with
    their tests, as they are (the two windows stay two types, above).
    `engines/aggregation` **stays where it is** for now: the colleague's
    `composite-analyzer` branch adds three files to it, and moving the

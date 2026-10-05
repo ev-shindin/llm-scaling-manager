@@ -64,7 +64,7 @@ the Prometheus queries it makes each cycle — one set per namespace, not per po
 
 ## How it is tested
 
-- End-to-end: `test/e2e/saturation_v2_test.go`,
+- End-to-end: `test/e2e/saturation_test.go`,
   `saturation_analyzer_path_test.go`, `saturation_config_test.go`,
   `external_scaler_keda_test.go`, `smoke_keda_test.go`.
 - Benchmark scenario: `hack/benchmark/scenarios/guides/workload-autoscaling.yaml`,

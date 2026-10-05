@@ -22,10 +22,10 @@ import (
 // This exists as one function because it was previously three, and the three
 // had drifted apart in ways no caller had chosen:
 //
-//   - saturation_v2.fleetAverage skipped a value of zero and, until 08d8ad6c,
+//   - saturation.fleetAverage skipped a value of zero and, until 08d8ad6c,
 //     admitted NaN -- `v <= 0` is false for NaN, so one bad replica turned the
 //     whole fleet's average into NaN and every figure priced from it followed.
-//   - saturation_v2.fleetPrefixHitRate hand-rolled the same body to treat zero
+//   - saturation.fleetPrefixHitRate hand-rolled the same body to treat zero
 //     as a reading, and was the only one of the three that rejected NaN.
 //   - throughput.averageShapeMetrics computed three means in one pass behind a
 //     joint gate, and was never audited for NaN at all.

@@ -34,7 +34,7 @@ func rolesOf(vcs []variantRecord) []string {
 // VariantCapacities, which ResultIsInformative also treats as uninformative.
 //
 // These are the single source of truth for the no-data/error sentinels:
-// producer packages (e.g. saturation_v2) reference them rather than
+// producer packages (e.g. saturation) reference them rather than
 // re-declaring the literals, so ResultIsInformative and the producers cannot
 // drift apart.
 const (
@@ -176,7 +176,7 @@ func releasableFor(supply, demand, target float64) float64 {
 // permanently invisible to scale-up until the analyzer starts emitting demand for it.
 //
 // This is NOT a complete gap: for disaggregated models, saturation's
-// estimateSchedulerQueueDemand (internal/engines/analyzers/saturation_v2/analyzer.go)
+// estimateSchedulerQueueDemand (internal/engines/analyzers/saturation/analyzer.go)
 // provides a purpose-built demand estimate for zero-replica roles from EPP queue-depth
 // signals, producing a real nonzero RequiredCapacity that does trigger scale-up for that
 // role before any replica of it exists — covering the ordinary cold-start case.

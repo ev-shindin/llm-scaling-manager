@@ -190,7 +190,7 @@ func expectAnalyzerPathLog(modelID string) {
 // through the KEDA **external scaler** — KEDA fetches the decision from WVA's
 // gRPC service rather than reading the wva_desired_replicas gauge out of
 // Prometheus. The Prometheus transport is covered by smoke_keda_test.go and
-// saturation_v2_test.go; this suite is the saturation-decision half of the
+// saturation_test.go; this suite is the saturation-decision half of the
 // external-scaler path, so both transports stay exercised.
 var _ = Describe("Saturation-driven scaling through the KEDA external scaler", Label("full"), Ordered, func() {
 	const (

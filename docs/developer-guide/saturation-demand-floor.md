@@ -7,7 +7,7 @@ retired.
 
 Code: the model and its arithmetic are `internal/signals/floor`; the window of
 saturated readings, the borrow between buckets and the application to the
-measured demand are `internal/engines/analyzers/saturation_v2/throughput_floor.go`.
+measured demand are `internal/engines/analyzers/saturation/throughput_floor.go`.
 
 ## The problem
 

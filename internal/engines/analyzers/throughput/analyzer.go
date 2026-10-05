@@ -393,7 +393,7 @@ func (a *ThroughputAnalyzer) Analyze(
 		// for SpareCapacity) is not inflated by still-booting KV=0 replicas. Not-ready replicas
 		// are already reflected in PendingReplicas (currentReplicas − readyReplicas); they count
 		// toward TotalAnticipatedSupply and so still suppress RequiredCapacity during scale-out.
-		// This mirrors saturation_v2 (ReplicaCount = readyCount, PendingReplicas separate) and
+		// This mirrors saturation (ReplicaCount = readyCount, PendingReplicas separate) and
 		// avoids double-counting booting replicas in both ReplicaCount and PendingReplicas.
 		// TotalCapacity is the product ReplicaCount × PerReplicaCapacity (the VariantCapacity
 		// contract, and what aggregation.SumTotalSupply recomputes); equals supply for nKV ≥ 1.
