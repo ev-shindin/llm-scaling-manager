@@ -38,10 +38,9 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	c := a.newCycle(ctx, input, satConfig)
 	c.observeFleetShape()
 	c.resolvePricing()
-	// NEGATIVE CONTROL: fitLines moved after priceReplicas.
+	c.fitLines()
 
 	caps, err := c.priceReplicas(ctx)
-	c.fitLines()
 	if err != nil {
 		return nil, err
 	}
