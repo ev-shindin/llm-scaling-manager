@@ -21,12 +21,23 @@ var _ = Describe("ParseSGLangArgs", func() {
 			Expect(params.GpuMemoryUtilization).To(Equal(0.9))
 			Expect(params.BlockSize).To(Equal(int64(1))) // page-size default
 			Expect(params.KvCacheDtype).To(Equal("auto"))
+			Expect(params.WeightDtype).To(Equal("auto"))
+			Expect(params.Quantization).To(BeEmpty())
 			Expect(params.TensorParallelSize).To(Equal(1))
 			Expect(params.MaxNumSeqs).To(Equal(int64(256)))
 			Expect(params.TotalKvTokensOverride).To(Equal(int64(0)))
 			Expect(params.EnforceEager).To(BeFalse())
 			Expect(params.IsV1Engine).To(BeTrue())
 			Expect(params.ChunkedPrefillEnabled).To(BeTrue())
+		})
+	})
+
+	Describe("Weight dtype and quantization", func() {
+		It("should parse --dtype and --quantization", func() {
+			deploy := makeTestDeployment("--dtype=bfloat16", "--quantization=fp8")
+			params := ParseSGLangArgs(scaletarget.NewDeploymentAccessor(deploy))
+			Expect(params.WeightDtype).To(Equal("bfloat16"))
+			Expect(params.Quantization).To(Equal("fp8"))
 		})
 	})
 

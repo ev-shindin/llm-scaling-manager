@@ -15,6 +15,7 @@ func defaultSGLangEngineParams() EngineParams {
 		GpuMemoryUtilization: 0.9, // --mem-fraction-static default
 		BlockSize:            1,   // --page-size default
 		KvCacheDtype:         "auto",
+		WeightDtype:          "auto",
 		TensorParallelSize:   1,
 		// SGLang auto-derives --max-running-requests from available memory when
 		// unset; 256 is a conservative placeholder that underestimates capacity
@@ -69,6 +70,10 @@ func applySGLangParam(key, value string, params *EngineParams) {
 		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
 			params.BlockSize = v
 		}
+	case "dtype":
+		params.WeightDtype = value
+	case "quantization":
+		params.Quantization = value
 	case "kv_cache_dtype":
 		params.KvCacheDtype = value
 	case "tp_size", "tensor_parallel_size", "tp":

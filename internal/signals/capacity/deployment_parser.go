@@ -34,6 +34,19 @@ type EngineParams struct {
 	// the same model on the same hardware.
 	Engine inferenceengine.Engine
 
+	// WeightDtype is the dtype the weights are loaded in (--dtype), and
+	// Quantization the weight quantization method (--quantization, unset when
+	// empty). Both are distinct from KvCacheDtype, which is the KV cache's
+	// dtype and says nothing about the weights.
+	//
+	// They matter twice. They change how much of the GPU the weights occupy,
+	// and so how much is left for KV at a given GpuMemoryUtilization -- that
+	// is k1. And they dominate the inter-token latency, so any key for a
+	// latency model that omits them pools an FP8 and a BF16 serving of one
+	// model onto a single ITL line.
+	WeightDtype  string // default: "auto"
+	Quantization string // default: "" (none)
+
 	GpuMemoryUtilization  float64 // default: 0.9
 	BlockSize             int64   // default: 16 (vLLM block size / SGLang page size)
 	KvCacheDtype          string  // default: "auto"
@@ -65,6 +78,7 @@ func defaultEngineParams() EngineParams {
 		GpuMemoryUtilization:  0.9,
 		BlockSize:             16,
 		KvCacheDtype:          "auto",
+		WeightDtype:           "auto",
 		TensorParallelSize:    1,
 		MaxNumSeqs:            256,
 		IsV1Engine:            true, // default since vLLM v0.8
@@ -275,6 +289,10 @@ func applyParam(key, value string, params *EngineParams) {
 		}
 	case "kv_cache_dtype":
 		params.KvCacheDtype = value
+	case "dtype":
+		params.WeightDtype = value
+	case "quantization":
+		params.Quantization = value
 	case "tensor_parallel_size":
 		if v, err := strconv.Atoi(value); err == nil {
 			params.TensorParallelSize = v
@@ -342,7 +360,9 @@ func (p *EngineParams) IsCapacityCompatible(other *EngineParams) bool {
 		p.TotalKvTokensOverride == other.TotalKvTokensOverride &&
 		p.EffectiveMaxBatchedTokens == other.EffectiveMaxBatchedTokens &&
 		p.MaxNumSeqs == other.MaxNumSeqs &&
-		p.MaxModelLen == other.MaxModelLen
+		p.MaxModelLen == other.MaxModelLen &&
+		p.WeightDtype == other.WeightDtype &&
+		p.Quantization == other.Quantization
 }
 
 // resolveEffectiveMaxBatchedTokens computes the per-step token budget

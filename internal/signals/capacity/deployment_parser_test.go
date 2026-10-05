@@ -184,6 +184,8 @@ var _ = Describe("ParseVLLMArgs", func() {
 			Expect(params.GpuMemoryUtilization).To(Equal(0.9))
 			Expect(params.BlockSize).To(Equal(int64(16)))
 			Expect(params.KvCacheDtype).To(Equal("auto"))
+			Expect(params.WeightDtype).To(Equal("auto"))
+			Expect(params.Quantization).To(BeEmpty())
 			Expect(params.TensorParallelSize).To(Equal(1))
 			Expect(params.MaxNumSeqs).To(Equal(int64(256)))
 			Expect(params.NumGpuBlocksOverride).To(Equal(int64(0)))
@@ -218,6 +220,30 @@ var _ = Describe("ParseVLLMArgs", func() {
 			Expect(params.MaxNumSeqs).To(Equal(int64(128)))
 			Expect(params.MaxModelLen).To(Equal(int64(8192)))
 			Expect(params.EffectiveMaxBatchedTokens).To(Equal(int64(4096)))
+		})
+	})
+
+	Describe("Weight dtype and quantization", func() {
+		It("should parse --dtype and --quantization, which are not kv-cache-dtype", func() {
+			// These three are independent flags and were conflated once: only
+			// --kv-cache-dtype was parsed, so an FP8-weight and a BF16-weight
+			// serving of one model were indistinguishable.
+			deploy := makeTestDeployment(
+				"--dtype=bfloat16",
+				"--quantization=fp8",
+				"--kv-cache-dtype=auto",
+			)
+			params := ParseVLLMArgs(scaletarget.NewDeploymentAccessor(deploy))
+
+			Expect(params.WeightDtype).To(Equal("bfloat16"))
+			Expect(params.Quantization).To(Equal("fp8"))
+			Expect(params.KvCacheDtype).To(Equal("auto"))
+		})
+
+		It("should parse --dtype in the space-separated form too", func() {
+			deploy := makeTestDeployment("--dtype", "float16")
+			params := ParseVLLMArgs(scaletarget.NewDeploymentAccessor(deploy))
+			Expect(params.WeightDtype).To(Equal("float16"))
 		})
 	})
 
@@ -464,6 +490,29 @@ var _ = Describe("IsCapacityCompatible", func() {
 
 		Expect(p1.EffectiveMaxBatchedTokens).To(Equal(p2.EffectiveMaxBatchedTokens),
 			"the resolver must hide MaxModelLen here, or this test proves nothing")
+		Expect(p1.IsCapacityCompatible(&p2)).To(BeFalse())
+	})
+
+	It("should return false when WeightDtype differs", func() {
+		// Weight dtype changes how much of the GPU the weights occupy and so
+		// how much is left for KV at the same GpuMemoryUtilization -- k1
+		// genuinely differs, and the ITL line differs by more.
+		p1 := defaultEngineParams()
+		resolveEffectiveMaxBatchedTokens(&p1)
+		p2 := defaultEngineParams()
+		resolveEffectiveMaxBatchedTokens(&p2)
+		p2.WeightDtype = "bfloat16"
+		Expect(p1.WeightDtype).NotTo(Equal(p2.WeightDtype))
+		Expect(p1.IsCapacityCompatible(&p2)).To(BeFalse())
+	})
+
+	It("should return false when Quantization differs", func() {
+		p1 := defaultEngineParams()
+		resolveEffectiveMaxBatchedTokens(&p1)
+		p2 := defaultEngineParams()
+		resolveEffectiveMaxBatchedTokens(&p2)
+		p2.Quantization = "fp8"
+		Expect(p1.Quantization).To(BeEmpty())
 		Expect(p1.IsCapacityCompatible(&p2)).To(BeFalse())
 	})
 
