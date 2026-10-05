@@ -117,6 +117,14 @@ last; it is the unit change that makes the other two land.
   observability yes, a metric for KEDA to threshold instead of WVA computing
   the target no.
 
+- **[Learned state across a restart](learned-state-across-restarts.md)** —
+  nothing the analyzer learns survives a restart, and a rollout mid-ramp costs
+  the ~8 minutes and 51 itlZero cycles measured on run QT. Two changes that only
+  work together: key the learned figures on an ENGINE CONFIG fingerprint rather
+  than a variant name (the relation already exists as IsCapacityCompatible, used
+  only as a fallback), and rehydrate from the published metrics at startup.
+  Revises signals-as-metrics.md, which called the restart gap unfixable.
+
 ## Product and lifecycle
 
 - **[Capacity-planner positioning](capacity-planner-positioning.md)** — where a
