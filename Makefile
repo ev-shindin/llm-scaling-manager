@@ -1156,8 +1156,22 @@ LLMDBENCHMARK        = $(shell command -v llmdbenchmark 2>/dev/null || echo $(BE
 # Common llmdbenchmark flags (spec + workspace + base dir for config resolution)
 BENCHMARK_CLI_FLAGS = --spec $(BENCHMARK_SPEC) --workspace $(BENCHMARK_WORKSPACE) --base-dir $(BENCHMARK_REPO_DIR)
 
+# A FLOOR UNDER transformers, or a fresh clone cannot bootstrap at all.
+#
+# llm-d-benchmark leaves `transformers` unpinned. Resolving it on Python 3.12
+# backtracks to transformers 4.12.2 (2021), which requires tokenizers 0.10.3 --
+# a version whose newest wheels are cp39, so pip builds it from source and dies
+# on "error: can't find Rust compiler". Measured on WSL/Python 3.12.3 against
+# v0.7.8: the venv step failed, the Makefile fell through to llm-d-benchmark's
+# own install.sh, and that died on `sudo: a password is required`, which reads
+# like a permissions problem and is not one.
+#
+# Any reasonably recent transformers ships wheels and resolves cleanly. This is
+# a floor, not a pin: uv is still free to pick something newer.
+BENCHMARK_TRANSFORMERS_FLOOR ?= "transformers>=4.44"
+
 .PHONY: benchmark-install
-benchmark-install: ## Clone llm-d-benchmark at BENCHMARK_REPO_REF (default v0.7.0) and install the llmdbenchmark CLI
+benchmark-install: ## Clone llm-d-benchmark at BENCHMARK_REPO_REF (default v0.7.8) and install the llmdbenchmark CLI
 	@if [ ! -d "$(BENCHMARK_REPO_DIR)" ]; then \
 		echo "Cloning llm-d-benchmark @ $(BENCHMARK_REPO_REF)..."; \
 		git clone --branch $(BENCHMARK_REPO_REF) $(BENCHMARK_REPO_URL) $(BENCHMARK_REPO_DIR); \
@@ -1261,11 +1275,11 @@ benchmark-install: ## Clone llm-d-benchmark at BENCHMARK_REPO_REF (default v0.7.
 		planner=$${planner:-git+https://github.com/llm-d-incubation/llm-d-planner.git@v0.1.0}; \
 		if command -v uv >/dev/null 2>&1; then \
 			(cd $(BENCHMARK_REPO_DIR) && uv venv "$(BENCHMARK_VENV)" >/tmp/llmdbench-venv.log 2>&1 \
-			 && VIRTUAL_ENV="$(BENCHMARK_VENV)" uv pip install -q -e . >>/tmp/llmdbench-venv.log 2>&1 \
+			 && VIRTUAL_ENV="$(BENCHMARK_VENV)" uv pip install -q -e . $(BENCHMARK_TRANSFORMERS_FLOOR) >>/tmp/llmdbench-venv.log 2>&1 \
 			 && VIRTUAL_ENV="$(BENCHMARK_VENV)" uv pip install -q "$$planner" >>/tmp/llmdbench-venv.log 2>&1) || true; \
 		else \
 			(cd $(BENCHMARK_REPO_DIR) && python3 -m venv "$(BENCHMARK_VENV)" >/tmp/llmdbench-venv.log 2>&1 \
-			 && "$(BENCHMARK_VENV)/bin/pip" install -q -e . >>/tmp/llmdbench-venv.log 2>&1 \
+			 && "$(BENCHMARK_VENV)/bin/pip" install -q -e . $(BENCHMARK_TRANSFORMERS_FLOOR) >>/tmp/llmdbench-venv.log 2>&1 \
 			 && "$(BENCHMARK_VENV)/bin/pip" install -q "$$planner" >>/tmp/llmdbench-venv.log 2>&1) || true; \
 		fi; \
 		if [ -x "$(LLMDBENCHMARK)" ] && "$(LLMDBENCHMARK)" --version >/dev/null 2>&1; then \

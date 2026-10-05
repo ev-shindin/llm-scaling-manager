@@ -305,6 +305,22 @@ and plausible table. The tooling enforces every one rather than trusting it:
   through the same claim the models use.
 - Everything [the warm pool guide](../warm-pool/) needs: the two images, the
   RBAC to patch Pods, the NetworkPolicy.
+- **To know who owns Istio.** The standup installs `istio-base` and `istiod` by
+  helmfile. On a cluster that already runs Istio by other means that install
+  does not merge: it fails on ownership metadata part-way through the standup,
+  and the half-built namespace then trips the EPP-reuse guard on the next
+  attempt. If the cluster provides Istio, say so in the scenario's `gateway:`
+  block and the standup will reuse it:
+
+  ```yaml
+      gateway:
+        className: istio
+        providerNamespace: istio-system
+        skipInstall: true
+  ```
+
+  `preflight` checks this both ways round, so neither mistake reaches a
+  standup.
 - **A node with 64 GiB free for the load Pod.** Each loader container is
   limited to 32 GiB, and it is not generous: inference-perf materializes
   synthetic prompts lazily in its worker processes and keeps every one, so

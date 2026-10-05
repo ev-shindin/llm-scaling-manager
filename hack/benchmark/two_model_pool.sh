@@ -427,6 +427,39 @@ verb_preflight() {
         rc=1
     fi
 
+    # WHO OWNS ISTIO. The standup installs istio-base + istiod by helmfile, and
+    # on a cluster that already runs Istio by any other means that install does
+    # not merge -- it fails on ownership:
+    #   ServiceAccount "istio-reader-service-account" in namespace "istio-system"
+    #   exists and cannot be imported into the current release
+    # Measured on CoreWeave: a shared cluster with Istio installed months
+    # earlier, not Helm-managed. The standup got as far as deploying one stack
+    # before dying, and the half-built namespace then tripped the EPP-reuse
+    # guard on the next attempt, so the fix was two failures away from the
+    # cause. The scenario can say "reuse what is there" instead.
+    local gw_installed gw_skips
+    gw_installed="$(kc get gatewayclass -o json 2>/dev/null | jq -r '
+        [.items[] | select(.spec.controllerName == "istio.io/gateway-controller")] | length')"
+    gw_skips="$(grep -c 'skipInstall:[[:space:]]*true' \
+        "$ROOT/hack/benchmark/scenarios/$BENCH_SPEC.yaml" 2>/dev/null || true)"
+    if [ "${gw_installed:-0}" -gt 0 ] && [ "${gw_skips:-0}" -eq 0 ]; then
+        warn "this cluster already provides Istio (an istio.io/gateway-controller GatewayClass exists),"
+        warn "  and the scenario does not say so. standup would try to install istio-base over it and"
+        warn "  fail on ownership metadata, part-way through, leaving a namespace that the next attempt"
+        warn "  refuses as someone else's. Add this under the scenario's gateway: block:"
+        warn "      providerNamespace: istio-system   # where the existing control plane lives"
+        warn "      skipInstall: true"
+        rc=1
+    elif [ "${gw_installed:-0}" -eq 0 ] && [ "${gw_skips:-0}" -gt 0 ]; then
+        warn "the scenario sets gateway.skipInstall, but no istio.io/gateway-controller GatewayClass"
+        warn "  exists here. Nothing would install a control plane and the Gateway would never be"
+        warn "  Programmed -- the load then fails to resolve, in every arm. Drop skipInstall, or"
+        warn "  point it at the cluster that has Istio."
+        rc=1
+    elif [ "${gw_installed:-0}" -gt 0 ]; then
+        ok "Istio is provided by the cluster and the scenario reuses it"
+    fi
+
     # The model cache. A pool Pod loads its warm copies through the SAME claim
     # the models use; pointed at a claim they do not use, the engine gets a
     # --model path that is not in the Pod, never answers, and the controller
