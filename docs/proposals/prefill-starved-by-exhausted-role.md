@@ -128,7 +128,7 @@ Three things seen in the same run are separate and stay open:
 
 2. **Prefill's throughput history is bucketed by OUTPUT length.**
    `outputBuckets = {short, medium, long, xlong, xxlong, huge}` keyed on
-   `avgOutput` (`saturation_v2/types.go`). Prefill's cost is input tokens, so a
+   `avgOutput` (`saturation/types.go`). Prefill's cost is input tokens, so a
    change in output length invalidates prefill's mu window and raises
    `staleShape` for a quantity that does not affect prefill's capacity at all.
    `staleShape` gates `mayOrder` (`floor.go:256`) and the queue escape hatch

@@ -38,7 +38,7 @@ WVA's analyzers carry three coupled problems:
 The saturation analyzer **does not compute** the identity metadata — it **copies** it. `AcceleratorName`,
 `Cost`, `Role`, and replica counts arrive **pre-computed on `domain.AnalyzerInput`** (via
 `VariantStates` and `ReplicaMetrics`) and are copied onto each `VariantCapacity`
-(`saturation_v2/analyzer.go:352-360, 441-453`). The authoritative sources already exist:
+(`saturation/analyzer.go:352-360, 441-453`). The authoritative sources already exist:
 
 | Field | Source | Site |
 |---|---|---|
@@ -71,7 +71,7 @@ the analyzer's output. This substantially de-risks it.
 
 - **V1 (`internal/saturationv1/`) and the queueing-model analyzer are out of scope** — both are being
   removed on a separate track. This design targets the **post-removal** engine
-  (`saturation_v2` + `throughput` + the external wrapper). Their removal is listed as a precondition
+  (`saturation` + `throughput` + the external wrapper). Their removal is listed as a precondition
   (§6) only to flag the one shared dependency (`DefaultVariantCost`) that must be relocated.
 - No change to the **optimizer's coordination math** (sum-over-variants / min-over-roles in
   utilization space). We change *where identity comes from* and *the shape analyzers emit*, not how
@@ -94,7 +94,7 @@ the analyzer's output. This substantially de-risks it.
                  ┌──────────────────┐   AnalyzerResult{D, P}  ┌────┴─────────────┐
                  │ Analyzers        │ ───────────────────────▶ │ wva_analyzer_*   │
                  │ (pure D/P):      │                          │ metrics          │
-                 │  saturation_v2   │                          └──────────────────┘
+                 │  saturation   │                          └──────────────────┘
                  │  throughput      │
                  │  external wrapper│
                  └──────────────────┘
@@ -128,7 +128,7 @@ type VariantMetadata struct {
 The discovery step is a consolidation of `annotationSourcedVariants` (identity/cost/model/min-max) +
 `BuildVariantStates` (role/accelerator/replicas/GPUs). It does **not** add new parsing — it moves the
 existing calls behind one boundary and returns `[]VariantMetadata` keyed by `VariantName`.
-`EngineParams` (vLLM/SGLang arg parsing for the k2 capacity *estimate*) stays with `saturation_v2` —
+`EngineParams` (vLLM/SGLang arg parsing for the k2 capacity *estimate*) stays with `saturation` —
 it is a capacity input, not identity.
 
 ### 3.2 The pure analyzer contract
@@ -263,13 +263,13 @@ today); no-op on paths that don't run discovery. `saturationEntry` deletion is d
 
 **Phase 3 — Trim the contract; analyzers emit pure `(D, P)`; delete `saturationEntry`. ✅ DONE.**
 *Done:*
-- *(3.0)* `saturation_v2` stopped laundering per-pod `Cost`/`AcceleratorName` onto its output —
+- *(3.0)* `saturation` stopped laundering per-pod `Cost`/`AcceleratorName` onto its output —
   identity now comes from discovery via the builder overlay.
 - *(3.1)* Extracted the dedicated capacity-build step (`buildCapacities` in `engine_v2.go`) that runs
   between every analyzer's `Analyze()` and the optimizer.
 - *(3.3a)* The builder assembles per-variant identity, model-level supply, and `RoleCapacities`
   (pairing the analyzer's `RoleDemand` with per-role supply grouped from `VariantCapacities`).
-- *(3.3b)* Analyzers now emit **pure `(D, P)`**: `saturation_v2`, `throughput`, and the external
+- *(3.3b)* Analyzers now emit **pure `(D, P)`**: `saturation`, `throughput`, and the external
   wrapper no longer set `TotalSupply`, `TotalAnticipatedSupply`, `Utilization`, or `RoleCapacities`.
   The builder derives all four from `VariantCapacities` + `RoleDemand`, so the linearity invariant
   (supply = Σ_v replicas × per-replica P) now holds **by construction** rather than by assertion —
@@ -404,7 +404,7 @@ describes that accurately.
 > **Do NOT take replica counts from `VariantMetadata`.** The original sketch said
 > "`aggregation` needs replica counts from metadata rather than from the analyzer output".
 > That is wrong and would silently over-scale every DP>1 deployment.
-> `VariantCapacity.ReplicaCount` is in **engine-instance units** — `saturation_v2` sets it
+> `VariantCapacity.ReplicaCount` is in **engine-instance units** — `saturation` sets it
 > to `len(replicas)`, and the collector keys `ReplicaMetrics` by `pod_name:port` "to support
 > multiple instances per pod" (`collector/replica_metrics.go:747`); a DP=8 pod hosts 8
 > independently-capacitied instances. The analyzer even rescales `PendingReplicas` by
@@ -452,7 +452,7 @@ now take the records and the state map instead of re-deriving both from the requ
 
 Re-keying is safe because `Variants` is never sparser than the saturation analyzer's
 output: `engine.go:1260-1262` derives `variantStates` from `variantMetadata` one-for-one,
-and `saturation_v2` emits exactly one `VariantCapacity` per `variantState`. (This does not
+and `saturation` emits exactly one `VariantCapacity` per `variantState`. (This does not
 hold for *every* analyzer — throughput skips variants whose ITL model will not resolve —
 but the helpers read the saturation entry specifically.)
 
@@ -517,7 +517,7 @@ references below are from the pre-removal plan and no longer resolve.
 
 ## 7. Test impact
 
-- **Analyzer suites** (`saturation_v2/*_test.go`, `throughput/*_test.go`) — update result assertions to
+- **Analyzer suites** (`saturation/*_test.go`, `throughput/*_test.go`) — update result assertions to
   the trimmed `(D, P)` shape.
 - **Engine** — `engine_register_test.go`, `engine_v2_threshold_test.go` (`applyUniversalThreshold`),
   `engine_v2_population_test.go`; add discovery-producer tests.

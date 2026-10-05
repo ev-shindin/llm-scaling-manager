@@ -1503,6 +1503,90 @@ var _ = Describe("ThroughputAnalyzer", func() {
 			Expect(ol).To(BeNumerically("~", 600.0, 1e-9))
 			Expect(hr).To(BeNumerically("~", 0.5, 1e-9))
 		})
+
+		// The three cases above never give a replica a zero or a non-finite hit
+		// rate, so none of them exercises the one option this call site passes:
+		// fleet.ZeroIsAReading() on the hitRate mean and NOT on il/ol. Dropping
+		// it, or wiring it onto the wrong one of the three Mean calls, would
+		// have gone unnoticed.
+		It("counts a zero hit rate, because caching off is a reading", func() {
+			// A fleet with prefix caching disabled reports 0 on every replica.
+			// Skipping those would leave the mean to whichever replica happened
+			// to report something -- here, 0.6 instead of 0.3.
+			metrics := []domain.ReplicaMetrics{
+				{AvgInputTokens: 1000, AvgOutputTokens: 200, PrefixCacheHitRate: 0, RequestRate: 1},
+				{AvgInputTokens: 1000, AvgOutputTokens: 200, PrefixCacheHitRate: 0.6, RequestRate: 1},
+			}
+			_, _, hr := averageShapeMetrics(metrics)
+			Expect(hr).To(BeNumerically("~", 0.3, 1e-9),
+				"a zero hit rate must be averaged in, not skipped as absent")
+		})
+
+		// A replica that has completed nothing is excluded by the `eligible`
+		// gate, not by the zero-mode: eligible requires BOTH lengths above
+		// DefaultMinTokensPerRequest, so such a replica never reaches
+		// fleet.Mean's own admits() check.
+		//
+		// Stated precisely because a negative control proved the obvious
+		// reading wrong: adding fleet.ZeroIsAReading() to the il and ol calls
+		// leaves every test here green, since no input can reach that branch
+		// behind eligible. So this pins the GATE, and there is no test that
+		// could pin the zero-mode on the lengths — there is no input for which
+		// the two behaviours differ.
+		It("excludes a replica reporting no completions at all", func() {
+			metrics := []domain.ReplicaMetrics{
+				{AvgInputTokens: 0, AvgOutputTokens: 0, PrefixCacheHitRate: 0.4, RequestRate: 1},
+				{AvgInputTokens: 2000, AvgOutputTokens: 400, PrefixCacheHitRate: 0.4, RequestRate: 1},
+			}
+			il, ol, _ := averageShapeMetrics(metrics)
+			Expect(il).To(BeNumerically("~", 2000.0, 1e-9),
+				"eligible must drop the replica reporting nothing, not halve the prompt length")
+			Expect(ol).To(BeNumerically("~", 400.0, 1e-9))
+		})
+
+		// This call site is deliberately UNBOUNDED, unlike its sibling
+		// saturation.fleetPrefixHitRate, which passes fleet.Within(0, 1).
+		//
+		// Pinned because nothing else distinguishes the two. Adding Within(0,1)
+		// here passed every other test in this block, so the asymmetry was
+		// invisible — and the bounded sibling is the one a future edit is
+		// likely to copy from, since the two now sit side by side calling the
+		// same helper with almost the same option list.
+		//
+		// Unbounded is not an endorsement: it is what the pre-refactor code
+		// did, and bounding it would change a decision on any fleet that
+		// reports out of range. That is a measurement question, not a cleanup,
+		// so the behaviour is preserved and recorded rather than quietly
+		// "fixed".
+		It("leaves an out-of-range hit rate in the mean, unlike the saturation side", func() {
+			metrics := []domain.ReplicaMetrics{
+				{AvgInputTokens: 2000, AvgOutputTokens: 400,
+					PrefixCacheHitRate: 1.4, RequestRate: 1},
+				{AvgInputTokens: 2000, AvgOutputTokens: 400,
+					PrefixCacheHitRate: 0.6, RequestRate: 1},
+			}
+			_, _, hr := averageShapeMetrics(metrics)
+			Expect(hr).To(BeNumerically("~", 1.0, 1e-9),
+				"1.4 is averaged in here; saturation.fleetPrefixHitRate would drop it")
+		})
+
+		// Before stage 3 this function had no per-value guard at all: a NaN hit
+		// rate was folded into its accumulator and poisoned the hit-rate output.
+		// il and ol had separate accumulators and so survived, which is what
+		// made it survive unnoticed.
+		It("drops a non-finite hit rate without poisoning the lengths", func() {
+			metrics := []domain.ReplicaMetrics{
+				{AvgInputTokens: 2000, AvgOutputTokens: 400,
+					PrefixCacheHitRate: math.NaN(), RequestRate: 1},
+				{AvgInputTokens: 2000, AvgOutputTokens: 400,
+					PrefixCacheHitRate: 0.5, RequestRate: 1},
+			}
+			il, ol, hr := averageShapeMetrics(metrics)
+			Expect(math.IsNaN(hr)).To(BeFalse(), "a NaN reading must not reach the mean")
+			Expect(hr).To(BeNumerically("~", 0.5, 1e-9), "only the clean replica counts")
+			Expect(il).To(BeNumerically("~", 2000.0, 1e-9), "and the lengths are untouched")
+			Expect(ol).To(BeNumerically("~", 400.0, 1e-9))
+		})
 	})
 
 	Describe("Analyze — tier-2 constrained OLS with multiple replicas", func() {

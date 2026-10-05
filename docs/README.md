@@ -82,6 +82,7 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 - **[Development setup](developer-guide/development.md)** · **[Testing](developer-guide/testing.md)** · **[Debugging](developer-guide/debugging.md)**
 - **[Multi-analyzer pipeline](developer-guide/multi-analyzer-pipeline.md)** — how analyzers are registered, run and scored
 - **[Saturation analyzer](developer-guide/saturation-analyzer.md)** — how it decides, with every formula and where each one lives
+- **[Which component owns which number](developer-guide/signal-dataflow.md)** — the chain from a metric scrape to a replica count, and where every parameter in the arithmetic comes from
 - **[Throughput analyzer](developer-guide/throughput-analyzer.md)** · **[saturation demand floor](developer-guide/saturation-demand-floor.md)** · **[pod scraping source](developer-guide/pod-scraping-source.md)**
 - **[Analyzer checklists](developer-guide/analyzer-checklists.md)** — what a new analyzer must show before it graduates
 - **[Analyzer evidence](developer-guide/analyzer-evidence.md)** — what each scaling signal was measured to do, and on which run

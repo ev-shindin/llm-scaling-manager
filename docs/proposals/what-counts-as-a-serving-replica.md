@@ -91,7 +91,7 @@ either side of that split.
 The natural place for this is the BUILDER step, `buildInstanceKey`. Every series
 of every query the collector runs passes through it, it already resolves pod
 identity there, and a Pod it rejects can reach no downstream consumer. That
-covers the analyzers that read `domain.ReplicaMetrics` -- `saturation_v2` and
+covers the analyzers that read `domain.ReplicaMetrics` -- `saturation` and
 `throughput` both take `input.ReplicaMetrics` -- so one fix serves both without
 either knowing about it.
 

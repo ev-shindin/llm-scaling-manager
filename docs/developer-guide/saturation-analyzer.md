@@ -1,7 +1,13 @@
 # The saturation analyzer
 
-How `internal/engines/analyzers/saturation_v2` decides, with every formula it
+How `internal/engines/analyzers/saturation` decides, with every formula it
 uses and where each one lives.
+
+The package is laid out by what each file computes: `analyze.go` runs one
+cycle, `replica_capacity.go` sizes a replica, `fleet_shape.go` averages the
+fleet, `queue_demand.go` prices unstarted work, `keys.go` files readings,
+`aggregate.go` sums them, `roles.go` holds the P/D predicates, and
+`analyzer.go` is the analyzer itself.
 
 This is the component page. Two neighbours cover parts of it in more depth and
 are not repeated here:
@@ -10,6 +16,9 @@ are not repeated here:
   what it is not invariant to.
 - [Analyzer evidence](analyzer-evidence.md) — the measured runs behind the hold
   rules, the windows and the arrival rate.
+- [Which component owns which number](signal-dataflow.md) — the same formulas
+  arranged by provenance: which component produces each parameter and which
+  consumes it, with the component diagram.
 
 `throughput-analyzer.md` is a **different** analyzer
 (`internal/engines/analyzers/throughput`). It shares vocabulary and almost no
@@ -32,7 +41,7 @@ recalibrated downstream — see [RC and SC](#rc-and-sc).
 
 ## One cycle, end to end
 
-`SaturationAnalyzer.Analyze` (`analyzer.go`):
+`SaturationAnalyzer.Analyze` (`analyze.go`):
 
 1. Average the fleet's shape — `fleetOutputLength`, `servedPromptLength`,
    `fleetPrefixHitRate`.
@@ -78,7 +87,7 @@ Within(a, b, tol)  =  |a.IL - b.IL| / b.IL <= tol
 
 ## Per-replica capacity
 
-`computeReplicaCapacity` in `analyzer.go`. A replica's capacity is a number of
+`computeReplicaCapacity` in `replica_capacity.go`. A replica's capacity is a number of
 **tokens**, and it is the smaller of two bounds.
 
 ### k1 — memory bound
@@ -93,7 +102,7 @@ full cache preempts and thrashes.
 
 ### k2 — compute bound
 
-`estimateCapacityFromParams()`, from the engine's own parameters
+`estimateCapacityFromParams()` in `replica_capacity.go`, from the engine's own parameters
 (`capacity.EngineParams`, parsed from the deployment):
 
 ```
@@ -211,7 +220,7 @@ separation is deliberate and is the subject of the next section.
 fit. During a shape change the divisor follows a short `[1m]` window so the old
 shape's long stragglers cannot dominate it. **The shape must follow with it.**
 
-`analyzer.go` resolves the pair together:
+`analyze.go` resolves the pair together:
 
 ```
 muDivisor = ExpectedOutputTokens(fleetOutput, stableOutput, 512)
@@ -423,11 +432,11 @@ token per request, so its output length is not a property of its work.
 | `DefaultMinKSpread` | 0.30 | `internal/signals/itl` |
 | `BacklogDrainSeconds` | 60 | `internal/signals/floor` |
 | `MinThroughputSamplesToOrder` | 2 | `internal/signals/floor` |
-| `ShapeChangeHoldMax` | 5m | `saturation_v2` |
-| `DecodeSaturationMemory` | 1m | `saturation_v2` |
-| `ThroughputSampleSpacing` | 1m | `saturation_v2` |
-| `DefaultExpectedOutputTokens` | 512 | `saturation_v2` |
-| `BytesPerToken` | 4 | `saturation_v2` |
+| `ShapeChangeHoldMax` | 5m | `saturation` |
+| `DecodeSaturationMemory` | 1m | `saturation` |
+| `ThroughputSampleSpacing` | 1m | `saturation` |
+| `DefaultExpectedOutputTokens` | 512 | `saturation` |
+| `BytesPerToken` | 4 | `saturation` |
 
 ## Reading a decision from the logs
 

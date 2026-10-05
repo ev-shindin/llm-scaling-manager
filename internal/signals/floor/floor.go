@@ -250,7 +250,7 @@ func Estimate(
 		// here and measured as one in run T: it withheld ordering 28 times,
 		// all of them in the phase-1 ramp, because the k it reads carries no
 		// window while the rate it compares against is averaged over a minute.
-		// It is now a diagnostic only -- saturation_v2.noteLineMismatch says
+		// It is now a diagnostic only -- saturation.noteLineMismatch says
 		// why -- so this file is back to one disjunction.
 		if rc.SaturatedThroughputDerived ||
 			(rc.SaturatedThroughputSamples >= MinThroughputSamplesToOrder && !staleShape) {
@@ -588,7 +588,7 @@ func queueJustifiedReplicas(q, mu, drainSeconds float64) float64 {
 // both caps below -- `floor > step` and `floor > hold` are both false, so the
 // role would publish a NaN with Held false, the exact inverse of this
 // package's contract. The ingest path that produces these readings already
-// uses this form (saturation_v2.recordSaturatedThroughput).
+// uses this form (saturation.recordSaturatedThroughput).
 //
 // +Inf is excluded explicitly because it passes `x > 0`: a replica of infinite
 // throughput prices capacity at zero cost, which is not a reading, and it also

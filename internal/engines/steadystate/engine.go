@@ -47,7 +47,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/external"
-	saturation_v2 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation_v2"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/executor"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
@@ -239,7 +239,7 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	}
 
 	capacityStore := capacity.NewStore()
-	satV2 := saturation_v2.NewSaturationAnalyzer(capacityStore)
+	satV2 := saturation.NewSaturationAnalyzer(capacityStore)
 
 	// Initialize with default optimizer. The actual optimizer is selected
 	// per-cycle in optimize() from the ConfigMap's live limiters: list, since
@@ -746,7 +746,7 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	logger.V(logging.DEBUG).Info("Optimizer selected", "analyzer", analyzerName,
 		"optimizer", e.optimizer.Name(), "limiter", limiterMode)
 
-	// V2 (saturation): saturation_v2.Analyzer → AnalyzerResult → Optimizer.Optimize → Enforcer bridge.
+	// V2 (saturation): saturation.Analyzer → AnalyzerResult → Optimizer.Optimize → Enforcer bridge.
 	mode := modeLabelForAnalyzer(analyzerName)
 	allDecisions := e.optimizeV2(ctx, modelGroups, currentAllocations)
 

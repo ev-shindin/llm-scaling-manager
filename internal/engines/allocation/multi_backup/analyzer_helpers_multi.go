@@ -36,7 +36,7 @@ func rolesOf(vcs []variantRecord) []string {
 // VariantCapacities, which ResultIsInformative also treats as uninformative.
 //
 // These are the single source of truth for the no-data/error sentinels:
-// producer packages (e.g. saturation_v2) reference them rather than
+// producer packages (e.g. saturation) reference them rather than
 // re-declaring the literals, so ResultIsInformative and the producers cannot
 // drift apart.
 const (

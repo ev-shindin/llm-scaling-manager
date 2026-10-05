@@ -381,7 +381,7 @@ var _ = Describe("ThroughputAnalyzer wiring health check", Label("smoke", "throu
 		// Restart is mandatory: registration is sticky. A config-only restore leaves TA
 		// registered and still consuming results. Only a restart with saturation-only
 		// config already in place yields a true TA-off controller so sibling suites
-		// (e.g. saturation_v2_test.go:280 scale-down) are not contaminated.
+		// (e.g. saturation_test.go:280 scale-down) are not contaminated.
 		By("Restarting WVA controller to restore default (saturation-only) startup config")
 		Expect(restartWVAController(ctx)).To(Succeed())
 

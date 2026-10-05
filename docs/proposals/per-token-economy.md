@@ -95,7 +95,7 @@ property of the hardware, which is the whole reason a shape-independent `mu` is
 derivable.
 
 **Demand floor** (`internal/signals/floor`, applied by
-`saturation_v2.applyThroughputFloor`) raises demand to what the offered load
+`saturation.applyThroughputFloor`) raises demand to what the offered load
 implies, per role, and holds it at the fleet's own size when the reading it
 would order on is not trustworthy.
 
@@ -346,7 +346,7 @@ throughput was disabled -- which is the default."
 
 **The duplication, and why it is worse than duplication:**
 
-| | throughput analyzer | `saturation_v2` |
+| | throughput analyzer | `saturation` |
 |---|---|---|
 | decode demand | `lambda * O`, output tokens/s | `tokenSec` then divided by `O` -> requests/s |
 | decode supply | `Sequences / ITLAt(kSat)` | the same `tokenSec`, discarded |

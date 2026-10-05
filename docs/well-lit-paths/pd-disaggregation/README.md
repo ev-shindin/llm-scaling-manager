@@ -264,7 +264,7 @@ That is scale-from-zero behaviour for the P/D shape. Steady-state scaling of a
 P/D model rides on [the saturation path](../scale-on-saturation/) and its suites;
 there is no P/D-specific steady-state spec. The unit specs that hold the
 benchmark's behaviour in place are in
-`internal/engines/analyzers/saturation_v2/` (`throughput_floor_test.go`, and
+`internal/engines/analyzers/saturation/` (`throughput_floor_test.go`, and
 the P/D cases in `arrival_demand_test.go` and `analyzer_test.go`), each with a
 negative control against the code it replaced.
 

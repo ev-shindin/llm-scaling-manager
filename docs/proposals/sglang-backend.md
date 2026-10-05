@@ -48,7 +48,7 @@ WVA bakes vLLM into four distinct layers:
 |---|-------|----------|----------------------|
 | 1 | Metric name constants | `internal/constants/metrics.go` | All `vllm:*` names |
 | 2 | PromQL query templates | `internal/collector/registration/*.go` | `vllm:*` names baked into templates |
-| 3 | Deployment arg parser | `internal/signals/capacity/deployment_parser.go` (was `saturation_v2/`) | `ParseVLLMArgs`, vLLM CLI flags |
+| 3 | Deployment arg parser | `internal/signals/capacity/deployment_parser.go` (was `saturation/`) | `ParseVLLMArgs`, vLLM CLI flags |
 | 4 | KV-cache config gauge | `vllm:cache_config_info` (consumed in `collector/extract.go` / `signals/capacity/store.go`) | vLLM info-gauge → token capacity |
 
 The query layer already has a clean seam: queries are registered as named

@@ -153,7 +153,7 @@ proposal must say which:
   (`throughput.checkVariantGPSMismatch`); as a single-cycle gate on the floor it
   was doing work it was never calibrated for.
 
-  So `saturation_v2.noteLineMismatch` measures and logs (`itl-gps-mismatch`,
+  So `saturation.noteLineMismatch` measures and logs (`itl-gps-mismatch`,
   with `gates=false`), skipping warm-pool bridges and non-decode roles whose
   rates say nothing about this variant's line, and the floor has no opinion
   about it. A persistent mismatch away from a ramp remains real evidence that

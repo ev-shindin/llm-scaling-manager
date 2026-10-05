@@ -101,6 +101,22 @@ last; it is the unit change that makes the other two land.
   output-length bucket keys and prefill's dropped backlog all depend on.
   Measures the `I`-up direction the shape-shift table lists as unrun.
 
+- **[Structuring the analyzers](analyzer-structure.md)** — the analyzers
+  work; reading them is expensive, and that cost is now producing defects.
+  Measures what is actually wrong (two grab-bag files of 35 and 43 functions,
+  one 155-line pipeline, the same weighted mean written three times, a
+  vestigial `_v2`) and what is NOT (function length, and the comment density,
+  which is why the system is debuggable and must survive). Six stages, each
+  landable alone, none permitted to change a decision.
+
+- **[Every signal as a metric](signals-as-metrics.md)** — the numbers that
+  produce a scaling decision exist only as log fields; 41 metrics are published
+  and nearly all are outcomes or health. Proposes the names and the label
+  vocabulary for the chain in between, with the cardinality arithmetic and the
+  reason-label rule it has to obey. Draws the line this repo already argued:
+  observability yes, a metric for KEDA to threshold instead of WVA computing
+  the target no.
+
 ## Product and lifecycle
 
 - **[Capacity-planner positioning](capacity-planner-positioning.md)** — where a
