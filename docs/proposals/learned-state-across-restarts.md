@@ -111,14 +111,46 @@ sufficient as written**, and the next two sections are the corrections.
 ```
 engineFingerprint = hash(
     fingerprintVersion,            // see versioning, below
-    modelID, weightDtype, quantization,   // NOT in EngineParams today
+    weightDtype, quantization,     // NOT in EngineParams today
     Engine, GpuMemoryUtilization, BlockSize, KvCacheDtype,
     TensorParallelSize, NumGpuBlocksOverride, TotalKvTokensOverride,
     EffectiveMaxBatchedTokens,
     MaxNumSeqs, MaxModelLen,       // see the defects below
-    acceleratorName, gpusPerReplica,
 )
+
+learnedStateKey = (modelID, acceleratorName, gpusPerReplica, engineFingerprint)
 ```
+
+### The hash covers the flags; the axes people query by stay labels
+
+`modelID`, `acceleratorName` and `gpusPerReplica` are **part of the key and
+not part of the hash**. The key is the tuple above, composed in one key
+function, and the fingerprint is only its last component.
+
+This corrects an earlier draft, which hashed all three in. Three reasons the
+split is better, none of which weakens the identity:
+
+- **It is directly queryable.** `wva_learned_itl_slope{model="..."}` answers
+  "what has this model learned" with no join, and `{accelerator="H200"}`
+  answers the comparison an operator actually makes. Hashed in, every such
+  question becomes a join against `wva_engine_config_info`.
+- **It removes a many-to-one inconsistency.** The info metric has to carry
+  the identity somewhere. If `model` is also hashed, there are N info series
+  per fingerprint and no way to tell which one a learned line came from. With
+  `model` on the key itself, the two agree by construction.
+- **It costs no cardinality.** The number of distinct
+  `(model, accelerator, gpus, fingerprint)` combinations is the same either
+  way. Only the representation changes.
+
+What this must not become is "the fingerprint alone identifies the line" --
+exactly the error the first draft made, and it would pool a 0.6B and a 32B
+model onto one ITL line. In Go the key is a composed string or a struct
+either way, so the discipline lives in the key function; a hash is not a
+substitute for writing that function once and using it everywhere.
+
+`weightDtype` and `quantization` stay hashed. They are launch flags like the
+rest, they are already labels on the info metric for readability, and nobody
+asks an autoscaler's internal state to list every model served at FP8.
 
 ### `EngineParams` says nothing about the weights
 
@@ -138,7 +170,8 @@ magnitude. ITL's slope and intercept are dominated by parameter count and weight
 dtype, which is exactly what the struct cannot see. Two variants deployed from
 one manifest template is the *common* case, not a contrived collision.
 
-So `modelID` is part of the fingerprint. And that is still not enough:
+So `modelID` is part of the KEY, as a label beside the fingerprint rather
+than hashed into it (see above). And that is still not enough:
 `applyParam` parses `gpu_memory_utilization`, `block_size`, `kv_cache_dtype`,
 `tensor_parallel_size`, `num_gpu_blocks_override`, `max_num_batched_tokens`,
 `max_num_seq(s)`, `max_model_len`, `enforce_eager` and
@@ -242,7 +275,7 @@ So the corrected key table is:
 
 | state | should be keyed by | why not more |
 | --- | --- | --- |
-| ITL line `(A, B)` | fingerprint | the same weights, engine build and hardware give the same line **whatever shape is arriving** — which is why the derived mu can price a shape the fleet has never saturated under. `noteITL` deliberately does *not* clear the window on a shape change, while the throughput analyzer's window *is* cleared; that asymmetry is the existing evidence for this claim. |
+| ITL line `(A, B)` | model + accelerator + gpus + fingerprint | the same weights, engine build and hardware give the same line **whatever shape is arriving** — which is why the derived mu can price a shape the fleet has never saturated under. `noteITL` deliberately does *not* clear the window on a shape change, while the throughput analyzer's window *is* cleared; that asymmetry is the existing evidence for this claim. |
 | k2 | fingerprint + role + output bucket + **queue threshold** | capacity is config **and** shape: `k2 = N_steady x (I + O/2)` |
 | throughput window (mu) | fingerprint + role + input and output buckets + **queue threshold** | a completion rate is per shape |
 | `capacity.Store` record | **unchanged** (namespace, model, variant) | circular, and `EffectiveCapacity` is shape-dependent |
@@ -495,25 +528,32 @@ a version bump means "start cold for everything", which is correct and cheap.
 
 ### The metric shape
 
-The fingerprint is the key label; its components live in a companion info
-metric. One correction from the review: the info metric must **not** carry
-`model` and `variant` as labels while `model` is hashed and `variant` is not —
-that makes it many-to-one against the fingerprint and defeats the purpose. It
-carries the hashed inputs, and the name mapping is a separate series.
+The label set is the key: `model`, `accelerator` and `gpus` beside the
+`fingerprint`, which stands for the engine flags alone. The flags themselves
+live in a companion info metric carrying exactly the hashed inputs, so it is
+one series per fingerprint rather than one per fingerprint and model. The
+`variant` name mapping is a third series, because a variant name is not part
+of any key here.
 
 ```
-wva_engine_config_info{fingerprint,fingerprint_version,model,weight_dtype,
-                       quantization,engine,tp,block_size,kv_dtype,
-                       max_num_seqs,max_model_len,max_batched_tokens,
-                       accelerator,gpus}                              1
-wva_engine_config_variant{exported_namespace,variant,fingerprint}     1
+# the flags behind one fingerprint: exactly the hashed inputs, so 1:1
+wva_engine_config_info{fingerprint,fingerprint_version,engine,weight_dtype,
+                       quantization,tp,block_size,kv_dtype,max_num_seqs,
+                       max_model_len,max_batched_tokens}              1
+# which deployed variants currently run that configuration
+wva_engine_config_variant{exported_namespace,variant,model,accelerator,
+                          gpus,fingerprint}                           1
 
-wva_learned_itl_slope{fingerprint}                                    A
-wva_learned_itl_intercept{fingerprint}                                B
-wva_learned_itl_samples{fingerprint}                                  n
-wva_learned_itl_learned_at_seconds{fingerprint}                       unix
-wva_learned_k2_tokens{fingerprint,role,out_bucket,q,source}           k2
-wva_learned_throughput{fingerprint,role,in_bucket,out_bucket,q}       mu
+# KEY = model + accelerator + gpus + fingerprint, on every learned family
+wva_learned_itl_slope{model,accelerator,gpus,fingerprint}             A
+wva_learned_itl_intercept{model,accelerator,gpus,fingerprint}         B
+wva_learned_itl_samples{model,accelerator,gpus,fingerprint}           n
+wva_learned_itl_learned_at_seconds{model,accelerator,gpus,
+                                   fingerprint}                      unix
+wva_learned_k2_tokens{model,accelerator,gpus,fingerprint,
+                      role,out_bucket,q,source}                       k2
+wva_learned_throughput{model,accelerator,gpus,fingerprint,
+                       role,in_bucket,out_bucket,q}                   mu
 wva_learned_throughput_samples{...}                                   n
 wva_learned_stable_shape_tokens{exported_namespace,model,axis}        I or O
 ```
