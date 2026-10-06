@@ -334,11 +334,20 @@ Cold start: the first observation lands at **t+8.8 min (cycle 36)** and the
 first OLS fit at **t+15.8 min (cycle 64)**. Between those two, 28 cycles were
 blocked on the sample count and **zero** on the spread.
 
-Two corrections this forces on the rest of this document. The gap is ~63 cycles
-and ~16 minutes, not the "51 cycles, ~8 minutes" quoted above — 8.8 minutes is
-when the first OBSERVATION arrives, not the first fit. And `itlZero` does not
-appear in these logs at all; the evidence is `held` and `ready` on the
-`itl-window` line, and any claim keyed on `itlZero` should be distrusted.
+One correction this forces on the rest of this document: the gap is ~63 cycles
+and ~16 minutes, not the "51 cycles, ~8 minutes" quoted above, because
+8.8 minutes is when the first OBSERVATION arrives and not the first fit.
+
+**And one retraction of a correction.** An earlier revision of this section said
+`itlZero` does not appear in these logs at all. That was wrong, and it was
+asserted without checking the log in question — the field was absent from the
+logs of OTHER runs, and that was generalised. In run QT `itlZero` appears 461
+times on the `derived-mu` line (not on `itl-window`): **79 true and 382 false**.
+Its last `true` is at 14:59:45, t+15.77 min, which is the same moment the first
+OLS fit appears and is therefore independent corroboration of the timeline
+above rather than a contradiction of it. The original "51 cycles" figure was
+right in kind — 79 per-pod records across roughly 64 cycles — and wrong only in
+the milestone it was attached to.
 
 **The conclusion: refit from the engines' own series, and store nothing.**
 
@@ -384,11 +393,37 @@ state. The live window holds 20 observations over 30 minutes, and a balanced
 router keeps every replica at nearly the same `k`, so the window often cannot
 span the 0.30 of `k` a two-parameter fit needs.
 
-A historical range spans more varied load, so the same query may produce a
-genuine OLS fit where the live window cannot — improving the line in **normal
-operation**, not only after a restart. That is a hypothesis and is written here
-as one: it needs the comparison in *How to know it worked* before anything is
-claimed for it. If it holds, it is worth more than the restart case.
+And the cause is now measured, which splits this from the restart case
+entirely. **The live window is bounded by its SIZE, not by its age:**
+
+| | run QT, decode |
+| --- | --- |
+| cycles at `held` = `DefaultWindowMaxSize` (20) | 129 of 244 (53%) |
+| median observations offered per cycle | 2 |
+| wall-clock a full 20-slot window therefore spans | ~10 cycles, ~2.5 min |
+| `DefaultObservationMaxAge` it is allowed | 30 min |
+| share of its own age bound actually used | **~8%** |
+| of the 129 FULL windows, how many cleared the spread | **4 (3%)** |
+
+So a full window is looking through a two-and-a-half-minute keyhole and fails
+the spread gate 97% of the time. `DefaultObservationMaxAge` is not what bounds
+it; `DefaultWindowMaxSize` is, and that is a constant.
+
+**That makes the cheapest fix a different one from the range query.** Raising
+`DefaultWindowMaxSize` so the window can reach its own age bound — around 120
+at two observations per cycle — addresses the 52% directly, in one constant, with
+no query and no startup path. The range query is still the answer for the COLD
+start, where there is no live data to widen; these are two levers on two
+different problems and this document had been conflating them.
+
+What is still untested, and must not be claimed: whether a wider window
+actually spans 0.30 of `k`. If a balanced router pins every replica to the same
+`k` for half an hour, neither a bigger window nor a longer query helps. The raw
+`(k, ITL)` pairs are not logged — only the window's `held`/`ready` summary — so
+this cannot be settled from run QT and needs either a Prometheus range query
+against a live fleet or the harness scrapes from the PVC. The evidence above is
+structural: it establishes that the window is far narrower than intended, not
+that widening it clears the gate.
 
 ### What in the rest of Part 2 still stands
 
@@ -742,7 +777,13 @@ in Part 2 replaced the store in steps 6 and 7.
 6. **Publish `wva_learned_*`.** Worth doing on its own: it makes a
    post-restart decision explicable on a dashboard, and it needs no trust from
    anyone. No store, and nothing reads it back.
-7. **Refit the ITL line at startup from the engines' own series.** A range
+7. **Raise `DefaultWindowMaxSize`** so the live window reaches its own
+   `DefaultObservationMaxAge` instead of stopping at ~8% of it. One constant,
+   independent of everything else here, and it is the measured cause of the 52%
+   of cycles that fall back to pinned-B. Gate it on the `k`-spread measurement
+   above, because a wider window that still cannot span 0.30 of `k` buys
+   nothing but memory.
+8. **Refit the ITL line at startup from the engines' own series.** A range
    query over `QueryAvgITL` and `QueryKvUsageInstant` for the fingerprint's
    model and hardware, fitted with the same `itl.Fit` the live path uses, and
    admitted through the same `itl.ValidModel`. Behind a flag, default off,
@@ -754,8 +795,8 @@ in Part 2 replaced the store in steps 6 and 7.
    election enabled those are different moments and a standby elected later
    would otherwise hold a line fitted from a range it read at boot.
 
-Steps 1-5 are worth doing even if 6 and 7 are never built, which is the test of
-whether the ordering is honest. Under the first draft's order, step 3 failed
+Steps 1-5 are worth doing even if 6, 7 and 8 are never built, which is the test
+of whether the ordering is honest. Under the first draft's order, step 3 failed
 that test — it moved `startSeconds` onto a key that does not describe it.
 
 Three knobs, not one: `refitFromHistory` (default off), the range the query
