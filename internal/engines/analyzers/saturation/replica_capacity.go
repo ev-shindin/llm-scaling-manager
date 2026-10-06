@@ -529,10 +529,23 @@ func (a *SaturationAnalyzer) computeK2(
 
 	// Priority 2: Historical — lock must cover Average() since Add() mutates
 	// the same slice from Priority 1 under the same lock.
+	//
+	// Stale() is checked here for the same reason the write path above checks
+	// it, and it was missing. Without it this read would return a window the
+	// sweep is about to delete, which made wiring EvictStaleHistory up a
+	// BEHAVIOUR change rather than the memory fix it was presented as: a k2
+	// older than HistoryEvictionTimeout used to be returned as
+	// K2SrcHistorical, and after the sweep it falls through to the derived
+	// figure instead. A derived k2 above the measured one raises
+	// effectiveCapacity and orders FEWER replicas, which is the direction this
+	// project has recorded as breaking TTFT irrecoverably. With the guard, a
+	// stale entry is ignored whether or not the sweep has reached it yet, so
+	// the two agree and the sweep is neutral again.
 	a.mu.Lock()
 	var histAvg float64
 	var histLen int
-	if ra, ok := a.computeCapacityHistory[historyKey]; ok {
+	if ra, ok := a.computeCapacityHistory[historyKey]; ok &&
+		!ra.Stale(capacity.HistoryEvictionTimeout) {
 		histAvg = ra.Average()
 		histLen = ra.Len()
 	}

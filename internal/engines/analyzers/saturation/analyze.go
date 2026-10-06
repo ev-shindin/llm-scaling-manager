@@ -292,7 +292,7 @@ func (c *cycle) fitLines() {
 		// ITL line is meaningless for either product.
 		windowKey := c.a.itlPhysicsKey(c.input.Namespace, c.input.ModelID, variant,
 			c.accelByVariant[variant], c.gpusByVariant[variant], c.fpByVariant[variant])
-		contributors := c.a.noteITLContributor(windowKey, c.input.Namespace, variant)
+		contributors := c.a.noteITLContributor(windowKey, c.input.Namespace, variant, c.a.now())
 		c.itlModels[variant] = c.a.noteITL(windowKey, variantKey, contributors,
 			c.input.ReplicaMetrics, variant, c.a.now(), c.logger)
 	}

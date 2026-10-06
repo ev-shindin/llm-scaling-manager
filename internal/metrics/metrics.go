@@ -1523,6 +1523,19 @@ func analyzerDemandLabelsFor(analyzer, namespace, modelID, role string) promethe
 
 // analyzerTargetLabelsFor is analyzerDemandLabelsFor's counterpart for
 // wva_analyzer_target.
+func analyzerTargetLabelsFor(analyzer, namespace, modelID, variantName string) prometheus.Labels {
+	labels := prometheus.Labels{
+		constants.LabelAnalyzerName: analyzer,
+		constants.LabelNamespace:    namespace,
+		constants.LabelModelName:    modelID,
+		constants.LabelVariantName:  variantName,
+	}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	return labels
+}
+
 // RecordEngineConfig publishes the engine-configuration fingerprint a variant
 // is running, with the flags that produced it.
 //
@@ -1597,19 +1610,6 @@ func (m *MetricsEmitter) DeleteEngineConfigForModel(namespace, modelID string) {
 		constants.LabelNamespace: namespace,
 		constants.LabelModelName: modelID,
 	})
-}
-
-func analyzerTargetLabelsFor(analyzer, namespace, modelID, variantName string) prometheus.Labels {
-	labels := prometheus.Labels{
-		constants.LabelAnalyzerName: analyzer,
-		constants.LabelNamespace:    namespace,
-		constants.LabelModelName:    modelID,
-		constants.LabelVariantName:  variantName,
-	}
-	if controllerInstance != "" {
-		labels[constants.LabelControllerInstance] = controllerInstance
-	}
-	return labels
 }
 
 // DeleteAnalyzerDemand removes one wva_analyzer_demand series. Absence is

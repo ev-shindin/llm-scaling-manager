@@ -339,6 +339,11 @@ func applyParam(key, value string, params *EngineParams) {
 // called them different. Rejecting it here, so the struct default survives, is
 // what keeps the two consistent -- and matches this parser's existing
 // contract that an unusable value leaves the default in place.
+//
+// The finiteness half duplicates utils.CheckValue, deliberately and not by
+// oversight: internal/utils also pulls in internal/domain, zapcore and yaml,
+// which is a poor trade for one predicate in a package that imports none of
+// them. If this file ever needs utils for another reason, collapse the two.
 func usableFraction(v float64) bool {
 	return !math.IsNaN(v) && !math.IsInf(v, 0) && v > 0 && v <= 1
 }

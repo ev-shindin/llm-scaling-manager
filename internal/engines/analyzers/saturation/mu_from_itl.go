@@ -321,6 +321,11 @@ func (a *SaturationAnalyzer) noteITL(windowKey, baselineKey string, contributors
 	// the measured one, so it has to clear a higher bar than two readings.
 	obs := w.Observations()
 	ready := w.Ready()
+	// Captured under the lock like its neighbours. The window is SHARED
+	// between variants now, so another variant's cycle can call GrowMaxSize on
+	// this same pointer; reading maxSize after the unlock was an
+	// unsynchronised read of a field another goroutine writes.
+	windowMax := w.MaxSize()
 	baseline, learned := a.itlBaseline[baselineKey]
 	a.mu.Unlock()
 	if !learned || !(baseline > 0) {
@@ -331,7 +336,7 @@ func (a *SaturationAnalyzer) noteITL(windowKey, baselineKey string, contributors
 	// `added` counts what was offered and len(obs) what was kept.
 	logger.V(logging.DEFAULT).Info("itl-window",
 		"variant", variantName, "key", windowKey, "baselineKey", baselineKey,
-		"contributors", contributors, "windowMax", w.MaxSize(),
+		"contributors", contributors, "windowMax", windowMax,
 		"replicas", considered, "offered", added, "held", len(obs),
 		"notReady", notReady, "noITL", noITL, "noK", noK, "aboveBand", aboveBand,
 		"ready", ready, "minSamples", itl.DefaultMinSamples)

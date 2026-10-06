@@ -96,11 +96,20 @@ type SaturationAnalyzer struct {
 	// share one window instead of each paying the fit again.
 	itlWindows map[string]*itl.Window
 	// itlContributors is which variants have fed each itlWindows key, by
-	// namespace|variant. Pooling needs it for one reason: Add evicts the
-	// oldest observation at capacity whoever contributed it, so N variants
-	// sharing a 20-slot window would hold 20/N cycles each. The window is
-	// grown to DefaultWindowMaxSize per contributor (itl.Window.GrowMaxSize).
-	itlContributors map[string]map[string]bool
+	// namespace|variant, with when each was last seen feeding it. Pooling
+	// needs it for one reason: Add evicts the oldest observation at capacity
+	// whoever contributed it, so N variants sharing a 20-slot window would
+	// hold 20/N cycles each. The window is grown to DefaultWindowMaxSize per
+	// contributor (itl.Window.GrowMaxSize).
+	//
+	// The timestamp is not decoration. The first version held a bool and was
+	// only ever cleared wholesale when its window went empty, which meant a
+	// window kept alive by ONE variant remembered every variant that had ever
+	// shared it -- the same "one entry per variant that has EVER been seen"
+	// leak EvictStaleHistory exists to stop, reintroduced in a new map. Worse
+	// than the memory: len() of this set is what drives GrowMaxSize, so dead
+	// contributors permanently inflated a live window's capacity.
+	itlContributors map[string]map[string]time.Time
 	// itlBaseline is the last B an OLS fit produced, keyed by itlWindowKey --
 	// namespace, model, VARIANT, accelerator, GPUs -- and deliberately NOT by
 	// the physics key the window above uses.
@@ -158,7 +167,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 	return &SaturationAnalyzer{
 		computeCapacityHistory: make(map[string]*capacity.RollingAverage),
 		lastAccelerator:        make(map[string]acceleratorMemo),
-		itlContributors:        make(map[string]map[string]bool),
+		itlContributors:        make(map[string]map[string]time.Time),
 		variantSeenAt:          make(map[string]time.Time),
 		saturatedThroughput:    make(map[string]*capacity.RollingAverage),
 		throughputSampledAt:    make(map[string]time.Time),
@@ -219,6 +228,29 @@ func (a *SaturationAnalyzer) EvictStaleHistory(timeout time.Duration) int {
 		w.Prune(now)
 		if w.Len() == 0 {
 			delete(a.itlWindows, key)
+			delete(a.itlContributors, key)
+		}
+	}
+	// A window kept alive by one variant must still forget the variants that
+	// have STOPPED feeding it. Without this, the loop above only ever clears a
+	// contributor set wholesale, so a renamed or deleted variant stayed in the
+	// set of every window it had ever shared -- and because len(set) is what
+	// GrowMaxSize scales by, a dead contributor permanently inflated a live
+	// window's capacity.
+	//
+	// The window's own size does NOT shrink back, deliberately: a contributor
+	// that goes quiet for a cycle must not discard the history of the ones
+	// still reporting, and Prune already bounds the window by
+	// DefaultObservationMaxAge whatever its capacity, so an over-sized window
+	// holds stale observations for no longer than a right-sized one. What this
+	// fixes is that growth is driven by LIVE contributors from here on.
+	for key, set := range a.itlContributors {
+		for contributor, seen := range set {
+			if now.Sub(seen) > timeout {
+				delete(set, contributor)
+			}
+		}
+		if len(set) == 0 {
 			delete(a.itlContributors, key)
 		}
 	}
@@ -323,15 +355,17 @@ func (a *SaturationAnalyzer) noteVariantSeen(key string, now time.Time) {
 // physics key drops the namespace and two namespaces can serve the same
 // deployment -- which is the pooling this exists to make correct, so they must
 // count as two contributors and not one.
-func (a *SaturationAnalyzer) noteITLContributor(windowKey, namespace, variantName string) int {
+func (a *SaturationAnalyzer) noteITLContributor(
+	windowKey, namespace, variantName string, now time.Time,
+) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	set, ok := a.itlContributors[windowKey]
 	if !ok {
-		set = make(map[string]bool, 2)
+		set = make(map[string]time.Time, 2)
 		a.itlContributors[windowKey] = set
 	}
-	set[namespace+"|"+variantName] = true
+	set[namespace+"|"+variantName] = now
 	return len(set)
 }
 

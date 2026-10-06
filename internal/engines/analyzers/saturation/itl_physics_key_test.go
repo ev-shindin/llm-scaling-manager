@@ -164,13 +164,13 @@ var _ = Describe("the pooled ITL window", func() {
 		keyB := a.itlWindowKey(ns, model, "decode-b", accel, 1)
 		Expect(keyA).NotTo(Equal(keyB))
 
-		contribA := a.noteITLContributor(shared, ns, "decode-a")
+		contribA := a.noteITLContributor(shared, ns, "decode-a", a.now())
 		Expect(contribA).To(Equal(1))
 		fitA := a.noteITL(shared, keyA, contribA, tenOn("decode-a", 0.20), "decode-a",
 			a.now(), logr.Discard())
 		Expect(fitA.IsZero()).To(BeFalse(), "ten readings over 0.36 of k must fit")
 
-		contribB := a.noteITLContributor(shared, ns, "decode-b")
+		contribB := a.noteITLContributor(shared, ns, "decode-b", a.now())
 		Expect(contribB).To(Equal(2), "a second variant feeding the same window")
 		fitB := a.noteITL(shared, keyB, contribB, tenOn("decode-b", 0.22), "decode-b",
 			a.now(), logr.Discard())
@@ -198,7 +198,7 @@ var _ = Describe("the pooled ITL window", func() {
 		a := NewSaturationAnalyzer(capacity.NewStore())
 		shared := "shared"
 		for i, variant := range []string{"v1", "v2", "v3", "v4"} {
-			n := a.noteITLContributor(shared, ns, variant)
+			n := a.noteITLContributor(shared, ns, variant, a.now())
 			Expect(n).To(Equal(i + 1))
 			a.noteITL(shared, a.itlWindowKey(ns, model, variant, accel, 1), n,
 				tenOn(variant, 0.20+0.01*float64(i)), variant, a.now(), logr.Discard())
@@ -211,9 +211,9 @@ var _ = Describe("the pooled ITL window", func() {
 		// The physics key drops the namespace, which is the pooling this
 		// exists to make correct -- so both must be counted.
 		a := NewSaturationAnalyzer(capacity.NewStore())
-		Expect(a.noteITLContributor("k", "ns-a", "decode")).To(Equal(1))
-		Expect(a.noteITLContributor("k", "ns-b", "decode")).To(Equal(2))
-		Expect(a.noteITLContributor("k", "ns-a", "decode")).To(Equal(2),
+		Expect(a.noteITLContributor("k", "ns-a", "decode", a.now())).To(Equal(1))
+		Expect(a.noteITLContributor("k", "ns-b", "decode", a.now())).To(Equal(2))
+		Expect(a.noteITLContributor("k", "ns-a", "decode", a.now())).To(Equal(2),
 			"the same contributor twice is still one")
 	})
 })
@@ -252,9 +252,53 @@ var _ = Describe("EvictStaleHistory with split keys", func() {
 		Expect(a.variantSeenAt).NotTo(HaveKey(key))
 	})
 
+	It("forgets a contributor that stopped feeding a window that is still alive", func() {
+		// The leak the first version had: the contributor set was only ever
+		// cleared wholesale when its window went empty, so a window kept alive
+		// by one variant remembered every variant that had ever shared it --
+		// and len(set) is what GrowMaxSize scales by, so a dead contributor
+		// permanently inflated a live window's capacity.
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		const shared = "physics"
+		now := a.now()
+
+		Expect(a.noteITLContributor(shared, ns, "decode-a", now.Add(-2*time.Hour))).To(Equal(1))
+		Expect(a.noteITLContributor(shared, ns, "decode-b", now)).To(Equal(2))
+
+		// Keep the window alive: a non-empty window must NOT be deleted, or
+		// this test would pass for the wrong reason.
+		w := itl.NewWindow(itl.DefaultWindowMaxSize, itl.DefaultObservationMaxAge,
+			itl.DefaultMinSamples, itl.DefaultMinKSpread,
+			itl.DefaultMinObservableK, itl.DefaultMaxObservableK)
+		Expect(w.Add(0.30, 0.01, now)).To(BeFalse())
+		a.itlWindows[shared] = w
+
+		a.EvictStaleHistory(time.Hour)
+
+		Expect(a.itlWindows).To(HaveKey(shared), "the window itself must survive")
+		Expect(a.itlContributors[shared]).To(HaveLen(1),
+			"the contributor last seen two hours ago must be gone")
+		Expect(a.itlContributors[shared]).To(HaveKey(ns + "|decode-b"))
+		Expect(a.itlContributors[shared]).NotTo(HaveKey(ns + "|decode-a"))
+
+		// And the count that drives GrowMaxSize is now the LIVE count.
+		Expect(a.noteITLContributor(shared, ns, "decode-b", now)).To(Equal(1),
+			"growth must be driven by live contributors, not by history")
+	})
+
+	It("drops an empty contributor set so the outer map does not leak keys", func() {
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		now := a.now()
+		a.noteITLContributor("gone", ns, "decode-a", now.Add(-2*time.Hour))
+		// No window for this key at all, so only the contributor sweep can
+		// remove it.
+		a.EvictStaleHistory(time.Hour)
+		Expect(a.itlContributors).NotTo(HaveKey("gone"))
+	})
+
 	It("drops a pooled window's contributor set with the window", func() {
 		a := NewSaturationAnalyzer(capacity.NewStore())
-		a.noteITLContributor("physics", ns, "decode-a")
+		a.noteITLContributor("physics", ns, "decode-a", a.now())
 		a.itlWindows["physics"] = itl.NewWindow(
 			itl.DefaultWindowMaxSize, itl.DefaultObservationMaxAge,
 			itl.DefaultMinSamples, itl.DefaultMinKSpread,
