@@ -89,6 +89,7 @@ var (
 	// KEDA/HPA and dashboards can consume every analyzer's reasoning.
 	analyzerDemand           *prometheus.GaugeVec
 	analyzerTarget           *prometheus.GaugeVec
+	engineConfig             *prometheus.GaugeVec
 	analyzerObservedReplicas *prometheus.GaugeVec
 
 	// controllerInstance stores the optional controller instance identifier.
@@ -155,6 +156,25 @@ func InitMetrics(registry prometheus.Registerer) error {
 	modelReplicasLabels := []string{constants.LabelNamespace, constants.LabelModelName}
 	// analyzerTargetLabels: per-analyzer per-replica target P, per variant.
 	analyzerTargetLabels := []string{constants.LabelAnalyzerName, constants.LabelNamespace, constants.LabelModelName, constants.LabelVariantName}
+	// engineConfigLabels: the key learned state is filed under -- model,
+	// accelerator, GPUs per replica, fingerprint -- followed by the engine
+	// flags the fingerprint hashes.
+	//
+	// Wide, and deliberately only one series per variant: every flag label is
+	// functionally determined by the variant, so they add width and not
+	// cardinality. The flags ride on this series rather than on a separate
+	// fingerprint-keyed info metric because that join is many-to-one -- two
+	// models can share a configuration -- and a reader of the info series
+	// could not then tell which variant a row describes.
+	engineConfigLabels := append([]string{
+		constants.LabelNamespace,
+		constants.LabelModelName,
+		constants.LabelVariantName,
+		constants.LabelAccelerator,
+		constants.LabelGPUsPerReplica,
+		constants.LabelFingerprint,
+		constants.LabelFingerprintVersion,
+	}, constants.EngineConfigFlagLabels...)
 
 	if controllerInstance != "" {
 		baseLabels = append(baseLabels, constants.LabelControllerInstance)
@@ -166,6 +186,7 @@ func InitMetrics(registry prometheus.Registerer) error {
 		satFreshnessLabels = append(satFreshnessLabels, constants.LabelControllerInstance)
 		analyzerDemandLabels = append(analyzerDemandLabels, constants.LabelControllerInstance)
 		analyzerTargetLabels = append(analyzerTargetLabels, constants.LabelControllerInstance)
+		engineConfigLabels = append(engineConfigLabels, constants.LabelControllerInstance)
 		unmeasuredQueueLabels = append(unmeasuredQueueLabels, constants.LabelControllerInstance)
 		variantAtMaxLabels = append(variantAtMaxLabels, constants.LabelControllerInstance)
 		modelScalingBlockedLabels = append(modelScalingBlockedLabels, constants.LabelControllerInstance)
@@ -255,6 +276,13 @@ func InitMetrics(registry prometheus.Registerer) error {
 			Help: "Per-analyzer demand D (the total measured signal) for a model instance, in the analyzer's own unit. Role is empty for non-disaggregated models. Paired with wva_analyzer_target as the D/P contract every analyzer exposes.",
 		},
 		analyzerDemandLabels,
+	)
+	engineConfig = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVAEngineConfig,
+			Help: "Always 1. Labels carry the engine-configuration fingerprint a variant runs and the launch flags it hashes, so a learned figure keyed on that fingerprint can be read back to the configuration it describes. Nothing is keyed on it yet.",
+		},
+		engineConfigLabels,
 	)
 	analyzerObservedReplicas = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -720,6 +748,9 @@ func InitMetrics(registry prometheus.Registerer) error {
 	}
 	if err := registry.Register(analyzerObservedReplicas); err != nil {
 		return fmt.Errorf("failed to register analyzerObservedReplicas metric: %w", err)
+	}
+	if err := registry.Register(engineConfig); err != nil {
+		return fmt.Errorf("failed to register %s: %w", constants.WVAEngineConfig, err)
 	}
 	if err := registry.Register(analyzerTarget); err != nil {
 		return fmt.Errorf("failed to register analyzerTarget metric: %w", err)
@@ -1492,6 +1523,82 @@ func analyzerDemandLabelsFor(analyzer, namespace, modelID, role string) promethe
 
 // analyzerTargetLabelsFor is analyzerDemandLabelsFor's counterpart for
 // wva_analyzer_target.
+// RecordEngineConfig publishes the engine-configuration fingerprint a variant
+// is running, with the flags that produced it.
+//
+// fingerprintVersion and flagValues come from the capacity package --
+// capacity.FingerprintVersion and EngineParams.FingerprintValues() -- passed in
+// rather than imported, so this infrastructure leaf gains no edge to a
+// pipeline package. flagValues is
+// positionally paired with constants.EngineConfigFlagLabels. A length
+// mismatch means the two drifted, and this drops the sample rather than
+// publishing a configuration described by the wrong labels -- a mislabelled
+// diagnostic is worse than an absent one.
+//
+// Any previous series for this variant is removed first. A variant whose
+// configuration changes would otherwise leave its old label combination
+// behind for ever, because changing a label value creates a new series rather
+// than updating the old one.
+func (m *MetricsEmitter) RecordEngineConfig(
+	namespace, modelID, variantName, accelerator string,
+	gpusPerReplica int,
+	fingerprint string,
+	fingerprintVersion int,
+	flagValues []string,
+) {
+	if engineConfig == nil || fingerprint == "" {
+		return
+	}
+	if len(flagValues) != len(constants.EngineConfigFlagLabels) {
+		return
+	}
+
+	m.DeleteEngineConfig(namespace, variantName)
+
+	labels := prometheus.Labels{
+		constants.LabelNamespace:          namespace,
+		constants.LabelModelName:          modelID,
+		constants.LabelVariantName:        variantName,
+		constants.LabelAccelerator:        accelerator,
+		constants.LabelGPUsPerReplica:     strconv.Itoa(gpusPerReplica),
+		constants.LabelFingerprint:        fingerprint,
+		constants.LabelFingerprintVersion: strconv.Itoa(fingerprintVersion),
+	}
+	for i, l := range constants.EngineConfigFlagLabels {
+		labels[l] = flagValues[i]
+	}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	engineConfig.With(labels).Set(1)
+}
+
+// DeleteEngineConfig removes every wva_engine_config series for a variant,
+// whatever configuration it was last seen running. Partial match because the
+// flag labels are part of the series identity and the caller does not know
+// which values are currently published.
+func (m *MetricsEmitter) DeleteEngineConfig(namespace, variantName string) {
+	if engineConfig == nil {
+		return
+	}
+	engineConfig.DeletePartialMatch(prometheus.Labels{
+		constants.LabelNamespace:   namespace,
+		constants.LabelVariantName: variantName,
+	})
+}
+
+// DeleteEngineConfigForModel removes every wva_engine_config series for a
+// model instance, used when a model stops being reconciled entirely.
+func (m *MetricsEmitter) DeleteEngineConfigForModel(namespace, modelID string) {
+	if engineConfig == nil {
+		return
+	}
+	engineConfig.DeletePartialMatch(prometheus.Labels{
+		constants.LabelNamespace: namespace,
+		constants.LabelModelName: modelID,
+	})
+}
+
 func analyzerTargetLabelsFor(analyzer, namespace, modelID, variantName string) prometheus.Labels {
 	labels := prometheus.Labels{
 		constants.LabelAnalyzerName: analyzer,

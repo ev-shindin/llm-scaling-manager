@@ -57,6 +57,13 @@ func (e *Engine) runV2AnalysisOnly(
 		e.capacityStore.LoadFromScaleTarget(namespace, modelID, va.Name, accelerator, gpuCount, scaleTarget)
 		logger.V(logging.DEBUG).Info("Pre-populated capacity store from scale target",
 			"variant", va.Name, "accelerator", accelerator, "gpuCount", gpuCount)
+		// Publish the engine-configuration fingerprint. Read back from the
+		// store rather than re-parsed, so the published digest is the one the
+		// rest of the pipeline will key on -- including when the record was
+		// learned live and LoadFromScaleTarget deliberately left it alone.
+		//
+		// Nothing is keyed on it yet; this makes it observable first.
+		e.publishEngineConfig(namespace, modelID, va.Name, accelerator, gpuCount)
 	}
 
 	// 2. Build AnalyzerInput
@@ -254,6 +261,27 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 	e.evictStaleAnalyzerSeries(namespace, modelID, current)
 }
 
+// publishEngineConfig records wva_engine_config for one variant from the
+// capacity store's record. A variant with no record, or a record with no
+// parsed params, publishes nothing: an absent series is the honest signal for
+// "the configuration could not be read", and a partial one would be read as a
+// configuration.
+func (e *Engine) publishEngineConfig(namespace, modelID, variantName, accelerator string, gpuCount int) {
+	if e.capacityStore == nil || e.metricsEmitter == nil {
+		return
+	}
+	rec := e.capacityStore.Get(namespace, modelID, variantName)
+	if rec == nil || rec.EngineParams == nil {
+		return
+	}
+	e.metricsEmitter.RecordEngineConfig(
+		namespace, modelID, variantName, accelerator, gpuCount,
+		rec.EngineParams.Fingerprint(),
+		capacity.FingerprintVersion,
+		rec.EngineParams.FingerprintValues(),
+	)
+}
+
 // staleHistoryEvictor is the part of the saturation analyzer this file needs.
 // saturationV2Analyzer is typed domain.Analyzer so tests can inject, so the
 // eviction entry point is reached through an assertion rather than a direct
@@ -325,6 +353,9 @@ func (e *Engine) evictStaleAnalyzerSeries(namespace, modelID string, current ana
 		if _, still := current.target[prev]; !still {
 			e.metricsEmitter.DeleteAnalyzerTarget(prev.analyzer, namespace, modelID, prev.variant)
 			e.metricsEmitter.DeleteAnalyzerObservedReplicas(prev.analyzer, namespace, modelID, prev.variant)
+			// The config series is per variant, not per analyzer, so this is
+			// idempotent when several analyzers report the same variant.
+			e.metricsEmitter.DeleteEngineConfig(namespace, prev.variant)
 		}
 	}
 	e.lastAnalyzerSeries[modelKey] = current
@@ -349,6 +380,7 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 	for modelKey, series := range e.lastAnalyzerSeries {
 		if !activeKeys[modelKey] {
 			e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
+			e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
 			delete(e.lastAnalyzerSeries, modelKey)
 		}
 	}
@@ -363,6 +395,7 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 func (e *Engine) evictAllAnalyzerSeries() {
 	for modelKey, series := range e.lastAnalyzerSeries {
 		e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
+		e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
 		delete(e.lastAnalyzerSeries, modelKey)
 	}
 }

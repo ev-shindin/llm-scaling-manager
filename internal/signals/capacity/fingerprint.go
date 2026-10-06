@@ -6,6 +6,8 @@ import (
 	"math"
 	"strconv"
 	"strings"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 )
 
 // FingerprintVersion is hashed into every fingerprint, so changing the set of
@@ -58,6 +60,13 @@ func (p *EngineParams) Fingerprint() string {
 	// Fixed order. Reordering changes every digest, so it is as much a part of
 	// the wire format as the field list, and a change to either is a version
 	// bump.
+	//
+	// The names here are internal salt: they keep two fields with the same
+	// value from being interchangeable, and nothing reads them. They are
+	// deliberately NOT taken from constants.EngineConfigFlagLabels, so that
+	// relabelling the published metric cannot silently reshuffle every stored
+	// digest. The pairing that must hold is between FingerprintFields and
+	// FingerprintValues, which is what labels the metric, and a test pins it.
 	fields := []string{
 		"v=" + strconv.Itoa(FingerprintVersion),
 		"engine=" + string(p.Engine),
@@ -111,27 +120,12 @@ func canonicalFloat(f float64) string {
 	}
 }
 
-// FingerprintFields returns the hashed field names in hash order, for the
-// drift test and for the info metric's label set. It is derived from nothing:
-// keeping it beside the hash is what makes "a new EngineParams field was added
-// and nobody decided whether it belongs" a test failure rather than a silent
-// mis-keying.
+// FingerprintFields returns the published label names for the hashed fields,
+// positionally paired with FingerprintValues. That pairing is what labels
+// wva_engine_config, so getting it wrong misreports a configuration rather
+// than mis-keying one; TestFingerprintLabelsDescribeTheirValues pins it.
 func FingerprintFields() []string {
-	return []string{
-		"engine",
-		"weight_dtype",
-		"quantization",
-		"gpu_memory_utilization",
-		"block_size",
-		"kv_cache_dtype",
-		"tensor_parallel_size",
-		"num_gpu_blocks_override",
-		"total_kv_tokens_override",
-		"effective_max_batched_tokens",
-		"max_num_seqs",
-		"max_model_len",
-		"enforce_eager",
-	}
+	return append([]string{}, constants.EngineConfigFlagLabels...)
 }
 
 // FingerprintValues returns the hashed values, in the same order as

@@ -263,6 +263,34 @@ const (
 	// WVAReplicaStartSecondsEstimate.
 	LabelStartSource = "source"
 
+	// WVAEngineConfig is a per-variant gauge, always 1, whose labels carry the
+	// engine-configuration fingerprint and the flags that produced it.
+	//
+	// One series per variant: the flag labels are functionally determined by
+	// the variant, so they add width and not cardinality. It is published as
+	// one wide series rather than as a fingerprint-keyed info metric joined to
+	// a variant metric, because the join's natural shape is many-to-one (two
+	// models can share a configuration) and a reader cannot then tell which
+	// variant a row describes.
+	//
+	// Nothing reads it. It exists so the fingerprint is observable before
+	// anything is keyed on it.
+	WVAEngineConfig = "wva_engine_config"
+
+	// LabelFingerprint is the engine-configuration digest, and
+	// LabelFingerprintVersion the hash's own version -- published beside it
+	// because the hash's input set is a wire format, and a bump means every
+	// stored key stops matching.
+	LabelFingerprint        = "fingerprint"
+	LabelFingerprintVersion = "fingerprint_version"
+
+	// LabelAccelerator and LabelGPUsPerReplica complete the key that learned
+	// state is filed under: (model, accelerator, gpus, fingerprint). They are
+	// labels rather than hashed into the digest so an operator can ask "this
+	// configuration on H200 versus H100" without a join.
+	LabelAccelerator    = "accelerator"
+	LabelGPUsPerReplica = "gpus"
+
 	// WVAModelsProcessed is a gauge that tracks the number of models processed in the last optimization cycle.
 	WVAModelsProcessed = "wva_models_processed"
 
@@ -729,3 +757,26 @@ const (
 const (
 	UnitContinuous = "continuous"
 )
+
+// EngineConfigFlagLabels are the engine-flag labels on WVAEngineConfig, in the
+// exact order the fingerprint hashes the fields.
+//
+// It lives here, in a leaf package, so that capacity (which hashes them) and
+// metrics (which publishes them) read one list instead of two that can drift.
+// The order is part of the fingerprint's wire format: reordering changes every
+// digest, so it is as much a version bump as adding a field.
+var EngineConfigFlagLabels = []string{
+	"engine",
+	"weight_dtype",
+	"quantization",
+	"gpu_memory_utilization",
+	"block_size",
+	"kv_cache_dtype",
+	"tensor_parallel_size",
+	"num_gpu_blocks_override",
+	"total_kv_tokens_override",
+	"effective_max_batched_tokens",
+	"max_num_seqs",
+	"max_model_len",
+	"enforce_eager",
+}

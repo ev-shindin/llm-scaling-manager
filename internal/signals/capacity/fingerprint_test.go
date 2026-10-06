@@ -266,3 +266,85 @@ func TestFingerprintAgreesWithCapacityCompatibilityOnNaN(t *testing.T) {
 		t.Fatalf("a valid fraction became %v: the guard is too strict", ok.GpuMemoryUtilization)
 	}
 }
+
+// TestFingerprintLabelsDescribeTheirValues pins the one pairing that can
+// misreport a configuration: wva_engine_config labels FingerprintValues by
+// position using FingerprintFields, so if the two lists are ordered
+// differently every published series names the wrong flag -- with no error
+// and no missing series, which is the worst kind of wrong for a diagnostic.
+//
+// For each label, mutate the field that label names and assert the value at
+// THAT position moves and no other does.
+func TestFingerprintLabelsDescribeTheirValues(t *testing.T) {
+	byLabel := map[string]func(*EngineParams){
+		"engine":                       func(p *EngineParams) { p.Engine = "sglang" },
+		"weight_dtype":                 func(p *EngineParams) { p.WeightDtype = "bfloat16" },
+		"quantization":                 func(p *EngineParams) { p.Quantization = "fp8" },
+		"gpu_memory_utilization":       func(p *EngineParams) { p.GpuMemoryUtilization = 0.85 },
+		"block_size":                   func(p *EngineParams) { p.BlockSize = 32 },
+		"kv_cache_dtype":               func(p *EngineParams) { p.KvCacheDtype = "fp8" },
+		"tensor_parallel_size":         func(p *EngineParams) { p.TensorParallelSize = 8 },
+		"num_gpu_blocks_override":      func(p *EngineParams) { p.NumGpuBlocksOverride = 4096 },
+		"total_kv_tokens_override":     func(p *EngineParams) { p.TotalKvTokensOverride = 100000 },
+		"effective_max_batched_tokens": func(p *EngineParams) { p.EffectiveMaxBatchedTokens = 4096 },
+		"max_num_seqs":                 func(p *EngineParams) { p.MaxNumSeqs = 512 },
+		"max_model_len":                func(p *EngineParams) { p.MaxModelLen = 131072 },
+		"enforce_eager":                func(p *EngineParams) { p.EnforceEager = true },
+	}
+
+	names := FingerprintFields()
+	if len(byLabel) != len(names) {
+		t.Fatalf("%d mutations for %d labels: one label is unexercised",
+			len(byLabel), len(names))
+	}
+
+	base := defaultEngineParams()
+	resolveEffectiveMaxBatchedTokens(&base)
+	baseValues := base.FingerprintValues()
+
+	for i, label := range names {
+		mutate, ok := byLabel[label]
+		if !ok {
+			t.Fatalf("no mutation for published label %q", label)
+		}
+		p := defaultEngineParams()
+		resolveEffectiveMaxBatchedTokens(&p)
+		mutate(&p)
+		got := p.FingerprintValues()
+
+		for j := range got {
+			changed := got[j] != baseValues[j]
+			if j == i && !changed {
+				t.Errorf("label %q is at position %d but mutating that field did "+
+					"not change the value there (%q): the labels and the values "+
+					"are ordered differently", label, i, got[j])
+			}
+			if j != i && changed {
+				t.Errorf("mutating the field for %q (position %d) also changed "+
+					"position %d (%q -> %q), labelled %q",
+					label, i, j, baseValues[j], got[j], names[j])
+			}
+		}
+	}
+}
+
+// TestFingerprintFlagLabelsAreValidPrometheusLabels guards the published side:
+// a label name Prometheus rejects would panic registration at startup.
+func TestFingerprintFlagLabelsAreValidPrometheusLabels(t *testing.T) {
+	seen := map[string]bool{}
+	for _, l := range FingerprintFields() {
+		if l == "" {
+			t.Error("an empty label name would be rejected at registration")
+		}
+		if seen[l] {
+			t.Errorf("duplicate label name %q: registration would panic", l)
+		}
+		seen[l] = true
+		for _, r := range l {
+			ok := r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+			if !ok {
+				t.Errorf("label %q contains %q, which Prometheus does not accept", l, r)
+			}
+		}
+	}
+}
