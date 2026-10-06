@@ -1,6 +1,7 @@
 package capacity
 
 import (
+	"math"
 	"strconv"
 	"strings"
 
@@ -280,7 +281,7 @@ func parseArgsWith(args []string, params *EngineParams, apply func(key, value st
 func applyParam(key, value string, params *EngineParams) {
 	switch key {
 	case "gpu_memory_utilization":
-		if v, err := strconv.ParseFloat(value, 64); err == nil {
+		if v, err := strconv.ParseFloat(value, 64); err == nil && usableFraction(v) {
 			params.GpuMemoryUtilization = v
 		}
 	case "block_size":
@@ -324,6 +325,22 @@ func applyParam(key, value string, params *EngineParams) {
 	case "enable_chunked_prefill":
 		params.ChunkedPrefillEnabled = true
 	}
+}
+
+// usableFraction reports whether a parsed memory fraction is a value the rest
+// of the pipeline can divide by: finite, and strictly inside (0, 1].
+//
+// It exists because ParseFloat accepts "NaN" and "Inf" -- a flag of
+// --gpu-memory-utilization=NaN parses without error, and the value then
+// defeats every comparison downstream, since NaN is not equal to itself and
+// NaN <= 0 is false. Two concrete consequences: IsCapacityCompatible would
+// report a variant as incompatible with ITSELF, and the engine fingerprint
+// would hash two NaN configurations to the same digest while that predicate
+// called them different. Rejecting it here, so the struct default survives, is
+// what keeps the two consistent -- and matches this parser's existing
+// contract that an unusable value leaves the default in place.
+func usableFraction(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0) && v > 0 && v <= 1
 }
 
 // IsCapacityCompatible checks whether two EngineParams configurations

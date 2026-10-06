@@ -63,7 +63,7 @@ func ParseSGLangArgs(scaleTarget scaletarget.ScaleTargetAccessor) EngineParams {
 func applySGLangParam(key, value string, params *EngineParams) {
 	switch key {
 	case "mem_fraction_static":
-		if v, err := strconv.ParseFloat(value, 64); err == nil {
+		if v, err := strconv.ParseFloat(value, 64); err == nil && usableFraction(v) {
 			params.GpuMemoryUtilization = v
 		}
 	case "page_size":
