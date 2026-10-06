@@ -176,3 +176,30 @@ func (w *Window) Len() int {
 func (w *Window) Clear() {
 	w.observations = w.observations[:0]
 }
+
+// GrowMaxSize raises the window's capacity to want, and never lowers it.
+// Reports whether the capacity changed.
+//
+// It exists because one window can be fed by SEVERAL variants once windows
+// are keyed by what ITL is a property of rather than by a variant name. Add
+// evicts the oldest observation at capacity regardless of who contributed it,
+// so four variants sharing a 20-slot window leave each of them five cycles of
+// history instead of twenty -- and maxAge stops being the thing that bounds
+// the window, which is the opposite of what pooling is for. The owner calls
+// this with DefaultWindowMaxSize times the number of contributors it has seen.
+//
+// Never lowers, because a contributor that goes quiet should not discard the
+// history of the ones still reporting; the window ages by maxAge instead.
+func (w *Window) GrowMaxSize(want int) bool {
+	if want <= w.maxSize {
+		return false
+	}
+	w.maxSize = want
+	return true
+}
+
+// MaxSize is the window's current capacity, for the owner's logging and for
+// tests.
+func (w *Window) MaxSize() int {
+	return w.maxSize
+}

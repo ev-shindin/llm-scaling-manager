@@ -245,7 +245,13 @@ func deriveMu(model itl.Model, params *capacity.EngineParams,
 // engine, not of the shape -- that is the whole reason mu can be derived across
 // a shape change -- so a fit made under one shape is still the right fit under
 // the next, and clearing it would reintroduce exactly the wait this replaces.
-func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetrics,
+// windowKey names the pooled window (itlPhysicsKey); baselineKey names this
+// variant's own learned B (itlWindowKey). They are different keys: the line is
+// a property of the configuration, the floor under it is a property of one
+// deployment's hardware. contributors is how many variants have fed the
+// window, which is what its capacity is scaled by.
+func (a *SaturationAnalyzer) noteITL(windowKey, baselineKey string, contributors int,
+	replicas []domain.ReplicaMetrics,
 	variantName string, now time.Time, logger logr.Logger) itl.Model {
 	// The lock is analyzer-wide: recordSaturatedThroughput,
 	// saturatedThroughputReading and EvictStaleHistory all take it, for every
@@ -254,7 +260,7 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	// rather than serialising every other model's cycle behind this one's
 	// scan, fit and two Info calls.
 	a.mu.Lock()
-	w, ok := a.itlWindows[key]
+	w, ok := a.itlWindows[windowKey]
 	if !ok {
 		w = itl.NewWindow(
 			itl.DefaultWindowMaxSize,
@@ -264,7 +270,14 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 			itl.DefaultMinObservableK,
 			itl.DefaultMaxObservableK,
 		)
-		a.itlWindows[key] = w
+		a.itlWindows[windowKey] = w
+	}
+	// One window can be fed by several variants now. Add evicts the oldest
+	// observation at capacity whoever contributed it, so without this four
+	// variants sharing the window would each hold five cycles of history
+	// instead of twenty, and maxAge would stop being what bounds it.
+	if contributors > 1 {
+		w.GrowMaxSize(itl.DefaultWindowMaxSize * contributors)
 	}
 	// Logged at DEFAULT, not DEBUG: the deployment passes no -v, so DEBUG (4)
 	// never prints and a diagnostic nobody can read is the problem it was
@@ -308,7 +321,7 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	// the measured one, so it has to clear a higher bar than two readings.
 	obs := w.Observations()
 	ready := w.Ready()
-	baseline, learned := a.itlBaseline[key]
+	baseline, learned := a.itlBaseline[baselineKey]
 	a.mu.Unlock()
 	if !learned || !(baseline > 0) {
 		baseline = itl.DefaultBaselineSec
@@ -317,7 +330,8 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	// Below DefaultMinObservableK the window drops the reading itself, so
 	// `added` counts what was offered and len(obs) what was kept.
 	logger.V(logging.DEFAULT).Info("itl-window",
-		"variant", variantName, "key", key,
+		"variant", variantName, "key", windowKey, "baselineKey", baselineKey,
+		"contributors", contributors, "windowMax", w.MaxSize(),
 		"replicas", considered, "offered", added, "held", len(obs),
 		"notReady", notReady, "noITL", noITL, "noK", noK, "aboveBand", aboveBand,
 		"ready", ready, "minSamples", itl.DefaultMinSamples)
@@ -331,7 +345,7 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 			// constant it replaced.
 			if model.B > 0 {
 				a.mu.Lock()
-				a.itlBaseline[key] = model.B
+				a.itlBaseline[baselineKey] = model.B
 				a.mu.Unlock()
 			}
 			logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "ols",

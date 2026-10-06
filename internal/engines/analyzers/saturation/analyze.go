@@ -103,6 +103,10 @@ type cycle struct {
 	muInput       float64
 	muShortWindow bool
 
+	// newCycle: the engine-configuration fingerprint per variant, which is
+	// what the pooled ITL window is keyed by.
+	fpByVariant map[string]string
+
 	// fitLines: one ITL(k) line per decode variant.
 	itlModels map[string]itl.Model
 }
@@ -138,10 +142,17 @@ func (a *SaturationAnalyzer) newCycle(
 	c.gpusByVariant = make(map[string]int, len(input.VariantStates))
 	c.rolesByVariant = make(map[string]string, len(input.VariantStates))
 	c.accelByVariant = make(map[string]string, len(input.VariantStates))
+	c.fpByVariant = make(map[string]string, len(input.VariantStates))
 	for _, vs := range input.VariantStates {
 		c.gpusByVariant[vs.VariantName] = vs.GPUsPerReplica
 		c.rolesByVariant[vs.VariantName] = vs.Role
 		c.accelByVariant[vs.VariantName] = vs.AcceleratorName
+		// Resolved once per cycle, here, because the ITL window is keyed by
+		// it and reading the store per replica would take its lock on every
+		// row. An empty fingerprint is a usable answer: itlPhysicsKey falls
+		// back to the variant key and pools nothing.
+		c.fpByVariant[vs.VariantName] = a.engineFingerprint(
+			input.Namespace, input.ModelID, vs.VariantName)
 	}
 
 	// Whether the decode role is saturated this cycle decides what a
@@ -263,8 +274,12 @@ func (c *cycle) fitLines() {
 		// decode. A P/D fleet projects its prefill backlog too, and leaving
 		// prefill out meant it published neither series, so a run could not even
 		// be reviewed for it.
-		c.a.noteReplicaStart(c.a.itlWindowKey(c.input.Namespace, c.input.ModelID, variant,
-			c.accelByVariant[variant], c.gpusByVariant[variant]),
+		variantKey := c.a.itlWindowKey(c.input.Namespace, c.input.ModelID, variant,
+			c.accelByVariant[variant], c.gpusByVariant[variant])
+		// Stamped before anything reads the variant-keyed state, because this
+		// is what ages it now that the window's emptiness no longer does.
+		c.a.noteVariantSeen(variantKey, c.a.now())
+		c.a.noteReplicaStart(variantKey,
 			c.input.Namespace, variant, c.input.ReplicaMetrics, c.logger)
 
 		if canonicalRole(c.rolesByVariant[variant]) != domain.RoleDecode {
@@ -275,9 +290,11 @@ func (c *cycle) fitLines() {
 		// bug stableAccelerator exists to prevent for k2 (the k1<->k2
 		// oscillation of PR #40 on a heterogeneous cluster), and a blended
 		// ITL line is meaningless for either product.
-		key := c.a.itlWindowKey(c.input.Namespace, c.input.ModelID, variant,
-			c.accelByVariant[variant], c.gpusByVariant[variant])
-		c.itlModels[variant] = c.a.noteITL(key, c.input.ReplicaMetrics, variant, c.a.now(), c.logger)
+		windowKey := c.a.itlPhysicsKey(c.input.Namespace, c.input.ModelID, variant,
+			c.accelByVariant[variant], c.gpusByVariant[variant], c.fpByVariant[variant])
+		contributors := c.a.noteITLContributor(windowKey, c.input.Namespace, variant)
+		c.itlModels[variant] = c.a.noteITL(windowKey, variantKey, contributors,
+			c.input.ReplicaMetrics, variant, c.a.now(), c.logger)
 	}
 }
 
