@@ -414,7 +414,12 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			// computeReplicaCapacity's parameter list, because it is a
 			// property of the CYCLE's line resolution (fitLines) and not of
 			// the replica being priced.
-			rc.SaturatedThroughputLineBorrowed = c.itlBorrowed[rm.VariantName]
+			// Only when the derived figure is the one in use. A variant
+			// holding a borrowed line but priced from its OWN measured window
+			// is not relying on the borrow, and flagging it would deny it an
+			// order it has earned.
+			rc.SaturatedThroughputLineBorrowed =
+				rc.SaturatedThroughputDerived && c.itlBorrowed[rm.VariantName]
 			replicaCapacities = append(replicaCapacities, *rc)
 		}
 	}

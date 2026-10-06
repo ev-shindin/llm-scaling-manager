@@ -132,6 +132,27 @@ type Term struct {
 // replica reads a short bucket and borrows the previous shape's mu; see "A
 // borrowed reading never outvotes a replica's own" in
 // docs/developer-guide/analyzer-evidence.md.
+// borrowedReading reports whether a replica's service rate is evidence about
+// something other than this variant's own current load, and so may hold a fleet
+// at its size but not grow it.
+//
+// Two kinds, and they are different in origin but identical in consequence. A
+// reading borrowed from a neighbouring SHAPE bucket is wrong in a known
+// direction. A figure derived from an ITL line borrowed from a sibling that
+// merely shares an engine configuration is evidence about that CONFIGURATION:
+// at a fixed k the resident sequence count is k*C/KVreq, and KVreq is the
+// shape, so the same line implies different service rates for two variants
+// serving different request shapes.
+//
+// A derived figure from the variant's OWN line is not borrowed and keeps its
+// licence to order without a sample count.
+func borrowedReading(rc capacity.ReplicaCapacity) bool {
+	if rc.SaturatedThroughputLineBorrowed {
+		return true
+	}
+	return rc.SaturatedThroughputBorrowed && !rc.SaturatedThroughputDerived
+}
+
 func Estimate(
 	lambda float64,
 	replicas []capacity.ReplicaCapacity,
@@ -209,6 +230,11 @@ func Estimate(
 	smallestP := make(map[string]float64)
 	// The same, from the replicas whose reading is a neighbouring bucket's;
 	// taken only for a role none of whose replicas reads its own.
+	// lineBorrowed records, per role, that what was routed as borrowed came
+	// from a borrowed ITL LINE rather than a neighbouring shape bucket -- so
+	// the hold can name which, instead of reporting a bucket borrow for
+	// something else entirely.
+	lineBorrowed := make(map[string]bool)
 	borrowedCosts := make(map[string][]float64)
 	borrowedMus := make(map[string][]float64)
 	mayOrder := make(map[string]bool)
@@ -230,9 +256,25 @@ func Estimate(
 		// this variant's own ITL(k), so it is neither borrowed from another
 		// shape's bucket nor a count of samples -- the two fields below
 		// describe the measured window that was not used.
-		if rc.SaturatedThroughputBorrowed && !rc.SaturatedThroughputDerived {
+		// A figure derived from a BORROWED line is routed here too, and that
+		// is the whole implementation of "may hold the fleet, may not grow
+		// it": this branch keeps borrowedOnly[role] true, which applies the
+		// cap below and names the reason, and it continues before mayOrder is
+		// ever set.
+		//
+		// An earlier version of this instead added !LineBorrowed to the
+		// mayOrder disjunction, which did nothing at all. The analyzer stamps
+		// MinDerivedThroughputSamples -- equal to MinThroughputSamplesToOrder
+		// by construction -- onto every derived figure, so the SAMPLE half of
+		// that disjunction re-admitted exactly what the derived half had just
+		// excluded. Gating a decision in one of two disjuncts gates nothing;
+		// the reading has to be routed, not annotated.
+		if borrowedReading(rc) {
 			borrowedCosts[role] = append(borrowedCosts[role], p/rc.SaturatedThroughput)
 			borrowedMus[role] = append(borrowedMus[role], rc.SaturatedThroughput)
+			if rc.SaturatedThroughputLineBorrowed {
+				lineBorrowed[role] = true
+			}
 			continue
 		}
 		costs[role] = append(costs[role], p/rc.SaturatedThroughput)
@@ -252,15 +294,9 @@ func Estimate(
 		// window while the rate it compares against is averaged over a minute.
 		// It is now a diagnostic only -- saturation.noteLineMismatch says
 		// why -- so this file is back to one disjunction.
-		// A derived figure needs no sample count -- it is priced for the
-		// shape arriving now -- but only when the line under it is this
-		// variant's OWN. A line borrowed from a sibling that merely shares an
-		// engine configuration is evidence about that configuration, not about
-		// this variant's load, and the two differ by the ratio of their
-		// request shapes. Such a figure may hold the fleet and must not grow
-		// it, exactly as a reading borrowed from a neighbouring bucket may
-		// not.
-		if (rc.SaturatedThroughputDerived && !rc.SaturatedThroughputLineBorrowed) ||
+		// Reaching here means the reading is this variant's own: a borrowed
+		// line, like a borrowed bucket, took the branch above and continued.
+		if rc.SaturatedThroughputDerived ||
 			(rc.SaturatedThroughputSamples >= MinThroughputSamplesToOrder && !staleShape) {
 			mayOrder[role] = true
 		}
@@ -428,6 +464,9 @@ func Estimate(
 				term.HeldWhy = "single-sample"
 				if borrowedOnly[role] {
 					term.HeldWhy = "borrowed"
+					if lineBorrowed[role] {
+						term.HeldWhy = "borrowed-line"
+					}
 				}
 				if staleShape {
 					term.HeldWhy = "shape-change"
