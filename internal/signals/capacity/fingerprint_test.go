@@ -198,22 +198,45 @@ func TestFingerprintOfNilIsEmpty(t *testing.T) {
 	}
 }
 
-// TestFingerprintSeparatorCannotBeForged covers the reason the fields are
-// NUL-separated: with a printable joiner, a value containing it could
-// impersonate a field boundary and two different configurations would collide.
-func TestFingerprintSeparatorCannotBeForged(t *testing.T) {
-	a := defaultEngineParams()
-	a.WeightDtype = "x"
-	a.Quantization = "y"
-	resolveEffectiveMaxBatchedTokens(&a)
+// TestFingerprintResistsBoundaryShifting replaces a test that did not test
+// what it claimed. The old one asserted the NUL separator stops a value forging
+// a field boundary, and tried it with a value containing "=" — which is part of
+// the fixed "name=" prefix, not the separator, so it passed with the NUL
+// changed to "|" and with it removed altogether.
+//
+// The property that holds is that moving characters across the boundary between
+// two adjacent hashed fields changes the digest, and it is guaranteed TWICE
+// OVER: by the per-field "name=" prefix and, independently, by the NUL
+// separator. Either alone suffices.
+//
+// That is worth stating because it means no single-mutation negative control
+// can make this spec fail — removing one mechanism leaves the other, and
+// removing the prefixes OR the NUL alone was measured to leave it green. The
+// control that bites is removing BOTH, at which point "auto"+"fp8" and
+// "autofp8"+"" hash alike and this fails. Defence in depth is the right design
+// here; an untestable-by-one-mutation spec is the honest consequence, and
+// pretending otherwise is what the previous version did.
+func TestFingerprintResistsBoundaryShifting(t *testing.T) {
+	split := defaultEngineParams()
+	split.WeightDtype = "auto"
+	split.Quantization = "fp8"
+	resolveEffectiveMaxBatchedTokens(&split)
 
-	b := defaultEngineParams()
-	b.WeightDtype = "x=y"
-	b.Quantization = ""
-	resolveEffectiveMaxBatchedTokens(&b)
+	joined := defaultEngineParams()
+	joined.WeightDtype = "autofp8"
+	joined.Quantization = ""
+	resolveEffectiveMaxBatchedTokens(&joined)
 
-	if a.Fingerprint() == b.Fingerprint() {
-		t.Fatal("two configurations collided: a value was able to impersonate a field boundary")
+	// The two differ only in where the boundary between the fields falls:
+	// their concatenated VALUES are identical, so only the field structure
+	// can tell them apart.
+	if split.WeightDtype+split.Quantization != joined.WeightDtype+joined.Quantization {
+		t.Fatal("the two configurations must have identical concatenated values, " +
+			"or this test proves nothing about the boundary")
+	}
+	if split.Fingerprint() == joined.Fingerprint() {
+		t.Fatal("two configurations collided across a field boundary: the per-field " +
+			"name prefixes are not reaching the digest")
 	}
 }
 

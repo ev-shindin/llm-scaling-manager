@@ -86,9 +86,17 @@ func (p *EngineParams) Fingerprint() string {
 
 	h := sha256.New()
 	for _, f := range fields {
-		// NUL-separated because it cannot appear in a container arg, so no
-		// value can impersonate a field boundary. Joining on a printable
-		// character would let a dtype of "a=1|b" collide with two fields.
+		// What actually prevents one value from impersonating a field
+		// boundary is the fixed "name=" prefix on every field: a value can
+		// contain any bytes it likes and still cannot forge another field's
+		// name at the position that field occupies.
+		//
+		// The NUL is belt and braces on top of that -- it cannot appear in a
+		// container arg, so it is unforgeable -- and an earlier comment here
+		// credited it with the whole job. That was wrong, and a test written
+		// to the wrong claim passed with the NUL removed entirely. The
+		// property that is actually tested is boundary-shifting between
+		// adjacent fields; see TestFingerprintResistsBoundaryShifting.
 		h.Write([]byte(f))
 		h.Write([]byte{0})
 	}

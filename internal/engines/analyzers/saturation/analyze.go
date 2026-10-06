@@ -3,6 +3,7 @@ package saturation
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -258,7 +259,19 @@ func (c *cycle) resolvePricing() {
 // saturated under (mu_from_itl.go).
 func (c *cycle) fitLines() {
 	c.itlModels = make(map[string]itl.Model, len(c.gpusByVariant))
+	// Sorted, because the order is now observable. Several variants can feed
+	// ONE pooled window, and each one fits over the window's contents as they
+	// stand when its turn comes -- so the first variant iterated fits without
+	// the others' observations from this cycle and the last fits with all of
+	// them. Over a map, that made each variant's derived mu, and therefore the
+	// role's replica count, depend on Go's randomised iteration order. With a
+	// window per variant the order could not matter; with a shared one it does.
+	variants := make([]string, 0, len(c.gpusByVariant))
 	for variant := range c.gpusByVariant {
+		variants = append(variants, variant)
+	}
+	sort.Strings(variants)
+	for _, variant := range variants {
 		// Decode only. ITL is the latency between GENERATED tokens, and
 		// deriveMu divides a token rate by an output length; prefill emits
 		// about one token per request -- its work is the prompt -- so the
