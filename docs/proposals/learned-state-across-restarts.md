@@ -1,9 +1,9 @@
 # Learned state across a restart, and what it should be keyed by
 
-**Status:** proposed, nothing built. Revised once already, substantially, after
-an adversarial review against the code; the review's findings are folded in
-below rather than appended, and the three that changed the design are called out
-where they land.
+**Status:** steps 1-5 built; 6 and 7 proposed. Revised twice, substantially:
+once after an adversarial review against the code, and once after the
+measurement in Part 2, which **removed the store from the design entirely**.
+The findings are folded in where they land rather than appended.
 
 Two changes that only make sense together: persisting what the analyzer learns,
 and fixing what it is filed under. Either alone is worth less than half —
@@ -13,9 +13,11 @@ situation it does not describe.
 This **revises [`signals-as-metrics.md`](signals-as-metrics.md)**, which said
 publishing these signals was observability only and that a restart gap was
 "honest rather than fixable". The first half stands. The second was wrong, but
-not in the way the first draft of this document claimed: the gap is fixable, and
-the fix is *not* reading the metrics back. See
-[the store](#the-store-a-configmap-written-on-change-not-the-metrics).
+not in the way the first draft of this document claimed: the gap is fixable,
+and the fix is neither reading WVA's own metrics back nor storing a snapshot.
+It is to refit the line from the **engines'** own series, which Prometheus
+already holds. See
+[there is no store](#measured-and-it-settles-the-mechanism-there-is-no-store).
 
 ## The problem, measured
 
@@ -310,7 +312,107 @@ Five effects, since this is the step whose behaviour change needs the most care:
    pooling makes the window shorter. This is the most mechanical of the five and
    the easiest to miss.
 
-## Part 2 — persisting it
+## Part 2 — carrying it across a restart
+
+### MEASURED, and it settles the mechanism: there is no store
+
+This section replaced its own conclusion once the measurement below was taken.
+Everything after it that argues for a ConfigMap is kept as the reasoning that
+led here, and is **superseded**.
+
+From run QT's controller log, 244 decode `itl-window` cycles, classified by the
+line's own `held` and `ready` fields:
+
+| what blocked the ITL fit | cycles | share |
+| --- | --- | --- |
+| the engine reported **no ITL at all** (window empty) | 35 | 14% |
+| the **sample count** (held 1-9) | 28 | 12% |
+| the **k-spread** (held >= 10, still not ready) | 127 | 52% |
+| ready, a fit was available | 54 | 22% |
+
+Cold start: the first observation lands at **t+8.8 min (cycle 36)** and the
+first OLS fit at **t+15.8 min (cycle 64)**. Between those two, 28 cycles were
+blocked on the sample count and **zero** on the spread.
+
+Two corrections this forces on the rest of this document. The gap is ~63 cycles
+and ~16 minutes, not the "51 cycles, ~8 minutes" quoted above — 8.8 minutes is
+when the first OBSERVATION arrives, not the first fit. And `itlZero` does not
+appear in these logs at all; the evidence is `held` and `ready` on the
+`itl-window` line, and any claim keyed on `itlZero` should be distrusted.
+
+**The conclusion: refit from the engines' own series, and store nothing.**
+
+If the fingerprint matches, it is by construction the same engine build on the
+same hardware serving the same model. Prometheus already holds that engine's
+`QueryAvgITL` and `QueryKvUsageInstant` series from before the restart — the
+same two series the live path fits the line from, every cycle. A **range**
+query at startup reconstructs the line from those real observations, so a
+stored copy adds nothing that the source does not already have.
+
+Every objection that killed the metrics read-back was about WVA reading back
+what **it** had published about itself: no writer identity behind the
+ServiceMonitor's `labeldrop`, an apparent age that resets on every republish,
+an unauthenticated input to a scaling decision, a feedback loop. **None of them
+apply to the engines' series.** That is an independent measurement, not WVA's
+own claim, and it is already trusted on the live path.
+
+So this drops, in full: the ConfigMap, its `schemaVersion`, the RBAC increase,
+the migration story, the flush story, and the "a poisoned figure now survives
+the restart that used to clear it" problem — because nothing is stored and
+every start re-derives.
+
+It also adds no dependency. Prometheus is already mandatory: `cmd/main.go`
+exits 1 when `PROMETHEUS_BASE_URL` is unset, so a controller that cannot reach
+it does not run at all.
+
+What the refit does **not** cover, stated rather than hidden:
+
+- **k2-observed.** It depends on WVA's own judgement that a replica was
+  saturated, not on a raw engine series. Re-deriving it means replaying that
+  judgement over historical rows, which is a bigger piece of work and is not
+  part of this.
+- **The replica start estimate.** Not a function of the engine configuration
+  (see the re-key section), so it stays per variant and is not carried.
+- **Retention.** Where Prometheus does not hold the window, the refit finds
+  nothing and the controller starts cold, exactly as today.
+
+### A second finding, possibly the more valuable half
+
+52% of **all** cycles could not fit an OLS line because of the k-spread and
+fell back to the pinned-B path. That is not a cold-start problem: it is steady
+state. The live window holds 20 observations over 30 minutes, and a balanced
+router keeps every replica at nearly the same `k`, so the window often cannot
+span the 0.30 of `k` a two-parameter fit needs.
+
+A historical range spans more varied load, so the same query may produce a
+genuine OLS fit where the live window cannot — improving the line in **normal
+operation**, not only after a restart. That is a hypothesis and is written here
+as one: it needs the comparison in *How to know it worked* before anything is
+claimed for it. If it holds, it is worth more than the restart case.
+
+### What in the rest of Part 2 still stands
+
+The sections below were written for a stored snapshot. Read them with this
+split in mind, because most of the reasoning survives the store being dropped:
+
+**Superseded.** *The store: a ConfigMap written on change* and its scoring
+table — kept because the four counts on which metrics-as-a-store lose are the
+reason the engines' series are read instead, and that argument is still load
+bearing. *Recovery* goes with it: there is nothing stored to flush, and
+restarting the controller clears the figure again, as it did before.
+*More than one controller* loses its ConfigMap half; the leader-election
+timing in it is why step 7 refits on leadership rather than at boot.
+
+**Still stands, unchanged.** *The guards* — rehydration is an optimisation and
+never a dependency, ingest runs `itl.ValidModel`, and the cross-validation
+against the first live observation is what bounds a plausible-but-wrong line.
+*Fingerprint versioning*, because the hash's input set is a compatibility
+promise whether or not anything stores it. *The metric shape*, since
+publishing `wva_learned_*` is still step 6. *The warm pool* and *SGLang*.
+
+**Three mechanisms the first draft assumed** also still stands in full, and one
+of its three is now a prerequisite that has already landed: `EvictStaleHistory`
+had no caller.
 
 ### What has to survive
 
@@ -611,13 +713,15 @@ vLLM.
 - **It does not eliminate plausible-but-wrong values** — it bounds them, with
   the cross-validation guard, to one cycle of exposure plus whatever a single
   observation cannot falsify.
-- **It does not survive a ConfigMap wipe**, by design.
+- **It does not survive a Prometheus retention gap**, by design: where the
+  series are not held, the refit finds nothing and the start is cold.
 - **It is not actuation.** Nothing here is a scaling input for KEDA or an HPA;
   that remains the rejected "metric shop" design.
 
 ## Order
 
-Revised; the first draft's order put an unsound step third.
+Revised twice: the first draft put an unsound step third, and the measurement
+in Part 2 replaced the store in steps 6 and 7.
 
 1. **`MaxNumSeqs` and `MaxModelLen` into `IsCapacityCompatible`**, with tests.
    Correctness fix, wrong today, independent of everything else.
@@ -635,18 +739,27 @@ Revised; the first draft's order put an unsound step third.
    scaling `DefaultWindowMaxSize` with the number of contributors. This alone
    makes a rename and a second identical variant free, with no persistence
    involved.
-6. **Publish `wva_learned_*` and write the ConfigMap**, with `learnedAt` and the
-   rehydrate-outcome metric. Still no read-back.
-7. **Rehydrate on becoming leader**, behind a flag, default off, with every
-   guard above including cross-validation. Default on only after the measured
-   comparison below.
+6. **Publish `wva_learned_*`.** Worth doing on its own: it makes a
+   post-restart decision explicable on a dashboard, and it needs no trust from
+   anyone. No store, and nothing reads it back.
+7. **Refit the ITL line at startup from the engines' own series.** A range
+   query over `QueryAvgITL` and `QueryKvUsageInstant` for the fingerprint's
+   model and hardware, fitted with the same `itl.Fit` the live path uses, and
+   admitted through the same `itl.ValidModel`. Behind a flag, default off,
+   with the cross-validation guard: the refitted line is provisional until the
+   first live observation either confirms it within a tolerance or discards it.
+   Default on only after the measured comparison below.
+
+   On becoming leader rather than at process start, because with leader
+   election enabled those are different moments and a standby elected later
+   would otherwise hold a line fitted from a range it read at boot.
 
 Steps 1-5 are worth doing even if 6 and 7 are never built, which is the test of
 whether the ordering is honest. Under the first draft's order, step 3 failed
 that test — it moved `startSeconds` onto a key that does not describe it.
 
-Three knobs, not one: `rehydrate` (default off), `rehydrateMaxAge`, and the
-mismatch tolerance for cross-validation.
+Three knobs, not one: `refitFromHistory` (default off), the range the query
+looks back over, and the mismatch tolerance for cross-validation.
 
 ## Testing
 
@@ -664,8 +777,13 @@ mismatch tolerance for cross-validation.
 ## How to know it worked
 
 Restart the controller mid-ramp on the shape-swap trace and compare the time
-from load start to the first `throughput-demand-floor` line, against the
-~8 minutes and 51 `itlZero` cycles of run QT.
+from load start to the first `throughput-demand-floor` line, and to the first
+`itl-fit`, against run QT's measured baseline: first observation t+8.8 min
+(cycle 36), first OLS fit t+15.8 min (cycle 64).
+
+And measure the second finding separately, because it is the one that pays in
+steady state: the share of cycles that reach an OLS fit rather than pinned-B,
+against run QT's 22%.
 
 With thresholds, because the first draft named a measurement and no number:
 

@@ -118,14 +118,16 @@ last; it is the unit change that makes the other two land.
   the target no.
 
 - **[Learned state across a restart](learned-state-across-restarts.md)** —
-  nothing the analyzer learns survives a restart, and a rollout mid-ramp costs
-  the ~8 minutes and 51 itlZero cycles measured on run QT. Two changes that only
-  work together: key the learned figures on an ENGINE CONFIG fingerprint rather
-  than a variant name (the relation already exists as IsCapacityCompatible, used
-  only as a fallback), and rehydrate on becoming leader from a write-on-change
-  ConfigMap — NOT from the metrics, which have no writer identity, no honest
-  timestamp and no trust boundary. Revises signals-as-metrics.md, which called
-  the restart gap unfixable.
+  nothing the analyzer learns survives a restart, and a cold start measured on
+  run QT takes 63 cycles and ~16 minutes to reach its first ITL fit. Key the
+  learned figures on an ENGINE CONFIG fingerprint rather than a variant name
+  (the relation already exists as IsCapacityCompatible, used only as a
+  fallback), and then carry nothing: if the fingerprint matches it is the same
+  engine, so refit the line from the ENGINES' own series, which Prometheus
+  already holds. No store, no RBAC, no schema. Also measures a second finding
+  worth more than the restart case: 52% of all cycles cannot fit an OLS line
+  for want of k-spread. Revises signals-as-metrics.md, which called the restart
+  gap unfixable.
 
 ## Product and lifecycle
 
