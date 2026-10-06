@@ -122,6 +122,35 @@ func TestRecordEngineConfigDropsAMismatchedValueList(t *testing.T) {
 	}
 }
 
+// TestRecordEngineConfigKeepsModelsApart is the bug the model argument fixes.
+// A variant name is unique within a MODEL, not within a namespace, and
+// RecordEngineConfig deletes before it sets -- so while the pre-delete matched
+// on namespace and variant alone, publishing one model's configuration
+// silently unpublished another model that happened to share both.
+func TestRecordEngineConfigKeepsModelsApart(t *testing.T) {
+	emitter, registry := engineConfigEmitter(t)
+
+	emitter.RecordEngineConfig("ns", "model-a", "decode", "NVIDIA-H200", 1, "d-a", 1,
+		flagValues(nil))
+	emitter.RecordEngineConfig("ns", "model-b", "decode", "NVIDIA-H200", 1, "d-b", 1,
+		flagValues(nil))
+
+	if got := countSeries(t, registry, constants.WVAEngineConfig); got != 2 {
+		t.Fatalf("%d series for two models sharing a namespace and a variant name, want 2", got)
+	}
+	for _, fp := range []string{"d-a", "d-b"} {
+		if !hasSeries(t, registry, constants.WVAEngineConfig, constants.LabelFingerprint, fp) {
+			t.Errorf("the series for %s was deleted by the other model's publish", fp)
+		}
+	}
+
+	// And a delete still removes only the model it names.
+	emitter.DeleteEngineConfig("ns", "model-a", "decode")
+	if !hasSeries(t, registry, constants.WVAEngineConfig, constants.LabelFingerprint, "d-b") {
+		t.Error("deleting one model's variant removed another model's")
+	}
+}
+
 func TestDeleteEngineConfig(t *testing.T) {
 	emitter, registry := engineConfigEmitter(t)
 
@@ -129,7 +158,7 @@ func TestDeleteEngineConfig(t *testing.T) {
 	emitter.RecordEngineConfig("ns", "m", "v2", "NVIDIA-H200", 1, "d2", 1, flagValues(nil))
 	emitter.RecordEngineConfig("other", "m2", "v3", "NVIDIA-H200", 1, "d3", 1, flagValues(nil))
 
-	emitter.DeleteEngineConfig("ns", "v1")
+	emitter.DeleteEngineConfig("ns", "m", "v1")
 	if got := countSeries(t, registry, constants.WVAEngineConfig); got != 2 {
 		t.Fatalf("%d series after deleting one variant, want 2", got)
 	}
@@ -155,7 +184,7 @@ func TestEngineConfigDeletesAreSafeBeforeInit(t *testing.T) {
 	defer func() { engineConfig = saved }()
 
 	emitter := NewMetricsEmitter()
-	emitter.DeleteEngineConfig("ns", "v1")
+	emitter.DeleteEngineConfig("ns", "m", "v1")
 	emitter.DeleteEngineConfigForModel("ns", "m")
 	emitter.RecordEngineConfig("ns", "m", "v1", "a", 1, "d", 1, flagValues(nil))
 }

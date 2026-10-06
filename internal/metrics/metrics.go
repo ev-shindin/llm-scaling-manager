@@ -1566,7 +1566,7 @@ func (m *MetricsEmitter) RecordEngineConfig(
 		return
 	}
 
-	m.DeleteEngineConfig(namespace, variantName)
+	m.DeleteEngineConfig(namespace, modelID, variantName)
 
 	labels := prometheus.Labels{
 		constants.LabelNamespace:          namespace,
@@ -1586,16 +1586,25 @@ func (m *MetricsEmitter) RecordEngineConfig(
 	engineConfig.With(labels).Set(1)
 }
 
-// DeleteEngineConfig removes every wva_engine_config series for a variant,
-// whatever configuration it was last seen running. Partial match because the
-// flag labels are part of the series identity and the caller does not know
-// which values are currently published.
-func (m *MetricsEmitter) DeleteEngineConfig(namespace, variantName string) {
+// DeleteEngineConfig removes every wva_engine_config series for one variant of
+// one model, whatever configuration it was last seen running. Partial match
+// because the flag labels are part of the series identity and the caller does
+// not know which values are currently published.
+//
+// modelID is part of the match and the omission of it was a bug. A variant
+// name is unique within a model, not within a namespace, so matching on
+// namespace and variant alone made two models that share a namespace AND a
+// variant name delete each other's series -- and because RecordEngineConfig
+// deletes before it sets, publishing the second model's configuration silently
+// unpublished the first. Found by the test that drives the engine's own
+// publication path.
+func (m *MetricsEmitter) DeleteEngineConfig(namespace, modelID, variantName string) {
 	if engineConfig == nil {
 		return
 	}
 	engineConfig.DeletePartialMatch(prometheus.Labels{
 		constants.LabelNamespace:   namespace,
+		constants.LabelModelName:   modelID,
 		constants.LabelVariantName: variantName,
 	})
 }

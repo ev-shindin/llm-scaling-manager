@@ -355,7 +355,7 @@ func (e *Engine) evictStaleAnalyzerSeries(namespace, modelID string, current ana
 			e.metricsEmitter.DeleteAnalyzerObservedReplicas(prev.analyzer, namespace, modelID, prev.variant)
 			// The config series is per variant, not per analyzer, so this is
 			// idempotent when several analyzers report the same variant.
-			e.metricsEmitter.DeleteEngineConfig(namespace, prev.variant)
+			e.metricsEmitter.DeleteEngineConfig(namespace, modelID, prev.variant)
 		}
 	}
 	e.lastAnalyzerSeries[modelKey] = current
