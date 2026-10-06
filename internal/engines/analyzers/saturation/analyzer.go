@@ -82,62 +82,42 @@ type SaturationAnalyzer struct {
 	// shape_change.go for what the event is for.
 	fleetShape map[string]*shapeMemo
 
-	// itlWindows is one rolling window of (k, ITL) readings, from which
-	// ITL(k) = A*k + B is fitted so mu can be derived for the shape the fleet
-	// is serving NOW rather than waiting for it to saturate under it
-	// (mu_from_itl.go).
+	// itlWindows is one rolling window of (k, ITL) readings PER VARIANT, from
+	// which ITL(k) = A*k + B is fitted so mu can be derived for the shape the
+	// fleet is serving NOW rather than waiting for it to saturate under it
+	// (mu_from_itl.go). Keyed like the throughput windows and swept with them.
 	//
-	// Keyed by itlPhysicsKey -- model, accelerator, GPUs per replica and the
-	// ENGINE-CONFIGURATION fingerprint -- and so NOT by namespace or variant
-	// name. ITL(k) is a property of the weights, the engine build and the
-	// hardware, which is the same reason the window is not cleared on a shape
-	// change. The consequence is deliberate: a renamed variant, a second
-	// identical variant, and the same deployment in another namespace all
-	// share one window instead of each paying the fit again.
+	// Per variant, and NOT pooled across the variants that share an engine
+	// configuration -- although ITL(k) is largely a property of the weights,
+	// the build and the hardware. An earlier version of this file pooled the
+	// OBSERVATIONS on that reasoning and it was the wrong mechanism: only A and
+	// B ever reach a decision, so what is worth sharing is the fitted LINE, not
+	// the data behind it. Sharing the line (itlLines below) is attributable,
+	// cannot blend two different traffic shapes into a figure describing
+	// neither, and does not make one variant's fit depend on the order the
+	// others happened to be iterated in.
 	itlWindows map[string]*itl.Window
-	// itlContributors is which variants have fed each itlWindows key, by
-	// namespace|variant, with when each was last seen feeding it. Pooling
-	// needs it for one reason: Add evicts the oldest observation at capacity
-	// whoever contributed it, so N variants sharing a 20-slot window would
-	// hold 20/N cycles each. The window is grown to DefaultWindowMaxSize per
-	// contributor (itl.Window.GrowMaxSize).
+	// itlLines is the last line each ENGINE CONFIGURATION was measured at,
+	// keyed by itlPhysicsKey, with the variant that measured it and when.
 	//
-	// The timestamp is not decoration. The first version held a bool and was
-	// only ever cleared wholesale when its window went empty, which meant a
-	// window kept alive by ONE variant remembered every variant that had ever
-	// shared it -- the same "one entry per variant that has EVER been seen"
-	// leak EvictStaleHistory exists to stop, reintroduced in a new map. Worse
-	// than the memory: len() of this set is what drives GrowMaxSize, so dead
-	// contributors permanently inflated a live window's capacity.
-	itlContributors map[string]map[string]time.Time
-	// itlBaseline is the last B an OLS fit produced, keyed by itlWindowKey --
-	// namespace, model, VARIANT, accelerator, GPUs -- and deliberately NOT by
-	// the physics key the window above uses.
-	//
-	// B is the zero-contention decode step measured on one variant's own
-	// hardware, and it is what the one-parameter fallback pins. Pooling it
-	// would let one variant's measured floor decide the steepness of every
-	// sibling's fit, which is the hazard the eviction comment has always
-	// described: "pin a hardware floor measured before a redeploy onto
-	// different hardware into every later fit for that key".
+	// This is what a variant with no usable fit of its own borrows, so a
+	// rename, a second identical variant, or the same deployment in another
+	// namespace gets a line on its FIRST cycle instead of paying the ~60
+	// cycles a fit takes -- which is the whole saving this was built for. A
+	// borrowed line is marked as such all the way to the floor, which may hold
+	// the fleet on it but not grow it: the line is evidence about a
+	// configuration, not about this variant's own load.
+	itlLines map[string]learnedLine
+	// itlBaseline is the last B an OLS fit produced for each window key: the
+	// zero-contention decode step for THAT model on THAT accelerator. It is
+	// what the one-parameter fallback pins, so a fleet that has once been
+	// measured never falls back to a constant guessed for another card.
 	itlBaseline map[string]float64
 	// startSeconds is the running estimate of how long one replica of each
-	// variant takes to become Ready, keyed by itlWindowKey. The demand floor
-	// projects the backlog forward over it, so it is a measurement -- see
-	// start_est.go for why a constant cannot do.
-	//
-	// Variant-keyed for a stronger reason than the baseline: a start time is
-	// an image pull, a node and a PVC, and is NOT a function of the engine
-	// configuration at all. startEstimates takes the MINIMUM over a role, so
-	// on the physics key the fastest-starting pod anywhere sharing a
-	// fingerprint would set the horizon T for every fleet that shares it, and
-	// under-projecting the backlog under-orders.
+	// variant takes to become Ready, keyed like the ITL windows and swept with
+	// them. The demand floor projects the backlog forward over it, so it is a
+	// measurement -- see start_est.go for why a constant cannot do.
 	startSeconds map[string]float64
-	// variantSeenAt is, per itlWindowKey, the last cycle that variant was
-	// seen. It is what ages itlBaseline, startSeconds and startOutliers now
-	// that they no longer share a key with the window whose emptiness used to
-	// evict them (EvictStaleHistory).
-	variantSeenAt map[string]time.Time
 	// startSeenPods is the Pods whose start has already been folded into that
 	// estimate, with when they were seen.
 	//
@@ -151,6 +131,17 @@ type SaturationAnalyzer struct {
 	startOutliers map[string]int
 	// now is the clock the memory reads; tests set it.
 	now func() time.Time
+}
+
+// learnedLine is one measured ITL(k) line, with who measured it and when.
+//
+// fromVariant is the variant key (itlWindowKey) of the fit's owner rather than
+// a bare variant name, so "is this my own line" is one comparison and two
+// namespaces serving the same deployment are told apart.
+type learnedLine struct {
+	model       itl.Model
+	fromVariant string
+	learnedAt   time.Time
 }
 
 // acceleratorMemo is the last accelerator that resolved for a variant, with the
@@ -167,8 +158,6 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 	return &SaturationAnalyzer{
 		computeCapacityHistory: make(map[string]*capacity.RollingAverage),
 		lastAccelerator:        make(map[string]acceleratorMemo),
-		itlContributors:        make(map[string]map[string]time.Time),
-		variantSeenAt:          make(map[string]time.Time),
 		saturatedThroughput:    make(map[string]*capacity.RollingAverage),
 		throughputSampledAt:    make(map[string]time.Time),
 		throughputLastRead:     make(map[string]float64),
@@ -176,6 +165,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		decodeSaturatedAt:      make(map[string]time.Time),
 		fleetShape:             make(map[string]*shapeMemo),
 		itlWindows:             make(map[string]*itl.Window),
+		itlLines:               make(map[string]learnedLine),
 		itlBaseline:            make(map[string]float64),
 		startSeconds:           make(map[string]float64),
 		startSeenPods:          make(map[string]time.Time),
@@ -228,50 +218,27 @@ func (a *SaturationAnalyzer) EvictStaleHistory(timeout time.Duration) int {
 		w.Prune(now)
 		if w.Len() == 0 {
 			delete(a.itlWindows, key)
-			delete(a.itlContributors, key)
+			// The learned baseline dies with the window that produced it.
+			// Kept, it would grow one float per variant/accelerator ever seen
+			// and, worse, pin a hardware floor measured before a redeploy onto
+			// different hardware into every later fit for that key.
+			delete(a.itlBaseline, key)
+			// And the start estimate, for the same reason: a figure measured
+			// before a redeploy onto different hardware would otherwise size
+			// every later projection for that key.
+			delete(a.startSeconds, key)
+			delete(a.startOutliers, key)
 		}
 	}
-	// A window kept alive by one variant must still forget the variants that
-	// have STOPPED feeding it. Without this, the loop above only ever clears a
-	// contributor set wholesale, so a renamed or deleted variant stayed in the
-	// set of every window it had ever shared -- and because len(set) is what
-	// GrowMaxSize scales by, a dead contributor permanently inflated a live
-	// window's capacity.
-	//
-	// The window's own size does NOT shrink back, deliberately: a contributor
-	// that goes quiet for a cycle must not discard the history of the ones
-	// still reporting, and Prune already bounds the window by
-	// DefaultObservationMaxAge whatever its capacity, so an over-sized window
-	// holds stale observations for no longer than a right-sized one. What this
-	// fixes is that growth is driven by LIVE contributors from here on.
-	for key, set := range a.itlContributors {
-		for contributor, seen := range set {
-			if now.Sub(seen) > timeout {
-				delete(set, contributor)
-			}
+	// A shared line ages on a timestamp of its own, because the window that
+	// produced it may already be gone -- which is the point of keeping it. It
+	// is only ever a starting point for a variant that has nothing of its own,
+	// and a line measured a day ago on a configuration nothing runs any more
+	// is not one.
+	for key, line := range a.itlLines {
+		if now.Sub(line.learnedAt) > timeout {
+			delete(a.itlLines, key)
 		}
-		if len(set) == 0 {
-			delete(a.itlContributors, key)
-		}
-	}
-	// The baseline, the start estimate and its outlier count are keyed per
-	// VARIANT and no longer share a key with the window above, so the window
-	// going empty can no longer evict them. They age on the variant's own
-	// last-seen instead, which is a timestamp of its own rather than an
-	// inference from someone else's emptiness.
-	//
-	// The reasons they must still age are unchanged and are the ones the old
-	// comment here gave: a learned hardware floor would otherwise pin a figure
-	// measured before a redeploy onto different hardware into every later fit,
-	// and a stale start estimate would size every later projection.
-	for key, seen := range a.variantSeenAt {
-		if now.Sub(seen) <= timeout {
-			continue
-		}
-		delete(a.variantSeenAt, key)
-		delete(a.itlBaseline, key)
-		delete(a.startSeconds, key)
-		delete(a.startOutliers, key)
 	}
 	a.evictStartSeenPods(now, timeout)
 	for key, ra := range a.saturatedThroughput {
@@ -339,34 +306,47 @@ func (a *SaturationAnalyzer) itlWindowKey(namespace, modelID, variantName, accel
 		a.stableAccelerator(namespace, variantName, accelerator), gpuCount)
 }
 
-// noteVariantSeen stamps a variant key as seen this cycle, which is what ages
-// the variant-keyed learned state in EvictStaleHistory.
-func (a *SaturationAnalyzer) noteVariantSeen(key string, now time.Time) {
+// publishLine records a variant's OWN fitted line as the line for its engine
+// configuration, so a sibling with nothing of its own can borrow it.
+//
+// Only a variant's own fit is published. A borrowed line is never
+// republished, which keeps the record traceable to one measurement instead of
+// letting a figure circulate between variants gathering authority it never
+// earned.
+func (a *SaturationAnalyzer) publishLine(
+	physicsKey, variantKey string, model itl.Model, now time.Time,
+) {
+	if physicsKey == "" || model.IsZero() {
+		return
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.variantSeenAt[key] = now
+	a.itlLines[physicsKey] = learnedLine{
+		model:       model,
+		fromVariant: variantKey,
+		learnedAt:   now,
+	}
 }
 
-// noteITLContributor records that a variant feeds a window, and returns how
-// many distinct variants now do. The count scales the window's capacity: see
-// itlContributors and itl.Window.GrowMaxSize.
+// borrowLine returns the line last measured for this engine configuration by
+// SOME OTHER variant, for a variant whose own window cannot produce one.
 //
-// Counted by namespace|variant rather than by variant name alone, because the
-// physics key drops the namespace and two namespaces can serve the same
-// deployment -- which is the pooling this exists to make correct, so they must
-// count as two contributors and not one.
-func (a *SaturationAnalyzer) noteITLContributor(
-	windowKey, namespace, variantName string, now time.Time,
-) int {
+// It reports the owner so the caller can log what was borrowed and from
+// where: a decision made on another variant's measurement has to be visible
+// as such. A line this variant measured itself is not a borrow and is not
+// returned -- the caller already has it, and calling it borrowed would
+// wrongly deny it the right to order.
+func (a *SaturationAnalyzer) borrowLine(physicsKey, variantKey string) (itl.Model, string, bool) {
+	if physicsKey == "" {
+		return itl.Model{}, "", false
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	set, ok := a.itlContributors[windowKey]
-	if !ok {
-		set = make(map[string]time.Time, 2)
-		a.itlContributors[windowKey] = set
+	line, ok := a.itlLines[physicsKey]
+	if !ok || line.model.IsZero() || line.fromVariant == variantKey {
+		return itl.Model{}, "", false
 	}
-	set[namespace+"|"+variantName] = now
-	return len(set)
+	return line.model, line.fromVariant, true
 }
 
 // itlPhysicsKey names one ITL(k) window, by what the line is a function of:

@@ -252,7 +252,15 @@ func Estimate(
 		// window while the rate it compares against is averaged over a minute.
 		// It is now a diagnostic only -- saturation.noteLineMismatch says
 		// why -- so this file is back to one disjunction.
-		if rc.SaturatedThroughputDerived ||
+		// A derived figure needs no sample count -- it is priced for the
+		// shape arriving now -- but only when the line under it is this
+		// variant's OWN. A line borrowed from a sibling that merely shares an
+		// engine configuration is evidence about that configuration, not about
+		// this variant's load, and the two differ by the ratio of their
+		// request shapes. Such a figure may hold the fleet and must not grow
+		// it, exactly as a reading borrowed from a neighbouring bucket may
+		// not.
+		if (rc.SaturatedThroughputDerived && !rc.SaturatedThroughputLineBorrowed) ||
 			(rc.SaturatedThroughputSamples >= MinThroughputSamplesToOrder && !staleShape) {
 			mayOrder[role] = true
 		}
