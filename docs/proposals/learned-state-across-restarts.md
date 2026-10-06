@@ -1,8 +1,8 @@
 # Learned state across a restart, and what it should be keyed by
 
-**Status:** steps 1-5 built (PR #120); 6, 7 and 8 proposed. Revised four times
-against code and measurement, and the corrections are not cosmetic — two of
-them reversed a conclusion. Each is recorded in
+**Status:** steps 1-5 built (PR #120); 6, 7 and 8 proposed. Revised five times
+against code and measurement, and the corrections are not cosmetic — three of
+them reversed a conclusion. They are recorded in
 [Appendix C](#appendix-c--what-this-document-got-wrong), and the designs that
 were tried and rejected are in Appendices A and B rather than inline, so
 everything before the appendices describes what is built or proposed now.
@@ -10,6 +10,15 @@ everything before the appendices describes what is built or proposed now.
 The analyzer learns three things and keys them badly. This fixes the keying,
 and then carries the one figure worth carrying across a restart — not by
 storing it, but by refitting it from the engines' own measurements.
+
+This **revises [`signals-as-metrics.md`](signals-as-metrics.md)**, which said
+publishing these signals was observability only and that a restart gap was
+"honest rather than fixable". The first half stands, and step 6 is that
+document's work. The second was wrong — but not in the way an earlier revision
+of *this* document claimed: the fix is neither reading WVA's own metrics back
+nor storing a snapshot, it is refitting from the **engines'** series. The
+sibling still carries one sentence in the old vocabulary and is corrected in
+the same change as this.
 
 ## The problem, measured
 
@@ -154,7 +163,10 @@ serving of one model collide.
 ### Two defects this exposed, both fixed and both worth fixing alone
 
 **`IsCapacityCompatible` compared neither `MaxNumSeqs` nor `MaxModelLen`.** `S`
-caps `N_steady` in k2 (`replica_capacity.go:718`) and `seqs` in the derived mu
+caps `N_steady` in k2
+(`internal/engines/analyzers/saturation/replica_capacity.go:718` — there are
+two files of that name, and the one in `internal/signals/capacity` has no
+`MaxNumSeqs` at all) and `seqs` in the derived mu
 (`mu_from_itl.go:218`). `MaxModelLen` changes KV per sequence, and reaches
 `EffectiveMaxBatchedTokens` only when chunked prefill is off — so on the V1
 path, where the resolver returns a flat 8192, it was invisible to the predicate
@@ -169,8 +181,9 @@ EVER been seen" leak the code's own comment warns about was live.
 
 `capacity.Store` is **not re-keyed**: the fingerprint comes from
 `Record.EngineParams`, which you only have after looking up by name, so a
-fingerprint key needs an extra index; six non-test callers genuinely ask "what
-did *this variant* measure"; and `Record.EffectiveCapacity` is `min(k1, k2)`,
+fingerprint key needs an extra index; of its eight non-test callers — two
+added by this work, `engineFingerprint` and `publishEngineConfig` — most
+genuinely ask "what did *this variant* measure"; and `Record.EffectiveCapacity` is `min(k1, k2)`,
 which is shape-dependent.
 
 **`queueThreshold` stays in the k2 and throughput keys.** Both end in `q%g`,
@@ -337,7 +350,25 @@ that widening it clears the gate.
    re-keyed. *(built)*
 6. **Publish `wva_learned_*`.** Worth doing on its own: it makes a
    post-restart decision explicable on a dashboard, and needs no trust from
-   anyone. No store, nothing read back.
+   anyone. No store, nothing read back. The families, which an earlier
+   revision dropped while leaving the cardinality arithmetic that depends on
+   them:
+
+   ```
+   wva_learned_itl_slope{model,accelerator,gpus,fingerprint}              A
+   wva_learned_itl_intercept{model,accelerator,gpus,fingerprint}          B
+   wva_learned_itl_samples{model,accelerator,gpus,fingerprint}            n
+   wva_learned_k2_tokens{...,role,out_bucket,q,source}                    k2
+   wva_learned_throughput{...,role,in_bucket,out_bucket,q}                mu
+   wva_learned_throughput_samples{...,role,in_bucket,out_bucket,q}        n
+   wva_learned_stable_shape_tokens{exported_namespace,model,axis}         I or O
+   ```
+
+   Label vocabulary is [`signals-as-metrics.md`](signals-as-metrics.md)'s:
+   **`exported_namespace`, never `namespace`**, because the controller's own
+   namespace takes `namespace` through the scrape and alerts keyed on it
+   silently matched nothing. The key labels are the tuple from Part 1, for the
+   reason given there.
 7. **Raise `DefaultWindowMaxSize`** to about 240 so the live window reaches its
    own age bound instead of stopping at ~8% of it. One constant, independent of
    everything else, and the measured cause of the 52%. Gate it on the `k`-spread
@@ -349,6 +380,27 @@ that widening it clears the gate.
    guard below. On becoming **leader**, not at process start: election is on in
    every shipped install, so a standby elected later would otherwise hold a
    line fitted from a range it read at boot.
+
+   **Whether a refitted line is its own or borrowed decides what step 8 can
+   do, and this document did not say.** Part 2 routes a line a variant did not
+   measure into the capped branch, where it may hold a fleet and not grow one.
+   A refitted line is not measured by *this process* — but it can be measured
+   by *this variant*, because the engine series carry `pod` and `instance` and
+   the collector already joins on them.
+
+   So the rule is by provenance, not by process:
+
+   - Refitted from **this variant's own pods'** series — its own line. It may
+     order, and the 90-second criterion below is the one that applies. This is
+     the case a restart of a running fleet hits, and the case worth building.
+   - Refitted from a **sibling's** pods, resolved only at fingerprint
+     granularity — borrowed. It is stamped like any other borrowed line and
+     may only hold, so step 8 cannot accelerate the first floor line at all in
+     that case; it accelerates the *hold*, which is worth much less.
+
+   A refit that cannot tell the two apart is the borrowed case by default, and
+   is then not worth the range query. **Resolving provenance per pod is
+   therefore a requirement of step 8, not a refinement of it.**
 
 Steps 1-5 were worth doing without 6-8, which is the test of whether the
 ordering is honest.
@@ -372,6 +424,22 @@ on the first real `(k, ITL)` reading check
 That bounds the one class `ValidModel` cannot — plausible but wrong — to a
 single cycle.
 
+**A refitted line needs somewhere to live that eviction will not sweep.**
+`itl.Window` holds observations and six config scalars and has nowhere to put
+a model, and `EvictStaleHistory` — which step 3 wired up, so this is live and
+no longer hypothetical — deletes a window the cycle its `Len()` reaches zero.
+A refitted-line-only window would be swept immediately. The place for it is
+`itlLines`, which step 5 already added: it is keyed by `itlPhysicsKey`, carries
+its own `learnedAt`, and ages by timeout rather than by a window's emptiness.
+Two rules come with that:
+
+- **Handover.** A refitted line is provisional and is replaced by the first
+  genuine fit, including a one-sample `FitPinnedB`. Holding it until the
+  window is `Ready()` would reintroduce the full exposure to a wrong line.
+- **Spread.** A stored `k` spread is metadata about the refitted model only and
+  goes away with it. It cannot be combined with live observations:
+  `KSpread()` over one real observation is 0.
+
 **Log every refitted line** with its range and its fit, and carry a flag on the
 `derived-mu` and `replica-capacity-decision` records. A decision made on a
 figure the process did not measure has to be visible as such — and `HeldWhy`
@@ -380,6 +448,15 @@ already carries `borrowed-line` for the same reason.
 **Publish a rehydration outcome metric**, `wva_refit_entries{outcome}` over
 `applied`, `rejected_invalid`, `rejected_mismatch`, `absent`. A diagnostic
 nobody can read is the problem it was written to solve.
+
+### The warm pool
+
+`noteITL` excludes `FromWarmPool` replicas, because a borrowed pod runs the
+pool's own engine settings — that is, **a different fingerprint**. Publishing a
+line measured on one would teach a configuration nothing serves, and a
+fingerprint is exactly what cannot tell the difference. It is the only safety
+property of line-sharing that is implemented without being argued anywhere
+else, which is why it is argued here.
 
 ### Cardinality of the learned families
 
@@ -403,8 +480,9 @@ family, times the distinct queue thresholds in use (one, in practice).
 - **Envtest** for the leader-elected runnable: that it refits on acquisition
   and not at process start, and that a lost lease stops it.
 - **A negative control per fix**, per this project's rule — and gated on the
-  control actually failing. Four tests on this branch passed against the bug
-  they named; the two that mattered are in Appendix C.
+  control actually failing. Five tests on this branch passed against the bug
+  they named; the one that mattered is in Appendix C, because it certified a
+  safety property that did not exist.
 
 ## How to know it worked
 
@@ -415,14 +493,29 @@ Run QT's baseline, re-derived: first observation **load + 22 s**, first OLS fit
 and first floor line **load + 7.4 min**, with **28 cycles** between them.
 
 - **Step 8 (the refit) succeeds** if the first floor line arrives inside
-  **2 minutes** of load start. Not 90 seconds: the floor also needs
-  `MinThroughputSamplesToOrder` saturated readings, and k2-observed is
-  explicitly not carried, so the ITL line is necessary and not sufficient. A
-  target under the floor's own other prerequisites would be unreachable by this
-  mechanism, which is how the previous threshold was wrong.
+  **90 seconds** of load start, *and only if the refitted line counts as the
+  variant's own* — see the paragraph below, which is the condition the whole
+  step rests on.
+
+  A previous revision set this to 2 minutes and justified it by saying the
+  floor "also needs `MinThroughputSamplesToOrder` saturated readings, so the
+  ITL line is necessary and not sufficient". **That was wrong.** `floor.go`'s
+  gate is `rc.SaturatedThroughputDerived || (samples >= … && !staleShape)`:
+  the derived disjunct is unconditional, and the comment beside it says
+  "Ordering on a derived figure does not wait for samples". Part 2 of this
+  document says the same thing from the other direction. Run QT settles it —
+  at 15:00:00Z the `itl-window`, `derived-mu` and `throughput-demand-floor`
+  lines are all in the **same cycle**, with no measured saturated reading and
+  `heldWhy` empty. The line was necessary *and sufficient*, so the figure to
+  beat is the 22 seconds the first observation takes, not a prerequisite that
+  does not exist.
 - **Step 7 (the window size) succeeds** if the share of cycles reaching an OLS
-  fit rises against run QT's **22%**, measured over a run with no restart at
-  all. It is a steady-state change and must be measured as one.
+  fit rises against run QT's **25.8%** — 54 of the **209 post-load** cycles,
+  not 54 of all 244. The all-cycles figure includes the 34 idle cycles this
+  document excludes as a cost two sections above, and comparing against it
+  would be the same methodology error as the first correction in Appendix C.
+  Measured over a run with no restart at all: it is a steady-state change and
+  must be measured as one.
 - **Three runs each way, compared on the median.** Phase-1 timings on this
   trace have produced 28 s, 59 s and 256 s medians for identical work, and the
   run above is n=1 on one decode variant.
@@ -516,7 +609,7 @@ under-projecting the backlog and under-ordering.
 
 ## Appendix C — what this document got wrong
 
-Four corrections, recorded because two of them reversed a conclusion and
+Six corrections, recorded because three of them reversed a conclusion and
 because the method errors recur.
 
 **The timeline was anchored to the wrong t0, twice.** Every figure was measured
@@ -541,6 +634,18 @@ historical read had no staleness guard though the write path beside it did, and
 had its start folded into the estimate again. Both are fixed; the lesson is
 that "wire up a function that already exists" is a behaviour change until its
 readers are checked.
+
+**Leader election was called off by default.** The Go flag's default is
+`false`, but `config/base/manager/deployment.yaml` passes
+`--leader-elect=true` and no overlay removes it, so a handoff is routine in
+every shipped install. The premise was used to downgrade the handoff case; it
+upgraded it instead.
+
+**`EnforceEager` was said to need a measurement before it could be hashed.**
+It does not. Excluding it pools an eager and a graph-captured engine onto one
+ITL line, which describes neither; including it costs only that each learns
+its own. The safe direction needs no measurement, and the built fingerprint
+hashes it.
 
 **A gate was written that did nothing, and a test certified it.** The
 borrowed-line gate added a term to one of two disjuncts while the other

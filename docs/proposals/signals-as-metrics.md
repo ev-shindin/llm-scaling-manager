@@ -255,8 +255,9 @@ happens.
 - **Historical comparison across a restart** — REVISED. This section called
   the restart gap honest rather than fixable, and that was wrong: see
   [learned state across a restart](learned-state-across-restarts.md), which
-  carries the learned figures across a restart and uses the families below to
-  make the result explicable. It does NOT read them back from these series, for
+  carries the learned ITL line across a restart and uses the families below to
+  make the result explicable. It does NOT carry a stored snapshot and does not
+  read these series back: it refits the line from the ENGINES own series. It does NOT read them back from these series, for
   a reason that belongs here too: the ServiceMonitor drops `pod` by design, so
   a `wva_` series has **no writer identity**, and `client_golang` cannot
   publish a historical timestamp, so a republished value looks new. It refits
