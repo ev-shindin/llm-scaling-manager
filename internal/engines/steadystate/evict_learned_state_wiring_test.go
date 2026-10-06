@@ -10,6 +10,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
@@ -72,6 +73,45 @@ func TestEvictStaleLearnedStateIsWiredIntoTheCycle(t *testing.T) {
 	require.Equal(t, 1, spy.calls, "a cycle must sweep learned state exactly once")
 	require.Equal(t, []time.Duration{capacity.HistoryEvictionTimeout}, spy.timeouts,
 		"swept on the same timeout the read path already checks (RollingAverage.Stale)")
+}
+
+// TestEvictStaleLearnedStateSweepsTheCapacityStore covers the OTHER half of the
+// sweep. The spy above proves the analyzer's evictor is called; nothing proved
+// the capacity store's was, and deleting that call left fifteen tests green.
+//
+// Ageing a record requires writing LearnedAt through the pointer Get returns,
+// which reaches past the store's documented contract ("a caller reads it and
+// writes through Update, never into it") -- because Update stamps LearnedAt to
+// now and the store offers no other way to age an entry. That it takes this to
+// observe the sweep at all is the reason the call went untested.
+func TestEvictStaleLearnedStateSweepsTheCapacityStore(t *testing.T) {
+	store := capacity.NewStore()
+	e := &Engine{
+		Config:               config.NewTestConfig(),
+		optimizer:            allocation.NewCostAwareOptimizer(),
+		saturationV2Analyzer: &evictSpy{},
+		capacityStore:        store,
+	}
+
+	store.Update("ns", "m", "v1", capacity.Record{
+		AcceleratorName: "NVIDIA-H200",
+		GpuCount:        1,
+		EngineParams:    &capacity.EngineParams{Engine: inferenceengine.EngineVLLM},
+	})
+	fresh := store.Get("ns", "m", "v1")
+	require.NotNil(t, fresh, "the record must exist before the sweep can be observed")
+
+	// Fresh: the sweep must leave it alone.
+	e.evictStaleLearnedState(context.Background())
+	require.NotNil(t, store.Get("ns", "m", "v1"),
+		"a record inside the eviction timeout must survive")
+
+	// Older than the store's own timeout.
+	fresh.LearnedAt = time.Now().Add(-2 * capacity.EvictionTimeout)
+	e.evictStaleLearnedState(context.Background())
+	require.Nil(t, store.Get("ns", "m", "v1"),
+		"the per-cycle sweep must evict a record past EvictionTimeout, which is "+
+			"the half of evictStaleLearnedState no test observed")
 }
 
 // TestEvictStaleLearnedStateSurvivesAnAnalyzerThatCannotEvict pins the failure

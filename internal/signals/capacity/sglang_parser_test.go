@@ -41,6 +41,31 @@ var _ = Describe("ParseSGLangArgs", func() {
 		})
 	})
 
+	Describe("an unusable memory fraction", func() {
+		// The guard mirrors the vLLM path's, and only the vLLM path was
+		// tested -- reverting this one left the whole package green.
+		// ParseFloat accepts "NaN" and "Inf", and NaN then defeats every
+		// comparison downstream: IsCapacityCompatible would report a variant
+		// as incompatible with itself.
+		It("leaves the default in place for NaN, Inf and out-of-range values", func() {
+			for _, bad := range []string{"NaN", "Inf", "-Inf", "0", "-0.5", "1.5"} {
+				deploy := makeTestDeployment("--mem-fraction-static=" + bad)
+				params := ParseSGLangArgs(scaletarget.NewDeploymentAccessor(deploy))
+				Expect(params.GpuMemoryUtilization).To(Equal(0.9),
+					"--mem-fraction-static="+bad+" must leave the SGLang default")
+			}
+		})
+
+		It("still accepts a usable fraction, including exactly 1", func() {
+			for _, good := range []string{"0.85", "1", "1.0"} {
+				deploy := makeTestDeployment("--mem-fraction-static=" + good)
+				params := ParseSGLangArgs(scaletarget.NewDeploymentAccessor(deploy))
+				Expect(params.GpuMemoryUtilization).To(BeNumerically(">", 0),
+					"--mem-fraction-static="+good+" is usable and must land")
+			}
+		})
+	})
+
 	Describe("SGLang flag mapping", func() {
 		It("should parse all known SGLang capacity flags", func() {
 			deploy := makeTestDeployment(
