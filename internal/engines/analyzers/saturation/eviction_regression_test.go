@@ -35,7 +35,8 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 		//
 		// The guard makes the read agree with the sweep: a stale entry is
 		// ignored whether or not the sweep has reached it yet.
-		k2From := func(a *SaturationAnalyzer, historyKey string) (int64, capacity.K2Source) {
+		const historyKey = "hist-key"
+		k2From := func(a *SaturationAnalyzer) (int64, capacity.K2Source) {
 			return a.computeK2(historyKey, model, ns, variant,
 				0,     // queueLen: not saturated, so Priority 1 cannot fire
 				0,     // tokensInUse
@@ -50,14 +51,12 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 
 		It("does not report a stale window as historical", func() {
 			a := NewSaturationAnalyzer(capacity.NewStore())
-			key := "hist-key"
-
 			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
 			ra.Add(50000)
-			a.computeCapacityHistory[key] = ra
+			a.computeCapacityHistory[historyKey] = ra
 
 			// Fresh: the historical figure is what a decision reads.
-			k2, src := k2From(a, key)
+			k2, src := k2From(a)
 			Expect(src).To(Equal(capacity.K2SrcHistorical),
 				"a fresh window must still answer Priority 2")
 			Expect(k2).To(BeNumerically("==", 50000))
@@ -65,7 +64,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 			// Aged past the timeout, WITHOUT running the sweep. The read must
 			// already ignore it, or the sweep changes the answer.
 			ra.TouchAt(time.Now().Add(-2 * capacity.HistoryEvictionTimeout))
-			_, staleSrc := k2From(a, key)
+			_, staleSrc := k2From(a)
 			Expect(staleSrc).NotTo(Equal(capacity.K2SrcHistorical),
 				"a stale window must not be read as historical: otherwise the "+
 					"sweep deleting it silently changes k2, and with it the replica count")
@@ -74,15 +73,14 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 		It("gives the same answer before and after the sweep", func() {
 			// The property the eviction commit claimed and did not have.
 			a := NewSaturationAnalyzer(capacity.NewStore())
-			key := "hist-key"
 			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
 			ra.Add(50000)
 			ra.TouchAt(time.Now().Add(-2 * capacity.HistoryEvictionTimeout))
-			a.computeCapacityHistory[key] = ra
+			a.computeCapacityHistory[historyKey] = ra
 
-			k2Before, srcBefore := k2From(a, key)
+			k2Before, srcBefore := k2From(a)
 			a.EvictStaleHistory(capacity.HistoryEvictionTimeout)
-			k2After, srcAfter := k2From(a, key)
+			k2After, srcAfter := k2From(a)
 
 			Expect(srcAfter).To(Equal(srcBefore),
 				"the sweep must not change which priority answers")
@@ -175,7 +173,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 				a.noteReplicaStart(key, ns, variant,
 					[]domain.ReplicaMetrics{readyPod("pod-a", 2700)}, logr.Discard())
 			}
-			Expect(base.Add(10 * step).Sub(base)).To(BeNumerically(">",
+			Expect(base.Add(10*step).Sub(base)).To(BeNumerically(">",
 				capacity.HistoryEvictionTimeout),
 				"the run must span more than the timeout, or the sweep is never tested")
 
