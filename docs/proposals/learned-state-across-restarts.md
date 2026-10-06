@@ -55,16 +55,16 @@ no floor at all. That is still the window the floor exists for, and a restart
 mid-ramp still lands in it; it is a smaller claim than "no floor", and it is the
 true one.
 
-**Which gate cost the 51 cycles is an open question, and it decides the prize.**
-At one reading per replica per cycle, 10 samples is ~10 cycles. 51 means the
-binding constraint was the **`k` spread** (0.30) or the observable band, not the
-sample count — and `noteITL` additionally discards `!Ready`, `FromWarmPool`,
-`AvgITL <= 0` and `KvUsageInstant <= 0` readings. This matters directly:
-if those 51 cycles were spent waiting for the fleet's load to *spread* `k`,
-rehydrating `(A, B)` buys all 51; if they were spent collecting samples, it buys
-about 10. **Settle this from the run-QT scrapes before building step 6** — the
-data is already on the PVC. The table above says 51 because that is what was
-measured; the attribution is not yet evidence.
+**Which gate cost the cycles is SETTLED, and the answer was neither candidate.**
+This paragraph used to pose it as an open question between the sample count and
+the k spread. Measured from run QT: 35 cycles with the engine reporting no ITL
+at all, 28 on the sample count, and **zero** on the spread before the first
+fit. The full classification, the corrected timeline (first observation
+t+8.8 min, first OLS fit t+15.8 min, so ~63 cycles and not 51) and the
+retraction of a wrong correction about itlZero are in
+[Part 2](#measured-and-it-settles-the-mechanism-there-is-no-store). The table
+above says 51 because that is the figure this document was built on; read Part 2
+for what it actually is.
 
 A rollout restarts the controller. So does a node drain and an OOM. Leader
 election is **off by default** (`--leader-elect=false`), so election churn is
