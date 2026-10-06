@@ -1,6 +1,6 @@
 # Learned state across a restart, and what it should be keyed by
 
-**Status:** steps 1-5 built; 6 and 7 proposed. Revised twice, substantially:
+**Status:** steps 1-5 built; 6, 7 and 8 proposed. Revised twice, substantially:
 once after an adversarial review against the code, and once after the
 measurement in Part 2, which **removed the store from the design entirely**.
 The findings are folded in where they land rather than appended.
@@ -212,32 +212,51 @@ in the fingerprint for the line even if KV capacity is unaffected. It needs a
 measurement first, and adding it later is a **fingerprint version bump**, not a
 free change.
 
-### What gets re-keyed, and what must not
+### BUILT, and not as a re-key: the fitted LINE is shared, not the window
 
-The first draft said "re-key the ITL window and `capacity.Store`". Both halves
-were wrong in ways the review caught.
+This section replaced itself twice. The first draft said "re-key the ITL window
+and `capacity.Store`". The second corrected that to "re-key `itlWindows` only",
+after review showed `itlWindowKey` keys **three** maps and two must not move.
+What is built does not re-key the window at all, and the reason is a question
+worth asking of any cached figure: **what does a decision actually read?**
 
-`itlWindowKey` keys **three** maps, not one: `itlWindows`, `itlBaseline` (the
-last `B` an OLS fit produced, which `FitPinnedB` pins) and `startSeconds`. The
-code is explicit about why the latter two die with the window:
+**Only `A` and `B`.** One call site uses the ITL model —
+`model.ITLAt(kPrice)` in `deriveMu` — plus `model.B` into `itlBaseline`.
+Everything else that touches either is a log field. The raw observations exist
+only to produce those two numbers and to decide whether they can be trusted
+(`Ready()`, `Len()`, `KSpread()`).
+
+So pooling the observations was the wrong mechanism for a saving that needs two
+floats. What ships instead:
+
+- **Each variant fits its own window**, keyed by `itlWindowKey` exactly as
+  before. Nothing about the window changes.
+- **A variant's own fit is published** as the line for its engine
+  configuration, under `itlPhysicsKey` — model, accelerator, GPUs, fingerprint.
+- **A variant with no usable fit of its own borrows that line**, marked
+  borrowed all the way to the floor, which may **hold** the fleet on it and
+  must not **grow** one.
+
+The saving is unchanged and is the point: a rename, a second identical variant,
+or the same deployment in another namespace gets a line on its first cycle
+instead of paying the ~63 cycles a fit takes.
+
+Three findings about what must NOT move survive intact, and the built design
+simply does not move them. `itlBaseline` and `startSeconds` share
+`itlWindowKey` with the window, and the code is explicit about why they die
+with it:
 
 > The learned baseline dies with the window that produced it. Kept, it would
 > grow one float per variant/accelerator ever seen and, worse, pin a hardware
 > floor measured before a redeploy onto different hardware into every later fit
 > for that key. / And the start estimate, for the same reason.
 
-**Replica start time is not a function of the engine configuration.** It is
-image pull, node, PVC and weight-download size — precisely what the fingerprint
-cannot see. Worse, `noteReplicaStart` runs *before* the decode guard that keeps
-prefill out of the ITL window, so prefill and decode variants with matching
-flags would land `startSeconds` under one fingerprint key, and the estimator
-takes the **minimum** per role: the fastest-starting pod anywhere sharing the
-fingerprint would set the horizon `T` for everyone, under-projecting the backlog
-and under-ordering. A step presented as behaviour-preserving would have been a
-regression.
-
-So: **re-key `itlWindows` only.** `itlBaseline` and `startSeconds` stay on the
-variant key — two keys computed per cycle instead of one, which is cheap.
+**Replica start time is not a function of the engine configuration** — it is
+image pull, node, PVC and weight-download size. `noteReplicaStart` runs
+*before* the decode guard, so prefill and decode variants with matching flags
+would have shared a key, and `startEstimates` takes the **minimum** per role:
+the fastest-starting pod anywhere sharing the fingerprint would have set the
+horizon `T` for everyone, under-projecting the backlog and under-ordering.
 
 `capacity.Store` is **not re-keyed at all**, for three reasons:
 
@@ -277,7 +296,7 @@ So the corrected key table is:
 
 | state | should be keyed by | why not more |
 | --- | --- | --- |
-| ITL line `(A, B)` | model + accelerator + gpus + fingerprint | the same weights, engine build and hardware give the same line **whatever shape is arriving** — which is why the derived mu can price a shape the fleet has never saturated under. `noteITL` deliberately does *not* clear the window on a shape change, while the throughput analyzer's window *is* cleared; that asymmetry is the existing evidence for this claim. |
+| ITL line `(A, B)` | model + accelerator + gpus + fingerprint — as a line to BORROW, not a window to pool | the same weights, engine build and hardware give **nearly** the same line, which is why a variant with nothing of its own can start from a sibling's. Only nearly: at a fixed `k` the sequence count is `k·C/KVreq` and `KVreq` is the shape, so a borrowed line may hold a fleet and not grow it. The observations themselves stay per variant, under `itlWindowKey`. |
 | k2 | fingerprint + role + output bucket + **queue threshold** | capacity is config **and** shape: `k2 = N_steady x (I + O/2)` |
 | throughput window (mu) | fingerprint + role + input and output buckets + **queue threshold** | a completion rate is per shape |
 | `capacity.Store` record | **unchanged** (namespace, model, variant) | circular, and `EffectiveCapacity` is shape-dependent |
@@ -285,32 +304,58 @@ So the corrected key table is:
 | stable shape | namespace + model | traffic, not configuration |
 | accelerator memo | **unchanged**, and it feeds the fingerprint | it exists because the accelerator reading is unstable |
 
-What is dropped from the ITL line's key is `namespace` and the variant name —
-not the model. The prize is correspondingly smaller than the first draft sold:
+What the SHARED LINE's key drops is `namespace` and the variant name — not
+the model. The prize is correspondingly smaller than the first draft sold:
 **a rename is free, and a second identical variant is free.** The cross-namespace
 claim survives only for genuinely identical deployments.
 
-### What pooling the ITL window actually changes
+### Why sharing observations was wrong, and sharing a line is not
 
-Five effects, since this is the step whose behaviour change needs the most care:
+Four findings from the review of the pooled version, each of which the line
+form removes rather than mitigates.
 
-1. Two variants of one model with identical flags — a canary, or the decode
-   halves of a P/D pair — now share observations. This is the prize.
-2. Observations from differently-loaded fleets merge, which **increases**
-   `KSpread()` and makes `Ready()` fire *sooner*: a fleet stuck at one `k` can
-   borrow spread from a sibling. A real benefit, and also the mechanism by which
-   a mis-keyed pool produces a confidently-fitted *wrong* line faster than
-   today — which is why the fingerprint has to be right first.
-3. `itlBaseline` would pool, pinning one variant's measured `B` into every
-   sibling's fit. Prevented by leaving it on the variant key, above.
-4. `startSeconds` would pool. Same.
-5. **The window's 20 slots are now shared.** `Add` evicts the oldest at
-   `DefaultWindowMaxSize` regardless of how many fleets feed it, so with four
-   contributing variants each one's history is five cycles deep and
-   `DefaultObservationMaxAge` becomes irrelevant — eviction by size dominates.
-   **`DefaultWindowMaxSize` must scale with the number of contributors**, or
-   pooling makes the window shorter. This is the most mechanical of the five and
-   the easiest to miss.
+**The blend described neither variant.** `itlPhysicsKey` asserts ITL(k) is a
+function of the model, the hardware and the flags. Not quite: at a fixed `k`
+the resident sequence count is `k·C/KVreq`, and `KVreq` is the **traffic
+shape**. Two variants on one configuration serving different shapes sit at
+different batch sizes at the same `k`, so on different lines — and this
+repository's own benchmark shapes differ by 2.1x. The existing rule that the
+window is *not* cleared on a shape change is an approximation across **time**
+for one fleet, which 30-minute ageing corrects; pooling turned it into a
+permanent blend across **concurrent** fleets that never converges, because both
+keep feeding it.
+
+**A variant could order on data it had never produced.** A derived figure needs
+no sample count — that is the point of deriving it — so a variant whose own
+window was empty was fitted a sibling's data and then granted the right to
+order replicas on it, bypassing both `MinThroughputSamplesToOrder` and the
+stale-shape guard. The line form keeps the saving and denies the ordering,
+through the same rule the floor already applies to a reading borrowed from a
+neighbouring shape bucket.
+
+**Separating `itlBaseline` was nominal.** The `B` written was the **pooled**
+fit's, so every contributor stored the same value under its own key. Only a
+variant still holding a pre-pooling `B` in the pinned-B tier saw a difference.
+With each variant fitting its own window, its `B` is its own.
+
+**Per-variant mu depended on Go map iteration order**, because each variant
+fitted over the shared window as it stood when its turn came, so the first
+iterated saw fewer points than the last. With a window per variant the order
+cannot matter.
+
+### What the line form makes unnecessary
+
+Worth listing, because it is most of the machinery pooling needed: the
+contributor set and its per-contributor ageing, `itl.Window.GrowMaxSize`
+(pooling shortened each contributor's history, so capacity had to scale with
+the contributor count), a `variantSeenAt` stamp and the split eviction it
+forced, and a two-key `noteITL`. The window's emptiness evicts the baseline and
+the start estimate again, as it always did.
+
+Measured cost of the pooled version, for the record: it also reintroduced the
+"one entry per variant that has EVER been seen" leak in a new map, and left an
+unsynchronised read of a field another variant's cycle could write. Both are
+gone with the mechanism rather than patched.
 
 ## Part 2 — carrying it across a restart
 
@@ -769,11 +814,13 @@ in Part 2 replaced the store in steps 6 and 7.
 4. **The fingerprint**, computed, versioned and published as
    `wva_engine_config_info`, used for nothing. Observable before it is
    load-bearing.
-5. **Re-key `itlWindows` only** onto it — not `itlBaseline`, not `startSeconds`,
-   not `capacity.Store` — keeping `queueThreshold` in the k2 and mu keys and
-   scaling `DefaultWindowMaxSize` with the number of contributors. This alone
-   makes a rename and a second identical variant free, with no persistence
-   involved.
+5. **Share the fitted LINE, not the window.** Each variant keeps its own
+   window; its own fit is published under the fingerprint; a variant with no
+   usable fit borrows a sibling's `(A, B)`, marked borrowed so the floor may
+   hold the fleet on it and not grow it. Nothing is re-keyed — not
+   `itlWindows`, not `itlBaseline`, not `startSeconds`, not `capacity.Store` —
+   and `queueThreshold` stays in the k2 and mu keys. This alone makes a rename
+   and a second identical variant free, with no persistence involved.
 6. **Publish `wva_learned_*`.** Worth doing on its own: it makes a
    post-restart decision explicable on a dashboard, and it needs no trust from
    anyone. No store, and nothing reads it back.
