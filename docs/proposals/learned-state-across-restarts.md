@@ -1,75 +1,63 @@
 # Learned state across a restart, and what it should be keyed by
 
-**Status:** steps 1-5 built; 6, 7 and 8 proposed. Revised twice, substantially:
-once after an adversarial review against the code, and once after the
-measurement in Part 2, which **removed the store from the design entirely**.
-The findings are folded in where they land rather than appended.
+**Status:** steps 1-5 built (PR #120); 6, 7 and 8 proposed. Revised four times
+against code and measurement, and the corrections are not cosmetic — two of
+them reversed a conclusion. Each is recorded in
+[Appendix C](#appendix-c--what-this-document-got-wrong), and the designs that
+were tried and rejected are in Appendices A and B rather than inline, so
+everything before the appendices describes what is built or proposed now.
 
-Two changes that only make sense together: persisting what the analyzer learns,
-and fixing what it is filed under. Either alone is worth less than half —
-persisting state keyed on the wrong thing carries a figure forward into a
-situation it does not describe.
-
-This **revises [`signals-as-metrics.md`](signals-as-metrics.md)**, which said
-publishing these signals was observability only and that a restart gap was
-"honest rather than fixable". The first half stands. The second was wrong, but
-not in the way the first draft of this document claimed: the gap is fixable,
-and the fix is neither reading WVA's own metrics back nor storing a snapshot.
-It is to refit the line from the **engines'** own series, which Prometheus
-already holds. See
-[there is no store](#measured-and-it-settles-the-mechanism-there-is-no-store).
+The analyzer learns three things and keys them badly. This fixes the keying,
+and then carries the one figure worth carrying across a restart — not by
+storing it, but by refitting it from the engines' own measurements.
 
 ## The problem, measured
 
 Nothing the analyzer learns survives a restart. Confirmed rather than assumed:
 there is no persistence anywhere in `internal/signals/capacity` or
 `internal/engines/analyzers/saturation` — `capacity.Store` is a plain
-`map[string]*Record` behind a mutex, and every window is in memory on the
-analyzer.
+`map[string]*Record` behind a mutex, and every window is in memory.
 
-What that costs:
+### What a cold start costs, measured from load start
 
-| lost | cost of relearning |
+Run QT, the decode variant, 244 `itl-window` cycles at a uniform 15 s. The
+harness starts at 14:52:38Z (`LLMDBENCH_HARNESS_START`), and **every figure
+below is relative to that**, not to the controller's first cycle:
+
+| | |
 | --- | --- |
-| the ITL line `(A, B)` per variant | **51 cycles** with `itlZero: true` before a fit exists — 10 samples **and** a `k` spread of 0.30, within an observable band of `[0.15, 0.80]` |
-| the derived mu | the floor may **hold the fleet but not grow it** until two own readings exist |
-| `k2` per shape bucket | falls back to `k1` alone, so capacity is memory-bound until a saturated cycle is observed |
-| the saturated throughput window | `MinThroughputSamplesToOrder` = 2 readings before the floor may order |
-| the stable shape | the queue is priced at `DefaultExpectedOutputTokens` = 512, which **under-states a 6000-token workload twelvefold** |
-| the replica start estimate | the floor's horizon `T` falls back to configuration |
+| first `(k, ITL)` observation held | **load + 22 s** |
+| first OLS fit, and first `throughput-demand-floor` | **load + 7.4 min** |
+| cycles between the two | **28, every one blocked on the sample count** |
+| cycles blocked on the `k` spread before the first fit | **0** |
 
-Measured end to end on run QT this month: **~8 minutes** between load starting
-and the first `throughput-demand-floor` line, with 51 `itlZero: true` cycles in
-between.
+So the relearning cost is **28 cycles, about 7 minutes**, and it is entirely
+the sample count: ten `(k, ITL)` pairs at roughly one per replica per cycle.
 
-Two corrections to how this was first stated, because both change what the
-proposal is worth:
+The classification over the whole run, with the idle period separated out
+because it is not a cost:
 
-**The floor is not absent — it is capped.** `useDerived` consults the derived mu
-only when a role has no own measured reading, and `floor.go` lets a role order
-on `SaturatedThroughputDerived || (samples >= 2 && !staleShape)`. With no
-derived mu, two own saturated readings still produce a floor. What is actually
-lost is the first two readings' worth of ordering plus the thin-window cap —
-"may hold the fleet but not grow it". Only a role **never seen saturated** gets
-no floor at all. That is still the window the floor exists for, and a restart
-mid-ramp still lands in it; it is a smaller claim than "no floor", and it is the
-true one.
+| state of the window | cycles | note |
+| --- | --- | --- |
+| empty, **before any traffic existed** | 34 | idle; nothing to learn from, nothing to save |
+| empty, after load started | 1 | the engine had not yet reported an ITL |
+| blocked on the sample count | 28 | **this is the relearning cost** |
+| blocked on the `k` spread | 127 | steady state, not cold start — see below |
+| ready, a fit available | 54 | |
 
-**Which gate cost the cycles is SETTLED, and the answer was neither candidate.**
-This paragraph used to pose it as an open question between the sample count and
-the k spread. Measured from run QT: 35 cycles with the engine reporting no ITL
-at all, 28 on the sample count, and **zero** on the spread before the first
-fit. The full classification, the corrected timeline (first observation
-t+8.8 min, first OLS fit t+15.8 min, so ~63 cycles and not 51) and the
-retraction of a wrong correction about itlZero are in
-[Part 2](#measured-and-it-settles-the-mechanism-there-is-no-store). The table
-above says 51 because that is the figure this document was built on; read Part 2
-for what it actually is.
+A rollout restarts the controller; so does a node drain, an OOM, and a leader
+handoff. **Leader election is enabled in every shipped install** —
+`config/base/manager/deployment.yaml` passes `--leader-elect=true` and no
+overlay removes it — so a handoff is routine, not exotic. The Go flag's own
+default is `false`, which is why an earlier revision of this document called
+election churn rare; that was wrong.
 
-A rollout restarts the controller. So does a node drain and an OOM. Leader
-election is **off by default** (`--leader-elect=false`), so election churn is
-not routine — but when it is enabled a handoff is a worse case than a restart,
-not a better one, and [that gets its own section](#more-than-one-controller).
+### Scope
+
+One decode variant, one run. The prefill variant never logged an
+`itl-window` line, so "244 cycles" is one sample and not a population. That
+matters most for the k-spread finding below, which is the one being promoted
+as valuable.
 
 ## Part 1 — what it is keyed by
 
@@ -86,7 +74,7 @@ not a better one, and [that gets its own section](#more-than-one-controller).
 
 `throughputKey` and `historyKey` take `variantName` and do not put it in the
 key — it only resolves `stableAccelerator`. So those two are already keyed on
-hardware and traffic shape rather than on identity. The ITL window and the
+hardware and traffic shape rather than identity. The ITL window and the
 capacity store are not.
 
 **Neither includes the engine configuration.** That is the defect, and it cuts
@@ -96,792 +84,467 @@ both ways:
   **different `--max-num-batched-tokens`** share a k2 history window. Their
   capacity genuinely differs; the window averages them together.
 - One variant **renamed**, or a second identical variant added, gets a fresh
-  ITL window and pays the relearning again — though `ITL(k)` is a property of
+  ITL window and pays the 28 cycles again — though `ITL(k)` is a property of
   the weights, the engine build and the hardware, not of a name.
 
-### The relation already exists
+### The fingerprint
 
 `capacity.EngineParams.IsCapacityCompatible` is close to the equality this
-wants: an eight-field predicate over `Engine`, `GpuMemoryUtilization`,
-`BlockSize`, `KvCacheDtype`, `TensorParallelSize`, `NumGpuBlocksOverride`,
-`TotalKvTokensOverride`, `EffectiveMaxBatchedTokens`. It is used only as a
-*fallback scan* in `Store.FindCompatible`, for sizing a zero-replica variant.
-
-The proposal promotes that relation from a fallback to a key — but it is **not
-sufficient as written**, and the next two sections are the corrections.
+wants, and was used only as a *fallback scan* in `Store.FindCompatible`. As
+built:
 
 ```
 engineFingerprint = hash(
-    fingerprintVersion,            // see versioning, below
-    weightDtype, quantization,     // NOT in EngineParams today
+    fingerprintVersion,
+    weightDtype, quantization,     // added to the parser; see below
     Engine, GpuMemoryUtilization, BlockSize, KvCacheDtype,
     TensorParallelSize, NumGpuBlocksOverride, TotalKvTokensOverride,
     EffectiveMaxBatchedTokens,
-    MaxNumSeqs, MaxModelLen,       // see the defects below
+    MaxNumSeqs, MaxModelLen,
+    EnforceEager,
 )
 
 learnedStateKey = (modelID, acceleratorName, gpusPerReplica, engineFingerprint)
 ```
 
+`EnforceEager` **is** hashed. An earlier revision said it needed a measurement
+first; it does not, and the asymmetry is deliberate. No CUDA graphs does not
+change how much KV fits, so a capacity record survives it — but it does change
+the inter-token latency, and this digest also keys a latency model. Including
+it costs only that two engines differing in `--enforce-eager` each learn their
+own line; excluding it would pool them onto one line describing neither. The
+safe direction needs no measurement.
+
+Three `EngineParams` fields are excluded on one rule: `MaxNumBatchedTokens`,
+`IsV1Engine` and `ChunkedPrefillEnabled` exist only to resolve
+`EffectiveMaxBatchedTokens`, which is hashed. Hashing an input beside the value
+it produces splits a key on a distinction the engine has already collapsed.
+
 ### The hash covers the flags; the axes people query by stay labels
 
 `modelID`, `acceleratorName` and `gpusPerReplica` are **part of the key and
-not part of the hash**. The key is the tuple above, composed in one key
-function, and the fingerprint is only its last component.
+not part of the hash**. The key is the tuple above, composed in one function.
 
-This corrects an earlier draft, which hashed all three in. Three reasons the
-split is better, none of which weakens the identity:
-
-- **It is directly queryable.** `wva_learned_itl_slope{model="..."}` answers
-  "what has this model learned" with no join, and `{accelerator="H200"}`
-  answers the comparison an operator actually makes. Hashed in, every such
-  question becomes a join against `wva_engine_config_info`.
-- **It removes a many-to-one inconsistency.** The info metric has to carry
-  the identity somewhere. If `model` is also hashed, there are N info series
-  per fingerprint and no way to tell which one a learned line came from. With
-  `model` on the key itself, the two agree by construction.
-- **It costs no cardinality.** The number of distinct
+- **Directly queryable.** `wva_engine_config{model="..."}` answers "what is
+  this model running" with no join, and `{accelerator="H200"}` answers the
+  comparison an operator actually makes.
+- **No cardinality cost.** The number of distinct
   `(model, accelerator, gpus, fingerprint)` combinations is the same either
-  way. Only the representation changes.
+  way.
 
-What this must not become is "the fingerprint alone identifies the line" --
-exactly the error the first draft made, and it would pool a 0.6B and a 32B
-model onto one ITL line. In Go the key is a composed string or a struct
-either way, so the discipline lives in the key function; a hash is not a
-substitute for writing that function once and using it everywhere.
-
-`weightDtype` and `quantization` stay hashed. They are launch flags like the
-rest, they are already labels on the info metric for readability, and nobody
-asks an autoscaler's internal state to list every model served at FP8.
+What this must not become is "the fingerprint alone identifies the line" —
+that would pool a 0.6B and a 32B model. The key is the tuple, and the
+discipline lives in the key function.
 
 ### `EngineParams` says nothing about the weights
 
-Stated prominently because the first draft got it wrong, and the error would
-have been the worst one this design could make. `EngineParams` holds `Engine`,
-`GpuMemoryUtilization`, `BlockSize`, `KvCacheDtype`, `TensorParallelSize`,
-`NumGpuBlocksOverride`, `MaxNumBatchedTokens`, `MaxNumSeqs`, `MaxModelLen`,
-`EnforceEager`, `IsV1Engine`, `ChunkedPrefillEnabled`, `TotalKvTokensOverride`
-and `EffectiveMaxBatchedTokens` — and **nothing that identifies the weights**.
-`KvCacheDtype` is the KV cache's dtype, not the model's; `MaxModelLen` is a
-context-length limit.
+`EngineParams` holds `Engine`, `GpuMemoryUtilization`, `BlockSize`,
+`KvCacheDtype`, `TensorParallelSize`, `NumGpuBlocksOverride`,
+`MaxNumBatchedTokens`, `MaxNumSeqs`, `MaxModelLen`, `EnforceEager`,
+`IsV1Engine`, `ChunkedPrefillEnabled`, `TotalKvTokensOverride` and
+`EffectiveMaxBatchedTokens` — and **nothing identifying the weights**.
+`KvCacheDtype` is the KV cache's dtype; `MaxModelLen` a context limit.
 
-A fingerprint built from `EngineParams` alone gives a 0.6B model and a 32B model
-the same identity whenever their launch flags and hardware match, and therefore
-the same ITL line — a quantity that differs between them by an order of
-magnitude. ITL's slope and intercept are dominated by parameter count and weight
-dtype, which is exactly what the struct cannot see. Two variants deployed from
-one manifest template is the *common* case, not a contrived collision.
+A fingerprint from it alone would give a 0.6B and a 32B model one identity
+whenever their flags and hardware matched, and ITL's slope is dominated by
+parameter count and weight dtype. So `modelID` is in the key, and the parser
+learned `--dtype` and `--quantization`, without which an FP8 and a BF16
+serving of one model collide.
 
-So `modelID` is part of the KEY, as a label beside the fingerprint rather
-than hashed into it (see above). And that is still not enough:
-`applyParam` parses `gpu_memory_utilization`, `block_size`, `kv_cache_dtype`,
-`tensor_parallel_size`, `num_gpu_blocks_override`, `max_num_batched_tokens`,
-`max_num_seq(s)`, `max_model_len`, `enforce_eager` and
-`enable_chunked_prefill` — **no `--dtype`, no `--quantization`**. An FP8 and a
-BF16 serving of the same model collide. **Teaching the parser those two flags is
-therefore a prerequisite, not a refinement**, and it is step 2 of the order.
+### Two defects this exposed, both fixed and both worth fixing alone
 
-A served model path plus revision would be stricter still, since two `modelID`s
-can point at different weights and a retune changes ITL without changing the
-name. `modelID` plus dtype and quantization is the floor, not the goal.
+**`IsCapacityCompatible` compared neither `MaxNumSeqs` nor `MaxModelLen`.** `S`
+caps `N_steady` in k2 (`replica_capacity.go:718`) and `seqs` in the derived mu
+(`mu_from_itl.go:218`). `MaxModelLen` changes KV per sequence, and reaches
+`EffectiveMaxBatchedTokens` only when chunked prefill is off — so on the V1
+path, where the resolver returns a flat 8192, it was invisible to the predicate
+entirely.
 
-The general lesson, which applies to every field: the fingerprint is a
-**deliberate list of what capacity and latency are a function of**, not
-"whatever `EngineParams` happens to carry". Build it by naming the physics and
-then checking the struct can supply it — the opposite order from the one that
-produced the error above.
+**`EvictStaleHistory` and `Store.EvictStale` had no production caller.** So the
+ITL windows, the learned baseline, the start estimate, the accelerator memo and
+the capacity records were never swept, and the "one window per variant that has
+EVER been seen" leak the code's own comment warns about was live.
 
-### Two defects this exposes, both worth fixing alone
+### What does NOT move
 
-**`IsCapacityCompatible` does not compare `MaxNumSeqs`.** But `S` caps
-`N_steady` in k2 (`replica_capacity.go:705`) and caps `seqs` in the derived mu
-(`mu_from_itl.go:218`). Two engines differing only in `--max-num-seqs` have
-different capacity *and* a different mu, and the predicate calls them
-compatible. Today that only mis-sizes a zero-replica variant through
-`FindCompatible`; promoted to a key it would pool two genuinely different
-engines.
+`capacity.Store` is **not re-keyed**: the fingerprint comes from
+`Record.EngineParams`, which you only have after looking up by name, so a
+fingerprint key needs an extra index; six non-test callers genuinely ask "what
+did *this variant* measure"; and `Record.EffectiveCapacity` is `min(k1, k2)`,
+which is shape-dependent.
 
-**`MaxModelLen` is absent too**, from the predicate and from the first draft's
-fingerprint. It changes KV per sequence, and with chunked prefill off it changes
-`EffectiveMaxBatchedTokens` through `resolveEffectiveMaxBatchedTokens`. Both
-join the comparison, and that is **step 1, worth doing whether or not the rest
-of this proposal happens.**
+**`queueThreshold` stays in the k2 and throughput keys.** Both end in `q%g`,
+with a measurement in the comment: a k2 of 2 learned under a low threshold kept
+a variant at utilization 1.0 under a threshold of 100. It is the only
+invalidator for a policy retune.
 
-`EnforceEager` is a third candidate — no CUDA graphs changes ITL, so it belongs
-in the fingerprint for the line even if KV capacity is unaffected. It needs a
-measurement first, and adding it later is a **fingerprint version bump**, not a
-free change.
+**The accelerator memo stays, and feeds the fingerprint.** It exists because
+the observed accelerator changes with pod placement and can read unresolved;
+the fingerprint takes `acceleratorName` as an input, so an unresolved
+accelerator would make the digest itself oscillate.
 
-### BUILT, and not as a re-key: the fitted LINE is shared, not the window
+| state | keyed by | why not more |
+| --- | --- | --- |
+| ITL **window** | unchanged: namespace, model, variant, accelerator, gpus | the observations are this variant's own |
+| ITL **line** (A, B), shared | model + accelerator + gpus + fingerprint | the same weights, build and hardware give **nearly** the same line — near enough to start from, not near enough to order on |
+| k2 | fingerprint + role + output bucket + **queue threshold** | capacity is config **and** shape |
+| throughput window (mu) | fingerprint + role + input and output buckets + **queue threshold** | a completion rate is per shape |
+| `capacity.Store` record | **unchanged** | circular, and `EffectiveCapacity` is shape-dependent |
+| `itlBaseline`, `startSeconds` | **unchanged** | a hardware floor and a start time are not functions of the config |
+| stable shape | namespace + model | traffic, not configuration |
+| accelerator memo | **unchanged**, and it feeds the fingerprint | the accelerator reading is unstable |
 
-This section replaced itself twice. The first draft said "re-key the ITL window
-and `capacity.Store`". The second corrected that to "re-key `itlWindows` only",
-after review showed `itlWindowKey` keys **three** maps and two must not move.
-What is built does not re-key the window at all, and the reason is a question
-worth asking of any cached figure: **what does a decision actually read?**
+## Part 2 — sharing the fitted line (built)
+
+The question that settled the mechanism: **what does a decision actually
+read?**
 
 **Only `A` and `B`.** One call site uses the ITL model —
 `model.ITLAt(kPrice)` in `deriveMu` — plus `model.B` into `itlBaseline`.
-Everything else that touches either is a log field. The raw observations exist
-only to produce those two numbers and to decide whether they can be trusted
-(`Ready()`, `Len()`, `KSpread()`).
+Everything else that touches either is a log field. The observations exist only
+to produce those two numbers and to gate their trust (`Ready()`, `Len()`,
+`KSpread()`).
 
-So pooling the observations was the wrong mechanism for a saving that needs two
-floats. What ships instead:
+So the window is not shared. The **line** is:
 
-- **Each variant fits its own window**, keyed by `itlWindowKey` exactly as
-  before. Nothing about the window changes.
-- **A variant's own fit is published** as the line for its engine
-  configuration, under `itlPhysicsKey` — model, accelerator, GPUs, fingerprint.
-- **A variant with no usable fit of its own borrows that line**, marked
-  borrowed all the way to the floor, which may **hold** the fleet on it and
-  must not **grow** one.
+- Each variant fits its own window, keyed exactly as before.
+- A variant's own fit is published as the line for its engine configuration.
+- A variant with no usable fit **borrows** that line, and the borrow is marked
+  to the floor, which may **hold** the fleet on it and must not **grow** one.
 
-The saving is unchanged and is the point: a rename, a second identical variant,
-or the same deployment in another namespace gets a line on its first cycle
-instead of paying the ~63 cycles a fit takes.
+That makes a rename, a second identical variant, and the same deployment in
+another namespace free — the 28 cycles, on their first cycle instead.
 
-Three findings about what must NOT move survive intact, and the built design
-simply does not move them. `itlBaseline` and `startSeconds` share
-`itlWindowKey` with the window, and the code is explicit about why they die
-with it:
+### Why a borrowed line may not grow a fleet
 
-> The learned baseline dies with the window that produced it. Kept, it would
-> grow one float per variant/accelerator ever seen and, worse, pin a hardware
-> floor measured before a redeploy onto different hardware into every later fit
-> for that key. / And the start estimate, for the same reason.
+`itlPhysicsKey` asserts ITL(k) is a function of the model, the hardware and the
+flags. Not quite: at a fixed `k` the resident sequence count is `k·C/KVreq`,
+and `KVreq` is the **traffic shape**. Two variants on one configuration serving
+different shapes sit at different batch sizes at the same `k`, so on different
+lines — this repository's own benchmark shapes differ by 2.1x. A borrowed line
+is evidence about a *configuration*, not about this variant's load.
 
-**Replica start time is not a function of the engine configuration** — it is
-image pull, node, PVC and weight-download size. `noteReplicaStart` runs
-*before* the decode guard, so prefill and decode variants with matching flags
-would have shared a key, and `startEstimates` takes the **minimum** per role:
-the fastest-starting pod anywhere sharing the fingerprint would have set the
-horizon `T` for everyone, under-projecting the backlog and under-ordering.
+**Gating this correctly took two attempts, and the first did nothing.** It is
+documented here because the failure is easy to repeat: the gate was written as
+`!LineBorrowed` added to one of two disjuncts, and the analyzer stamps
+`MinDerivedThroughputSamples` — equal to `MinThroughputSamplesToOrder` by
+construction — onto every derived figure, so the sample half re-admitted
+exactly what the derived half excluded. Separately,
+`fleetHasMeasuredItself` settled the shape-change hold on sight of any derived
+figure, clearing the `staleShape` that was the only other brake, in the same
+cycle. A borrowed line grew a fleet 15.8x past the intended cap.
 
-`capacity.Store` is **not re-keyed at all**, for three reasons:
+What works is **routing, not annotating**: a borrowed-line figure takes the
+branch the floor already has for a reading borrowed from a neighbouring shape
+bucket, which caps it, names it `borrowed-line`, and returns before `mayOrder`
+is reached. Gating a decision in one of two disjuncts gates nothing.
 
-- It is circular. The fingerprint comes from `Record.EngineParams`, and the
-  Record is populated by `LoadFromScaleTarget(namespace, modelID, variantName)`.
-  Looking up by fingerprint requires the params you only have after looking up
-  by name, so it needs an extra name→fingerprint index with its own staleness —
-  a net *increase* in keyed state.
-- `Get(namespace, modelID, variantName)` has six non-test callers, and several
-  genuinely ask "what did *this variant* measure"; one reads
-  `existing.EngineParams` to decide whether to preserve them, which becomes
-  self-referential under a fingerprint key.
-- `Record.EffectiveCapacity` is `min(k1, k2)`, and k2 is **shape-dependent** —
-  which is why `historyKey` buckets it by output length. Two variants with one
-  fingerprint serving different shapes would overwrite each other on every
-  `Update`.
-
-`FindCompatible` therefore stays as it is, and gets the two fixed fields.
-
-**Keep `queueThreshold` in the k2 and throughput keys.** Both end in `q%g`
-today, with a measurement in the comment: a k2 of 2 learned under a low
-threshold kept a variant at utilization 1.0 under a threshold of 100, where P1
-could not fire at all. It is the *only* invalidator for a policy retune —
-persisting k2 without it would re-seed an operator who retunes
-`queueLengthThreshold` and restarts with the pre-retune value, removing the
-escape hatch the key change provides.
-
-**Keep the accelerator memo.** The first draft said it "should disappear — the
-accelerator is in the fingerprint". Backwards: the memo exists because the
-observed accelerator changes with pod placement and can read unresolved, and it
-was added to stop a measured k1↔k2 oscillation on a heterogeneous cluster. The
-fingerprint takes `acceleratorName` as an **input**, so an unresolved
-accelerator makes the fingerprint itself oscillate. The memo must survive and
-must feed the fingerprint.
-
-So the corrected key table is:
-
-| state | should be keyed by | why not more |
-| --- | --- | --- |
-| ITL line `(A, B)` | model + accelerator + gpus + fingerprint — as a line to BORROW, not a window to pool | the same weights, engine build and hardware give **nearly** the same line, which is why a variant with nothing of its own can start from a sibling's. Only nearly: at a fixed `k` the sequence count is `k·C/KVreq` and `KVreq` is the shape, so a borrowed line may hold a fleet and not grow it. The observations themselves stay per variant, under `itlWindowKey`. |
-| k2 | fingerprint + role + output bucket + **queue threshold** | capacity is config **and** shape: `k2 = N_steady x (I + O/2)` |
-| throughput window (mu) | fingerprint + role + input and output buckets + **queue threshold** | a completion rate is per shape |
-| `capacity.Store` record | **unchanged** (namespace, model, variant) | circular, and `EffectiveCapacity` is shape-dependent |
-| `itlBaseline`, `startSeconds` | **unchanged** (variant key) | a hardware floor and a start time are not functions of the config |
-| stable shape | namespace + model | traffic, not configuration |
-| accelerator memo | **unchanged**, and it feeds the fingerprint | it exists because the accelerator reading is unstable |
-
-What the SHARED LINE's key drops is `namespace` and the variant name — not
-the model. The prize is correspondingly smaller than the first draft sold:
-**a rename is free, and a second identical variant is free.** The cross-namespace
-claim survives only for genuinely identical deployments.
-
-### Why sharing observations was wrong, and sharing a line is not
-
-Four findings from the review of the pooled version, each of which the line
-form removes rather than mitigates.
-
-**The blend described neither variant.** `itlPhysicsKey` asserts ITL(k) is a
-function of the model, the hardware and the flags. Not quite: at a fixed `k`
-the resident sequence count is `k·C/KVreq`, and `KVreq` is the **traffic
-shape**. Two variants on one configuration serving different shapes sit at
-different batch sizes at the same `k`, so on different lines — and this
-repository's own benchmark shapes differ by 2.1x. The existing rule that the
-window is *not* cleared on a shape change is an approximation across **time**
-for one fleet, which 30-minute ageing corrects; pooling turned it into a
-permanent blend across **concurrent** fleets that never converges, because both
-keep feeding it.
-
-**A variant could order on data it had never produced.** A derived figure needs
-no sample count — that is the point of deriving it — so a variant whose own
-window was empty was fitted a sibling's data and then granted the right to
-order replicas on it, bypassing both `MinThroughputSamplesToOrder` and the
-stale-shape guard. The line form keeps the saving and denies the ordering,
-through the same rule the floor already applies to a reading borrowed from a
-neighbouring shape bucket.
-
-**Separating `itlBaseline` was nominal.** The `B` written was the **pooled**
-fit's, so every contributor stored the same value under its own key. Only a
-variant still holding a pre-pooling `B` in the pinned-B tier saw a difference.
-With each variant fitting its own window, its `B` is its own.
-
-**Per-variant mu depended on Go map iteration order**, because each variant
-fitted over the shared window as it stood when its turn came, so the first
-iterated saw fewer points than the last. With a window per variant the order
-cannot matter.
-
-### What the line form makes unnecessary
-
-Worth listing, because it is most of the machinery pooling needed: the
-contributor set and its per-contributor ageing, `itl.Window.GrowMaxSize`
-(pooling shortened each contributor's history, so capacity had to scale with
-the contributor count), a `variantSeenAt` stamp and the split eviction it
-forced, and a two-key `noteITL`. The window's emptiness evicts the baseline and
-the start estimate again, as it always did.
-
-Measured cost of the pooled version, for the record: it also reintroduced the
-"one entry per variant that has EVER been seen" leak in a new map, and left an
-unsynchronised read of a field another variant's cycle could write. Both are
-gone with the mechanism rather than patched.
-
-## Part 2 — carrying it across a restart
-
-### MEASURED, and it settles the mechanism: there is no store
-
-This section replaced its own conclusion once the measurement below was taken.
-Everything after it that argues for a ConfigMap is kept as the reasoning that
-led here, and is **superseded**.
-
-From run QT's controller log, 244 decode `itl-window` cycles, classified by the
-line's own `held` and `ready` fields:
-
-| what blocked the ITL fit | cycles | share |
-| --- | --- | --- |
-| the engine reported **no ITL at all** (window empty) | 35 | 14% |
-| the **sample count** (held 1-9) | 28 | 12% |
-| the **k-spread** (held >= 10, still not ready) | 127 | 52% |
-| ready, a fit was available | 54 | 22% |
-
-Cold start: the first observation lands at **t+8.8 min (cycle 36)** and the
-first OLS fit at **t+15.8 min (cycle 64)**. Between those two, 28 cycles were
-blocked on the sample count and **zero** on the spread.
-
-One correction this forces on the rest of this document: the gap is ~63 cycles
-and ~16 minutes, not the "51 cycles, ~8 minutes" quoted above, because
-8.8 minutes is when the first OBSERVATION arrives and not the first fit.
-
-**And one retraction of a correction.** An earlier revision of this section said
-`itlZero` does not appear in these logs at all. That was wrong, and it was
-asserted without checking the log in question — the field was absent from the
-logs of OTHER runs, and that was generalised. In run QT `itlZero` appears 461
-times on the `derived-mu` line (not on `itl-window`): **79 true and 382 false**.
-Its last `true` is at 14:59:45, t+15.77 min, which is the same moment the first
-OLS fit appears and is therefore independent corroboration of the timeline
-above rather than a contradiction of it. The original "51 cycles" figure was
-right in kind — 79 per-pod records across roughly 64 cycles — and wrong only in
-the milestone it was attached to.
-
-**The conclusion: refit from the engines' own series, and store nothing.**
+## Part 3 — carrying it across a restart: there is no store
 
 If the fingerprint matches, it is by construction the same engine build on the
 same hardware serving the same model. Prometheus already holds that engine's
-`QueryAvgITL` and `QueryKvUsageInstant` series from before the restart — the
-same two series the live path fits the line from, every cycle. A **range**
-query at startup reconstructs the line from those real observations, so a
-stored copy adds nothing that the source does not already have.
+measurements from before the restart — **the same two PromQL expressions the
+live fit consumes every cycle**:
 
-Every objection that killed the metrics read-back was about WVA reading back
-what **it** had published about itself: no writer identity behind the
+- `QueryKvUsageInstant` — a gauge,
+  `max by (model_name, instance, pod)(vllm:kv_cache_usage_perc{…})`
+- `QueryAvgITL` — *not* a single series:
+  `max by (…)(rate(vllm:inter_token_latency_seconds_sum[1m]) / rate(…_count[1m]))`,
+  a ratio of two rates over two histogram counters
+
+Both land in `domain.ReplicaMetrics` straight from those queries and are added
+as the pair `w.Add(rm.KvUsageInstant, rm.AvgITL, now)`, joined per pod. A
+`query_range` over the same expressions reconstructs the line from the same
+real observations, so a stored copy adds nothing its source does not have.
+
+Every objection that killed reading WVA's **own** metrics back was about WVA
+reading what it published about itself: no writer identity behind the
 ServiceMonitor's `labeldrop`, an apparent age that resets on every republish,
-an unauthenticated input to a scaling decision, a feedback loop. **None of them
-apply to the engines' series.** That is an independent measurement, not WVA's
-own claim, and it is already trusted on the live path.
+an unauthenticated input to a scaling decision, a feedback loop. None of those
+apply to the engines' series, which is an independent measurement already
+trusted on the live path.
 
-So this drops, in full: the ConfigMap, its `schemaVersion`, the RBAC increase,
-the migration story, the flush story, and the "a poisoned figure now survives
-the restart that used to clear it" problem — because nothing is stored and
-every start re-derives.
+So this drops the ConfigMap, a `schemaVersion`, an RBAC increase, a migration
+story, a flush story, and the problem that a poisoned figure would outlive the
+restart that used to clear it. The reasoning, and the scoring against a
+write-on-change ConfigMap, is in
+[Appendix A](#appendix-a--rejected-storing-a-snapshot).
 
-It also adds no dependency. Prometheus is already mandatory: `cmd/main.go`
-exits 1 when `PROMETHEUS_BASE_URL` is unset, so a controller that cannot reach
-it does not run at all.
+**What it costs, stated rather than implied.** There is no range-query path in
+the tree today: `internal/prometheus/api.go` only calls
+`promAPI.Query(ctx, q, time.Now())`, `QueryRange` appears nowhere outside
+tests, and `parseMatrix` keeps only the newest sample per series. Step 8 needs
+a matrix consumer that retains more than the last point. "A range query
+reconstructs the line" is a mechanism, not a small change.
 
-What the refit does **not** cover, stated rather than hidden:
+**What it does not cover.** k2-observed depends on WVA's own judgement that a
+replica was saturated, not on a raw engine series. The replica start estimate
+is not a function of the engine configuration and is not carried. And where
+Prometheus does not retain the window, the refit finds nothing and the start is
+cold — the honest failure mode, and indistinguishable in the log from "nothing
+to find", which is the weakest point of this design.
 
-- **k2-observed.** It depends on WVA's own judgement that a replica was
-  saturated, not on a raw engine series. Re-deriving it means replaying that
-  judgement over historical rows, which is a bigger piece of work and is not
-  part of this.
-- **The replica start estimate.** Not a function of the engine configuration
-  (see the re-key section), so it stays per variant and is not carried.
-- **Retention.** Where Prometheus does not hold the window, the refit finds
-  nothing and the controller starts cold, exactly as today.
+`PROMETHEUS_BASE_URL` is already mandatory: `internal/config/loader.go` errors
+without it and `cmd/main.go` exits 1, with a second check later and an exit on
+an unreachable Prometheus. So the refit adds no dependency. It does depend on
+the Prometheus Operator CRD being present for the ServiceMonitor, which
+`config/base/kustomization.yaml` ships by default — the CRD, not the manifest,
+is the external requirement.
 
-### A second finding, possibly the more valuable half
+## The second finding, and it is not about restarts
 
-52% of **all** cycles could not fit an OLS line because of the k-spread and
-fell back to the pinned-B path. That is not a cold-start problem: it is steady
-state. The live window holds 20 observations over 30 minutes, and a balanced
-router keeps every replica at nearly the same `k`, so the window often cannot
-span the 0.30 of `k` a two-parameter fit needs.
-
-And the cause is now measured, which splits this from the restart case
-entirely. **The live window is bounded by its SIZE, not by its age:**
+**52% of all cycles** could not fit an OLS line for want of `k` spread and fell
+back to pinned-B. That is steady state. The cause is measured, and it is not
+the age bound:
 
 | | run QT, decode |
 | --- | --- |
 | cycles at `held` = `DefaultWindowMaxSize` (20) | 129 of 244 (53%) |
 | median observations offered per cycle | 2 |
-| wall-clock a full 20-slot window therefore spans | ~10 cycles, ~2.5 min |
+| wall-clock a full 20-slot window spans | ~10 cycles, **~2.5 min** |
 | `DefaultObservationMaxAge` it is allowed | 30 min |
 | share of its own age bound actually used | **~8%** |
 | of the 129 FULL windows, how many cleared the spread | **4 (3%)** |
 
-So a full window is looking through a two-and-a-half-minute keyhole and fails
-the spread gate 97% of the time. `DefaultObservationMaxAge` is not what bounds
-it; `DefaultWindowMaxSize` is, and that is a constant.
+The window is bounded by its **size**, not its age: a full window looks through
+a two-and-a-half-minute keyhole and fails the spread gate 97% of the time. At
+two observations per 15 s cycle, reaching the 30-minute bound needs about
+**240 slots**, not 20.
 
-**That makes the cheapest fix a different one from the range query.** Raising
-`DefaultWindowMaxSize` so the window can reach its own age bound — around 120
-at two observations per cycle — addresses the 52% directly, in one constant, with
-no query and no startup path. The range query is still the answer for the COLD
-start, where there is no live data to widen; these are two levers on two
-different problems and this document had been conflating them.
+So the cheapest fix is one constant, and it is a different lever from the
+refit: raising `DefaultWindowMaxSize` addresses the 52%, while the range query
+addresses the cold start where there is no live data to widen.
 
-What is still untested, and must not be claimed: whether a wider window
-actually spans 0.30 of `k`. If a balanced router pins every replica to the same
-`k` for half an hour, neither a bigger window nor a longer query helps. The raw
-`(k, ITL)` pairs are not logged — only the window's `held`/`ready` summary — so
-this cannot be settled from run QT and needs either a Prometheus range query
-against a live fleet or the harness scrapes from the PVC. The evidence above is
-structural: it establishes that the window is far narrower than intended, not
+**Not claimed:** that a wider window actually spans 0.30 of `k`. If a balanced
+router pins every replica to one `k` for half an hour, neither helps. The raw
+pairs are not logged, so this needs a range query against a live fleet, and the
+evidence above is structural — the window is far narrower than intended, not
 that widening it clears the gate.
-
-### What in the rest of Part 2 still stands
-
-The sections below were written for a stored snapshot. Read them with this
-split in mind, because most of the reasoning survives the store being dropped:
-
-**Superseded.** *The store: a ConfigMap written on change* and its scoring
-table — kept because the four counts on which metrics-as-a-store lose are the
-reason the engines' series are read instead, and that argument is still load
-bearing. *Recovery* goes with it: there is nothing stored to flush, and
-restarting the controller clears the figure again, as it did before.
-*More than one controller* loses its ConfigMap half; the leader-election
-timing in it is why step 7 refits on leadership rather than at boot.
-
-**Still stands, unchanged.** *The guards* — rehydration is an optimisation and
-never a dependency, ingest runs `itl.ValidModel`, and the cross-validation
-against the first live observation is what bounds a plausible-but-wrong line.
-*Fingerprint versioning*, because the hash's input set is a compatibility
-promise whether or not anything stores it. *The metric shape*, since
-publishing `wva_learned_*` is still step 6. *The warm pool* and *SGLang*.
-
-**Three mechanisms the first draft assumed** also still stands in full, and one
-of its three is now a prerequisite that has already landed: `EvictStaleHistory`
-had no caller.
-
-### What has to survive
-
-The first draft's inventory was incomplete. The analyzer's struct also holds
-`itlBaseline`, `startSeconds`, `startOutliers`, `startSeenPods`,
-`decodeSaturatedAt`, `throughputSampledAt`, `throughputLastRead` and
-`lastAccelerator`.
-
-| state | what to store | per key | persist? |
-| --- | --- | --- | --- |
-| ITL line | `A`, `B`, sample count, `k` spread, **`learnedAt`** | 5 scalars | **yes** |
-| k2 | the value, the sample count, which priority produced it, `learnedAt` | 3 + 1 label | **yes** |
-| throughput window | the value, sample count, `learnedAt` | 3 scalars | **yes** |
-| stable shape | `I`, `O` | 2 floats | **yes** |
-| start estimate | seconds | 1 float | **no** — not a function of the fingerprint, and it already publishes as `wva_replica_start_seconds_estimate` |
-| `itlBaseline` | — | — | **no** — dies with its window, deliberately |
-| accelerator memo, `decodeSaturatedAt`, scrape bookkeeping | — | — | **no** — process-local |
-
-The ITL line is rehydrated **as a model, not as observations**: the 20
-`(k, ITL)` pairs do not need to survive.
-
-### Three mechanisms the first draft assumed and the code does not have
-
-**`EvictStaleHistory` has no caller.** It is defined on the analyzer and called
-only from tests — the codebase already says so, in `RollingAverage.Stale`'s own
-doc comment: "but it has no caller on the reconcile path, so a window can
-outlive the behaviour it describes." So `itlWindows`, `itlBaseline`,
-`startSeconds`, `lastAccelerator` and `decodeSaturatedAt` are **never swept in
-production**, and the "one window per variant that has EVER been seen" leak the
-comment warns about is live today. The first draft's central age guard —
-"rehydrated entries are subject to the existing `EvictStaleHistory`" — was
-built on dead code. **Wiring it up is an independent bug fix and a prerequisite:
-step 3.** The real read-time guards are `RollingAverage.Stale(HistoryEvictionTimeout)`
-at **24 hours**, not a scrape-interval multiple.
-
-**A rehydrated value cannot carry its original age through the types it lands
-in.** `RollingAverage.lastUpdated` is unexported and stamped `time.Now()` on
-creation and on every `Add`, and its own doc says a window created and never
-added to is "fresh for one timeout" — so a rehydrated k2 or mu window is
-24h-fresh regardless of the age of the number in it, the opposite of the first
-draft's claim. `itlBaseline` and `startSeconds` are bare `map[string]float64`
-with no timestamp slot. Hence `learnedAt` is stored as **an explicit field and
-compared against `time.Now()`**, never inferred from a sample's own timestamp.
-
-**`itl.Window` has nowhere to put a model.** It holds `observations` plus six
-config scalars; `Ready()` is `len(observations) >= minSamples && KSpread() >= minKSpread`,
-both computed from the slice. Rehydrating `(A, B)` needs three new fields and a
-precedence rule, and the first draft specified neither. The rules:
-
-- **Handover.** A rehydrated line is **provisional**. It is used, and it is
-  replaced by the first genuine fit — not held until `Ready()`, which would
-  reintroduce the full exposure to a possibly-wrong line. A one-sample
-  `FitPinnedB` counts as a genuine fit, so the gain in the worst case is one
-  cycle; the gain in the expected case is every cycle until the spread gate
-  opens, which is the quantity [the open question above](#the-problem-measured)
-  has to settle.
-- **Eviction.** A rehydrated-model-only window has `Len() == 0`, and the
-  eviction pass deletes windows at `Len() == 0`. Once that pass is wired up
-  (step 3) it would delete the rehydrated line immediately; while it is dead,
-  the line is immortal for the process lifetime. Both are wrong, so the window
-  needs an explicit "model without observations" state that eviction ages by
-  `learnedAt` instead of by `Len()`.
-- **Spread.** A stored spread cannot be combined with live observations —
-  `KSpread()` over one real observation is 0. The stored spread is **metadata
-  about the rehydrated model only**, and goes away with it at handover.
-
-**`RollingAverage` has no weight.** Seeding one value and claiming `n = 10` is
-not expressible: the next `Add` makes the average `(v + new)/2`, not
-`(10v + new)/11`, giving the rehydrated figure five times the influence it
-should have. `Median()` over a one-element seed *is* that element, so the first
-real reading flips mu wholesale. The choice taken here is to **seed `n`
-identical values** — defensible, stated explicitly, and the alternative is a
-weighted form that is a larger change than the feature.
-
-### The store: a ConfigMap written on change, not the metrics
-
-**This reverses the first draft's headline choice, and the reversal is the
-review's most useful outcome.** The first draft dismissed a ConfigMap on write
-amplification. That argument attacks a design nobody proposed.
-
-The first draft also claimed the 1 MiB limit is one "this project has already
-hit". **That claim is unsupported and is withdrawn** — the only 1 MiB reference
-in the repository is a *guidellm trace* ConfigMap in the P/D well-lit path
-("1MiB cap; the trace is 900KB"), a benchmark artifact and not controller state.
-Asserting an incident that did not happen, as confirmation of the very thing
-being argued, is the failure mode this project has a rule about.
-
-Scored against the variant that was actually available — **one** ConfigMap for
-the whole controller, written only when a hash of the serialised state moves,
-with a floor on write frequency:
-
-| | metrics read-back | one ConfigMap, write-on-change |
-| --- | --- | --- |
-| write cost | none | a write when a figure moves, floored at ~30s; k2 and mu move on *saturated* cycles, and a quiet fleet writes nothing. The controller already writes Events on the reconcile path. |
-| size | n/a | a few hundred fingerprint×bucket entries of scalars is tens of kB, three orders of magnitude inside the limit |
-| history | free, and queryable | last value only |
-| new API surface | none | one object and a schema |
-| availability at startup | needs Prometheus reachable **and** scraping WVA | needs only the API server, which the controller already requires |
-| **writer identity** | **none** — see below | RBAC |
-| **concurrent writers** | last scrape wins, silently | CAS on `resourceVersion` |
-| **honest age** | **impossible** — see below | a `learnedAt` field |
-| **authority** | a feedback loop over an unauthenticated input | authoritative |
-| **flush** | delete nothing; restart re-reads it | `kubectl delete configmap` |
-
-Four of those rows are decisive, and three are new since the first draft:
-
-**Metrics have no writer identity, by deliberate configuration.** The
-ServiceMonitor drops `instance`, `pod`, `container` and `node`, with the comment
-that this keeps "a single series per (variant_name, namespace) regardless of how
-many controller pods are running. Without this, rolling updates produce multiple
-series and break KEDA's scalar expectation." So `wva_learned_itl_slope{fingerprint}`
-is **one series shared by every controller pod**. During a rollout the old and
-new pod post to the same identity, and which value a range query returns is a
-race — the new pod can read back the cold state it just published itself.
-Keeping `pod` would fix the race and break the invariant KEDA depends on.
-
-**An age cap is unenforceable across more than one restart.** Prometheus stamps
-samples at scrape time and `client_golang`'s `GaugeVec` has no timestamp API, so
-the moment a rehydrated value is republished its apparent age resets to zero. A
-crashlooping controller would carry a figure **forever**, with `rehydrateMaxAge`
-never firing and no observation ever re-validating it. That is a ratchet: it
-turns the acknowledged "plausible but wrong" risk from transient into permanent.
-A `learnedAt` *field* has none of this; a `learnedAt` *series* would have to be
-published as a value and would still be republished by every hop.
-
-**Prometheus becomes an unauthenticated input to a scaling decision.** Anything
-that can write `wva_learned_itl_slope{fingerprint=...}` into the configured
-Prometheus can size someone else's fleet: a co-tenant exposing a metric of that
-name, a misconfigured `remote_write`, a federation or Thanos endpoint
-aggregating another cluster, a recording rule. There is no writer identity (the
-labeldrop removed it), no signature, and **no namespace scoping** — the physics
-keys deliberately drop namespace, so a tenant in one namespace can poison a
-fingerprint serving another. This is a genuine trust-boundary change, it was
-absent from the first draft, and on its own it settles the mechanism.
-
-**Metrics make the feature silently inert.** Reading back requires the operator
-to have installed `config/base/monitoring/servicemonitor.yaml` *and* pointed
-`PROMETHEUS_BASE_URL` at the same Prometheus that scrapes WVA. Nothing checks
-that, and the failure mode — "starts cold" — is also the correct-and-expected
-log line.
-
-So the split is:
-
-- **Publish `wva_learned_*` as metrics.** Worth doing for its own sake: it is
-  the [`signals-as-metrics.md`](signals-as-metrics.md) work, it makes a
-  post-restart decision explicable on a dashboard, and it needs no trust.
-- **Read back from the ConfigMap.** It has RBAC, CAS, an honest timestamp, a
-  flush, and no dependency on a query engine.
-
-What metrics genuinely win — free history and queryability — is retained by
-publishing; it was never the read path that needed them.
-
-### The guards, which are the whole design
-
-**Rehydration is an optimisation and never a dependency.** If the ConfigMap is
-absent, unreadable or unparseable, the controller starts cold exactly as it does
-now. There is no configuration in which WVA requires anything beyond the API
-server to start.
-
-**Validate on ingest with the live path's own validators.** A rehydrated ITL
-line goes through `itl.ValidModel` — finite, `A > 1e-12`, `A·0.85 + B > 0` — and
-a rehydrated k2 through the same positivity checks. A bug that writes a wrong
-`A` cannot survive a restart if the live path would itself reject it.
-
-**Cross-validate against the first live observation.** This is strictly stronger
-than the validators and was missing from the first draft. `noteLineMismatch`
-already compares the observed generation-token rate against the line as a
-diagnostic. For rehydrated entries, promote it: admit `(A, B)` as provisional,
-use it, and on the first cycle with a real `(k, ITL)` reading check
-`|ITL_obs − (A·k + B)| / ITL_obs` against a tolerance. Fail it and discard, log
-it, start cold. **This bounds exactly the class `ValidModel` cannot** —
-plausible but wrong — and costs one cycle rather than 51. The ITL case is the
-easy one because a single observation falsifies a line; k2 and mu need the same
-treatment through the P1-observed path.
-
-**Cap the age** on the stored `learnedAt` against `time.Now()`, with
-`rehydrateMaxAge`. Past it, start cold.
-
-**Rehydrate on becoming leader, not at process start.** With leader election
-enabled those are different moments: a standby elected two hours later would
-otherwise hold data read at boot, or nothing at all. It is a leader-elected
-`Runnable`.
-
-**Log every rehydrated entry at `logging.DEFAULT`**, with its age and its key,
-and carry a `rehydrated` flag on the `derived-mu` and
-`replica-capacity-decision` records. A decision made on a figure the process did
-not measure has to be visible as such.
-
-**And publish a metric for the rehydration itself** — this project's own rule is
-that a diagnostic nobody can read is the problem it was written to solve:
-
-```
-wva_rehydrate_entries{family,outcome}   counter
-```
-
-with `outcome` in `applied`, `rejected_invalid`, `rejected_stale`,
-`rejected_mismatch`, `absent`. Without it, "is this feature doing anything" is
-unanswerable from a dashboard.
-
-### Recovery
-
-Today, when a learned figure is wrong in a way the validators pass, the
-operator's recourse **is** restarting the controller. This feature removes that,
-so it has to replace it. `kubectl delete configmap wva-learned-state` is the
-documented flush, `rehydrateMaxAge=0` disables the read path, and both belong in
-the troubleshooting reference rather than only here.
-
-### Fingerprint versioning
-
-The hash's **input set is a wire format** the moment anything stores it, and the
-breakage is silent rather than a missing series: adding `EnforceEager` later
-makes every stored entry stop matching, with no error. So
-`fingerprintVersion` is hashed in, the ConfigMap carries a `schemaVersion`, and
-a version bump means "start cold for everything", which is correct and cheap.
-
-### The metric shape
-
-The label set is the key: `model`, `accelerator` and `gpus` beside the
-`fingerprint`, which stands for the engine flags alone. The flags themselves
-live in a companion info metric carrying exactly the hashed inputs, so it is
-one series per fingerprint rather than one per fingerprint and model. The
-`variant` name mapping is a third series, because a variant name is not part
-of any key here.
-
-```
-# the flags behind one fingerprint: exactly the hashed inputs, so 1:1
-wva_engine_config_info{fingerprint,fingerprint_version,engine,weight_dtype,
-                       quantization,tp,block_size,kv_dtype,max_num_seqs,
-                       max_model_len,max_batched_tokens}              1
-# which deployed variants currently run that configuration
-wva_engine_config_variant{exported_namespace,variant,model,accelerator,
-                          gpus,fingerprint}                           1
-
-# KEY = model + accelerator + gpus + fingerprint, on every learned family
-wva_learned_itl_slope{model,accelerator,gpus,fingerprint}             A
-wva_learned_itl_intercept{model,accelerator,gpus,fingerprint}         B
-wva_learned_itl_samples{model,accelerator,gpus,fingerprint}           n
-wva_learned_itl_learned_at_seconds{model,accelerator,gpus,
-                                   fingerprint}                      unix
-wva_learned_k2_tokens{model,accelerator,gpus,fingerprint,
-                      role,out_bucket,q,source}                       k2
-wva_learned_throughput{model,accelerator,gpus,fingerprint,
-                       role,in_bucket,out_bucket,q}                   mu
-wva_learned_throughput_samples{...}                                   n
-wva_learned_stable_shape_tokens{exported_namespace,model,axis}        I or O
-```
-
-Label vocabulary is [`signals-as-metrics.md`](signals-as-metrics.md)'s —
-`exported_namespace` and not `namespace`, for the reason stated there.
-
-One unresolved tension, named rather than hidden: `source` on
-`wva_learned_k2_tokens` should distinguish a rehydrated figure from an observed
-one, but adding `source="rehydrated"` **changes series identity**. Since the
-read path is the ConfigMap, this is now cosmetic rather than load-bearing — but
-if metrics read-back is ever revisited, it is a contradiction, not a detail.
-
-**Cardinality, computed rather than asserted.** `outputBuckets` has 6 members
-plus `prefillOutputBucket`, and `classifyInputLength` delegates to
-`classifyOutputLength`, so inputs have 6. `wva_learned_throughput` is therefore
-fingerprints × 3 roles × 6 in × 7 out ≈ **126 series per fingerprint**, doubled
-by the `_samples` family, times the number of distinct queue thresholds in use
-(1, in practice). Bounded by distinct engine configurations rather than by
-replicas — a fleet scaling 1 → 10 adds no series — but it is per fingerprint,
-not per fleet, and that multiplication belongs in the open rather than behind
-the word "bounded".
-
-### More than one controller
-
-With `--leader-elect=false` (the default) a rollout briefly runs two pods, both
-scraped, both writing. The ConfigMap's CAS makes the loser retry rather than
-clobber. With leader election enabled, `LeaderElectionReleaseOnCancel: true`
-means a graceful step-down releases the lease; the new leader rehydrates on
-acquisition, which is the correct moment. A flap A→B→A is the case that breaks
-the metrics path (B publishes cold state; A rehydrates B's garbage) and is
-harmless against a store only the leader writes.
-
-### The warm pool
-
-`noteITL` excludes `FromWarmPool` replicas because a borrowed pod runs the
-pool's own engine settings — that is, **a different fingerprint**. If the pool
-publishes one, the controller would learn an ITL line for a configuration
-nothing serves. The pool's variants are excluded from publishing as well as from
-learning.
-
-### SGLang
-
-`sglang_parser.go` populates a narrower subset of `EngineParams` than the vLLM
-parser, so SGLang fingerprints discriminate less. `Engine` is hashed, so the two
-never cross — but the within-SGLang collision rate is higher, and until the
-parser is extended the honest statement is that this feature is better tested on
-vLLM.
-
-## What this does not solve
-
-- **It does not make a cold start fast.** A genuinely new configuration still
-  pays the full relearning. This removes relearning after a *restart*, not
-  learning.
-- **It does not eliminate plausible-but-wrong values** — it bounds them, with
-  the cross-validation guard, to one cycle of exposure plus whatever a single
-  observation cannot falsify.
-- **It does not survive a Prometheus retention gap**, by design: where the
-  series are not held, the refit finds nothing and the start is cold.
-- **It is not actuation.** Nothing here is a scaling input for KEDA or an HPA;
-  that remains the rejected "metric shop" design.
 
 ## Order
 
-Revised twice: the first draft put an unsound step third, and the measurement
-in Part 2 replaced the store in steps 6 and 7.
-
 1. **`MaxNumSeqs` and `MaxModelLen` into `IsCapacityCompatible`**, with tests.
-   Correctness fix, wrong today, independent of everything else.
+   Correctness fix, wrong today, independent of everything else. *(built)*
 2. **Teach the parser `--dtype` and `--quantization`.** Without them the
-   fingerprint pools an FP8 and a BF16 serving of one model. Prerequisite for
-   step 4, useful on its own for `FindCompatible`.
-3. **Wire up `EvictStaleHistory`.** It has no production caller, which is a live
-   leak the code already documents, and the eviction rules below depend on it.
-   Independent bug fix.
-4. **The fingerprint**, computed, versioned and published as
-   `wva_engine_config_info`, used for nothing. Observable before it is
-   load-bearing.
-5. **Share the fitted LINE, not the window.** Each variant keeps its own
-   window; its own fit is published under the fingerprint; a variant with no
-   usable fit borrows a sibling's `(A, B)`, marked borrowed so the floor may
-   hold the fleet on it and not grow it. Nothing is re-keyed — not
-   `itlWindows`, not `itlBaseline`, not `startSeconds`, not `capacity.Store` —
-   and `queueThreshold` stays in the k2 and mu keys. This alone makes a rename
-   and a second identical variant free, with no persistence involved.
+   fingerprint pools an FP8 and a BF16 serving of one model. *(built)*
+3. **Wire up `EvictStaleHistory` and `Store.EvictStale`.** Neither had a
+   production caller. Independent bug fix — and not a neutral one: see
+   Appendix C. *(built)*
+4. **The fingerprint**, computed, versioned, published as `wva_engine_config`
+   — one wide series per variant, load-bearing for nothing. *(built)*
+5. **Share the fitted line.** Each variant keeps its own window; a variant with
+   no usable fit borrows a sibling's `(A, B)`, marked borrowed. Nothing is
+   re-keyed. *(built)*
 6. **Publish `wva_learned_*`.** Worth doing on its own: it makes a
-   post-restart decision explicable on a dashboard, and it needs no trust from
-   anyone. No store, and nothing reads it back.
-7. **Raise `DefaultWindowMaxSize`** so the live window reaches its own
-   `DefaultObservationMaxAge` instead of stopping at ~8% of it. One constant,
-   independent of everything else here, and it is the measured cause of the 52%
-   of cycles that fall back to pinned-B. Gate it on the `k`-spread measurement
-   above, because a wider window that still cannot span 0.30 of `k` buys
-   nothing but memory.
-8. **Refit the ITL line at startup from the engines' own series.** A range
-   query over `QueryAvgITL` and `QueryKvUsageInstant` for the fingerprint's
-   model and hardware, fitted with the same `itl.Fit` the live path uses, and
-   admitted through the same `itl.ValidModel`. Behind a flag, default off,
-   with the cross-validation guard: the refitted line is provisional until the
-   first live observation either confirms it within a tolerance or discards it.
-   Default on only after the measured comparison below.
+   post-restart decision explicable on a dashboard, and needs no trust from
+   anyone. No store, nothing read back.
+7. **Raise `DefaultWindowMaxSize`** to about 240 so the live window reaches its
+   own age bound instead of stopping at ~8% of it. One constant, independent of
+   everything else, and the measured cause of the 52%. Gate it on the `k`-spread
+   measurement above: a wider window that still cannot span 0.30 buys only
+   memory.
+8. **Refit the ITL line at startup from the engines' own expressions.** A range
+   query fitted with the same `itl.Fit` and admitted through the same
+   `itl.ValidModel`, behind a flag defaulting off, with the cross-validation
+   guard below. On becoming **leader**, not at process start: election is on in
+   every shipped install, so a standby elected later would otherwise hold a
+   line fitted from a range it read at boot.
 
-   On becoming leader rather than at process start, because with leader
-   election enabled those are different moments and a standby elected later
-   would otherwise hold a line fitted from a range it read at boot.
+Steps 1-5 were worth doing without 6-8, which is the test of whether the
+ordering is honest.
 
-Steps 1-5 are worth doing even if 6, 7 and 8 are never built, which is the test
-of whether the ordering is honest. Under the first draft's order, step 3 failed
-that test — it moved `startSeconds` onto a key that does not describe it.
+Three knobs: `refitFromHistory` (default off), the range it looks back over,
+and the mismatch tolerance.
 
-Three knobs, not one: `refitFromHistory` (default off), the range the query
-looks back over, and the mismatch tolerance for cross-validation.
+### The guards
+
+**The refit is an optimisation, never a dependency.** No Prometheus, no series,
+a bad parse — the controller starts cold exactly as it does now.
+
+**Validate on ingest with the live path's own validator.** A refitted line goes
+through `itl.ValidModel` — finite, `A > 1e-12`, `A·0.85 + B > 0`.
+
+**Cross-validate against the first live observation.** `noteLineMismatch`
+already compares an observed generation-token rate against the line as a
+diagnostic. For a refitted line, promote it: admit the line as provisional, and
+on the first real `(k, ITL)` reading check
+`|ITL_obs − (A·k + B)| / ITL_obs` against a tolerance. Fail it and discard.
+That bounds the one class `ValidModel` cannot — plausible but wrong — to a
+single cycle.
+
+**Log every refitted line** with its range and its fit, and carry a flag on the
+`derived-mu` and `replica-capacity-decision` records. A decision made on a
+figure the process did not measure has to be visible as such — and `HeldWhy`
+already carries `borrowed-line` for the same reason.
+
+**Publish a rehydration outcome metric**, `wva_refit_entries{outcome}` over
+`applied`, `rejected_invalid`, `rejected_mismatch`, `absent`. A diagnostic
+nobody can read is the problem it was written to solve.
+
+### Cardinality of the learned families
+
+`outputBuckets` has 6 members; `prefillOutputBucket` is deliberately not among
+them; `classifyInputLength` delegates to `classifyOutputLength`, so the input
+axis is the same 6 and never includes `noout`.
+
+Role and out-bucket are **not independent**: `throughputKey` forces
+`outBucket = prefillOutputBucket` for prefill and only for prefill. So the
+reachable set is (decode+both) 2 × 6 × 6 = 72 plus prefill 1 × 6 × 1 = 6 →
+**78 per fingerprint as a hard upper bound**, and realistically 36 for a
+decode fingerprint and 6 for a prefill one, since a P/D fleet gives the two
+roles different params and so different fingerprints. Doubled by the `_samples`
+family, times the distinct queue thresholds in use (one, in practice).
 
 ## Testing
 
-- **Unit.** The ingest path against a table of stored entries: valid, invalid
-  `A`, stale `learnedAt`, unknown `schemaVersion`, mismatched fingerprint
-  version, and a line that fails cross-validation on the first observation.
-- **Envtest** for the leader-elected `Runnable`: that it rehydrates on
-  acquisition and not at process start, and that a lost lease stops writes.
-  `internal/collector/source/prometheus` and the scale-to-zero suite already
-  have the harness patterns.
-- **Negative control, per this project's rule.** Every one of these tests run
-  against the pre-change binary, with the failure pasted — in particular that
-  the re-key test fails on the parent commit.
+- **Unit**, against the existing `mockPrometheusAPI`: a refitted line that is
+  valid, one with an invalid `A`, one outside the retention window, and one
+  that fails cross-validation on the first live observation.
+- **Envtest** for the leader-elected runnable: that it refits on acquisition
+  and not at process start, and that a lost lease stops it.
+- **A negative control per fix**, per this project's rule — and gated on the
+  control actually failing. Four tests on this branch passed against the bug
+  they named; the two that mattered are in Appendix C.
 
 ## How to know it worked
 
-Restart the controller mid-ramp on the shape-swap trace and compare the time
-from load start to the first `throughput-demand-floor` line, and to the first
-`itl-fit`, against run QT's measured baseline: first observation t+8.8 min
-(cycle 36), first OLS fit t+15.8 min (cycle 64).
+Restart the controller mid-ramp on the shape-swap trace, and measure **from
+load start**, which is the correction Appendix C explains.
 
-And measure the second finding separately, because it is the one that pays in
-steady state: the share of cycles that reach an OLS fit rather than pinned-B,
-against run QT's 22%.
+Run QT's baseline, re-derived: first observation **load + 22 s**, first OLS fit
+and first floor line **load + 7.4 min**, with **28 cycles** between them.
 
-With thresholds, because the first draft named a measurement and no number:
+- **Step 8 (the refit) succeeds** if the first floor line arrives inside
+  **2 minutes** of load start. Not 90 seconds: the floor also needs
+  `MinThroughputSamplesToOrder` saturated readings, and k2-observed is
+  explicitly not carried, so the ITL line is necessary and not sufficient. A
+  target under the floor's own other prerequisites would be unreachable by this
+  mechanism, which is how the previous threshold was wrong.
+- **Step 7 (the window size) succeeds** if the share of cycles reaching an OLS
+  fit rises against run QT's **22%**, measured over a run with no restart at
+  all. It is a steady-state change and must be measured as one.
+- **Three runs each way, compared on the median.** Phase-1 timings on this
+  trace have produced 28 s, 59 s and 256 s medians for identical work, and the
+  run above is n=1 on one decode variant.
+- A result that does not clear its target by a wide margin is a negative
+  result, and the flag stays off.
 
-- **Success** is the first floor line inside **90 seconds** of load start, and
-  fewer than **10** `itlZero` cycles.
-- **The cold control matters as much as the treatment.** Phase-1 timings on this
-  trace are noisy enough that identical work has produced 28 s, 59 s and 256 s
-  medians across three runs, so this is **three runs each way**, compared on the
-  median, cold-to-cold, binary the only variable — the method
-  [`analyzer-evidence.md`](../developer-guide/analyzer-evidence.md) uses
-  throughout.
-- **A result that does not clear its floor by a wide margin is a negative
-  result**, and the feature should stay default-off.
+## What this does not solve
+
+- **It does not make a genuinely new configuration fast.** It removes
+  relearning after a restart, not learning.
+- **It does not eliminate plausible-but-wrong values** — the cross-validation
+  guard bounds them to one cycle of exposure plus whatever a single observation
+  cannot falsify.
+- **It does not survive a retention gap**, by design.
+- **It is not actuation.** Nothing here is a scaling input for KEDA or an HPA.
+
+---
+
+## Appendix A — rejected: storing a snapshot
+
+**SUPERSEDED. Kept because the four counts on which metrics-as-a-store lose
+are the reason the engines' series are read instead.**
+
+Two candidates were worked through before the refit. Reading WVA's **own**
+`wva_learned_*` metrics back, and writing one ConfigMap on change.
+
+The metrics read-back loses on four counts, and all four are properties of the
+shipped configuration rather than opinions:
+
+- **No writer identity.** The ServiceMonitor drops
+  `instance|pod|container|node` deliberately, so KEDA sees one scalar per
+  series. That makes `wva_learned_itl_slope{fingerprint}` one series shared by
+  every controller pod: during a rollout the new pod can read back the cold
+  state it just published.
+- **No honest age.** Prometheus stamps samples at scrape time and
+  `client_golang`'s `GaugeVec` has no timestamp API, so a republished value's
+  apparent age resets to zero. A crashlooping controller would carry a figure
+  for ever.
+- **No trust boundary.** Anything able to write that series name into the
+  configured Prometheus could size someone else's fleet, and the physics keys
+  deliberately drop the namespace.
+- **Silently inert.** Read-back needs the ServiceMonitor present *and*
+  `PROMETHEUS_BASE_URL` pointed at the Prometheus that scrapes WVA, and the
+  failure mode is "starts cold", which is also the expected log line.
+
+The ConfigMap answered all four — RBAC, CAS on `resourceVersion`, an honest
+`learnedAt` field, and `kubectl delete` as a flush. It was rejected only once
+the measurement showed there is nothing to store: the engines already hold the
+observations, and refitting from them needs no object, no schema, no RBAC and
+no migration.
+
+One claim from that round is **withdrawn**: that the 1 MiB ConfigMap limit is
+one "this project has already hit". The only such reference in the repository
+is a *guidellm trace* ConfigMap in the P/D well-lit path — a benchmark
+artifact, not controller state.
+
+## Appendix B — rejected: pooling the ITL window
+
+**SUPERSEDED by Part 2. Kept because four of its defects are easy to
+reintroduce.**
+
+The first design for sharing shared the *observations*: one window per
+`itlPhysicsKey`, fed by every variant with that configuration. Review found
+four defects, and the line form removes rather than mitigates each.
+
+- **The blend described neither variant** whenever their shapes differed, for
+  the `k·C/KVreq` reason in Part 2. The existing rule that the window is not
+  cleared on a shape change is an approximation across *time* for one fleet,
+  which 30-minute ageing corrects; pooling made it a permanent blend across
+  *concurrent* fleets that never converges.
+- **A variant could order on data it had never produced**, because a derived
+  figure needs no sample count.
+- **Separating `itlBaseline` was nominal**: the `B` written was the pooled
+  fit's, so every contributor stored the same value under its own key.
+- **Per-variant mu depended on Go map iteration order**, because each variant
+  fitted over the shared window as it stood when its turn came.
+
+It also needed machinery the line form does not: a contributor set with
+per-contributor ageing, a `GrowMaxSize` on the window because pooling shortened
+each contributor's history, a `variantSeenAt` stamp and the split eviction it
+forced, and a two-key `noteITL`. Two bugs came with that machinery — the
+contributor set reintroduced the "one entry per variant ever seen" leak in a
+new map, and `MaxSize()` was read outside the lock on a now-shared window.
+
+A re-key of the window would also have moved `itlBaseline` and `startSeconds`,
+which share `itlWindowKey`. **Replica start time is not a function of the
+engine configuration** — it is image pull, node, PVC and weight-download size —
+and `startEstimates` takes the **minimum** per role, so the fastest-starting
+pod anywhere sharing a fingerprint would have set the horizon `T` for everyone,
+under-projecting the backlog and under-ordering.
+
+## Appendix C — what this document got wrong
+
+Four corrections, recorded because two of them reversed a conclusion and
+because the method errors recur.
+
+**The timeline was anchored to the wrong t0, twice.** Every figure was measured
+from the controller's first log line, which is 8.4 minutes before the harness
+starts. So 34 of the 35 empty-window cycles were idle with no traffic to learn
+from, the "first observation at t+8.8 min" was really load + 22 s, and the
+first fit was load + 7.4 min rather than t+15.8. A revision that "corrected"
+the cost *upward* to ~63 cycles and ~16 minutes was therefore wrong in the
+wrong direction; the original ~8 minutes to the first floor line was right.
+This is the second time in this work that a window was anchored to a log's
+first line rather than to the event being measured.
+
+**A retraction was itself wrong.** A revision claimed `itlZero` does not appear
+in these logs. It appears 461 times on the `derived-mu` line — 79 true, 382
+false — and the claim was made from *other* runs' logs and generalised without
+grepping the one in question.
+
+**Wiring up the evictors was presented as a pure memory fix and was not.** Two
+read paths depended on entries the sweep now deletes: the k2 Priority-2
+historical read had no staleness guard though the write path beside it did, and
+`startSeenPods` was never re-stamped, so a Pod Ready longer than the timeout
+had its start folded into the estimate again. Both are fixed; the lesson is
+that "wire up a function that already exists" is a behaviour change until its
+readers are checked.
+
+**A gate was written that did nothing, and a test certified it.** The
+borrowed-line gate added a term to one of two disjuncts while the other
+disjunct re-admitted everything, and the spec that covered it built its fixture
+with a sample count production never produces. Four tests on this branch passed
+against the bug they were written for; this was the one that mattered, because
+it certified a safety property that did not exist.

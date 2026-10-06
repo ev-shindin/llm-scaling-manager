@@ -119,7 +119,7 @@ last; it is the unit change that makes the other two land.
 
 - **[Learned state across a restart](learned-state-across-restarts.md)** —
   nothing the analyzer learns survives a restart, and a cold start measured on
-  run QT takes 63 cycles and ~16 minutes to reach its first ITL fit. Key the
+  run QT spends 28 cycles and ~7 minutes relearning the ITL line. Key the
   learned figures on an ENGINE CONFIG fingerprint rather than a variant name
   (the relation already exists as IsCapacityCompatible, used only as a
   fallback), and then carry nothing: if the fingerprint matches it is the same
