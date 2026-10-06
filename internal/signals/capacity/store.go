@@ -169,7 +169,11 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 // given timeout. This prevents unbounded memory growth from deleted or
 // long-unused variants. Use a long timeout (EvictionTimeout, seven days)
 // since historical capacity data is valuable for zero-replica estimation.
-// No caller on the reconcile path today.
+//
+// Called once per cycle from steadystate.evictStaleLearnedState. The comment
+// here used to say there was no caller on the reconcile path, which was true
+// when written; this is the fourth comment of that kind the same commit
+// falsified, so if a sweep is ever unwired again, look for the others.
 func (s *Store) EvictStale(timeout time.Duration) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

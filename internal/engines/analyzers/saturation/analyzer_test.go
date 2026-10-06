@@ -230,9 +230,10 @@ var _ = Describe("SaturationAnalyzer", func() {
 		})
 
 		It("should not dilute a fresh observation against a stale window", func() {
-			// A variant that goes quiet keeps its window: samples are evicted by
-			// count, never by age, and EvictStaleHistory has no caller on the
-			// reconcile path. Blending a first observation back into that window
+			// A variant that goes quiet keeps its window within the sweep's
+			// timeout: samples are evicted by count, never by age, and the
+			// per-cycle EvictStaleHistory only drops a window once it is
+			// EMPTY. Blending a first observation back into that window
 			// would size current capacity from behaviour before the gap, at 9/10
 			// weight -- an exposure the raw return did not have.
 			steady := func(tokens int64) *domain.AnalyzerResult {

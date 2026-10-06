@@ -177,8 +177,10 @@ func TestReplicaStartEstimateIdentityAndOutliers(t *testing.T) {
 	})
 
 	t.Run("a pod that stops reporting is forgotten", func(t *testing.T) {
-		// This is what bounds the map. EvictStaleHistory has no caller on the
-		// reconcile path, so a set keyed per pod cannot be left to it.
+		// This is what bounds the map in practice. EvictStaleHistory does now
+		// run every cycle, but on a 24h timeout and only as a backstop for a
+		// variant that disappears entirely -- a set keyed per pod cannot be
+		// left to that.
 		a := NewSaturationAnalyzer(capacity.NewStore())
 		a.noteReplicaStart(key, "ns", variant,
 			[]domain.ReplicaMetrics{replica("ns", "d0", 67), replica("ns", "d1", 70)},
