@@ -8,6 +8,13 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
+// The dtype and quantization values these tests mutate to. Named because they
+// recur across the mutation tables, not because the particular value matters.
+const (
+	testWeightDtype  = "bfloat16"
+	testQuantization = "fp8"
+)
+
 // fingerprintHashed and fingerprintExcluded together must name EVERY field of
 // EngineParams. That is the point of the drift test below: adding a field to
 // the struct and not deciding which list it belongs in is a test failure
@@ -86,8 +93,10 @@ func TestFingerprintIsStableAcrossCalls(t *testing.T) {
 	if got := len(a.Fingerprint()); got != fingerprintLength {
 		t.Fatalf("fingerprint is %d characters, want %d", got, fingerprintLength)
 	}
-	if a.Fingerprint() != a.Fingerprint() {
-		t.Fatal("Fingerprint is not deterministic within one process")
+	first, second := a.Fingerprint(), a.Fingerprint()
+	if first != second {
+		t.Fatalf("Fingerprint is not deterministic within one process: %q then %q",
+			first, second)
 	}
 }
 
@@ -101,11 +110,11 @@ func TestFingerprintChangesWithEveryHashedField(t *testing.T) {
 
 	mutations := map[string]func(*EngineParams){
 		"Engine":                    func(p *EngineParams) { p.Engine = "sglang" },
-		"WeightDtype":               func(p *EngineParams) { p.WeightDtype = "bfloat16" },
-		"Quantization":              func(p *EngineParams) { p.Quantization = "fp8" },
+		"WeightDtype":               func(p *EngineParams) { p.WeightDtype = testWeightDtype },
+		"Quantization":              func(p *EngineParams) { p.Quantization = testQuantization },
 		"GpuMemoryUtilization":      func(p *EngineParams) { p.GpuMemoryUtilization = 0.85 },
 		"BlockSize":                 func(p *EngineParams) { p.BlockSize = 32 },
-		"KvCacheDtype":              func(p *EngineParams) { p.KvCacheDtype = "fp8" },
+		"KvCacheDtype":              func(p *EngineParams) { p.KvCacheDtype = testQuantization },
 		"TensorParallelSize":        func(p *EngineParams) { p.TensorParallelSize = 8 },
 		"NumGpuBlocksOverride":      func(p *EngineParams) { p.NumGpuBlocksOverride = 4096 },
 		"TotalKvTokensOverride":     func(p *EngineParams) { p.TotalKvTokensOverride = 100000 },
@@ -230,8 +239,9 @@ func TestLearnedStateKeyIsTheWholeTuple(t *testing.T) {
 		t.Fatal("one and two GPUs per replica share a key")
 	}
 
-	if LearnedStateKey("m", "a", 1, fp) != LearnedStateKey("m", "a", 1, fp) {
-		t.Fatal("the key is not stable for identical inputs")
+	againA, againB := LearnedStateKey("m", "a", 1, fp), LearnedStateKey("m", "a", 1, fp)
+	if againA != againB {
+		t.Fatalf("the key is not stable for identical inputs: %q then %q", againA, againB)
 	}
 }
 
@@ -278,11 +288,11 @@ func TestFingerprintAgreesWithCapacityCompatibilityOnNaN(t *testing.T) {
 func TestFingerprintLabelsDescribeTheirValues(t *testing.T) {
 	byLabel := map[string]func(*EngineParams){
 		"engine":                       func(p *EngineParams) { p.Engine = "sglang" },
-		"weight_dtype":                 func(p *EngineParams) { p.WeightDtype = "bfloat16" },
-		"quantization":                 func(p *EngineParams) { p.Quantization = "fp8" },
+		"weight_dtype":                 func(p *EngineParams) { p.WeightDtype = testWeightDtype },
+		"quantization":                 func(p *EngineParams) { p.Quantization = testQuantization },
 		"gpu_memory_utilization":       func(p *EngineParams) { p.GpuMemoryUtilization = 0.85 },
 		"block_size":                   func(p *EngineParams) { p.BlockSize = 32 },
-		"kv_cache_dtype":               func(p *EngineParams) { p.KvCacheDtype = "fp8" },
+		"kv_cache_dtype":               func(p *EngineParams) { p.KvCacheDtype = testQuantization },
 		"tensor_parallel_size":         func(p *EngineParams) { p.TensorParallelSize = 8 },
 		"num_gpu_blocks_override":      func(p *EngineParams) { p.NumGpuBlocksOverride = 4096 },
 		"total_kv_tokens_override":     func(p *EngineParams) { p.TotalKvTokensOverride = 100000 },

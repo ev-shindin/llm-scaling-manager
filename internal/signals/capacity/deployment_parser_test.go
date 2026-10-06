@@ -214,7 +214,7 @@ var _ = Describe("ParseVLLMArgs", func() {
 
 			Expect(params.GpuMemoryUtilization).To(Equal(0.85))
 			Expect(params.BlockSize).To(Equal(int64(32)))
-			Expect(params.KvCacheDtype).To(Equal("fp8"))
+			Expect(params.KvCacheDtype).To(Equal(testQuantization))
 			Expect(params.TensorParallelSize).To(Equal(4))
 			Expect(params.MaxNumBatchedTokens).To(Equal(int64(4096)))
 			Expect(params.MaxNumSeqs).To(Equal(int64(128)))
@@ -235,8 +235,8 @@ var _ = Describe("ParseVLLMArgs", func() {
 			)
 			params := ParseVLLMArgs(scaletarget.NewDeploymentAccessor(deploy))
 
-			Expect(params.WeightDtype).To(Equal("bfloat16"))
-			Expect(params.Quantization).To(Equal("fp8"))
+			Expect(params.WeightDtype).To(Equal(testWeightDtype))
+			Expect(params.Quantization).To(Equal(testQuantization))
 			Expect(params.KvCacheDtype).To(Equal("auto"))
 		})
 
@@ -388,7 +388,7 @@ var _ = Describe("IsCapacityCompatible", func() {
 		resolveEffectiveMaxBatchedTokens(&p1)
 		p2 := defaultEngineParams()
 		resolveEffectiveMaxBatchedTokens(&p2)
-		p2.KvCacheDtype = "fp8"
+		p2.KvCacheDtype = testQuantization
 		Expect(p1.IsCapacityCompatible(&p2)).To(BeFalse())
 	})
 
@@ -501,7 +501,7 @@ var _ = Describe("IsCapacityCompatible", func() {
 		resolveEffectiveMaxBatchedTokens(&p1)
 		p2 := defaultEngineParams()
 		resolveEffectiveMaxBatchedTokens(&p2)
-		p2.WeightDtype = "bfloat16"
+		p2.WeightDtype = testWeightDtype
 		Expect(p1.WeightDtype).NotTo(Equal(p2.WeightDtype))
 		Expect(p1.IsCapacityCompatible(&p2)).To(BeFalse())
 	})
@@ -511,7 +511,7 @@ var _ = Describe("IsCapacityCompatible", func() {
 		resolveEffectiveMaxBatchedTokens(&p1)
 		p2 := defaultEngineParams()
 		resolveEffectiveMaxBatchedTokens(&p2)
-		p2.Quantization = "fp8"
+		p2.Quantization = testQuantization
 		Expect(p1.Quantization).To(BeEmpty())
 		Expect(p1.IsCapacityCompatible(&p2)).To(BeFalse())
 	})
