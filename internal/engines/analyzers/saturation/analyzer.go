@@ -298,9 +298,10 @@ func engineParamsFor(a *SaturationAnalyzer, namespace, modelID, variantName stri
 // heterogeneous fleet reports) and the GPU count, and no shape dimension at
 // all.
 //
-// It no longer names the ITL window itself -- see itlPhysicsKey. The two are
-// separate because a window is a property of the configuration while a
-// hardware floor and a start time are properties of a deployment.
+// It names the ITL window too: the window was never re-keyed, and sharing
+// happens on the fitted LINE instead (itlLines, itlPhysicsKey). An earlier
+// revision of this file did pool the window on the physics key, and this
+// comment described that design; see docs/proposals for why it was replaced.
 func (a *SaturationAnalyzer) itlWindowKey(namespace, modelID, variantName, accelerator string, gpuCount int) string {
 	return fmt.Sprintf("%s|%s|%s|%s|%d", namespace, modelID, variantName,
 		a.stableAccelerator(namespace, variantName, accelerator), gpuCount)
@@ -349,7 +350,8 @@ func (a *SaturationAnalyzer) borrowLine(physicsKey, variantKey string) (itl.Mode
 	return line.model, line.fromVariant, true
 }
 
-// itlPhysicsKey names one ITL(k) window, by what the line is a function of:
+// itlPhysicsKey names one SHARED LINE record -- not a window -- by what the
+// line is a function of:
 // the model, the hardware, and the engine configuration that produced it.
 // Namespace and variant name are deliberately absent.
 //

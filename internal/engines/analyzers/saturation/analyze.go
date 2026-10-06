@@ -321,7 +321,9 @@ func (c *cycle) fitLines() {
 		// same configuration, if there is one. This is the saving the
 		// fingerprint was built for: a rename, a second identical variant or
 		// the same deployment in another namespace gets a line immediately
-		// instead of paying the ~60 cycles a fit takes.
+		// instead of paying the ~28 cycles a fit takes -- measured from load
+		// start on run QT, which is the figure a controller-boot anchor had
+		// inflated to ~60.
 		borrowed, from, ok := c.a.borrowLine(physicsKey, variantKey)
 		if !ok {
 			continue
