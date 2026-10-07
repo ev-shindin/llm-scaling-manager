@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -179,32 +182,35 @@ func TestUtilizationShareChecksWhichDonorPodWent(t *testing.T) {
 	}
 }
 
-// A fill timeout is attributed from the node picture: something took the
-// released GPUs, or they are free but on no node in one piece large enough.
+// A fill timeout is attributed from the receiver's Pending pods and the node
+// picture: something took the released GPUs, or they are free but the pods do
+// not fit the nodes.
 func TestShareFillTimeoutCause(t *testing.T) {
-	g := allocation.ShareGroup{AcceleratorType: "A100",
-		Grow: map[string]allocation.ShareVariant{"B": {GPUs: 8, PodGPUs: []int{4, 4}}}}
-	tr := allocation.ShareTransfer{Receiver: "B", GPUs: 8}
 	nodes := func(free ...int) map[string]decision.NodeGPU {
-		out := map[string]decision.NodeGPU{"other": {Accelerator: "H100", Capacity: 8}}
+		out := map[string]decision.NodeGPU{"other": {Accelerator: "H100", Capacity: 8},
+			"cordoned": {Accelerator: "A100", Capacity: 8, Unschedulable: true}}
 		for i, f := range free {
 			out[fmt.Sprint("n", i)] = decision.NodeGPU{Accelerator: "A100", Capacity: 8, Used: 8 - f}
 		}
 		return out
 	}
 	for _, tc := range []struct {
-		name  string
-		nodes map[string]decision.NodeGPU
-		want  string
+		name    string
+		pending []int
+		nodes   map[string]decision.NodeGPU
+		want    string
 	}{
-		{"taken: fewer free than the replica", nodes(2, 3), constants.ScalingBlockedReleaseTaken},
-		{"shape: enough in total, no node holds a pod", nodes(3, 3, 3), constants.ScalingBlockedReleaseShapeMismatch},
-		{"a node holds the pod: not a GPU cause", nodes(4, 0), ""},
-		{"another accelerator's free GPUs do not count", nodes(1), constants.ScalingBlockedReleaseTaken},
-		{"no node information", nil, ""},
+		{"taken: fewer free than the Pending pods request", []int{4, 4}, nodes(2, 3), constants.ScalingBlockedReleaseTaken},
+		{"shape: enough in total, no node holds a pod", []int{4, 4}, nodes(3, 3, 3), constants.ScalingBlockedReleaseShapeMismatch},
+		{"shape: one pod fits, the other does not", []int{4, 4}, nodes(4, 2, 2), constants.ScalingBlockedReleaseShapeMismatch},
+		{"the pods fit: not a GPU cause", []int{4, 4}, nodes(4, 4), ""},
+		{"only the Pending part counts: a placed leader frees nothing", []int{4}, nodes(4), ""},
+		{"other accelerators and cordoned nodes do not count", []int{1}, nodes(0), constants.ScalingBlockedReleaseTaken},
+		{"nothing Pending", nil, nodes(0), ""},
+		{"no node information", []int{4}, nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := shareFillTimeoutCause(g, tr, tc.nodes); got != tc.want {
+			if got := shareFillTimeoutCause("A100", tc.pending, tc.nodes); got != tc.want {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
@@ -269,7 +275,19 @@ func TestUtilizationShareAttributesAFillTimeout(t *testing.T) {
 			if started == 0 {
 				t.Fatal("setup: no transfer started")
 			}
-			f.current["A"] -= started // released; B's new pods never land
+			f.current["A"] -= started // released; B's new pod waits for a node
+			pending := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "B-v-new",
+					Labels: map[string]string{"app": "B-decode", appsv1.DefaultDeploymentUniqueLabelKey: "h1"},
+					OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet",
+						Name: "B-decode-h1", UID: "rs", Controller: ptr.To(true)}}},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "vllm", Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}}}},
+				Status: corev1.PodStatus{Phase: corev1.PodPending},
+			}
+			if err := se.c.Create(context.Background(), pending); err != nil {
+				t.Fatal(err)
+			}
 			taken := false
 			for range 40 {
 				cycle()

@@ -8,6 +8,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/resources"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -119,9 +120,10 @@ func (d *K8sWithGpuOperator) listGPUNodes(ctx context.Context) (map[string]NodeI
 			ni, exists := nodes[node.Name]
 			if !exists {
 				ni = NodeInfo{
-					Name:         node.Name,
-					Labels:       copyStringMap(node.Labels),
-					Accelerators: make(map[string]AcceleratorModelInfo),
+					Name:          node.Name,
+					Labels:        copyStringMap(node.Labels),
+					Accelerators:  make(map[string]AcceleratorModelInfo),
+					Unschedulable: node.Spec.Unschedulable,
 				}
 			}
 			// i915 and xe resources use the same gpu.intel.com/product label, so
@@ -244,10 +246,11 @@ func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[st
 	out := make(map[string]NodeGPUs, len(nodeGPUType))
 	for name, model := range nodeGPUType {
 		out[name] = NodeGPUs{
-			Accelerator: model,
-			Capacity:    nodes[name].Accelerators[model].Count,
-			Used:        byNode[name],
-			Labels:      nodes[name].Labels,
+			Accelerator:   model,
+			Capacity:      nodes[name].Accelerators[model].Count,
+			Used:          byNode[name],
+			Labels:        nodes[name].Labels,
+			Unschedulable: nodes[name].Unschedulable,
 		}
 	}
 	return byType, byNamespace, out, nil
@@ -279,7 +282,7 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 			continue
 		}
 
-		gpuCount := getPodGPURequests(&pod)
+		gpuCount := resources.PodGPURequests(&pod)
 		if gpuCount <= 0 {
 			continue
 		}
@@ -347,46 +350,6 @@ func nodeGPUTypesOf(nodes map[string]NodeInfo) map[string]string {
 		}
 	}
 	return out
-}
-
-// getPodGPURequests returns the total GPU requests for a pod across all containers.
-// For regular containers, GPUs are summed (they run concurrently).
-// For init containers, we take the max (they run sequentially).
-// The final result is max(initContainerMax, regularContainerSum) since init containers
-// complete before regular containers start.
-func getPodGPURequests(pod *corev1.Pod) int {
-	// Sum GPU requests from regular containers (run concurrently)
-	regularTotal := 0
-	for _, container := range pod.Spec.Containers {
-		for _, res := range constants.VendorResources {
-			resName := corev1.ResourceName(res.ResourceName)
-			if qty, ok := container.Resources.Requests[resName]; ok {
-				regularTotal += int(qty.Value())
-			}
-		}
-	}
-
-	// Find max GPU request from init containers (run sequentially)
-	initMax := 0
-	for _, container := range pod.Spec.InitContainers {
-		containerGPUs := 0
-		for _, res := range constants.VendorResources {
-			resName := corev1.ResourceName(res.ResourceName)
-			if qty, ok := container.Resources.Requests[resName]; ok {
-				containerGPUs += int(qty.Value())
-			}
-		}
-		if containerGPUs > initMax {
-			initMax = containerGPUs
-		}
-	}
-
-	// Return max of init containers and regular containers
-	// (init containers finish before regular containers start)
-	if initMax > regularTotal {
-		return initMax
-	}
-	return regularTotal
 }
 
 // Ensure K8sWithGpuOperator implements FullDiscovery

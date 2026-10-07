@@ -103,8 +103,9 @@ type ShareTransfer struct {
 	// forgotten, aborted -- is aborted too: its receiver's replica will never
 	// have all its holes.
 	setReleased, setPending int
-	// plannedRunning is set, each cycle, while one of PlannedPods still runs.
-	plannedRunning bool
+	// plannedRunning is set, each cycle, while one of PlannedPods still runs;
+	// plannedUnknown while one of them could not be read.
+	plannedRunning, plannedUnknown bool
 }
 
 // IsSetPrimary reports whether t carries a donor set's receiver.
@@ -414,9 +415,16 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 		given[t.Donor] += t.DonorGPUs
 		releasable[t] = held[t.Donor] <= base[t.Donor]-given[t.Donor]
 	}
-	waiting := map[string]bool{} // set IDs with a contributor not yet released
+	// A donor that shrank while a planned pod still runs lost another pod:
+	// the planned hole is not open, and never will be by this transfer.
+	wrongPod := func(t *ShareTransfer) bool { return releasable[t] && t.plannedRunning }
+	// Set IDs with a contributor not yet released -- including one whose
+	// planned hole did not open, or cannot be read: its primary must not
+	// release on the strength of the others. A wrong-pod contributor leaves
+	// the ledger below, and the set is then broken.
+	waiting := map[string]bool{}
 	for t, ok := range releasable {
-		if !ok && t.SetID != "" && !t.IsSetPrimary() {
+		if (!ok || wrongPod(t) || t.plannedUnknown) && t.SetID != "" && !t.IsSetPrimary() {
 			waiting[t.SetID] = true
 		}
 	}
@@ -429,11 +437,10 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 		}
 	}
 	broken := func(t *ShareTransfer) bool { return t.IsSetPrimary() && t.setPending > live[t.ID] }
-	// A donor that shrank while a planned pod still runs lost another pod:
-	// the planned hole is not open, and never will be by this transfer.
-	wrongPod := func(t *ShareTransfer) bool { return releasable[t] && t.plannedRunning }
 	for _, t := range l.transfers {
-		if !releasable[t] || (t.IsSetPrimary() && waiting[t.ID]) || broken(t) || wrongPod(t) {
+		// A planned pod that could not be read: neither released nor wrong
+		// this cycle. The release timeout still bounds the wait.
+		if !releasable[t] || (t.IsSetPrimary() && waiting[t.ID]) || broken(t) || wrongPod(t) || t.plannedUnknown {
 			continue
 		}
 		if t.SetID != "" && !t.IsSetPrimary() {
@@ -467,7 +474,7 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 			// Not the donor's failure: no back-off.
 			ended = append(ended, ShareTransferEnd{*t, ShareOutcomeAborted})
 			continue
-		case t.State == ShareReleasing && wrongPod(t):
+		case t.State == ShareReleasing && wrongPod(t) && !t.plannedUnknown:
 			// The donor did give; its GPUs return to the budget for the next
 			// plan. No back-off: the donor released, and promptly.
 			ended = append(ended, ShareTransferEnd{*t, ShareOutcomeWrongPod})
@@ -638,10 +645,11 @@ func (l *ShareLedger) MeasuredRelease() (time.Duration, bool) {
 }
 
 // PlannedRunning records, for this cycle, which node-planned transfers still
-// have a planned donor pod running (IDs in running). Observe reads it.
-func (l *ShareLedger) PlannedRunning(running map[string]bool) {
+// have a planned donor pod running (IDs in running) and which have one that
+// could not be read (IDs in unknown). Observe reads it.
+func (l *ShareLedger) PlannedRunning(running, unknown map[string]bool) {
 	for _, t := range l.transfers {
-		t.plannedRunning = running[t.ID]
+		t.plannedRunning, t.plannedUnknown = running[t.ID], unknown[t.ID]
 	}
 }
 

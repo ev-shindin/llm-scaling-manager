@@ -1970,9 +1970,20 @@ optimizer every cycle (§6.6).
          first, into the smallest hole that fits, else on the node needing the
          fewest further donor replicas. Free GPUs complete a hole but never
          stand in for a donor's quota. The search runs before the node-blind
-         one, which remains the fallback.
+         one, which remains the fallback. The whole set passes the same
+         admission as a node-blind set, the concurrency limit counted across
+         all its donors.
+       - only schedulable nodes count, and the GPUs already promised to a
+         Pending receiver or held for a wake are taken off the nodes with the
+         most free first: a Pending pod has no node, so they would otherwise
+         show as free twice.
+       - within one cycle, a started node-aware set spends its node state: the
+         free GPUs it placed into and its donor pods are not offered to the
+         next receiver.
        - a receiver LWS with the exclusive-topology annotation keeps every
-         hole in one domain, and never falls back to the node-blind search.
+         hole in one domain, trying each domain in turn; a node without the
+         label is in none. It never falls back to the node-blind search, with
+         node information or without.
        - a Deployment donor offers each Ready pod as a replica, and nothing
          while any of its pods is not Ready. An LWS donor offers its
          highest-index group.
@@ -1981,16 +1992,24 @@ optimizer every cycle (§6.6).
        - checking which pod went: a planned transfer whose donor shrank while
          a planned pod still runs ends `outcome="wrong-pod"`. The receiver is
          not raised, the donor stays lowered and its GPUs return to the
-         budget. Not the donor's fault, so it does not back off.
-     - fill-timeout attribution from the node picture: `release-taken` when
-       fewer GPUs are free than the receiver's replica, `release-shape-mismatch`
-       when enough are free but on no node enough for its largest pod, and no
-       reason when a node has room (the pod is Pending for another cause).
-       Reported on the receiver's model for one release timeout.
+         budget. Not the donor's fault, so it does not back off. A set
+         contributor that ends so keeps its primary from releasing; the set is
+         then broken and the primary aborted. A planned pod that cannot be
+         read (only NotFound means gone) holds the transfer for the cycle.
+     - fill-timeout attribution from the receiver's Pending pods and the node
+       picture: `release-taken` when fewer GPUs are free than those pods
+       request, `release-shape-mismatch` when enough are free but the pods do
+       not fit the nodes, and no reason when they fit (a pod is Pending for
+       another cause). Reported on the receiver's model for one release
+       timeout, and cleared when a transfer to it completes.
      - claims for a model that must wake a prefill with its decode: the wake
        claims one releasing transfer per role it must start, all or none, on
-       one accelerator (`ShareClaimStore.ClaimSet`, replicas matched largest
-       first). A role already serving is not claimed for.
+       one accelerator (`ShareClaimStore.ClaimSet`: replicas matched largest
+       first, each preferring the best-off receiver's transfer, backtracking
+       when a later replica would be left without one). A role already serving
+       is not claimed for. If one of the pair's transfers moves on before the
+       steady-state engine applies the claims, that redirect fails and the pair
+       is half funded; its other role waits for idle GPUs, as before.
      - the kind e2e, single role and P/D: shadow evaluates and touches nothing.
        Active, an idle model's marked pod is the one its ReplicaSet removes,
        and the loaded model grows only after the release. A P/D decode LWS

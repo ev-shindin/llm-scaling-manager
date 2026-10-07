@@ -44,6 +44,18 @@ func GetContainersGPUs(containers []corev1.Container) int {
 	return total
 }
 
+// PodGPURequests returns the GPUs a pod requests, as the scheduler accounts
+// them: regular containers run together, so their requests add up; init
+// containers run one at a time before them, so only the largest counts; the
+// pod holds the larger of the two.
+func PodGPURequests(pod *corev1.Pod) int {
+	initMax := 0
+	for _, c := range pod.Spec.InitContainers {
+		initMax = max(initMax, GetContainersGPUs([]corev1.Container{c}))
+	}
+	return max(initMax, GetContainersGPUs(pod.Spec.Containers))
+}
+
 // GetResourceWithBackoff performs a Get operation with exponential backoff retry logic
 func GetResourceWithBackoff[T client.Object](ctx context.Context, c client.Client, objKey client.ObjectKey, obj T, backoff wait.Backoff, resourceType string) error {
 	return wait.ExponentialBackoffWithContext(ctx, backoff, func(ctx context.Context) (bool, error) {

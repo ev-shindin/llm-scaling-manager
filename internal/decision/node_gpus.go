@@ -7,12 +7,14 @@ import (
 )
 
 // NodeGPU is one GPU node as the usage refresher last saw it: its accelerator,
-// capacity, the GPUs requested by pods scheduled to it, and its labels.
+// capacity, the GPUs requested by pods scheduled to it, its labels, and
+// whether it is cordoned.
 type NodeGPU struct {
-	Accelerator string
-	Capacity    int
-	Used        int
-	Labels      map[string]string
+	Accelerator   string
+	Capacity      int
+	Used          int
+	Labels        map[string]string
+	Unschedulable bool
 }
 
 // Free is the node's GPUs no scheduled pod requests.

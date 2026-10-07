@@ -130,3 +130,33 @@ func TestClaimShareTransferForAPDPair(t *testing.T) {
 		})
 	}
 }
+
+// A P/D pair claims in one group: a prefill on another accelerator, or on one
+// not resolved, cannot share the decode's claim set.
+func TestClaimShareTransferNeedsOneAccelerator(t *testing.T) {
+	group := modelGroup{namespace: selNS, modelID: "m"}
+	for _, tc := range []struct {
+		name    string
+		prefill Candidate
+		want    bool
+	}{
+		{"same accelerator (control)", cand("pre", domain.RolePrefill, "A100", 1, 1), true},
+		{"another accelerator", cand("pre", domain.RolePrefill, "H100", 1, 1), false},
+		{"unresolved accelerator", cand("pre", domain.RolePrefill, "", 1, 1), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			saved := decision.DefaultShareClaims
+			decision.DefaultShareClaims = &decision.ShareClaimStore{}
+			t.Cleanup(func() { decision.DefaultShareClaims = saved })
+			decision.DefaultShareClaims.Publish(map[string][]decision.ShareClaimable{
+				decision.ShareGroupKey("", "A100"): {{ID: "t0", ReceiverZ: -0.3, DonorGPUs: 1}, {ID: "t1", ReceiverZ: -0.3, DonorGPUs: 1}},
+				decision.ShareGroupKey("", "H100"): {{ID: "h0", ReceiverZ: -0.3, DonorGPUs: 1}},
+			}, time.Now())
+			e := &Engine{config: pdShareConfig(t)}
+			candidates := []Candidate{cand("dec", domain.RoleDecode, "A100", 1, 1), tc.prefill}
+			if _, ok := e.claimShareTransfer(context.Background(), group, candidates, nil, coverage{}); ok != tc.want {
+				t.Fatalf("claimed %v, want %v", ok, tc.want)
+			}
+		})
+	}
+}

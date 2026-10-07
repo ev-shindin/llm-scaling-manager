@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/resources"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -558,7 +559,7 @@ func TestGetPodGPURequests_MixedVendors(t *testing.T) {
 		},
 	}
 
-	result := getPodGPURequests(pod)
+	result := resources.PodGPURequests(pod)
 	// Should sum all GPU requests across vendors
 	assert.Equal(t, 6, result)
 }

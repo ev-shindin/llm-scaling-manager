@@ -839,15 +839,16 @@ func TestUtilizationShareWakeClaimRedirectsATransfer(t *testing.T) {
 	started := se.untilStarted()
 
 	// A parked standard model wakes: z = -1, below B's (short, weight 1).
-	claim, outcome := decision.DefaultShareClaims.Claim("", "A100", nil, 1, -1, "ns/W", "ns/W-v", se.clock)
-	if outcome != decision.ShareClaimRedirected {
+	claims, outcome := decision.DefaultShareClaims.ClaimSet("", "A100",
+		[]decision.ShareWake{{GPUs: 1, Variant: "ns/W-v"}}, -1, "ns/W", se.clock)
+	if outcome != decision.ShareClaimRedirected || len(claims) != 1 {
 		t.Fatalf("want the wake to claim a releasing transfer, got %q", outcome)
 	}
 	se.cycle() // applies the claim
 	var remarked bool
 	for _, p := range markedPods(t, c) {
 		var m transferMark
-		if json.Unmarshal([]byte(p.Annotations[utilizationShareTransferAnnotation]), &m) == nil && m.ID == claim.ID {
+		if json.Unmarshal([]byte(p.Annotations[utilizationShareTransferAnnotation]), &m) == nil && m.ID == claims[0].ID {
 			remarked = m.Receiver == "" && m.GPUs == 0
 		}
 	}

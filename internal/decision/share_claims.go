@@ -99,18 +99,6 @@ type ShareWake struct {
 	Variant string
 }
 
-// Claim tries to redirect a releasing transfer to a wake of one replica. See
-// ClaimSet.
-func (s *ShareClaimStore) Claim(scope, accelerator string, wakePods []int, wakeGPUs int,
-	z float64, model, wake string, now time.Time) (ShareClaim, string) {
-	claims, outcome := s.ClaimSet(scope, accelerator, []ShareWake{{Pods: wakePods, GPUs: wakeGPUs, Variant: wake}},
-		z, model, now)
-	if len(claims) == 0 {
-		return ShareClaim{}, outcome
-	}
-	return claims[0], outcome
-}
-
 // ClaimSet tries to redirect one releasing transfer to each replica of a
 // wake -- a decode with the prefill it must wake alongside -- all or none:
 // half a P/D pair woken serves nothing. scope is the wake's own group -- its
@@ -118,8 +106,9 @@ func (s *ShareClaimStore) Claim(scope, accelerator string, wakePods []int, wakeG
 // and z its score there. Only that group is tried: a model is planned in one
 // group, and the GPUs of another are not its to take. A transfer qualifies for
 // a replica when the wake scores lower than its receiver and its donor pods
-// cover the replica's; replicas are matched largest first, each to the
-// qualifying transfer with the lowest receiver score. model (namespace/model)
+// cover the replica's. Replicas are matched largest first, each preferring the
+// transfer of the best-off receiver (highest score), backtracking when a later
+// replica would be left without one. model (namespace/model)
 // is held for ShareClaimModelHold after a claim. It returns the claims and the
 // outcome; only ShareClaimRedirected carries claims.
 func (s *ShareClaimStore) ClaimSet(scope, accelerator string, wakes []ShareWake,
@@ -143,23 +132,40 @@ func (s *ShareClaimStore) ClaimSet(scope, accelerator string, wakes []ShareWake,
 	}
 	order := slices.Clone(wakes)
 	slices.SortStableFunc(order, func(a, b ShareWake) int { return cmp.Compare(b.GPUs, a.GPUs) })
-	used := map[int]bool{}
-	var claims []ShareClaim
-	for _, w := range order {
-		best := -1
-		for i, e := range entries {
-			if used[i] || !(z < e.ReceiverZ) || !PodsCover(e.DonorPodGPUs, e.DonorGPUs, w.Pods, w.GPUs) {
+	pref := make([]int, len(entries))
+	for i := range pref {
+		pref[i] = i
+	}
+	slices.SortStableFunc(pref, func(a, b int) int {
+		return cmp.Or(cmp.Compare(entries[b].ReceiverZ, entries[a].ReceiverZ), cmp.Compare(entries[a].ID, entries[b].ID))
+	})
+	used := make([]bool, len(entries))
+	pick := make([]int, len(order))
+	var assign func(i int) bool
+	assign = func(i int) bool {
+		if i == len(order) {
+			return true
+		}
+		w := order[i]
+		for _, j := range pref {
+			e := entries[j]
+			if used[j] || !(z < e.ReceiverZ) || !PodsCover(e.DonorPodGPUs, e.DonorGPUs, w.Pods, w.GPUs) {
 				continue
 			}
-			if best < 0 || cmp.Or(cmp.Compare(e.ReceiverZ, entries[best].ReceiverZ), cmp.Compare(entries[best].ID, e.ID)) > 0 {
-				best = i
+			used[j], pick[i] = true, j
+			if assign(i + 1) {
+				return true
 			}
+			used[j] = false
 		}
-		if best < 0 {
-			return nil, ShareClaimRefusedFit
-		}
-		used[best] = true
-		claims = append(claims, ShareClaim{Scope: scope, Accelerator: accelerator, ID: entries[best].ID, Wake: w.Variant})
+		return false
+	}
+	if !assign(0) {
+		return nil, ShareClaimRefusedFit
+	}
+	claims := make([]ShareClaim, 0, len(order))
+	for i, w := range order {
+		claims = append(claims, ShareClaim{Scope: scope, Accelerator: accelerator, ID: entries[pick[i]].ID, Wake: w.Variant})
 	}
 	s.claimable[key] = slices.DeleteFunc(slices.Clone(entries), func(e ShareClaimable) bool {
 		return slices.ContainsFunc(claims, func(c ShareClaim) bool { return c.ID == e.ID })

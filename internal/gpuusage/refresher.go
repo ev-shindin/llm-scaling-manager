@@ -165,7 +165,8 @@ func (r *Refresher) Refresh(ctx context.Context) error {
 		r.store().Publish(byType, byNamespace)
 		published := make(map[string]decision.NodeGPU, len(nodes))
 		for name, n := range nodes {
-			published[name] = decision.NodeGPU{Accelerator: n.Accelerator, Capacity: n.Capacity, Used: n.Used, Labels: n.Labels}
+			published[name] = decision.NodeGPU{Accelerator: n.Accelerator, Capacity: n.Capacity, Used: n.Used,
+				Labels: n.Labels, Unschedulable: n.Unschedulable}
 		}
 		r.nodeStore().Publish(published, time.Now())
 		log.FromContext(ctx).V(logging.DEBUG).Info("Refreshed cluster GPU usage",

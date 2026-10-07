@@ -167,3 +167,14 @@ func TestShareClaimStoreClaimsASetAllOrNone(t *testing.T) {
 		}
 	}
 }
+
+// Claim is ClaimSet for a wake of one replica: the tests' shorthand.
+func (s *ShareClaimStore) Claim(scope, accelerator string, wakePods []int, wakeGPUs int,
+	z float64, model, wake string, now time.Time) (ShareClaim, string) {
+	claims, outcome := s.ClaimSet(scope, accelerator, []ShareWake{{Pods: wakePods, GPUs: wakeGPUs, Variant: wake}},
+		z, model, now)
+	if len(claims) == 0 {
+		return ShareClaim{}, outcome
+	}
+	return claims[0], outcome
+}

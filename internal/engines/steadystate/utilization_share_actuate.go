@@ -162,7 +162,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		logger.Info("Utilization share: transfer redirected to a woken model; its receiver is planned again",
 			"id", c.ID, "wake", c.Wake, "receiver", prev.Receiver, "donor", prev.Donor)
 	}
-	l.PlannedRunning(e.plannedRunning(ctx, l))
+	l.PlannedRunning(e.plannedRunning(ctx, logger, l))
 	for _, end := range l.Observe(held, now, tm) {
 		t := end.Transfer
 		metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, string(end.Outcome), t.Urgent)
@@ -175,8 +175,12 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			}
 			e.unmarkDonorPods(ctx, logger, t)
 		}
+		if end.Outcome == allocation.ShareOutcomeDone && t.Receiver != "" {
+			l.FillBlocked(t.Receiver, "", now) // the receiver fills again
+		}
 		if end.Outcome == allocation.ShareOutcomeFillTimeout && t.Receiver != "" {
-			reason := shareFillTimeoutCause(g, t, e.shareNodes(now))
+			pending := e.pendingPodGPUs(ctx, accessor(t.Receiver, t.ReceiverVariant), g.Origins[t.Receiver].Namespace)
+			reason := shareFillTimeoutCause(g.AcceleratorType, pending, e.shareNodes(now))
 			l.FillBlocked(t.Receiver, reason, now.Add(tm.ReleaseTimeout))
 			if reason != "" {
 				logger.Info("WARNING: utilization share: the receiver's pods stayed Pending after its GPUs were released",
@@ -224,7 +228,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	for _, t := range l.Transfers() {
 		before[t.ID] = t
 	}
-	nodes, units, domains := e.shareNodeInputs(ctx, g, accessor, now)
+	nodes, units, domains := e.shareNodeInputs(ctx, logger, g, accessor, l.Promised()+l.WakeHeld(now), now)
 	plan := allocation.PlanShareTransfers(l, allocation.SharePlanInput{
 		Roles: g.Roles, Held: held, Thresholds: g.Thresholds, Budget: g.Budget, Tolerance: us.Tolerance,
 		Give: g.Give, Grow: g.Grow, Nodes: nodes, DonorUnits: units, DomainKey: domains,
@@ -985,21 +989,26 @@ func boolInt(b bool) int {
 // nothing when any of its pods is not Ready: the ReplicaSet removes a not-Ready
 // pod first, wherever it runs, so the planned hole would not open. A
 // LeaderWorkerSet donor offers its highest-index group, the one LWS removes.
-func (e *Engine) shareNodeInputs(ctx context.Context, g allocation.ShareGroup,
-	accessor func(role, variant string) scaletarget.ScaleTargetAccessor, now time.Time) (
+func (e *Engine) shareNodeInputs(ctx context.Context, logger logr.Logger, g allocation.ShareGroup,
+	accessor func(role, variant string) scaletarget.ScaleTargetAccessor, reserved int, now time.Time) (
 	map[string]allocation.ShareNode, map[string][]allocation.ShareUnit, map[string]string) {
-	snap := e.shareNodes(now)
-	if snap == nil || e.client == nil {
-		return nil, nil, nil
-	}
-	nodes := map[string]allocation.ShareNode{}
-	for name, n := range snap {
-		if n.Accelerator == g.AcceleratorType {
-			nodes[name] = allocation.ShareNode{Free: n.Free(), Labels: n.Labels}
+	// Domains are known without node information, and a receiver with one
+	// is then never funded by the node-blind search.
+	domains := map[string]string{}
+	for role, grow := range g.Grow {
+		if acc := accessor(role, grow.Name); acc != nil {
+			if key := scaletarget.ExclusiveTopology(acc); key != "" {
+				domains[role] = key
+			}
 		}
 	}
+	snap := e.shareNodes(now)
+	if snap == nil || e.client == nil {
+		return nil, nil, domains
+	}
+	nodes := shareFreeNodes(snap, g.AcceleratorType, reserved)
 	if len(nodes) == 0 {
-		return nil, nil, nil
+		return nil, nil, domains
 	}
 	units := map[string][]allocation.ShareUnit{}
 	for role, give := range g.Give {
@@ -1009,40 +1018,13 @@ func (e *Engine) shareNodeInputs(ctx context.Context, g allocation.ShareGroup,
 		}
 		pods, err := e.donorPods(ctx, acc, g.Origins[role].Namespace)
 		if err != nil {
+			// The donor then gives nothing to a node-aware set this cycle.
+			logger.V(logging.DEBUG).Info("Utilization share: could not list a donor's pods for node-aware planning",
+				"role", role, "error", err.Error())
 			continue
 		}
-		pods = slices.DeleteFunc(pods, func(p corev1.Pod) bool {
-			_, marked := p.Annotations[utilizationShareTransferAnnotation]
-			return marked
-		})
-		toPod := func(p corev1.Pod) allocation.SharePod {
-			return allocation.SharePod{Name: utils.GetNamespacedKey(p.Namespace, p.Name), Node: p.Spec.NodeName,
-				GPUs: resources.GetContainersGPUs(p.Spec.Containers)}
-		}
-		if scaletarget.IsLeaderWorkerSet(acc) {
-			if len(pods) > 0 {
-				u := allocation.ShareUnit{}
-				for _, p := range pods {
-					u.Pods = append(u.Pods, toPod(p))
-				}
-				units[role] = []allocation.ShareUnit{u}
-			}
-			continue
-		}
-		if slices.ContainsFunc(pods, func(p corev1.Pod) bool { return !variantmeta.PodReady(&p) }) {
-			continue
-		}
-		slices.SortFunc(pods, func(a, b corev1.Pod) int { return cmp.Compare(a.Name, b.Name) })
-		for _, p := range pods {
-			units[role] = append(units[role], allocation.ShareUnit{Pods: []allocation.SharePod{toPod(p)}})
-		}
-	}
-	domains := map[string]string{}
-	for role, grow := range g.Grow {
-		if acc := accessor(role, grow.Name); acc != nil {
-			if key := scaletarget.ExclusiveTopology(acc); key != "" {
-				domains[role] = key
-			}
+		if u := shareDonorUnits(scaletarget.IsLeaderWorkerSet(acc), pods); len(u) > 0 {
+			units[role] = u
 		}
 	}
 	return nodes, units, domains
@@ -1058,12 +1040,15 @@ func plannedPods(planned bool, pods []string) []string {
 }
 
 // plannedRunning returns the releasing transfers with a planned donor pod
-// still running: present and not terminating. A pod that cannot be read is
-// not counted as running -- the check then falls back to the count.
-func (e *Engine) plannedRunning(ctx context.Context, l *allocation.ShareLedger) map[string]bool {
-	out := map[string]bool{}
+// still running -- present and not terminating -- and those with one that
+// could not be read. Only NotFound means gone: any other error leaves the
+// transfer undecided for the cycle, since reading it as gone would raise the
+// receiver into a hole that may not be open, and as running would end a
+// transfer whose pod did go.
+func (e *Engine) plannedRunning(ctx context.Context, logger logr.Logger, l *allocation.ShareLedger) (running, unknown map[string]bool) {
+	running, unknown = map[string]bool{}, map[string]bool{}
 	if e.client == nil {
-		return out
+		return running, unknown
 	}
 	for _, t := range l.Transfers() {
 		if t.State != allocation.ShareReleasing {
@@ -1072,13 +1057,19 @@ func (e *Engine) plannedRunning(ctx context.Context, l *allocation.ShareLedger) 
 		for _, key := range t.PlannedPods {
 			ns, name, _ := strings.Cut(key, "/")
 			var p corev1.Pod
-			if err := e.client.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &p); err == nil && p.DeletionTimestamp == nil {
-				out[t.ID] = true
-				break
+			err := e.client.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &p)
+			switch {
+			case apierrors.IsNotFound(err):
+			case err != nil:
+				logger.V(logging.DEBUG).Info("Utilization share: could not read a planned donor pod; transfer held this cycle",
+					"id", t.ID, "pod", key, "error", err.Error())
+				unknown[t.ID] = true
+			case p.DeletionTimestamp == nil:
+				running[t.ID] = true
 			}
 		}
 	}
-	return out
+	return running, unknown
 }
 
 // shareNodes is the fresh per-node GPU picture, or nil.
@@ -1091,34 +1082,135 @@ func (e *Engine) shareNodes(now time.Time) map[string]decision.NodeGPU {
 }
 
 // shareFillTimeoutCause attributes a transfer whose receiver stayed Pending
-// after its donors released (section 6.3), from the node picture of the
-// group's accelerator: release-taken when fewer GPUs are free than the
-// receiver's replica needs -- something else took them; release-shape-mismatch
-// when enough are free in total but no node holds the receiver's largest pod.
-// "" when a node does hold it (the pod is Pending for another reason: a taint,
-// an affinity) or there is no node information.
-func shareFillTimeoutCause(g allocation.ShareGroup, t allocation.ShareTransfer, nodes map[string]decision.NodeGPU) string {
-	if nodes == nil {
+// after its donors released (section 6.3), from the receiver's Pending pods'
+// GPU requests and the node picture of its accelerator: release-taken when
+// fewer GPUs are free than those pods request -- something else took them;
+// release-shape-mismatch when enough are free in total but the pods do not fit
+// the nodes, placed largest first into the smallest hole that holds each. ""
+// when they fit (a pod is Pending for another reason: a taint, an affinity),
+// when none is Pending, or without node information.
+func shareFillTimeoutCause(accelerator string, pending []int, nodes map[string]decision.NodeGPU) string {
+	if nodes == nil || len(pending) == 0 {
 		return ""
 	}
-	largest := max(t.GPUs, 1)
-	if grow, ok := g.Grow[t.Receiver]; ok && len(grow.PodGPUs) > 0 {
-		largest = slices.Max(grow.PodGPUs)
+	free := map[string]int{}
+	total := 0
+	for name, n := range nodes {
+		if n.Accelerator == accelerator && !n.Unschedulable {
+			free[name] = n.Free()
+			total += n.Free()
+		}
 	}
-	total, most := 0, 0
-	for _, n := range nodes {
-		if n.Accelerator != g.AcceleratorType {
+	need := slices.Sorted(slices.Values(pending))
+	slices.Reverse(need)
+	sum, fits := 0, true
+	for _, p := range need {
+		sum += p
+		best := ""
+		for name, f := range free {
+			if f >= p && (best == "" || f < free[best] || (f == free[best] && name < best)) {
+				best = name
+			}
+		}
+		if best == "" {
+			fits = false
 			continue
 		}
-		total += n.Free()
-		most = max(most, n.Free())
+		free[best] -= p
 	}
 	switch {
-	case most >= largest:
+	case fits:
 		return ""
-	case total >= max(t.GPUs, 1):
+	case total >= sum:
 		return constants.ScalingBlockedReleaseShapeMismatch
 	default:
 		return constants.ScalingBlockedReleaseTaken
 	}
+}
+
+// pendingPodGPUs is the GPU request of each of a variant's pods that is
+// waiting for a node. Nil when they cannot be listed.
+func (e *Engine) pendingPodGPUs(ctx context.Context, acc scaletarget.ScaleTargetAccessor, namespace string) []int {
+	if e.client == nil || acc == nil {
+		return nil
+	}
+	pods, err := variantmeta.ListVariantPods(ctx, e.client, namespace, acc)
+	if err != nil {
+		return nil
+	}
+	var out []int
+	for _, p := range pods {
+		if p.Spec.NodeName == "" && p.DeletionTimestamp == nil && p.Status.Phase == corev1.PodPending {
+			out = append(out, resources.PodGPURequests(&p))
+		}
+	}
+	return out
+}
+
+// shareDonorUnits is what a donor could give a node-aware set, from its pods
+// (donorPods: running, scheduled, and for a LeaderWorkerSet its highest-index
+// group only). Pods already marked by a transfer are another transfer's. A
+// LeaderWorkerSet gives that group, all its pods at once, as one unit. A
+// Deployment gives each pod as a unit, and nothing while any pod is not
+// Ready: the ReplicaSet removes a not-Ready pod first, wherever it runs, so
+// the planned hole would not open.
+func shareDonorUnits(lws bool, pods []corev1.Pod) []allocation.ShareUnit {
+	if !lws && slices.ContainsFunc(pods, func(p corev1.Pod) bool { return !variantmeta.PodReady(&p) }) {
+		return nil
+	}
+	pods = slices.DeleteFunc(slices.Clone(pods), func(p corev1.Pod) bool {
+		_, marked := p.Annotations[utilizationShareTransferAnnotation]
+		return marked
+	})
+	if len(pods) == 0 {
+		return nil
+	}
+	slices.SortFunc(pods, func(a, b corev1.Pod) int { return cmp.Compare(a.Name, b.Name) })
+	toPod := func(p corev1.Pod) allocation.SharePod {
+		return allocation.SharePod{Name: utils.GetNamespacedKey(p.Namespace, p.Name), Node: p.Spec.NodeName,
+			GPUs: resources.PodGPURequests(&p)}
+	}
+	if lws {
+		u := allocation.ShareUnit{}
+		for _, p := range pods {
+			u.Pods = append(u.Pods, toPod(p))
+		}
+		return []allocation.ShareUnit{u}
+	}
+	out := make([]allocation.ShareUnit, 0, len(pods))
+	for _, p := range pods {
+		out = append(out, allocation.ShareUnit{Pods: []allocation.SharePod{toPod(p)}})
+	}
+	return out
+}
+
+// shareFreeNodes is the node picture a node-aware plan may use: the schedulable
+// nodes of the accelerator, each with its free GPUs. reserved GPUs -- released
+// to a receiver whose pods are still Pending, or held for a wake -- show as
+// free on some node, because a Pending pod has none; where is not known, so
+// they are taken from the nodes with the most free first, which is where they
+// would count most.
+func shareFreeNodes(snap map[string]decision.NodeGPU, accelerator string, reserved int) map[string]allocation.ShareNode {
+	nodes := map[string]allocation.ShareNode{}
+	for name, n := range snap {
+		if n.Accelerator == accelerator && !n.Unschedulable {
+			nodes[name] = allocation.ShareNode{Free: n.Free(), Labels: n.Labels}
+		}
+	}
+	for reserved > 0 {
+		most := ""
+		for name, n := range nodes {
+			if n.Free > 0 && (most == "" || n.Free > nodes[most].Free || (n.Free == nodes[most].Free && name < most)) {
+				most = name
+			}
+		}
+		if most == "" {
+			break
+		}
+		n := nodes[most]
+		n.Free--
+		nodes[most] = n
+		reserved--
+	}
+	return nodes
 }
