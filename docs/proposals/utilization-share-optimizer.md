@@ -25,6 +25,14 @@ limit) and wants all of it used. When it is on:
    donor's GPUs have actually been released — which, under the derived HPA's
    scale-down stabilization window, is minutes after WVA publishes the lower
    target, not the next cycle.
+5. **It does not oscillate.** A controller whose moves land minutes after it
+   decides them oscillates unless it is built not to. A simulator found four
+   ways the first rules did, and §6.7 closes each one. It judges on committed
+   GPUs, only moves for roles a move can actually fix, puts hysteresis on
+   cancellation, and holds a pair from reversing for two release times. Steady
+   load produces no transfers, and a demand step settles in the minimum number
+   with none wasted. The cost is stated: load that swings faster than a
+   transfer can land is not tracked.
 
 The two roles of a P/D model get the same headroom, so they run equally loaded
 relative to their thresholds, and GPUs move between the two roles of one model
@@ -163,7 +171,7 @@ P/D model, the single synthetic role `both` otherwise. For a role `r` of model
 | `N_r = d_r / k_r` | **need**: GPUs that put the role exactly at its threshold | derived; the GPU form of the engine's `RequiredCapacity` arithmetic |
 | `G_r` | GPUs the role **holds** | `Σ_v HeldReplicas × GPUsPerReplica`, where `HeldReplicas` counts scheduled pods until their containers exit, terminating ones included (§6.3) |
 | `x_r = G_r / N_r − 1` | **headroom**: the traffic spike the role absorbs before it needs to scale | derived; negative = short |
-| `u_r = d_r / G_r` | utilization | the engine's `Utilization` (`TotalDemand / TotalSupply`), per role |
+| `u_r = d_r / G_r` | utilization | computed here from `G_r`, per role. Not the engine's `Utilization` field, which is `TotalDemand / (ReplicaCount × PerReplicaCapacity)`: it excludes terminating pods and is in capacity units |
 | `F_r`, `C_r` | floor and ceiling, GPUs | §5.5 |
 
 Headroom and utilization are two views of one number: `u_r = k_r / (1 + x_r)`.
@@ -198,8 +206,13 @@ has no need and no headroom to speak of, and receives nothing above its floor.
 
 ### 5.1 Need first, then spare
 
+Everything in §5 runs over **`B_net`**, the budget this optimizer plans over:
+the limiter's `B` minus what WVA has set aside or does not plan — fixed
+consumers, frozen models, the reserve and the warm pool's carve-out (§6.2). Where
+§5 writes `B` it means `B_net`.
+
 Let each role's **claim** be its need, raised to its floor and capped at its
-ceiling, `N̄_r = min(max(N_r, F_r), C_r)`, and let `S = B − Σ N̄_r` be the
+ceiling, `N̄_r = min(max(N_r, F_r), C_r)`, and let `S = B_net − Σ N̄_r` be the
 spare. (Floors count here because KEDA enforces them whatever WVA publishes; a
 budget that covers every need but not every floor is not a budget with spare.
 §5.5 case 3 is that situation.)
@@ -239,7 +252,7 @@ weights have no effect: there is nothing to share.
 `S = 16 − 10 = 6`, `s = 6 / (2·5 + 3.75 + 1.25) = 0.4`. A's headroom is exactly
 twice B's and C's — that is the whole meaning of the weight. A ends up 22 % cooler
 than B, but that is an *outcome* of how much spare there is, not a setting: with
-12 GPUs the same weights give A 11 % cooler, with 10 GPUs nothing, and with 8 GPUs
+12 GPUs the same weights give A 10 % cooler, with 10 GPUs nothing, and with 8 GPUs
 A is cut 13 % below its need while B and C are cut 27 %.
 
 Note that weights 2 : 1 : 1 do **not** split the 6 spare GPUs 50 / 25 / 25. A
@@ -395,7 +408,7 @@ Five cases:
    claim. On a per-tenant install the tenant pays for their own floors, which is
    the right owner.
 
-4. **Floors exceed the budget** (`Σ F_r > B`). Nothing is shared and no transfer
+4. **Floors exceed the budget** (`Σ F_r > B_net`). Nothing is shared and no transfer
    is planned; the group reports `floors-exceed-quota`. Some of those pods will
    not be admitted — the HPA enforces the floor and the `ResourceQuota` refuses
    it — which is a configuration conflict only the operator can resolve.
@@ -474,9 +487,23 @@ against its queue, so a systematic under-read shows up as prefill queues at
 positive reported headroom before any transfer acts on it.
 
 `pdTransfers` (§8) stays as a **kill switch**, on by default: off, P/D models are
-sized by today's paired allocator as fixed consumers — subtracted from `B`,
-scaled up from free budget, never donor or receiver — while aggregated models
+sized by today's paired allocator as **fixed consumers**, while aggregated models
 keep the new behaviour.
+
+A fixed consumer is sized by today's path and never gives GPUs away, but it
+must still be able to **grow** in a full quota. Otherwise, because this
+optimizer drives free GPUs to about zero, the documented rollback would freeze
+every P/D model at its current size. So:
+
+- `B_net` subtracts each fixed consumer's **`max(held, today's-path target)`**,
+  not what it holds now. The GPUs it is entitled to are set aside before anything
+  is shared.
+- When that target is above what it holds, the gap is funded **first from free
+  GPUs, then by ordinary transfers** from planned roles. The fixed consumer is a
+  receiver like any other, with the same donor sets, scale-down-first and
+  per-pod holes. It is never a donor.
+- Within one cycle, fixed-consumer growth draws on `free` before any planned
+  receiver, so the same free GPU is never handed out twice.
 
 **Multi-accelerator models** — variants on more than one GPU *type*, not
 replicas of many GPUs — are the one shape that stays outside. They are fixed
@@ -502,8 +529,11 @@ the admission rule of §6.2: the pair's lowest `z` rises (−0.33 → −0.20 �
 → +0.07) and A stays in band (6 GPUs against `Ĝ = 6.2`, tolerance 0.93). A
 fourth step fails both tests: the lowest `z` would fall to 0.00, and A at 5 GPUs
 would be 1.2 below its target, outside the tolerance. So it stops at three
-transfers, one replica each. With `maxReplicasPerCycle: 2`, two run in the
-first cycle and the third in the next.
+transfers, one replica each. With `maxConcurrentTransfers: 2`, two start in
+the first cycle. The third waits until one of them reaches Done, about one
+release time later, and until A and B are past the reversal hold that keeps them
+from moving the other way (§6.7). It does not wait for the hold to start the
+third in the *same* direction.
 
 **A short quota**: demands doubled (8 / 6 / 2, need 20) on 16 GPUs. A 9 (−10 %),
 B 5 (−33 %), C 2 (−20 %). The heavier model is cut least.
@@ -557,9 +587,12 @@ For each enabled group:
    unmodeled. Multi-accelerator models (and P/D models when `pdTransfers` is
    off) are fixed consumers (§5.6): sized by today's path, subtracted from `B`,
    never planned.
-2. Compute two targets from the **committed** allocation — current holdings
-   adjusted by every transfer already in flight (§6.3) — so a transfer started
-   three cycles ago is not planned again:
+2. Compute two targets, and judge every role, against its **committed**
+   allocation `Ḡ_r`: current holdings adjusted by every transfer already in
+   flight (§6.3). A receiver whose replica is still on its way already counts it,
+   so a transfer started three cycles ago is not planned again. Judging the band
+   on held GPUs instead re-plans every in-flight transfer every cycle until it
+   lands — measured in §6.7 as the largest single source of oscillation:
    - the **continuous** target `Ĝ_r` (§5.1, water-filled over floors and
      ceilings), and its utilization `û_r = d_r / Ĝ_r`;
    - the **integer** target `G*_r` (§5.4), which only decides *which* replica
@@ -567,11 +600,14 @@ For each enabled group:
 3. A role is **in band** when either holds, and **out of band** otherwise:
 
    ```text
-   |G_r − Ĝ_r| ≤ tol_r,   tol_r = max(τ_rel · Ĝ_r,  ½ · g_r)     GPU distance  (τ_rel default 0.15)
-   |u_r − û_r| ≤ τ_abs                                           idle floor    (τ_abs default 0.05)
+   |Ḡ_r − Ĝ_r| ≤ tol_r,   tol_r = max(τ_rel · Ĝ_r,  ½ · g_r)     GPU distance  (τ_rel default 0.15)
+   |ū_r − û_r| ≤ τ_abs   and  ū_r ≤ k_r                          idle floor    (τ_abs default 0.05)
    ```
 
-   where `g_r` is one replica of the role, in GPUs. The band is judged in **GPU
+   where `g_r` is one replica of the role, in GPUs, and `ū_r = d_r / Ḡ_r`. The
+   idle floor applies only to a role that is not past its threshold. With a large
+   spare every `û` is small, and a role far below its target could otherwise pass
+   on the idle floor while it queues. The band is judged in **GPU
    space**, the space moves happen in. `τ_rel` is the "±threshold percent"
    knob: 15 % of the role's target, in GPUs. The idle floor stops idle models
    from churning: `0.02` against `0.03` is a large relative miss of no
@@ -601,19 +637,32 @@ For each enabled group:
    tolerance. The band and the admission rule below use the **same in-band
    predicate** against `Ĝ`, so they cannot disagree about whether a move
    helps.
-4. Act only if some role has been out of band for `confirmCycles` consecutive
-   cycles (default 2). The demand feeding `d_r` is already windowed by the
-   analyzers; this is a second, cheap guard against one noisy cycle. A floor that
-   is owed (§5.5 case 5) skips both the band and this wait.
+4. A role is **actionable** when it is out of band **and** its committed
+   allocation differs from its integer target (`Ḡ_r ≠ G*_r`). A role already at
+   its integer target can be out of band only through replica granularity, and
+   no move can improve it. Before this rule, one such role — model C, 2 GPUs
+   against a target of 1.4 — kept the whole group "out of band" forever and
+   licensed a stream of A ↔ B moves (§6.7).
+5. Act only if some role has been actionable for `confirmCycles` consecutive
+   cycles (default 2), and plan only transfers that **involve a confirmed
+   actionable role**, as receiver or as donor (§6.2). One role's deviation never
+   licenses a move between two others. The demand feeding `d_r` is already
+   windowed by the analyzers; the confirmation is a second, cheap guard against
+   one noisy cycle. A floor that is owed (§5.5 case 5) skips the band, this wait
+   and §6.7's holds.
 
 ### 6.2 Plan transfers
 
 When the group acts:
 
-- **Receivers** are roles with `G_r < G*_r`, lowest `z` first.
-- **Donors** are roles with `G_r > G*_r` and `G_r > F_r`, highest `z` first. A
+- **Receivers** are roles with `Ḡ_r < G*_r`, lowest `z` first.
+- **Donors** are roles with `Ḡ_r > G*_r` and `Ḡ_r > F_r`, highest `z` first. A
   donor need not itself be out of band — it is chosen because its target is
-  lower. The band decides *whether* to rebalance; the target decides *who* pays.
+  lower. The band decides *whether* to
+  rebalance; the target decides *who* pays.
+- **Every transfer involves a confirmed actionable role** (§6.1 step 5), and
+  respects the reversal hold (§6.7): a role that gave within `reversalHold`
+  cannot receive, and a role that received cannot give.
 - **Free budget first.** GPUs in the budget that nobody holds go to receivers
   immediately, with no transfer and no wait. Free is computed here, from held
   GPUs and the ledger — **never** from the limiter's `Used`:
@@ -644,6 +693,20 @@ When the group acts:
   Every GPU lands in exactly one term. WVA's own non-planned consumers come
   out of `B_net`; WVA's planned roles are `G_r`; everyone else is `H_other`;
   in-flight transfers are `P`.
+
+  **The reserve is accounted, not just subtracted.** `B_net` always sets aside
+  `reserveGPUs`, but once a wake spends some of it, the woken model's GPUs sit in
+  `G_r` while the reserve is still subtracted, and `free` would go negative. So:
+
+  ```text
+  reserveRoom = min(reserveGPUs, max(0, free_raw + reserveGPUs))     free_raw = the formula above
+  free        = max(0, free_raw)
+  ```
+
+  `reserveRoom` is what a wake or an urgent receiver may still take from the
+  reserve. When it is below `reserveGPUs`, the next plan treats the shortfall
+  as a receiver of its own and refills it by transfer, at the lowest priority of
+  any receiver.
 
   Each GPU is counted once. While a donor is Releasing, its GPUs are still in
   `G_r` and are **not** also in `P`; at release they leave `G_r` and enter `P`;
@@ -677,10 +740,16 @@ When the group acts:
   improves the worst-off role among those it touches, so no sequence of moves
   returns to an earlier state. The second stops a move that fixes one band
   violation by creating another, which is the residual churn the first
-  condition allows when one replica is a large fraction of a donor. Both are
-  judged against the continuous target `û`, like the band test. A transfer for
-  an owed floor (§5.5 case 5) bypasses both; it may still never take a donor
-  below its own floor.
+  condition allows when one replica is a large fraction of a donor. The first is
+  judged in `z`; the second against the continuous target `Ĝ`, with the band's
+  own predicate. A transfer for an owed floor (§5.5 case 5) bypasses both, and
+  §6.7's holds; it may still never take a donor below its own floor.
+
+  With demand held fixed, the first condition alone guarantees convergence: each
+  admitted move makes the group's sorted list of `z` values strictly larger in
+  the max-min order, a finite set of allocations cannot increase forever, so the
+  planner stops. Demand is not fixed, and §6.7 is what keeps noise from
+  restarting it every cycle.
 - Bound the pace: at most `maxReplicasPerCycle` replicas given or received by
   any one role in a planning cycle (default 2), and at most
   `maxConcurrentTransfers` transfers in flight per group (default 2). A large
@@ -699,9 +768,9 @@ machine kept across cycles in a per-group **transfer ledger**:
 
 ```text
   Planned ──► Releasing ──► Released ──► Filling ──► Done
-                  │   │          │            │
-                  │   │          └─► Planned  └─► Done (fill-timeout)
-                  │   │         (claimed by a wake)
+                  │   │                       │  │
+                  │   │                       │  └─► Done (fill-timeout)
+                  │   │                       └─► Planned (claimed by a wake)
                   │   └─► Aborted (releaseTimeout)
                   └─► Cancelled
 ```
@@ -709,12 +778,12 @@ machine kept across cycles in a per-group **transfer ledger**:
 | state | what WVA publishes | exit condition |
 | --- | --- | --- |
 | **Planned** | nothing yet | the donor set is admitted this cycle → Releasing |
-| **Releasing** | each donor's target lowered, its chosen pods marked with a low deletion cost (§6.5); receiver's target **unchanged** | every hole of the receiver's pod-to-node assignment is open, observed as **held** GPUs on that node (or the set's GPUs released anywhere, without node information) → Released; demand reversal → Cancelled; `releaseTimeout` → Aborted |
-| **Released** | — | same cycle: receiver target raised by one replica → Filling; or a wake claimed the GPUs (below) → the receiver's entry returns to Planned |
-| **Filling** | receiver's raised target | receiver's new pods are **scheduled** — from then on they hold the GPUs and count in `G_r` → Done; still unscheduled past `fillTimeout` → Done with outcome `fill-timeout` |
+| **Releasing** | each donor's target lowered, its chosen pods marked with a low deletion cost (§6.5); receiver's target **unchanged** | every hole of the receiver's pod-to-node assignment is open, observed as GPUs **no longer held** on that node (terminating pods still count as held), or the set's GPUs released anywhere without node information → Released; demand reversal → Cancelled; `releaseTimeout` → Aborted |
+| **Released** | — | a bookkeeping step inside one cycle, never observed between cycles: the receiver's target is raised by one replica → Filling |
+| **Filling** | receiver's raised target | receiver's new pods are **scheduled** — from then on they hold the GPUs and count in `G_r` → Done; still unscheduled past `fillTimeout` → Done with outcome `fill-timeout`; a wake claims the GPUs while the pods are still unscheduled → the receiver's target is restored to its previous value and the entry returns to Planned |
 | **Cancelled** | donors' targets restored for pods not yet removed | terminal; the ledger entry is removed |
 | **Aborted** | donors' targets restored | terminal; reported as `release-timeout` |
-| **Done** | — | terminal; ledger entry removed; the roles enter `cooldown` |
+| **Done** | — | terminal; ledger entry removed; donor and receiver enter the reversal hold (§6.7) |
 
 Only Releasing can be cancelled. Once the GPUs are released, a reversal is
 handled by an ordinary plan next cycle, not by undoing the transfer.
@@ -744,8 +813,9 @@ is giving, and the receiver as already holding one more replica. That is what st
 running, from planning the same transfer again or handing the promised GPUs to a
 third model.
 
-**Who else may use released GPUs.** Between Released and the receiver's pods
-appearing, the released GPUs are free on the nodes and free in the quota. Two
+**Who else may use released GPUs.** While a transfer is Filling — released,
+its receiver's pods not yet scheduled — the released GPUs are free on the nodes
+and free in the quota. Two
 other WVA components read exactly that: the warm pool grows into the headroom
 published by `PublishNamespaceHeadroom`, and the scale-from-zero engine wakes a
 model when `FitsGPUBudget` says it fits. They are treated differently, because
@@ -786,24 +856,30 @@ they want the GPUs for different reasons.
   GPUs, z)` and receives the entries it took. That is how two components acting
   on the same GPUs in the same second end with one of them holding them, not
   both. A claimed transfer is **not** undone: the donor released for good, and
-  the GPUs went where the weights say they belong. The receiver's entry returns
-  to Planned with its committed allocation removed, and the next cycle funds it
-  from another donor set.
+  the GPUs went where the weights say they belong. The receiver's raised target
+  is **restored to its previous value** in the same step, so its Pending pods do
+  not race the wake's pods for the same holes. Its entry returns to Planned with
+  its committed allocation removed, and the next cycle funds it from another
+  donor set.
 
 The order a wake draws from is: free GPUs, then the reserve (§7.2), then
 claimable promised GPUs. The warm pool draws from free GPUs only.
 
-**Cancellation is cheap until the first pod goes.** If during Releasing the
-donor's demand rises so that its *reduced* size would put it out of band on the
-high side, the transfer is cancelled and the donor's target restored. While the
+**Cancellation is cheap until the first pod goes, and it has hysteresis.** If
+during Releasing the donor's demand rises so that its reduced size would land
+**more than twice its tolerance** below its target, or the receiver is now at or
+above its own target without the transfer, the transfer is cancelled and the
+donor's target restored. The thresholds are deliberately wider than the
+admission test's: a cancel rule that mirrors admission flips with demand noise
+— plan, cancel, plan — and in simulation it kept a needed transfer from ever
+landing (§6.7). A cancelled pair enters the reversal hold. While the
 HPA is still holding the window's maximum, none of the donor's pods have been
 touched, and the cancel costs nothing. That stops being true once the window
 expires: the scale-down policies then remove pods step by step, and a cancel
 after the first removal brings those replicas back **cold**. So cancellation is
 decided per step: before the first pod of the transfer is removed, cancel; after
 it, the transfer completes for the pods already gone and cancels only the rest,
-and the donor's renewed demand is met by an ordinary plan next cycle. The same
-holds if the receiver's demand falls back into band.
+and the donor's renewed demand is met by an ordinary plan next cycle.
 
 **Timeouts.**
 
@@ -830,11 +906,28 @@ expressed by tagging transfer decisions with a new
 `WasLimited`: the ledger, not the hold, owns that variant's target while the
 transfer lives.
 
-**Controller restart.** The ledger is in memory. On start, a variant whose last
-published target (the sticky store) is below its running count is treated as
-Releasing with an unknown receiver: nothing is scaled up into its GPUs until they
-are observed free, and the first plan after restart assigns them through the
-free-budget path. Losing the ledger can delay a transfer; it cannot double-spend.
+**Controller restart.** The ledger must survive one, and nothing in memory
+does. The published-target store (`decision`) and `lastDecided` are both
+in-memory, so after a restart there is nothing to compare a donor's lowered
+target with. The first cycle's demand-driven targets would then restore every
+Releasing donor, and a Filling receiver's Pending pods would be in neither
+`G_r` nor `P`, so their GPUs would read as free and be handed out twice. So:
+
+- **The ledger is persisted** in a ConfigMap owned by the controller in its own
+  namespace (`wva-utilization-share-ledger`), rewritten on every state change and
+  read before the first optimize cycle. A state change is at most a few per
+  cycle, well within ConfigMap write rates. The controller already writes
+  ConfigMaps in its namespace, so this needs no new permission.
+- **If the ConfigMap is missing or stale** (older than `releaseTimeout`), the
+  ledger is rebuilt conservatively from the cluster. Any WVA variant whose HPA
+  `desiredReplicas` is below its `status.replicas` is treated as Releasing with
+  an unknown receiver, and its target is held at the HPA's desired value, not
+  raised. Any **unscheduled** pod of a WVA variant above what it holds is
+  counted in `P`. Nothing is scaled up into a donor's GPUs until they are
+  observed free; the first plan then assigns them through the free-budget path.
+
+Losing the ConfigMap can delay a transfer; it cannot restore a releasing donor
+or double-spend a promised GPU.
 
 ### 6.4 Receivers below their need
 
@@ -844,8 +937,8 @@ that costs latency for the whole window, while the donor holds headroom it does
 not need. Such transfers are marked **urgent**, and urgency buys three things, in
 order:
 
-1. **The reserve.** If `reserveGPUs` has room, the receiver is filled from it
-   at once and the transfer refills the reserve instead (§7.2).
+1. **The reserve.** If `reserveRoom` (§6.2) covers a replica, the receiver is
+   filled from it at once, and the reserve is refilled by the next plan (§7.2).
 2. **The short window.** Urgent transfers are the first, and in stage 3 the only,
    ones for which the donor's stabilization window is shortened through
    `wvaOwnership` ([A release the swap can survive](managed-keda-behavior.md)).
@@ -903,10 +996,12 @@ candidate donor set, the hole on node `n` is
 The set is valid only if every pod of the receiver replica can be assigned a
 node whose remaining hole covers its GPU request. Two receiver pods may share a
 node only if the hole holds both. Pod-level GPU requests and per-node capacity
-are already observable: `gpunodes` lists GPU capacity per node and the
-GPU-holding pods with their `nodeName` (`DiscoverUsageByNamespace`), so `free_n`
-is capacity minus requests on the node, and WVA's own pod listing gives each
-donor pod's node. This applies **whenever node information exists**, for a quota
+are almost observable. `gpunodes` lists GPU capacity per node
+(`DiscoverNodes`), and `DiscoverUsageByNamespace` already lists every scheduled
+GPU pod with its `nodeName`, but it only returns totals per type and per
+namespace. Per-node usage — and so `free_n`, capacity minus requests on the
+node — needs a new per-node aggregation over that same listing (§11). WVA's own
+pod listing gives each donor pod's node. This applies **whenever node information exists**, for a quota
 group as much as for a physical one. A quota counts GPUs, but the receiver still
 has to land on a node.
 
@@ -999,7 +1094,8 @@ the node. The optimizer does not add node affinity to the receiver's pods
 
 **In the ledger**, a transfer is one receiver replica, its planned pod-to-node
 assignment, and the donor set. Releasing ends when every hole in the assignment
-is open, observed as **held** GPUs on that node. Without node information it ends
+is open, observed as GPUs **no longer held** on that node (a terminating pod
+still holds its GPUs). Without node information it ends
 when the set's GPUs are released anywhere. Cancellation is per donor, under the
 rule in §6.3: donors whose pods are already gone stay gone. If the set is
 cancelled after some donors released, their GPUs return to the free budget and
@@ -1031,6 +1127,94 @@ optimizer said. In a fallback cycle no transfer advances or starts, and receiver
 are not raised. Donors keep their lowered targets until a cycle with constraints
 resumes the transfer, or `releaseTimeout` aborts it and restores them.
 
+### 6.7 Why it does not oscillate
+
+A transfer takes at least one **release time** to land: the HPA's scale-down
+stabilization window (300 s by default) plus drain and termination. A
+controller whose actions land minutes after it decides them is a textbook
+oscillator. The admission rule of §6.2 guarantees convergence only while demand
+holds still, and demand never does. So the rules were tested in a simulator
+(`hack/utilization-share-oscillation-sim.py`): six hours of 30-second cycles, a
+360 s release, demand that is steady and noisy, tied between two models,
+stepped, or swapping between models, on 1-GPU replicas and on 8-GPU P/D
+replicas, averaged over five seeds.
+
+**The simulator found four oscillations in the rules as first written.**
+
+1. **Judging on held GPUs re-plans in-flight transfers.** A receiver whose
+   replica is still on its way looks just as short every cycle until it lands,
+   so the planner keeps funding it. Fixed by judging everything on the
+   committed allocation `Ḡ` (§6.1 step 2).
+2. **One unfixable role licensed moves between two others.** Model C held 2
+   GPUs against a continuous target of 1.4 — one replica is too coarse to fix
+   that, and 2 is already its integer target — so C was "out of band" forever.
+   Since *any* out-of-band role let the group act, demand noise flipping the
+   integer targets of A and B produced a stream of A → B, B → A moves. Each one
+   passed the admission rule because the noise had moved `z` in between. Fixed
+   by **actionable roles** (out of band *and* off the integer target) and by
+   requiring every transfer to involve one (§6.1 steps 4–5).
+3. **Cancel mirrored admit.** While the HPA still holds the window's maximum,
+   cancelling a transfer moves no pod, so the first draft cancelled whenever
+   the admission test stopped holding. The two tests sat on the same threshold,
+   and noise flipped between them: plan, cancel the next cycle, plan again. In
+   the stepped scenario that was 666 free cancels in six hours, and the transfer
+   that was needed **never landed** — the receiver stayed exactly as short as if
+   nothing had been done. Fixed by **hysteresis**: a transfer is cancelled only
+   on a clear reversal — its donor would now land more than twice its tolerance
+   below target, or its receiver is at or above its own target without it —
+   and a cancelled pair enters the reversal hold like a completed one.
+4. **Moving GPUs back before the last move settled.** Fixed by a **reversal
+   hold**: a role that gave cannot receive, and a role that received cannot
+   give, for `reversalHold` (default two release times) after its transfer
+   completes or is cancelled. The hold blocks only the opposite direction; a
+   rebalance that needs three replicas moved the same way is not slowed by it.
+
+**What was tried and rejected: slow giving.** A donor could be allowed to give
+only what it would still give at its peak need over a trailing window — the
+HPA's own scale-down rule, applied to planning. It turned out to duplicate what
+the HPA window already does: a donor's pods are held for the whole window
+anyway, and a transfer whose donor needs the GPUs back inside it is cancelled
+for free. On top of that, it cost shortfall wherever load really moves (4.3 % →
+7.3 % on a 60-minute swing, 0.6 % → 1.3 % on the P/D swing). The HPA window is
+the design's low-pass filter on the donor side; the optimizer does not add a
+second one.
+
+**Result** (transfers landed / cancelled free inside the window / wasted —
+reversed within one release time of landing / shortfall — GPUs below
+instantaneous need, as a share of need, which is what makes requests queue):
+
+| scenario | stand still | rules as first written | rules of this section |
+| --- | --- | --- | --- |
+| 1-GPU replicas, 16 GPUs, steady load ±10 % | 0 / 0 / 0 / 0.0 % | 0 / 0 / 0 / 0.0 % | 0 / 0 / 0 / 0.0 % |
+| 1-GPU replicas, 16 GPUs, two models tied | 0 / 0 / 0 / 0.0 % | 0 / 0 / 0 / 0.0 % | 0 / 0 / 0 / 0.0 % |
+| 1-GPU replicas, 16 GPUs, B's demand doubles | 0 / 0 / 0 / 15.9 % | 4 / 535 / 0 / 3.5 % | **3 / 0 / 0 / 0.4 %** |
+| 1-GPU replicas, 12 GPUs, B's demand doubles | 0 / 0 / 0 / 17.8 % | 2 / 666 / 0 / 17.8 % | **3 / 1 / 0 / 12.2 %** |
+| 1-GPU replicas, 12 GPUs, A/B swap every 60 min | 0 / 0 / 0 / 5.5 % | 22 / 467 / 0 / 5.2 % | **47 / 0 / 6 / 4.3 %** |
+| 1-GPU replicas, 12 GPUs, A/B swap every 15 min | 0 / 0 / 0 / 5.5 % | 3 / 530 / 1 / 5.6 % | 7 / 24 / 0 / 8.1 % |
+| 8-GPU P/D, 64 GPUs, steady load ±10 % | 0 / 0 / 0 / 0.0 % | 0 / 0 / 0 / 0.0 % | 0 / 0 / 0 / 0.0 % |
+| 8-GPU P/D, 64 GPUs, A prompts ↔ outputs every 60 min | 0 / 0 / 0 / 1.8 % | 1 / 325 / 0 / 1.8 % | **11 / 0 / 0 / 0.6 %** |
+| 8-GPU P/D, 48 GPUs, A prompts ↔ outputs every 60 min | 0 / 0 / 0 / 12.3 % | 0 / 248 / 0 / 12.3 % | 16 / 0 / 0 / 13.2 % |
+
+Steady and tied load produces **no transfers at all**. A real shift settles in
+the minimum number of transfers with nothing wasted, and cuts the shortfall it
+was built for. Free cancels drop from hundreds to a handful.
+
+**What the rules cannot do**, stated rather than tuned away: load that reverses
+faster than about three release times cannot be tracked by moving GPUs, because
+the GPUs arrive after the load has turned. On a tight quota with a 15-minute
+swing the optimizer ends 2.6 points of shortfall worse than standing still, and
+on the tight P/D swing 0.9 points worse. The rules keep that from becoming
+oscillation — no wasted transfers — but they do not make it pay. Two levers
+exist outside this section: the short window for urgent transfers (§6.4, stage
+3), which shortens the release time itself, and headroom: the spare this
+optimizer hands out is exactly what absorbs a swing it cannot follow.
+
+The simulator is design evidence, not a test of code. It models one group,
+single-variant roles and same-size replicas, and no floors above need or wakes.
+The implementation's tests (§12) re-run its scenarios against the real
+planner.
+
+
 ## 7. Interactions
 
 ### 7.1 Saturation and the existing analyzers
@@ -1056,8 +1240,9 @@ A full quota has a consequence that must be designed for, not discovered:
   than that receiver (§6.3). Only if all three are empty does the wake become a
   transfer of its own. The **reserve**: `reserveGPUs` (default `0`;
   recommended: one replica of the largest scale-to-zero variant in the group) is
-  held out of `B`, the scale-from-zero engine — and an urgent receiver (§6.4) —
-  may spend it immediately, and the next plan refills it by transfer. A model
+  held out of `B_net`, the scale-from-zero engine — and an urgent receiver
+  (§6.4) — may spend up to `reserveRoom` of it immediately (§6.2), and the next
+  plan refills it by transfer. A model
   with no demand receives nothing above its floor, so a model allowed to park
   still parks.
 - **Parked models when the quota is short.** A parked role with demand sits at
@@ -1151,12 +1336,12 @@ default:
       defaultWeightClass: standard
       minWeight: 0.5                # clamp range for every weight; defaults to the
       maxWeight: 4                  #   smallest and largest class weight (§5.3)
-      tolerance: 0.15               # τ_rel: relative band around û
+      tolerance: 0.15               # τ_rel: band in GPUs, as a fraction of the target Ĝ (never under ½ replica)
       minDeviation: 0.05            # τ_abs: absolute floor on |u − û|
       confirmCycles: 2              # consecutive out-of-band cycles before acting
       maxReplicasPerCycle: 2        # replicas any one role gives or receives per cycle
       maxConcurrentTransfers: 2     # per group
-      cooldown: 2m                  # after a role's transfer completes
+      reversalHold: 0               # 0 = 2 x release time; a role that gave cannot receive (and vice versa) for this long (§6.7)
       releaseTimeout: 0             # 0 = derive from the ScaledObject window + grace
       fillTimeout: 10m
       reserveGPUs: 0                # held out of B for scale-from-zero
@@ -1188,7 +1373,7 @@ resolves today (default → tier → override):
 ```yaml
 my-model#my-namespace:
   weightClass: important     # preferred: a name from weightClasses
-  # weight: 2                # or a number; exactly one of the two
+  # weight: 2                # or a number; at most one of the two (neither → defaultWeightClass)
 ```
 
 On a cluster-scoped install these entries can be tenant-written, which is why the
@@ -1211,7 +1396,10 @@ every class weight inside `[minWeight, maxWeight]`. A per-namespace range only
 clamps: `batch` in the example narrows it to `[1, 1]`, which makes every class
 weigh 1 there, and is valid although the class weights lie outside it.
 `0 < tolerance < 1`; `minDeviation ≥ 0`; `confirmCycles ≥ 1`;
-`maxReplicasPerCycle ≥ 1`; `reserveGPUs ≥ 0`;
+`maxReplicasPerCycle ≥ 1`; `maxConcurrentTransfers ≥ 1`; `reserveGPUs ≥ 0`;
+`reversalHold`, `releaseTimeout` ≥ 0 (0 = derived); `fillTimeout > 0`;
+`defaultWeightClass` names a class in `weightClasses`; a model entry setting both
+`weight` and `weightClass` is an error on that entry;
 `0 < floorWarnFraction ≤ 1`; non-finite values rejected (`x <= 0` admits NaN);
 unknown namespace keys reported; `type: utilizationShare` with no `limiters:`
 declared is an error — there is no budget to share.
@@ -1224,7 +1412,8 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | series | labels | meaning |
 | --- | --- | --- |
 | `wva_utilization_share_headroom` | model, `role`, `exported_namespace` | `x_r`: the spike the role absorbs before scaling (negative = short) |
-| `wva_utilization_share_target` | model, `role`, `exported_namespace` | `û_r`, the continuous target the band is judged against |
+| `wva_utilization_share_target_gpus` | model, `role`, `exported_namespace` | `Ĝ_r`, the continuous target the band is judged against, in GPUs |
+| `wva_utilization_share_holds_total` | `accelerator`, `scope`, `kind` | transfers withheld by §6.7: `reversal-hold` / `not-actionable` |
 | `wva_utilization_share_actual` | model, `role`, `exported_namespace` | `u_r` |
 | `wva_utilization_share_spare_gpus` | `accelerator`, `scope` | `S`; negative when the quota is short |
 | `wva_utilization_share_floor_excess_gpus` | model, `role`, `exported_namespace` | GPUs a floor holds above need (§5.5) |
@@ -1234,7 +1423,7 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_model_scaling_blocked` | `reason="awaiting-release"` | receiver waiting on a donor |
 | `wva_model_scaling_blocked` | `reason="quota-short"` | below need; the cause (load, whose floor, or which woken model) is on a `QuotaShort` Event and in the log |
 | `wva_model_scaling_blocked` | `reason="floor-pinned"` | floor above the share (§5.5) |
-| `wva_model_scaling_blocked` | `reason="floors-exceed-quota"` | `Σ F > B` |
+| `wva_model_scaling_blocked` | `reason="floors-exceed-quota"` | `Σ F > B_net` |
 | `wva_model_scaling_blocked` | `reason="donors-at-floor"` | out of band, no donor can give |
 | `wva_model_scaling_blocked` | `reason="no-compatible-donor"` | out of band, and no donor set opens a fitting hole for every pod of a receiver replica — without node information, no single donor pod is large enough (§6.5) |
 | `wva_utilization_share_claims_total` | `accelerator`, `scope`, `outcome` | wake claims on promised GPUs: `granted` / `refused-score` / `refused-fit` |
@@ -1284,7 +1473,10 @@ moves.
 | `H_other` for physical groups: scheduled GPU pods on the group's nodes minus WVA's held | `internal/gpuusage` view, read by the optimizer |
 | ledger store with `Claim(namespace, accelerator, GPUs, z)`, one mutex | `internal/decision` |
 | wake draws free → reserve → claim | `internal/engines/scalefromzero` (`selection.go`, `candidates.go`) |
-| donor-set search per receiver pod; per-node free from capacity minus scheduled requests; LWS pod list and `exclusive-topology` domain | `internal/engines/allocation`, reading `gpunodes` (`NodeInfo.Labels`) |
+| donor-set search per receiver pod; LWS pod list and `exclusive-topology` domain | `internal/engines/allocation`, reading `gpunodes` (`NodeInfo.Labels`) |
+| per-node GPU usage (new aggregation over the listing `DiscoverUsageByNamespace` already does), for `free_n` | `internal/gpunodes` |
+| ledger persistence: ConfigMap `wva-utilization-share-ledger`, conservative rebuild from HPA `desiredReplicas` and unscheduled pods | `internal/engines/steadystate` |
+| oscillation guards of §6.7 | `internal/engines/allocation` (planner); evidence in `hack/utilization-share-oscillation-sim.py` |
 | receiver and donor pod shapes (per-pod GPU request, node) | `internal/engines/variantmeta`, from the pod listing it already performs |
 | mark chosen donor pods with `controller.kubernetes.io/pod-deletion-cost`; RBAC `patch pods` in workload namespaces | `internal/engines/steadystate` (actuation of a transfer), `config/rbac/` |
 | `optimizer:` block, `weight` / `weightClass` on model entries, defaults, independent validation | `internal/config/saturation_scaling.go` |
@@ -1301,7 +1493,7 @@ optimizer every cycle (§6.6).
 
 ## 12. Verification
 
-- **Allocator, property tests:** `Σ G = B` whenever any role has demand and room;
+- **Allocator, property tests:** `Σ G = B_net` whenever any role has demand and room;
   no role below its claim (need raised to floor) while `S ≥ 0`, with §5.5 case 3
   as the fixture where `S < 0` although every need fits; the loop terminates
   with mixed replica sizes and a remainder smaller than any replica; a role with
@@ -1313,7 +1505,7 @@ optimizer every cycle (§6.6).
 - **Floors:** one fixture per case of §5.5. Case 3 asserts the starved model's
   `QuotaShort` Event on B names C's floor, A gets none, and `floorExcessGPUs`
   equals the excess;
-  a pinned role never triggers a rebalance; `Σ F > B` plans nothing; a raised
+  a pinned role never triggers a rebalance; `Σ F > B_net` plans nothing; a raised
   floor opens a transfer without waiting for `confirmCycles`; a donor at its floor
   is never selected.
 - **Anti-oscillation:** a randomized sequence of demands, every admitted move
@@ -1324,6 +1516,16 @@ optimizer every cycle (§6.6).
   transfer (the integer target flips, the continuous one does not). Negative
   controls: the same fixtures without the admission rule, and with the band
   judged against the integer target, both ping-pong.
+- **Oscillation (§6.7):** every scenario of
+  `hack/utilization-share-oscillation-sim.py` is re-run against the real planner
+  with a fake clock. Steady and tied load produce zero transfers; a demand step
+  settles in the minimum number of transfers with none wasted and at most a
+  handful of cancels; no landed transfer is reversed within one release time
+  except under load swinging faster than the release. Negative controls, one
+  per §6.7 fix: judge on held GPUs, let any out-of-band role license any move,
+  make cancel mirror admission, drop the reversal hold. Each must reproduce its
+  oscillation (re-planning in-flight transfers, A ↔ B streams, hundreds of
+  plan/cancel flips with the step never landing, quick reversals).
 - **Weights:** the clamp is fixed — adding a model with a new smallest weight
   changes no existing model's clamped weight.
 - **Ledger, fake clock:** receiver never raised before the donor's held GPUs
