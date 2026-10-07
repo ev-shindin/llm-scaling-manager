@@ -421,6 +421,12 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			"saturatedThroughput", term.Mu, "perReplicaCapacity", term.PerReplica,
 			"replicasImplied", term.Replicas, "heldAtFleet", term.Held, "heldWhy", term.HeldWhy,
 			"orderedBehindQueue", term.OrderedBehindQueue,
+			// The two gates behind heldAtFleet. The hold is a CAP, so
+			// heldAtFleet=false means either "mu was orderable" or "it was not
+			// and the cap sat above an already-small floor" -- two different
+			// states that a run testing the borrow path has to tell apart, and
+			// could not.
+			"mayOrder", term.MayOrder, "borrowedOnly", term.BorrowedOnly,
 			// How many replicas the standing queue was worth when the release
 			// fired. Run T showed orderedBehindQueue=true on five consecutive
 			// cycles and no way to tell whether the cap granted one replica

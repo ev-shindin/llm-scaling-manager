@@ -93,6 +93,22 @@ type Term struct {
 	// and a run that shows only the resulting fleet cannot tell a cap that
 	// granted one replica from a queue that only justified one.
 	QueueJustifiedReplicas float64
+	// MayOrder and BorrowedOnly are the two gates that decide whether the
+	// hold branch runs at all, reported whether or not it changed the floor.
+	//
+	// They are here because Held alone is ambiguous in the case that matters.
+	// The hold is a CAP -- `if floor > hold` -- so Held stays false both when
+	// the role's mu was orderable and when it was not but the cap sat above an
+	// already-small floor. A run that set out to test whether a borrowed line
+	// pins an idle fleet got Held=false on every record and could not tell
+	// which had happened; it needed a second reading of the source to rule out
+	// the first. One cycle's ambiguity cost a 25-minute cluster run.
+	//
+	// BorrowedOnly is the role-level gate, true until some replica of the role
+	// contributes a reading of its own, so it is not implied by any one
+	// replica's borrowed flag.
+	MayOrder     bool
+	BorrowedOnly bool
 }
 
 // Estimate computes the per-role floor from lambda, the
@@ -432,6 +448,10 @@ func Estimate(
 				floor = step
 			}
 		}
+		// Recorded before the hold branch, so they describe the gates as they
+		// were evaluated whether or not the cap went on to bind.
+		term.MayOrder = mayOrder[role]
+		term.BorrowedOnly = borrowedOnly[role]
 		if !mayOrder[role] && scaleUpThreshold > 0 {
 			// A hold, not an order, on either. Letting a single reading
 			// order one replica was tried twice and dropped: against the

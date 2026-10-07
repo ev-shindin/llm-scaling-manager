@@ -60,6 +60,11 @@ var logContract = map[string][]string{
 		"demandBeforeFloor", "residentDemand", "flooredTo", // what changed
 		"arrivalRate", "backlogRequests", "drainSeconds", "saturatedThroughput", "perReplicaCapacity", "replicasImplied", // and from which terms
 		"heldAtFleet", "heldWhy", // and whether the floor was allowed to order on them
+		// heldAtFleet is NOT sufficient on its own. The hold is a cap
+		// (`if floor > hold`), so heldAtFleet=false covers two states: mu was
+		// orderable, or it was not and the cap sat above an already-small
+		// floor. These two separate them.
+		"mayOrder", "borrowedOnly",
 	},
 	// Prefill's share of the scheduler queue is dropped while prefill has no
 	// mu (throughput_floor.go); the line is what explains the gap between

@@ -134,4 +134,52 @@ var _ = Describe("Estimate with a borrowed ITL line", func() {
 			Equal("borrowed-line+shape-change"),
 			"both reasons hold, so both are reported")
 	})
+
+	// WHY THE GATES ARE REPORTED SEPARATELY FROM Held.
+	//
+	// The hold is a CAP -- `if floor > hold` -- so Held is false in two
+	// completely different states: the role's mu was orderable, or it was not
+	// and the cap sat above a floor that was already smaller. Held alone
+	// cannot tell them apart, and the difference is the whole question when a
+	// borrowed line is suspected of pinning a fleet.
+	//
+	// This is not hypothetical. A 25-minute cluster run set out to test
+	// exactly that, got heldAtFleet=false on every floor record with 40
+	// borrowed readings in the same window, and could not say from the log
+	// whether the hold branch had run at all. It took a second reading of this
+	// function to rule out the alternative. MayOrder and BorrowedOnly are what
+	// that run needed.
+	It("reports the gates even when the cap does not bind", func() {
+		// lambda/mu = 0.370, so the uncapped floor is 0.370 x K1, well under
+		// the 0.85 x K1 cap. The cap is evaluated and does not bind -- which
+		// is the idle fleet the cluster run was looking at.
+		const idleLambda = 2.0
+		f := Estimate(idleLambda, []capacity.ReplicaCapacity{derived(true)},
+			variants(1), nil, BacklogDrainSeconds, 0.85, false, 0, nil)
+		t := f.Terms[domain.RoleDecode]
+
+		Expect(t.Held).To(BeFalse(),
+			"precondition: at lambda/mu = %.3f the floor is below the cap, so it cannot bind",
+			idleLambda/runMu)
+		Expect(f.ByRole[domain.RoleDecode]).To(
+			BeNumerically("~", idleLambda/runMu*float64(runK1), 1e-6),
+			"and the floor is the uncapped figure, not the cap")
+
+		// The point: the gates are still reported.
+		Expect(t.MayOrder).To(BeFalse(),
+			"a borrowed line is not orderable, and that is true whether or not the cap bound")
+		Expect(t.BorrowedOnly).To(BeTrue(),
+			"the role's only reading is borrowed, which Held=false must not hide")
+	})
+
+	It("reports MayOrder true when the reading is the variant's own", func() {
+		// The positive control for the field above: same shape, own line, so
+		// an assertion of MayOrder=false would be proving the field is simply
+		// always false.
+		f := Estimate(2.0, []capacity.ReplicaCapacity{derived(false)},
+			variants(1), nil, BacklogDrainSeconds, 0.85, false, 0, nil)
+		t := f.Terms[domain.RoleDecode]
+		Expect(t.MayOrder).To(BeTrue(), "a variant's own derived line is orderable")
+		Expect(t.BorrowedOnly).To(BeFalse(), "and nothing about the role is borrowed")
+	})
 })
