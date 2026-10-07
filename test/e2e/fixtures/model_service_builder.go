@@ -216,6 +216,12 @@ func DiscoverAcceleratorProduct(ctx context.Context, k8sClient *kubernetes.Clien
 	return key, product, ok
 }
 
+// DiscoverAccelerator is DiscoverAcceleratorProduct plus the vendor's
+// resource name, for a caller that requests the GPUs itself (WithLWSGPUs).
+func DiscoverAccelerator(ctx context.Context, k8sClient *kubernetes.Clientset) (key, product, resourceName string, ok bool) {
+	return discoverAccelerator(ctx, k8sClient)
+}
+
 // discoverAccelerator also reports the vendor's RESOURCE name, which a caller
 // needs to ask for one of these GPUs: the product label and the resource are a
 // pair (amd.com/gpu.product-name goes with amd.com/gpu), and mixing them across

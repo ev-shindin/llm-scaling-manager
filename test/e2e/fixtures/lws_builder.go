@@ -3,23 +3,30 @@ package fixtures
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	k8sresource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
 )
 
 // EnsureModelServiceLWS creates or replaces a LeaderWorkerSet for model service (idempotent for test setup).
 // so the collector can attribute pod metrics to the right annotated scaler. Pass "" to omit.
-func EnsureModelServiceLWS(ctx context.Context, crClient client.Client, namespace, name, poolName, modelID string, useSimulator bool, maxNumSeqs int, groupSize int32) error {
+func EnsureModelServiceLWS(ctx context.Context, crClient client.Client, namespace, name, poolName, modelID string, useSimulator bool, maxNumSeqs int, groupSize int32, opts ...LWSOption) error {
 	lwsName := name + decodeNameSuffix
 	desiredLWS := buildModelServiceLWS(namespace, name, poolName, modelID, useSimulator, maxNumSeqs, groupSize)
+	for _, opt := range opts {
+		opt(desiredLWS)
+	}
 
 	// Check if LWS already exists
 	existingLWS := &lwsv1.LeaderWorkerSet{}
@@ -211,5 +218,62 @@ func buildModelServiceLWS(namespace, name, poolName, modelID string, useSimulato
 				WorkerTemplate: workerTemplate,
 			},
 		},
+	}
+}
+
+// LWSOption adjusts a model-service LeaderWorkerSet before it is applied.
+type LWSOption func(*lwsv1.LeaderWorkerSet)
+
+// lwsTemplates returns the leader and worker pod templates.
+func lwsTemplates(l *lwsv1.LeaderWorkerSet) []*corev1.PodTemplateSpec {
+	out := []*corev1.PodTemplateSpec{&l.Spec.LeaderWorkerTemplate.WorkerTemplate}
+	if l.Spec.LeaderWorkerTemplate.LeaderTemplate != nil {
+		out = append(out, l.Spec.LeaderWorkerTemplate.LeaderTemplate)
+	}
+	return out
+}
+
+// WithLWSRole stamps the P/D role on both pod templates, where WVA reads it.
+func WithLWSRole(role string) LWSOption {
+	return func(l *lwsv1.LeaderWorkerSet) {
+		for _, t := range lwsTemplates(l) {
+			if t.Labels == nil {
+				t.Labels = map[string]string{}
+			} else {
+				t.Labels = maps.Clone(t.Labels) // the templates share one map
+			}
+			t.Labels[variantmeta.RoleLabel] = role
+		}
+	}
+}
+
+// WithLWSReplicas sets the number of groups the set starts with.
+func WithLWSReplicas(n int32) LWSOption {
+	return func(l *lwsv1.LeaderWorkerSet) { l.Spec.Replicas = ptr.To(n) }
+}
+
+// WithLWSGPUs pins every pod of the set to one GPU product and has each
+// request gpusPerPod of that vendor's resource. key, product and resource come
+// from DiscoverAccelerator, which keeps them a matching pair.
+func WithLWSGPUs(key, product, resource string, gpusPerPod int64) LWSOption {
+	return func(l *lwsv1.LeaderWorkerSet) {
+		q := *k8sresource.NewQuantity(gpusPerPod, k8sresource.DecimalSI)
+		for _, t := range lwsTemplates(l) {
+			if t.Spec.NodeSelector == nil {
+				t.Spec.NodeSelector = map[string]string{}
+			}
+			t.Spec.NodeSelector[key] = product
+			for i := range t.Spec.Containers {
+				c := &t.Spec.Containers[i]
+				if c.Resources.Requests == nil {
+					c.Resources.Requests = corev1.ResourceList{}
+				}
+				if c.Resources.Limits == nil {
+					c.Resources.Limits = corev1.ResourceList{}
+				}
+				c.Resources.Requests[corev1.ResourceName(resource)] = q
+				c.Resources.Limits[corev1.ResourceName(resource)] = q
+			}
+		}
 	}
 }
