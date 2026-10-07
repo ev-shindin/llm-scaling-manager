@@ -1863,6 +1863,10 @@ optimizer every cycle (§6.6).
        after it;
      - the overlay on the cycle's decisions under the `utilization-share`
        reason, which the sticky scale-down hold stands down for;
+     - re-anchoring: a variant held off its target by something outside the
+       optimizer (a ResourceQuota denial, a ScaledObject ceiling, scale to
+       zero), with no transfer in flight, returns to its running count after
+       one release timeout, with a WARN;
      - `wva_utilization_share_transfers_total`.
 
    **Not yet built in stage 2:**

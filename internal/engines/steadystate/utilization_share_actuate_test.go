@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -254,5 +255,97 @@ func TestApplyUtilizationShareOverrides(t *testing.T) {
 	}
 	if decisions[1].TargetReplicas != 4 {
 		t.Errorf("an unplanned variant was changed: %d", decisions[1].TargetReplicas)
+	}
+}
+
+// A variant held off its target by something outside the optimizer -- here a
+// replica a ResourceQuota denies -- is re-anchored to what runs once the gap
+// has outlasted the release timeout, and not before. A variant a transfer is
+// still moving is never re-anchored: the gap is the transfer.
+func TestUtilizationShareReanchorsAStuckTarget(t *testing.T) {
+	tm := allocation.ShareTimings{Window: time.Minute, ReleaseTimeout: 10 * time.Minute, FillTimeout: 5 * time.Minute}
+	g := allocation.ShareGroup{
+		Origins:  map[string]allocation.ShareRoleOrigin{"ns/C/": {Namespace: "ns", ModelID: "C"}},
+		Variants: map[string][]allocation.ShareVariant{"ns/C/": {{Name: "C-v", Current: 1}}},
+	}
+	variantKey := func(_, v string) string { return "ns/" + v }
+	t0 := time.Unix(0, 0)
+
+	for _, tc := range []struct {
+		name     string
+		inFlight bool
+		want     int
+	}{
+		{"stuck", false, 1},
+		{"a transfer explains the gap", true, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &Engine{}
+			e.utilizationShare.desired = map[string]int{"ns/C-v": 2}
+			e.utilizationShare.divergedSince = map[string]time.Time{}
+			l := allocation.NewShareLedger()
+			if tc.inFlight {
+				l.StartFill("ns/C/", "C-v", 1, map[string]int{"ns/C/": 1}, t0, tm)
+			}
+			step := func(at time.Time) int {
+				e.reanchorShareTargets(logr.Discard(), l, g, variantKey, at, tm)
+				return e.utilizationShare.desired["ns/C-v"]
+			}
+			step(t0)
+			if got := step(t0.Add(tm.ReleaseTimeout - time.Second)); got != 2 {
+				t.Fatalf("re-anchored before the release timeout: target %d", got)
+			}
+			if got := step(t0.Add(tm.ReleaseTimeout)); got != tc.want {
+				t.Fatalf("target after the release timeout = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// stubOptimizer returns fixed decisions.
+type stubOptimizer struct{ decisions []domain.VariantDecision }
+
+func (s stubOptimizer) Name() string { return "stub" }
+func (s stubOptimizer) Optimize(context.Context, []allocation.ModelScalingRequest, []*allocation.ResourceConstraints) []domain.VariantDecision {
+	return append([]domain.VariantDecision(nil), s.decisions...)
+}
+
+// optimizeV2's decision step applies the share targets over today's decisions
+// once the optimizer acts, and leaves them alone in shadow mode.
+func TestDecideV2AppliesUtilizationShareTargets(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy string
+		active bool
+	}{
+		{"active", activeShare, true},
+		{"shadow", selectedShadow, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newShareFleet()
+			opt := stubOptimizer{}
+			for _, id := range []string{"A", "B", "C"} {
+				opt.decisions = append(opt.decisions, domain.VariantDecision{Namespace: "ns", ModelID: id, VariantName: id + "-v",
+					CurrentReplicas: f.current[id], TargetReplicas: f.current[id]})
+			}
+			clock := time.Unix(0, 0)
+			e := &Engine{Config: shadowConfig(t, tc.policy), client: sharePods(t, f)}
+			e.utilizationShare.now = func() time.Time { return clock }
+			ctx, _ := observe(t)
+			var a domain.VariantDecision
+			for range 20 {
+				clock = clock.Add(30 * time.Second)
+				a = e.decideV2(ctx, opt, f.requests(), fullQuota(), f.scaleTargets())[0]
+				if a.TargetReplicas < 9 {
+					break
+				}
+			}
+			if tc.active != (a.TargetReplicas < 9) {
+				t.Fatalf("active=%t but A's decision target is %d", tc.active, a.TargetReplicas)
+			}
+			if tc.active != (a.ReasonCategory() == domain.DecisionReasonUtilizationShare) {
+				t.Fatalf("active=%t but A's reason is %q", tc.active, a.ReasonCategory())
+			}
+		})
 	}
 }

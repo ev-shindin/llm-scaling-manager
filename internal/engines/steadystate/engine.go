@@ -1267,14 +1267,7 @@ func (e *Engine) optimizeV2(
 	if g, ok := optimizer.(*allocation.GreedyByScoreOptimizer); ok {
 		g.Rescale = e.resolveRescaleFlags(requests)
 	}
-	allDecisions := optimizer.Optimize(ctx, requests, constraints)
-	// The utilization-share optimizer runs beside today's. In shadow mode it
-	// publishes what it would do and the decisions above stand; active, it owns
-	// the targets of the variants it plans and today's decisions keep the rest.
-	if overrides := e.evaluateUtilizationShare(ctx, requests, constraints, modelScaleTargets); len(overrides) > 0 {
-		applied := applyUtilizationShareOverrides(allDecisions, overrides)
-		logger.V(logging.DEBUG).Info("Utilization share set planned targets", "variants", applied)
-	}
+	allDecisions := e.decideV2(ctx, optimizer, requests, constraints, modelScaleTargets)
 	logScalingDecisions(ctx, requests, allDecisions)
 
 	logger.Info("V2 optimizer produced decisions",

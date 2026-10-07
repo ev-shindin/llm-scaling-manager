@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
@@ -69,6 +71,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		st.ledgers = map[string]*allocation.ShareLedger{}
 		st.desired = map[string]int{}
 		st.quietUntil = map[string]time.Time{}
+		st.divergedSince = map[string]time.Time{}
 	}
 	key := shareGroupKey(g)
 	logger = logger.WithValues("accelerator", g.AcceleratorType, "scope", g.Scope)
@@ -129,6 +132,8 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 				"receiver", t.Receiver, "variant", t.ReceiverVariant)
 		}
 	}
+
+	e.reanchorShareTargets(logger, l, g, variantKey, now, tm)
 
 	if now.Before(st.quietUntil[key]) {
 		return e.shareOverrides(g, variantKey, "restart quiet period")
@@ -483,4 +488,61 @@ func applyUtilizationShareOverrides(decisions []domain.VariantDecision, override
 		applied++
 	}
 	return applied
+}
+
+// reanchorShareTargets resets a planned variant's target to what is running
+// when the two have disagreed, with no transfer in flight to explain it, for
+// longer than the release timeout. A target only moves by the ledger's own
+// steps, so without this anything that keeps a variant off its target -- a
+// ResourceQuota that denies the pod, a ScaledObject ceiling below it, a
+// controller that scales it to zero -- would leave the optimizer planning on a
+// count that does not exist, for as long as it is selected.
+func (e *Engine) reanchorShareTargets(logger logr.Logger, l *allocation.ShareLedger, g allocation.ShareGroup,
+	variantKey func(string, string) string, now time.Time, tm allocation.ShareTimings) {
+	st := &e.utilizationShare
+	inFlight := map[string]bool{}
+	for _, t := range l.Transfers() {
+		if t.DonorVariant != "" {
+			inFlight[variantKey(t.Donor, t.DonorVariant)] = true
+		}
+		if t.ReceiverVariant != "" {
+			inFlight[variantKey(t.Receiver, t.ReceiverVariant)] = true
+		}
+	}
+	for role, vs := range g.Variants {
+		for _, v := range vs {
+			k := variantKey(role, v.Name)
+			if inFlight[k] || st.desired[k] == v.Current {
+				delete(st.divergedSince, k)
+				continue
+			}
+			since, ok := st.divergedSince[k]
+			if !ok {
+				st.divergedSince[k] = now
+				continue
+			}
+			if now.Sub(since) >= tm.ReleaseTimeout {
+				logger.Info("WARNING: utilization share target re-anchored to the running count; "+
+					"something outside the optimizer kept the variant off its target",
+					"variant", k, "target", st.desired[k], "running", v.Current, "since", since)
+				st.desired[k] = v.Current
+				delete(st.divergedSince, k)
+			}
+		}
+	}
+}
+
+// decideV2 is optimizeV2's decision step: today's optimizer decides, and the
+// utilization-share optimizer runs beside it. In shadow mode it publishes what
+// it would do and those decisions stand; active, it owns the targets of the
+// variants it plans and today's decisions keep the rest.
+func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptimizer,
+	requests []allocation.ModelScalingRequest, constraints []*allocation.ResourceConstraints,
+	scaleTargets map[string]map[string]scaletarget.ScaleTargetAccessor) []domain.VariantDecision {
+	decisions := optimizer.Optimize(ctx, requests, constraints)
+	if overrides := e.evaluateUtilizationShare(ctx, requests, constraints, scaleTargets); len(overrides) > 0 {
+		applied := applyUtilizationShareOverrides(decisions, overrides)
+		ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("Utilization share set planned targets", "variants", applied)
+	}
+	return decisions
 }

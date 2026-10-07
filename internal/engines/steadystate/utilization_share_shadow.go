@@ -34,6 +34,9 @@ type utilizationShareState struct {
 	ledgers    map[string]*allocation.ShareLedger
 	desired    map[string]int
 	quietUntil map[string]time.Time
+	// divergedSince is when a planned variant's running count first differed
+	// from its target with no transfer in flight; see reanchorShareTargets.
+	divergedSince map[string]time.Time
 	// now is the clock; nil is time.Now. Tests set it.
 	now func() time.Time
 }
@@ -42,7 +45,7 @@ type utilizationShareState struct {
 // pods; when the optimizer is activated again, the rebuild reads them back and
 // removes those that are stale.
 func (st *utilizationShareState) resetActuation() {
-	st.ledgers, st.desired, st.quietUntil = nil, nil, nil
+	st.ledgers, st.desired, st.quietUntil, st.divergedSince = nil, nil, nil, nil
 }
 
 // evaluateUtilizationShare runs the utilization-share optimizer
@@ -204,6 +207,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	for k := range st.desired {
 		if _, ok := overrides[k]; !ok {
 			delete(st.desired, k)
+			delete(st.divergedSince, k)
 		}
 	}
 	return overrides
