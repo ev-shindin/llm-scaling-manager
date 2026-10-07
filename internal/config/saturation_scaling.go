@@ -65,6 +65,36 @@ type ScalingPolicy struct {
 	// needs a way to stop it that does not involve a new image.
 	DisableShapeChangeHold bool `yaml:"disableShapeChangeHold,omitempty"`
 
+	// DisableLearnedStateReuse makes every variant learn from its own
+	// readings alone: no ITL line is shared between variants, and no
+	// zero-replica variant takes a capacity figure from a sibling. It does
+	// not disable learning, and it does not clear anything already stored —
+	// it stops the two paths by which one variant's measurement prices
+	// another's decision.
+	//
+	// Both paths are covered because an operator asking for this wants one
+	// thing, and either path alone leaves it half-done:
+	//
+	//   - the fingerprint-keyed ITL line (analyzer.go, itlPhysicsKey). Off,
+	//     the key falls back to the per-variant form, which is the same
+	//     degradation an unreadable engine configuration already produces.
+	//   - the cross-variant capacity estimate for a variant with no record
+	//     of its own (replica_capacity.go, FindCompatible).
+	//
+	// It is a switch because reuse rests on a fingerprint over 14 parsed
+	// fields, and a configuration the parser reads WRONG rather than not at
+	// all still produces a confident key: SGLang flags parsed as vLLM read as
+	// a complete set of vLLM defaults, and would share state with every other
+	// default configuration of that model. That residual is documented where
+	// the key is built and cannot be closed from inside the parser, so the
+	// remedy has to be an operator-facing one. Without it, the only ways out
+	// are editing FingerprintVersion — which flushes reuse for every model on
+	// the cluster — or a new image.
+	//
+	// Reuse is on by default: it is what lets a scaled-out variant price its
+	// first decision from something other than a guess.
+	DisableLearnedStateReuse bool `yaml:"disableLearnedStateReuse,omitempty"`
+
 	// ShapeChangeHoldSeconds overrides how long the fleet is withheld from
 	// release after its shape changes, when nothing settles the hold sooner.
 	// Zero takes the default.

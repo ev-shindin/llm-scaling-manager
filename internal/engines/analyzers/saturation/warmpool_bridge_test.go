@@ -51,7 +51,7 @@ func TestABridgesDemandIsCountedTowardTheVariant(t *testing.T) {
 	bridge := bridgeReplica("pool-0", 400, true)
 
 	got := a.aggregateByVariant([]capacity.ReplicaCapacity{own, bridge},
-		nil, oneVariantState(1), "model", "ns", 0.9, logr.Discard())
+		nil, oneVariantState(1), "model", "ns", 0.9, false, logr.Discard())
 
 	if len(got) != 1 {
 		t.Fatalf("variants = %+v, want one", got)
@@ -77,7 +77,7 @@ func TestABridgeIsNotCountedAsSupply(t *testing.T) {
 	bridge := bridgeReplica("pool-0", 400, true)
 
 	got := a.aggregateByVariant([]capacity.ReplicaCapacity{own, bridge},
-		nil, oneVariantState(1), "model", "ns", 0.9, logr.Discard())
+		nil, oneVariantState(1), "model", "ns", 0.9, false, logr.Discard())
 
 	if got[0].ReplicaCount != 1 {
 		t.Errorf("ReplicaCount = %d, want 1: the bridge is borrowed and must not be supply",
@@ -108,7 +108,7 @@ func TestAVariantCarriedEntirelyByThePoolHasNoSupplyOfItsOwn(t *testing.T) {
 	bridge := bridgeReplica("pool-0", 400, true)
 
 	got := a.aggregateByVariant([]capacity.ReplicaCapacity{bridge},
-		nil, oneVariantState(0), "model", "ns", 0.9, logr.Discard())
+		nil, oneVariantState(0), "model", "ns", 0.9, false, logr.Discard())
 
 	if got[0].ReplicaCount != 0 {
 		t.Errorf("ReplicaCount = %d, want 0: every live row was a bridge", got[0].ReplicaCount)
@@ -131,7 +131,7 @@ func TestAVariantWithNoBridgeIsUnaffected(t *testing.T) {
 	got := a.aggregateByVariant([]capacity.ReplicaCapacity{
 		bridgeReplica("variant-a-0", 100, false),
 		bridgeReplica("variant-a-1", 150, false),
-	}, nil, oneVariantState(2), "model", "ns", 0.9, logr.Discard())
+	}, nil, oneVariantState(2), "model", "ns", 0.9, false, logr.Discard())
 
 	if got[0].ReplicaCount != 2 {
 		t.Errorf("ReplicaCount = %d, want 2", got[0].ReplicaCount)
@@ -158,7 +158,7 @@ func TestUtilizationMeasuresTheVariantsOwnFleet(t *testing.T) {
 	got := a.aggregateByVariant([]capacity.ReplicaCapacity{
 		bridgeReplica("variant-a-0", 500, false),
 		bridgeReplica("pool-0", 400, true),
-	}, nil, oneVariantState(1), "model", "ns", 0.9, logr.Discard())
+	}, nil, oneVariantState(1), "model", "ns", 0.9, false, logr.Discard())
 
 	// 900 of demand over the one replica the variant actually owns.
 	if got[0].Utilization != 0.9 {

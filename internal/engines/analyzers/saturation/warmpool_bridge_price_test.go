@@ -50,7 +50,7 @@ func TestABridgeDoesNotSetTheVariantsPerReplicaPrice(t *testing.T) {
 	bridge := pricedReplica("pool-0", 100, 600, true)
 
 	got := a.aggregateByVariant([]capacity.ReplicaCapacity{own, bridge},
-		nil, oneVariantState(1), "model", "ns", 0.9, logr.Discard())
+		nil, oneVariantState(1), "model", "ns", 0.9, false, logr.Discard())
 
 	if len(got) != 1 {
 		t.Fatalf("variants = %+v, want one", got)
@@ -87,7 +87,7 @@ func TestTheAnalyzerLeavesTheDerivedBridgeCapacityToTheBuilder(t *testing.T) {
 	got := a.aggregateByVariant([]capacity.ReplicaCapacity{
 		pricedReplica("variant-a-0", 100, 1000, false),
 		pricedReplica("pool-0", 100, 600, true),
-	}, nil, oneVariantState(1), "model", "ns", 0.9, logr.Discard())
+	}, nil, oneVariantState(1), "model", "ns", 0.9, false, logr.Discard())
 
 	if got[0].WarmPoolCapacity != 0 {
 		t.Errorf("WarmPoolCapacity = %v, want 0 from the analyzer: the builder derives it "+
@@ -115,7 +115,7 @@ func TestAVariantCarriedOnlyByABridgeIsStillPriced(t *testing.T) {
 
 	got := a.aggregateByVariant([]capacity.ReplicaCapacity{
 		pricedReplica("pool-0", 400, 600, true),
-	}, nil, oneVariantState(0), "model", "ns", 0.9, logr.Discard())
+	}, nil, oneVariantState(0), "model", "ns", 0.9, false, logr.Discard())
 
 	if got[0].PerReplicaCapacity != 600 {
 		t.Errorf("PerReplicaCapacity = %v, want 600 (the only reading there was): "+
@@ -148,7 +148,7 @@ func TestAnticipatedSupplyIsPricedAtTheOwnReading(t *testing.T) {
 	got := a.aggregateByVariant([]capacity.ReplicaCapacity{
 		pricedReplica("variant-a-0", 100, 1000, false),
 		pricedReplica("pool-0", 100, 600, true),
-	}, nil, states, "model", "ns", 0.9, logr.Discard())
+	}, nil, states, "model", "ns", 0.9, false, logr.Discard())
 
 	if got[0].ReplicaCount != 1 || got[0].PendingReplicas != 1 {
 		t.Fatalf("counts = %d ready / %d pending, want 1 / 1",

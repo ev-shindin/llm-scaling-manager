@@ -157,8 +157,18 @@ func (a *SaturationAnalyzer) newCycle(
 		// it and reading the store per replica would take its lock on every
 		// row. An empty fingerprint is a usable answer: itlPhysicsKey falls
 		// back to the variant key and pools nothing.
-		c.fpByVariant[vs.VariantName] = a.engineFingerprint(
-			input.Namespace, input.ModelID, vs.VariantName)
+		//
+		// Which is exactly what DisableLearnedStateReuse wants, so it is
+		// expressed by withholding the fingerprint rather than by a second
+		// branch inside the key function. The operator switch and an
+		// unreadable engine configuration then reach the same code path, and
+		// there is only one of them to reason about.
+		if cfg.DisableLearnedStateReuse {
+			c.fpByVariant[vs.VariantName] = ""
+		} else {
+			c.fpByVariant[vs.VariantName] = a.engineFingerprint(
+				input.Namespace, input.ModelID, vs.VariantName)
+		}
 	}
 
 	// Whether the decode role is saturated this cycle decides what a
@@ -469,7 +479,8 @@ func (c *cycle) settleShape(caps []capacity.ReplicaCapacity) {
 // and adds what the router is holding and no pod has started.
 func (c *cycle) priceDemand(caps []capacity.ReplicaCapacity) demandParts {
 	variantCapacities := c.a.aggregateByVariant(caps, c.input.ReplicaMetrics,
-		c.input.VariantStates, c.input.ModelID, c.input.Namespace, c.cfg.KvCacheThreshold, c.logger)
+		c.input.VariantStates, c.input.ModelID, c.input.Namespace, c.cfg.KvCacheThreshold,
+		c.cfg.DisableLearnedStateReuse, c.logger)
 
 	// Model-level demand D (the analyzer owns demand attribution). Supply,
 	// utilization, and RoleCapacities are assembled downstream by the engine's

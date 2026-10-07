@@ -310,6 +310,48 @@ decode's figure down to the built-in fallback, and under-pricing a queue is the
 failure the key exists to fix. Writing it on one variant and leaving it off the
 others is the simplest way to get this right.
 
+### `disableLearnedStateReuse`
+
+Makes every variant learn from its own readings alone. Off by default.
+
+```yaml
+default:
+  disableLearnedStateReuse: true
+```
+
+Normally a variant with nothing measured yet is priced from a sibling that
+runs the **same engine configuration** on the same accelerator and GPU count.
+That is what lets a scaled-out variant price its first decision from something
+other than a guess, and it happens two ways:
+
+| path | what is reused |
+| --- | --- |
+| the shared ITL line | the inter-token-latency model `ITL(k) = A·k + B` another variant fitted, used to derive this one's service rate |
+| the cross-variant capacity figure | another variant's measured per-replica capacity, as the estimate for a variant with no record of its own |
+
+Setting this key stops **both**. The variant keeps learning; it just no longer
+starts from anyone else's measurement. Nothing already stored is cleared.
+
+**When to set it.** Reuse rests on a fingerprint over the engine flags the
+scaling manager could read from the deployment. A configuration it reads
+*wrong* rather than not at all still produces a confident fingerprint — SGLang
+flags parsed as vLLM read as a complete set of vLLM defaults, and would share
+state with every other default configuration of that model. If a variant is
+being priced from a sibling that is not really like it, this is the switch that
+stops it.
+
+A variant whose flags the manager could not read at all is already excluded:
+an unresolved flag withholds the fingerprint, and the variant is filed under
+its own key. `wva_engine_config` tells the two cases apart, by presence rather
+than by value — a variant whose configuration could not be read publishes **no
+series at all**. So a variant that *has* a `wva_engine_config` series, on a
+configuration you know is unusual, is the case this key is for; a variant with
+no series is already learning on its own.
+
+**What it costs.** A variant with no readings of its own and no sibling to
+borrow from prices its first decisions from its deployment-derived capacity
+alone, which is a weaker estimate. Expect a slower first ramp.
+
 ### Default Configuration
 
 Since v0.9.0 the shipped `default` entry selects **V2** (token/capacity-based) via

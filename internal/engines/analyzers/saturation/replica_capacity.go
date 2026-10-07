@@ -614,13 +614,29 @@ func (a *SaturationAnalyzer) computeK2(
 // capacity estimation for zero-replica variants that have no prior data.
 // The search is cross-namespace since capacity depends on hardware + config,
 // not namespace.
-func (a *SaturationAnalyzer) lookupCompatibleCapacity(namespace, modelID, variantName, accelerator string, gpuCount int) *capacity.Record {
+// compatibleBound is FindCompatible with the reuse switch in front of it, so
+// the two call sites that take a figure from a sibling cannot diverge on
+// whether they honour it.
+func (a *SaturationAnalyzer) compatibleBound(
+	reuseDisabled bool, modelID, accelerator string, gpuCount int, params *capacity.EngineParams,
+) *capacity.Record {
+	if reuseDisabled {
+		return nil
+	}
+	return a.capacityStore.FindCompatible(modelID, accelerator, gpuCount, params)
+}
+
+func (a *SaturationAnalyzer) lookupCompatibleCapacity(namespace, modelID, variantName, accelerator string, gpuCount int, reuseDisabled bool) *capacity.Record {
 	// Get EngineParams for this variant (from deployment-derived record)
 	rec := a.capacityStore.Get(namespace, modelID, variantName)
 	if rec == nil || rec.EngineParams == nil {
 		return nil
 	}
-	return a.capacityStore.FindCompatible(modelID, accelerator, gpuCount, rec.EngineParams)
+	// Refused outright when reuse is off: this whole function exists to price
+	// a variant from a sibling's measurement, which is the thing the switch
+	// withholds. The caller's remaining branches fall back to the variant's
+	// own figures.
+	return a.compatibleBound(reuseDisabled, modelID, accelerator, gpuCount, rec.EngineParams)
 }
 
 // estimateStoredCapacity returns a capacity estimate for a zero-replica variant
@@ -648,6 +664,10 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 	gpuCount int,
 	kvCacheThreshold float64,
 	modelAvgInput, modelAvgOutput float64,
+	// reuseDisabled withholds only the compatible-variant BOUND below. The
+	// variant's own stored record, and the k2 derivation over it, are its own
+	// measurements and stay.
+	reuseDisabled bool,
 	logger logr.Logger,
 ) float64 {
 	if rec == nil {
@@ -679,7 +699,14 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 			}
 
 			// Bound by compatible variant's live EffectiveCapacity (already min(k1,k2))
-			if compatible := a.capacityStore.FindCompatible(modelID, accelerator, gpuCount, rec.EngineParams); compatible != nil && compatible.LearnedFrom == capacity.LearnedFromLive && compatible.EffectiveCapacity > 0 {
+			//
+			// This bound is a MAX clamp, so withholding it can only raise the
+			// estimate. That is the direction this project calls dangerous --
+			// removing it once turned 5,000 into 153,600 -- but here it is
+			// what the operator asked for, and the own-k1 bound above still
+			// applies. The log line below names the surviving bound, so a
+			// reader can tell which one held.
+			if compatible := a.compatibleBound(reuseDisabled, modelID, accelerator, gpuCount, rec.EngineParams); compatible != nil && compatible.LearnedFrom == capacity.LearnedFromLive && compatible.EffectiveCapacity > 0 {
 				if compatible.EffectiveCapacity < bounded {
 					bounded = compatible.EffectiveCapacity
 					boundedBy = "compatible-variant-live"
