@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -146,44 +147,46 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 			fixtures.WithWVATriggerMetadata(modelA, "10.0"),
 			fixtures.WithScaledObjectScaleDownStabilizationWindow(window))).To(Succeed())
 
-		By("Waiting for two A pods to be marked as one donor set")
-		var marked []corev1.Pod
+		// The set is found from the controller's own log, not by catching the
+		// marked pods: a set on a simulator can start and release within ~30 s,
+		// and a poll that must see both marks at once races it (a run missed
+		// them entirely while the controller did exactly the right thing).
+		By("Waiting for a donor set of two of A's replicas to start, funding B's decode")
+		started := regexp.MustCompile(`"scope": "` + ns + `".*"set": "([^"]+)", "donor": "[^"]*/` + modelA +
+			`/both", "receiver": "([^"]*)"`)
+		var setID string
 		Eventually(func(g Gomega) {
-			marked = markedSharePods(ns)
-			g.Expect(marked).To(HaveLen(2))
+			members := map[string]int{}
+			receivers := map[string]string{}
+			for _, line := range strings.Split(controllerLogsSince(start), "\n") {
+				if !strings.Contains(line, "transfer started") {
+					continue
+				}
+				if m := started.FindStringSubmatch(line); m != nil {
+					members[m[1]]++
+					if m[2] != "" {
+						receivers[m[1]] = m[2]
+					}
+				}
+			}
+			for id, n := range members {
+				if n == 2 && strings.HasSuffix(receivers[id], "/"+modelB+"/decode") {
+					setID = id
+				}
+			}
+			g.Expect(setID).NotTo(BeEmpty(), "no set of two A replicas funding B's decode has started: %v", members)
 		}, 12*time.Minute, 5*time.Second).Should(Succeed())
-		sets := map[string]bool{}
-		for _, p := range marked {
+		GinkgoWriter.Printf("donor set: %s\n", setID)
+
+		// Marks, where the pods are still there to read: only A's, only this set.
+		for _, p := range markedSharePods(ns) {
 			Expect(p.Labels["app"]).To(Equal(depA), "only A has replicas to give")
 			var m struct {
 				SetID string `json:"setID"`
 			}
 			Expect(json.Unmarshal([]byte(p.Annotations["llm-d.ai/utilization-share-transfer"]), &m)).To(Succeed())
-			Expect(m.SetID).NotTo(BeEmpty(), "pod %s is not marked as part of a set", p.Name)
-			sets[m.SetID] = true
+			Expect(m.SetID).To(Equal(setID), "pod %s carries a mark of another set", p.Name)
 		}
-		Expect(sets).To(HaveLen(1), "both donors must belong to one set")
-		var setID string
-		for id := range sets {
-			setID = id
-		}
-
-		By("Checking the decode LWS is not raised until BOTH donor pods have gone")
-		gone := func(name string) bool {
-			p, err := k8sClient.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
-			return err != nil || p.DeletionTimestamp != nil
-		}
-		var raisedEarly bool
-		Eventually(func(g Gomega) {
-			var l lwsv1.LeaderWorkerSet
-			g.Expect(crClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: lwsDecode}, &l)).To(Succeed())
-			bothGone := gone(marked[0].Name) && gone(marked[1].Name)
-			if *l.Spec.Replicas >= 2 && !bothGone {
-				raisedEarly = true
-			}
-			g.Expect(*l.Spec.Replicas).To(BeNumerically(">=", 2))
-		}, 12*time.Minute, time.Second).Should(Succeed())
-		Expect(raisedEarly).To(BeFalse(), "the decode LWS was raised while a donor pod still held its GPU")
 
 		By("Waiting for the new decode group to be ready and the set's transfer to complete")
 		Eventually(func(g Gomega) {
@@ -193,15 +196,16 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 			logs := controllerLogsSince(start)
 			// The set, from the controller's own account: two members started,
 			// the primary (whose ID is the set's) raised the receiver and ended
-			// done, and no member of the set released after that raise.
-			started := 0
+			// done, and no member of the set released after that raise -- the
+			// receiver is raised only when all its holes are open.
+			members := 0
 			var raised, lastRelease time.Time
 			for _, line := range strings.Split(logs, "\n") {
 				at, ok := logLineTime(line)
 				switch {
 				case !ok:
 				case strings.Contains(line, "transfer started") && strings.Contains(line, `"set": "`+setID+`"`):
-					started++
+					members++
 				case strings.Contains(line, "released, raising the receiver") && strings.Contains(line, `"id": "`+setID+`"`):
 					raised = at
 				case strings.Contains(line, "transfer ended") && strings.Contains(line, `"outcome": "done"`) &&
@@ -209,7 +213,7 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 					lastRelease = at // a contributor completes at its release
 				}
 			}
-			g.Expect(started).To(Equal(2), "want exactly the two members of set %s started", setID)
+			g.Expect(members).To(Equal(2), "want exactly the two members of set %s started", setID)
 			g.Expect(raised.IsZero()).To(BeFalse(), "the set's primary never raised the receiver")
 			g.Expect(lastRelease).NotTo(BeTemporally(">", raised), "a member released after the receiver was raised")
 			g.Expect(logs).To(MatchRegexp(`transfer ended.*"id": "` + setID + `".*"outcome": "done"`))
