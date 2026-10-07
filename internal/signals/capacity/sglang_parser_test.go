@@ -57,11 +57,20 @@ var _ = Describe("ParseSGLangArgs", func() {
 		})
 
 		It("still accepts a usable fraction, including exactly 1", func() {
-			for _, good := range []string{"0.85", "1", "1.0"} {
-				deploy := makeTestDeployment("--mem-fraction-static=" + good)
+			// The EXACT value, not `> 0`. The SGLang default is 0.9, which is
+			// also `> 0`, so the looser assertion could not tell "my 1.0
+			// landed" from "the guard rejected it and the default stayed" --
+			// and the boundary is where that matters: narrowing `v <= 1` to
+			// `v < 1` silently excludes both of the two values this spec is
+			// named for, and left it green. Verified by that mutation.
+			for _, tc := range []struct {
+				arg  string
+				want float64
+			}{{"0.85", 0.85}, {"1", 1}, {"1.0", 1}} {
+				deploy := makeTestDeployment("--mem-fraction-static=" + tc.arg)
 				params := ParseSGLangArgs(scaletarget.NewDeploymentAccessor(deploy))
-				Expect(params.GpuMemoryUtilization).To(BeNumerically(">", 0),
-					"--mem-fraction-static="+good+" is usable and must land")
+				Expect(params.GpuMemoryUtilization).To(Equal(tc.want),
+					"--mem-fraction-static="+tc.arg+" is usable and must land as itself")
 			}
 		})
 	})

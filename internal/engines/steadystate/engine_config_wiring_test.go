@@ -16,6 +16,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
@@ -237,6 +238,31 @@ func TestRunV2AnalysisOnly_PublishesNothingForAVariantWithNoScaleTarget(t *testi
 	// configuration to publish, and an absent series is the honest signal.
 	e, registry := engineConfigEngine(t)
 	e.saturationV2Analyzer = saturation.NewSaturationAnalyzer(e.capacityStore)
+
+	// THE SEED IS WHAT MAKES THIS A TEST. publishEngineConfig no-ops when the
+	// store holds no record for the variant, so an empty registry is also
+	// exactly what DELETING the skip produces -- and what deleting the whole
+	// step-1 loop produces. A verification pass proved both against the first
+	// draft of this spec, which passed with the feature ripped out: failure
+	// shape (b), an absence that holds because the subject never ran.
+	//
+	// With a complete record seeded the two outcomes finally differ: the skip
+	// still publishes nothing, while a publish call reached without the skip
+	// finds params and emits a series.
+	e.capacityStore.Update("ns", "m", "v1", capacity.Record{
+		AcceleratorName: "H100",
+		GpuCount:        1,
+		EngineParams: &capacity.EngineParams{
+			Engine:                    inferenceengine.EngineVLLM,
+			GpuMemoryUtilization:      0.9,
+			BlockSize:                 16,
+			KvCacheDtype:              "auto",
+			WeightDtype:               "auto",
+			TensorParallelSize:        1,
+			MaxNumSeqs:                256,
+			EffectiveMaxBatchedTokens: 8192,
+		},
+	})
 
 	va := &llmdVariantAutoscalingV1alpha1.VariantAutoscaling{
 		ObjectMeta: metav1.ObjectMeta{Name: "v1", Namespace: "ns"},
