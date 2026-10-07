@@ -102,8 +102,10 @@ type SaturationAnalyzer struct {
 	//
 	// This is what a variant with no usable fit of its own borrows, so a
 	// rename, a second identical variant, or the same deployment in another
-	// namespace gets a line on its FIRST cycle instead of paying the ~60
-	// cycles a fit takes -- which is the whole saving this was built for. A
+	// namespace gets a line on its FIRST cycle instead of paying the ~28
+	// cycles a fit takes -- measured on one benchmark run from load start,
+	// which is the figure a controller-boot anchor had inflated to ~60. That
+	// is the whole saving this was built for. A
 	// borrowed line is marked as such all the way to the floor, which may hold
 	// the fleet on it but not grow it: the line is evidence about a
 	// configuration, not about this variant's own load.
@@ -129,6 +131,25 @@ type SaturationAnalyzer struct {
 	// implausible for a variant, so a genuine change of hardware is eventually
 	// admitted rather than rejected forever against a stale estimate.
 	startOutliers map[string]int
+	// variantSeenAt is when each variant key was last REPORTED, which is what
+	// the learned per-variant state is swept on.
+	//
+	// It exists because an empty ITL window is not evidence that a variant is
+	// gone. Window.Add admits only k in [DefaultMinObservableK,
+	// DefaultMaxObservableK], so a healthy, under-utilised fleet below k=0.15
+	// offers readings every cycle and holds NONE -- its window is permanently
+	// empty while the variant is perfectly live. Keying the sweep on
+	// Len() == 0 therefore deleted the learned start estimate and the ITL
+	// baseline of exactly the fleets that were doing fine, every cycle; and
+	// because startSeenPods is re-stamped for a Pod still being reported,
+	// noteReplicaStart could never put the start estimate back. The figure was
+	// gone until the Pod was replaced.
+	//
+	// Stamped by noteITL and by noteReplicaStart, so it covers every role
+	// rather than decode alone -- which also bounds the start estimate of a
+	// prefill or RoleBoth variant, whose keys the window cascade could never
+	// visit and so never swept at all.
+	variantSeenAt map[string]time.Time
 	// now is the clock the memory reads; tests set it.
 	now func() time.Time
 }
@@ -170,6 +191,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		startSeconds:           make(map[string]float64),
 		startSeenPods:          make(map[string]time.Time),
 		startOutliers:          make(map[string]int),
+		variantSeenAt:          make(map[string]time.Time),
 		now:                    time.Now,
 	}
 }
@@ -179,6 +201,25 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 // but the descriptive name here is used in AnalyzerResult.AnalyzerName for observability.
 func (a *SaturationAnalyzer) Name() string {
 	return "saturation-token-based"
+}
+
+// noteVariantSeen records that a variant key was reported this cycle. The
+// learned state keyed on it is swept on this timestamp and nothing else.
+//
+// Callers hold a.mu.
+func (a *SaturationAnalyzer) noteVariantSeen(key string, now time.Time) {
+	a.variantSeenAt[key] = now
+}
+
+// variantIsStale reports whether nothing has reported a variant key within the
+// timeout. A key with no stamp at all counts as stale: every producer of
+// learned state stamps one, so an unstamped key is left over from before a key
+// changed shape and is exactly what the sweep is for.
+//
+// Callers hold a.mu.
+func (a *SaturationAnalyzer) variantIsStale(key string, now time.Time, timeout time.Duration) bool {
+	seen, ok := a.variantSeenAt[key]
+	return !ok || now.Sub(seen) > timeout
 }
 
 // EvictStaleHistory removes k2 history entries that have not been updated
@@ -208,26 +249,57 @@ func (a *SaturationAnalyzer) EvictStaleHistory(timeout time.Duration) int {
 			delete(a.lastAccelerator, key)
 		}
 	}
-	// An ITL window ages by its own observations rather than by a timestamp
-	// of its own: Prune drops readings past DefaultObservationMaxAge, so a
-	// window left empty by that belongs to a variant nothing has reported for
-	// at least that long. Without this the map keeps one window per variant
-	// that has EVER been seen, including deleted and renamed ones.
+	// Every map of learned per-variant state ages on variantSeenAt: the time
+	// the variant was last REPORTED. The window is still pruned every sweep,
+	// because stale observations must not reach a fit, but an empty window is
+	// no longer taken as evidence that the variant is gone -- see
+	// variantSeenAt's own comment for why it is not, and for what that cost.
+	//
+	// The intent is unchanged and is the one the first version of this loop
+	// stated: without a sweep the maps keep one entry per variant that has
+	// EVER been seen, including deleted and renamed ones, and a baseline or a
+	// start time measured before a redeploy onto different hardware would size
+	// every later fit and projection for that key. Only the liveness test
+	// changed, from "its window is empty" to "nothing has reported it".
 	now := a.now()
-	for key, w := range a.itlWindows {
+	for _, w := range a.itlWindows {
 		w.Prune(now)
-		if w.Len() == 0 {
+	}
+	for key := range a.itlWindows {
+		if a.variantIsStale(key, now, timeout) {
 			delete(a.itlWindows, key)
-			// The learned baseline dies with the window that produced it.
-			// Kept, it would grow one float per variant/accelerator ever seen
-			// and, worse, pin a hardware floor measured before a redeploy onto
-			// different hardware into every later fit for that key.
+			evicted++
+		}
+	}
+	// Separate loops, not one pass over itlWindows: noteReplicaStart runs for
+	// every role while noteITL runs for decode only, so a prefill or RoleBoth
+	// variant has a start estimate and no window at all. Sweeping these
+	// through the window map left those keys unbounded -- the very leak the
+	// sweep was wired up to close.
+	for key := range a.itlBaseline {
+		if a.variantIsStale(key, now, timeout) {
 			delete(a.itlBaseline, key)
-			// And the start estimate, for the same reason: a figure measured
-			// before a redeploy onto different hardware would otherwise size
-			// every later projection for that key.
+			evicted++
+		}
+	}
+	for key := range a.startSeconds {
+		if a.variantIsStale(key, now, timeout) {
 			delete(a.startSeconds, key)
 			delete(a.startOutliers, key)
+			evicted++
+		}
+	}
+	// An outlier count can outlive its estimate: the estimate is deleted on a
+	// rejected sample's key only through the loop above.
+	for key := range a.startOutliers {
+		if a.variantIsStale(key, now, timeout) {
+			delete(a.startOutliers, key)
+			evicted++
+		}
+	}
+	for key, seen := range a.variantSeenAt {
+		if now.Sub(seen) > timeout {
+			delete(a.variantSeenAt, key)
 		}
 	}
 	// A shared line ages on a timestamp of its own, because the window that

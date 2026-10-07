@@ -98,6 +98,11 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 	present := make(map[string]struct{}, len(replicas))
 
 	a.mu.Lock()
+	// This runs for every role, so it is what bounds the start estimate of a
+	// prefill or RoleBoth variant: noteITL stamps decode keys only, and the
+	// sweep that used to reach these maps through the ITL window map could
+	// never visit a key that has no window.
+	a.noteVariantSeen(key, a.now())
 	for _, rm := range replicas {
 		if rm.VariantName != variantName || rm.FromWarmPool || rm.PodName == "" {
 			continue

@@ -254,6 +254,11 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	// rather than serialising every other model's cycle behind this one's
 	// scan, fit and two Info calls.
 	a.mu.Lock()
+	// Before anything else: this variant has been reported, which is what the
+	// sweep ages its learned state on. An empty window is not evidence of a
+	// gone variant -- Window.Add admits only a band of k, so a healthy
+	// under-utilised fleet holds nothing while reporting every cycle.
+	a.noteVariantSeen(key, now)
 	w, ok := a.itlWindows[key]
 	if !ok {
 		w = itl.NewWindow(
