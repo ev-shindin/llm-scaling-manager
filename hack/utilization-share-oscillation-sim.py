@@ -3,40 +3,51 @@
 
 See docs/proposals/utilization-share-optimizer.md, section 6.7. This is design
 evidence, not a test of any code in the tree: it models the planner of
-sections 5 and 6 closely enough to show whether a rule set oscillates.
+sections 5 and 6 closely enough to show whether a rule set oscillates, and
+what each anti-oscillation rule contributes.
 
-Model. One budget group. Every role is a single variant whose replicas are
-all the same size. Demand is a function of time. Every CYCLE seconds the
-planner computes targets and may start transfers; a transfer's donor
-replica is released DELAY seconds later (the HPA scale-down window plus
-drain), and the receiver holds its new replica from then on. A role may
-give or receive at most two replicas per cycle; at most two transfers are
-in flight per group.
+Model
+-----
+One budget group; every role is a single variant whose replicas are all the
+same size. Every CYCLE seconds the planner reads demand -- LAG seconds old,
+averaged over LAG seconds, as the analyzers' windows deliver it -- computes
+targets, and may start or cancel transfers. A transfer's donor replica is
+released RELEASE seconds after it starts (the HPA scale-down window plus
+drain). The receiver holds its new replica from then on, and SERVES from it
+FILL seconds later (pod start and model load). A role gives or receives at
+most two replicas per cycle; at most two transfers are in flight per group.
 
-Every variant may cancel a transfer while the HPA still holds the
-scale-down window's maximum (the first WINDOW seconds): no donor pod has been
-removed yet, so a cancel costs nothing.
+A transfer may be cancelled while the HPA still holds the window's maximum
+(its first WINDOW seconds): no donor pod has been removed yet, so a cancel
+costs nothing.
 
-Variants:
-  static          never transfers -- the baseline to beat
-  as-written      the planner as the proposal stood before section 6.7: band
-                  and planning judged on HELD GPUs, any out-of-band role
-                  licenses any transfer, no reversal hold, and a cancel rule
-                  that mirrors the admission rule
-  proposed        section 6.7: COMMITTED GPUs; transfers only for actionable
-                  roles (out of band AND off the integer target); a reversal
-                  hold of 2 x DELAY, also after a cancel; cancel only on a
-                  clear reversal (hysteresis)
-  +slow-giving    proposed, plus a donor gives only what it would still give
-                  at its peak need over the last 2 x DELAY. Rejected: the HPA
-                  window already does this job, and it costs shortfall
+Rules (each a flag, so every rule can be removed on its own):
+  committed    judge band and plan on committed GPUs (held, plus in-flight
+               receipts, minus in-flight gifts), not held GPUs
+  actionable   only roles out of band AND off their integer target trigger,
+               and every transfer must involve one
+  hysteresis   cancel only on a clear reversal: the donor would land more than
+               2 x its tolerance below target, or the receiver is more than
+               its tolerance above target without the transfer. Without it,
+               cancel mirrors admission
+  hold         a role that gave cannot receive, and one that received cannot
+               give, for HOLD seconds from the transfer's start or cancel
+  swing        a role whose transfers change direction twice within SWING_W
+               (8 x the decide-to-serve LATENCY) is following a load it cannot
+               catch; for SWING_W it is planned on its MEAN need over that window
+  slow_giving  a donor gives only what it would still give at its peak need
+               over the last HOLD seconds (rejected in section 6.7)
 
 Reported per scenario, averaged over SEEDS:
-  landed     transfers that completed
+  landed     transfers that completed before the end of the run
   cancelled  transfers cancelled free inside the window
-  wasted     landed transfers reversed within one DELAY after landing
-  short   time-averaged GPUs below instantaneous need, as a share of need
-          (what makes requests queue)
+  wasted     landed transfers undone within one RELEASE after landing: the
+             donor receives, or the receiver gives, any replica in that time
+             (catches A->B->C->A cycles, not only exact pair reversals)
+  short      time-averaged GPUs below instantaneous need that are actually
+             SERVING, as a share of need (what makes requests queue). The
+             sweep also reports it weighted by each model's weight, since the
+             optimizer deliberately shorts a light model before a heavy one
 
 Run: python3 hack/utilization-share-oscillation-sim.py
 """
@@ -46,14 +57,22 @@ import random
 K = 0.8              # scale-up threshold
 CYCLE = 30           # optimize interval, s
 WINDOW = 300         # HPA scale-down stabilization window, s
-DELAY = 360          # release time: the window + drain, s
+RELEASE = 360        # release time: the window + drain, s
+FILL = 180           # receiver pod start + model load, s
+LAG = 60             # analyzer delay: demand seen is LAG s old, averaged over LAG s
 T_END = 6 * 3600     # simulated time, s
-HOLD = 2 * DELAY     # reversal hold, s
-PEAK_W = 2 * DELAY   # slow-giving window, s
+HOLD = 2 * RELEASE   # reversal hold, s
 TAU = 0.15           # relative band, fraction of the target
 TAU_ABS = 0.05       # idle floor, utilization
-CONFIRM = 2          # consecutive out-of-band cycles
+CONFIRM = 2          # consecutive actionable cycles
 SEEDS = range(1, 6)
+LATENCY = 2 * LAG + CONFIRM * CYCLE + RELEASE + FILL   # decide-to-serve, s
+SWING_W = 8 * LATENCY  # swing damping window, s
+
+ALL = dict(committed=True, actionable=True, hysteresis=True, hold=True, slow_giving=False, headroom_band=None,
+           swing="mean")
+NONE = dict(committed=False, actionable=False, hysteresis=False, hold=False, slow_giving=False, headroom_band=None,
+            swing=False)
 
 
 def z(G, N, w):
@@ -94,97 +113,123 @@ def integer_targets(roles, need, B):
         left -= roles[r]["g"]
 
 
+def tol(tgt, g):
+    return max(TAU * tgt, 0.5 * g)
+
+
 def in_band(G, tgt, N, g):
-    if abs(G - tgt) <= max(TAU * tgt, 0.5 * g):
+    if abs(G - tgt) <= tol(tgt, g):
         return True
     d = N * K
     # idle floor, only for a role that is not past its threshold
     return G > 0 and tgt > 0 and d / G <= K and abs(d / G - d / tgt) <= TAU_ABS
 
 
-def simulate(roles, demand, B, variant, seed):
+def simulate(roles, demand, B, rules, seed):
+    """rules: None for stand-still, else a dict of the flags above."""
     rnd = random.Random(seed)
     held = {r: roles[r]["init"] for r in roles}
-    inflight = []                       # (release_time, donor, receiver, g)
-    out_cnt = {r: 0 for r in roles}
+    serving = dict(held)
+    inflight = []                    # dicts: start, dn, rc, g
+    filling = []                     # (serve_time, rc, g)
+    act_cnt = {r: 0 for r in roles}
     last_gave = {r: -1e9 for r in roles}
     last_got = {r: -1e9 for r in roles}
-    needhist = {r: [] for r in roles}
-    history = []
+    dirs = {r: [] for r in roles}    # (t, +1 received / -1 gave), for swing detection
+    swing_w = rules.get("swing_w", SWING_W) if rules else SWING_W
+    damped_until = {r: -1e9 for r in roles}
+    seen = {r: [] for r in roles}    # (t, need) samples, for lag and peak
+    landed, gifts, receipts = [], [], []   # landed: (land_t, dn, rc)
     cancels = 0
     short, total = 0.0, 0.0
-    proposed = variant in ("proposed", "+slow-giving")
-    slow_giving = variant == "+slow-giving"
+    wshort, wtotal = 0.0, 0.0
     t = 0
     while t < T_END:
-        for item in [i for i in inflight if i[0] <= t]:
-            _, dn, rc, g = item
-            held[dn] -= g
-            held[rc] += g
-            inflight.remove(item)
-        need = {r: demand[r](t, rnd) / K for r in roles}
-        short += sum(max(0.0, need[r] - held[r]) for r in roles)
-        total += sum(need.values())
+        for tr in [x for x in inflight if x["start"] + RELEASE <= t]:
+            held[tr["dn"]] -= tr["g"]
+            serving[tr["dn"]] -= tr["g"]
+            held[tr["rc"]] += tr["g"]
+            filling.append((t + FILL, tr["rc"], tr["g"]))
+            landed.append((t, tr["dn"], tr["rc"]))
+            inflight.remove(tr)
+        for f in [x for x in filling if x[0] <= t]:
+            serving[f[1]] += f[2]
+            filling.remove(f)
+
+        inst = {r: demand[r](t, rnd) / K for r in roles}
+        short += sum(max(0.0, inst[r] - serving[r]) for r in roles)
+        total += sum(inst.values())
+        wshort += sum(roles[r]["w"] * max(0.0, inst[r] - serving[r]) for r in roles)
+        wtotal += sum(roles[r]["w"] * inst[r] for r in roles)
         for r in roles:
-            needhist[r] = [(tt, v) for tt, v in needhist[r] if t - tt <= PEAK_W] + [(t, need[r])]
-        if variant == "static":
+            seen[r] = [(tt, v) for tt, v in seen[r] if t - tt <= max(HOLD, 2 * LAG, swing_w)] + [(t, inst[r])]
+        if rules is None:
             t += CYCLE
             continue
+
+        # what the analyzers deliver: LAG seconds old, averaged over LAG seconds
+        need = {}
+        for r in roles:
+            win = [v for tt, v in seen[r] if LAG <= t - tt <= 2 * LAG]
+            need[r] = sum(win) / len(win) if win else inst[r]
+        if rules.get("swing") == "mean":
+            for r in roles:
+                if t < damped_until[r]:
+                    win = [v for tt, v in seen[r] if t - tt <= swing_w]
+                    need[r] = sum(win) / len(win)
         cont = continuous_targets(roles, need, B)
-        # Cancellation (section 6.3). While the HPA still holds the window's
-        # maximum -- the first WINDOW seconds of a transfer -- no donor pod has
-        # been removed, so cancelling costs nothing. A transfer is cancelled
-        # when its donor would now be pushed below its band, or its receiver
-        # is back at or above its target without it.
-        for item in list(inflight):
-            rel, dn, rc, g = item
-            if rel - DELAY + WINDOW <= t:
+        integ = integer_targets(roles, need, B)
+
+        # cancellation, inside the window only
+        for tr in list(inflight):
+            if t - tr["start"] > WINDOW:
                 continue
-            committed_now = dict(held)
-            for _, d2, r2, g2 in inflight:
-                if (_, d2, r2, g2) != item:
-                    committed_now[d2] -= g2
-                    committed_now[r2] += g2
-            after = committed_now[dn] - g
-            tol_d = max(TAU * cont[dn], 0.5 * roles[dn]["g"])
-            if proposed:
-                # hysteresis: cancel only on a CLEAR reversal -- the donor would
-                # land more than twice its tolerance below target, or the
-                # receiver is now at or above its target without this transfer
-                donor_short = after < cont[dn] - 2 * tol_d
-                receiver_fine = committed_now[rc] >= cont[rc]
+            others = dict(held)
+            for o in inflight:
+                if o is not tr:
+                    others[o["dn"]] -= o["g"]
+                    others[o["rc"]] += o["g"]
+            dn, rc, g = tr["dn"], tr["rc"], tr["g"]
+            after = others[dn] - g
+            if rules["hysteresis"]:
+                donor_short = after < cont[dn] - 2 * tol(cont[dn], roles[dn]["g"])
+                receiver_fine = others[rc] > cont[rc] + tol(cont[rc], roles[rc]["g"])
             else:
-                # the mirror image of the admission rule
                 donor_short = after < cont[dn] and not in_band(after, cont[dn], need[dn], roles[dn]["g"])
-                receiver_fine = committed_now[rc] >= cont[rc] or in_band(committed_now[rc], cont[rc], need[rc], roles[rc]["g"])
+                receiver_fine = others[rc] >= cont[rc] or in_band(others[rc], cont[rc], need[rc], roles[rc]["g"])
             if donor_short or receiver_fine:
-                inflight.remove(item)
+                inflight.remove(tr)
                 cancels += 1
-                history.remove((rel - DELAY, dn, rc))
-                if proposed:
-                    # a cancelled transfer holds the pair like a completed one
+                if rules["hold"]:
                     last_gave[dn] = t
                     last_got[rc] = t
+
         committed = dict(held)
-        for _, dn, rc, g in inflight:
-            committed[dn] -= g
-            committed[rc] += g
-        base = committed if proposed else held
-        integ = integer_targets(roles, need, B)
+        for tr in inflight:
+            committed[tr["dn"]] -= tr["g"]
+            committed[tr["rc"]] += tr["g"]
+        base = committed if rules["committed"] else held
+
         for r in roles:
-            oob = not in_band(base[r], cont[r], need[r], roles[r]["g"])
-            if proposed:
-                oob = oob and base[r] != integ[r]
-            out_cnt[r] = out_cnt[r] + 1 if oob else 0
-        if any(out_cnt[r] >= CONFIRM for r in roles) and len(inflight) < 2:
-            if slow_giving:
-                peak = {r: max(v for _, v in needhist[r]) for r in roles}
-                integ_peak = integer_targets(roles, peak, B)
+            trig = not in_band(base[r], cont[r], need[r], roles[r]["g"])
+            hb = rules.get("headroom_band")
+            if trig and hb is not None and base[r] >= need[r]:
+                # headroom-only deviation: the role is not short. Act only on a
+                # much larger miss (hb = fraction of target; inf = never)
+                trig = abs(base[r] - cont[r]) > max(hb * cont[r], 0.5 * roles[r]["g"])
+            if rules["actionable"]:
+                trig = trig and base[r] != integ[r]
+            act_cnt[r] = act_cnt[r] + 1 if trig else 0
+
+        if any(act_cnt[r] >= CONFIRM for r in roles) and len(inflight) < 2:
+            if rules["slow_giving"]:
+                peak = {r: max(v for tt, v in seen[r] if t - tt <= HOLD) for r in roles}
+                integ_give = integer_targets(roles, peak, B)
             else:
-                integ_peak = integ
+                integ_give = integ
             recv = sorted((r for r in roles if base[r] < integ[r]),
                           key=lambda r: z(base[r], need[r], roles[r]["w"]))
-            donors = sorted((r for r in roles if base[r] > integ[r] and base[r] > integ_peak[r]
+            donors = sorted((r for r in roles if base[r] > integ[r] and base[r] > integ_give[r]
                              and base[r] > roles[r]["floor"]),
                             key=lambda r: -z(base[r], need[r], roles[r]["w"]))
             work = dict(base)
@@ -195,11 +240,12 @@ def simulate(roles, demand, B, variant, seed):
                         continue
                     if roles[dn]["g"] < roles[rc]["g"]:
                         continue
-                    if proposed:
-                        if t - last_gave[rc] < HOLD or t - last_got[dn] < HOLD:
-                            continue
-                        if out_cnt[rc] < CONFIRM and out_cnt[dn] < CONFIRM:
-                            continue
+                    if rules["hold"] and (t - last_gave[rc] < HOLD or t - last_got[dn] < HOLD):
+                        continue
+                    if rules.get("swing") is True and (t < damped_until[rc] or t < damped_until[dn]):
+                        continue
+                    if rules["actionable"] and act_cnt[rc] < CONFIRM and act_cnt[dn] < CONFIRM:
+                        continue
                     g = roles[rc]["g"]
                     before = min(z(work[dn], need[dn], roles[dn]["w"]), z(work[rc], need[rc], roles[rc]["w"]))
                     after = min(z(work[dn] - g, need[dn], roles[dn]["w"]), z(work[rc] + g, need[rc], roles[rc]["w"]))
@@ -210,14 +256,24 @@ def simulate(roles, demand, B, variant, seed):
                     work[rc] += g
                     moved[dn] += 1
                     moved[rc] += 1
-                    inflight.append((t + DELAY, dn, rc, g))
+                    inflight.append(dict(start=t, dn=dn, rc=rc, g=g))
                     last_gave[dn] = t
                     last_got[rc] = t
-                    history.append((t, dn, rc))
+                    if rules.get("swing"):
+                        # a role whose transfers change direction twice within
+                        # SWING_W is following a load it cannot catch: damp it
+                        for r, sgn in ((dn, -1), (rc, +1)):
+                            dirs[r] = [(tt, d) for tt, d in dirs[r] if t - tt <= swing_w] + [(t, sgn)]
+                            flips = sum(1 for a, b in zip(dirs[r], dirs[r][1:]) if a[1] != b[1])
+                            if flips >= 2:
+                                damped_until[r] = t + swing_w
         t += CYCLE
-    wasted = sum(1 for i, (t1, a, b) in enumerate(history)
-                 if any(t2 - t1 <= 2 * DELAY and c == b and d == a for t2, c, d in history[i + 1:]))
-    return len(history), wasted, short / total, cancels
+
+    wasted = 0
+    for t1, dn, rc in landed:
+        if any(0 < t2 - t1 <= RELEASE and (r2 == dn or d2 == rc) for t2, d2, r2 in landed):
+            wasted += 1
+    return len(landed), cancels, wasted, short / total, wshort / wtotal
 
 
 def noisy(level, amp=0.10):
@@ -244,19 +300,23 @@ def pd_8gpu(init):
 
 
 SCENARIOS = [
-    ("1-GPU replicas, 16 GPUs, steady load, +-10 % noise", one_gpu((9, 5, 2)),
+    ("1-GPU, 16 GPUs, steady load +-10 %", one_gpu((9, 5, 2)),
      {"A": noisy(4), "B": noisy(3), "C": noisy(1)}, 16),
-    ("1-GPU replicas, 16 GPUs, two models tied", one_gpu((8, 6, 2)),
+    ("1-GPU, 16 GPUs, two models tied", one_gpu((8, 6, 2)),
      {"A": noisy(3.2), "B": noisy(3.2), "C": noisy(1)}, 16),
-    ("1-GPU replicas, 16 GPUs, B doubles at 1 h", one_gpu((9, 5, 2)),
+    ("1-GPU, 16 GPUs, B's demand doubles", one_gpu((9, 5, 2)),
      {"A": noisy(4), "B": step(3, 6, 3600), "C": noisy(1)}, 16),
-    ("1-GPU replicas, 12 GPUs, B doubles at 1 h", one_gpu((6, 5, 1)),
+    ("1-GPU, 12 GPUs, B's demand doubles", one_gpu((6, 5, 1)),
      {"A": noisy(4), "B": step(3, 6, 3600), "C": noisy(1)}, 12),
-    ("1-GPU replicas, 12 GPUs, A/B load swaps every 15 min", one_gpu((6, 5, 1)),
-     {"A": periodic(3.5, 0.4, 900), "B": periodic(3.5, 0.4, 900, math.pi), "C": noisy(1)}, 12),
-    ("1-GPU replicas, 12 GPUs, A/B load swaps every 60 min", one_gpu((6, 5, 1)),
+    ("1-GPU, 12 GPUs, A/B swap every 60 min", one_gpu((6, 5, 1)),
      {"A": periodic(3.5, 0.4, 3600), "B": periodic(3.5, 0.4, 3600, math.pi), "C": noisy(1)}, 12),
-    ("8-GPU P/D, 64 GPUs, steady load, +-10 % noise", pd_8gpu((16, 24, 8, 16)),
+    ("1-GPU, 12 GPUs, A/B swap every 15 min", one_gpu((6, 5, 1)),
+     {"A": periodic(3.5, 0.4, 900), "B": periodic(3.5, 0.4, 900, math.pi), "C": noisy(1)}, 12),
+    ("1-GPU, 12 GPUs, A/B swap every 30 min", one_gpu((6, 5, 1)),
+     {"A": periodic(3.5, 0.4, 1800), "B": periodic(3.5, 0.4, 1800, math.pi), "C": noisy(1)}, 12),
+    ("1-GPU, 12 GPUs, A/B swap every 3 h", one_gpu((6, 5, 1)),
+     {"A": periodic(3.5, 0.4, 10800), "B": periodic(3.5, 0.4, 10800, math.pi), "C": noisy(1)}, 12),
+    ("8-GPU P/D, 64 GPUs, steady load +-10 %", pd_8gpu((16, 24, 8, 16)),
      {"A/prefill": noisy(8), "A/decode": noisy(14.4), "B/prefill": noisy(4.8), "B/decode": noisy(9.6)}, 64),
     ("8-GPU P/D, 64 GPUs, A prompts<->outputs every 60 min", pd_8gpu((16, 24, 8, 16)),
      {"A/prefill": periodic(6.4, 0.4, 3600), "A/decode": periodic(17.6, 0.25, 3600, math.pi),
@@ -266,24 +326,62 @@ SCENARIOS = [
       "B/prefill": noisy(4.8), "B/decode": noisy(9.6)}, 48),
 ]
 
-VARIANTS = ("static", "as-written", "proposed", "+slow-giving")
+MAIN = [("stand still", None), ("as first written", NONE), ("section 6.7", ALL)]
+ABLATIONS = [
+    ("section 6.7", ALL),
+    ("- committed", dict(ALL, committed=False)),
+    ("- actionable", dict(ALL, actionable=False)),
+    ("- hysteresis", dict(ALL, hysteresis=False)),
+    ("- hold", dict(ALL, hold=False)),
+    ("- swing damping", dict(ALL, swing=False)),
+    ("+ slow giving", dict(ALL, slow_giving=True)),
+]
+REJECTED = [
+    ("section 6.7", ALL),
+    ("freeze swinging roles", dict(ALL, swing=True)),
+    ("short receivers only", dict(ALL, headroom_band=math.inf)),
+]
+
+
+def table(variants):
+    print("| scenario | " + " | ".join(n for n, _ in variants) + " |")
+    print("| --- |" + " --- |" * len(variants))
+    for name, roles, demand, B in SCENARIOS:
+        cells = []
+        for _, rules in variants:
+            runs = [simulate(roles, demand, B, rules, s) for s in SEEDS]
+            avg = [sum(r[i] for r in runs) / len(runs) for i in range(5)]
+            cells.append("%.0f / %.0f / %.0f / %.1f %%" % (avg[0], avg[1], avg[2], 100 * avg[3]))
+        print("| %s | %s |" % (name, " | ".join(cells)))
+
+
+def sweep():
+    print("A/B swap period sweep, 1-GPU, 12 GPUs -- weighted shortfall (unweighted), mean of %d seeds"
+          % len(SEEDS))
+    print("| swing period | stand still | section 6.7 without swing damping | section 6.7 |")
+    print("| --- | --- | --- | --- |")
+    for period in (900, 1800, 3600, 5400, 7200, 10800, 14400):
+        roles = one_gpu((6, 5, 1))
+        dem = {"A": periodic(3.5, 0.4, period), "B": periodic(3.5, 0.4, period, math.pi), "C": noisy(1)}
+        cells = []
+        for rules in (None, dict(ALL, swing=False), ALL):
+            runs = [simulate(roles, dem, 12, rules, s) for s in SEEDS]
+            cells.append("%.1f %% (%.1f %%)" % (100 * sum(r[4] for r in runs) / len(runs),
+                                               100 * sum(r[3] for r in runs) / len(runs)))
+        print("| %d min | %s |" % (period // 60, " | ".join(cells)))
 
 
 def main():
-    print("6 h simulated, %d s cycles, %d s release, mean of %d seeds" % (CYCLE, DELAY, len(SEEDS)))
-    print("| scenario | " + " | ".join(VARIANTS) + " |")
-    print("| --- |" + " --- |" * len(VARIANTS))
-    for name, roles, demand, B in SCENARIOS:
-        cells = []
-        for v in VARIANTS:
-            runs = [simulate(roles, demand, B, v, s) for s in SEEDS]
-            n = sum(r[0] for r in runs) / len(runs)
-            w = sum(r[1] for r in runs) / len(runs)
-            sh = sum(r[2] for r in runs) / len(runs)
-            c = sum(r[3] for r in runs) / len(runs)
-            cells.append("%.0f / %.0f / %.0f / %.1f %%" % (n, c, w, 100 * sh))
-        print("| %s | %s |" % (name, " | ".join(cells)))
-    print("cells: transfers landed / cancelled free inside the window / wasted / shortfall")
+    print("6 h, %d s cycles, %d s window, %d s release, %d s fill, %d s analyzer lag, mean of %d seeds"
+          % (CYCLE, WINDOW, RELEASE, FILL, LAG, len(SEEDS)))
+    print("cells: landed / cancelled free / wasted / shortfall\n")
+    table(MAIN)
+    print()
+    table(ABLATIONS)
+    print()
+    table(REJECTED)
+    print()
+    sweep()
 
 
 if __name__ == "__main__":
