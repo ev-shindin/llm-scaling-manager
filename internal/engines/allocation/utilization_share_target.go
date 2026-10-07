@@ -217,7 +217,7 @@ const ShareIdleFloor = 0.05
 // the target's. threshold is the role's scale-up threshold k_r, so its
 // utilization is need·k / GPUs.
 func ShareInBand(committed, target float64, r ShareRole, tolerance, threshold float64) bool {
-	if math.Abs(committed-target) <= math.Max(tolerance*target, 0.5*float64(max(r.ReplicaGPUs, 1))) {
+	if math.Abs(committed-target) <= shareTol(target, r, tolerance) {
 		return true
 	}
 	if committed <= 0 || target <= 0 {

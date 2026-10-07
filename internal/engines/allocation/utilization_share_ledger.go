@@ -1,0 +1,351 @@
+package allocation
+
+import (
+	"fmt"
+	"slices"
+	"time"
+)
+
+// ShareTransferState is a transfer's place in the state machine of
+// docs/proposals/utilization-share-optimizer.md §6.3. "Released" is a step
+// inside one cycle, not a state the ledger holds between cycles.
+type ShareTransferState int
+
+const (
+	// ShareReleasing: the donor's target is lowered; the receiver's is not.
+	ShareReleasing ShareTransferState = iota
+	// ShareFilling: released; the receiver's target is raised and its pods are
+	// not yet scheduled.
+	ShareFilling
+)
+
+func (s ShareTransferState) String() string {
+	switch s {
+	case ShareReleasing:
+		return "releasing"
+	case ShareFilling:
+		return "filling"
+	}
+	return fmt.Sprintf("state(%d)", int(s))
+}
+
+// ShareTransferOutcome is how a transfer left the ledger.
+type ShareTransferOutcome string
+
+const (
+	ShareOutcomeDone        ShareTransferOutcome = "done"
+	ShareOutcomeFillTimeout ShareTransferOutcome = "fill-timeout"
+	ShareOutcomeCancelled   ShareTransferOutcome = "cancelled"
+	ShareOutcomeAborted     ShareTransferOutcome = "aborted"
+)
+
+// ShareTransfer moves one receiver replica: Donor gives GPUs, Receiver gets
+// them once they are released (§6.2). Stage 2 begins with a single donor role
+// per transfer; per-pod donor sets (§6.5) extend Donor without changing the
+// state machine.
+type ShareTransfer struct {
+	ID       string
+	Donor    string // role key
+	Receiver string // role key
+	// GPUs is one receiver replica.
+	GPUs int
+	// DonorGPUs is one donor replica: at least GPUs. Without node information
+	// a receiver pod is funded only by one donor pod at least its size (§6.5),
+	// and the surplus returns to the idle budget when it is released.
+	DonorGPUs int
+	// Entitled transfers -- owed floors, fixed consumers, reserve refill --
+	// bypass the z admission rule and the holds, and set no hold (§6.2).
+	Entitled bool
+	// Urgent receivers are below their need (§6.4).
+	Urgent bool
+
+	State   ShareTransferState
+	Started time.Time
+	// Deadline is when the current state times out.
+	Deadline time.Time
+	// donorBase and receiverBase are the donor's held GPUs when the transfer
+	// started and the receiver's when it entered Filling; release and fill are
+	// observed against them.
+	donorBase, receiverBase int
+}
+
+// ShareTransferEnd records a transfer that left the ledger this cycle.
+type ShareTransferEnd struct {
+	Transfer ShareTransfer
+	Outcome  ShareTransferOutcome
+}
+
+// ShareTimings are the derived timings the ledger runs with (§8.4).
+type ShareTimings struct {
+	// Window is the donor's HPA scale-down stabilization window: while a
+	// transfer is younger than this, no donor pod has been removed and a cancel
+	// is free.
+	Window         time.Duration
+	ReleaseTimeout time.Duration
+	FillTimeout    time.Duration
+	// ReversalHold blocks a role from moving the opposite way, measured from a
+	// transfer's start or cancellation.
+	ReversalHold time.Duration
+	// SwingWindow: a role whose transfers change direction twice within it is
+	// planned on its mean need for the next SwingWindow.
+	SwingWindow time.Duration
+}
+
+type shareMove struct {
+	at       time.Time
+	received bool
+}
+
+type shareNeedSample struct {
+	at   time.Time
+	need float64
+}
+
+// ShareLedger holds a group's transfers across cycles, and the per-role
+// history the anti-oscillation rules of §6.7 need. It is owned by the engine,
+// not by an optimizer instance (§6.6), and is not safe for concurrent use.
+type ShareLedger struct {
+	transfers []*ShareTransfer
+	nextID    int
+
+	lastGave, lastGot map[string]time.Time
+	moves             map[string][]shareMove
+	swingUntil        map[string]time.Time
+	needs             map[string][]shareNeedSample
+	confirm           map[string]int
+}
+
+// NewShareLedger returns an empty ledger.
+func NewShareLedger() *ShareLedger {
+	return &ShareLedger{
+		lastGave:   map[string]time.Time{},
+		lastGot:    map[string]time.Time{},
+		moves:      map[string][]shareMove{},
+		swingUntil: map[string]time.Time{},
+		needs:      map[string][]shareNeedSample{},
+		confirm:    map[string]int{},
+	}
+}
+
+// Transfers returns the transfers in flight, oldest first.
+func (l *ShareLedger) Transfers() []ShareTransfer {
+	out := make([]ShareTransfer, 0, len(l.transfers))
+	for _, t := range l.transfers {
+		out = append(out, *t)
+	}
+	return out
+}
+
+// InFlight is how many transfers count against the concurrency limit.
+func (l *ShareLedger) InFlight() int { return len(l.transfers) }
+
+// Committed returns each role's committed allocation Ḡ (§6.1 step 2): what it
+// holds, minus what it is still giving, plus what it is promised and does not
+// yet hold.
+func (l *ShareLedger) Committed(held map[string]int) map[string]int {
+	out := make(map[string]int, len(held))
+	for k, v := range held {
+		out[k] = v
+	}
+	for _, t := range l.transfers {
+		switch t.State {
+		case ShareReleasing:
+			out[t.Donor] -= t.DonorGPUs
+			out[t.Receiver] += t.GPUs
+		case ShareFilling:
+			out[t.Receiver] += t.GPUs
+		}
+	}
+	return out
+}
+
+// Promised is P (§6.2): GPUs released for a receiver that it does not yet hold.
+func (l *ShareLedger) Promised() int {
+	p := 0
+	for _, t := range l.transfers {
+		if t.State == ShareFilling {
+			p += t.GPUs
+		}
+	}
+	return p
+}
+
+// Start records a newly admitted transfer, in Releasing.
+func (l *ShareLedger) Start(t ShareTransfer, held map[string]int, now time.Time, tm ShareTimings) ShareTransfer {
+	l.nextID++
+	t.ID = fmt.Sprintf("t%d", l.nextID)
+	if t.DonorGPUs < t.GPUs {
+		t.DonorGPUs = t.GPUs
+	}
+	t.State = ShareReleasing
+	t.Started = now
+	t.Deadline = now.Add(tm.ReleaseTimeout)
+	t.donorBase = held[t.Donor]
+	l.transfers = append(l.transfers, &t)
+	if !t.Entitled {
+		l.recordMove(t.Donor, false, now, tm)
+		l.recordMove(t.Receiver, true, now, tm)
+	}
+	return t
+}
+
+// Cancel removes a transfer that is still Releasing and inside the window, so
+// no donor pod has moved, and holds the pair (§6.3, §6.7 rule 3). It reports
+// whether the transfer was cancelled.
+func (l *ShareLedger) Cancel(id string, now time.Time, tm ShareTimings) bool {
+	i := slices.IndexFunc(l.transfers, func(t *ShareTransfer) bool { return t.ID == id })
+	if i < 0 {
+		return false
+	}
+	t := l.transfers[i]
+	if t.State != ShareReleasing || now.Sub(t.Started) >= tm.Window {
+		return false
+	}
+	l.transfers = slices.Delete(l.transfers, i, i+1)
+	if !t.Entitled {
+		l.lastGave[t.Donor] = now
+		l.lastGot[t.Receiver] = now
+	}
+	return true
+}
+
+// Observe advances every transfer from what the cluster shows this cycle and
+// returns those that left the ledger. held is each role's GPUs held now,
+// terminating pods included.
+//
+// Several transfers can draw on one donor, or fill one receiver, at once. They
+// are released and filled in start order against a common base, so the first
+// one completes when one replica's worth has moved, the second when two have.
+func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTimings) []ShareTransferEnd {
+	var ended []ShareTransferEnd
+
+	// Releasing -> Filling, per donor in start order.
+	given := map[string]int{}
+	base := map[string]int{}
+	for _, t := range l.transfers {
+		if t.State != ShareReleasing {
+			continue
+		}
+		if _, ok := base[t.Donor]; !ok {
+			base[t.Donor] = t.donorBase
+		}
+		given[t.Donor] += t.DonorGPUs
+		if held[t.Donor] <= base[t.Donor]-given[t.Donor] {
+			t.State = ShareFilling
+			t.Deadline = now.Add(tm.FillTimeout)
+			t.receiverBase = held[t.Receiver]
+		}
+	}
+	// A transfer released this cycle measures its receiver from now; one that
+	// was already filling keeps its base. Filling -> Done, per receiver in start
+	// order.
+	got := map[string]int{}
+	rbase := map[string]int{}
+	keep := l.transfers[:0]
+	for _, t := range l.transfers {
+		switch {
+		case t.State == ShareReleasing && !now.Before(t.Deadline):
+			ended = append(ended, ShareTransferEnd{*t, ShareOutcomeAborted})
+			continue
+		case t.State == ShareFilling:
+			if _, ok := rbase[t.Receiver]; !ok {
+				rbase[t.Receiver] = t.receiverBase
+			}
+			got[t.Receiver] += t.GPUs
+			if held[t.Receiver] >= rbase[t.Receiver]+got[t.Receiver] {
+				ended = append(ended, ShareTransferEnd{*t, ShareOutcomeDone})
+				continue
+			}
+			if !now.Before(t.Deadline) {
+				ended = append(ended, ShareTransferEnd{*t, ShareOutcomeFillTimeout})
+				continue
+			}
+		}
+		keep = append(keep, t)
+	}
+	l.transfers = keep
+	return ended
+}
+
+// ReceivingHeld reports whether role may not receive now: it gave within the
+// reversal hold.
+func (l *ShareLedger) ReceivingHeld(role string, now time.Time, tm ShareTimings) bool {
+	t, ok := l.lastGave[role]
+	return ok && now.Sub(t) < tm.ReversalHold
+}
+
+// GivingHeld reports whether role may not give now: it received within the
+// reversal hold.
+func (l *ShareLedger) GivingHeld(role string, now time.Time, tm ShareTimings) bool {
+	t, ok := l.lastGot[role]
+	return ok && now.Sub(t) < tm.ReversalHold
+}
+
+// recordMove notes a role's transfer direction, holds it from reversing, and
+// marks it swinging when its moves changed direction twice within the swing
+// window (§6.7 rule 5).
+func (l *ShareLedger) recordMove(role string, received bool, now time.Time, tm ShareTimings) {
+	if received {
+		l.lastGot[role] = now
+	} else {
+		l.lastGave[role] = now
+	}
+	l.moves[role] = append(l.moves[role], shareMove{now, received})
+	ms := slices.DeleteFunc(l.moves[role], func(m shareMove) bool { return now.Sub(m.at) > tm.SwingWindow })
+	l.moves[role] = ms
+	flips := 0
+	for i := 1; i < len(ms); i++ {
+		if ms[i].received != ms[i-1].received {
+			flips++
+		}
+	}
+	if flips >= 2 {
+		l.swingUntil[role] = now.Add(tm.SwingWindow)
+	}
+}
+
+// Swinging reports whether role is planned on its mean need now.
+func (l *ShareLedger) Swinging(role string, now time.Time) bool {
+	return now.Before(l.swingUntil[role])
+}
+
+// RecordNeeds stores this cycle's needs, keeping a swing window of history.
+func (l *ShareLedger) RecordNeeds(needs map[string]float64, now time.Time, tm ShareTimings) {
+	for role, n := range needs {
+		l.needs[role] = append(l.needs[role], shareNeedSample{now, n})
+		l.needs[role] = slices.DeleteFunc(l.needs[role], func(x shareNeedSample) bool { return now.Sub(x.at) > tm.SwingWindow })
+	}
+}
+
+// PlanningNeed is the need a role is planned on: its mean over the swing
+// window while it is swinging, else its current need.
+func (l *ShareLedger) PlanningNeed(role string, current float64, now time.Time) float64 {
+	if !l.Swinging(role, now) || len(l.needs[role]) == 0 {
+		return current
+	}
+	sum := 0.0
+	for _, s := range l.needs[role] {
+		sum += s.need
+	}
+	return sum / float64(len(l.needs[role]))
+}
+
+// Confirm updates each role's run of consecutive actionable cycles and
+// returns it. A role absent from actionable is reset.
+func (l *ShareLedger) Confirm(actionable map[string]bool) map[string]int {
+	for role := range l.confirm {
+		if !actionable[role] {
+			delete(l.confirm, role)
+		}
+	}
+	for role, a := range actionable {
+		if a {
+			l.confirm[role]++
+		}
+	}
+	out := make(map[string]int, len(l.confirm))
+	for k, v := range l.confirm {
+		out[k] = v
+	}
+	return out
+}
