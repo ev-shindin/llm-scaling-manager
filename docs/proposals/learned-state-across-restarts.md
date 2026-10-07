@@ -1,8 +1,10 @@
 # Learned state across a restart, and what it should be keyed by
 
-**Status:** steps 1-5 built (PR #120); 6, 7 and 8 proposed. Revised five times
-against code and measurement, and the corrections are not cosmetic — three of
-them reversed a conclusion. They are recorded in
+**Status:** steps 1-5 built (PR #120); 6, 7 and 8 proposed. Revised **nine
+times** against code and measurement — that is the count in this file's own
+history, and an earlier header said five, which matched neither the history nor
+the corrections below. **Six** of those revisions corrected a stated fact and
+three of the six reversed a conclusion; those six are the ones recorded in
 [Appendix C](#appendix-c--what-this-document-got-wrong), and the designs that
 were tried and rejected are in Appendices A and B rather than inline, so
 everything before the appendices describes what is built or proposed now.
@@ -17,8 +19,9 @@ publishing these signals was observability only and that a restart gap was
 document's work. The second was wrong — but not in the way an earlier revision
 of *this* document claimed: the fix is neither reading WVA's own metrics back
 nor storing a snapshot, it is refitting from the **engines'** series. The
-sibling still carries one sentence in the old vocabulary and is corrected in
-the same change as this.
+sibling was corrected on this branch four commits before this sentence was
+written, and already carries its own REVISED block; what was left in the old
+vocabulary is one bullet, fixed here.
 
 ## The problem, measured
 
@@ -40,8 +43,31 @@ below is relative to that**, not to the controller's first cycle:
 | cycles between the two | **28, every one blocked on the sample count** |
 | cycles blocked on the `k` spread before the first fit | **0** |
 
-So the relearning cost is **28 cycles, about 7 minutes**, and it is entirely
-the sample count: ten `(k, ITL)` pairs at roughly one per replica per cycle.
+So the relearning cost is **28 cycles, about 7 minutes**. The window reports
+the sample count as the blocker, but the sample count is not the *mechanism*,
+and an earlier revision of this line said it was ("ten pairs at roughly one per
+replica per cycle"). Measured over those 28 cycles:
+
+| | run QT, decode |
+| --- | --- |
+| pairs OFFERED to the window | **38** |
+| pairs the window HELD | **10** |
+| cycles offering 2 / 1 / 0 | 15 / 8 / 5 |
+| `Prune` drops in the interval | 0 (7 min against a 30-min bound) |
+| cycles where `maxSize` bound | 0 (held never exceeded 10) |
+
+Arrival was ~1.36 pairs a cycle and **admission 0.36**. The 28 missing pairs
+were discarded inside `Window.Add` by the low-`k` floor,
+`k < itl.DefaultMinObservableK` (0.15) — the fleet was ramping and most
+replicas had not yet filled enough KV to be observable. At one admitted pair
+per replica per cycle the first fit would have landed in ten cycles, not 28.
+
+**Two things follow.** The cold-start cost is an *admission* cost, not an
+arrival cost, so raising `DefaultWindowMaxSize` (step 7) does not touch it —
+step 7 is a steady-state change and its own success criterion says so. And the
+0.15 floor lives in `Window.Add`, not in `itl.Fit`, so step 8's "the same
+`itl.Fit`" does **not** inherit it: a refit reading a range query directly
+would admit points the live path rejects, and has to apply the band itself.
 
 The classification over the whole run, with the idle period separated out
 because it is not a cost:
@@ -183,7 +209,8 @@ EVER been seen" leak the code's own comment warns about was live.
 `Record.EngineParams`, which you only have after looking up by name, so a
 fingerprint key needs an extra index; of its eight non-test callers — two
 added by this work, `engineFingerprint` and `publishEngineConfig` — most
-genuinely ask "what did *this variant* measure"; and `Record.EffectiveCapacity` is `min(k1, k2)`,
+genuinely ask "what did *this variant* measure"; and
+`Record.EffectiveCapacity` is `min(k1, k2)`,
 which is shape-dependent.
 
 **`queueThreshold` stays in the k2 and throughput keys.** Both end in `q%g`,
@@ -196,12 +223,21 @@ the observed accelerator changes with pod placement and can read unresolved;
 the fingerprint takes `acceleratorName` as an input, so an unresolved
 accelerator would make the digest itself oscillate.
 
+Two rows are marked **proposed**, and the distinction matters for step 6: as
+built, `historyKey` is `modelID|accelerator|gpus|role|outBucket|q` and
+`throughputKey` is `modelID|accelerator|gpus|role|i<in>|<out>|q`. Neither
+contains the fingerprint — step 5 re-keyed the ITL line and nothing else. So a
+`wva_learned_k2_tokens{…,fingerprint}` published today would split one
+window's value across two series the moment a configuration changed, which is
+the opposite of what the label is for. **Publishing a fingerprint label on k2
+or throughput requires the re-key first.**
+
 | state | keyed by | why not more |
 | --- | --- | --- |
 | ITL **window** | unchanged: namespace, model, variant, accelerator, gpus | the observations are this variant's own |
 | ITL **line** (A, B), shared | model + accelerator + gpus + fingerprint | the same weights, build and hardware give **nearly** the same line — near enough to start from, not near enough to order on |
-| k2 | fingerprint + role + output bucket + **queue threshold** | capacity is config **and** shape |
-| throughput window (mu) | fingerprint + role + input and output buckets + **queue threshold** | a completion rate is per shape |
+| k2 | **proposed:** fingerprint + role + output bucket + **queue threshold** | capacity is config **and** shape |
+| throughput window (mu) | **proposed:** fingerprint + role + input and output buckets + **queue threshold** | a completion rate is per shape |
 | `capacity.Store` record | **unchanged** | circular, and `EffectiveCapacity` is shape-dependent |
 | `itlBaseline`, `startSeconds` | **unchanged** | a hardware floor and a start time are not functions of the config |
 | stable shape | namespace + model | traffic, not configuration |
@@ -234,8 +270,11 @@ another namespace free — the 28 cycles, on their first cycle instead.
 flags. Not quite: at a fixed `k` the resident sequence count is `k·C/KVreq`,
 and `KVreq` is the **traffic shape**. Two variants on one configuration serving
 different shapes sit at different batch sizes at the same `k`, so on different
-lines — this repository's own benchmark shapes differ by 2.1x. A borrowed line
-is evidence about a *configuration*, not about this variant's load.
+lines. (How far apart two real shapes sit is not measured here; the
+1k/6000 → 8k/1000 swap this repository benchmarks moves `KVreq` by roughly 2x,
+which is an order-of-magnitude statement and not a figure to rely on.) A
+borrowed line is evidence about a *configuration*, not about this variant's
+load.
 
 **Gating this correctly took two attempts, and the first did nothing.** It is
 documented here because the failure is easy to repeat: the gate was written as
@@ -245,12 +284,27 @@ construction — onto every derived figure, so the sample half re-admitted
 exactly what the derived half excluded. Separately,
 `fleetHasMeasuredItself` settled the shape-change hold on sight of any derived
 figure, clearing the `staleShape` that was the only other brake, in the same
-cycle. A borrowed line grew a fleet 15.8x past the intended cap.
+cycle. Measured by running the fixed and unfixed trees over one cycle of the
+same input: the floor published **0.850 replicas** (790,323 tokens) with the
+gate working and **13.433** (12,489,743 tokens) without it — **15.8x** past the
+intended cap.
 
-What works is **routing, not annotating**: a borrowed-line figure takes the
-branch the floor already has for a reading borrowed from a neighbouring shape
-bucket, which caps it, names it `borrowed-line`, and returns before `mayOrder`
-is reached. Gating a decision in one of two disjuncts gates nothing.
+The two halves were fixed two different ways, and an earlier version of this
+section reported only one of them.
+
+**The floor's half: routing, not annotating.** A borrowed-line figure takes the
+branch `floor.Estimate` already has for a reading borrowed from a neighbouring
+shape bucket, which caps it, names it `borrowed-line`, and returns before
+`mayOrder` is reached. Annotating the disjunction was what failed.
+
+**The hold's half: annotating, in a conjunction.** `fleetHasMeasuredItself`
+takes the same `!LineBorrowed` term that did nothing in the floor's
+disjunction and it works there, because every term of a conjunction binds.
+
+So the lesson is about **disjunctions**, not about annotation: a term added to
+one of two disjuncts gates nothing, while the same term in a conjunction gates
+everything. Stated as "routing, not annotating" it was over-general, and it
+contradicted the fix sitting in the other file.
 
 ## Part 3 — carrying it across a restart: there is no store
 
@@ -306,9 +360,12 @@ is the external requirement.
 
 ## The second finding, and it is not about restarts
 
-**52% of all cycles** could not fit an OLS line for want of `k` spread and fell
-back to pinned-B. That is steady state. The cause is measured, and it is not
-the age bound:
+**52% of all 244 cycles** could not fit an OLS line for want of `k` spread and
+fell back to pinned-B — 60% of the 210 post-load ones. Both bases appear in
+this document and they answer different questions: the all-cycles figure is
+what a run's log shows, the post-load figure is what the fix is measured
+against, and the success criterion below uses the post-load one. That is
+steady state either way. The cause is measured, and it is not the age bound:
 
 | | run QT, decode |
 | --- | --- |
@@ -369,6 +426,33 @@ that widening it clears the gate.
    namespace takes `namespace` through the scrape and alerts keyed on it
    silently matched nothing. The key labels are the tuple from Part 1, for the
    reason given there.
+
+   **Three questions this list does not answer, and step 6 cannot be built
+   until it does.**
+
+   *It collides with the sibling's own families.* `signals-as-metrics.md`
+   already specifies `wva_itl_line_slope/_intercept/_samples` keyed
+   `{exported_namespace, model, variant}`, and
+   `wva_shape_input_tokens`/`_output_tokens` keyed
+   `{exported_namespace, model, role, window}`. The names above are different
+   and the keys are incompatible — per-variant against per-configuration.
+   Neither family is implemented, so this is two live proposals disagreeing,
+   not a migration. **The per-configuration key is the right one for the ITL
+   line** (it is what the line is now shared on; see Part 1), so step 6
+   supersedes the sibling's three ITL families and the sibling's shape
+   families stand as written. Step 6 must say so in the sibling too.
+
+   *`source` is undefined here, and was flagged as a contradiction when it
+   was defined.* It was meant to separate a refitted figure from an observed
+   one — but a label is part of series identity, so `source="refit"` makes
+   the refitted figure a *different series* rather than an annotation on the
+   same one, and anything averaging over the family then double-counts. Carry
+   it as an `_info`-style companion, or not at all. Not as a label on the
+   value.
+
+   *Two of the seven families need a re-key first*, per the table in Part 1:
+   `wva_learned_k2_tokens` and `wva_learned_throughput` carry a `fingerprint`
+   label over a window whose internal key has none.
 7. **Raise `DefaultWindowMaxSize`** to about 240 so the live window reaches its
    own age bound instead of stopping at ~8% of it. One constant, independent of
    everything else, and the measured cause of the 52%. Gate it on the `k`-spread
@@ -445,18 +529,35 @@ Two rules come with that:
 figure the process did not measure has to be visible as such — and `HeldWhy`
 already carries `borrowed-line` for the same reason.
 
-**Publish a rehydration outcome metric**, `wva_refit_entries{outcome}` over
+**Publish a refit outcome metric**, `wva_refit_entries{outcome}` over
 `applied`, `rejected_invalid`, `rejected_mismatch`, `absent`. A diagnostic
 nobody can read is the problem it was written to solve.
 
 ### The warm pool
 
 `noteITL` excludes `FromWarmPool` replicas, because a borrowed pod runs the
-pool's own engine settings — that is, **a different fingerprint**. Publishing a
-line measured on one would teach a configuration nothing serves, and a
-fingerprint is exactly what cannot tell the difference. It is the only safety
-property of line-sharing that is implemented without being argued anywhere
-else, which is why it is argued here.
+pool's own engine settings — and that reason is **false**, which matters
+because it is the reason the code gave too.
+
+`warmpool.EngineOptionsFrom` derives a warm copy's command line from the
+ordinary replicas' own PodSpec *precisely so the two match* (its comment: a
+different `--gpu-memory-utilization` is a different torch.compile cache key),
+and `warmableFlags` covers every flag this fingerprint hashes. A lent pod
+therefore normally hashes to the **same** engine configuration. The
+fingerprint is exactly what cannot tell it apart — which is why the exclusion
+is load-bearing rather than redundant, and why it needed a reason that holds.
+
+The reason that holds is what the pod is running: a pool Pod hosts one awake
+engine **plus its sleepers**, each keeping ~1.4 GiB of GPU residue (`demand.go`
+measured 4.4 GiB free at 0.95 on an 80 GiB card). Its ITL(k) is the latency of
+an engine sharing a card, and its `k` is read against a KV budget the sleepers
+have already eaten into. A pool that sets an explicit `GPUMemoryUtilization`
+does also change the digest, but the exclusion cannot rest on that: zero
+inherits the workload's value, and zero is the default.
+
+The pool's variants are excluded from **publishing** as well as from learning,
+for the same reason. It is the only safety property of line-sharing that was
+implemented without being argued anywhere, which is why it is argued here.
 
 ### Cardinality of the learned families
 
@@ -472,6 +573,24 @@ decode fingerprint and 6 for a prefill one, since a P/D fleet gives the two
 roles different params and so different fingerprints. Doubled by the `_samples`
 family, times the distinct queue thresholds in use (one, in practice).
 
+**That is one family's axis, not the list's.** It is `wva_learned_throughput`'s
+and its `_samples` twin. The other five:
+`wva_learned_k2_tokens` is `role × out_bucket` = 2×6 + 1×1 = **13** per
+fingerprint, not 78, times whatever `source` turns out to be (see the question
+above — if it stays a label, multiply); the three ITL families are **1 each**
+per fingerprint, since they carry no role or bucket; and
+`wva_learned_stable_shape_tokens` is **2** per model, being keyed by axis
+rather than by fingerprint at all. Total per fingerprint: 78 + 78 + 13 + 3,
+plus 2 per model.
+
+### What the digest discriminates less well on SGLang
+
+One field: `NumGpuBlocksOverride` has no SGLang flag, so two SGLang engines
+differing only in it hash the same. Everything else the digest hashes is
+parsed off an SGLang Deployment, `EffectiveMaxBatchedTokens` through the same
+helper as vLLM. An earlier revision made this a section and overstated it; it
+is one field.
+
 ## Testing
 
 - **Unit**, against the existing `mockPrometheusAPI`: a refitted line that is
@@ -480,9 +599,14 @@ family, times the distinct queue thresholds in use (one, in practice).
 - **Envtest** for the leader-elected runnable: that it refits on acquisition
   and not at process start, and that a lost lease stops it.
 - **A negative control per fix**, per this project's rule — and gated on the
-  control actually failing. Five tests on this branch passed against the bug
-  they named; the one that mattered is in Appendix C, because it certified a
-  safety property that did not exist.
+  control actually failing. **Eight** tests on this branch have now passed
+  against the bug they named, each found by mutation and none by reading. The
+  count is in this document because it is the branch's most reliable statistic
+  and not a one-off: the recurring shapes are a fixture value production never
+  produces, an assertion on an absence that holds because the subject never
+  ran, and an assertion too broad to see its own boundary. The one that
+  mattered is in Appendix C, because it certified a safety property that did
+  not exist.
 
 ## How to know it worked
 
@@ -494,8 +618,8 @@ and first floor line **load + 7.4 min**, with **28 cycles** between them.
 
 - **Step 8 (the refit) succeeds** if the first floor line arrives inside
   **90 seconds** of load start, *and only if the refitted line counts as the
-  variant's own* — see the paragraph below, which is the condition the whole
-  step rests on.
+  variant's own* — see the provenance rule in step 8 of **Order** above, which
+  is the condition the whole step rests on.
 
   A previous revision set this to 2 minutes and justified it by saying the
   floor "also needs `MinThroughputSamplesToOrder` saturated readings, so the
@@ -510,10 +634,13 @@ and first floor line **load + 7.4 min**, with **28 cycles** between them.
   beat is the 22 seconds the first observation takes, not a prerequisite that
   does not exist.
 - **Step 7 (the window size) succeeds** if the share of cycles reaching an OLS
-  fit rises against run QT's **25.8%** — 54 of the **209 post-load** cycles,
-  not 54 of all 244. The all-cycles figure includes the 34 idle cycles this
-  document excludes as a cost two sections above, and comparing against it
-  would be the same methodology error as the first correction in Appendix C.
+  fit rises against run QT's **25.7%** — 54 of the **210 post-load** cycles,
+  not 54 of all 244. The all-cycles figure includes the 34 idle cycles that
+  "What a cold start costs" excludes as a cost, and comparing against it would
+  be the same methodology error as the first correction in Appendix C. (A
+  previous revision printed 25.8% = 54/209, which drops the one post-load
+  empty cycle as well; the document's own classification table puts that cycle
+  after load, so the denominator is 244 − 34 = 210.)
   Measured over a run with no restart at all: it is a steady-state change and
   must be measured as one.
 - **Three runs each way, compared on the median.** Phase-1 timings on this
@@ -613,7 +740,8 @@ Six corrections, recorded because three of them reversed a conclusion and
 because the method errors recur.
 
 **The timeline was anchored to the wrong t0, twice.** Every figure was measured
-from the controller's first log line, which is 8.4 minutes before the harness
+from the controller's first analysis CYCLE, which is 8.4 minutes before the
+harness
 starts. So 34 of the 35 empty-window cycles were idle with no traffic to learn
 from, the "first observation at t+8.8 min" was really load + 22 s, and the
 first fit was load + 7.4 min rather than t+15.8. A revision that "corrected"
@@ -650,6 +778,6 @@ hashes it.
 **A gate was written that did nothing, and a test certified it.** The
 borrowed-line gate added a term to one of two disjuncts while the other
 disjunct re-admitted everything, and the spec that covered it built its fixture
-with a sample count production never produces. Four tests on this branch passed
-against the bug they were written for; this was the one that mattered, because
-it certified a safety property that did not exist.
+with a sample count production never produces. Eight tests on this branch have
+passed against the bug they were written for; this was the one that mattered,
+because it certified a safety property that did not exist.
