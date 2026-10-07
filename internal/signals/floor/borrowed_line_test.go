@@ -93,6 +93,34 @@ var _ = Describe("Estimate with a borrowed ITL line", func() {
 		Expect(f.Terms[domain.RoleDecode].HeldWhy).To(Equal("borrowed"))
 	})
 
+	It("composes a borrowed BUCKET with a stale shape too", func() {
+		// The composition branch keys on borrowedOnly[role], which is true for
+		// EITHER borrow -- a borrowed line or a borrowed bucket. Only the line
+		// half was pinned, so narrowing the condition to lineBorrowed[role],
+		// an easy slip given the parallel naming, would silently drop a
+		// borrowed bucket back to the bare "shape-change" and hide the borrow
+		// from an operator. That is the exact invisibility the composition was
+		// added to fix, so both halves are pinned.
+		bucket := capacity.ReplicaCapacity{
+			VariantName:                 "v",
+			SaturatedThroughput:         2.67,
+			SaturatedThroughputSamples:  MinThroughputSamplesToOrder,
+			SaturatedThroughputBorrowed: true,
+		}
+		withStale := Estimate(runLambda, []capacity.ReplicaCapacity{bucket},
+			variants(1), nil, BacklogDrainSeconds, 0.85, true, 0, nil)
+		Expect(withStale.Terms[domain.RoleDecode].HeldWhy).To(
+			Equal("borrowed+shape-change"),
+			"a borrowed bucket under a stale shape must keep naming the borrow")
+
+		// The control: the same fixture without the stale shape, so the
+		// assertion above cannot pass on a value that was already composed.
+		withoutStale := Estimate(runLambda, []capacity.ReplicaCapacity{bucket},
+			variants(1), nil, BacklogDrainSeconds, 0.85, false, 0, nil)
+		Expect(withoutStale.Terms[domain.RoleDecode].HeldWhy).To(Equal("borrowed"),
+			"and without a stale shape it is the borrow alone")
+	})
+
 	It("orders once one replica is priced from its own window", func() {
 		// Borrowing a line says nothing about a replica whose MEASURED window
 		// answered instead. Such a record is not flagged -- the analyzer sets

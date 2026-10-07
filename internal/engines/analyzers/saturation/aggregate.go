@@ -184,10 +184,23 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 			// No own record — try cross-variant estimation from a compatible variant
 			perReplicaCapacity = float64(rec.EffectiveCapacity)
 			capacityLabel = satReasonP0Store
+			// donorUnresolved is the donor's unresolved set, because
+			// FindCompatible deliberately does NOT gate on completeness: an
+			// unreadable flag defaulted on BOTH sides compares equal, so
+			// this borrow can rest on an equality nothing verified. The
+			// capacity store's own comment said this log line carried the
+			// donor's set, and it did not -- it carried only LearnedFrom, so
+			// the one place the uncertainty is acted on was the one place it
+			// was invisible. Empty is the good case.
+			var donorUnresolved []string
+			if rec.EngineParams != nil {
+				donorUnresolved = rec.EngineParams.Unresolved
+			}
 			logger.Info("variant-capacity-source",
 				"modelID", modelID, "namespace", namespace, "variant", vs.VariantName,
 				"reason", "no own capacity record; borrowed from a compatible variant",
-				"perReplicaCapacity", perReplicaCapacity, "engineParamsSource", rec.LearnedFrom)
+				"perReplicaCapacity", perReplicaCapacity, "engineParamsSource", rec.LearnedFrom,
+				"donorUnresolved", donorUnresolved)
 		} else {
 			capacityLabel = satReasonNoData
 			logger.Info("variant-capacity-source",

@@ -340,13 +340,18 @@ state with every other default configuration of that model. If a variant is
 being priced from a sibling that is not really like it, this is the switch that
 stops it.
 
-A variant whose flags the manager could not read at all is already excluded:
-an unresolved flag withholds the fingerprint, and the variant is filed under
-its own key. `wva_engine_config` tells the two cases apart, by presence rather
-than by value — a variant whose configuration could not be read publishes **no
-series at all**. So a variant that *has* a `wva_engine_config` series, on a
-configuration you know is unusual, is the case this key is for; a variant with
-no series is already learning on its own.
+A variant whose flags the manager could not read is **already** excluded from
+sharing, so this key is not what you need for that case. Read
+`wva_engine_config` to tell them apart:
+
+| what you see | what it means |
+| --- | --- |
+| a series with a non-empty `unresolved` label | one or more flags could not be read. The variant is **already** excluded from sharing, and `unresolved` names the flags to fix (usually a value that comes from a ConfigMap or `valueFrom`, which the manager cannot read). This key would change nothing. |
+| **no series at all** | there is no parsed engine configuration for the variant — no capacity record yet, or nothing readable in the pod template. Also already excluded. |
+| a series with `unresolved` empty | the configuration was read in full and the variant **is** sharing, keyed on `fingerprint`. This is the case the key is for. |
+
+So set it when a variant has a complete-looking fingerprint and is still being
+priced from a sibling it is not really like — the wrong-parser case above.
 
 **What it costs.** A variant with no readings of its own and no sibling to
 borrow from prices its first decisions from its deployment-derived capacity

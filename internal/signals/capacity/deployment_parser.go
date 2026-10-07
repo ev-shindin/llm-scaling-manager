@@ -92,10 +92,17 @@ type EngineParams struct {
 	// measured on the other. Recording the gap is what lets the digest refuse
 	// to assert an equality it never verified; see Complete and Fingerprint.
 	//
-	// Six causes reach this list, all the same class:
+	// Seven causes reach this list, all the same class:
 	//   - a variable reference nothing could resolve (not in the container's
 	//     literal env, or supplied by valueFrom/envFrom, which this package
 	//     cannot read)
+	//   - a reference that was STARTED and could not be finished: `${FOO`
+	//     with no closing brace, or `${}` with no name. A review found this
+	//     one missing from the list and from the code: such a value was
+	//     reported resolved, so `--dtype=${FOO` set the field to the literal
+	//     "${FOO" and still read as Complete. A lone or trailing `$`, and a
+	//     `$` before a byte that cannot begin a name, are deliberately NOT
+	//     here -- they are not references at all (see startsBracedRef)
 	//   - a reference that RESOLVED to a value which is itself a reference.
 	//     The kubelet expands `$(OTHER)` between env vars, so the lookup
 	//     succeeds and the result is still unusable; this is the one the
@@ -276,8 +283,30 @@ func resolveRefs(s string, env map[string]string) (string, bool) {
 		}
 		name, next, ok := varNameAt(s, i)
 		if !ok {
-			// A trailing or isolated "$" is not a reference. Keep it, and do
-			// not call the value unresolved on its account.
+			// FOUR DIFFERENT FAILURES REACH HERE, and they do not mean the
+			// same thing.
+			//
+			// A trailing or isolated "$", and a "$" before a byte that cannot
+			// start a name, are not references at all. The shell would leave
+			// them alone and so do we: keep the byte, and do NOT call the
+			// value unresolved on their account.
+			//
+			// But "${FOO" with no closing brace, and "${}" with no name, DID
+			// start a reference and could not finish it. Those used to take
+			// the same path, which reported the whole value as resolved --
+			// so `--dtype=${FOO` set WeightDtype to the literal "${FOO" with
+			// Unresolved empty and Complete() true, and that garbage was
+			// hashed into a confident fingerprint. Measured, not argued: a
+			// probe printed `dtype="${FOO" unresolved=[] complete=true`.
+			// Numeric flags were saved only by ParseInt failing afterwards;
+			// the string flags (--dtype, --quantization, --kv-cache-dtype)
+			// have nothing but usableWord, which accepts any non-empty
+			// string. That is the same false-equality this field exists to
+			// prevent, reached by a malformed reference instead of an
+			// unreadable one.
+			if startsBracedRef(s, i) {
+				resolved = false
+			}
 			out.WriteByte('$')
 			continue
 		}
@@ -341,6 +370,17 @@ func resolveRefs(s string, env map[string]string) (string, bool) {
 // varNameAt reads the variable name of a reference beginning at the "$" at
 // position i, returning the name and the index just past the reference.
 // It recognises ${NAME}, $(NAME) and bare $NAME.
+// startsBracedRef reports whether the "$" at i opens a `${` or `$(` form,
+// whether or not that form turns out to be well-formed.
+//
+// It is the difference between "this was never a reference" and "this was a
+// reference I could not read", which varNameAt collapses into one ok=false and
+// which resolveRefs has to tell apart: only the second may leave a value
+// looking verified when it is not.
+func startsBracedRef(s string, i int) bool {
+	return i+1 < len(s) && (s[i+1] == '{' || s[i+1] == '(')
+}
+
 func varNameAt(s string, i int) (name string, next int, ok bool) {
 	if i+1 >= len(s) {
 		return "", 0, false

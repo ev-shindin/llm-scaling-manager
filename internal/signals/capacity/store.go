@@ -251,7 +251,14 @@ func (s *Store) FindCompatible(modelID, accelerator string, gpuCount int, params
 		//
 		// What the borrow at the second call site DOES get is a log line
 		// naming the donor's unresolved set, so the uncertainty is visible
-		// where it is acted on (variant-capacity-source in aggregate.go).
+		// where it is acted on: the `donorUnresolved` field on
+		// variant-capacity-source in aggregate.go.
+		//
+		// That field is named here because this comment asserted it before it
+		// existed. A review checked and found the log line carried only
+		// LearnedFrom, which made the one place the uncertainty is acted on
+		// the one place it was invisible -- so the mitigation this paragraph
+		// offers for not gating on completeness was not actually there.
 		if rec.EngineParams == nil || !rec.EngineParams.IsCapacityCompatible(params) {
 			continue
 		}

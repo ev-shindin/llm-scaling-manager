@@ -1,6 +1,7 @@
 package capacity
 
 import (
+	"slices"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -231,6 +232,80 @@ func TestParserHandlesTheDollarEscapeAndBareDollars(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A reference that was STARTED and could not be finished is not a literal.
+//
+// This was a real defect, found by review and confirmed by running it: a
+// malformed reference took the same path as a lone "$" -- "not a reference,
+// keep the byte, stay resolved" -- so `--dtype=${FOO` set WeightDtype to the
+// literal "${FOO" with Unresolved empty and Complete() TRUE. A probe printed
+// exactly that. The digest then asserted an equality it had never verified,
+// which is the false-equality direction this whole mechanism exists to stop.
+//
+// Numeric flags happened to be safe, because ParseInt fails on the garbage
+// afterwards and that failure is recorded. The string flags had nothing:
+// usableWord accepts any non-empty string. So the cases below are deliberately
+// string-valued, and the numeric one is included to show it is not the thing
+// that was protecting them.
+//
+// The CONTROLS for this live in TestParserHandlesTheDollarEscapeAndBareDollars,
+// which pins the other half -- a lone, trailing or non-name-leading "$" stays
+// a literal and must NOT be called unresolved. Both halves have to hold: a fix
+// that simply marked every "$" unresolved would pass this test and fail that
+// one, which is how the distinction stays honest.
+func TestAMalformedReferenceIsNotALiteral(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"an unterminated brace", "${FOO"},
+		{"an unterminated paren", "$(FOO"},
+		{"an empty brace body", "${}"},
+		{"an empty paren body", "$()"},
+		{"a malformed reference after real text", "fp8${FOO"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := parseShell("vllm serve m --dtype "+tc.value, nil)
+			if p.Complete() {
+				t.Errorf("Unresolved = %v, want dtype recorded: %q started a reference "+
+					"and could not finish it, so the field is a default standing in "+
+					"for something unknown -- not a measurement", p.Unresolved, tc.value)
+			}
+			if !slices.Contains(p.Unresolved, keyDtype) {
+				t.Errorf("Unresolved = %v, want it to contain %q", p.Unresolved, keyDtype)
+			}
+			if p.WeightDtype == tc.value {
+				t.Errorf("WeightDtype = %q -- the malformed reference was stored as a "+
+					"verified value, which is what this test exists to prevent",
+					p.WeightDtype)
+			}
+		})
+	}
+
+	// THE POSITIVE CONTROL for the mechanism, not for the bug: a WELL-FORMED
+	// reference that nothing resolves was already recorded correctly. If this
+	// ever fails, the cases above are passing for an unrelated reason.
+	t.Run("a well-formed unresolvable reference was already recorded", func(t *testing.T) {
+		p := parseShell("vllm serve m --dtype ${FOO}", nil)
+		if p.Complete() || !slices.Contains(p.Unresolved, keyDtype) {
+			t.Errorf("Unresolved = %v, want dtype: this is the pre-existing behaviour "+
+				"the malformed cases above were missing", p.Unresolved)
+		}
+	})
+
+	// And the numeric flag, which was only ever saved by ParseInt rejecting
+	// the garbage. It must still be recorded -- now for the reference reason
+	// rather than the number reason.
+	t.Run("a numeric flag with a malformed reference", func(t *testing.T) {
+		p := parseShell("vllm serve m --block-size ${BS", nil)
+		if p.Complete() || !slices.Contains(p.Unresolved, "block_size") {
+			t.Errorf("Unresolved = %v, want block_size", p.Unresolved)
+		}
+		if p.BlockSize != 16 {
+			t.Errorf("BlockSize = %d, want the default 16", p.BlockSize)
+		}
+	})
 }
 
 func TestParserReadsTheNegativeBooleanForms(t *testing.T) {
