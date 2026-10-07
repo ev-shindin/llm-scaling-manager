@@ -122,5 +122,16 @@ var _ = Describe("Estimate with a borrowed ITL line", func() {
 		Expect(withoutStale.ByRole[domain.RoleDecode]).To(
 			Equal(withStale.ByRole[domain.RoleDecode]),
 			"the cap on a borrowed line must not depend on the shape-change hold")
+
+		// And the borrow stays NAMED when both reasons hold. The two caps are
+		// the same number, so the reason string is the only thing that tells
+		// an operator which one to chase -- and a shape change settles itself
+		// within a few cycles while a borrowed line persists until the variant
+		// fits its own. Naming only the transient one sends them after the
+		// wrong thing, and this is the common case: a fleet ramping into a new
+		// shape is exactly when a fresh variant has no line of its own.
+		Expect(withStale.Terms[domain.RoleDecode].HeldWhy).To(
+			Equal("borrowed-line+shape-change"),
+			"both reasons hold, so both are reported")
 	})
 })

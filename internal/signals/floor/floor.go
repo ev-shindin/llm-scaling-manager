@@ -469,7 +469,20 @@ func Estimate(
 					}
 				}
 				if staleShape {
-					term.HeldWhy = "shape-change"
+					// Both reasons can hold at once, and the cap is the same
+					// number either way -- but what an operator has to fix is
+					// not. Overwriting made every borrow invisible in a cycle
+					// that also had a stale shape, which is most cycles while
+					// a fleet is still ramping into a new shape, so the one
+					// reason that gets named is the one that goes away on its
+					// own. The composed value keeps the borrow visible; the
+					// single-sample case still reads as "shape-change" alone,
+					// because a stale shape is the reason that bounds it.
+					if borrowedOnly[role] {
+						term.HeldWhy += "+shape-change"
+					} else {
+						term.HeldWhy = "shape-change"
+					}
 				}
 			}
 		}

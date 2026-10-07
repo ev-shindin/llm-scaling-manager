@@ -95,6 +95,8 @@ var logContract = map[string][]string{
 		"variant", "pod", // join keys
 		"ok", "rate", "seqs", "tokenSec", // the result and its two factors
 		"kPrice", "itlAtKPrice", "itlA", "itlB", "itlZero", // the line and where it is read
+		// and whose line it is: a borrowed one may hold a fleet and not grow one
+		"lineBorrowed",
 		"avgOutputTokens", "muDivisor", // the shape's [5m] output length beside the short-window one mu is actually divided by
 		"kvReqPerSeq", "replicaKvTokens", "maxNumSeqs", // and the budget
 	},

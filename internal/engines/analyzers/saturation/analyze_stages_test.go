@@ -40,6 +40,7 @@ var derivedMuFields = []string{
 	"kPrice",
 	"kvReqFleet",
 	"kvReqPerSeq",
+	"lineBorrowed",
 	"maxNumSeqs",
 	"muDivisor",
 	"muInputTokens",

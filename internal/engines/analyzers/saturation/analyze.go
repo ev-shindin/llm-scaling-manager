@@ -396,6 +396,13 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				"rate", derived.rate, "seqs", derived.seqs, "tokenSec", derived.tokenSec,
 				"kPrice", kPrice, "itlAtKPrice", itlModel.ITLAt(kPrice),
 				"itlA", itlModel.A, "itlB", itlModel.B, "itlZero", itlModel.IsZero(),
+				// Whose line it is. Without this the record reports a rate
+				// built on a sibling's physics identically to one built on the
+				// variant's own, and the two carry different authority
+				// downstream: a borrowed line may hold a fleet and not grow
+				// one. itl-line-borrowed says it once per cycle; this says it
+				// beside the number it produced.
+				"lineBorrowed", c.itlBorrowed[rm.VariantName],
 				"avgOutputTokens", fleetShape.AvgOutputTokens,
 				"muDivisor", c.muDivisor,
 				"avgInputTokens", fleetShape.AvgInputTokens,
