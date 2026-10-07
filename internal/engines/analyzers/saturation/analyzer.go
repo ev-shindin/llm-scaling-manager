@@ -455,5 +455,25 @@ func (a *SaturationAnalyzer) engineFingerprint(namespace, modelID, variantName s
 	if rec == nil || rec.EngineParams == nil {
 		return ""
 	}
+	// A configuration this controller could not fully READ does not get a
+	// sharing key, and an empty fingerprint is how itlPhysicsKey is told to
+	// fall back to the per-variant window key -- so such a variant learns its
+	// own line and neither lends nor borrows one.
+	//
+	// Without this the digest would be doing the one thing it must not: an
+	// llm-d Deployment passing `--block-size $VLLM_BLOCK_SIZE` leaves the
+	// default on every variant, so a whole fleet of differently-configured
+	// engines hashes alike and any of them may price itself from another's
+	// measured latency line. Hashing the unresolved SET stops an incomplete
+	// read colliding with a complete one; it cannot stop two incomplete reads
+	// colliding with each other, because the thing they disagree about is
+	// exactly what neither could read. Only refusing the key does that.
+	//
+	// The cost is that such a fleet gets no cross-variant head start, which is
+	// the feature degrading to its pre-existing behaviour rather than
+	// misfiring. wva_engine_config's `unresolved` label says why.
+	if !rec.EngineParams.Complete() {
+		return ""
+	}
 	return rec.EngineParams.Fingerprint()
 }

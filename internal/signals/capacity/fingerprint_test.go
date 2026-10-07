@@ -34,6 +34,11 @@ var fingerprintHashed = []string{
 	"MaxNumSeqs",
 	"MaxModelLen",
 	"EnforceEager",
+	// Hashed so an incompletely-read configuration cannot collide with a
+	// fully-read one. It is not sufficient on its own -- two engines with the
+	// same unreadable flag still agree here -- which is why sharing also gates
+	// on Complete(); see the field's comment in deployment_parser.go.
+	"Unresolved",
 }
 
 // All three are excluded on one rule: they exist only to resolve
@@ -122,6 +127,9 @@ func TestFingerprintChangesWithEveryHashedField(t *testing.T) {
 		"MaxNumSeqs":                func(p *EngineParams) { p.MaxNumSeqs = 512 },
 		"MaxModelLen":               func(p *EngineParams) { p.MaxModelLen = 131072 },
 		"EnforceEager":              func(p *EngineParams) { p.EnforceEager = true },
+		"Unresolved": func(p *EngineParams) {
+			p.Unresolved = []string{"block_size"}
+		},
 	}
 
 	if len(mutations) != len(fingerprintHashed) {
@@ -323,6 +331,9 @@ func TestFingerprintLabelsDescribeTheirValues(t *testing.T) {
 		"max_num_seqs":                 func(p *EngineParams) { p.MaxNumSeqs = 512 },
 		"max_model_len":                func(p *EngineParams) { p.MaxModelLen = 131072 },
 		"enforce_eager":                func(p *EngineParams) { p.EnforceEager = true },
+		"unresolved": func(p *EngineParams) {
+			p.Unresolved = []string{"block_size"}
+		},
 	}
 
 	names := FingerprintFields()

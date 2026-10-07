@@ -2,8 +2,11 @@ package capacity
 
 import (
 	"math"
+	"slices"
 	"strconv"
 	"strings"
+
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
@@ -68,6 +71,48 @@ type EngineParams struct {
 	// EffectiveMaxBatchedTokens is the resolved per-step token budget used
 	// for k2 derivation. It is computed after parsing all other fields.
 	EffectiveMaxBatchedTokens int64
+
+	// Unresolved names the flags whose value this parser could NOT read, so
+	// the field below them is a DEFAULT standing in for something unknown
+	// rather than a measurement of the engine.
+	//
+	// It exists because that distinction was invisible, and the consequence
+	// was measured on a cluster. llm-d/llmdbench Deployments put the flags on
+	// the command line with the values as shell variables --
+	// `--block-size $VLLM_BLOCK_SIZE` with VLLM_BLOCK_SIZE=128 in the
+	// container env. ParseInt fails on "$VLLM_BLOCK_SIZE", the field kept its
+	// default of 16, and `wva_engine_config` reported block_size=16 for an
+	// engine running 128. `--max-model-len $VLLM_MAX_MODEL_LEN` reported 0
+	// against a real 16384.
+	//
+	// Why that is worse than merely inaccurate: these fields key a SHARING
+	// decision. A field that silently defaults makes two genuinely different
+	// engines hash to one digest -- a false equality, which is the dangerous
+	// direction, because it licenses one variant to borrow a latency line
+	// measured on the other. Recording the gap is what lets the digest refuse
+	// to assert an equality it never verified; see Complete and Fingerprint.
+	//
+	// Four causes reach this list, all the same class:
+	//   - a variable reference nothing could resolve (not in the container's
+	//     literal env, or supplied by valueFrom/envFrom, which this package
+	//     cannot read)
+	//   - a resolved value that is not a number where a number is required
+	//   - a memory fraction rejected by usableFraction (NaN, Inf, out of range)
+	//   - a flag we map whose value token is missing entirely
+	//
+	// Sorted and deduplicated, so it is stable enough to hash.
+	Unresolved []string
+}
+
+// Complete reports whether every flag this parser maps was actually read.
+//
+// A false result does not mean the params are unusable -- the defaults are
+// still the best available guess, and k2 derivation goes on using them. It
+// means they must not be used as an EQUALITY: two incompletely-read
+// configurations can agree on every field and still describe different
+// engines. Callers that share learned state between variants gate on this.
+func (p *EngineParams) Complete() bool {
+	return p != nil && len(p.Unresolved) == 0
 }
 
 // defaultEngineParams returns EngineParams with vLLM defaults
@@ -124,8 +169,11 @@ func ParseVLLMArgs(scaleTarget scaletarget.ScaleTargetAccessor) EngineParams {
 		// Collect all args from Command + Args, handling shell commands
 		allArgs := collectArgs(container.Command, container.Args)
 
-		// Parse the collected arguments
-		parseArgs(allArgs, &params)
+		// Resolved against THIS container's env, not a merged one. A
+		// reference in a container's args is expanded from its own
+		// environment, and merging two containers' envs would let a sidecar
+		// supply a value the engine never sees.
+		parseArgs(allArgs, &params, envValues(&container))
 	}
 
 	// V1 engine always enables chunked prefill regardless of flag
@@ -135,6 +183,175 @@ func ParseVLLMArgs(scaleTarget scaletarget.ScaleTargetAccessor) EngineParams {
 
 	resolveEffectiveMaxBatchedTokens(&params)
 	return params
+}
+
+// envValues is one container's literal environment, as a name -> value map for
+// resolving variable references in its own args.
+//
+// Entries using valueFrom are deliberately ABSENT rather than recorded as
+// empty: their value lives in a ConfigMap, Secret, field or resource reference
+// that this package has no client to read. A reference to one must come out of
+// the resolver as unresolved, so the digest knows it is incomplete -- an empty
+// string would be a guess, and a guess is the false equality this whole
+// mechanism exists to prevent. envFrom is invisible here for the same reason.
+func envValues(container *corev1.Container) map[string]string {
+	env := make(map[string]string, len(container.Env))
+	for _, e := range container.Env {
+		if e.ValueFrom != nil {
+			continue
+		}
+		env[e.Name] = e.Value
+	}
+	return env
+}
+
+// resolveRefs substitutes variable references in an argument value against the
+// container's own environment, returning the resolved string and whether every
+// reference in it could be resolved.
+//
+// Three forms, because two different things do the expanding and a manifest
+// may use either:
+//
+//   - $(VAR) is Kubernetes' own syntax. The kubelet expands it in command and
+//     args from the container's env before the process starts, so the string
+//     in the manifest is not what the engine receives.
+//   - $VAR and ${VAR} are the shell's. They survive into the manifest whenever
+//     the command is `/bin/sh -c "... --block-size $VLLM_BLOCK_SIZE ..."`,
+//     which is the shape this parser actually meets in the field, and the
+//     shell expands them from the same env.
+//
+// $$ is a literal dollar: Kubernetes' escape for a reference it should not
+// expand, and the sequence a manifest uses when it wants the shell to see a
+// single $. It is emitted as one "$" and consumes no name.
+//
+// A reference to a name the container does not define is NOT substituted with
+// an empty string. The whole point is to be able to say "unknown"; silently
+// reading an unset variable as zero-length is how `--block-size` became 16.
+func resolveRefs(s string, env map[string]string) (string, bool) {
+	if !strings.Contains(s, "$") {
+		return s, true
+	}
+	var out strings.Builder
+	resolved := true
+	for i := 0; i < len(s); i++ {
+		if s[i] != '$' {
+			out.WriteByte(s[i])
+			continue
+		}
+		// "$$" -> a literal dollar, consuming both bytes.
+		if i+1 < len(s) && s[i+1] == '$' {
+			out.WriteByte('$')
+			i++
+			continue
+		}
+		name, next, ok := varNameAt(s, i)
+		if !ok {
+			// A trailing or isolated "$" is not a reference. Keep it, and do
+			// not call the value unresolved on its account.
+			out.WriteByte('$')
+			continue
+		}
+		v, found := env[name]
+		if !found {
+			resolved = false
+			// Keep the reference in the output so a log or a label shows what
+			// could not be read, rather than a misleading blank.
+			out.WriteString(s[i:next])
+			i = next - 1
+			continue
+		}
+		out.WriteString(v)
+		i = next - 1
+	}
+	return out.String(), resolved
+}
+
+// varNameAt reads the variable name of a reference beginning at the "$" at
+// position i, returning the name and the index just past the reference.
+// It recognises ${NAME}, $(NAME) and bare $NAME.
+func varNameAt(s string, i int) (name string, next int, ok bool) {
+	if i+1 >= len(s) {
+		return "", 0, false
+	}
+	switch s[i+1] {
+	case '{', '(':
+		close := byte('}')
+		if s[i+1] == '(' {
+			close = ')'
+		}
+		for j := i + 2; j < len(s); j++ {
+			if s[j] == close {
+				if j == i+2 {
+					return "", 0, false // "${}" is not a reference
+				}
+				return s[i+2 : j], j + 1, true
+			}
+		}
+		return "", 0, false // unterminated
+	}
+	// Bare $NAME: the shell's name charset, which is what the shell would use
+	// to decide where the name ends.
+	j := i + 1
+	for j < len(s) && (s[j] == '_' ||
+		(s[j] >= 'A' && s[j] <= 'Z') ||
+		(s[j] >= 'a' && s[j] <= 'z') ||
+		(j > i+1 && s[j] >= '0' && s[j] <= '9')) {
+		j++
+	}
+	if j == i+1 {
+		return "", 0, false
+	}
+	return s[i+1 : j], j, true
+}
+
+// noteUnresolved records that a flag we map could not be read, keeping the
+// list sorted and free of duplicates so it is stable enough to hash.
+//
+// Only keys this parser actually maps are recorded. An unresolved
+// `--model $MODEL_NAME` says nothing about capacity or latency and would
+// otherwise make every deployment's digest incomplete for no gain.
+func noteUnresolved(params *EngineParams, key string) {
+	if _, mapped := mappedValueKeys[key]; !mapped {
+		return
+	}
+	if slices.Contains(params.Unresolved, key) {
+		return
+	}
+	params.Unresolved = append(params.Unresolved, key)
+	slices.Sort(params.Unresolved)
+}
+
+// mappedValueKeys is every normalized flag key, across both engines, whose
+// VALUE lands in a field that is hashed or compared. Boolean flags are absent:
+// they carry no value, so there is nothing to fail to resolve.
+//
+// One set rather than one per engine, deliberately. The two engines' key
+// namespaces do not collide, and a single set cannot drift out of step with
+// the dispatch in ParseEngineArgs -- which is how the singular --max-num-seq
+// came to be silently ignored for a while.
+var mappedValueKeys = map[string]struct{}{
+	// vLLM
+	"gpu_memory_utilization":  {},
+	"block_size":              {},
+	"kv_cache_dtype":          {},
+	"dtype":                   {},
+	"quantization":            {},
+	"tensor_parallel_size":    {},
+	"num_gpu_blocks_override": {},
+	"max_num_batched_tokens":  {},
+	"max_num_seq":             {},
+	"max_num_seqs":            {},
+	"max_model_len":           {},
+	// SGLang
+	"mem_fraction_static":  {},
+	"page_size":            {},
+	"tp_size":              {},
+	"tp":                   {},
+	"max_running_requests": {},
+	"max_total_tokens":     {},
+	"context_length":       {},
+	"max_prefill_tokens":   {},
+	"chunked_prefill_size": {},
 }
 
 // collectArgs merges container Command and Args, expanding shell commands.
@@ -238,9 +455,10 @@ func normalizeKey(key string) string {
 	return strings.ReplaceAll(key, "-", "_")
 }
 
-// parseArgs walks the argument list and populates params using the vLLM flag mapping.
-func parseArgs(args []string, params *EngineParams) {
-	parseArgsWith(args, params, applyParam)
+// parseArgs walks the argument list and populates params using the vLLM flag
+// mapping, resolving variable references against env.
+func parseArgs(args []string, params *EngineParams, env map[string]string) {
+	parseArgsWith(args, params, env, applyParam)
 }
 
 // parseArgsWith walks the argument list and applies each normalized --key/value
@@ -248,7 +466,18 @@ func parseArgs(args []string, params *EngineParams) {
 // parsers, which differ only in their per-flag mapping (applyParam vs
 // applySGLangParam). Boolean flags (no following value) are passed with an empty
 // value string.
-func parseArgsWith(args []string, params *EngineParams, apply func(key, value string, params *EngineParams)) {
+//
+// Two things happen to a value before it is applied. It is resolved against
+// env, because the value in a manifest is routinely a variable reference that
+// something else expands (see resolveRefs). And if either the resolution or
+// the apply fails, the key is recorded in params.Unresolved -- the field then
+// holds a default, and the digest has to know that it does.
+//
+// apply returns false when it recognised the key and could not use the value.
+// An unrecognised key returns true: there is nothing to record about a flag
+// this parser does not map.
+func parseArgsWith(args []string, params *EngineParams, env map[string]string,
+	apply func(key, value string, params *EngineParams) bool) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if !strings.HasPrefix(arg, "--") {
@@ -256,38 +485,83 @@ func parseArgsWith(args []string, params *EngineParams, apply func(key, value st
 		}
 
 		var key, value string
+		hasValue := false
 		if idx := strings.Index(arg, "="); idx >= 0 {
 			// --key=value format
 			key = normalizeKey(arg[:idx])
 			value = arg[idx+1:]
+			hasValue = true
 		} else {
 			key = normalizeKey(arg)
 			// Check if next token is the value (not another flag)
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
 				value = args[i+1]
+				hasValue = true
 				i++ // consume the value
 			}
 			// Otherwise it's a boolean flag (no value)
 		}
 
-		apply(key, value, params)
+		if hasValue {
+			resolved, ok := resolveRefs(value, env)
+			if !ok {
+				// The reference named something the container does not
+				// define, or something only the API server could read.
+				noteUnresolved(params, key)
+				continue
+			}
+			value = resolved
+		}
+
+		if !apply(key, value, params) {
+			noteUnresolved(params, key)
+		}
 	}
 }
 
-// applyParam sets the corresponding EngineParams field from a
-// normalized key and its string value. Parse errors are silently ignored
-// and the default value is preserved — this is intentional graceful
-// degradation since deployment args are operator-controlled.
-func applyParam(key, value string, params *EngineParams) {
+// applyParam sets the corresponding EngineParams field from a normalized key
+// and its string value, returning false when it recognised the key and could
+// not use the value.
+//
+// The default is still preserved on failure -- that part is unchanged, and is
+// the right graceful degradation for an operator-controlled arg. What changed
+// is that the failure is no longer SILENT: the caller records the key, so a
+// default standing in for an unreadable value can be told apart from a default
+// that is genuinely the engine's setting. The two were indistinguishable, and
+// the digest built on them asserted equalities it had not verified.
+//
+// A string-valued key cannot fail: any token is a legitimate dtype as far as
+// this parser is concerned, and the engine is the thing that validates it.
+//
+// The negative boolean forms were missing. vLLM renders several booleans with
+// argparse's BooleanOptionalAction, so `--no-<flag>` is how an operator turns
+// one off, and both negative forms fell through the same path as a genuinely
+// unknown flag.
+//
+// For chunked prefill that only changes anything on V0: ParseVLLMArgs forces
+// ChunkedPrefillEnabled true for V1 whatever the args said, which is
+// pre-existing and reflects the engine rather than this parser. Where the flag
+// does apply it matters more than a label, because it moves
+// EffectiveMaxBatchedTokens from the chunked default to max(MaxModelLen, 2048),
+// and that figure is hashed and derives k2.
+//
+// `--no-enforce-eager` has no such override and applies on either engine. Both
+// forms are plain assignments, so the LAST occurrence wins, which is what
+// argparse does.
+func applyParam(key, value string, params *EngineParams) bool {
 	switch key {
 	case "gpu_memory_utilization":
-		if v, err := strconv.ParseFloat(value, 64); err == nil && usableFraction(v) {
-			params.GpuMemoryUtilization = v
+		v, err := strconv.ParseFloat(value, 64)
+		if err != nil || !usableFraction(v) {
+			return false
 		}
+		params.GpuMemoryUtilization = v
 	case "block_size":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			params.BlockSize = v
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return false
 		}
+		params.BlockSize = v
 	case "kv_cache_dtype":
 		params.KvCacheDtype = value
 	case "dtype":
@@ -295,17 +569,23 @@ func applyParam(key, value string, params *EngineParams) {
 	case "quantization":
 		params.Quantization = value
 	case "tensor_parallel_size":
-		if v, err := strconv.Atoi(value); err == nil {
-			params.TensorParallelSize = v
+		v, err := strconv.Atoi(value)
+		if err != nil {
+			return false
 		}
+		params.TensorParallelSize = v
 	case "num_gpu_blocks_override":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			params.NumGpuBlocksOverride = v
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return false
 		}
+		params.NumGpuBlocksOverride = v
 	case "max_num_batched_tokens":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			params.MaxNumBatchedTokens = v
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return false
 		}
+		params.MaxNumBatchedTokens = v
 	case "max_num_seq", "max_num_seqs":
 		// vLLM accepts both --max-num-seq and --max-num-seqs (confirmed live:
 		// this repo's own scenarios invoke the singular form, and vLLM starts
@@ -313,18 +593,27 @@ func applyParam(key, value string, params *EngineParams) {
 		// the singular one fell through to the same "unrecognized flag" path
 		// as an actually-unknown flag, silently leaving MaxNumSeqs at its
 		// struct default.
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			params.MaxNumSeqs = v
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return false
 		}
+		params.MaxNumSeqs = v
 	case "max_model_len":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			params.MaxModelLen = v
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return false
 		}
+		params.MaxModelLen = v
 	case "enforce_eager":
 		params.EnforceEager = true
+	case "no_enforce_eager":
+		params.EnforceEager = false
 	case "enable_chunked_prefill":
 		params.ChunkedPrefillEnabled = true
+	case "no_enable_chunked_prefill":
+		params.ChunkedPrefillEnabled = false
 	}
+	return true
 }
 
 // usableFraction reports whether a parsed memory fraction is a value the rest
@@ -369,6 +658,18 @@ func usableFraction(v float64) bool {
 // KV fits or how many sequences run. A capacity record stays reusable across
 // it. Keying a latency model on these params is a different equality, and it
 // needs this one plus EnforceEager.
+// Completeness is deliberately NOT checked here, and the reason is worth
+// stating because the first version of this change got it wrong. Gating the
+// predicate on Complete() makes it non-reflexive: a variant whose
+// --gpu-memory-utilization could not be read stops being compatible with
+// ITSELF, which TestFingerprintAgreesWithCapacityCompatibilityOnNaN exists to
+// forbid. An equality that is not reflexive is the wrong shape for a
+// comparison.
+//
+// The rule that an unreadable flag is an absence of evidence is real, but it
+// belongs to the decision to REUSE one variant's record for another, which is
+// Store.FindCompatible -- the only caller, and the only place that knows the
+// two records are different variants. It is enforced there.
 func (p *EngineParams) IsCapacityCompatible(other *EngineParams) bool {
 	if p == nil || other == nil {
 		return false

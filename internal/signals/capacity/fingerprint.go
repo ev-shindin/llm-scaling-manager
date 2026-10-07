@@ -20,7 +20,14 @@ import (
 // and the controller relearns while looking healthy. Bump this in the same
 // commit as any change to the field list, and treat "every fingerprint starts
 // cold once" as the expected cost.
-const FingerprintVersion = 1
+//
+// Version 2 adds the unresolved-flag set. Measured on a cluster: an
+// llm-d/llmdbench Deployment passes `--block-size $VLLM_BLOCK_SIZE`, the
+// parser could not read it, the field kept its default of 16 against a real
+// 128, and the digest asserted an equality it had never verified. The set is
+// hashed so an incompletely-read configuration can never collide with a
+// fully-read one.
+const FingerprintVersion = 2
 
 // fingerprintLength is how much of the digest reaches the label. 16 hex
 // characters is 64 bits: for the few hundred distinct engine configurations a
@@ -82,6 +89,21 @@ func (p *EngineParams) Fingerprint() string {
 		"max_num_seqs=" + strconv.FormatInt(p.MaxNumSeqs, 10),
 		"max_model_len=" + strconv.FormatInt(p.MaxModelLen, 10),
 		"enforce_eager=" + strconv.FormatBool(p.EnforceEager),
+		// WHICH FIELDS ABOVE ARE REAL. Every value in this list is either the
+		// engine's setting or a default that silently replaced something
+		// unreadable, and until this field existed nothing could tell the two
+		// apart -- so two engines differing on exactly the flag neither could
+		// be read for hashed identically. That is a false equality, and this
+		// digest licenses one variant to borrow another's measured latency
+		// line, so a false equality is the dangerous direction.
+		//
+		// Hashing the set is necessary but NOT sufficient, and the difference
+		// matters: it stops an incomplete read colliding with a complete one,
+		// but two engines with the SAME unreadable flag still agree here while
+		// their real values may differ. So the digest alone cannot authorise
+		// sharing -- callers gate on Complete() as well. Comma-joined over a
+		// sorted, deduplicated list, so it is stable.
+		"unresolved=" + strings.Join(p.Unresolved, ","),
 	}
 
 	h := sha256.New()
@@ -157,6 +179,7 @@ func (p *EngineParams) FingerprintValues() []string {
 		strconv.FormatInt(p.MaxNumSeqs, 10),
 		strconv.FormatInt(p.MaxModelLen, 10),
 		strconv.FormatBool(p.EnforceEager),
+		strings.Join(p.Unresolved, ","),
 	}
 }
 

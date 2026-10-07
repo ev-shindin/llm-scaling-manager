@@ -779,4 +779,10 @@ var EngineConfigFlagLabels = []string{
 	"max_num_seqs",
 	"max_model_len",
 	"enforce_eager",
+	// Which of the labels above are the engine's real settings and which
+	// are defaults that replaced something this controller could not read.
+	// Empty is the good case. Published because the gap is otherwise
+	// invisible: a block_size of 16 reads identically whether the engine
+	// runs 16 or the flag was "$VLLM_BLOCK_SIZE" and nothing resolved it.
+	"unresolved",
 }

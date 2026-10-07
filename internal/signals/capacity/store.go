@@ -213,8 +213,26 @@ func (s *Store) FindCompatible(modelID, accelerator string, gpuCount int, params
 			continue
 		}
 
-		// Must have compatible engine parameters
+		// Must have compatible engine parameters.
+		//
+		// And both sides must have been fully READ. Two configurations can
+		// agree on every compared field while differing on exactly the flag
+		// neither side could be read for -- an llm-d Deployment passing
+		// `--block-size $VLLM_BLOCK_SIZE` leaves 16 on both, whatever the two
+		// engines actually run. That is an absence of evidence, not a match,
+		// and acting on it reuses one variant's MEASURED capacity as
+		// another's estimate on the strength of two identical defaults.
+		//
+		// The gate is here rather than inside IsCapacityCompatible so that
+		// predicate stays reflexive; this is the only caller, and the only
+		// one that knows it is looking at a different variant. Falling
+		// through to the derived estimate is the conservative direction:
+		// over-estimating k2 breaks TTFT irrecoverably, under-estimating
+		// costs replicas.
 		if rec.EngineParams == nil || !rec.EngineParams.IsCapacityCompatible(params) {
+			continue
+		}
+		if !rec.EngineParams.Complete() || !params.Complete() {
 			continue
 		}
 

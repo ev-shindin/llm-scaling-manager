@@ -46,30 +46,38 @@ func ParseSGLangArgs(scaleTarget scaletarget.ScaleTargetAccessor) EngineParams {
 	}
 
 	for _, container := range podTemplateSpec.Spec.Containers {
-		// collectArgs and the --key/--key=value parsing loop are shared with the
-		// vLLM parser; only the per-flag mapping (applySGLangParam) differs.
+		// collectArgs, variable resolution and the --key/--key=value parsing
+		// loop are shared with the vLLM parser; only the per-flag mapping
+		// (applySGLangParam) differs. The env is this container's own, for the
+		// reason given at the vLLM call site.
 		allArgs := collectArgs(container.Command, container.Args)
-		parseArgsWith(allArgs, &params, applySGLangParam)
+		parseArgsWith(allArgs, &params, envValues(&container), applySGLangParam)
 	}
 
 	resolveEffectiveMaxBatchedTokens(&params)
 	return params
 }
 
-// applySGLangParam sets the corresponding EngineParams field from a
-// normalized SGLang flag key and its string value. Parse errors are silently
-// ignored and the default value is preserved (graceful degradation), matching
-// the vLLM parser's behavior.
-func applySGLangParam(key, value string, params *EngineParams) {
+// applySGLangParam sets the corresponding EngineParams field from a normalized
+// SGLang flag key and its string value, returning false when it recognised the
+// key and could not use the value -- the caller then records the key, so a
+// default standing in for an unreadable value is distinguishable from the
+// engine's real setting. The default is still preserved either way, matching
+// the vLLM parser.
+func applySGLangParam(key, value string, params *EngineParams) bool {
 	switch key {
 	case "mem_fraction_static":
-		if v, err := strconv.ParseFloat(value, 64); err == nil && usableFraction(v) {
-			params.GpuMemoryUtilization = v
+		v, err := strconv.ParseFloat(value, 64)
+		if err != nil || !usableFraction(v) {
+			return false
 		}
+		params.GpuMemoryUtilization = v
 	case "page_size":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			params.BlockSize = v
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return false
 		}
+		params.BlockSize = v
 	case "dtype":
 		params.WeightDtype = value
 	case "quantization":
@@ -77,36 +85,49 @@ func applySGLangParam(key, value string, params *EngineParams) {
 	case "kv_cache_dtype":
 		params.KvCacheDtype = value
 	case "tp_size", "tensor_parallel_size", "tp":
-		if v, err := strconv.Atoi(value); err == nil {
-			params.TensorParallelSize = v
+		v, err := strconv.Atoi(value)
+		if err != nil {
+			return false
 		}
+		params.TensorParallelSize = v
 	case "max_running_requests":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			params.MaxNumSeqs = v
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return false
 		}
+		params.MaxNumSeqs = v
 	case "max_total_tokens":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			params.TotalKvTokensOverride = v
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return false
 		}
+		params.TotalKvTokensOverride = v
 	case "context_length":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			params.MaxModelLen = v
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return false
 		}
+		params.MaxModelLen = v
 	case "max_prefill_tokens":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			params.MaxNumBatchedTokens = v
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return false
 		}
+		params.MaxNumBatchedTokens = v
 	case "chunked_prefill_size":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			if v > 0 {
-				params.MaxNumBatchedTokens = v
-				params.ChunkedPrefillEnabled = true
-			} else {
-				// SGLang uses --chunked-prefill-size=-1 to disable chunked prefill.
-				params.ChunkedPrefillEnabled = false
-			}
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return false
+		}
+		if v > 0 {
+			params.MaxNumBatchedTokens = v
+			params.ChunkedPrefillEnabled = true
+		} else {
+			// SGLang uses --chunked-prefill-size=-1 to disable chunked prefill.
+			params.ChunkedPrefillEnabled = false
 		}
 	case "disable_cuda_graph":
 		params.EnforceEager = true
 	}
+	return true
 }
