@@ -97,3 +97,13 @@ func (r *lwsAccessor) GetNamespace() string {
 	// r.lws is always not nil
 	return r.lws.Namespace
 }
+
+// ExclusiveTopology returns the node label a LeaderWorkerSet confines each of
+// its groups to (the exclusive-topology annotation), or "" for any other scale
+// target or an LWS without one.
+func ExclusiveTopology(acc ScaleTargetAccessor) string {
+	if l, ok := acc.(*lwsAccessor); ok {
+		return l.lws.Annotations[lwsv1.ExclusiveKeyAnnotationKey]
+	}
+	return ""
+}

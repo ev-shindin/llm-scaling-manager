@@ -22,54 +22,99 @@ import (
 // redirects the transfer on its next pass so the original receiver is not
 // raised into it.
 //
-// A claim funds one replica, so a model that must wake a prefill with its
-// decode does not claim. Decode candidates are tried cheapest first.
+// The wake claims a transfer for each role it must start: the decode unless
+// one is serving, and, for a model that must wake a prefill with its decode,
+// the prefill unless one is serving. A P/D pair claims both or neither, on
+// one accelerator. Candidates are tried cheapest first, decode before
+// prefill.
 //
 // constraints are the wake's own: a namespace with its own quota claims only in
 // its namespace group, any other namespace only in the cluster group.
 func (e *Engine) claimShareTransfer(ctx context.Context, group modelGroup, candidates []Candidate,
-	constraints []*allocation.ResourceConstraints) (Candidate, bool) {
-	if e.config == nil || e.requirePrefill(group.modelID, group.namespace) {
-		return Candidate{}, false
+	constraints []*allocation.ResourceConstraints, covered coverage) ([]Candidate, bool) {
+	if e.config == nil {
+		return nil, false
 	}
 	zNamespace, zCluster, ok := e.config.UtilizationShareWakeScores(group.namespace, group.modelID)
 	if !ok {
-		return Candidate{}, false
+		return nil, false
 	}
 	scope, z := "", zCluster
 	if _, nsScoped := allocation.GPUBudgets(constraints, group.namespace); nsScoped {
 		scope, z = group.namespace, zNamespace
 	}
-	decodes, _ := splitByRole(candidates)
+	decodes, prefills := splitByRole(candidates)
 	sortByCost(decodes)
+	sortByCost(prefills)
+	// Each role the wake must start is a list of candidates; a role it need
+	// not start is one empty slot.
+	none := []Candidate{{}}
+	if covered.decode {
+		decodes = none
+	}
+	if !e.requirePrefill(group.modelID, group.namespace) || covered.prefill {
+		prefills = none
+	}
 	last, lastAcc := "", ""
-	for _, c := range decodes {
-		if !constants.IsAcceleratorResolved(c.Accelerator) {
-			continue
-		}
-		claim, outcome := decision.DefaultShareClaims.Claim(scope, c.Accelerator, c.PodGPUs, c.GPUsPerReplica, z,
-			utils.GetNamespacedKey(group.namespace, group.modelID),
-			utils.GetNamespacedKey(group.namespace, c.VariantName), time.Now())
-		if outcome == decision.ShareClaimRedirected {
-			scope := claim.Scope
-			if scope == "" {
-				scope = constants.UtilizationShareClusterScope
+	for _, d := range decodes {
+		for _, p := range prefills {
+			var set []Candidate
+			for _, c := range []Candidate{d, p} {
+				if c.VariantName != "" {
+					set = append(set, c)
+				}
 			}
-			metrics.CountUtilizationShareClaim(c.Accelerator, scope, outcome)
-			e.claimOutcomeChanged(group.key(), "")
-			ctrl.LoggerFrom(ctx).Info("Scale-from-zero: woke a model by claiming a releasing utilization-share transfer",
-				"namespace", group.namespace, "modelID", group.modelID, "variant", c.VariantName,
-				"transfer", claim.ID, "scope", scope)
-			return c, true
+			if len(set) == 0 || !sameResolvedAccelerator(set) {
+				continue
+			}
+			acc := set[0].Accelerator
+			wakes := make([]decision.ShareWake, 0, len(set))
+			for _, c := range set {
+				wakes = append(wakes, decision.ShareWake{Pods: c.PodGPUs, GPUs: c.GPUsPerReplica,
+					Variant: utils.GetNamespacedKey(group.namespace, c.VariantName)})
+			}
+			claims, outcome := decision.DefaultShareClaims.ClaimSet(scope, acc, wakes, z,
+				utils.GetNamespacedKey(group.namespace, group.modelID), time.Now())
+			if outcome == decision.ShareClaimRedirected {
+				scope := claims[0].Scope
+				if scope == "" {
+					scope = constants.UtilizationShareClusterScope
+				}
+				metrics.CountUtilizationShareClaim(acc, scope, outcome)
+				e.claimOutcomeChanged(group.key(), "")
+				ids := make([]string, 0, len(claims))
+				for _, c := range claims {
+					ids = append(ids, c.ID)
+				}
+				variants := make([]string, 0, len(set))
+				for _, c := range set {
+					variants = append(variants, c.VariantName)
+				}
+				ctrl.LoggerFrom(ctx).Info("Scale-from-zero: woke a model by claiming releasing utilization-share transfers",
+					"namespace", group.namespace, "modelID", group.modelID, "variants", variants,
+					"transfers", ids, "scope", scope)
+				return set, true
+			}
+			last, lastAcc = outcome, acc
 		}
-		last, lastAcc = outcome, c.Accelerator
 	}
 	// A refused claim is counted once per change: this loop runs at 10 Hz. Its
 	// scope is the wake's own namespace -- which group refused is not known.
 	if last != "" && e.claimOutcomeChanged(group.key(), last) {
 		metrics.CountUtilizationShareClaim(lastAcc, group.namespace, last)
 	}
-	return Candidate{}, false
+	return nil, false
+}
+
+// sameResolvedAccelerator reports whether every candidate runs on one known
+// accelerator: a claim set is made in one group.
+func sameResolvedAccelerator(set []Candidate) bool {
+	for _, c := range set {
+		if !constants.IsAcceleratorResolved(c.Accelerator) || c.Accelerator != set[0].Accelerator {
+			return false
+		}
+	}
+	return true
 }
 
 // claimOutcomeChanged records a model's last claim outcome and reports whether

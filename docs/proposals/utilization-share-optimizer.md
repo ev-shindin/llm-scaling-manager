@@ -1618,7 +1618,7 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_utilization_share_actual` | model, `role`, `exported_namespace` | `u_r` |
 | `wva_utilization_share_spare_gpus` | `accelerator`, `scope` | `S`; negative when the quota is short |
 | `wva_utilization_share_floor_excess_gpus` | model, `role`, `exported_namespace` | GPUs a floor holds above need (§5.5) |
-| `wva_utilization_share_transfers_total` | `accelerator`, `scope`, `outcome`, `urgent` | `done` / `fill-timeout` / `cancelled` / `aborted` / `redirected` |
+| `wva_utilization_share_transfers_total` | `accelerator`, `scope`, `outcome`, `urgent` | `done` / `fill-timeout` / `cancelled` / `aborted` / `redirected` / `wrong-pod` |
 | `wva_utilization_share_reserve_debt_gpus` | `accelerator`, `scope` | `reserveDebt`: reserve GPUs spent and not yet refilled (§6.2) |
 | `wva_utilization_share_effective_seconds` | `accelerator`, `scope`, `param`, `source` | the derived timings in force and where each came from (§8.4) |
 | `wva_utilization_share_promised_gpus` | `accelerator`, `scope` | `P`: GPUs released for a receiver and not yet held by it — withheld from the warm pool, from wakes and from plans (§6.3) |
@@ -1629,7 +1629,7 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_model_scaling_blocked` | `reason="floors-exceed-quota"` | `Σ F > B_net` |
 | `wva_model_scaling_blocked` | `reason="donors-at-floor"` | out of band, no donor can give |
 | `wva_model_scaling_blocked` | `reason="no-compatible-donor"` | out of band, and no donor set opens a fitting hole for every pod of a receiver replica — without node information, no single donor pod is large enough (§6.5) |
-| `wva_utilization_share_claims_total` | `accelerator`, `scope`, `outcome` | wake claims on Releasing transfers: `redirected` / `refused-score` / `refused-fit` / `none-releasing` |
+| `wva_utilization_share_claims_total` | `accelerator`, `scope`, `outcome` | wake claims on Releasing transfers: `redirected` / `refused-score` / `refused-fit` / `refused-held` / `none-releasing` |
 | `wva_utilization_share_donors_per_transfer` | `accelerator`, `scope` | histogram: donor replicas funding one receiver replica |
 | `wva_model_scaling_blocked` | `reason="release-shape-mismatch"` | GPUs released but the receiver's replica does not fit them (§6.5) |
 | `wva_model_scaling_blocked` | `reason="release-taken"` | GPUs released, then occupied by a pod WVA did not place (§6.3) |
@@ -1958,30 +1958,56 @@ optimizer every cycle (§6.6).
      - `wva_utilization_share_transfers_total`, and, for an active group,
        `_promised_gpus`, `_effective_seconds`, `_swinging` and the
        `_release_seconds` histogram.
+     - the per-node half of donor sets (section 6.5):
+       - the usage refresher's one pod walk also yields each GPU node's
+         capacity, requested GPUs and labels
+         (`gpunodes.DiscoverUsageWithNodes`), published as
+         `decision.NodeGPUStore` and used for two minutes at most. The
+         refresher now runs periodically whenever the optimizer acts, quota or
+         not.
+       - with node information, a hole is a node's free GPUs plus the chosen
+         donor pods on it (`shareNodeSet`). Receiver pods are placed largest
+         first, into the smallest hole that fits, else on the node needing the
+         fewest further donor replicas. Free GPUs complete a hole but never
+         stand in for a donor's quota. The search runs before the node-blind
+         one, which remains the fallback.
+       - a receiver LWS with the exclusive-topology annotation keeps every
+         hole in one domain, and never falls back to the node-blind search.
+       - a Deployment donor offers each Ready pod as a replica, and nothing
+         while any of its pods is not Ready. An LWS donor offers its
+         highest-index group.
+       - the planned pods, and only they, are marked; a mark carries
+         `planned`, so a restart keeps the next check.
+       - checking which pod went: a planned transfer whose donor shrank while
+         a planned pod still runs ends `outcome="wrong-pod"`. The receiver is
+         not raised, the donor stays lowered and its GPUs return to the
+         budget. Not the donor's fault, so it does not back off.
+     - fill-timeout attribution from the node picture: `release-taken` when
+       fewer GPUs are free than the receiver's replica, `release-shape-mismatch`
+       when enough are free but on no node enough for its largest pod, and no
+       reason when a node has room (the pod is Pending for another cause).
+       Reported on the receiver's model for one release timeout.
+     - claims for a model that must wake a prefill with its decode: the wake
+       claims one releasing transfer per role it must start, all or none, on
+       one accelerator (`ShareClaimStore.ClaimSet`, replicas matched largest
+       first). A role already serving is not claimed for.
+     - the kind e2e, single role and P/D: shadow evaluates and touches nothing.
+       Active, an idle model's marked pod is the one its ReplicaSet removes,
+       and the loaded model grows only after the release. A P/D decode LWS
+       grows by one group funded by two of an idle model's replicas as one
+       set, raised only after both released. The first cluster run found that
+       the engine keyed scale targets by Deployment name, not variant name, so
+       no donor could be marked.
 
    **Not yet built in stage 2:**
-   - the per-node half of donor sets (section 6.5):
-     - holes made of a node's free GPUs plus donor pods on that node, which
-       needs the per-node usage aggregation of section 11;
-     - the topology-domain constraint of an LWS receiver;
-     - observing a release per node;
-     - checking which pod actually went.
-     Without node information, the half that is valid everywhere is built
-     (see above).
-   - the `release-taken` and
-     `release-shape-mismatch` reasons, which need the per-node view of
-     section 6.5. A fill timeout is counted (`outcome="fill-timeout"`) but
-     not yet attributed.
-   - a claim for a model that must wake a prefill with its decode: one claim
-     funds one replica, so such a wake waits for idle GPUs or its own
-     transfer. The warm pool's own carve-out from idle (section 7.2) is not
-     built either.
-   - the P/D and multi-GPU kind e2e. The single-role e2e is built
-     (`test/e2e/utilization_share_test.go`): shadow evaluates and touches
-     nothing. Active, an idle model's marked pod is the one its ReplicaSet
-     removes, and the loaded model grows only after the release. Its first
-     cluster run found that the engine keyed scale targets by Deployment
-     name, not variant name, so no donor could be marked.
+   - the warm pool's own carve-out from idle (section 7.2): the pool publishes
+     no GPU target to carve from.
+   - re-planning a receiver from the holes that did open after a wrong pod
+     went; the transfer ends and the next plan starts afresh instead.
+   - a node-aware e2e: the kind emulator's GPUs are all on one node, with
+     more GPUs than the test quota, so the receiver's pods always fit the
+     node's free GPUs and the node-aware search defers to the node-blind one.
+     It is covered by unit tests only.
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4).
 

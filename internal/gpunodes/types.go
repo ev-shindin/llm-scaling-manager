@@ -19,3 +19,12 @@ type NodeInfo struct {
 	// to AcceleratorModelInfo (count, memory).
 	Accelerators map[string]AcceleratorModelInfo
 }
+
+// NodeGPUs is one GPU node's accelerator, its capacity, the GPUs pods
+// scheduled to it request, and its labels.
+type NodeGPUs struct {
+	Accelerator string
+	Capacity    int
+	Used        int
+	Labels      map[string]string
+}

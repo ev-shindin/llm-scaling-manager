@@ -90,57 +90,86 @@ func (s *ShareClaimStore) Publish(claimable map[string][]ShareClaimable, now tim
 	s.claimable, s.at = c, now
 }
 
-// Claim tries to redirect a releasing transfer to a wake of one replica:
-// wakePods are its pods' GPUs (nil when unknown, then wakeGPUs is compared).
-// scope is the wake's own group -- its namespace when the namespace has its
-// own quota, "" for the cluster group -- and z its score there. Only that
-// group is tried: a model is planned in one group, and the GPUs of another are
-// not its to take. model (namespace/model) is held for ShareClaimModelHold
-// after a claim. It returns the claim and the outcome; only
-// ShareClaimRedirected carries a claim.
+// ShareWake is one replica a wake needs funded: its pods' GPUs (nil when
+// unknown, then GPUs is compared), its total, and its variant
+// (namespace/variant).
+type ShareWake struct {
+	Pods    []int
+	GPUs    int
+	Variant string
+}
+
+// Claim tries to redirect a releasing transfer to a wake of one replica. See
+// ClaimSet.
 func (s *ShareClaimStore) Claim(scope, accelerator string, wakePods []int, wakeGPUs int,
 	z float64, model, wake string, now time.Time) (ShareClaim, string) {
+	claims, outcome := s.ClaimSet(scope, accelerator, []ShareWake{{Pods: wakePods, GPUs: wakeGPUs, Variant: wake}},
+		z, model, now)
+	if len(claims) == 0 {
+		return ShareClaim{}, outcome
+	}
+	return claims[0], outcome
+}
+
+// ClaimSet tries to redirect one releasing transfer to each replica of a
+// wake -- a decode with the prefill it must wake alongside -- all or none:
+// half a P/D pair woken serves nothing. scope is the wake's own group -- its
+// namespace when the namespace has its own quota, "" for the cluster group --
+// and z its score there. Only that group is tried: a model is planned in one
+// group, and the GPUs of another are not its to take. A transfer qualifies for
+// a replica when the wake scores lower than its receiver and its donor pods
+// cover the replica's; replicas are matched largest first, each to the
+// qualifying transfer with the lowest receiver score. model (namespace/model)
+// is held for ShareClaimModelHold after a claim. It returns the claims and the
+// outcome; only ShareClaimRedirected carries claims.
+func (s *ShareClaimStore) ClaimSet(scope, accelerator string, wakes []ShareWake,
+	z float64, model string, now time.Time) ([]ShareClaim, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.claimable == nil || now.Sub(s.at) > ShareClaimMaxAge {
-		return ShareClaim{}, ShareClaimNoneReleasing
+	if len(wakes) == 0 || s.claimable == nil || now.Sub(s.at) > ShareClaimMaxAge {
+		return nil, ShareClaimNoneReleasing
 	}
 	if at, ok := s.lastClaim[model]; ok && now.Sub(at) < ShareClaimModelHold {
-		return ShareClaim{}, ShareClaimRefusedHeld
+		return nil, ShareClaimRefusedHeld
 	}
-	outcome := ShareClaimNoneReleasing
-	{
-		key := ShareGroupKey(scope, accelerator)
-		entries := s.claimable[key]
+	key := ShareGroupKey(scope, accelerator)
+	entries := s.claimable[key]
+	if len(entries) == 0 {
+		return nil, ShareClaimNoneReleasing
+	}
+	// Ties go to the receiver, which was promised first.
+	if !slices.ContainsFunc(entries, func(e ShareClaimable) bool { return z < e.ReceiverZ }) {
+		return nil, ShareClaimRefusedScore
+	}
+	order := slices.Clone(wakes)
+	slices.SortStableFunc(order, func(a, b ShareWake) int { return cmp.Compare(b.GPUs, a.GPUs) })
+	used := map[int]bool{}
+	var claims []ShareClaim
+	for _, w := range order {
 		best := -1
 		for i, e := range entries {
-			// Ties go to the receiver, which was promised first.
-			if !(z < e.ReceiverZ) {
-				if outcome == ShareClaimNoneReleasing {
-					outcome = ShareClaimRefusedScore
-				}
-				continue
-			}
-			if !PodsCover(e.DonorPodGPUs, e.DonorGPUs, wakePods, wakeGPUs) {
-				outcome = ShareClaimRefusedFit
+			if used[i] || !(z < e.ReceiverZ) || !PodsCover(e.DonorPodGPUs, e.DonorGPUs, w.Pods, w.GPUs) {
 				continue
 			}
 			if best < 0 || cmp.Or(cmp.Compare(e.ReceiverZ, entries[best].ReceiverZ), cmp.Compare(entries[best].ID, e.ID)) > 0 {
 				best = i
 			}
 		}
-		if best >= 0 {
-			c := ShareClaim{Scope: scope, Accelerator: accelerator, ID: entries[best].ID, Wake: wake}
-			s.claimable[key] = slices.Delete(slices.Clone(entries), best, best+1)
-			s.claims = append(s.claims, c)
-			if s.lastClaim == nil {
-				s.lastClaim = map[string]time.Time{}
-			}
-			s.lastClaim[model] = now
-			return c, ShareClaimRedirected
+		if best < 0 {
+			return nil, ShareClaimRefusedFit
 		}
+		used[best] = true
+		claims = append(claims, ShareClaim{Scope: scope, Accelerator: accelerator, ID: entries[best].ID, Wake: w.Variant})
 	}
-	return ShareClaim{}, outcome
+	s.claimable[key] = slices.DeleteFunc(slices.Clone(entries), func(e ShareClaimable) bool {
+		return slices.ContainsFunc(claims, func(c ShareClaim) bool { return c.ID == e.ID })
+	})
+	s.claims = append(s.claims, claims...)
+	if s.lastClaim == nil {
+		s.lastClaim = map[string]time.Time{}
+	}
+	s.lastClaim[model] = now
+	return claims, ShareClaimRedirected
 }
 
 // Take returns and forgets the claims made against one group.

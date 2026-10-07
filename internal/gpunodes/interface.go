@@ -51,3 +51,10 @@ type FullDiscovery interface {
 	UsageDiscovery
 	NodeDiscovery
 }
+
+// NodeUsageDiscovery additionally returns the per-node view from the same pod
+// walk as the namespaced one. Optional: a discovery that cannot provide it
+// leaves the per-node consumers without node information, which they handle.
+type NodeUsageDiscovery interface {
+	DiscoverUsageWithNodes(ctx context.Context) (map[string]int, map[string]map[string]int, map[string]NodeGPUs, error)
+}

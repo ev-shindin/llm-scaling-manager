@@ -373,3 +373,10 @@ func (c *Config) UtilizationShareWakeScores(namespace, modelID string) (zNamespa
 	}
 	return zNamespace, zCluster, true
 }
+
+// UtilizationShareActive reports whether the utilization-share optimizer is
+// selected and acting (not in shadow mode).
+func (c *Config) UtilizationShareActive() bool {
+	us, selected, err := c.UtilizationShare()
+	return err == nil && selected && !us.Shadow
+}

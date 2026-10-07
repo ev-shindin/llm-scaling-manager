@@ -38,6 +38,44 @@ type SharePlanInput struct {
 	// role absent from a non-nil map cannot give, or cannot grow. Nil maps size
 	// every move by the role's ReplicaGPUs.
 	Give, Grow map[string]ShareVariant
+	// Nodes is the per-node picture for the group's accelerator: each node's
+	// free GPUs and labels. Nil without node information, and then donor pods
+	// are never combined on a node (§6.5).
+	Nodes map[string]ShareNode
+	// DonorUnits are, per donor role, the replicas it could give and where
+	// their pods run: one Ready, unmarked pod per Deployment replica, the
+	// highest-index group of a LeaderWorkerSet. A role absent gives nothing to
+	// a node-aware set.
+	DonorUnits map[string][]ShareUnit
+	// DomainKey is, per receiver role, the node label all its pods' holes must
+	// share (a LeaderWorkerSet's exclusive topology), or "".
+	DomainKey map[string]string
+}
+
+// ShareNode is one node's free GPUs and labels.
+type ShareNode struct {
+	Free   int
+	Labels map[string]string
+}
+
+// SharePod is one donor pod: its name (namespace/name), node and GPUs.
+type SharePod struct {
+	Name, Node string
+	GPUs       int
+}
+
+// ShareUnit is what one donor replica frees when it goes: its pods.
+type ShareUnit struct {
+	Pods []SharePod
+}
+
+// GPUs is the unit's total.
+func (u ShareUnit) GPUs() int {
+	n := 0
+	for _, p := range u.Pods {
+		n += p.GPUs
+	}
+	return n
 }
 
 // SharePlan is what one planning cycle decided.
@@ -303,7 +341,19 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 		}
 		if !funded && candidates > 0 && misfits == candidates && in.Grow != nil {
 			// No single donor replica fits. Several may (§6.5).
-			if set := shareDonorSet(l, in, rc, donors, work, moved, byKey, cont, z, isConfirmed, now, tm); len(set) > 0 {
+			// With node information, a node's free GPUs and the donor pods on it
+			// make one hole together, and the holes can be kept in the
+			// receiver's topology domain (§6.5). Without it, or when it finds
+			// nothing, each donor pod is a hole of its own size -- true on any
+			// node, but blind to a domain, so not for a receiver that has one.
+			var set []shareDonor
+			if in.Nodes != nil {
+				set = shareNodeSet(l, in, rc, donors, work, moved, byKey, cont, z, isConfirmed, now, tm)
+			}
+			if len(set) == 0 && in.DomainKey[rc] == "" {
+				set = shareDonorSet(l, in, rc, donors, work, moved, byKey, cont, z, isConfirmed, now, tm)
+			}
+			if len(set) > 0 {
 				started := startShareSet(l, in, rc, set, float64(work[rc]) < byKey[rc].Need, now, tm)
 				plan.Started = append(plan.Started, started...)
 				for _, d := range set {
@@ -333,6 +383,8 @@ type shareDonor struct {
 	role, variant string
 	pods          []int
 	gpus          int
+	// planned are the donor pods a node-aware set chose (namespace/name).
+	planned []string
 }
 
 // shareDonorSet looks for donor replicas that together fund one replica of
@@ -428,15 +480,23 @@ func shareDonorSet(l *ShareLedger, in SharePlanInput, rc string, donors []string
 func startShareSet(l *ShareLedger, in SharePlanInput, rc string, set []shareDonor, urgent bool,
 	now time.Time, tm ShareTimings) []ShareTransfer {
 	grow := in.Grow[rc]
+	setID := "pending"
+	if len(set) == 1 {
+		setID = "" // a single donor replica, placed on a node: an ordinary transfer
+	}
 	primary := l.Start(ShareTransfer{
 		Donor: set[0].role, Receiver: rc, GPUs: max(grow.GPUs, 1), DonorGPUs: set[0].gpus,
-		DonorVariant: set[0].variant, ReceiverVariant: grow.Name, SetID: "pending", Urgent: urgent,
+		DonorVariant: set[0].variant, ReceiverVariant: grow.Name, SetID: setID, Urgent: urgent,
+		PlannedPods: set[0].planned,
 	}, in.Held, now, tm)
 	ids := make([]string, 0, len(set)-1)
 	for _, d := range set[1:] {
-		c := l.Start(ShareTransfer{Donor: d.role, DonorGPUs: d.gpus, DonorVariant: d.variant, SetID: "pending"},
-			in.Held, now, tm)
+		c := l.Start(ShareTransfer{Donor: d.role, DonorGPUs: d.gpus, DonorVariant: d.variant, SetID: "pending",
+			PlannedPods: d.planned}, in.Held, now, tm)
 		ids = append(ids, c.ID)
+	}
+	if len(set) == 1 {
+		return []ShareTransfer{primary}
 	}
 	l.LinkSet(primary.ID, ids...)
 	out := make([]ShareTransfer, 0, len(set))
@@ -446,4 +506,160 @@ func startShareSet(l *ShareLedger, in SharePlanInput, rc string, set []shareDono
 		}
 	}
 	return out
+}
+
+// shareNodeSet looks for donor replicas that open, node by node, a hole for
+// every pod of one replica of receiver rc (§6.5, with node information). A
+// hole on a node is its free GPUs plus the GPUs of the chosen donor pods on
+// it, so donor pods too small on their own can fund a pod together where they
+// share a node, and a node's free GPUs can complete a hole.
+//
+// Receiver pods are placed largest first. A pod goes into an existing hole
+// where one fits, the smallest that does; otherwise a hole is opened on the
+// node that needs the fewest further donor replicas, taking the donors with the
+// most to spare first, and on a tie the one that leaves the smallest hole. A
+// receiver with an exclusive topology keeps every hole in one domain.
+//
+// The donors must give at least the receiver's replica: free GPUs complete a
+// hole, they never stand in for a donor -- the quota still has to fit. The set
+// passes the same admission as shareDonorSet.
+func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string, work, moved map[string]int,
+	byKey map[string]ShareRole, cont map[string]float64, z func(string, int) float64,
+	isConfirmed func(string) bool, now time.Time, tm ShareTimings) []shareDonor {
+	grow, ok := in.Grow[rc]
+	if !ok || len(grow.PodGPUs) == 0 || in.Give == nil || in.DonorUnits == nil {
+		return nil
+	}
+	if l.ReceivingHeld(rc, now, tm) || moved[rc] >= ShareMaxReplicasPerCycle {
+		return nil
+	}
+	need := slices.Sorted(slices.Values(grow.PodGPUs))
+	slices.Reverse(need)
+	nodes := slices.Sorted(maps.Keys(in.Nodes))
+	hole := map[string]int{}
+	for n, info := range in.Nodes {
+		hole[n] = info.Free
+	}
+	key, domain := in.DomainKey[rc], ""
+	inDomain := func(n string) bool { return key == "" || domain == "" || in.Nodes[n].Labels[key] == domain }
+
+	taken := map[string]int{}
+	usedUnit := map[string]map[int]bool{}
+	var set []shareDonor
+	canGive := func(dn string, extra int) bool {
+		give, ok := in.Give[dn]
+		if !ok || dn == rc {
+			return false
+		}
+		gd := max(give.GPUs, 1)
+		k := taken[dn] + extra
+		return moved[dn]+k <= ShareMaxReplicasPerCycle && work[dn]-k*gd >= byKey[dn].Floor &&
+			!l.GivingHeld(dn, now, tm) && l.InFlight()+len(set)+extra <= ShareMaxConcurrentTransfers
+	}
+	for _, p := range need {
+		best := ""
+		for _, n := range nodes {
+			if inDomain(n) && hole[n] >= p && (best == "" || hole[n] < hole[best]) {
+				best = n
+			}
+		}
+		if best == "" {
+			// Open a hole: per node, the fewest donor units that cover p there.
+			type option struct {
+				node  string
+				units [][2]int // [donor index, unit index]
+				left  int
+			}
+			var opt *option
+			for _, n := range nodes {
+				if !inDomain(n) {
+					continue
+				}
+				h, extra := hole[n], map[string]int{}
+				var units [][2]int
+				for di, dn := range donors {
+					if h >= p {
+						break
+					}
+					for ui, u := range in.DonorUnits[dn] {
+						if h >= p {
+							break
+						}
+						if usedUnit[dn][ui] || !canGive(dn, extra[dn]+1) {
+							continue
+						}
+						on := 0
+						for _, pod := range u.Pods {
+							if pod.Node == n {
+								on += pod.GPUs
+							}
+						}
+						if on == 0 {
+							continue
+						}
+						units = append(units, [2]int{di, ui})
+						extra[dn]++
+						h += on
+					}
+				}
+				if h < p {
+					continue
+				}
+				o := option{node: n, units: units, left: h - p}
+				if opt == nil || len(o.units) < len(opt.units) ||
+					(len(o.units) == len(opt.units) && o.left < opt.left) {
+					opt = &o
+				}
+			}
+			if opt == nil {
+				return nil
+			}
+			for _, du := range opt.units {
+				dn, u := donors[du[0]], in.DonorUnits[donors[du[0]]][du[1]]
+				if usedUnit[dn] == nil {
+					usedUnit[dn] = map[int]bool{}
+				}
+				usedUnit[dn][du[1]] = true
+				taken[dn]++
+				d := shareDonor{role: dn, variant: in.Give[dn].Name, gpus: max(in.Give[dn].GPUs, 1)}
+				for _, pod := range u.Pods {
+					hole[pod.Node] += pod.GPUs
+					d.planned = append(d.planned, pod.Name)
+				}
+				set = append(set, d)
+			}
+			best = opt.node
+		}
+		hole[best] -= p
+		if key != "" && domain == "" {
+			domain = in.Nodes[best].Labels[key]
+		}
+	}
+	if len(set) == 0 {
+		return nil // free GPUs alone: the idle fill's to place, within the quota
+	}
+	gives, g := 0, max(grow.GPUs, 1)
+	for _, d := range set {
+		gives += d.gpus
+	}
+	if gives < g {
+		return nil
+	}
+	// Admission over the whole set, as shareDonorSet.
+	confirmed := isConfirmed(rc)
+	before, after := z(rc, work[rc]), z(rc, work[rc]+g)
+	for dn, k := range taken {
+		gd := max(in.Give[dn].GPUs, 1)
+		before = math.Min(before, z(dn, work[dn]))
+		after = math.Min(after, z(dn, work[dn]-k*gd))
+		left := float64(work[dn] - k*gd)
+		if !(left >= cont[dn] || ShareInBand(left, cont[dn], byKey[dn], in.Tolerance, in.Thresholds[dn])) {
+			return nil
+		}
+		confirmed = confirmed || isConfirmed(dn)
+	}
+	if !confirmed || !(after > before) {
+		return nil
+	}
+	return set
 }

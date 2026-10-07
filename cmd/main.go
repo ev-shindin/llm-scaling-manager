@@ -562,7 +562,10 @@ func main() {
 	// need a restart.
 	usageRefresher := &gpuusage.Refresher{
 		Discovery: gpunodes.NewK8sWithGpuOperator(mgr.GetClient()),
-		Periodic:  func() bool { return allocation.PhysicalUsageConfigured(cfg) },
+		// The utilization-share optimizer reads the per-node picture to place a
+		// receiver's pods into the holes donors open (section 6.5 of its
+		// proposal), quota or not.
+		Periodic: func() bool { return allocation.PhysicalUsageConfigured(cfg) || cfg.UtilizationShareActive() },
 	}
 	if err := mgr.Add(usageRefresher); err != nil {
 		setupLog.Error(err, "unable to add the GPU usage refresher to the manager")

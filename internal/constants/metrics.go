@@ -630,6 +630,8 @@ var (
 		ScalingBlockedDonorsAtFloor,
 		ScalingBlockedNoCompatibleDonor,
 		ScalingBlockedReleaseTimeout,
+		ScalingBlockedReleaseTaken,
+		ScalingBlockedReleaseShapeMismatch,
 	}
 )
 
@@ -657,6 +659,14 @@ const (
 	// ScalingBlockedReleaseTimeout: the role's last release was aborted, and
 	// it is backing off before it is asked to give again.
 	ScalingBlockedReleaseTimeout = "release-timeout"
+	// ScalingBlockedReleaseTaken: the role's last transfer timed out filling,
+	// and the GPUs its donors released are no longer free -- a pod WVA did not
+	// place took them. Needs node information.
+	ScalingBlockedReleaseTaken = "release-taken"
+	// ScalingBlockedReleaseShapeMismatch: the role's last transfer timed out
+	// filling with enough GPUs free in total, but on no node enough for the
+	// role's largest pod. Needs node information.
+	ScalingBlockedReleaseShapeMismatch = "release-shape-mismatch"
 )
 
 // Pod-mapping miss reasons (values for the `reason` label of WVAPodMappingMissTotal).

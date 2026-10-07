@@ -41,6 +41,11 @@ const (
 	// ShareOutcomeRedirected counts a transfer a wake claimed (section 6.3);
 	// it stays in the ledger as a release with no receiver.
 	ShareOutcomeRedirected ShareTransferOutcome = "redirected"
+	// ShareOutcomeWrongPod counts a node-planned transfer whose donor shrank
+	// by a different pod than the one marked: the GPUs came free, but not
+	// where the plan put the receiver's pod, so the receiver is not raised
+	// (section 6.5, "check which pod actually went").
+	ShareOutcomeWrongPod ShareTransferOutcome = "wrong-pod"
 )
 
 // ShareTransfer moves one receiver replica: Donor gives GPUs, Receiver gets
@@ -72,6 +77,10 @@ type ShareTransfer struct {
 	Entitled bool
 	// Urgent receivers are below their need (§6.4).
 	Urgent bool
+	// PlannedPods are the donor pods a node-aware plan chose (namespace/name):
+	// the ones to mark, because the holes are planned where they run (§6.5).
+	// Empty when any of the donor's pods will do.
+	PlannedPods []string
 	// SetID links the transfers of one donor set (§6.5): several donor
 	// replicas funding one receiver replica, each receiver pod by a donor pod
 	// of its own. The primary carries the receiver and its ID is the set's;
@@ -94,6 +103,8 @@ type ShareTransfer struct {
 	// forgotten, aborted -- is aborted too: its receiver's replica will never
 	// have all its holes.
 	setReleased, setPending int
+	// plannedRunning is set, each cycle, while one of PlannedPods still runs.
+	plannedRunning bool
 }
 
 // IsSetPrimary reports whether t carries a donor set's receiver.
@@ -153,6 +164,9 @@ type ShareLedger struct {
 	// kept its pods, and retrying at once would loop start/abort forever.
 	aborts    map[string]int
 	giveAfter map[string]time.Time
+	// fillBlocked is, per receiver, why its last fill timed out
+	// (release-taken or release-shape-mismatch) and until when it is reported.
+	fillBlocked map[string]shareFillBlock
 
 	lastGave, lastGot map[string]time.Time
 	moves             map[string][]shareMove
@@ -194,6 +208,7 @@ func NewShareLedger() *ShareLedger {
 		undo:        map[string]shareUndo{},
 		aborts:      map[string]int{},
 		giveAfter:   map[string]time.Time{},
+		fillBlocked: map[string]shareFillBlock{},
 		lastGave:    map[string]time.Time{},
 		lastGot:     map[string]time.Time{},
 		moves:       map[string][]shareMove{},
@@ -414,8 +429,11 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 		}
 	}
 	broken := func(t *ShareTransfer) bool { return t.IsSetPrimary() && t.setPending > live[t.ID] }
+	// A donor that shrank while a planned pod still runs lost another pod:
+	// the planned hole is not open, and never will be by this transfer.
+	wrongPod := func(t *ShareTransfer) bool { return releasable[t] && t.plannedRunning }
 	for _, t := range l.transfers {
-		if !releasable[t] || (t.IsSetPrimary() && waiting[t.ID]) || broken(t) {
+		if !releasable[t] || (t.IsSetPrimary() && waiting[t.ID]) || broken(t) || wrongPod(t) {
 			continue
 		}
 		if t.SetID != "" && !t.IsSetPrimary() {
@@ -448,6 +466,11 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 		case t.State == ShareReleasing && broken(t):
 			// Not the donor's failure: no back-off.
 			ended = append(ended, ShareTransferEnd{*t, ShareOutcomeAborted})
+			continue
+		case t.State == ShareReleasing && wrongPod(t):
+			// The donor did give; its GPUs return to the budget for the next
+			// plan. No back-off: the donor released, and promptly.
+			ended = append(ended, ShareTransferEnd{*t, ShareOutcomeWrongPod})
 			continue
 		case t.State == ShareReleasing && !now.Before(t.Deadline):
 			ended = append(ended, ShareTransferEnd{*t, ShareOutcomeAborted})
@@ -614,6 +637,14 @@ func (l *ShareLedger) MeasuredRelease() (time.Duration, bool) {
 	return s[i], true
 }
 
+// PlannedRunning records, for this cycle, which node-planned transfers still
+// have a planned donor pod running (IDs in running). Observe reads it.
+func (l *ShareLedger) PlannedRunning(running map[string]bool) {
+	for _, t := range l.transfers {
+		t.plannedRunning = running[t.ID]
+	}
+}
+
 // ConfirmStarted records that a transfer took effect: its donor pods are
 // marked and the donor's target is lowered.
 func (l *ShareLedger) ConfirmStarted(id string, pods []string) {
@@ -649,4 +680,29 @@ func (l *ShareLedger) Forget(id string) {
 	l.moves[u.receiver] = u.receiverMoves
 	restore(l.swingUntil, u.donor, u.donorSwing, !u.donorSwing.IsZero())
 	restore(l.swingUntil, u.receiver, u.receiverSwing, !u.receiverSwing.IsZero())
+}
+
+type shareFillBlock struct {
+	reason string
+	until  time.Time
+}
+
+// FillBlocked records why role's fill timed out, reported until until. An
+// empty reason clears it.
+func (l *ShareLedger) FillBlocked(role, reason string, until time.Time) {
+	if reason == "" {
+		delete(l.fillBlocked, role)
+		return
+	}
+	l.fillBlocked[role] = shareFillBlock{reason, until}
+}
+
+// FillBlockedReason is the reason recorded for role's last timed-out fill,
+// while it is still reported, or "".
+func (l *ShareLedger) FillBlockedReason(role string, now time.Time) string {
+	b, ok := l.fillBlocked[role]
+	if !ok || !now.Before(b.until) {
+		return ""
+	}
+	return b.reason
 }

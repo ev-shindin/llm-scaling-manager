@@ -60,6 +60,9 @@ type Refresher struct {
 	Discovery gpunodes.NamespacedUsageDiscovery
 	// Store receives each observation. Defaults to decision.DefaultGPUUsage.
 	Store *decision.GPUUsageStore
+	// Nodes receives the per-node view, when Discovery provides one. Defaults
+	// to decision.DefaultNodeGPUs.
+	Nodes *decision.NodeGPUStore
 	// Interval between refreshes. Defaults to DefaultInterval.
 	Interval time.Duration
 	// Periodic reports whether the PERIODIC observation is worth taking right now.
@@ -154,6 +157,21 @@ func (r *Refresher) EnsureFresh(ctx context.Context, maxAge time.Duration) {
 // Consumers bound how stale a snapshot may be, so a sustained outage still
 // degrades to unknown; it just does not lie on the way there.
 func (r *Refresher) Refresh(ctx context.Context) error {
+	if nd, ok := r.Discovery.(gpunodes.NodeUsageDiscovery); ok {
+		byType, byNamespace, nodes, err := nd.DiscoverUsageWithNodes(ctx)
+		if err != nil {
+			return fmt.Errorf("discovering GPU usage: %w", err)
+		}
+		r.store().Publish(byType, byNamespace)
+		published := make(map[string]decision.NodeGPU, len(nodes))
+		for name, n := range nodes {
+			published[name] = decision.NodeGPU{Accelerator: n.Accelerator, Capacity: n.Capacity, Used: n.Used, Labels: n.Labels}
+		}
+		r.nodeStore().Publish(published, time.Now())
+		log.FromContext(ctx).V(logging.DEBUG).Info("Refreshed cluster GPU usage",
+			"gpusInUse", byType, "namespaces", len(byNamespace), "nodes", len(nodes))
+		return nil
+	}
 	byType, byNamespace, err := r.Discovery.DiscoverUsageByNamespace(ctx)
 	if err != nil {
 		return fmt.Errorf("discovering GPU usage: %w", err)
@@ -239,6 +257,13 @@ func (r *Refresher) store() *decision.GPUUsageStore {
 		return r.Store
 	}
 	return decision.DefaultGPUUsage
+}
+
+func (r *Refresher) nodeStore() *decision.NodeGPUStore {
+	if r.Nodes != nil {
+		return r.Nodes
+	}
+	return decision.DefaultNodeGPUs
 }
 
 func (r *Refresher) interval() time.Duration {

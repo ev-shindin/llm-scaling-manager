@@ -44,6 +44,9 @@ type utilizationShareState struct {
 	blockedModels map[string]bool
 	// now is the clock; nil is time.Now. Tests set it.
 	now func() time.Time
+	// nodes is the per-node GPU picture; nil is decision.DefaultNodeGPUs,
+	// which the usage refresher publishes. Tests set it.
+	nodes *decision.NodeGPUStore
 }
 
 // resetActuation forgets every ledger. A transfer's donor marks stay on its

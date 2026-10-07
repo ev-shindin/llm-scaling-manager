@@ -112,3 +112,58 @@ func TestShareClaimStoreDoesNotRepublishAClaimedTransfer(t *testing.T) {
 		t.Fatalf("the claimed transfer was claimable again: %q", outcome)
 	}
 }
+
+// A P/D wake claims one transfer per replica, all or none: a decode and a
+// prefill each need a hole of their own, larger replicas are matched first so
+// a small one cannot take the only large hole, and a pair that does not fully
+// fit claims nothing and leaves both transfers claimable.
+func TestShareClaimStoreClaimsASetAllOrNone(t *testing.T) {
+	t0 := time.Unix(0, 0)
+	cluster := ShareGroupKey("", "A100")
+	pair := []ShareWake{{Pods: []int{2}, GPUs: 2, Variant: "ns/pre"}, {Pods: []int{8}, GPUs: 8, Variant: "ns/dec"}}
+
+	s := claimStore(map[string][]ShareClaimable{cluster: {
+		// The small hole has the best-off receiver: taken first for the 8-GPU
+		// replica it would be, were it large enough.
+		{ID: "big", ReceiverZ: -0.5, DonorGPUs: 8, DonorPodGPUs: []int{8}},
+		{ID: "small", ReceiverZ: -0.2, DonorGPUs: 8, DonorPodGPUs: []int{8}},
+	}}, t0)
+	claims, outcome := s.ClaimSet("", "A100", pair, -1, "ns/m", t0)
+	if outcome != ShareClaimRedirected || len(claims) != 2 {
+		t.Fatalf("want both replicas claimed, got %q %v", outcome, claims)
+	}
+	if claims[0].ID == claims[1].ID {
+		t.Fatalf("two replicas claimed one hole: %v", claims)
+	}
+	if got := s.Take("", "A100"); len(got) != 2 {
+		t.Fatalf("want two claims to take, got %v", got)
+	}
+
+	// Only one transfer: neither replica is claimed, and it stays claimable.
+	s = claimStore(map[string][]ShareClaimable{cluster: {{ID: "only", ReceiverZ: -0.2, DonorGPUs: 8, DonorPodGPUs: []int{8}}}}, t0)
+	if claims, outcome = s.ClaimSet("", "A100", pair, -1, "ns/m", t0); outcome != ShareClaimRefusedFit || len(claims) != 0 {
+		t.Fatalf("want a half pair refused, got %q %v", outcome, claims)
+	}
+	if got := s.Take("", "A100"); len(got) != 0 {
+		t.Fatalf("a refused pair recorded claims: %v", got)
+	}
+	if c, outcome := s.Claim("", "A100", []int{8}, 8, -1, "ns/other", "ns/w", t0); outcome != ShareClaimRedirected || c.ID != "only" {
+		t.Fatalf("the refused pair's transfer must stay claimable, got %q %+v", outcome, c)
+	}
+
+	// Largest first: the 8-GPU replica takes the only 8-GPU hole even though
+	// the 2-GPU replica is listed first.
+	s = claimStore(map[string][]ShareClaimable{cluster: {
+		{ID: "two", ReceiverZ: -0.5, DonorGPUs: 2, DonorPodGPUs: []int{2}},
+		{ID: "eight", ReceiverZ: -0.2, DonorGPUs: 8, DonorPodGPUs: []int{8}},
+	}}, t0)
+	claims, outcome = s.ClaimSet("", "A100", pair, -1, "ns/m", t0)
+	if outcome != ShareClaimRedirected {
+		t.Fatalf("want the pair claimed, got %q", outcome)
+	}
+	for _, c := range claims {
+		if (c.Wake == "ns/dec") != (c.ID == "eight") {
+			t.Fatalf("decode must take the 8-GPU hole: %v", claims)
+		}
+	}
+}
