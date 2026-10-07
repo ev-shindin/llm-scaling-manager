@@ -168,6 +168,21 @@ type ScalingPolicy struct {
 	// With no limiters declared, the physical-inventory limiter is used.
 	// See Config.EffectiveLimiterMode / Config.EffectiveQuotaEntries.
 	Limiters []QuotaLimiterConfig `yaml:"limiters,omitempty"`
+
+	// Optimizer selects and configures the fleet's optimizer. Like Limiters it is
+	// honored only on the cluster "default" entry, read by Config.UtilizationShare,
+	// and never merged. It is not checked by Validate: an invalid block disables
+	// the optimizer instead of dropping the entry, and with it the limiters.
+	Optimizer *OptimizerConfig `yaml:"optimizer,omitempty"`
+
+	// WeightClass names this model's weight class for the utilization-share
+	// optimizer (see UtilizationShareConfig.WeightClasses). Mutually exclusive
+	// with Weight; neither takes the default class.
+	WeightClass string `yaml:"weightClass,omitempty"`
+
+	// Weight is this model's numeric weight for the utilization-share optimizer,
+	// clamped into the range the weight classes span. Zero means unset.
+	Weight float64 `yaml:"weight,omitempty"`
 }
 
 // ScaleToZeroEnvelope is the scale-to-zero policy for a scaling entry, and the
@@ -476,6 +491,13 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	if len(override.Analyzers) > 0 {
 		c.Analyzers = override.Analyzers
 	}
+	// The weight is one choice expressed one of two ways, so an override that
+	// states either replaces both: a model that names a class must not inherit a
+	// number from the default entry, which Validate would reject as both set.
+	if override.WeightClass != "" || override.Weight != 0 {
+		c.WeightClass = override.WeightClass
+		c.Weight = override.Weight
+	}
 	// Merged FIELD BY FIELD, not wholesale. The envelope carries two independent
 	// settings, so replacing it would make an override that sets only
 	// retentionPeriod silently discard an inherited enabled (and vice versa) —
@@ -498,7 +520,8 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	}
 	// Limiters is intentionally NOT merged: it is a cluster-"default"-scope setting
 	// read only from the global default entry (see Config.EffectiveLimiterMode), so
-	// a per-model override's limiters would never be consumed.
+	// a per-model override's limiters would never be consumed. Optimizer is not
+	// merged for the same reason (see Config.UtilizationShare).
 	if override.ModelID != "" {
 		c.ModelID = override.ModelID
 	}
@@ -519,6 +542,9 @@ func (c *ScalingPolicy) Validate() error {
 	}
 	if c.Priority < 0 {
 		return fmt.Errorf("priority must be >= 0, got %.2f", c.Priority)
+	}
+	if err := c.validateWeight(); err != nil {
+		return err
 	}
 
 	// V2 threshold range/consistency checks apply whenever the fields are set,

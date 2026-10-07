@@ -66,6 +66,11 @@ func parseScalingPolicyConfig(cmData map[string]string, logger logr.Logger) (con
 			logger.Info("Ignoring limiters on a non-default saturation config entry; "+
 				"the GPU limiter is selected only from the \"default\" entry", "key", key)
 		}
+		// optimizer: sits beside limiters: and is read from the same place only.
+		if key != config.GlobalDefaultsKey && satConfig.Optimizer != nil {
+			logger.Info("Ignoring optimizer on a non-default saturation config entry; "+
+				"the optimizer is selected only from the \"default\" entry, beside limiters", "key", key)
+		}
 		// The limiters: list reads like a set of bounds that all apply; it is not.
 		// One mode is selected, quota wins, and anything else declared is built as
 		// nothing. Silence here is the hazard: the operator reads the config as
