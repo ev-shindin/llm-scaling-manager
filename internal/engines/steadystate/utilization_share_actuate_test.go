@@ -52,19 +52,22 @@ func (f *shareFleet) requests() []allocation.ModelScalingRequest {
 	return out
 }
 
-func (f *shareFleet) scaleTargets() map[string]map[string]scaletarget.ScaleTargetAccessor {
-	out := map[string]map[string]scaletarget.ScaleTargetAccessor{}
+// scaleTargets keys each variant's Deployment by namespace/variant, as
+// optimizeV2 does. The Deployment is named differently from the variant, as it
+// is in a KEDA-discovered fleet: a lookup by the wrong name finds nothing.
+func (f *shareFleet) scaleTargets() map[string]scaletarget.ScaleTargetAccessor {
+	out := map[string]scaletarget.ScaleTargetAccessor{}
 	for _, id := range []string{"A", "B", "C"} {
-		v := id + "-v"
+		dep := id + "-decode"
 		n := int32(f.current[id])
 		d := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: v},
+			ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: dep},
 			Spec: appsv1.DeploymentSpec{
 				Replicas: &n,
-				Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": v}}},
+				Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": dep}}},
 			},
 		}
-		out["ns/"+id] = map[string]scaletarget.ScaleTargetAccessor{v: scaletarget.NewDeploymentAccessor(d)}
+		out["ns/"+id+"-v"] = scaletarget.NewDeploymentAccessor(d)
 	}
 	return out
 }
@@ -80,9 +83,9 @@ func sharePods(t *testing.T, f *shareFleet) client.Client {
 		for i := range f.current[id] {
 			objs = append(objs, &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: fmt.Sprintf("%s-v-%d", id, i),
-					Labels: map[string]string{"app": id + "-v", appsv1.DefaultDeploymentUniqueLabelKey: "h1"},
+					Labels: map[string]string{"app": id + "-decode", appsv1.DefaultDeploymentUniqueLabelKey: "h1"},
 					OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet",
-						Name: id + "-v-h1", UID: "rs", Controller: ptr.To(true)}}},
+						Name: id + "-decode-h1", UID: "rs", Controller: ptr.To(true)}}},
 				Spec: corev1.PodSpec{NodeName: "n1"},
 				Status: corev1.PodStatus{Phase: corev1.PodRunning,
 					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
@@ -150,7 +153,7 @@ func TestUtilizationShareActuatesScaleDownFirst(t *testing.T) {
 		t.Fatalf("want %d marked donor pods, got %d", started, len(marked))
 	}
 	for _, p := range marked {
-		if p.Labels["app"] != "A-v" || p.Annotations[podDeletionCostAnnotation] != donorDeletionCost {
+		if p.Labels["app"] != "A-decode" || p.Annotations[podDeletionCostAnnotation] != donorDeletionCost {
 			t.Errorf("pod %s: want an A pod at deletion cost %s, got app=%s cost=%q",
 				p.Name, donorDeletionCost, p.Labels["app"], p.Annotations[podDeletionCostAnnotation])
 		}
@@ -577,7 +580,7 @@ func TestUtilizationShareRefusesADonorWithANotReadyPod(t *testing.T) {
 		}
 	}
 	for _, m := range markedPods(t, c) {
-		if m.Labels["app"] == "A-v" {
+		if m.Labels["app"] == "A-decode" {
 			t.Fatalf("A pod %s left marked", m.Name)
 		}
 	}

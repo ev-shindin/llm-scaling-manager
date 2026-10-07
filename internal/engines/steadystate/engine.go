@@ -1157,6 +1157,12 @@ func (e *Engine) optimizeV2(
 	// applyScaleToZeroEnforcement needs them to gate the enforcer. Captured here
 	// because data.scaleTargets is only in scope during this collection loop.
 	modelScaleTargets := make(map[string]map[string]scaletarget.ScaleTargetAccessor)
+	// variantScaleTargets is the same accessors keyed by namespace/variant, for
+	// the utilization-share optimizer, which plans variants. The model's map
+	// above is keyed by scale-target name, and a variant is rarely named after
+	// its Deployment (a KEDA-discovered variant is named after its
+	// ScaledObject).
+	variantScaleTargets := make(map[string]scaletarget.ScaleTargetAccessor)
 
 	for groupKey, modelVAs := range modelGroups {
 		modelID := modelVAs[0].Spec.ModelID
@@ -1203,6 +1209,12 @@ func (e *Engine) optimizeV2(
 		requests = append(requests, *req)
 		modelReplicaMetrics[modelID] = data.replicaMetrics
 		modelScaleTargets[utils.GetNamespacedKey(namespace, modelID)] = data.scaleTargets
+		for i := range modelVAs {
+			va := &modelVAs[i]
+			if t, ok := data.scaleTargets[utils.GetNamespacedKey(va.Namespace, va.GetScaleTargetName())]; ok {
+				variantScaleTargets[utils.GetNamespacedKey(va.Namespace, va.Name)] = t
+			}
+		}
 	}
 
 	if len(requests) == 0 {
@@ -1270,7 +1282,7 @@ func (e *Engine) optimizeV2(
 	if g, ok := optimizer.(*allocation.GreedyByScoreOptimizer); ok {
 		g.Rescale = e.resolveRescaleFlags(requests)
 	}
-	allDecisions := e.decideV2(ctx, optimizer, requests, constraints, modelScaleTargets)
+	allDecisions := e.decideV2(ctx, optimizer, requests, constraints, variantScaleTargets)
 	logScalingDecisions(ctx, requests, allDecisions)
 
 	logger.Info("V2 optimizer produced decisions",

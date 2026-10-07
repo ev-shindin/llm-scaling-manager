@@ -65,7 +65,7 @@ func (st *utilizationShareState) resetActuation() {
 // cycle's scale targets by namespace/model, then variant.
 func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []allocation.ModelScalingRequest,
 	constraints []*allocation.ResourceConstraints,
-	scaleTargets map[string]map[string]scaletarget.ScaleTargetAccessor) (overrides map[string]utilizationShareOverride) {
+	scaleTargets map[string]scaletarget.ScaleTargetAccessor) (overrides map[string]utilizationShareOverride) {
 	logger := ctrl.LoggerFrom(ctx).WithName("utilization-share")
 	st := &e.utilizationShare
 	// The optimizer must never cost the cycle it rides on: a bug here loses

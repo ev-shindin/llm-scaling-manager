@@ -79,7 +79,7 @@ func shareGroupKey(g allocation.ShareGroup) string { return g.AcceleratorType + 
 // namespace/model, then variant.
 func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger, us config.UtilizationShare,
 	g allocation.ShareGroup, ev allocation.ShareEvaluation,
-	scaleTargets map[string]map[string]scaletarget.ScaleTargetAccessor, now time.Time) shareActuation {
+	scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) shareActuation {
 	st := &e.utilizationShare
 	if st.ledgers == nil {
 		st.ledgers = map[string]*allocation.ShareLedger{}
@@ -95,8 +95,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	}
 
 	accessor := func(role, variant string) scaletarget.ScaleTargetAccessor {
-		o := g.Origins[role]
-		return scaleTargets[utils.GetNamespacedKey(o.Namespace, o.ModelID)][variant]
+		return scaleTargets[utils.GetNamespacedKey(g.Origins[role].Namespace, variant)]
 	}
 	variantKey := func(role, variant string) string {
 		return utils.GetNamespacedKey(g.Origins[role].Namespace, variant)
@@ -637,7 +636,7 @@ func (e *Engine) reanchorShareTargets(logger logr.Logger, l *allocation.ShareLed
 // variants it plans and today's decisions keep the rest.
 func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptimizer,
 	requests []allocation.ModelScalingRequest, constraints []*allocation.ResourceConstraints,
-	scaleTargets map[string]map[string]scaletarget.ScaleTargetAccessor) []domain.VariantDecision {
+	scaleTargets map[string]scaletarget.ScaleTargetAccessor) []domain.VariantDecision {
 	decisions := optimizer.Optimize(ctx, requests, constraints)
 	if overrides := e.evaluateUtilizationShare(ctx, requests, constraints, scaleTargets); len(overrides) > 0 {
 		applied := applyUtilizationShareOverrides(decisions, overrides)
