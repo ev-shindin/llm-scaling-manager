@@ -32,8 +32,8 @@ func shareReq(id, ns string, demand float64, current int) ModelScalingRequest {
 
 func ptrInt(v int) *int { return &v }
 
-func weightsByModel(w map[string]float64) func(ModelScalingRequest) float64 {
-	return func(req ModelScalingRequest) float64 {
+func weightsByModel(w map[string]float64) func(ModelScalingRequest, bool) float64 {
+	return func(req ModelScalingRequest, _ bool) float64 {
 		if v, ok := w[req.ModelID]; ok {
 			return v
 		}

@@ -33,6 +33,11 @@ type SharePlanInput struct {
 	Thresholds map[string]float64
 	Budget     int
 	Tolerance  float64
+	// Give and Grow, when set, name the variant each role gives from and grows,
+	// and size the move by their replicas (ShareGroup.Give, ShareGroup.Grow). A
+	// role absent from a non-nil map cannot give, or cannot grow. Nil maps size
+	// every move by the role's ReplicaGPUs.
+	Give, Grow map[string]ShareVariant
 }
 
 // SharePlan is what one planning cycle decided.
@@ -137,6 +142,20 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 			}
 			rr, dr := byKey[rc], byKey[dn]
 			g, gd := max(rr.ReplicaGPUs, 1), max(dr.ReplicaGPUs, 1)
+			if in.Grow != nil {
+				v, ok := in.Grow[rc]
+				if !ok {
+					continue
+				}
+				g = max(v.GPUs, 1)
+			}
+			if in.Give != nil {
+				v, ok := in.Give[dn]
+				if !ok {
+					continue
+				}
+				gd = max(v.GPUs, 1)
+			}
 			if gd < g {
 				continue // one donor pod must cover one receiver pod (§6.5)
 			}

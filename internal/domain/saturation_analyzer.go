@@ -250,6 +250,10 @@ type VariantReplicaState struct {
 	// StuckReplicas is how many of this variant's Pods are not Ready and not
 	// starting either. See domain.VariantCapacity.StuckReplicas.
 	StuckReplicas int
+	// HeldReplicas counts replicas holding GPUs, terminating ones included; see
+	// VariantMetadata.HeldReplicas. HeldKnown false means it could not be read.
+	HeldReplicas int
+	HeldKnown    bool
 	// GPUsPerReplica is the number of GPUs required per replica, extracted from
 	// the deployment's container resource requests (nvidia.com/gpu, amd.com/gpu, etc.).
 	// Defaults to 1 if no GPU requests are found.

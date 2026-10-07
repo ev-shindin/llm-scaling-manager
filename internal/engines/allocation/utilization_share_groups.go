@@ -15,6 +15,15 @@ import (
 // keeps free + held clear of integer overflow.
 const MaxShareBudgetGPUs = 1 << 20
 
+// ShareVariant is the variant of a role a transfer acts on.
+type ShareVariant struct {
+	Name string
+	// GPUs is one replica of it.
+	GPUs int
+	// Current is its replica count now.
+	Current int
+}
+
 // ShareRoleOrigin names the model and role a ShareRole was built from.
 type ShareRoleOrigin struct {
 	Namespace string
@@ -34,14 +43,23 @@ type ShareGroup struct {
 	// they come out of the budget exactly once.
 	Budget int
 	Roles  []ShareRole
-	// Committed is what each role holds now.
+	// Committed is the GPUs each role holds now: scheduled pods, terminating
+	// ones included (HeldReplicas), falling back to the replica count when the
+	// pods could not be listed. The ledger adjusts it for transfers in flight.
 	Committed map[string]int
+	// Give and Grow name the variant of each role that gives a replica (the
+	// most expensive with replicas above its floor) and the one that grows (the
+	// cheapest with room below its ceiling), as rescale reclaims and fills.
+	// A role absent from Give has nothing it can give.
+	Give, Grow map[string]ShareVariant
 	// Thresholds is each role's scale-up threshold k_r.
 	Thresholds map[string]float64
 	Origins    map[string]ShareRoleOrigin
 	// Frozen lists the models of this group that were not planned this cycle,
 	// as "namespace/model: why".
 	Frozen []string
+
+	listed int // the planned roles' GPUs by replica count, for the budget
 }
 
 // ShareGroupOptions controls which groups BuildShareGroups returns.
@@ -54,8 +72,10 @@ type ShareGroupOptions struct {
 	// NamespaceEnabled reports whether a namespace-quota group takes part. Nil
 	// means every namespace does.
 	NamespaceEnabled func(namespace string) bool
-	// Weight resolves a request's model weight.
-	Weight func(req ModelScalingRequest) float64
+	// Weight resolves a request's model weight. clusterScope is true when the
+	// model is planned in the cluster group, where models of different
+	// namespaces share one budget.
+	Weight func(req ModelScalingRequest, clusterScope bool) float64
 }
 
 // BuildShareGroups turns one cycle's requests and constraints into the groups
@@ -83,6 +103,8 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 				AcceleratorType: acc,
 				Scope:           scope,
 				Committed:       map[string]int{},
+				Give:            map[string]ShareVariant{},
+				Grow:            map[string]ShareVariant{},
 				Thresholds:      map[string]float64{},
 				Origins:         map[string]ShareRoleOrigin{},
 			}
@@ -112,7 +134,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		}
 		g := group(acc, scope)
 
-		roles, why := shareRolesForRequest(req, records, acc, opts.Weight)
+		roles, why := shareRolesForRequest(req, records, acc, opts.Weight, scope == "")
 		if why != "" {
 			g.Frozen = append(g.Frozen, modelKey(req)+": "+why)
 			continue
@@ -121,9 +143,17 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		for _, r := range roles {
 			o := ShareRoleOrigin{Namespace: req.Namespace, ModelID: req.ModelID, Role: r.role}
 			g.Roles = append(g.Roles, r.ShareRole)
-			g.Committed[r.Key] = roleCurrentGPUs(records, stateMap, acc, r.role)
+			g.Committed[r.Key] = roleHeldGPUs(records, stateMap, acc, r.role)
+			g.listed += roleCurrentGPUs(records, stateMap, acc, r.role)
 			g.Thresholds[r.Key] = req.CompositeSignal.ScaleUpThreshold
 			g.Origins[r.Key] = o
+			vs := variantsForRole(variantsOnType(records, acc), r.role)
+			if give, ok := shareGiveVariant(vs, stateMap); ok {
+				g.Give[r.Key] = give
+			}
+			if grow, ok := shareGrowVariant(vs, stateMap); ok {
+				g.Grow[r.Key] = grow
+			}
 		}
 	}
 
@@ -139,14 +169,14 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		if !ok || free < 0 || free > MaxShareBudgetGPUs {
 			continue // unlimited, unknown, or no real bound: nothing to "use all of" (proposal §7.3)
 		}
-		held := 0
-		for _, c := range g.Committed {
-			held += c
-		}
-		if held > MaxShareBudgetGPUs-free {
+		// The limiter's free figure is net of what WVA's variants hold by
+		// replica count, so the budget adds back that count -- not the held
+		// figure, which also counts terminating pods. Those then show up as
+		// committed and not idle, which is the point of counting them.
+		if g.listed > MaxShareBudgetGPUs-free {
 			continue
 		}
-		g.Budget = free + held
+		g.Budget = free + g.listed
 		slices.SortFunc(g.Roles, func(a, b ShareRole) int { return cmp.Compare(a.Key, b.Key) })
 		slices.Sort(g.Frozen)
 		out = append(out, *g)
@@ -164,7 +194,7 @@ type shareRoleInput struct {
 // sized: equalizing one role against a guess about the other is the failure
 // the freeze exists to prevent.
 func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc string,
-	weight func(ModelScalingRequest) float64) ([]shareRoleInput, string) {
+	weight func(ModelScalingRequest, bool) float64, clusterScope bool) ([]shareRoleInput, string) {
 	sig := req.CompositeSignal
 	switch {
 	case sig.Result == nil:
@@ -176,7 +206,7 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 	}
 	w := 1.0
 	if weight != nil {
-		w = weight(req)
+		w = weight(req, clusterScope)
 	}
 	stateMap := buildStateMap(req.VariantStates)
 	var out []shareRoleInput
@@ -234,4 +264,51 @@ func roleCeilingGPUs(variants []variantRecord, stateMap map[string]domain.Varian
 		ceiling += *st.MaxReplicas * gpusPerReplicaFromState(stateMap, vc.VariantName)
 	}
 	return ceiling
+}
+
+// roleHeldGPUs sums the GPUs a role's variants on accType hold: HeldReplicas
+// where the pods were listed, CurrentReplicas where they could not be.
+func roleHeldGPUs(records []variantRecord, stateMap map[string]domain.VariantReplicaState, accType, role string) int {
+	total := 0
+	for _, vc := range variantsForRole(variantsOnType(records, accType), role) {
+		st := stateMap[vc.VariantName]
+		n := st.CurrentReplicas
+		if st.HeldKnown {
+			n = st.HeldReplicas
+		}
+		total += n * gpusPerReplicaFromState(stateMap, vc.VariantName)
+	}
+	return total
+}
+
+// shareGiveVariant picks the variant a role gives a replica from: the least
+// cost-efficient one that is above its floor.
+func shareGiveVariant(vs []variantRecord, stateMap map[string]domain.VariantReplicaState) (ShareVariant, bool) {
+	sorted := sortByCostEfficiencyAsc(vs)
+	for i := len(sorted) - 1; i >= 0; i-- {
+		st := stateMap[sorted[i].VariantName]
+		floor := 0
+		if st.MinReplicas != nil {
+			floor = *st.MinReplicas
+		}
+		if st.CurrentReplicas > floor {
+			return ShareVariant{Name: sorted[i].VariantName, GPUs: gpusPerReplicaFromState(stateMap, sorted[i].VariantName),
+				Current: st.CurrentReplicas}, true
+		}
+	}
+	return ShareVariant{}, false
+}
+
+// shareGrowVariant picks the variant a role grows: the most cost-efficient one
+// with room below its ceiling.
+func shareGrowVariant(vs []variantRecord, stateMap map[string]domain.VariantReplicaState) (ShareVariant, bool) {
+	for _, vc := range sortByCostEfficiencyAsc(vs) {
+		st := stateMap[vc.VariantName]
+		if st.MaxReplicas != nil && *st.MaxReplicas > 0 && st.CurrentReplicas >= *st.MaxReplicas {
+			continue
+		}
+		return ShareVariant{Name: vc.VariantName, GPUs: gpusPerReplicaFromState(stateMap, vc.VariantName),
+			Current: st.CurrentReplicas}, true
+	}
+	return ShareVariant{}, false
 }

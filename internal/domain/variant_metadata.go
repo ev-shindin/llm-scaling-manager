@@ -48,6 +48,14 @@ type VariantMetadata struct {
 	DesiredReplicas int
 	ReadyReplicas   int
 	PendingReplicas int
+	// HeldReplicas counts the replicas holding GPUs: scheduled and not
+	// finished, TERMINATING ones included -- a pod being deleted keeps its GPUs
+	// through its drain and grace period, which CurrentReplicas
+	// (status.replicas) stops counting the moment deletion starts. HeldKnown is
+	// false when the pods could not be listed; consumers then fall back to
+	// CurrentReplicas.
+	HeldReplicas int
+	HeldKnown    bool
 	// MinReplicas/MaxReplicas are the scaling bounds; nil means unset.
 	MinReplicas *int
 	MaxReplicas *int
@@ -69,6 +77,8 @@ func (m VariantMetadata) ToReplicaState() VariantReplicaState {
 		PendingReplicas: m.PendingReplicas,
 		PendingAges:     m.PendingAges,
 		StuckReplicas:   m.StuckReplicas,
+		HeldReplicas:    m.HeldReplicas,
+		HeldKnown:       m.HeldKnown,
 		GPUsPerReplica:  m.GPUsPerReplica,
 		Role:            m.Role,
 		AcceleratorName: m.AcceleratorName,

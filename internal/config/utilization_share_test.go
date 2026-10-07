@@ -331,3 +331,13 @@ optimizer:
 		Expect(selected).To(BeFalse())
 	})
 })
+
+var _ = Describe("Config.NamespaceHasLocalPolicy", func() {
+	It("is true only for a namespace with its own scaling-policy map", func() {
+		c := NewTestConfig()
+		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: parsePolicy(quotaLimiters)})
+		c.UpdateScalingPolicyConfigForNamespace("tenant-a", map[string]ScalingPolicy{GlobalDefaultsKey: {WeightClass: "critical"}})
+		Expect(c.NamespaceHasLocalPolicy("tenant-a")).To(BeTrue())
+		Expect(c.NamespaceHasLocalPolicy("tenant-b")).To(BeFalse())
+	})
+})

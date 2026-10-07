@@ -339,3 +339,16 @@ func (c *Config) IgnoredOptimizerNamespaces() []string {
 	sort.Strings(out)
 	return out
 }
+
+// NamespaceHasLocalPolicy reports whether namespace has its own scaling-policy
+// map. Such a map replaces the global one for that namespace's models, so a
+// weight resolved there was written by whoever owns the namespace -- on a
+// cluster-scoped install, a tenant. The utilization-share optimizer does not
+// honor such a weight in the cluster group, where tenants share one budget
+// (proposal §8.2).
+// Thread-safe.
+func (c *Config) NamespaceHasLocalPolicy(namespace string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.saturation.namespaceConfigs[namespace]) > 0
+}
