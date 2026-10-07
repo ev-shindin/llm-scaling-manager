@@ -1886,6 +1886,26 @@ optimizer every cycle (§6.6).
        no more than its floor. It does not also require the role to be out
        of band: the continuous targets already absorb floors, so a role whose
        GPUs are all pinned elsewhere sits in band at its shortfall.
+     - donor sets without node information (section 6.5), the half that is
+       valid everywhere:
+       - When no single donor replica can host a receiver replica, the
+         planner funds each receiver pod, largest first, by a donor pod of
+         its own at least its size. It first uses a spare pod of a replica
+         already in the set, then takes a new replica from the donor with the
+         most to spare, smallest fitting pod.
+       - Several smaller pods are never added up, so a receiver needing one
+         16-GPU pod is not funded by two 8-GPU donors.
+       - The whole set passes section 6.2 admission, with the holds, the pace
+         and the concurrency limit applied to every member.
+       - A set is one primary transfer, which carries the receiver, plus
+         contributors that carry none, linked by `SetID`, which is also
+         written into the donor marks.
+       - The receiver is raised only once every member has released.
+         Contributors' released GPUs are promised to it meanwhile.
+       - Cancelling the primary cancels the contributors that still can be.
+       - A set starts whole or not at all: if one member's pod cannot be
+         marked, the whole set is dropped.
+       - Measured by `wva_utilization_share_donors_per_transfer`.
      - wake claims (section 6.3), through one mutex-guarded store in
        `internal/decision`:
        - Each pass, every active group publishes the transfers still
@@ -1940,10 +1960,15 @@ optimizer every cycle (§6.6).
        `_release_seconds` histogram.
 
    **Not yet built in stage 2:**
-   - donor *sets* across several donor replicas, with the per-node check
-     (§6.5). A transfer has one donor replica today, so a receiver larger
-     than every donor replica's pods is not funded at all.
-   - `_donors_per_transfer` (donor sets, above); and the `release-taken` and
+   - the per-node half of donor sets (section 6.5):
+     - holes made of a node's free GPUs plus donor pods on that node, which
+       needs the per-node usage aggregation of section 11;
+     - the topology-domain constraint of an LWS receiver;
+     - observing a release per node;
+     - checking which pod actually went.
+     Without node information, the half that is valid everywhere is built
+     (see above).
+   - the `release-taken` and
      `release-shape-mismatch` reasons, which need the per-node view of
      section 6.5. A fill timeout is counted (`outcome="fill-timeout"`) but
      not yet attributed.

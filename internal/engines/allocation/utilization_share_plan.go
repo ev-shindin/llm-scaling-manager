@@ -128,6 +128,14 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 		receiverFine := float64(receiverWithout) > cont[t.Receiver]+shareTol(cont[t.Receiver], rc, in.Tolerance)
 		if (donorShort || receiverFine) && l.Cancel(t.ID, now, tm) {
 			plan.Cancelled = append(plan.Cancelled, t.ID)
+			// A set's contributors go with its primary, while they still can.
+			if t.IsSetPrimary() {
+				for _, m := range l.Transfers() {
+					if m.SetID == t.ID && l.Cancel(m.ID, now, tm) {
+						plan.Cancelled = append(plan.Cancelled, m.ID)
+					}
+				}
+			}
 			committed = l.Committed(in.Held)
 		}
 	}
@@ -283,6 +291,20 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 			moved[rc]++
 			funded = true
 		}
+		if !funded && candidates > 0 && misfits == candidates && in.Grow != nil {
+			// No single donor replica fits. Several may (§6.5).
+			if set := shareDonorSet(l, in, rc, donors, work, moved, byKey, cont, z, isConfirmed, now, tm); len(set) > 0 {
+				started := startShareSet(l, in, rc, set, float64(work[rc]) < byKey[rc].Need, now, tm)
+				plan.Started = append(plan.Started, started...)
+				for _, d := range set {
+					work[d.role] -= d.gpus
+					moved[d.role]++
+				}
+				work[rc] += max(in.Grow[rc].GPUs, 1)
+				moved[rc]++
+				funded = true
+			}
+		}
 		if !funded && isConfirmed(rc) && actionable[rc] && candidates > 0 && misfits == candidates {
 			plan.Unfunded[rc] = ShareUnfundedNoCompatibleDonor
 		}
@@ -294,4 +316,124 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 // configured tolerance of the target, never under half a replica.
 func shareTol(target float64, r ShareRole, tolerance float64) float64 {
 	return math.Max(tolerance*target, 0.5*float64(max(r.ReplicaGPUs, 1)))
+}
+
+// shareDonor is one donor replica in a set.
+type shareDonor struct {
+	role, variant string
+	pods          []int
+	gpus          int
+}
+
+// shareDonorSet looks for donor replicas that together fund one replica of
+// receiver rc (§6.5): each receiver pod, largest first, by a donor pod of its
+// own at least its size -- first a spare pod of a replica already in the set,
+// then a new replica from the donor with the most to spare. Without pod shapes
+// it finds nothing: several replicas' GPUs are never added up. The whole set
+// must pass §6.2 admission: the lowest score among the receiver and every
+// donor rises, no donor leaves its band or goes below its floor, and the holds,
+// the pace and the concurrency limit hold for every member.
+func shareDonorSet(l *ShareLedger, in SharePlanInput, rc string, donors []string, work, moved map[string]int,
+	byKey map[string]ShareRole, cont map[string]float64, z func(string, int) float64,
+	isConfirmed func(string) bool, now time.Time, tm ShareTimings) []shareDonor {
+	grow, ok := in.Grow[rc]
+	if !ok || len(grow.PodGPUs) == 0 || in.Give == nil {
+		return nil
+	}
+	if l.ReceivingHeld(rc, now, tm) || moved[rc] >= ShareMaxReplicasPerCycle {
+		return nil
+	}
+	need := slices.Sorted(slices.Values(grow.PodGPUs))
+	slices.Reverse(need)
+
+	var set []shareDonor
+	spare := [][]int{} // per set member, its pods not yet assigned
+	taken := map[string]int{}
+	for _, p := range need {
+		// A spare pod of a replica already in the set: the smallest that fits.
+		bi, bj := -1, -1
+		for i := range spare {
+			for j, s := range spare[i] {
+				if s >= p && (bi < 0 || s < spare[bi][bj]) {
+					bi, bj = i, j
+				}
+			}
+		}
+		if bi >= 0 {
+			spare[bi] = slices.Delete(spare[bi], bj, bj+1)
+			continue
+		}
+		// A new replica, from the donor with the most to spare.
+		added := false
+		for _, dn := range donors {
+			give, ok := in.Give[dn]
+			if !ok || len(give.PodGPUs) == 0 || dn == rc {
+				continue
+			}
+			gd := max(give.GPUs, 1)
+			k := taken[dn] + 1
+			if moved[dn]+k > ShareMaxReplicasPerCycle || work[dn]-k*gd < byKey[dn].Floor || l.GivingHeld(dn, now, tm) {
+				continue
+			}
+			pods := slices.Sorted(slices.Values(give.PodGPUs))
+			j := slices.IndexFunc(pods, func(s int) bool { return s >= p })
+			if j < 0 {
+				continue
+			}
+			set = append(set, shareDonor{role: dn, variant: give.Name, pods: give.PodGPUs, gpus: gd})
+			spare = append(spare, slices.Delete(pods, j, j+1))
+			taken[dn]++
+			added = true
+			break
+		}
+		if !added {
+			return nil
+		}
+	}
+	if len(set) < 2 || l.InFlight()+len(set) > ShareMaxConcurrentTransfers {
+		return nil
+	}
+	// Admission over the whole set.
+	g := max(grow.GPUs, 1)
+	confirmed := isConfirmed(rc)
+	before, after := z(rc, work[rc]), z(rc, work[rc]+g)
+	for dn, k := range taken {
+		gd := max(in.Give[dn].GPUs, 1)
+		before = math.Min(before, z(dn, work[dn]))
+		after = math.Min(after, z(dn, work[dn]-k*gd))
+		left := float64(work[dn] - k*gd)
+		if !(left >= cont[dn] || ShareInBand(left, cont[dn], byKey[dn], in.Tolerance, in.Thresholds[dn])) {
+			return nil
+		}
+		confirmed = confirmed || isConfirmed(dn)
+	}
+	if !confirmed || !(after > before) {
+		return nil
+	}
+	return set
+}
+
+// startShareSet starts a donor set's transfers: the primary, carrying the
+// receiver replica, and one contributor per further donor replica, linked.
+func startShareSet(l *ShareLedger, in SharePlanInput, rc string, set []shareDonor, urgent bool,
+	now time.Time, tm ShareTimings) []ShareTransfer {
+	grow := in.Grow[rc]
+	primary := l.Start(ShareTransfer{
+		Donor: set[0].role, Receiver: rc, GPUs: max(grow.GPUs, 1), DonorGPUs: set[0].gpus,
+		DonorVariant: set[0].variant, ReceiverVariant: grow.Name, SetID: "pending", Urgent: urgent,
+	}, in.Held, now, tm)
+	ids := make([]string, 0, len(set)-1)
+	for _, d := range set[1:] {
+		c := l.Start(ShareTransfer{Donor: d.role, DonorGPUs: d.gpus, DonorVariant: d.variant, SetID: "pending"},
+			in.Held, now, tm)
+		ids = append(ids, c.ID)
+	}
+	l.LinkSet(primary.ID, ids...)
+	out := make([]ShareTransfer, 0, len(set))
+	for _, id := range append([]string{primary.ID}, ids...) {
+		if t, ok := l.Transfer(id); ok {
+			out = append(out, t)
+		}
+	}
+	return out
 }

@@ -365,3 +365,95 @@ var _ = Describe("Why a receiver is not funded (§9)", func() {
 		Expect(p.Unfunded).To(BeEmpty())
 	})
 })
+
+var _ = Describe("Donor sets (§6.5)", func() {
+	// B, far short, grows by one LWS replica of two 8-GPU pods. A and C each
+	// hold surplus in Deployment replicas of one 8-GPU pod: no single donor
+	// replica can host B's replica, two together can -- one pod each.
+	run := func(receiverPods []int, aFloor int) (SharePlan, *ShareLedger) {
+		roles := []ShareRole{
+			{Key: "A", Weight: 1, Need: 4, Floor: aFloor, Ceiling: 64, ReplicaGPUs: 8},
+			{Key: "B", Weight: 1, Need: 64, Ceiling: 64, ReplicaGPUs: 16},
+			{Key: "C", Weight: 1, Need: 4, Ceiling: 64, ReplicaGPUs: 8},
+		}
+		in := SharePlanInput{Roles: roles, Held: map[string]int{"A": 24, "B": 16, "C": 24},
+			Thresholds: map[string]float64{"A": 0.8, "B": 0.8, "C": 0.8}, Budget: 64, Tolerance: 0.15,
+			Give: map[string]ShareVariant{
+				"A": {Name: "a", GPUs: 8, PodGPUs: []int{8}},
+				"C": {Name: "c", GPUs: 8, PodGPUs: []int{8}},
+			},
+			Grow: map[string]ShareVariant{"B": {Name: "b", GPUs: 16, PodGPUs: receiverPods}},
+		}
+		l := NewShareLedger()
+		var p SharePlan
+		for i := range 3 {
+			if p = PlanShareTransfers(l, in, time.Unix(int64(30*i), 0), simTimings()); len(p.Started) > 0 {
+				break
+			}
+		}
+		return p, l
+	}
+
+	It("funds a two-pod receiver replica from two donor replicas, linked", func() {
+		p, _ := run([]int{8, 8}, 0)
+		Expect(p.Started).To(HaveLen(2))
+		primary, contributor := p.Started[0], p.Started[1]
+		Expect(primary.IsSetPrimary()).To(BeTrue())
+		Expect(primary.Receiver).To(Equal("B"))
+		Expect(primary.GPUs).To(Equal(16))
+		Expect(primary.DonorGPUs).To(Equal(8), "a set member gives one donor replica, not the receiver's size")
+		Expect(contributor.Receiver).To(BeEmpty())
+		Expect(contributor.SetID).To(Equal(primary.ID))
+	})
+
+	It("never adds up smaller donor pods into one larger hole (control)", func() {
+		p, _ := run([]int{16}, 0)
+		Expect(p.Started).To(BeEmpty())
+		Expect(p.Unfunded).To(HaveKeyWithValue("B", ShareUnfundedNoCompatibleDonor))
+	})
+
+	It("raises the receiver only when every member has released, promising what has", func() {
+		// A may give only one replica above its floor, so the set is A and C:
+		// two donors that release independently.
+		_, l := run([]int{8, 8}, 16)
+		var primary, contributor ShareTransfer
+		Expect(l.Transfers()).To(HaveLen(2))
+		for _, t := range l.Transfers() {
+			if t.IsSetPrimary() {
+				primary = t
+			} else {
+				contributor = t
+			}
+		}
+		held := map[string]int{"A": 24, "B": 16, "C": 24}
+		Expect(contributor.Donor).NotTo(Equal(primary.Donor))
+		held[contributor.Donor] -= 8
+		ends := l.Observe(held, time.Unix(200, 0), simTimings())
+		Expect(ends).To(HaveLen(1), "the contributor completes at its release")
+		p, _ := l.Transfer(primary.ID)
+		Expect(p.State).To(Equal(ShareReleasing), "the primary waits for its own donor")
+		Expect(l.Promised()).To(Equal(8), "the contributor's GPUs are promised to the receiver meanwhile")
+
+		held[primary.Donor] -= 8
+		l.Observe(held, time.Unix(230, 0), simTimings())
+		p, _ = l.Transfer(primary.ID)
+		Expect(p.State).To(Equal(ShareFilling))
+		Expect(l.Promised()).To(Equal(16))
+	})
+
+	It("keeps the primary waiting when its own donor releases first", func() {
+		_, l := run([]int{8, 8}, 16)
+		var primary ShareTransfer
+		for _, t := range l.Transfers() {
+			if t.IsSetPrimary() {
+				primary = t
+			}
+		}
+		held := map[string]int{"A": 24, "B": 16, "C": 24}
+		held[primary.Donor] -= 8
+		Expect(l.Observe(held, time.Unix(200, 0), simTimings())).To(BeEmpty())
+		p, _ := l.Transfer(primary.ID)
+		Expect(p.State).To(Equal(ShareReleasing), "one hole of two is not a replica")
+		Expect(l.Promised()).To(BeZero())
+	})
+})

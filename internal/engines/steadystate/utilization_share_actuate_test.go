@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -858,5 +859,62 @@ func TestUtilizationShareWakeClaimRedirectsATransfer(t *testing.T) {
 	o := se.cycle()
 	if want := 5 + started - 1; o["ns/B-v"].Target != want {
 		t.Fatalf("B = %d after the release, want %d: the claimed replica's GPUs went to the wake", o["ns/B-v"].Target, want)
+	}
+}
+
+// A receiver replica of two pods, when every donor replica has one: no single
+// donor can host it, and two are marked together as one donor set (section
+// 6.5). The receiver is raised only once BOTH have released -- one hole of two
+// is not a replica.
+func TestUtilizationShareFundsAReplicaFromADonorSet(t *testing.T) {
+	f := newShareFleet()
+	c := sharePods(t, f)
+	se := newShareEngine(t, f, c, time.Unix(0, 0))
+	requests := func() []allocation.ModelScalingRequest {
+		out := f.requests()
+		for i := range out {
+			st := &out[i].VariantStates[0]
+			if out[i].ModelID == "B" {
+				st.GPUsPerReplica, st.PodGPUs = 2, []int{1, 1}
+			} else {
+				st.PodGPUs = []int{1}
+			}
+		}
+		return out
+	}
+	cycle := func() map[string]utilizationShareOverride {
+		se.clock = se.clock.Add(30 * time.Second)
+		return se.e.evaluateUtilizationShare(se.ctx, requests(), fullQuota(), f.scaleTargets())
+	}
+	var marked []corev1.Pod
+	for range 20 {
+		cycle()
+		if marked = markedPods(t, c); len(marked) > 0 {
+			break
+		}
+	}
+	if len(marked) != 2 {
+		t.Fatalf("want two donor pods marked as one set, got %d", len(marked))
+	}
+	sets := map[string]bool{}
+	for _, p := range marked {
+		var m transferMark
+		if err := json.Unmarshal([]byte(p.Annotations[utilizationShareTransferAnnotation]), &m); err != nil || m.SetID == "" {
+			t.Fatalf("pod %s: mark carries no set: %q", p.Name, p.Annotations[utilizationShareTransferAnnotation])
+		}
+		sets[m.SetID] = true
+	}
+	if len(sets) != 1 {
+		t.Fatalf("want both marks in one set, got %v", sets)
+	}
+	donorOf := func(p corev1.Pod) string { return strings.TrimSuffix(p.Labels["app"], "-decode") }
+
+	f.current[donorOf(marked[0])]--
+	if o := cycle(); o["ns/B-v"].Target != 5 {
+		t.Fatalf("B raised to %d with one of its two holes open", o["ns/B-v"].Target)
+	}
+	f.current[donorOf(marked[1])]--
+	if o := cycle(); o["ns/B-v"].Target != 6 {
+		t.Fatalf("B = %d once both donors released, want 6", o["ns/B-v"].Target)
 	}
 }

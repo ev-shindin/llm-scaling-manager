@@ -68,6 +68,10 @@ const (
 	// none-releasing).
 	WVAUtilizationShareClaimsTotal = "wva_utilization_share_claims_total"
 
+	// WVAUtilizationShareDonorsPerTransfer is a histogram: the donor replicas
+	// that fund one receiver replica (section 6.5).
+	WVAUtilizationShareDonorsPerTransfer = "wva_utilization_share_donors_per_transfer"
+
 	// LabelParam names a derived timing; LabelSource is where its inputs came
 	// from.
 	LabelParam  = "param"

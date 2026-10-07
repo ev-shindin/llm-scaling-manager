@@ -27,6 +27,7 @@ var (
 	utilizationShareFloorExcess    *prometheus.GaugeVec
 	utilizationShareWithheld       *prometheus.CounterVec
 	utilizationShareClaims         *prometheus.CounterVec
+	utilizationShareDonorsPer      *prometheus.HistogramVec
 	utilizationShareEffective      *prometheus.GaugeVec
 	utilizationShareSwinging       *prometheus.GaugeVec
 	utilizationShareRelease        *prometheus.HistogramVec
@@ -86,6 +87,14 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		Help: "Utilization-share optimizer: scale-from-zero wake claims on releasing transfers, by outcome.",
 	}, append(slices.Clone(groupLabels), constants.LabelOutcome))
 	if err := registry.Register(utilizationShareClaims); err != nil {
+		return fmt.Errorf("failed to register utilization-share metric: %w", err)
+	}
+	utilizationShareDonorsPer = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    constants.WVAUtilizationShareDonorsPerTransfer,
+		Help:    "Utilization-share optimizer: donor replicas funding one receiver replica.",
+		Buckets: []float64{1, 2, 3, 4},
+	}, groupLabels)
+	if err := registry.Register(utilizationShareDonorsPer); err != nil {
 		return fmt.Errorf("failed to register utilization-share metric: %w", err)
 	}
 	utilizationShareReserveDebt = gauge(constants.WVAUtilizationShareReserveDebtGPUs,
@@ -315,4 +324,17 @@ func CountUtilizationShareClaim(acceleratorType, scope, outcome string) {
 		l[constants.LabelControllerInstance] = controllerInstance
 	}
 	utilizationShareClaims.With(l).Inc()
+}
+
+// ObserveUtilizationShareDonorsPerTransfer records how many donor replicas
+// fund one receiver replica.
+func ObserveUtilizationShareDonorsPerTransfer(acceleratorType, scope string, donors int) {
+	if utilizationShareDonorsPer == nil {
+		return
+	}
+	l := prometheus.Labels{constants.LabelAcceleratorType: acceleratorType, constants.LabelScope: scope}
+	if controllerInstance != "" {
+		l[constants.LabelControllerInstance] = controllerInstance
+	}
+	utilizationShareDonorsPer.With(l).Observe(float64(donors))
 }

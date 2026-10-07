@@ -52,6 +52,8 @@ type transferMark struct {
 	GPUs            int       `json:"gpus"`
 	DonorGPUs       int       `json:"donorGPUs"`
 	Started         time.Time `json:"started"`
+	// SetID links the members of a donor set (section 6.5).
+	SetID string `json:"setID,omitempty"`
 }
 
 // shareActuation is what one active cycle of a group did, for the caller to
@@ -175,7 +177,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		if t.Donor != "" {
 			metrics.ObserveUtilizationShareRelease(g.AcceleratorType, scope, now.Sub(t.Started))
 		}
-		if t.Donor != "" && t.Receiver == "" {
+		if t.Donor != "" && t.Receiver == "" && t.SetID == "" {
 			logger.Info("Utilization share: reserve refilled", "id", t.ID, "donor", t.Donor, "gpus", t.DonorGPUs)
 		}
 		if t.Donor != "" && t.ReceiverVariant != "" {
@@ -214,19 +216,37 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, string(allocation.ShareOutcomeCancelled), t.Urgent)
 		logger.Info("Utilization share: transfer cancelled", "id", id, "donor", t.Donor, "receiver", t.Receiver)
 	}
-	for _, t := range plan.Started {
-		pods, err := e.markDonorPods(ctx, t, accessor(t.Donor, t.DonorVariant), g.Origins[t.Donor].Namespace)
-		if err != nil {
-			l.Forget(t.ID)
-			e.unmarkDonorPods(ctx, logger, allocation.ShareTransfer{DonorPods: pods})
+	// A donor set (section 6.5) starts whole or not at all: a primary whose
+	// contributor could not be marked would raise its receiver into a hole
+	// that never fully opens.
+	for _, set := range shareStartedSets(plan.Started) {
+		marked := map[string][]string{}
+		var failed error
+		for _, t := range set {
+			pods, err := e.markDonorPods(ctx, t, accessor(t.Donor, t.DonorVariant), g.Origins[t.Donor].Namespace)
+			marked[t.ID] = pods
+			if err != nil {
+				failed = err
+				break
+			}
+		}
+		if failed != nil {
+			for _, t := range set {
+				l.Forget(t.ID)
+				e.unmarkDonorPods(ctx, logger, allocation.ShareTransfer{ID: t.ID, DonorPods: marked[t.ID]})
+			}
 			logger.Info("WARNING: utilization share could not mark a donor pod; transfer not started",
-				"id", t.ID, "donor", t.Donor, "error", err.Error())
+				"id", set[0].ID, "donors", len(set), "error", failed.Error())
 			continue
 		}
-		l.ConfirmStarted(t.ID, pods)
-		st.desired[variantKey(t.Donor, t.DonorVariant)]--
-		logger.Info("Utilization share: transfer started", "id", t.ID, "donor", t.Donor, "receiver", t.Receiver,
-			"donorVariant", t.DonorVariant, "receiverVariant", t.ReceiverVariant, "urgent", t.Urgent, "pods", pods)
+		metrics.ObserveUtilizationShareDonorsPerTransfer(g.AcceleratorType, scope, len(set))
+		for _, t := range set {
+			l.ConfirmStarted(t.ID, marked[t.ID])
+			st.desired[variantKey(t.Donor, t.DonorVariant)]--
+			logger.Info("Utilization share: transfer started", "id", t.ID, "set", t.SetID, "donor", t.Donor,
+				"receiver", t.Receiver, "donorVariant", t.DonorVariant, "receiverVariant", t.ReceiverVariant,
+				"urgent", t.Urgent, "pods", marked[t.ID])
+		}
 	}
 
 	e.fillIdleShare(logger, l, g, ev, held, variantKey, now, tm)
@@ -426,7 +446,7 @@ func (e *Engine) markDonorPods(ctx context.Context, t allocation.ShareTransfer,
 		pods = pods[:1]
 	}
 	raw, err := json.Marshal(transferMark{ID: t.ID, Donor: t.Donor, Receiver: t.Receiver, DonorVariant: t.DonorVariant,
-		ReceiverVariant: t.ReceiverVariant, GPUs: t.GPUs, DonorGPUs: t.DonorGPUs, Started: t.Started})
+		ReceiverVariant: t.ReceiverVariant, GPUs: t.GPUs, DonorGPUs: t.DonorGPUs, Started: t.Started, SetID: t.SetID})
 	if err != nil {
 		return nil, err
 	}
@@ -558,7 +578,7 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 		l.Restore(allocation.ShareTransfer{
 			ID: m.ID, Donor: m.Donor, Receiver: m.Receiver, DonorVariant: m.DonorVariant,
 			ReceiverVariant: m.ReceiverVariant, GPUs: m.GPUs, DonorGPUs: m.DonorGPUs, Started: m.Started,
-			Deadline: m.Started.Add(tm.ReleaseTimeout), DonorPods: f.pods, DonorLowered: f.live,
+			Deadline: m.Started.Add(tm.ReleaseTimeout), DonorPods: f.pods, DonorLowered: f.live, SetID: m.SetID,
 		}, g.Committed[m.Donor])
 		if f.live {
 			e.utilizationShare.desired[variantKey(m.Donor, m.DonorVariant)]--
@@ -591,7 +611,10 @@ func validTransferMark(raw string, m *transferMark, role string, give allocation
 		return ""
 	case !ok || m.Receiver == role || m.ReceiverVariant != grow.Name:
 		return "receiver is not a variant of this group that can grow"
-	case m.GPUs != max(grow.GPUs, 1) || m.DonorGPUs != max(give.GPUs, 1, m.GPUs):
+	case m.GPUs != max(grow.GPUs, 1) || (m.SetID == "" && m.DonorGPUs != max(give.GPUs, 1, m.GPUs)) ||
+		(m.SetID != "" && m.DonorGPUs != max(give.GPUs, 1)):
+		// A single donor gives at least the receiver replica; a set member
+		// gives one donor replica of several.
 		return "replica sizes do not match the variants"
 	case m.Started.After(now):
 		return "starts in the future"
@@ -839,4 +862,38 @@ func (e *Engine) remarkDonorPods(ctx context.Context, logger logr.Logger, l *all
 			logger.Info("WARNING: could not re-mark a donor pod", "pod", key, "error", err.Error())
 		}
 	}
+}
+
+// shareStartedSets groups this cycle's started transfers into what must start
+// together: each donor set's members, primary first, and each single transfer
+// alone.
+func shareStartedSets(started []allocation.ShareTransfer) [][]allocation.ShareTransfer {
+	var out [][]allocation.ShareTransfer
+	index := map[string]int{}
+	for _, t := range started {
+		if t.SetID == "" {
+			out = append(out, []allocation.ShareTransfer{t})
+			continue
+		}
+		i, ok := index[t.SetID]
+		if !ok {
+			i = len(out)
+			index[t.SetID] = i
+			out = append(out, nil)
+		}
+		out[i] = append(out[i], t)
+	}
+	for _, set := range out {
+		slices.SortStableFunc(set, func(a, b allocation.ShareTransfer) int {
+			return cmp.Compare(boolInt(!a.IsSetPrimary()), boolInt(!b.IsSetPrimary()))
+		})
+	}
+	return out
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

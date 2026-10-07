@@ -72,6 +72,12 @@ type ShareTransfer struct {
 	Entitled bool
 	// Urgent receivers are below their need (§6.4).
 	Urgent bool
+	// SetID links the transfers of one donor set (§6.5): several donor
+	// replicas funding one receiver replica, each receiver pod by a donor pod
+	// of its own. The primary carries the receiver and its ID is the set's;
+	// the contributors carry no receiver. The receiver is raised only when
+	// every member has released. Empty for a single-donor transfer.
+	SetID string
 
 	State   ShareTransferState
 	Started time.Time
@@ -81,7 +87,13 @@ type ShareTransfer struct {
 	// started and the receiver's when it entered Filling; release and fill are
 	// observed against them.
 	donorBase, receiverBase int
+	// setReleased is, on a set's primary, the GPUs its contributors have
+	// released while it still waits: promised to its receiver.
+	setReleased int
 }
+
+// IsSetPrimary reports whether t carries a donor set's receiver.
+func (t ShareTransfer) IsSetPrimary() bool { return t.SetID != "" && t.SetID == t.ID }
 
 // ShareTransferEnd records a transfer that left the ledger this cycle.
 type ShareTransferEnd struct {
@@ -217,7 +229,7 @@ func (l *ShareLedger) StartFill(receiver, variant string, gpus int, held map[str
 // after a restart (§6.3). heldDonor is what the donor holds now; its marked
 // pods still hold their GPUs, so the release is observed against that.
 func (l *ShareLedger) Restore(t ShareTransfer, heldDonor int) {
-	if t.DonorGPUs < t.GPUs {
+	if t.SetID == "" && t.DonorGPUs < t.GPUs {
 		t.DonorGPUs = t.GPUs
 	}
 	t.State = ShareReleasing
@@ -261,8 +273,11 @@ func (l *ShareLedger) Committed(held map[string]int) map[string]int {
 func (l *ShareLedger) Promised() int {
 	p := 0
 	for _, t := range l.transfers {
-		if t.State == ShareFilling {
+		switch t.State {
+		case ShareFilling:
 			p += t.GPUs
+		case ShareReleasing:
+			p += t.setReleased
 		}
 	}
 	return p
@@ -272,8 +287,8 @@ func (l *ShareLedger) Promised() int {
 func (l *ShareLedger) Start(t ShareTransfer, held map[string]int, now time.Time, tm ShareTimings) ShareTransfer {
 	l.nextID++
 	t.ID = fmt.Sprintf("%s-t%d", l.incarnation, l.nextID)
-	if t.DonorGPUs < t.GPUs {
-		t.DonorGPUs = t.GPUs
+	if t.SetID == "" && t.DonorGPUs < t.GPUs {
+		t.DonorGPUs = t.GPUs // a set member gives one donor replica of several
 	}
 	t.State = ShareReleasing
 	t.Started = now
@@ -292,9 +307,31 @@ func (l *ShareLedger) Start(t ShareTransfer, held map[string]int, now time.Time,
 		u.got, u.hadGot = l.lastGot[t.Receiver]
 		l.undo[t.ID] = u
 		l.recordMove(t.Donor, false, now, tm)
-		l.recordMove(t.Receiver, true, now, tm)
+		if t.Receiver != "" {
+			l.recordMove(t.Receiver, true, now, tm)
+		}
 	}
 	return t
+}
+
+// LinkSet makes primary the receiver-carrying member of a donor set and
+// contributors its other members (§6.5).
+func (l *ShareLedger) LinkSet(primary string, contributors ...string) {
+	for _, t := range l.transfers {
+		if t.ID == primary || slices.Contains(contributors, t.ID) {
+			t.SetID = primary
+		}
+	}
+}
+
+// Transfer returns the transfer with that ID.
+func (l *ShareLedger) Transfer(id string) (ShareTransfer, bool) {
+	for _, t := range l.transfers {
+		if t.ID == id {
+			return *t, true
+		}
+	}
+	return ShareTransfer{}, false
 }
 
 // Cancel removes a transfer that is still Releasing and inside the window, so
@@ -327,9 +364,12 @@ func (l *ShareLedger) Cancel(id string, now time.Time, tm ShareTimings) bool {
 func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTimings) []ShareTransferEnd {
 	var ended []ShareTransferEnd
 
-	// Releasing -> Filling, per donor in start order.
+	// Releasing -> Filling, per donor in start order. A set's primary waits
+	// until every contributor has released too: its receiver is raised only
+	// when the whole set's holes are open.
 	given := map[string]int{}
 	base := map[string]int{}
+	releasable := map[*ShareTransfer]bool{}
 	for _, t := range l.transfers {
 		if t.State != ShareReleasing || t.Donor == "" {
 			continue
@@ -338,18 +378,35 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 			base[t.Donor] = t.donorBase
 		}
 		given[t.Donor] += t.DonorGPUs
-		if held[t.Donor] <= base[t.Donor]-given[t.Donor] {
-			l.releases = append(l.releases, now.Sub(t.Started))
-			if len(l.releases) > shareReleaseSamples {
-				l.releases = l.releases[len(l.releases)-shareReleaseSamples:]
-			}
-			t.State = ShareFilling
-			t.Deadline = now.Add(tm.FillTimeout)
-			t.receiverBase = held[t.Receiver]
-			l.released = append(l.released, *t)
-			delete(l.aborts, t.Donor)
-			delete(l.giveAfter, t.Donor)
+		releasable[t] = held[t.Donor] <= base[t.Donor]-given[t.Donor]
+	}
+	waiting := map[string]bool{} // set IDs with a contributor not yet released
+	for t, ok := range releasable {
+		if !ok && t.SetID != "" && !t.IsSetPrimary() {
+			waiting[t.SetID] = true
 		}
+	}
+	for _, t := range l.transfers {
+		if !releasable[t] || (t.IsSetPrimary() && waiting[t.ID]) {
+			continue
+		}
+		if t.SetID != "" && !t.IsSetPrimary() {
+			for _, p := range l.transfers {
+				if p.ID == t.SetID && p.State == ShareReleasing {
+					p.setReleased += t.DonorGPUs
+				}
+			}
+		}
+		l.releases = append(l.releases, now.Sub(t.Started))
+		if len(l.releases) > shareReleaseSamples {
+			l.releases = l.releases[len(l.releases)-shareReleaseSamples:]
+		}
+		t.State = ShareFilling
+		t.Deadline = now.Add(tm.FillTimeout)
+		t.receiverBase = held[t.Receiver]
+		l.released = append(l.released, *t)
+		delete(l.aborts, t.Donor)
+		delete(l.giveAfter, t.Donor)
 	}
 	// A transfer released this cycle measures its receiver from now; one that
 	// was already filling keeps its base. Filling -> Done, per receiver in start
