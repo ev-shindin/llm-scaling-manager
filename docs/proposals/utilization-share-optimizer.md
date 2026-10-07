@@ -1,6 +1,6 @@
 # Proposal: a utilization-share optimizer
 
-**Status:** design. Nothing here is built.
+**Status:** stage 1 (shadow) built; stages 2–3 are design. See §13.
 **Created:** 2026-10-05
 **Last Updated:** 2026-10-07
 
@@ -1594,6 +1594,8 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | --- | --- | --- |
 | `wva_utilization_share_headroom` | model, `role`, `exported_namespace` | `x_r`: the spike the role absorbs before scaling (negative = short) |
 | `wva_utilization_share_target_gpus` | model, `role`, `exported_namespace` | `Ĝ_r`, the continuous target the band is judged against, in GPUs |
+| `wva_utilization_share_actionable` | model, `role`, `exported_namespace` | 1 when the role is out of band and off its integer target — a move could fix it (§6.1) |
+| `wva_utilization_share_replicas_to_move` | `accelerator`, `scope` | replicas the integer target would move; in shadow mode, what would be planned |
 | `wva_utilization_share_withheld_total` | `accelerator`, `scope`, `reason` | transfers not planned: `reversal-hold` (§6.7 rule 4) / `not-actionable` (§6.1 step 4). The swing rule withholds nothing; it changes the need a role is planned on, reported by `wva_utilization_share_swinging` |
 | `wva_utilization_share_swinging` | model, `role`, `exported_namespace` | 1 while a role is planned on its mean need (§6.7 rule 5) |
 | `wva_utilization_share_actual` | model, `role`, `exported_namespace` | `u_r` |
@@ -1820,6 +1822,17 @@ optimizer every cycle (§6.6).
    would, and how large the transfers are, before anything is written. For P/D
    models it also records each role's headroom against its queue, the check
    that prefill's demand is not systematically under-read (§5.6).
+
+   **Built** in `internal/config/utilization_share.go` (the §8 surface),
+   `internal/engines/allocation/utilization_share_{target,groups}.go` (§5 and
+   §6.1), `internal/engines/steadystate/utilization_share_shadow.go` (the
+   per-cycle evaluation) and `internal/metrics/utilization_share_metrics.go`.
+   Two simplifications are deliberate, and both close in stage 2:
+   - a group's committed GPUs are today's replica counts, not the
+     terminating-inclusive `HeldReplicas`, which only actuation needs;
+   - the transfers that would be planned are reported as **replicas to move**
+     (the integer target's shortfall). Pairing them into donor sets needs the
+     per-pod and per-node views of §6.5, which stage 2 builds with the ledger.
 2. **Actuate with the full window**, on quota groups, P/D and multi-GPU
    replicas included — that is the fleet this is for. Ledger, promised GPUs,
    per-pod donor sets, cancel, timeouts, the engine's overlay. Correct, slow.
