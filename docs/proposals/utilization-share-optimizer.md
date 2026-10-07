@@ -961,7 +961,9 @@ and the donor's renewed demand is met by an ordinary plan next cycle.
   termination grace + 2 cycles, §8.4): the donor's GPUs did not come back. Abort, restore the donor's target, report
   `release-timeout`. The likely causes — a PodDisruptionBudget, a stuck
   finalizer, an operator who raised the ScaledObject floor — are outside WVA and
-  must be visible, not retried forever.
+  must be visible, not retried forever. Built: the donor backs off one release
+  timeout before it may give again. The back-off doubles with each consecutive
+  abort, up to 16x, and resets on the first release that lands.
 - **Fill timeout** (derived, §8.4 — Filling ends when the pods are *scheduled*,
   so this covers the scale-up's way through KEDA, the HPA and the scheduler, not
   model load): the receiver's new
@@ -1527,14 +1529,20 @@ the admin decides what a class is worth, and no number a tenant writes can leave
 the range the classes span. An unknown class name is an error on that model's
 entry only, falling back to the weight-1 class with a WARN.
 
-A tenant still chooses its own class, and in the **cluster** group that choice
-is weighed against every other tenant's. So in a cluster-scope group a weight is
-honoured only when it comes from the installation's own scaling-policy map --
-the admin's. A `weightClass` or `weight` set in a namespace's local map (which a
-tenant may own) is ignored there, with a WARN naming the model, and the model
-gets the default class. In that namespace's own quota group, whose budget the
-tenant owns whole, the same weight counts: there it only orders the tenant's own
-models.
+A namespace's own scaling-policy map replaces the installation's for that
+namespace, so whoever writes it sets every input its models are sized by:
+`weightClass`/`weight`, `scaleUpThreshold`, and `kvCacheThreshold`, which sets
+per-replica capacity. That map may be the tenant's. In the **cluster** group these
+inputs would be weighed against every other tenant's: a threshold of 0.05
+instead of 0.85 reads as 17x the need. Ignoring only the weight leaves that
+open.
+
+So a model whose namespace has its own map is **not planned in the cluster
+group**. It is frozen there, today's optimizer keeps it, and its GPUs stay
+outside the group's budget. In that namespace's own quota group, a budget the
+tenant owns whole, it is planned with its own inputs; there they only order the
+tenant's own models. To have such a model planned cluster-wide, an admin
+removes the namespace's map or gives the namespace its own quota.
 
 ### 8.3 Validation must not cost the limiters
 
@@ -1867,6 +1875,15 @@ optimizer every cycle (§6.6).
        after it;
      - the overlay on the cycle's decisions under the `utilization-share`
        reason, which the sticky scale-down hold stands down for;
+     - restoring from marks only what this controller would have written. A
+       mark is read from the donor variant's own pods (Deployment pods are
+       matched by ReplicaSet ownership, not only by labels). It must name that
+       donor variant, a receiver variant of the same group, both replica sizes,
+       and a start in the past. Anything else is removed with a WARN.
+     - concurrent transfers from one donor mark distinct pods, and each
+       transfer unmarks only its own.
+     - a donor lowered on a restart only if its marked pod was not yet
+       terminating, and raised back on cancel or abort only if it was lowered.
      - promised GPUs withheld from the other two consumers of "what is
        free": the steady-state engine publishes them each pass
        (`decision.PublishSharePromised`), and both the warm pool's headroom

@@ -2,7 +2,10 @@ package variantmeta
 
 import (
 	"context"
+	"fmt"
+	"slices"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,26 +35,16 @@ func heldReplicaCount(ctx context.Context, k8sClient client.Client, namespace st
 	if k8sClient == nil || scaleTarget == nil {
 		return 0, false
 	}
-	var selector client.MatchingLabels
-	group := scaleTarget.GetGroupSize() > 1
-	if group {
-		selector = client.MatchingLabels{lwsv1.SetNameLabelKey: scaleTarget.GetName()}
-	} else {
-		tpl := scaleTarget.GetLeaderPodTemplateSpec()
-		if tpl == nil || len(tpl.Labels) == 0 {
-			return 0, false
-		}
-		selector = client.MatchingLabels(tpl.Labels)
-	}
-	var pods corev1.PodList
-	if err := k8sClient.List(ctx, &pods, client.InNamespace(namespace), selector); err != nil {
+	group := scaletarget.IsLeaderWorkerSet(scaleTarget)
+	pods, err := ListVariantPods(ctx, k8sClient, namespace, scaleTarget)
+	if err != nil {
 		ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("Could not list a variant's pods to count the GPUs it holds",
 			"namespace", namespace, "error", err.Error())
 		return 0, false
 	}
 	groups := map[string]struct{}{}
-	for i := range pods.Items {
-		p := &pods.Items[i]
+	for i := range pods {
+		p := &pods[i]
 		if !holdsGPUs(p) {
 			continue
 		}
@@ -82,4 +75,48 @@ func holdsGPUs(p *corev1.Pod) bool {
 		return false
 	}
 	return true
+}
+
+// ListVariantPods lists the pods of one scale target. A LeaderWorkerSet's pods
+// carry its name in the set-name label. A Deployment's are matched by its pod
+// template labels AND by ownership -- controlled by one of its ReplicaSets,
+// which are named <deployment>-<pod-template-hash> -- because two variants of
+// one model routinely share template labels, and a label match alone would
+// count, or mark, the other variant's pods.
+func ListVariantPods(ctx context.Context, c client.Client, namespace string,
+	acc scaletarget.ScaleTargetAccessor) ([]corev1.Pod, error) {
+	if scaletarget.IsLeaderWorkerSet(acc) {
+		var list corev1.PodList
+		if err := c.List(ctx, &list, client.InNamespace(namespace),
+			client.MatchingLabels{lwsv1.SetNameLabelKey: acc.GetName()}); err != nil {
+			return nil, err
+		}
+		return list.Items, nil
+	}
+	tpl := acc.GetLeaderPodTemplateSpec()
+	if tpl == nil || len(tpl.Labels) == 0 {
+		return nil, fmt.Errorf("scale target %s has no pod template labels", acc.GetName())
+	}
+	var list corev1.PodList
+	if err := c.List(ctx, &list, client.InNamespace(namespace), client.MatchingLabels(tpl.Labels)); err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(list.Items, func(p corev1.Pod) bool {
+		return !ownedByDeployment(&p, acc.GetName())
+	}), nil
+}
+
+// ownedByDeployment reports whether a pod is controlled by a ReplicaSet of the
+// named Deployment.
+func ownedByDeployment(p *corev1.Pod, deployment string) bool {
+	hash := p.Labels[appsv1.DefaultDeploymentUniqueLabelKey]
+	if hash == "" {
+		return false
+	}
+	for _, o := range p.OwnerReferences {
+		if o.Controller != nil && *o.Controller && o.Kind == "ReplicaSet" && o.Name == deployment+"-"+hash {
+			return true
+		}
+	}
+	return false
 }

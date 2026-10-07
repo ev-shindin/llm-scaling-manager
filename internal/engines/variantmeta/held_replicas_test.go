@@ -2,6 +2,7 @@ package variantmeta
 
 import (
 	"context"
+	"maps"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -18,10 +19,12 @@ import (
 
 func heldPod(name string, labels map[string]string, node string, phase corev1.PodPhase, deleting bool) *corev1.Pod {
 	p := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: labels},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: maps.Clone(labels)},
 		Spec:       corev1.PodSpec{NodeName: node},
 		Status:     corev1.PodStatus{Phase: phase},
 	}
+	// Owned by Deployment "m", as its ReplicaSet's pods are; ownedBy changes it.
+	ownedBy(p, "m")
 	if deleting {
 		// The fake client accepts a deletion timestamp only on an object that
 		// still has a finalizer, which is exactly a pod still draining.
@@ -97,5 +100,40 @@ func TestHeldReplicasCountsLWSGroups(t *testing.T) {
 func TestHeldReplicasUnknownWithoutAClient(t *testing.T) {
 	if _, known := heldReplicaCount(context.Background(), nil, "ns", nil); known {
 		t.Fatal("a missing client must report the count as unknown, not zero")
+	}
+}
+
+// ownedBy makes p a pod of the named Deployment's ReplicaSet.
+func ownedBy(p *corev1.Pod, deployment string) *corev1.Pod {
+	if p.Labels == nil {
+		p.Labels = map[string]string{}
+	}
+	p.Labels[appsv1.DefaultDeploymentUniqueLabelKey] = "h1"
+	p.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "apps/v1", Kind: "ReplicaSet", Name: deployment + "-h1", UID: "rs", Controller: ptr.To(true),
+	}}
+	return p
+}
+
+// Two variants of one model share pod template labels; a variant's pods are
+// the ones its own ReplicaSet controls. Negative control: the sibling's pods,
+// matched by label, must not be counted (or, by the same lister, marked as
+// donors).
+func TestHeldReplicasCountsOnlyTheDeploymentsOwnPods(t *testing.T) {
+	sel := map[string]string{"app": "m"}
+	d := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"},
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: sel}},
+		},
+	}
+	c := heldClient(t,
+		heldPod("mine", sel, "n1", corev1.PodRunning, false),
+		ownedBy(heldPod("sibling-1", sel, "n1", corev1.PodRunning, false), "m-other"),
+		ownedBy(heldPod("sibling-2", sel, "n1", corev1.PodRunning, false), "m-other"),
+	)
+	held, known := heldReplicaCount(context.Background(), c, "ns", scaletarget.NewDeploymentAccessor(d))
+	if !known || held != 1 {
+		t.Fatalf("held = %d (known %t), want 1: the sibling variant's pods share labels but not the owner", held, known)
 	}
 }

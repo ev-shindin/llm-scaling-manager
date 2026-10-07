@@ -125,6 +125,10 @@ type ShareGroupOptions struct {
 	// model is planned in the cluster group, where models of different
 	// namespaces share one budget.
 	Weight func(req ModelScalingRequest, clusterScope bool) float64
+	// Exclude reports why a request must not be planned in its group, or "".
+	// An excluded model is frozen: today's optimizer keeps it, and its GPUs
+	// stay outside the group's budget.
+	Exclude func(req ModelScalingRequest, clusterScope bool) string
 }
 
 // BuildShareGroups turns one cycle's requests and constraints into the groups
@@ -184,7 +188,14 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		}
 		g := group(acc, scope)
 
-		roles, why := shareRolesForRequest(req, records, acc, opts.Weight, scope == "")
+		why := ""
+		if opts.Exclude != nil {
+			why = opts.Exclude(req, scope == "")
+		}
+		var roles []shareRoleInput
+		if why == "" {
+			roles, why = shareRolesForRequest(req, records, acc, opts.Weight, scope == "")
+		}
 		if why != "" {
 			g.Frozen = append(g.Frozen, modelKey(req)+": "+why)
 			continue

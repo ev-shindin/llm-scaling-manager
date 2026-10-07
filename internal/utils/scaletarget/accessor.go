@@ -81,3 +81,11 @@ func PodGPUs(acc ScaleTargetAccessor) []int {
 	}
 	return nil
 }
+
+// IsLeaderWorkerSet reports whether acc is a LeaderWorkerSet. Group size is not
+// the test: an LWS of size 1 is still an LWS, whose pods belong to a
+// StatefulSet and are named by group index, not to a ReplicaSet.
+func IsLeaderWorkerSet(acc ScaleTargetAccessor) bool {
+	_, ok := acc.(*lwsAccessor)
+	return ok
+}

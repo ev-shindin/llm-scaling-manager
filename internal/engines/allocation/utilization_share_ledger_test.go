@@ -139,3 +139,35 @@ var _ = Describe("ShareLedger", func() {
 		Expect(l.Confirm(map[string]bool{"A": true})["A"]).To(Equal(1))
 	})
 })
+
+var _ = Describe("ShareLedger.Forget", func() {
+	tm := ShareTimings{Window: time.Minute, ReleaseTimeout: 10 * time.Minute, FillTimeout: 5 * time.Minute,
+		ReversalHold: time.Hour, SwingWindow: time.Hour}
+	t0 := time.Unix(0, 0)
+
+	It("puts back the holds Start set for a transfer that never took effect", func() {
+		l := NewShareLedger()
+		t := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 1}, map[string]int{"A": 4}, t0, tm)
+		Expect(l.ReceivingHeld("A", t0, tm)).To(BeTrue(), "control: Start holds the donor from receiving")
+		Expect(l.GivingHeld("B", t0, tm)).To(BeTrue(), "control: Start holds the receiver from giving")
+		l.Forget(t.ID)
+		Expect(l.Transfers()).To(BeEmpty())
+		Expect(l.ReceivingHeld("A", t0, tm)).To(BeFalse())
+		Expect(l.GivingHeld("B", t0, tm)).To(BeFalse())
+	})
+
+	It("keeps the holds of a transfer that was confirmed", func() {
+		l := NewShareLedger()
+		t := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 1}, map[string]int{"A": 4}, t0, tm)
+		l.ConfirmStarted(t.ID, []string{"ns/a-0"})
+		Expect(l.Transfers()[0].DonorLowered).To(BeTrue())
+		Expect(l.ReceivingHeld("A", t0, tm)).To(BeTrue())
+	})
+
+	It("never reuses an ID across ledgers, so a restart cannot collide with a restored transfer", func() {
+		a := NewShareLedger().Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 1}, map[string]int{}, t0, tm)
+		time.Sleep(time.Microsecond)
+		b := NewShareLedger().Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 1}, map[string]int{}, t0, tm)
+		Expect(a.ID).NotTo(Equal(b.ID))
+	})
+})

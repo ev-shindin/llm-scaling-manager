@@ -3,6 +3,7 @@ package allocation
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"time"
 )
 
@@ -53,6 +54,10 @@ type ShareTransfer struct {
 	// DonorPods are the donor pods marked to be removed (namespace/name), so a
 	// cancel can unmark them (§6.5).
 	DonorPods []string
+	// DonorLowered is true once the donor's target has been lowered for this
+	// transfer: when its pods were marked, or on a restart when its marked pod
+	// was not yet terminating. Only then does a cancel or abort raise it back.
+	DonorLowered bool
 	// GPUs is one receiver replica.
 	GPUs int
 	// DonorGPUs is one donor replica: at least GPUs. Without node information
@@ -113,6 +118,18 @@ type shareNeedSample struct {
 type ShareLedger struct {
 	transfers []*ShareTransfer
 	nextID    int
+	// incarnation prefixes the IDs this ledger issues, so a transfer started
+	// after a restart never shares an ID with one restored from a mark.
+	incarnation string
+	// undo is what Start changed in the move history, per transfer, until
+	// ConfirmStarted; Forget puts it back.
+	undo map[string]shareUndo
+	// aborts counts a donor's consecutive aborted releases, and giveAfter is
+	// when it may give again: an abort means something outside WVA -- a
+	// PodDisruptionBudget, a stuck finalizer, a raised ScaledObject floor --
+	// kept its pods, and retrying at once would loop start/abort forever.
+	aborts    map[string]int
+	giveAfter map[string]time.Time
 
 	lastGave, lastGot map[string]time.Time
 	moves             map[string][]shareMove
@@ -130,15 +147,30 @@ type ShareLedger struct {
 // shareReleaseSamples is how many completed releases the ledger remembers.
 const shareReleaseSamples = 20
 
+// shareUndo is the move history of a transfer's two roles before Start.
+type shareUndo struct {
+	donor, receiver string
+	gave, got       time.Time
+	hadGave, hadGot bool
+	donorMoves      []shareMove
+	receiverMoves   []shareMove
+	donorSwing      time.Time
+	receiverSwing   time.Time
+}
+
 // NewShareLedger returns an empty ledger.
 func NewShareLedger() *ShareLedger {
 	return &ShareLedger{
-		lastGave:   map[string]time.Time{},
-		lastGot:    map[string]time.Time{},
-		moves:      map[string][]shareMove{},
-		swingUntil: map[string]time.Time{},
-		needs:      map[string][]shareNeedSample{},
-		confirm:    map[string]int{},
+		incarnation: strconv.FormatInt(time.Now().UnixNano(), 36),
+		undo:        map[string]shareUndo{},
+		aborts:      map[string]int{},
+		giveAfter:   map[string]time.Time{},
+		lastGave:    map[string]time.Time{},
+		lastGot:     map[string]time.Time{},
+		moves:       map[string][]shareMove{},
+		swingUntil:  map[string]time.Time{},
+		needs:       map[string][]shareNeedSample{},
+		confirm:     map[string]int{},
 	}
 }
 
@@ -170,7 +202,7 @@ func (l *ShareLedger) InFlight() int {
 func (l *ShareLedger) StartFill(receiver, variant string, gpus int, held map[string]int, now time.Time, tm ShareTimings) ShareTransfer {
 	l.nextID++
 	t := &ShareTransfer{
-		ID: fmt.Sprintf("f%d", l.nextID), Receiver: receiver, ReceiverVariant: variant,
+		ID: fmt.Sprintf("%s-f%d", l.incarnation, l.nextID), Receiver: receiver, ReceiverVariant: variant,
 		GPUs: gpus, Entitled: true, State: ShareFilling, Started: now,
 		Deadline: now.Add(tm.FillTimeout), receiverBase: held[receiver],
 	}
@@ -232,7 +264,7 @@ func (l *ShareLedger) Promised() int {
 // Start records a newly admitted transfer, in Releasing.
 func (l *ShareLedger) Start(t ShareTransfer, held map[string]int, now time.Time, tm ShareTimings) ShareTransfer {
 	l.nextID++
-	t.ID = fmt.Sprintf("t%d", l.nextID)
+	t.ID = fmt.Sprintf("%s-t%d", l.incarnation, l.nextID)
 	if t.DonorGPUs < t.GPUs {
 		t.DonorGPUs = t.GPUs
 	}
@@ -242,6 +274,16 @@ func (l *ShareLedger) Start(t ShareTransfer, held map[string]int, now time.Time,
 	t.donorBase = held[t.Donor]
 	l.transfers = append(l.transfers, &t)
 	if !t.Entitled {
+		u := shareUndo{
+			donor: t.Donor, receiver: t.Receiver,
+			donorMoves:    slices.Clone(l.moves[t.Donor]),
+			receiverMoves: slices.Clone(l.moves[t.Receiver]),
+			donorSwing:    l.swingUntil[t.Donor],
+			receiverSwing: l.swingUntil[t.Receiver],
+		}
+		u.gave, u.hadGave = l.lastGave[t.Donor]
+		u.got, u.hadGot = l.lastGot[t.Receiver]
+		l.undo[t.ID] = u
 		l.recordMove(t.Donor, false, now, tm)
 		l.recordMove(t.Receiver, true, now, tm)
 	}
@@ -298,6 +340,8 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 			t.Deadline = now.Add(tm.FillTimeout)
 			t.receiverBase = held[t.Receiver]
 			l.released = append(l.released, *t)
+			delete(l.aborts, t.Donor)
+			delete(l.giveAfter, t.Donor)
 		}
 	}
 	// A transfer released this cycle measures its receiver from now; one that
@@ -310,6 +354,13 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 		switch {
 		case t.State == ShareReleasing && !now.Before(t.Deadline):
 			ended = append(ended, ShareTransferEnd{*t, ShareOutcomeAborted})
+			if t.Donor != "" {
+				// Back off one release timeout, doubling per consecutive
+				// abort up to 16x; a release that lands resets it.
+				l.aborts[t.Donor]++
+				backoff := tm.ReleaseTimeout << min(l.aborts[t.Donor]-1, 4)
+				l.giveAfter[t.Donor] = now.Add(backoff)
+			}
 			continue
 		case t.State == ShareFilling:
 			if _, ok := rbase[t.Receiver]; !ok {
@@ -339,8 +390,11 @@ func (l *ShareLedger) ReceivingHeld(role string, now time.Time, tm ShareTimings)
 }
 
 // GivingHeld reports whether role may not give now: it received within the
-// reversal hold.
+// reversal hold, or its last release was aborted and it is backing off.
 func (l *ShareLedger) GivingHeld(role string, now time.Time, tm ShareTimings) bool {
+	if now.Before(l.giveAfter[role]) {
+		return true
+	}
 	t, ok := l.lastGot[role]
 	return ok && now.Sub(t) < tm.ReversalHold
 }
@@ -426,18 +480,39 @@ func (l *ShareLedger) MeasuredRelease() (time.Duration, bool) {
 	return s[i], true
 }
 
-// SetDonorPods records the donor pods a transfer marked.
-func (l *ShareLedger) SetDonorPods(id string, pods []string) {
+// ConfirmStarted records that a transfer took effect: its donor pods are
+// marked and the donor's target is lowered.
+func (l *ShareLedger) ConfirmStarted(id string, pods []string) {
 	for _, t := range l.transfers {
 		if t.ID == id {
 			t.DonorPods = pods
+			t.DonorLowered = true
 		}
 	}
+	delete(l.undo, id)
 }
 
 // Forget drops a transfer that never took effect -- its donor pod could not be
-// marked -- without the holds a cancel sets: nothing moved, so nothing can
-// swing back.
+// marked -- and puts back the move history Start recorded for it: nothing
+// moved, so it must neither hold its roles nor count toward a swing.
 func (l *ShareLedger) Forget(id string) {
 	l.transfers = slices.DeleteFunc(l.transfers, func(t *ShareTransfer) bool { return t.ID == id })
+	u, ok := l.undo[id]
+	if !ok {
+		return
+	}
+	delete(l.undo, id)
+	restore := func(m map[string]time.Time, k string, v time.Time, had bool) {
+		if had {
+			m[k] = v
+		} else {
+			delete(m, k)
+		}
+	}
+	restore(l.lastGave, u.donor, u.gave, u.hadGave)
+	restore(l.lastGot, u.receiver, u.got, u.hadGot)
+	l.moves[u.donor] = u.donorMoves
+	l.moves[u.receiver] = u.receiverMoves
+	restore(l.swingUntil, u.donor, u.donorSwing, !u.donorSwing.IsZero())
+	restore(l.swingUntil, u.receiver, u.receiverSwing, !u.receiverSwing.IsZero())
 }

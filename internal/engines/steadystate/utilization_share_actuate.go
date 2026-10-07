@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
@@ -21,6 +23,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
@@ -113,8 +116,17 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	l, ok := st.ledgers[key]
 	if !ok {
 		l = allocation.NewShareLedger()
+		restored, err := e.restoreShareTransfers(ctx, logger, l, g, accessor, variantKey, now, tm)
+		if err != nil {
+			// Without the marks the ledger would start blind to releases in
+			// flight; it is not created, so the read is retried next cycle,
+			// and nothing is planned meanwhile.
+			logger.Info("WARNING: utilization share could not read transfer marks; retrying next cycle",
+				"error", err.Error())
+			return shareActuation{overrides: e.shareOverrides(g, variantKey, "reading transfer marks"),
+				timings: tm, sources: src}
+		}
 		st.ledgers[key] = l
-		restored := e.restoreShareTransfers(ctx, logger, l, g, accessor, variantKey, now, tm)
 		// After a restart a transfer in Filling has no mark left, and its
 		// receiver may have no pods yet: plan nothing for one fill timeout.
 		st.quietUntil[key] = now.Add(tm.FillTimeout)
@@ -130,7 +142,9 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		// when it can, and the transfer simply stops counting as committed
 		// (§6.3). An aborted release restores the donor.
 		if end.Outcome == allocation.ShareOutcomeAborted && t.DonorVariant != "" {
-			st.desired[variantKey(t.Donor, t.DonorVariant)]++
+			if t.DonorLowered {
+				st.desired[variantKey(t.Donor, t.DonorVariant)]++
+			}
 			e.unmarkDonorPods(ctx, logger, t)
 		}
 		logger.Info("Utilization share: transfer ended", "id", t.ID, "outcome", end.Outcome,
@@ -166,7 +180,9 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	}, now, tm)
 	for _, id := range plan.Cancelled {
 		t := before[id]
-		st.desired[variantKey(t.Donor, t.DonorVariant)]++
+		if t.DonorLowered {
+			st.desired[variantKey(t.Donor, t.DonorVariant)]++
+		}
 		e.unmarkDonorPods(ctx, logger, t)
 		metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, string(allocation.ShareOutcomeCancelled), t.Urgent)
 		logger.Info("Utilization share: transfer cancelled", "id", id, "donor", t.Donor, "receiver", t.Receiver)
@@ -180,7 +196,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 				"id", t.ID, "donor", t.Donor, "error", err.Error())
 			continue
 		}
-		l.SetDonorPods(t.ID, pods)
+		l.ConfirmStarted(t.ID, pods)
 		st.desired[variantKey(t.Donor, t.DonorVariant)]--
 		logger.Info("Utilization share: transfer started", "id", t.ID, "donor", t.Donor, "receiver", t.Receiver,
 			"donorVariant", t.DonorVariant, "receiverVariant", t.ReceiverVariant, "urgent", t.Urgent, "pods", pods)
@@ -315,24 +331,14 @@ func (e *Engine) optimizeInterval() time.Duration {
 // ready pods not being deleted; on a LeaderWorkerSet, the pods of its
 // highest-index group, which LWS removes first and does not steer by cost.
 func (e *Engine) donorPods(ctx context.Context, acc scaletarget.ScaleTargetAccessor, namespace string) ([]corev1.Pod, error) {
-	var sel client.MatchingLabels
-	lws := acc.GetGroupSize() > 1
-	if lws {
-		sel = client.MatchingLabels{lwsv1.SetNameLabelKey: acc.GetName()}
-	} else {
-		tpl := acc.GetLeaderPodTemplateSpec()
-		if tpl == nil || len(tpl.Labels) == 0 {
-			return nil, fmt.Errorf("variant %s has no pod template labels", acc.GetName())
-		}
-		sel = client.MatchingLabels(tpl.Labels)
-	}
-	var list corev1.PodList
-	if err := e.client.List(ctx, &list, client.InNamespace(namespace), sel); err != nil {
+	lws := scaletarget.IsLeaderWorkerSet(acc)
+	list, err := variantmeta.ListVariantPods(ctx, e.client, namespace, acc)
+	if err != nil {
 		return nil, err
 	}
 	var pods []corev1.Pod
 	maxGroup := -1
-	for _, p := range list.Items {
+	for _, p := range list {
 		if p.DeletionTimestamp != nil || p.Spec.NodeName == "" {
 			continue
 		}
@@ -344,6 +350,9 @@ func (e *Engine) donorPods(ctx context.Context, acc scaletarget.ScaleTargetAcces
 		pods = append(pods, p)
 	}
 	if lws {
+		if maxGroup < 0 {
+			return nil, fmt.Errorf("no pod of %s carries a group index", acc.GetName())
+		}
 		pods = slices.DeleteFunc(pods, func(p corev1.Pod) bool {
 			return p.Labels[lwsv1.GroupIndexLabelKey] != strconv.Itoa(maxGroup)
 		})
@@ -365,15 +374,23 @@ func (e *Engine) markDonorPods(ctx context.Context, t allocation.ShareTransfer,
 	if err != nil {
 		return nil, err
 	}
-	if len(pods) == 0 {
-		return nil, fmt.Errorf("donor variant %q has no pod to give", t.DonorVariant)
-	}
-	if acc.GetGroupSize() <= 1 {
+	if !scaletarget.IsLeaderWorkerSet(acc) {
 		for _, p := range pods {
-			if !podReady(&p) {
+			if !variantmeta.PodReady(&p) {
 				return nil, fmt.Errorf("donor variant %q has a pod that is not ready; its victim cannot be steered", t.DonorVariant)
 			}
 		}
+	}
+	// A pod another transfer has marked is that transfer's: a second
+	// concurrent transfer from the same donor gives a different pod, or none.
+	pods = slices.DeleteFunc(pods, func(p corev1.Pod) bool {
+		_, marked := p.Annotations[utilizationShareTransferAnnotation]
+		return marked
+	})
+	if len(pods) == 0 {
+		return nil, fmt.Errorf("donor variant %q has no unmarked pod to give", t.DonorVariant)
+	}
+	if !scaletarget.IsLeaderWorkerSet(acc) {
 		slices.SortFunc(pods, func(a, b corev1.Pod) int { return cmp.Compare(a.Name, b.Name) })
 		pods = pods[:1]
 	}
@@ -409,7 +426,15 @@ func (e *Engine) unmarkDonorPods(ctx context.Context, logger logr.Logger, t allo
 		ns, name, _ := strings.Cut(key, "/")
 		var p corev1.Pod
 		if err := e.client.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &p); err != nil {
-			continue // gone: nothing to unmark
+			if !apierrors.IsNotFound(err) {
+				// Not "gone": the mark stays, and a restart inside the
+				// release timeout would restore the transfer. Say so.
+				logger.Info("WARNING: could not read a donor pod to unmark it", "pod", key, "error", err.Error())
+			}
+			continue
+		}
+		if t.ID != "" && !markedFor(&p, t.ID) {
+			continue // marked for another transfer since: not this one's to clear
 		}
 		patch := client.MergeFrom(p.DeepCopy())
 		delete(p.Annotations, podDeletionCostAnnotation)
@@ -420,64 +445,118 @@ func (e *Engine) unmarkDonorPods(ctx context.Context, logger logr.Logger, t allo
 	}
 }
 
+// markedFor reports whether a pod's transfer mark names the transfer id.
+func markedFor(p *corev1.Pod, id string) bool {
+	var m transferMark
+	return json.Unmarshal([]byte(p.Annotations[utilizationShareTransferAnnotation]), &m) == nil && m.ID == id
+}
+
 // restoreShareTransfers rebuilds a group's Releasing transfers from its donor
-// pods' marks after a restart (§6.3). A mark older than the release timeout
-// is stale and removed. A donor whose marked pod is not yet terminating is
-// still counted in status.replicas, so its desired count is lowered to keep
-// the release going.
+// pods' marks after a restart (§6.3).
+//
+// A mark sits on a pod in the donor's namespace, which its tenant may be able
+// to write, so it is read only from the donor variant's own pods and is
+// believed only when it matches what this controller would have written for
+// that group now: the donor role and variant it is found under, a receiver
+// role and variant of the same group, the replica sizes of both, and a start
+// in the past. Anything else is removed with a WARN. A mark older than the
+// release timeout is stale and removed quietly.
+//
+// The pods of one transfer -- every pod of an LWS group -- are restored as one
+// transfer. If any of them is not yet terminating, the donor is still counted
+// in status.replicas and its target is lowered again to keep the release
+// going; DonorLowered records that, so a later cancel or abort raises only
+// what was lowered.
+//
+// An error listing a donor's pods is returned before anything is applied.
 func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, l *allocation.ShareLedger,
 	g allocation.ShareGroup, accessor func(string, string) scaletarget.ScaleTargetAccessor,
-	variantKey func(string, string) string, now time.Time, tm allocation.ShareTimings) int {
+	variantKey func(string, string) string, now time.Time, tm allocation.ShareTimings) (int, error) {
 	if e.client == nil {
-		return 0
+		return 0, nil
 	}
-	restored := 0
-	seen := map[string]bool{}
-	for role, give := range g.Give {
+	type found struct {
+		mark transferMark
+		pods []string
+		live bool
+	}
+	byID := map[string]*found{}
+	var order []string
+	var invalid []string
+	for _, role := range slices.Sorted(maps.Keys(g.Give)) {
+		give := g.Give[role]
 		acc := accessor(role, give.Name)
 		if acc == nil {
 			continue
 		}
-		var list corev1.PodList
-		if err := e.client.List(ctx, &list, client.InNamespace(g.Origins[role].Namespace)); err != nil {
-			continue
+		pods, err := variantmeta.ListVariantPods(ctx, e.client, g.Origins[role].Namespace, acc)
+		if err != nil {
+			return 0, fmt.Errorf("list the pods of donor variant %s: %w", give.Name, err)
 		}
-		for _, p := range list.Items {
+		for _, p := range pods {
 			raw, ok := p.Annotations[utilizationShareTransferAnnotation]
 			if !ok {
 				continue
 			}
+			key := utils.GetNamespacedKey(p.Namespace, p.Name)
 			var m transferMark
-			if json.Unmarshal([]byte(raw), &m) != nil || m.Donor != role || seen[m.ID] {
+			if why := validTransferMark(raw, &m, role, give, g, now); why != "" {
+				logger.Info("WARNING: utilization share removed a transfer mark it did not write", "pod", key, "reason", why)
+				invalid = append(invalid, key)
 				continue
 			}
-			seen[m.ID] = true
 			if now.Sub(m.Started) >= tm.ReleaseTimeout {
-				e.unmarkDonorPods(ctx, logger, allocation.ShareTransfer{DonorPods: []string{utils.GetNamespacedKey(p.Namespace, p.Name)}})
+				invalid = append(invalid, key)
 				continue
 			}
-			l.Restore(allocation.ShareTransfer{
-				ID: m.ID, Donor: m.Donor, Receiver: m.Receiver, DonorVariant: m.DonorVariant,
-				ReceiverVariant: m.ReceiverVariant, GPUs: m.GPUs, DonorGPUs: m.DonorGPUs, Started: m.Started,
-				Deadline: m.Started.Add(tm.ReleaseTimeout), DonorPods: []string{utils.GetNamespacedKey(p.Namespace, p.Name)},
-			}, g.Committed[m.Donor])
-			if p.DeletionTimestamp == nil {
-				e.utilizationShare.desired[variantKey(m.Donor, m.DonorVariant)]--
+			id := role + "|" + m.ID
+			f, ok := byID[id]
+			if !ok {
+				f = &found{mark: m}
+				byID[id] = f
+				order = append(order, id)
 			}
-			restored++
+			f.pods = append(f.pods, key)
+			f.live = f.live || p.DeletionTimestamp == nil
 		}
 	}
-	return restored
+	e.unmarkDonorPods(ctx, logger, allocation.ShareTransfer{DonorPods: invalid})
+	for _, id := range order {
+		f := byID[id]
+		m := f.mark
+		l.Restore(allocation.ShareTransfer{
+			ID: m.ID, Donor: m.Donor, Receiver: m.Receiver, DonorVariant: m.DonorVariant,
+			ReceiverVariant: m.ReceiverVariant, GPUs: m.GPUs, DonorGPUs: m.DonorGPUs, Started: m.Started,
+			Deadline: m.Started.Add(tm.ReleaseTimeout), DonorPods: f.pods, DonorLowered: f.live,
+		}, g.Committed[m.Donor])
+		if f.live {
+			e.utilizationShare.desired[variantKey(m.Donor, m.DonorVariant)]--
+		}
+	}
+	return len(order), nil
 }
 
-// podReady reports whether a pod's Ready condition is true.
-func podReady(p *corev1.Pod) bool {
-	for _, c := range p.Status.Conditions {
-		if c.Type == corev1.PodReady {
-			return c.Status == corev1.ConditionTrue
-		}
+// validTransferMark parses a mark into m and reports why it is not one this
+// controller would have written for donor role and its giving variant, or "".
+func validTransferMark(raw string, m *transferMark, role string, give allocation.ShareVariant,
+	g allocation.ShareGroup, now time.Time) string {
+	if err := json.Unmarshal([]byte(raw), m); err != nil {
+		return "unparseable"
 	}
-	return false
+	grow, ok := g.Grow[m.Receiver]
+	switch {
+	case m.ID == "":
+		return "no id"
+	case m.Donor != role || m.DonorVariant != give.Name:
+		return "donor is not the variant the mark is on"
+	case !ok || m.Receiver == role || m.ReceiverVariant != grow.Name:
+		return "receiver is not a variant of this group that can grow"
+	case m.GPUs != max(grow.GPUs, 1) || m.DonorGPUs != max(give.GPUs, 1, m.GPUs):
+		return "replica sizes do not match the variants"
+	case m.Started.After(now):
+		return "starts in the future"
+	}
+	return ""
 }
 
 // applyUtilizationShareOverrides sets each planned variant's decision to the
@@ -569,9 +648,7 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 	// until the next one (section 6.3).
 	if len(constraints) > 0 {
 		now := time.Now()
-		if p := decision.LatestSharePromised(now); len(p) > 0 {
-			allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, p), now)
-		}
+		allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, decision.LatestSharePromised(now)), now)
 	}
 	return decisions
 }

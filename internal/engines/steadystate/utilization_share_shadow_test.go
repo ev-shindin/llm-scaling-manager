@@ -268,32 +268,41 @@ func TestUtilizationShareShadowReportsStandingConditionsOnce(t *testing.T) {
 	}
 }
 
-// §8.2 and the PR #121 security review: a weight a tenant writes in its own
-// namespace's map must not count in the cluster group, where it would be
-// weighed against every other tenant's. In that namespace's own quota group --
-// a budget the tenant owns whole -- it counts.
-func TestUtilizationShareShadowScopesTenantWeights(t *testing.T) {
+// §8.2 and the PR #121 security review: a namespace with its own
+// scaling-policy map sets every input its models are sized by -- weight,
+// scale-up threshold, KV threshold -- and that map may be the tenant's. In the
+// cluster group, where those inputs would be weighed against every other
+// tenant's, its models are not planned; a namespace without one is. In the
+// namespace's own quota group -- a budget the tenant owns whole -- they are.
+func TestUtilizationShareShadowScopesTenantPolicy(t *testing.T) {
 	c := shadowConfig(t, selectedShadow)
 	c.UpdateScalingPolicyConfigForNamespace("ns", map[string]config.ScalingPolicy{
-		config.GlobalDefaultsKey: {WeightClass: "critical"},
+		config.GlobalDefaultsKey: {WeightClass: "critical", ScaleUpThreshold: 0.05},
 	})
-	reqs := []allocation.ModelScalingRequest{shadowRequest("A", "critical", 4000, 9), shadowRequest("B", "", 3000, 5)}
-
-	ctx, logs := observe(t)
-	e := &Engine{Config: c}
-	e.evaluateUtilizationShare(ctx, reqs, fullQuota(), nil)
-	ignored := logs.FilterMessageSnippet("invalid weight").All()
-	if len(ignored) != 1 || ignored[0].ContextMap()["model"] != "ns/A" {
-		t.Fatalf("want the tenant's weight on ns/A reported as ignored in the cluster group, got %v", ignored)
+	other := shadowRequest("B", "", 3000, 5)
+	other.Namespace = "admin-only"
+	reqs := []allocation.ModelScalingRequest{shadowRequest("A", "critical", 4000, 9), other}
+	planned := func(reg *prometheus.Registry) map[string]bool {
+		out := map[string]bool{}
+		for _, m := range family(t, reg, constants.WVAUtilizationShareTargetGPUs) {
+			out[label(m, constants.LabelNamespace)] = true
+		}
+		return out
 	}
 
-	ctx, logs = observe(t)
-	e = &Engine{Config: c}
+	reg := freshMetrics(t)
+	ctx, _ := observe(t)
+	(&Engine{Config: c}).evaluateUtilizationShare(ctx, reqs, fullQuota(), nil)
+	if got := planned(reg); got["ns"] || !got["admin-only"] {
+		t.Fatalf("cluster group: want only the namespace without its own map planned, got %v", got)
+	}
+
+	reg = freshMetrics(t)
 	nsQuota := []*allocation.ResourceConstraints{{
 		NamespacePools: map[string]map[string]allocation.ResourcePool{"ns": {"A100": {Limit: 16, Used: 14}}},
 	}}
-	e.evaluateUtilizationShare(ctx, reqs, nsQuota, nil)
-	if n := logs.FilterMessageSnippet("invalid weight").Len(); n != 0 {
-		t.Fatalf("the tenant's weight must count in its own quota group, got %d warnings", n)
+	(&Engine{Config: c}).evaluateUtilizationShare(ctx, reqs[:1], nsQuota, nil)
+	if got := planned(reg); !got["ns"] {
+		t.Fatalf("the namespace's own quota group must plan its models, got %v", got)
 	}
 }

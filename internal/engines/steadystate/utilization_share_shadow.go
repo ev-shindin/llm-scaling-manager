@@ -122,22 +122,24 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		ClusterIsQuota:   e.Config.EffectiveLimiterMode() == config.LimiterTypeQuota,
 		PhysicalGroups:   us.PhysicalGroups,
 		NamespaceEnabled: us.EnabledForNamespace,
-		Weight: func(req allocation.ModelScalingRequest, clusterScope bool) float64 {
-			model := utils.GetNamespacedKey(req.Namespace, req.ModelID)
-			stated := req.WeightClass != "" || !req.Weight.IsZero()
-			if clusterScope && stated && e.Config.NamespaceHasLocalPolicy(req.Namespace) {
-				// A weight from a namespace's own map is the tenant's word about
-				// itself; in the cluster group it would be weighed against every
-				// other tenant's. Only admin-owned weights count there (§8.2).
-				weightErrs[model] = "weight set in the namespace's own scaling-policy map is " +
-					"ignored in the cluster-wide group; using the default class"
-				return us.Classes[us.DefaultClass]
-			}
+		Weight: func(req allocation.ModelScalingRequest, _ bool) float64 {
 			w, err := us.Weight(req.WeightClass, req.Weight)
 			if err != nil {
-				weightErrs[model] = err.Error()
+				weightErrs[utils.GetNamespacedKey(req.Namespace, req.ModelID)] = err.Error()
 			}
 			return w
+		},
+		// A namespace with its own scaling-policy map sets every input its
+		// models are sized by -- weight, scale-up threshold, KV threshold -- and
+		// that map may be the tenant's. In the cluster group those inputs would
+		// be weighed against every other tenant's, so such a model is not
+		// planned there; today's optimizer keeps it. In its own namespace's
+		// quota group, a budget the tenant owns whole, it is planned (§8.2).
+		Exclude: func(req allocation.ModelScalingRequest, clusterScope bool) string {
+			if clusterScope && e.Config.NamespaceHasLocalPolicy(req.Namespace) {
+				return "namespace has its own scaling-policy map; not planned in the cluster-wide group"
+			}
+			return ""
 		},
 	})
 	for model, msg := range weightErrs {

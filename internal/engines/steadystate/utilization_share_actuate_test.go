@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -13,8 +15,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
@@ -76,7 +80,9 @@ func sharePods(t *testing.T, f *shareFleet) client.Client {
 		for i := range f.current[id] {
 			objs = append(objs, &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: fmt.Sprintf("%s-v-%d", id, i),
-					Labels: map[string]string{"app": id + "-v"}},
+					Labels: map[string]string{"app": id + "-v", appsv1.DefaultDeploymentUniqueLabelKey: "h1"},
+					OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet",
+						Name: id + "-v-h1", UID: "rs", Controller: ptr.To(true)}}},
 				Spec: corev1.PodSpec{NodeName: "n1"},
 				Status: corev1.PodStatus{Phase: corev1.PodRunning,
 					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
@@ -376,6 +382,7 @@ func TestUtilizationShareActivePublishesActuationSeries(t *testing.T) {
 				clock = clock.Add(30 * time.Second)
 				return e.evaluateUtilizationShare(ctx, f.requests(), fullQuota(), f.scaleTargets())
 			}
+			decision.PublishSharePromised(map[string]map[string]int{}, clock)
 			started := 0
 			for range 20 {
 				if o := cycle(); o != nil {
@@ -383,6 +390,9 @@ func TestUtilizationShareActivePublishesActuationSeries(t *testing.T) {
 						break
 					}
 				}
+			}
+			if tc.active && started == 0 {
+				t.Fatal("setup: no transfer started in 20 cycles")
 			}
 			f.current["A"] -= started
 			cycle()
@@ -433,6 +443,7 @@ func TestUtilizationSharePublishesPromisedGPUs(t *testing.T) {
 				clock = clock.Add(30 * time.Second)
 				return e.evaluateUtilizationShare(ctx, f.requests(), fullQuota(), f.scaleTargets())
 			}
+			decision.PublishSharePromised(map[string]map[string]int{}, clock)
 			started := 0
 			for range 20 {
 				if o := cycle(); o != nil {
@@ -440,6 +451,9 @@ func TestUtilizationSharePublishesPromisedGPUs(t *testing.T) {
 						break
 					}
 				}
+			}
+			if tc.active && started == 0 {
+				t.Fatal("setup: no transfer started in 20 cycles")
 			}
 			if got := decision.LatestSharePromised(clock)[""]["A100"]; got != 0 {
 				t.Fatalf("promised %d before any release", got)
@@ -454,5 +468,263 @@ func TestUtilizationSharePublishesPromisedGPUs(t *testing.T) {
 				t.Fatalf("promised after the release = %d, want %d", got, want)
 			}
 		})
+	}
+}
+
+// shareEngine is an active engine on the section 5.7 fleet with its own clock.
+type shareEngine struct {
+	t     *testing.T
+	f     *shareFleet
+	c     client.Client
+	e     *Engine
+	clock time.Time
+	ctx   context.Context
+}
+
+func newShareEngine(t *testing.T, f *shareFleet, c client.Client, clock time.Time) *shareEngine {
+	t.Helper()
+	se := &shareEngine{t: t, f: f, c: c, clock: clock}
+	se.e = &Engine{Config: shadowConfig(t, activeShare), client: c}
+	se.e.utilizationShare.now = func() time.Time { return se.clock }
+	se.ctx, _ = observe(t)
+	return se
+}
+
+func (se *shareEngine) cycle() map[string]utilizationShareOverride {
+	se.clock = se.clock.Add(30 * time.Second)
+	return se.e.evaluateUtilizationShare(se.ctx, se.f.requests(), fullQuota(), se.f.scaleTargets())
+}
+
+// untilStarted cycles until A gives, and returns how many replicas it gave.
+func (se *shareEngine) untilStarted() int {
+	se.t.Helper()
+	for range 20 {
+		if started := 9 - se.cycle()["ns/A-v"].Target; started > 0 {
+			return started
+		}
+	}
+	se.t.Fatal("setup: no transfer started in 20 cycles")
+	return 0
+}
+
+func annotate(t *testing.T, c client.Client, name string, ann map[string]string) {
+	t.Helper()
+	var p corev1.Pod
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: name}, &p); err != nil {
+		t.Fatal(err)
+	}
+	p.Annotations = ann
+	if err := c.Update(context.Background(), &p); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A release that never lands -- a PodDisruptionBudget, a stuck finalizer -- is
+// aborted: the donor's target comes back, its pods are unmarked so a restart
+// cannot resurrect the transfer, and the donor backs off instead of being
+// asked again at once, which would loop start/abort forever (section 6.3).
+func TestUtilizationShareAbortRestoresTheDonorAndBacksOff(t *testing.T) {
+	f := newShareFleet()
+	c := sharePods(t, f)
+	se := newShareEngine(t, f, c, time.Unix(0, 0))
+	started := se.untilStarted()
+	if len(markedPods(t, c)) != started {
+		t.Fatalf("setup: %d marked, want %d", len(markedPods(t, c)), started)
+	}
+	start := se.clock
+	var o map[string]utilizationShareOverride
+	for range 60 { // A's pods never go: well past the release timeout
+		o = se.cycle()
+		if len(markedPods(t, c)) == 0 {
+			break
+		}
+	}
+	aborted := se.clock
+	if n := len(markedPods(t, c)); n != 0 {
+		t.Fatalf("%d donor pods still marked 30 minutes after the transfer started", n)
+	}
+	if o["ns/A-v"].Target != 9 {
+		t.Fatalf("A target after the abort = %d, want 9 restored", o["ns/A-v"].Target)
+	}
+	// The back-off is at least one release timeout, which is how long the
+	// aborted attempt took.
+	for se.clock.Before(aborted.Add(aborted.Sub(start) - time.Minute)) {
+		if o = se.cycle(); o["ns/A-v"].Target != 9 || len(markedPods(t, c)) != 0 {
+			t.Fatalf("A asked to give again %s after an abort: target %d, %d marked",
+				se.clock.Sub(aborted), o["ns/A-v"].Target, len(markedPods(t, c)))
+		}
+	}
+}
+
+// The ReplicaSet removes a not-Ready pod before it consults deletion cost, so
+// a donor with one cannot be steered: no transfer starts from it and no pod is
+// left marked.
+func TestUtilizationShareRefusesADonorWithANotReadyPod(t *testing.T) {
+	f := newShareFleet()
+	c := sharePods(t, f)
+	var p corev1.Pod
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "A-v-4"}, &p); err != nil {
+		t.Fatal(err)
+	}
+	p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
+	if err := c.Status().Update(context.Background(), &p); err != nil {
+		t.Fatal(err)
+	}
+	se := newShareEngine(t, f, c, time.Unix(0, 0))
+	for range 20 {
+		if a := se.cycle()["ns/A-v"].Target; a != 9 {
+			t.Fatalf("A lowered to %d although one of its pods is not Ready", a)
+		}
+	}
+	for _, m := range markedPods(t, c) {
+		if m.Labels["app"] == "A-v" {
+			t.Fatalf("A pod %s left marked", m.Name)
+		}
+	}
+}
+
+// roleA and roleB are the share role keys of the fleet's models.
+var (
+	roleA = "ns/A/" + domain.RoleBoth
+	roleB = "ns/B/" + domain.RoleBoth
+)
+
+// A mark is read back only when it is one this controller would have written:
+// a tenant who can edit its own pods must not be able to steer a restart.
+func TestUtilizationShareRestoreRejectsForgedMarks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mark transferMark
+	}{
+		{"huge transfer", transferMark{ID: "x", Donor: roleA, Receiver: roleB, DonorVariant: "A-v", ReceiverVariant: "B-v", GPUs: 500, DonorGPUs: 500}},
+		{"negative transfer", transferMark{ID: "x", Donor: roleA, Receiver: roleB, DonorVariant: "A-v", ReceiverVariant: "B-v", GPUs: -4, DonorGPUs: -4}},
+		{"unknown receiver", transferMark{ID: "x", Donor: roleA, Receiver: "victim/Z/" + domain.RoleBoth, DonorVariant: "A-v", ReceiverVariant: "Z-v", GPUs: 1, DonorGPUs: 1}},
+		{"wrong donor variant", transferMark{ID: "x", Donor: roleA, Receiver: roleB, DonorVariant: "C-v", ReceiverVariant: "B-v", GPUs: 1, DonorGPUs: 1}},
+		{"starts in the future", transferMark{ID: "x", Donor: roleA, Receiver: roleB, DonorVariant: "A-v", ReceiverVariant: "B-v", GPUs: 1, DonorGPUs: 1,
+			Started: time.Unix(1<<40, 0)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newShareFleet()
+			c := sharePods(t, f)
+			clock := time.Unix(100000, 0)
+			if tc.mark.Started.IsZero() {
+				tc.mark.Started = clock.Add(-time.Minute)
+			}
+			raw, _ := json.Marshal(tc.mark)
+			annotate(t, c, "A-v-0", map[string]string{utilizationShareTransferAnnotation: string(raw), podDeletionCostAnnotation: donorDeletionCost})
+
+			se := newShareEngine(t, f, c, clock)
+			o := se.cycle()
+			if o["ns/A-v"].Target != 9 || o["ns/B-v"].Target != 5 {
+				t.Fatalf("a forged mark moved targets: A=%d B=%d", o["ns/A-v"].Target, o["ns/B-v"].Target)
+			}
+			if n := len(markedPods(t, c)); n != 0 {
+				t.Fatalf("the forged mark was left on the pod")
+			}
+			if p := se.e.utilizationShare.ledgers; len(p) != 1 {
+				t.Fatalf("want one ledger, got %d", len(p))
+			}
+			for _, l := range se.e.utilizationShare.ledgers {
+				if n := len(l.Transfers()); n != 0 {
+					t.Fatalf("forged mark restored as %d transfers", n)
+				}
+			}
+		})
+	}
+	// Control: the same shape with valid fields is restored.
+	f := newShareFleet()
+	c := sharePods(t, f)
+	clock := time.Unix(100000, 0)
+	raw, _ := json.Marshal(transferMark{ID: "x", Donor: roleA, Receiver: roleB, DonorVariant: "A-v", ReceiverVariant: "B-v",
+		GPUs: 1, DonorGPUs: 1, Started: clock.Add(-time.Minute)})
+	annotate(t, c, "A-v-0", map[string]string{utilizationShareTransferAnnotation: string(raw), podDeletionCostAnnotation: donorDeletionCost})
+	if a := newShareEngine(t, f, c, clock).cycle()["ns/A-v"].Target; a != 8 {
+		t.Fatalf("control: a valid mark must be restored and lower A to 8, got %d", a)
+	}
+}
+
+// After a restart, a marked pod that is already terminating is out of
+// status.replicas: the donor is not lowered again, and an abort does not raise
+// it either -- it was never lowered by this controller.
+func TestUtilizationShareRestoredTerminatingMarkIsNotRestoredTwice(t *testing.T) {
+	f := newShareFleet()
+	c := sharePods(t, f)
+	first := newShareEngine(t, f, c, time.Unix(0, 0))
+	if started := first.untilStarted(); started != 1 {
+		t.Skipf("fixture started %d transfers; this test needs exactly one", started)
+	}
+	m := markedPods(t, c)[0]
+	m.Finalizers = []string{"drain"}
+	if err := c.Update(context.Background(), &m); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(context.Background(), &m); err != nil {
+		t.Fatal(err)
+	}
+	f.current["A"] = 8 // status.replicas no longer counts the terminating pod
+
+	restarted := newShareEngine(t, f, c, first.clock)
+	if a := restarted.cycle()["ns/A-v"].Target; a != 8 {
+		t.Fatalf("A after restart = %d, want 8: the terminating pod is already out of the count", a)
+	}
+	// Every cycle, through the abort and after it: a raise right at the
+	// abort would otherwise be undone by the re-anchor before a final check.
+	for i := range 60 {
+		if a := restarted.cycle()["ns/A-v"].Target; a > 8 {
+			t.Fatalf("cycle %d: A raised to %d by the abort of a transfer that never lowered it", i, a)
+		}
+	}
+}
+
+// Two transfers in flight from one Deployment donor give two different pods:
+// each is steered, and ending one cannot clear the other's mark.
+func TestUtilizationShareConcurrentTransfersMarkDistinctPods(t *testing.T) {
+	f := newShareFleet()
+	c := sharePods(t, f)
+	se := newShareEngine(t, f, c, time.Unix(0, 0))
+	se.untilStarted()
+	most := 0
+	for i := range 15 { // inside the release timeout: nothing has ended yet
+		given := 9 - se.cycle()["ns/A-v"].Target
+		if marked := len(markedPods(t, c)); marked != given {
+			t.Fatalf("cycle %d: A gave %d replicas but %d distinct pods are marked", i, given, marked)
+		}
+		most = max(most, given)
+	}
+	if most < 2 {
+		t.Skipf("fixture never had two transfers in flight (most %d); nothing to check", most)
+	}
+}
+
+// An LWS donor gives its highest-index group, every pod of it.
+func TestUtilizationShareLWSDonorGivesItsHighestGroup(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	objs := make([]client.Object, 0, 6)
+	for g := range 3 {
+		for w := range 2 {
+			objs = append(objs, &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: fmt.Sprintf("d-%d-%d", g, w), Labels: map[string]string{
+					lwsv1.SetNameLabelKey: "d", lwsv1.GroupIndexLabelKey: strconv.Itoa(g)}},
+				Spec: corev1.PodSpec{NodeName: "n1"},
+			})
+		}
+	}
+	e := &Engine{client: fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()}
+	lws := &lwsv1.LeaderWorkerSet{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "d"},
+		Spec: lwsv1.LeaderWorkerSetSpec{LeaderWorkerTemplate: lwsv1.LeaderWorkerTemplate{Size: ptr.To[int32](2)}}}
+	pods, err := e.donorPods(context.Background(), scaletarget.NewLWSAccessor(lws), "ns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(pods))
+	for _, p := range pods {
+		names = append(names, p.Name)
+	}
+	slices.Sort(names)
+	if !slices.Equal(names, []string{"d-2-0", "d-2-1"}) {
+		t.Fatalf("donor pods = %v, want the whole highest group d-2-*", names)
 	}
 }
