@@ -23,14 +23,14 @@ func TestShareClaimStore(t *testing.T) {
 	}}
 
 	s := claimStore(entries, t0)
-	c, outcome := s.Claim("ns", "A100", []int{8}, 8, -1, -1, "ns/w", t0)
+	c, outcome := s.Claim("", "A100", []int{8}, 8, -1, "ns/m1", "ns/w1", t0)
 	if outcome != ShareClaimRedirected || c.ID != "high" || c.Scope != "" {
 		t.Fatalf("want the best-off receiver's transfer redirected, got %q %+v", outcome, c)
 	}
-	if c, outcome = s.Claim("ns", "A100", []int{8}, 8, -1, -1, "ns/w2", t0); c.ID != "low" {
+	if c, outcome = s.Claim("", "A100", []int{8}, 8, -1, "ns/m2", "ns/w2", t0); c.ID != "low" {
 		t.Fatalf("second claim: want the other transfer, got %q %+v", outcome, c)
 	}
-	if _, outcome = s.Claim("ns", "A100", []int{8}, 8, -1, -1, "ns/w3", t0); outcome != ShareClaimNoneReleasing {
+	if _, outcome = s.Claim("", "A100", []int{8}, 8, -1, "ns/m3", "ns/w3", t0); outcome != ShareClaimNoneReleasing {
 		t.Fatalf("both claimed: want none-releasing, got %q", outcome)
 	}
 	if got := s.Take("", "A100"); len(got) != 2 {
@@ -54,22 +54,61 @@ func TestShareClaimStore(t *testing.T) {
 		{"a stale list allows nothing", -1, []int{8}, 8, t0.Add(ShareClaimMaxAge + time.Second), ShareClaimNoneReleasing},
 	} {
 		s := claimStore(map[string][]ShareClaimable{cluster: {{ID: "x", ReceiverZ: -0.2, DonorGPUs: 8, DonorPodGPUs: []int{8}}}}, t0)
-		if _, got := s.Claim("ns", "A100", tc.pods, tc.gpus, tc.z, tc.z, "ns/w", tc.at); got != tc.outcome {
+		if _, got := s.Claim("", "A100", tc.pods, tc.gpus, tc.z, "ns/m", "ns/w", tc.at); got != tc.outcome {
 			t.Errorf("%s: outcome %q, want %q", tc.name, got, tc.outcome)
 		}
 	}
 }
 
-// A model in a namespace with its own quota group claims there, with its
-// score there; the cluster group is tried only after.
-func TestShareClaimStoreTriesTheNamespaceGroupFirst(t *testing.T) {
+// A wake claims only in its own group: a namespace with its own quota never
+// reaches the cluster group's transfers, however much it would score there.
+func TestShareClaimStoreStaysInTheWakesGroup(t *testing.T) {
 	t0 := time.Unix(0, 0)
 	s := claimStore(map[string][]ShareClaimable{
-		ShareGroupKey("ns", "A100"): {{ID: "ns-t", ReceiverZ: -0.2, DonorGPUs: 1}},
-		ShareGroupKey("", "A100"):   {{ID: "cl-t", ReceiverZ: -0.2, DonorGPUs: 1}},
+		ShareGroupKey("", "A100"): {{ID: "cl-t", ReceiverZ: -0.2, DonorGPUs: 1}},
 	}, t0)
-	c, outcome := s.Claim("ns", "A100", nil, 1, -1, -1, "ns/w", t0)
-	if outcome != ShareClaimRedirected || c.ID != "ns-t" || c.Scope != "ns" {
-		t.Fatalf("want the namespace group's transfer, got %q %+v", outcome, c)
+	if _, outcome := s.Claim("ns", "A100", nil, 1, -1, "ns/m", "ns/w", t0); outcome != ShareClaimNoneReleasing {
+		t.Fatalf("a namespace-quota wake reached the cluster group: %q", outcome)
+	}
+	// Control: a cluster-scoped wake claims it.
+	if c, outcome := s.Claim("", "A100", nil, 1, -1, "ns/m", "ns/w", t0); outcome != ShareClaimRedirected || c.ID != "cl-t" {
+		t.Fatalf("control: want the cluster transfer claimed, got %q %+v", outcome, c)
+	}
+}
+
+// One model claims at most once per hold: a woken model stays inactive until
+// KEDA acts, and without the hold the 10 Hz wake loop would claim every
+// releasing transfer in reach.
+func TestShareClaimStoreHoldsAModelAfterAClaim(t *testing.T) {
+	t0 := time.Unix(0, 0)
+	cluster := ShareGroupKey("", "A100")
+	s := claimStore(map[string][]ShareClaimable{cluster: {
+		{ID: "a", ReceiverZ: -0.2, DonorGPUs: 1}, {ID: "b", ReceiverZ: -0.2, DonorGPUs: 1},
+	}}, t0)
+	if _, outcome := s.Claim("", "A100", nil, 1, -1, "ns/m", "ns/w", t0); outcome != ShareClaimRedirected {
+		t.Fatalf("first claim: %q", outcome)
+	}
+	if _, outcome := s.Claim("", "A100", nil, 1, -1, "ns/m", "ns/w", t0.Add(time.Second)); outcome != ShareClaimRefusedHeld {
+		t.Fatalf("a second claim by the same model inside the hold: want refused-held, got %q", outcome)
+	}
+	// Control: another model is not held.
+	if _, outcome := s.Claim("", "A100", nil, 1, -1, "ns/other", "ns/w2", t0.Add(time.Second)); outcome != ShareClaimRedirected {
+		t.Fatalf("control: another model's claim: %q", outcome)
+	}
+}
+
+// A claimed transfer is not published again before the engine takes the
+// claim, or a second wake could claim the same hole.
+func TestShareClaimStoreDoesNotRepublishAClaimedTransfer(t *testing.T) {
+	t0 := time.Unix(0, 0)
+	cluster := ShareGroupKey("", "A100")
+	list := map[string][]ShareClaimable{cluster: {{ID: "x", ReceiverZ: -0.2, DonorGPUs: 1}}}
+	s := claimStore(list, t0)
+	if _, outcome := s.Claim("", "A100", nil, 1, -1, "ns/m1", "ns/w1", t0); outcome != ShareClaimRedirected {
+		t.Fatalf("first claim: %q", outcome)
+	}
+	s.Publish(list, t0) // the engine's next pass still lists it
+	if _, outcome := s.Claim("", "A100", nil, 1, -1, "ns/m2", "ns/w2", t0); outcome != ShareClaimNoneReleasing {
+		t.Fatalf("the claimed transfer was claimable again: %q", outcome)
 	}
 }

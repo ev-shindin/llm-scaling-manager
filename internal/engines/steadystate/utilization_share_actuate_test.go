@@ -839,7 +839,7 @@ func TestUtilizationShareWakeClaimRedirectsATransfer(t *testing.T) {
 	started := se.untilStarted()
 
 	// A parked standard model wakes: z = -1, below B's (short, weight 1).
-	claim, outcome := decision.DefaultShareClaims.Claim("ns", "A100", nil, 1, -1, -1, "ns/W-v", se.clock)
+	claim, outcome := decision.DefaultShareClaims.Claim("", "A100", nil, 1, -1, "ns/W", "ns/W-v", se.clock)
 	if outcome != decision.ShareClaimRedirected {
 		t.Fatalf("want the wake to claim a releasing transfer, got %q", outcome)
 	}
@@ -916,5 +916,52 @@ func TestUtilizationShareFundsAReplicaFromADonorSet(t *testing.T) {
 	f.current[donorOf(marked[1])]--
 	if o := cycle(); o["ns/B-v"].Target != 6 {
 		t.Fatalf("B = %d once both donors released, want 6", o["ns/B-v"].Target)
+	}
+}
+
+// A donor set restores whole or not at all: a primary mark that names a
+// receiver larger than what its set's donors give would book GPUs nobody gave
+// up -- a debt the refill would then take from other tenants. Control: the
+// same primary with a contributor that covers the receiver is restored.
+func TestUtilizationShareRestoresDonorSetsWhole(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		contributor bool
+		wantA       int
+	}{
+		{"forged primary alone", false, 9},
+		{"whole set", true, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newShareFleet()
+			c := sharePods(t, f)
+			clock := time.Unix(100000, 0)
+			mark := func(pod string, m transferMark) {
+				m.Started = clock.Add(-time.Minute)
+				raw, _ := json.Marshal(m)
+				annotate(t, c, pod, map[string]string{utilizationShareTransferAnnotation: string(raw), podDeletionCostAnnotation: donorDeletionCost})
+			}
+			mark("A-v-0", transferMark{ID: "x", SetID: "x", Donor: roleA, Receiver: roleB, DonorVariant: "A-v",
+				ReceiverVariant: "B-v", GPUs: 2, DonorGPUs: 1})
+			if tc.contributor {
+				mark("A-v-1", transferMark{ID: "y", SetID: "x", Donor: roleA, DonorVariant: "A-v", DonorGPUs: 1})
+			}
+			e := &Engine{Config: shadowConfig(t, activeShare), client: c}
+			e.utilizationShare.now = func() time.Time { return clock }
+			ctx, _ := observe(t)
+			reqs := f.requests()
+			for i := range reqs {
+				st := &reqs[i].VariantStates[0]
+				if reqs[i].ModelID == "B" {
+					st.GPUsPerReplica, st.PodGPUs = 2, []int{1, 1}
+				} else {
+					st.PodGPUs = []int{1}
+				}
+			}
+			o := e.evaluateUtilizationShare(ctx, reqs, fullQuota(), f.scaleTargets())
+			if got := o["ns/A-v"].Target; got != tc.wantA {
+				t.Fatalf("A = %d after restart, want %d", got, tc.wantA)
+			}
+		})
 	}
 }

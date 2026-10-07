@@ -147,7 +147,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	// Wake claims first, before Observe: a claim made against a Releasing
 	// transfer must be applied before a release turns it into Filling.
 	for _, c := range decision.DefaultShareClaims.Take(g.Scope, g.AcceleratorType) {
-		prev, ok := l.Redirect(c.ID)
+		prev, ok := l.Redirect(c.ID, now, tm.FillTimeout)
 		if !ok {
 			logger.Info("Utilization share: a wake claimed a transfer that is no longer releasing; ignored",
 				"id", c.ID, "wake", c.Wake)
@@ -192,7 +192,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	out := shareActuation{timings: tm, sources: src}
 	if now.Before(st.quietUntil[key]) {
 		out.overrides = e.shareOverrides(g, variantKey, "restart quiet period")
-		out.promised = l.Promised()
+		out.promised = l.Promised() + l.WakeHeld(now)
 		out.reserveDebt = shareDebtNow(l, held, g.Budget)
 		out.blocked = shareBlockedReasons(l, g, ev, nil, now)
 		out.claimable = shareClaimable(l, g, held)
@@ -231,7 +231,10 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			}
 		}
 		if failed != nil {
-			for _, t := range set {
+			// In reverse start order: each member's Start snapshotted the move
+			// history its predecessors had already changed.
+			for i := len(set) - 1; i >= 0; i-- {
+				t := set[i]
 				l.Forget(t.ID)
 				e.unmarkDonorPods(ctx, logger, allocation.ShareTransfer{ID: t.ID, DonorPods: marked[t.ID]})
 			}
@@ -251,7 +254,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 
 	e.fillIdleShare(logger, l, g, ev, held, variantKey, now, tm)
 	out.overrides = e.shareOverrides(g, variantKey, "utilization share")
-	out.promised = l.Promised()
+	out.promised = l.Promised() + l.WakeHeld(now)
 	out.swinging = plan.Swinging
 	out.reserveDebt = shareDebtNow(l, held, g.Budget)
 	out.blocked = shareBlockedReasons(l, g, ev, plan.Unfunded, now)
@@ -266,7 +269,8 @@ func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g 
 	ev allocation.ShareEvaluation, held map[string]int, variantKey func(string, string) string,
 	now time.Time, tm allocation.ShareTimings) {
 	committed := l.Committed(held)
-	idle := g.Budget
+	// GPUs redirected to a woken model are its, however idle they look.
+	idle := g.Budget - l.WakeHeld(now)
 	for _, c := range committed {
 		idle -= c
 	}
@@ -571,10 +575,41 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 			f.live = f.live || p.DeletionTimestamp == nil
 		}
 	}
+	// A donor set restores whole or not at all (section 6.5): a primary, and
+	// members whose donor replicas together cover the receiver's replica. A
+	// member without its primary, or a set that gives less than its receiver
+	// takes, is a mark this controller did not write -- or the rest of it is
+	// gone -- and every member is removed.
+	setGives, primaryTakes := map[string]int{}, map[string]int{}
+	for _, id := range order {
+		m := byID[id].mark
+		if m.SetID == "" {
+			continue
+		}
+		setGives[m.SetID] += m.DonorGPUs
+		if m.ID == m.SetID && m.Receiver != "" {
+			primaryTakes[m.SetID] = m.GPUs
+		}
+	}
+	order = slices.DeleteFunc(order, func(id string) bool {
+		f := byID[id]
+		if s := f.mark.SetID; s != "" {
+			if takes, ok := primaryTakes[s]; !ok || setGives[s] < takes {
+				logger.Info("WARNING: utilization share removed an incomplete donor-set mark", "set", s, "pods", f.pods)
+				invalid = append(invalid, f.pods...)
+				return true
+			}
+		}
+		return false
+	})
 	e.unmarkDonorPods(ctx, logger, allocation.ShareTransfer{DonorPods: invalid})
+	contributors := map[string][]string{}
 	for _, id := range order {
 		f := byID[id]
 		m := f.mark
+		if m.SetID != "" && m.ID != m.SetID {
+			contributors[m.SetID] = append(contributors[m.SetID], m.ID)
+		}
 		l.Restore(allocation.ShareTransfer{
 			ID: m.ID, Donor: m.Donor, Receiver: m.Receiver, DonorVariant: m.DonorVariant,
 			ReceiverVariant: m.ReceiverVariant, GPUs: m.GPUs, DonorGPUs: m.DonorGPUs, Started: m.Started,
@@ -583,6 +618,9 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 		if f.live {
 			e.utilizationShare.desired[variantKey(m.Donor, m.DonorVariant)]--
 		}
+	}
+	for set, members := range contributors {
+		l.LinkSet(set, members...)
 	}
 	return len(order), nil
 }
@@ -804,7 +842,8 @@ func shareClaimable(l *allocation.ShareLedger, g allocation.ShareGroup, held map
 	}
 	var out []decision.ShareClaimable
 	for _, t := range l.Transfers() {
-		if t.State != allocation.ShareReleasing || t.Receiver == "" {
+		// A set member's hole funds its receiver together with the others.
+		if t.State != allocation.ShareReleasing || t.Receiver == "" || t.SetID != "" {
 			continue
 		}
 		r, ok := roles[t.Receiver]

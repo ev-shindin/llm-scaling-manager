@@ -457,3 +457,82 @@ var _ = Describe("Donor sets (§6.5)", func() {
 		Expect(l.Promised()).To(BeZero())
 	})
 })
+
+var _ = Describe("Donor-set integrity and wake holds (§6.3, §6.5)", func() {
+	tm := simTimings()
+	t0 := time.Unix(0, 0)
+	startSet := func(l *ShareLedger) (primary, contributor ShareTransfer) {
+		held := map[string]int{"A": 8, "C": 8}
+		p := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 16, DonorGPUs: 8, SetID: "pending"}, held, t0, tm)
+		c := l.Start(ShareTransfer{Donor: "C", DonorGPUs: 8, SetID: "pending"}, held, t0, tm)
+		l.LinkSet(p.ID, c.ID)
+		p, _ = l.Transfer(p.ID)
+		c, _ = l.Transfer(c.ID)
+		return p, c
+	}
+
+	It("aborts a primary whose contributor left without releasing, instead of releasing it alone", func() {
+		l := NewShareLedger()
+		p, c := startSet(l)
+		l.Forget(c.ID)
+		ends := l.Observe(map[string]int{"A": 0, "C": 8}, t0.Add(time.Minute), tm)
+		Expect(ends).To(HaveLen(1))
+		Expect(ends[0].Transfer.ID).To(Equal(p.ID))
+		Expect(ends[0].Outcome).To(Equal(ShareOutcomeAborted))
+		Expect(l.Promised()).To(BeZero(), "nothing is promised to a receiver whose replica cannot be whole")
+		Expect(l.GivingHeld("A", t0.Add(time.Minute), tm)).To(BeFalse(), "a broken set is not the donor's fault: no back-off")
+	})
+
+	It("keeps the primary waiting while its contributor is still releasing (control)", func() {
+		l := NewShareLedger()
+		p, _ := startSet(l)
+		Expect(l.Observe(map[string]int{"A": 0, "C": 8}, t0.Add(time.Minute), tm)).To(BeEmpty())
+		got, _ := l.Transfer(p.ID)
+		Expect(got.State).To(Equal(ShareReleasing))
+	})
+
+	It("never redirects a set member to a wake", func() {
+		l := NewShareLedger()
+		p, c := startSet(l)
+		_, ok := l.Redirect(p.ID, t0, time.Minute)
+		Expect(ok).To(BeFalse())
+		_, ok = l.Redirect(c.ID, t0, time.Minute)
+		Expect(ok).To(BeFalse())
+	})
+
+	It("holds a redirected transfer's GPUs for the wake until the hold expires", func() {
+		l := NewShareLedger()
+		t := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 8}, map[string]int{"A": 8}, t0, tm)
+		_, ok := l.Redirect(t.ID, t0, 2*time.Minute)
+		Expect(ok).To(BeTrue())
+		Expect(l.WakeHeld(t0.Add(time.Minute))).To(Equal(8))
+		Expect(l.WakeHeld(t0.Add(2 * time.Minute))).To(BeZero())
+	})
+})
+
+var _ = Describe("Reserve refill and rebalance in one cycle", func() {
+	// B is far short and confirmed; A is far over and the group over budget.
+	// A pays the debt and is B's best donor: together the two must not take
+	// more than ShareMaxReplicasPerCycle replicas from A in one cycle.
+	It("counts refills against the per-role pace", func() {
+		roles := []ShareRole{
+			{Key: "A", Weight: 1, Need: 2, Ceiling: 64, ReplicaGPUs: 1},
+			{Key: "B", Weight: 1, Need: 40, Ceiling: 64, ReplicaGPUs: 1},
+		}
+		in := SharePlanInput{Roles: roles, Held: map[string]int{"A": 30, "B": 4},
+			Thresholds: map[string]float64{"A": 0.8, "B": 0.8}, Budget: 34, Tolerance: 0.15}
+		l := NewShareLedger()
+		// Cycle 1 confirms B once; then a wake takes 2 and the group is over.
+		PlanShareTransfers(l, in, time.Unix(0, 0), simTimings())
+		in.Budget = 32
+		p := PlanShareTransfers(l, in, time.Unix(30, 0), simTimings())
+		Expect(p.Refills).To(BeNumerically(">", 0), "setup: a refill must start")
+		fromA := 0
+		for _, t := range p.Started {
+			if t.Donor == "A" {
+				fromA++
+			}
+		}
+		Expect(fromA).To(BeNumerically("<=", ShareMaxReplicasPerCycle))
+	})
+})

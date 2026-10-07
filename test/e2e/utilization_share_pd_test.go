@@ -163,6 +163,10 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 			sets[m.SetID] = true
 		}
 		Expect(sets).To(HaveLen(1), "both donors must belong to one set")
+		var setID string
+		for id := range sets {
+			setID = id
+		}
 
 		By("Checking the decode LWS is not raised until BOTH donor pods have gone")
 		gone := func(name string) bool {
@@ -187,8 +191,38 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 			g.Expect(crClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: lwsDecode}, &l)).To(Succeed())
 			g.Expect(l.Status.ReadyReplicas).To(BeNumerically(">=", 2))
 			logs := controllerLogsSince(start)
-			g.Expect(logs).To(MatchRegexp(`transfer ended.*\bdone\b`))
-			g.Expect(strings.Count(logs, "Utilization share: transfer started")).To(BeNumerically(">=", 2))
+			// The set, from the controller's own account: two members started,
+			// the primary (whose ID is the set's) raised the receiver and ended
+			// done, and no member of the set released after that raise.
+			started := 0
+			var raised, lastRelease time.Time
+			for _, line := range strings.Split(logs, "\n") {
+				at, ok := logLineTime(line)
+				switch {
+				case !ok:
+				case strings.Contains(line, "transfer started") && strings.Contains(line, `"set": "`+setID+`"`):
+					started++
+				case strings.Contains(line, "released, raising the receiver") && strings.Contains(line, `"id": "`+setID+`"`):
+					raised = at
+				case strings.Contains(line, "transfer ended") && strings.Contains(line, `"outcome": "done"`) &&
+					strings.Contains(line, `"receiver": ""`) && strings.Contains(line, `"scope": "`+ns+`"`):
+					lastRelease = at // a contributor completes at its release
+				}
+			}
+			g.Expect(started).To(Equal(2), "want exactly the two members of set %s started", setID)
+			g.Expect(raised.IsZero()).To(BeFalse(), "the set's primary never raised the receiver")
+			g.Expect(lastRelease).NotTo(BeTemporally(">", raised), "a member released after the receiver was raised")
+			g.Expect(logs).To(MatchRegexp(`transfer ended.*"id": "` + setID + `".*"outcome": "done"`))
 		}, 8*time.Minute, 10*time.Second).Should(Succeed())
 	})
 })
+
+// logLineTime parses the RFC 3339 timestamp a controller log line starts with.
+func logLineTime(line string) (time.Time, bool) {
+	ts, _, ok := strings.Cut(line, "\t")
+	if !ok {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	return t, err == nil
+}

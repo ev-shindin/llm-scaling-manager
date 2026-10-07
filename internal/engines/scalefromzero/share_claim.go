@@ -8,6 +8,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 )
@@ -23,13 +24,21 @@ import (
 //
 // A claim funds one replica, so a model that must wake a prefill with its
 // decode does not claim. Decode candidates are tried cheapest first.
-func (e *Engine) claimShareTransfer(ctx context.Context, group modelGroup, candidates []Candidate) (Candidate, bool) {
+//
+// constraints are the wake's own: a namespace with its own quota claims only in
+// its namespace group, any other namespace only in the cluster group.
+func (e *Engine) claimShareTransfer(ctx context.Context, group modelGroup, candidates []Candidate,
+	constraints []*allocation.ResourceConstraints) (Candidate, bool) {
 	if e.config == nil || e.requirePrefill(group.modelID, group.namespace) {
 		return Candidate{}, false
 	}
 	zNamespace, zCluster, ok := e.config.UtilizationShareWakeScores(group.namespace, group.modelID)
 	if !ok {
 		return Candidate{}, false
+	}
+	scope, z := "", zCluster
+	if _, nsScoped := allocation.GPUBudgets(constraints, group.namespace); nsScoped {
+		scope, z = group.namespace, zNamespace
 	}
 	decodes, _ := splitByRole(candidates)
 	sortByCost(decodes)
@@ -38,8 +47,9 @@ func (e *Engine) claimShareTransfer(ctx context.Context, group modelGroup, candi
 		if !constants.IsAcceleratorResolved(c.Accelerator) {
 			continue
 		}
-		claim, outcome := decision.DefaultShareClaims.Claim(group.namespace, c.Accelerator, c.PodGPUs,
-			c.GPUsPerReplica, zNamespace, zCluster, utils.GetNamespacedKey(group.namespace, c.VariantName), time.Now())
+		claim, outcome := decision.DefaultShareClaims.Claim(scope, c.Accelerator, c.PodGPUs, c.GPUsPerReplica, z,
+			utils.GetNamespacedKey(group.namespace, group.modelID),
+			utils.GetNamespacedKey(group.namespace, c.VariantName), time.Now())
 		if outcome == decision.ShareClaimRedirected {
 			scope := claim.Scope
 			if scope == "" {

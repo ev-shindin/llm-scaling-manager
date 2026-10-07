@@ -88,8 +88,12 @@ type ShareTransfer struct {
 	// observed against them.
 	donorBase, receiverBase int
 	// setReleased is, on a set's primary, the GPUs its contributors have
-	// released while it still waits: promised to its receiver.
-	setReleased int
+	// released while it still waits: promised to its receiver. setPending is
+	// how many contributors have not released yet. A primary whose pending
+	// contributor has left the ledger without releasing -- cancelled,
+	// forgotten, aborted -- is aborted too: its receiver's replica will never
+	// have all its holes.
+	setReleased, setPending int
 }
 
 // IsSetPrimary reports whether t carries a donor set's receiver.
@@ -139,6 +143,10 @@ type ShareLedger struct {
 	// undo is what Start changed in the move history, per transfer, until
 	// ConfirmStarted; Forget puts it back.
 	undo map[string]shareUndo
+	// wakeHolds are the GPUs redirected to woken models (Redirect): free soon
+	// on the nodes, but taken by a wake's pod. Idle fills and other wakes must
+	// not count them until the hold expires.
+	wakeHolds []shareWakeHold
 	// aborts counts a donor's consecutive aborted releases, and giveAfter is
 	// when it may give again: an abort means something outside WVA -- a
 	// PodDisruptionBudget, a stuck finalizer, a raised ScaledObject floor --
@@ -171,6 +179,12 @@ type shareUndo struct {
 	receiverMoves   []shareMove
 	donorSwing      time.Time
 	receiverSwing   time.Time
+}
+
+// shareWakeHold is GPUs held for a woken model until a time.
+type shareWakeHold struct {
+	gpus  int
+	until time.Time
 }
 
 // NewShareLedger returns an empty ledger.
@@ -322,6 +336,11 @@ func (l *ShareLedger) LinkSet(primary string, contributors ...string) {
 			t.SetID = primary
 		}
 	}
+	for _, t := range l.transfers {
+		if t.ID == primary {
+			t.setPending = len(contributors)
+		}
+	}
 }
 
 // Transfer returns the transfer with that ID.
@@ -386,14 +405,24 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 			waiting[t.SetID] = true
 		}
 	}
+	// A set whose pending contributor is no longer in the ledger is broken:
+	// its primary must not release alone (it is aborted below).
+	live := map[string]int{}
 	for _, t := range l.transfers {
-		if !releasable[t] || (t.IsSetPrimary() && waiting[t.ID]) {
+		if t.State == ShareReleasing && t.SetID != "" && !t.IsSetPrimary() {
+			live[t.SetID]++
+		}
+	}
+	broken := func(t *ShareTransfer) bool { return t.IsSetPrimary() && t.setPending > live[t.ID] }
+	for _, t := range l.transfers {
+		if !releasable[t] || (t.IsSetPrimary() && waiting[t.ID]) || broken(t) {
 			continue
 		}
 		if t.SetID != "" && !t.IsSetPrimary() {
 			for _, p := range l.transfers {
 				if p.ID == t.SetID && p.State == ShareReleasing {
 					p.setReleased += t.DonorGPUs
+					p.setPending--
 				}
 			}
 		}
@@ -416,6 +445,10 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 	keep := l.transfers[:0]
 	for _, t := range l.transfers {
 		switch {
+		case t.State == ShareReleasing && broken(t):
+			// Not the donor's failure: no back-off.
+			ended = append(ended, ShareTransferEnd{*t, ShareOutcomeAborted})
+			continue
 		case t.State == ShareReleasing && !now.Before(t.Deadline):
 			ended = append(ended, ShareTransferEnd{*t, ShareOutcomeAborted})
 			if t.Donor != "" {
@@ -458,15 +491,31 @@ func (l *ShareLedger) ReceivingHeld(role string, now time.Time, tm ShareTimings)
 // already waiting for the hole -- and the original receiver, no longer
 // committed the GPUs, is planned again. It returns the transfer as it was, and
 // false when no transfer of that ID is still Releasing. A claim sets no hold.
-func (l *ShareLedger) Redirect(id string) (ShareTransfer, bool) {
+//
+// A donor set's member is never redirected: its holes fund one receiver
+// replica together, and one member's hole is not what a wake needs. The GPUs
+// redirected are held for the wake until hold expires (WakeHeld), so an idle
+// fill does not raise another receiver into the hole the wake's pod waits for.
+func (l *ShareLedger) Redirect(id string, now time.Time, hold time.Duration) (ShareTransfer, bool) {
 	for _, t := range l.transfers {
-		if t.ID == id && t.State == ShareReleasing && t.Receiver != "" {
+		if t.ID == id && t.State == ShareReleasing && t.Receiver != "" && t.SetID == "" {
 			prev := *t
 			t.Receiver, t.ReceiverVariant, t.GPUs, t.Urgent = "", "", 0, false
+			l.wakeHolds = append(l.wakeHolds, shareWakeHold{gpus: t.DonorGPUs, until: now.Add(hold)})
 			return prev, true
 		}
 	}
 	return ShareTransfer{}, false
+}
+
+// WakeHeld is the GPUs held for woken models now.
+func (l *ShareLedger) WakeHeld(now time.Time) int {
+	l.wakeHolds = slices.DeleteFunc(l.wakeHolds, func(h shareWakeHold) bool { return !now.Before(h.until) })
+	n := 0
+	for _, h := range l.wakeHolds {
+		n += h.gpus
+	}
+	return n
 }
 
 // BackingOff reports whether role is backing off after an aborted release.

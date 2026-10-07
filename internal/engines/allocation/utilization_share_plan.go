@@ -121,6 +121,13 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 		if t.State != ShareReleasing || now.Sub(t.Started) >= tm.Window {
 			continue
 		}
+		// A transfer with no receiver is a reserve refill, entitled and not
+		// subject to hysteresis, or a set's contributor, which goes only with
+		// its primary: cancelling it alone would leave the primary to raise its
+		// receiver into a hole that never fully opens.
+		if t.Receiver == "" {
+			continue
+		}
 		dn, rc := byKey[t.Donor], byKey[t.Receiver]
 		donorAfter := committed[t.Donor] // already net of this transfer
 		receiverWithout := committed[t.Receiver] - t.GPUs
@@ -159,6 +166,9 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 	// no receiver: the donor is lowered and nobody is raised. A donor gives
 	// only above its whole-replica target and its floor, best-off first.
 	plan.ReserveDebt = ShareDebt(committed, in.Budget)
+	// moved counts each role's replicas moved this cycle -- refills and
+	// rebalance alike -- against ShareMaxReplicasPerCycle.
+	moved := map[string]int{}
 	if debt := plan.ReserveDebt; debt > 0 {
 		var cands []string
 		for _, r := range roles {
@@ -190,13 +200,14 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 			// The same pace as a rebalance: up to ShareMaxReplicasPerCycle
 			// replicas per role, never below its whole-replica target or floor.
 			left := committed[dn]
-			for n := 0; n < ShareMaxReplicasPerCycle && debt > 0 && l.InFlight() < ShareMaxConcurrentTransfers; n++ {
+			for moved[dn] < ShareMaxReplicasPerCycle && debt > 0 && l.InFlight() < ShareMaxConcurrentTransfers {
 				if left-gd < byKey[dn].Floor || left-gd < integ[dn] {
 					break
 				}
 				t := l.Start(ShareTransfer{Donor: dn, DonorGPUs: gd, DonorVariant: give.Name, Entitled: true}, in.Held, now, tm)
 				plan.Started = append(plan.Started, t)
 				plan.Refills++
+				moved[dn]++
 				debt -= gd
 				left -= gd
 			}
@@ -228,7 +239,6 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 	})
 
 	work := maps.Clone(committed)
-	moved := map[string]int{}
 	for _, rc := range receivers {
 		candidates, misfits, funded := 0, 0, false
 		for _, dn := range donors {

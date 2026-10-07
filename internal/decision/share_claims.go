@@ -46,6 +46,15 @@ const (
 // optimizer that has stopped publishing, and nothing is claimable.
 const ShareClaimMaxAge = 2 * time.Minute
 
+// ShareClaimModelHold is how long a model that claimed a transfer may not claim
+// another. A woken model stays inactive until KEDA has acted on its wake, and
+// the wake loop runs at 10 Hz: without a hold, one parked model would claim
+// every releasing transfer in reach before its first replica existed.
+const ShareClaimModelHold = 2 * time.Minute
+
+// ShareClaimRefusedHeld is the outcome for a model still within its hold.
+const ShareClaimRefusedHeld = "refused-held"
+
 // ShareClaimStore holds the claimable transfers of every active group, keyed by
 // ShareGroupKey, and the claims made against them.
 type ShareClaimStore struct {
@@ -53,6 +62,8 @@ type ShareClaimStore struct {
 	claimable map[string][]ShareClaimable
 	claims    []ShareClaim
 	at        time.Time
+	// lastClaim is when each model last claimed (namespace/model).
+	lastClaim map[string]time.Time
 }
 
 // ShareGroupKey is a group's key: its scope ("" for the cluster group, else a
@@ -68,35 +79,39 @@ func (s *ShareClaimStore) Publish(claimable map[string][]ShareClaimable, now tim
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// A transfer already claimed and not yet taken stays out: the engine still
+	// lists it until it applies the claim, and a second wake must not claim
+	// the same hole.
+	for k, entries := range c {
+		c[k] = slices.DeleteFunc(entries, func(e ShareClaimable) bool {
+			return slices.ContainsFunc(s.claims, func(cl ShareClaim) bool { return cl.ID == e.ID })
+		})
+	}
 	s.claimable, s.at = c, now
-	// A claim made against a transfer the engine no longer lists is dropped
-	// when taken; nothing to do here.
 }
 
 // Claim tries to redirect a releasing transfer to a wake of one replica:
-// wakePods are its pods' GPUs (nil when unknown, then wakeGPUs is compared). The
-// wake's own group is tried first -- its namespace's quota group -- then the
-// cluster group, each with the wake's score there: zNamespace and zCluster.
-// It returns the claim and the outcome; only ShareClaimRedirected carries a
-// claim.
-func (s *ShareClaimStore) Claim(namespace, accelerator string, wakePods []int, wakeGPUs int,
-	zNamespace, zCluster float64, wake string, now time.Time) (ShareClaim, string) {
+// wakePods are its pods' GPUs (nil when unknown, then wakeGPUs is compared).
+// scope is the wake's own group -- its namespace when the namespace has its
+// own quota, "" for the cluster group -- and z its score there. Only that
+// group is tried: a model is planned in one group, and the GPUs of another are
+// not its to take. model (namespace/model) is held for ShareClaimModelHold
+// after a claim. It returns the claim and the outcome; only
+// ShareClaimRedirected carries a claim.
+func (s *ShareClaimStore) Claim(scope, accelerator string, wakePods []int, wakeGPUs int,
+	z float64, model, wake string, now time.Time) (ShareClaim, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.claimable == nil || now.Sub(s.at) > ShareClaimMaxAge {
 		return ShareClaim{}, ShareClaimNoneReleasing
 	}
+	if at, ok := s.lastClaim[model]; ok && now.Sub(at) < ShareClaimModelHold {
+		return ShareClaim{}, ShareClaimRefusedHeld
+	}
 	outcome := ShareClaimNoneReleasing
-	for _, scope := range []string{namespace, ""} {
+	{
 		key := ShareGroupKey(scope, accelerator)
 		entries := s.claimable[key]
-		if len(entries) == 0 {
-			continue
-		}
-		z := zCluster
-		if scope != "" {
-			z = zNamespace
-		}
 		best := -1
 		for i, e := range entries {
 			// Ties go to the receiver, which was promised first.
@@ -118,6 +133,10 @@ func (s *ShareClaimStore) Claim(namespace, accelerator string, wakePods []int, w
 			c := ShareClaim{Scope: scope, Accelerator: accelerator, ID: entries[best].ID, Wake: wake}
 			s.claimable[key] = slices.Delete(slices.Clone(entries), best, best+1)
 			s.claims = append(s.claims, c)
+			if s.lastClaim == nil {
+				s.lastClaim = map[string]time.Time{}
+			}
+			s.lastClaim[model] = now
 			return c, ShareClaimRedirected
 		}
 	}

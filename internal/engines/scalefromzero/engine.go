@@ -518,7 +518,7 @@ func (e *Engine) processInactiveModel(
 	if len(selected) == 0 && outcome == OutcomeNoCapacity {
 		// No idle GPUs and no reserve: a transfer still releasing for another
 		// receiver may be claimed (utilization-share optimizer, section 6.3).
-		if c, ok := e.claimShareTransfer(ctx, group, candidates); ok {
+		if c, ok := e.claimShareTransfer(ctx, group, candidates, constraints); ok {
 			selected = []Candidate{c}
 		}
 	}

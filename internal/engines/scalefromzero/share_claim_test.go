@@ -45,13 +45,13 @@ func TestClaimShareTransfer(t *testing.T) {
 
 	publish()
 	e := &Engine{config: shareConfig(t, true)}
-	if _, ok := e.claimShareTransfer(context.Background(), group, candidates); ok {
+	if _, ok := e.claimShareTransfer(context.Background(), group, candidates, nil); ok {
 		t.Fatal("shadow mode claimed a transfer")
 	}
 
 	publish()
 	e = &Engine{config: shareConfig(t, false)}
-	c, ok := e.claimShareTransfer(context.Background(), group, candidates)
+	c, ok := e.claimShareTransfer(context.Background(), group, candidates, nil)
 	if !ok || c.VariantName != "cheap" {
 		t.Fatalf("want the cheapest decode variant woken by a claim, got %v %+v", ok, c)
 	}
