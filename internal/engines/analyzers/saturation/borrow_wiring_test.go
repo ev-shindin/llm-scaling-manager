@@ -90,9 +90,14 @@ func TestBorrowedLineReachesTheRecord(t *testing.T) {
 	ctx, _ := observedCtx(t)
 	a := newAnalyzer()
 
-	// Cycle 1: the lender measures and publishes; the starved variant has
-	// nothing to borrow yet, because publication happens in this same cycle
-	// and borrowing reads what a PREVIOUS cycle left.
+	// Cycle 1: the lender measures and publishes. An earlier version of this
+	// comment claimed the starved variant has nothing to borrow yet "because
+	// borrowing reads what a PREVIOUS cycle left" -- which is not true, and
+	// not true of this fixture in particular: fitLines publishes and borrows
+	// in one sorted loop, and `variant-lender` < `variant-starved`, so the
+	// borrow fires in this very cycle. Nothing here asserted that claim, so it
+	// sat wrong without failing anything. See fitLines on what the sort order
+	// does and does not decide.
 	rows := append(lenderRows(), starvedRow())
 	_, err := a.Analyze(ctx, makeAnalyzerInput(rows, states))
 	require.NoError(t, err)

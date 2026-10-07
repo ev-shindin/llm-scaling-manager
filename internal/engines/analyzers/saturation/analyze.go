@@ -269,11 +269,25 @@ func (c *cycle) fitLines() {
 	for variant := range c.gpusByVariant {
 		variants = append(variants, variant)
 	}
-	// Sorted so a cycle's log reads the same way twice. Nothing depends on the
-	// order any more -- each variant fits its own window, and a line is only
-	// ever borrowed from a PREVIOUS cycle's publication -- but an earlier
-	// version pooled the observations, where the order silently decided which
-	// variant saw which data.
+	// Sorted so a cycle's log reads the same way twice, and because the order
+	// DOES still decide something.
+	//
+	// An earlier comment here claimed it did not -- that "a line is only ever
+	// borrowed from a PREVIOUS cycle's publication". That is false, and was
+	// measured to be: publishLine writes a.itlLines and borrowLine reads it
+	// inside this one loop, so a lender sorting before a borrower is borrowed
+	// from in the SAME cycle. Renaming the lender from `a-fitter` to
+	// `z-fitter` flips a first-cycle borrow from happening to not happening,
+	// on otherwise identical input.
+	//
+	// Sorting is what makes that deterministic, which is the property worth
+	// having: the alternative is a borrow that depends on Go's map iteration
+	// order and so differs between two runs of the same fleet. What sorting
+	// does NOT give is the BEST lender -- publishLine overwrites
+	// unconditionally, so with two publishers on one fingerprint the stored
+	// line is the alphabetically greatest variant's, whatever its fit quality.
+	// itl.Model carries neither the tier nor the sample count, so there is
+	// nothing to tie-break on here yet; that is a known gap, not a property.
 	sort.Strings(variants)
 	for _, variant := range variants {
 		// Decode only. ITL is the latency between GENERATED tokens, and
