@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
@@ -406,6 +407,51 @@ func TestUtilizationShareActivePublishesActuationSeries(t *testing.T) {
 			}
 			if n := family(t, reg, constants.WVAUtilizationShareReleaseSeconds)[0].GetHistogram().GetSampleCount(); n != uint64(started) {
 				t.Errorf("release observations = %d, want %d", n, started)
+			}
+		})
+	}
+}
+
+// GPUs released for a receiver and not yet held are published as promised, so
+// wakes and the warm pool withhold them; a shadow pass promises nothing.
+func TestUtilizationSharePublishesPromisedGPUs(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy string
+		active bool
+	}{
+		{"active", activeShare, true},
+		{"shadow", selectedShadow, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newShareFleet()
+			clock := time.Unix(0, 0)
+			e := &Engine{Config: shadowConfig(t, tc.policy), client: sharePods(t, f)}
+			e.utilizationShare.now = func() time.Time { return clock }
+			ctx, _ := observe(t)
+			cycle := func() map[string]utilizationShareOverride {
+				clock = clock.Add(30 * time.Second)
+				return e.evaluateUtilizationShare(ctx, f.requests(), fullQuota(), f.scaleTargets())
+			}
+			started := 0
+			for range 20 {
+				if o := cycle(); o != nil {
+					if started = 9 - o["ns/A-v"].Target; started > 0 {
+						break
+					}
+				}
+			}
+			if got := decision.LatestSharePromised(clock)[""]["A100"]; got != 0 {
+				t.Fatalf("promised %d before any release", got)
+			}
+			f.current["A"] -= started
+			cycle()
+			want := 0
+			if tc.active {
+				want = started
+			}
+			if got := decision.LatestSharePromised(clock)[""]["A100"]; got != want {
+				t.Fatalf("promised after the release = %d, want %d", got, want)
 			}
 		})
 	}

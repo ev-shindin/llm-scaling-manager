@@ -1094,7 +1094,10 @@ func (e *Engine) selectV2Optimizer(
 	// fleet was not idle either, and so a live cluster with one no-change variant
 	// never published headroom at all -- the pool read "unknown" forever and
 	// grew past a one-GPU quota unopposed.
-	allocation.PublishNamespaceHeadroom(constraints, time.Now())
+	// GPUs the utilization-share optimizer has promised to a receiver are
+	// withheld from the pool (section 6.3 of its proposal).
+	now := time.Now()
+	allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, decision.LatestSharePromised(now)), now)
 	return optimizer, constraints
 }
 

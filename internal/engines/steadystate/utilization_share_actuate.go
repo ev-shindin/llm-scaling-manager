@@ -18,6 +18,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
@@ -562,6 +563,15 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 	if overrides := e.evaluateUtilizationShare(ctx, requests, constraints, scaleTargets); len(overrides) > 0 {
 		applied := applyUtilizationShareOverrides(decisions, overrides)
 		ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("Utilization share set planned targets", "variants", applied)
+	}
+	// Republish the warm pool's headroom with this pass's promises withheld,
+	// so a transfer that started filling this cycle is not open to the pool
+	// until the next one (section 6.3).
+	if len(constraints) > 0 {
+		now := time.Now()
+		if p := decision.LatestSharePromised(now); len(p) > 0 {
+			allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, p), now)
+		}
 	}
 	return decisions
 }

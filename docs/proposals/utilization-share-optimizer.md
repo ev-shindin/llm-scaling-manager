@@ -1867,6 +1867,11 @@ optimizer every cycle (§6.6).
        after it;
      - the overlay on the cycle's decisions under the `utilization-share`
        reason, which the sticky scale-down hold stands down for;
+     - promised GPUs withheld from the other two consumers of "what is
+       free": the steady-state engine publishes them each pass
+       (`decision.PublishSharePromised`), and both the warm pool's headroom
+       and the scale-from-zero budget check count them as used
+       (`allocation.WithholdPromised`);
      - re-anchoring: a variant held off its target by something outside the
        optimizer (a ResourceQuota denial, a ScaledObject ceiling, scale to
        zero), with no transfer in flight, returns to its running count after
@@ -1882,7 +1887,10 @@ optimizer every cycle (§6.6).
    - the `redirected` outcome; the `_withheld_total`, `_actual`,
      `_floor_excess_gpus` and `_reserve_debt_gpus` series of §9; and the
      `awaiting-release` blocked reason.
-   - wake claims for scale-from-zero, and the warm pool's share of idle (§7).
+   - wake *claims*: a wake that scores lower than a Releasing transfer's
+     receiver redirecting it (§6.3). Until then a wake never takes promised
+     GPUs and waits for idle ones -- at most a fill timeout. The warm pool's
+     own carve-out from idle (§7.2) is not built either.
    - the kind e2e of §12.
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4).

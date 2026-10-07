@@ -12,6 +12,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
@@ -77,6 +78,15 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		}
 	}()
 
+	now := time.Now()
+	if st.now != nil {
+		now = st.now()
+	}
+	// What the active groups have promised, published on every exit: empty
+	// when nothing acts, so wakes and the warm pool stop withholding at once.
+	promised := map[string]map[string]int{}
+	defer func() { decision.PublishSharePromised(promised, now) }()
+
 	us, selected, err := e.Config.UtilizationShare()
 	errText := ""
 	if err != nil {
@@ -104,10 +114,6 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	}
 	if us.Shadow {
 		st.resetActuation()
-	}
-	now := time.Now()
-	if st.now != nil {
-		now = st.now()
 	}
 	seen := map[string]bool{}
 
@@ -185,6 +191,12 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			maps.Copy(overrides, act.overrides)
 			pg.Active = true
 			pg.PromisedGPUs = float64(act.promised)
+			if act.promised > 0 {
+				if promised[g.Scope] == nil {
+					promised[g.Scope] = map[string]int{}
+				}
+				promised[g.Scope][g.AcceleratorType] += act.promised
+			}
 			pg.Timings = shareTimingSeries(act.timings, act.sources)
 			for _, k := range act.swinging {
 				if i, ok := roleIdx[k]; ok {
