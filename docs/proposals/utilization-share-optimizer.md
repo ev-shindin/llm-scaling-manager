@@ -1867,14 +1867,16 @@ optimizer every cycle (§6.6).
        optimizer (a ResourceQuota denial, a ScaledObject ceiling, scale to
        zero), with no transfer in flight, returns to its running count after
        one release timeout, with a WARN;
-     - `wva_utilization_share_transfers_total`.
+     - `wva_utilization_share_transfers_total`, and, for an active group,
+       `_promised_gpus`, `_effective_seconds`, `_swinging` and the
+       `_release_seconds` histogram.
 
    **Not yet built in stage 2:**
    - per-pod donor *sets* across several donor pods, with the per-node
      check (§6.5). A transfer has one donor role today, and a Deployment
      donor gives one pod at a time.
-   - the `redirected` outcome, the withheld, swinging, promised,
-     effective-timing and release-time series of §9, and the
+   - the `redirected` outcome; the `_withheld_total`, `_actual`,
+     `_floor_excess_gpus` and `_reserve_debt_gpus` series of §9; and the
      `awaiting-release` blocked reason.
    - wake claims for scale-from-zero, and the warm pool's share of idle (§7).
    - the kind e2e of §12.

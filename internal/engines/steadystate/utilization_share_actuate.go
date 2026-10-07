@@ -50,6 +50,16 @@ type transferMark struct {
 	Started         time.Time `json:"started"`
 }
 
+// shareActuation is what one active cycle of a group did, for the caller to
+// apply and publish.
+type shareActuation struct {
+	overrides map[string]utilizationShareOverride
+	promised  int
+	timings   allocation.ShareTimings
+	sources   allocation.ShareTimingSource
+	swinging  []string
+}
+
 // utilizationShareOverride is a planned variant's target as the optimizer owns
 // it, applied over the cycle's decisions.
 type utilizationShareOverride struct {
@@ -65,7 +75,7 @@ func shareGroupKey(g allocation.ShareGroup) string { return g.AcceleratorType + 
 // namespace/model, then variant.
 func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger, us config.UtilizationShare,
 	g allocation.ShareGroup, ev allocation.ShareEvaluation,
-	scaleTargets map[string]map[string]scaletarget.ScaleTargetAccessor, now time.Time) map[string]utilizationShareOverride {
+	scaleTargets map[string]map[string]scaletarget.ScaleTargetAccessor, now time.Time) shareActuation {
 	st := &e.utilizationShare
 	if st.ledgers == nil {
 		st.ledgers = map[string]*allocation.ShareLedger{}
@@ -126,6 +136,9 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			"donor", t.Donor, "receiver", t.Receiver)
 	}
 	for _, t := range l.TakeReleased() {
+		if t.Donor != "" {
+			metrics.ObserveUtilizationShareRelease(g.AcceleratorType, scope, now.Sub(t.Started))
+		}
 		if t.Donor != "" && t.ReceiverVariant != "" {
 			st.desired[variantKey(t.Receiver, t.ReceiverVariant)]++
 			logger.Info("Utilization share: released, raising the receiver", "id", t.ID,
@@ -135,8 +148,11 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 
 	e.reanchorShareTargets(logger, l, g, variantKey, now, tm)
 
+	out := shareActuation{timings: tm, sources: src}
 	if now.Before(st.quietUntil[key]) {
-		return e.shareOverrides(g, variantKey, "restart quiet period")
+		out.overrides = e.shareOverrides(g, variantKey, "restart quiet period")
+		out.promised = l.Promised()
+		return out
 	}
 
 	before := map[string]allocation.ShareTransfer{}
@@ -170,7 +186,10 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	}
 
 	e.fillIdleShare(logger, l, g, ev, held, variantKey, now, tm)
-	return e.shareOverrides(g, variantKey, "utilization share")
+	out.overrides = e.shareOverrides(g, variantKey, "utilization share")
+	out.promised = l.Promised()
+	out.swinging = plan.Swinging
+	return out
 }
 
 // fillIdleShare raises receivers below their whole-replica target into GPUs

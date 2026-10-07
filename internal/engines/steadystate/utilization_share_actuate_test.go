@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
@@ -345,6 +346,66 @@ func TestDecideV2AppliesUtilizationShareTargets(t *testing.T) {
 			}
 			if tc.active != (a.ReasonCategory() == domain.DecisionReasonUtilizationShare) {
 				t.Fatalf("active=%t but A's reason is %q", tc.active, a.ReasonCategory())
+			}
+		})
+	}
+}
+
+// An active group publishes what actuation needs to be read: promised GPUs, the
+// derived timings with their source, swinging per role, and each release's
+// duration. A shadow group publishes none of them -- they would describe
+// actuation that is not happening.
+func TestUtilizationShareActivePublishesActuationSeries(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy string
+		active bool
+	}{
+		{"active", activeShare, true},
+		{"shadow", selectedShadow, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := freshMetrics(t)
+			f := newShareFleet()
+			clock := time.Unix(0, 0)
+			e := &Engine{Config: shadowConfig(t, tc.policy), client: sharePods(t, f)}
+			e.utilizationShare.now = func() time.Time { return clock }
+			ctx, _ := observe(t)
+			cycle := func() map[string]utilizationShareOverride {
+				clock = clock.Add(30 * time.Second)
+				return e.evaluateUtilizationShare(ctx, f.requests(), fullQuota(), f.scaleTargets())
+			}
+			started := 0
+			for range 20 {
+				if o := cycle(); o != nil {
+					if started = 9 - o["ns/A-v"].Target; started > 0 {
+						break
+					}
+				}
+			}
+			f.current["A"] -= started
+			cycle()
+
+			want := map[bool][4]int{true: {1, 5, 3, 1}, false: {0, 0, 0, 0}}[tc.active]
+			got := [4]int{
+				len(family(t, reg, constants.WVAUtilizationSharePromisedGPUs)),
+				len(family(t, reg, constants.WVAUtilizationShareEffectiveSeconds)),
+				len(family(t, reg, constants.WVAUtilizationShareSwinging)),
+				len(family(t, reg, constants.WVAUtilizationShareReleaseSeconds)),
+			}
+			if got != want {
+				t.Fatalf("series (promised, timings, swinging, release) = %v, want %v", got, want)
+			}
+			if !tc.active {
+				return
+			}
+			for _, m := range family(t, reg, constants.WVAUtilizationShareEffectiveSeconds) {
+				if s := label(m, constants.LabelSource); s != "default" {
+					t.Errorf("timing %s: source %q, want default (no ScaledObject in the registry)", label(m, constants.LabelParam), s)
+				}
+			}
+			if n := family(t, reg, constants.WVAUtilizationShareReleaseSeconds)[0].GetHistogram().GetSampleCount(); n != uint64(started) {
+				t.Errorf("release observations = %d, want %d", n, started)
 			}
 		})
 	}

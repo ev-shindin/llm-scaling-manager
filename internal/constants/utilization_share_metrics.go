@@ -31,6 +31,27 @@ const (
 	// ledger, by outcome (done, fill-timeout, cancelled, aborted).
 	WVAUtilizationShareTransfersTotal = "wva_utilization_share_transfers_total"
 
+	// WVAUtilizationSharePromisedGPUs is a gauge: P, GPUs released for a
+	// receiver and not yet held by it.
+	WVAUtilizationSharePromisedGPUs = "wva_utilization_share_promised_gpus"
+
+	// WVAUtilizationShareEffectiveSeconds is a gauge: a derived timing in force,
+	// by param and the source of its inputs (section 8.4).
+	WVAUtilizationShareEffectiveSeconds = "wva_utilization_share_effective_seconds"
+
+	// WVAUtilizationShareSwinging is a gauge: 1 while a role is planned on its
+	// mean need (section 6.7 rule 5).
+	WVAUtilizationShareSwinging = "wva_utilization_share_swinging"
+
+	// WVAUtilizationShareReleaseSeconds is a histogram: transfer start to the
+	// donor's GPUs released.
+	WVAUtilizationShareReleaseSeconds = "wva_utilization_share_release_seconds"
+
+	// LabelParam names a derived timing; LabelSource is where its inputs came
+	// from.
+	LabelParam  = "param"
+	LabelSource = "source"
+
 	// LabelUrgent is "true" on a transfer whose receiver was below its need.
 	LabelUrgent = "urgent"
 

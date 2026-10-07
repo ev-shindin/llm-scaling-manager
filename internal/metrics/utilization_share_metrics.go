@@ -2,10 +2,12 @@ package metrics
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -19,6 +21,10 @@ var (
 	utilizationShareSpareGPUs      *prometheus.GaugeVec
 	utilizationShareReplicasToMove *prometheus.GaugeVec
 	utilizationShareTransfers      *prometheus.CounterVec
+	utilizationSharePromisedGPUs   *prometheus.GaugeVec
+	utilizationShareEffective      *prometheus.GaugeVec
+	utilizationShareSwinging       *prometheus.GaugeVec
+	utilizationShareRelease        *prometheus.HistogramVec
 )
 
 // registerUtilizationShareMetrics creates and registers the utilization-share
@@ -52,6 +58,26 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		"Utilization-share optimizer: replicas the whole-replica target would move. In shadow mode, "+
 			"what would be planned.",
 		groupLabels)
+	utilizationSharePromisedGPUs = gauge(constants.WVAUtilizationSharePromisedGPUs,
+		"Utilization-share optimizer: GPUs released for a receiver and not yet held by it. "+
+			"Published only while the optimizer acts.",
+		groupLabels)
+	utilizationShareEffective = gauge(constants.WVAUtilizationShareEffectiveSeconds,
+		"Utilization-share optimizer: a derived timing in force, in seconds, and where its inputs came "+
+			"from (scaledobject, pod, measured, default). Published only while the optimizer acts.",
+		append(slices.Clone(groupLabels), constants.LabelParam, constants.LabelSource))
+	utilizationShareSwinging = gauge(constants.WVAUtilizationShareSwinging,
+		"Utilization-share optimizer: 1 while a role is planned on its mean need because it reversed "+
+			"direction twice within the swing window. Published only while the optimizer acts.",
+		roleLabels)
+	utilizationShareRelease = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    constants.WVAUtilizationShareReleaseSeconds,
+		Help:    "Utilization-share optimizer: time from a transfer's start to its donor's GPUs being released.",
+		Buckets: []float64{30, 60, 120, 240, 360, 480, 600, 900, 1200, 1800},
+	}, groupLabels)
+	if err := registry.Register(utilizationShareRelease); err != nil {
+		return fmt.Errorf("failed to register utilization-share metric: %w", err)
+	}
 	utilizationShareTransfers = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: constants.WVAUtilizationShareTransfersTotal,
 		Help: "Utilization-share optimizer: transfers that left the ledger, by outcome.",
@@ -62,6 +88,7 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 	for _, g := range []*prometheus.GaugeVec{
 		utilizationShareHeadroom, utilizationShareTargetGPUs, utilizationShareActionable,
 		utilizationShareSpareGPUs, utilizationShareReplicasToMove,
+		utilizationSharePromisedGPUs, utilizationShareEffective, utilizationShareSwinging,
 	} {
 		if err := registry.Register(g); err != nil {
 			return fmt.Errorf("failed to register utilization-share metric: %w", err)
@@ -77,6 +104,14 @@ type UtilizationShareRole struct {
 	Headroom   float64
 	TargetGPUs float64
 	Actionable bool
+	// Swinging is published only for an active group.
+	Swinging bool
+}
+
+// UtilizationShareTiming is one derived timing of an active group.
+type UtilizationShareTiming struct {
+	Param, Source string
+	Seconds       float64
 }
 
 // UtilizationShareGroup is one group's published evaluation.
@@ -87,6 +122,11 @@ type UtilizationShareGroup struct {
 	SpareGPUs      float64
 	ReplicasToMove int
 	Roles          []UtilizationShareRole
+	// Active is true when the optimizer acts on this group; the fields below
+	// are published only then.
+	Active       bool
+	PromisedGPUs float64
+	Timings      []UtilizationShareTiming
 }
 
 // utilizationSharePublished is the series the last PublishUtilizationShare set,
@@ -138,6 +178,15 @@ func PublishUtilizationShare(groups []UtilizationShareGroup) {
 		}
 		set(utilizationShareSpareGPUs, gl, grp.SpareGPUs)
 		set(utilizationShareReplicasToMove, gl, float64(grp.ReplicasToMove))
+		if grp.Active {
+			set(utilizationSharePromisedGPUs, gl, grp.PromisedGPUs)
+			for _, tm := range grp.Timings {
+				tl := maps.Clone(gl)
+				tl[constants.LabelParam] = tm.Param
+				tl[constants.LabelSource] = tm.Source
+				set(utilizationShareEffective, tl, tm.Seconds)
+			}
+		}
 		for _, r := range grp.Roles {
 			rl := prometheus.Labels{
 				constants.LabelNamespace: r.Namespace,
@@ -156,6 +205,13 @@ func PublishUtilizationShare(groups []UtilizationShareGroup) {
 				actionable = 1
 			}
 			set(utilizationShareActionable, rl, actionable)
+			if grp.Active {
+				swinging := 0.0
+				if r.Swinging {
+					swinging = 1
+				}
+				set(utilizationShareSwinging, rl, swinging)
+			}
 		}
 	}
 }
@@ -175,4 +231,16 @@ func CountUtilizationShareTransfer(acceleratorType, scope, outcome string, urgen
 		l[constants.LabelControllerInstance] = controllerInstance
 	}
 	utilizationShareTransfers.With(l).Inc()
+}
+
+// ObserveUtilizationShareRelease records how long one donor took to release.
+func ObserveUtilizationShareRelease(acceleratorType, scope string, d time.Duration) {
+	if utilizationShareRelease == nil {
+		return
+	}
+	l := prometheus.Labels{constants.LabelAcceleratorType: acceleratorType, constants.LabelScope: scope}
+	if controllerInstance != "" {
+		l[constants.LabelControllerInstance] = controllerInstance
+	}
+	utilizationShareRelease.With(l).Observe(d.Seconds())
 }

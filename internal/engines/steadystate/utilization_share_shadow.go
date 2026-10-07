@@ -156,7 +156,9 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		}
 		var table []string
 		var actionable []string
+		roleIdx := map[string]int{}
 		for _, v := range ev.Roles {
+			roleIdx[v.Key] = len(pg.Roles)
 			o := g.Origins[v.Key]
 			pg.Roles = append(pg.Roles, metrics.UtilizationShareRole{
 				Namespace:  o.Namespace,
@@ -172,8 +174,6 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 				actionable = append(actionable, v.Key)
 			}
 		}
-		published = append(published, pg)
-
 		mode := "Shadow: utilization share would rebalance"
 		if !us.Shadow {
 			mode = "Utilization share: rebalancing"
@@ -181,8 +181,18 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			if overrides == nil {
 				overrides = map[string]utilizationShareOverride{}
 			}
-			maps.Copy(overrides, e.actuateUtilizationShare(ctx, logger, us, g, ev, scaleTargets, now))
+			act := e.actuateUtilizationShare(ctx, logger, us, g, ev, scaleTargets, now)
+			maps.Copy(overrides, act.overrides)
+			pg.Active = true
+			pg.PromisedGPUs = float64(act.promised)
+			pg.Timings = shareTimingSeries(act.timings, act.sources)
+			for _, k := range act.swinging {
+				if i, ok := roleIdx[k]; ok {
+					pg.Roles[i].Swinging = true
+				}
+			}
 		}
+		published = append(published, pg)
 
 		kv := []any{
 			"accelerator", g.AcceleratorType, "scope", scope, "budget", g.Budget,
@@ -218,4 +228,31 @@ func formatHeadroom(x float64) string {
 		return "n/a"
 	}
 	return fmt.Sprintf("%+.0f%%", 100*x)
+}
+
+// shareTimingSeries is a group's derived timings as published series: each
+// parameter in seconds, with where its inputs came from (section 8.4) --
+// measured when the group's own releases set it, else the ScaledObject or pod
+// template when any input was read there, else the cluster defaults.
+func shareTimingSeries(tm allocation.ShareTimings, src allocation.ShareTimingSource) []metrics.UtilizationShareTiming {
+	derived := func(inputs ...string) string {
+		for _, in := range inputs {
+			if src[in] == "measured" {
+				return "measured"
+			}
+		}
+		for _, in := range inputs {
+			if src[in] == "scaledobject" || src[in] == "pod" {
+				return src[in]
+			}
+		}
+		return "default"
+	}
+	return []metrics.UtilizationShareTiming{
+		{Param: "window", Source: derived("window"), Seconds: tm.Window.Seconds()},
+		{Param: "release_timeout", Source: derived("window", "polling", "grace"), Seconds: tm.ReleaseTimeout.Seconds()},
+		{Param: "fill_timeout", Source: derived("polling"), Seconds: tm.FillTimeout.Seconds()},
+		{Param: "reversal_hold", Source: derived("release", "window", "polling", "grace"), Seconds: tm.ReversalHold.Seconds()},
+		{Param: "swing_window", Source: derived("release", "window", "polling", "grace"), Seconds: tm.SwingWindow.Seconds()},
+	}
 }
