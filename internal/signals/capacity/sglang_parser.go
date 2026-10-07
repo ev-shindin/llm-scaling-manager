@@ -45,7 +45,8 @@ func ParseSGLangArgs(scaleTarget scaletarget.ScaleTargetAccessor) EngineParams {
 		return params
 	}
 
-	for _, container := range podTemplateSpec.Spec.Containers {
+	// The engine's containers only, for the reason given at the vLLM call site.
+	for _, container := range inferenceengine.ConfigContainers(podTemplateSpec, inferenceengine.EngineSGLang) {
 		// collectArgs, variable resolution and the --key/--key=value parsing
 		// loop are shared with the vLLM parser; only the per-flag mapping
 		// (applySGLangParam) differs. The env is this container's own, for the

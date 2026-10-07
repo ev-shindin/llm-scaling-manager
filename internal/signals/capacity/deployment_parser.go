@@ -154,7 +154,13 @@ func ParseVLLMArgs(scaleTarget scaletarget.ScaleTargetAccessor) EngineParams {
 		return params
 	}
 
-	for _, container := range podTemplateSpec.Spec.Containers {
+	// The ENGINE's containers, not every container. A pod that runs the engine
+	// beside a routing sidecar or an exporter has several containers carrying
+	// flags, and walking all of them let the last one win on any flag name they
+	// shared -- publishing and hashing a sidecar's --dtype as the engine's,
+	// with no error and no missing series. ConfigContainers documents the rule
+	// and its fallback.
+	for _, container := range inferenceengine.ConfigContainers(podTemplateSpec, inferenceengine.EngineVLLM) {
 		// Check environment variables first
 		for _, env := range container.Env {
 			if env.Name == "VLLM_USE_V1" {

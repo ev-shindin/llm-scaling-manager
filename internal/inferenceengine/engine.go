@@ -65,17 +65,107 @@ func isSGLangContainer(c *corev1.Container) bool {
 		return true
 	}
 
-	// Join command + args into a single lowercase string so we catch both the
-	// argv form (["python", "-m", "sglang.launch_server", ...]) and the shell
-	// form (["/bin/sh", "-c", "python -m sglang.launch_server ..."]).
-	cmd := strings.ToLower(strings.Join(slices.Concat(c.Command, c.Args), " "))
+	// The command is joined into a single lowercase string so both the argv form
+	// (["python", "-m", "sglang.launch_server", ...]) and the shell form
+	// (["/bin/sh", "-c", "python -m sglang.launch_server ..."]) are caught, and
+	// only the documented launch forms are matched. See sglangLaunchCommand,
+	// which is this half on its own -- ConfigContainers needs the command
+	// signal without the image one, because they are not equally trustworthy.
+	return sglangLaunchCommand(c)
+}
 
-	// Match only the documented launch forms. A bare "-m sglang" prefix is
-	// intentionally not matched: it is broader than the contract (it would also
-	// match "-m sglang_bench" and similar), and the two forms below already cover
-	// every supported SGLang launch.
+// isVLLMContainer reports whether a container runs a vLLM server, based on its
+// launch command/args or its image reference.
+//
+// Only the documented launch forms, for the same reason isSGLangContainer
+// gives: a bare "-m vllm" prefix would also match "-m vllm_bench" and
+// anything else beginning that way.
+func isVLLMContainer(c *corev1.Container) bool {
+	if vllmLaunchCommand(c) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(c.Image), "vllm")
+}
+
+// vllmLaunchCommand reports whether a container's command or args actually
+// launch a vLLM server. It is the STRONG signal, kept separate from the image
+// check because the two are not equally trustworthy -- see ConfigContainers.
+func vllmLaunchCommand(c *corev1.Container) bool {
+	cmd := strings.ToLower(strings.Join(slices.Concat(c.Command, c.Args), " "))
+	return strings.Contains(cmd, "vllm serve") ||
+		strings.Contains(cmd, "vllm.entrypoints")
+}
+
+// sglangLaunchCommand is isSGLangContainer's command half, for the same reason.
+func sglangLaunchCommand(c *corev1.Container) bool {
+	cmd := strings.ToLower(strings.Join(slices.Concat(c.Command, c.Args), " "))
 	return strings.Contains(cmd, "sglang.launch_server") ||
 		strings.Contains(cmd, "sglang serve")
+}
+
+// ConfigContainers returns the containers whose args carry the engine's
+// configuration, which is what an argument parser should read and nothing else.
+//
+// It exists because reading EVERY container is wrong in a way that is silent.
+// A pod that runs the engine beside a routing sidecar, a proxy or an exporter
+// has several containers with flags, and a parser that walks all of them lets
+// the last one win on any flag name they happen to share -- so a sidecar's
+// --dtype or --block-size would be published and hashed as the engine's. There
+// is no error and no missing series; the configuration is simply someone
+// else's.
+//
+// THE TWO SIGNALS ARE NOT EQUALLY GOOD, and the order matters:
+//
+//  1. A launch command. `vllm serve ...` or `sglang.launch_server` in the
+//     command or args is the engine actually being started, and it is what
+//     the deployments in the field carry -- including through a shell wrapper,
+//     since the whole `-c` string is searched.
+//  2. The image reference. Weaker, because "vllm" appears in the image of
+//     things that are not an engine: a vllm-router, a vllm-exporter, a
+//     benchmark image built from one. It is the fallback for a container whose
+//     command is a bare entrypoint with the launch built in.
+//
+// Taking them in that order means a sidecar named after the engine cannot
+// outvote the container that demonstrably starts it.
+//
+// When NEITHER signal identifies anything, every container is returned -- the
+// historical behaviour. That is deliberate: returning none would leave the
+// params entirely at their defaults with nothing recorded as unread, which is
+// a configuration of pure defaults presented as a measurement, and that is the
+// false equality the unresolved set exists to prevent. A possibly-wrong read
+// that the rest of the pipeline can still sanity-check beats a confidently
+// empty one.
+func ConfigContainers(tmpl *corev1.PodTemplateSpec, engine Engine) []corev1.Container {
+	if tmpl == nil {
+		return nil
+	}
+	all := tmpl.Spec.Containers
+
+	launches, images := sglangLaunchCommand, isSGLangContainer
+	if engine != EngineSGLang {
+		launches, images = vllmLaunchCommand, isVLLMContainer
+	}
+
+	var byCommand []corev1.Container
+	for i := range all {
+		if launches(&all[i]) {
+			byCommand = append(byCommand, all[i])
+		}
+	}
+	if len(byCommand) > 0 {
+		return byCommand
+	}
+
+	var byImage []corev1.Container
+	for i := range all {
+		if images(&all[i]) {
+			byImage = append(byImage, all[i])
+		}
+	}
+	if len(byImage) > 0 {
+		return byImage
+	}
+	return all
 }
 
 // Present returns the deterministically-ordered set of distinct engines detected

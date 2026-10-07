@@ -377,3 +377,75 @@ func TestUnresolvedIgnoresFlagsTheParserDoesNotMap(t *testing.T) {
 		t.Errorf("BlockSize = %d, want 128", p.BlockSize)
 	}
 }
+
+// TestTheParserReadsOnlyTheEngineContainer is the wiring, not the rule.
+//
+// ConfigContainers has its own specs in internal/inferenceengine, and all of
+// them passed while the parsers still walked every container -- a
+// well-identified helper nobody called. This drives the parser and reads the
+// result, which is the only thing that shows the selection is in use.
+//
+// The fixture is the cluster's decode pod with the llm-d routing sidecar as a
+// regular container (it runs as one in other llm-d layouts) and given flag
+// names it shares with the engine. Sorted last by nothing in particular: the
+// old loop simply let whichever came later win.
+func TestTheParserReadsOnlyTheEngineContainer(t *testing.T) {
+	engine := corev1.Container{
+		Name:    "vllm",
+		Image:   "docker.io/vllm/vllm-openai:v0.26.0",
+		Command: []string{"/bin/bash", "-c"},
+		Args: []string{". /shared-config/llmdbench_env.sh && vllm serve /model-cache/m " +
+			"--block-size $VLLM_BLOCK_SIZE --max-model-len $VLLM_MAX_MODEL_LEN " +
+			"--dtype bfloat16"},
+		Env: []corev1.EnvVar{
+			{Name: "VLLM_BLOCK_SIZE", Value: "128"},
+			{Name: "VLLM_MAX_MODEL_LEN", Value: "16384"},
+		},
+	}
+	sidecar := corev1.Container{
+		Name:    "routing-proxy",
+		Image:   "ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.9.0",
+		Command: []string{"/app/proxy"},
+		// The same flag NAMES, different values. Nothing stops a sidecar
+		// having them; what must stop is them being read as the engine's.
+		Args: []string{"--block-size", "8", "--max-model-len", "512", "--dtype", "float16"},
+	}
+
+	d := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "d", Namespace: "ns"},
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{engine, sidecar}},
+			},
+		},
+	}
+	p := ParseVLLMArgs(scaletarget.NewDeploymentAccessor(d))
+
+	if p.BlockSize != 128 {
+		t.Errorf("BlockSize = %d, want 128 from the engine -- 8 is the sidecar's",
+			p.BlockSize)
+	}
+	if p.MaxModelLen != 16384 {
+		t.Errorf("MaxModelLen = %d, want 16384 from the engine -- 512 is the sidecar's",
+			p.MaxModelLen)
+	}
+	if p.WeightDtype != "bfloat16" {
+		t.Errorf("WeightDtype = %q, want bfloat16 from the engine -- float16 is the sidecar's",
+			p.WeightDtype)
+	}
+	if !p.Complete() {
+		t.Errorf("Unresolved = %v, want empty: the engine's own env resolves both "+
+			"its references", p.Unresolved)
+	}
+
+	// And the order must not matter, which is the actual defect: the old loop
+	// let the last container win.
+	rev := d.DeepCopy()
+	rev.Spec.Template.Spec.Containers = []corev1.Container{sidecar, engine}
+	q := ParseVLLMArgs(scaletarget.NewDeploymentAccessor(rev))
+	if q.Fingerprint() != p.Fingerprint() {
+		t.Errorf("swapping the container order changed the digest (%s vs %s): the "+
+			"configuration depends on which container is listed last",
+			p.Fingerprint(), q.Fingerprint())
+	}
+}
