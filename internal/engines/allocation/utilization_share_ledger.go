@@ -393,6 +393,11 @@ func (l *ShareLedger) ReceivingHeld(role string, now time.Time, tm ShareTimings)
 	return ok && now.Sub(t) < tm.ReversalHold
 }
 
+// BackingOff reports whether role is backing off after an aborted release.
+func (l *ShareLedger) BackingOff(role string, now time.Time) bool {
+	return now.Before(l.giveAfter[role])
+}
+
 // GivingHeld reports whether role may not give now: it received within the
 // reversal hold, or its last release was aborted and it is backing off.
 func (l *ShareLedger) GivingHeld(role string, now time.Time, tm ShareTimings) bool {

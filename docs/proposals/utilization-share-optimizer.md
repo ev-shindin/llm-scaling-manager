@@ -1875,6 +1875,17 @@ optimizer every cycle (§6.6).
        after it;
      - the overlay on the cycle's decisions under the `utilization-share`
        reason, which the sticky scale-down hold stands down for;
+     - section 9's `_withheld_total`, `_actual` and `_floor_excess_gpus`, and
+       the utilization-share reasons on `wva_model_scaling_blocked`:
+       `awaiting-release`, `quota-short`, `floor-pinned`,
+       `floors-exceed-quota`, `donors-at-floor`, `no-compatible-donor` and
+       `release-timeout`. They are a third reason-owner set, published only
+       while the optimizer acts (in shadow mode "blocked by the optimizer"
+       would be false) and cleared when a model stops being planned.
+       `donors-at-floor` means the role is short and every other role holds
+       no more than its floor. It does not also require the role to be out
+       of band: the continuous targets already absorb floors, so a role whose
+       GPUs are all pinned elsewhere sits in band at its shortfall.
      - the reserve (section 7.2). `reserveGPUs` comes out of every group's
        budget, so those quota GPUs stay free for a wake. Committed GPUs above
        the budget are reserve debt (`wva_utilization_share_reserve_debt_gpus`).
@@ -1913,9 +1924,11 @@ optimizer every cycle (§6.6).
    - donor *sets* across several donor replicas, with the per-node check
      (§6.5). A transfer has one donor replica today, so a receiver larger
      than every donor replica's pods is not funded at all.
-   - the `redirected` outcome; the `_withheld_total`, `_actual` and
-     `_floor_excess_gpus` series of §9; and the `awaiting-release` blocked
-     reason.
+   - the `redirected` outcome and `_claims_total` (wake claims, below);
+     `_donors_per_transfer` (donor sets, above); and the `release-taken` and
+     `release-shape-mismatch` reasons, which need the per-node view of
+     section 6.5. A fill timeout is counted (`outcome="fill-timeout"`) but
+     not yet attributed.
    - wake *claims*: a wake that scores lower than a Releasing transfer's
      receiver redirecting it (§6.3). Until then a wake never takes promised
      GPUs and waits for idle ones -- at most a fill timeout. The warm pool's

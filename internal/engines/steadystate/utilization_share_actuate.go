@@ -60,9 +60,14 @@ type shareActuation struct {
 	overrides   map[string]utilizationShareOverride
 	promised    int
 	reserveDebt int
-	timings     allocation.ShareTimings
-	sources     allocation.ShareTimingSource
-	swinging    []string
+	// blocked is each planned model's utilization-share blocked reasons,
+	// keyed by namespace/model, an empty list for a model with none.
+	blocked map[string][]string
+	// withheld counts this cycle's withheld transfers by reason.
+	withheld map[string]int
+	timings  allocation.ShareTimings
+	sources  allocation.ShareTimingSource
+	swinging []string
 }
 
 // utilizationShareOverride is a planned variant's target as the optimizer owns
@@ -171,6 +176,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		out.overrides = e.shareOverrides(g, variantKey, "restart quiet period")
 		out.promised = l.Promised()
 		out.reserveDebt = shareDebtNow(l, held, g.Budget)
+		out.blocked = shareBlockedReasons(l, g, ev, nil, now)
 		return out
 	}
 
@@ -211,6 +217,8 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	out.promised = l.Promised()
 	out.swinging = plan.Swinging
 	out.reserveDebt = shareDebtNow(l, held, g.Budget)
+	out.blocked = shareBlockedReasons(l, g, ev, plan.Unfunded, now)
+	out.withheld = plan.Withheld
 	return out
 }
 
@@ -671,4 +679,76 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 // against a budget: allocation.ShareDebt over this cycle's commitments.
 func shareDebtNow(l *allocation.ShareLedger, held map[string]int, budget int) int {
 	return allocation.ShareDebt(l.Committed(held), budget)
+}
+
+// shareBlockedReasons is each planned model's utilization-share blocked
+// reasons (section 9), keyed by namespace/model. Every planned model has an
+// entry, empty when nothing holds it back, so a reason that stops holding is
+// cleared.
+func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev allocation.ShareEvaluation,
+	unfunded map[string]string, now time.Time) map[string][]string {
+	out := map[string][]string{}
+	model := func(role string) string {
+		o := g.Origins[role]
+		return utils.GetNamespacedKey(o.Namespace, o.ModelID)
+	}
+	add := func(role, reason string) {
+		k := model(role)
+		if !slices.Contains(out[k], reason) {
+			out[k] = append(out[k], reason)
+		}
+	}
+	floors := 0
+	for _, r := range g.Roles {
+		out[model(r.Key)] = out[model(r.Key)][:0:0]
+		floors += r.Floor
+	}
+	// donorsAtFloor: every role other than skip holds no more than its floor.
+	donorsAtFloor := func(skip string) bool {
+		for _, o := range g.Roles {
+			if o.Key != skip && g.Committed[o.Key] > o.Floor {
+				return false
+			}
+		}
+		return len(g.Roles) > 1
+	}
+	verdict := map[string]allocation.ShareRoleVerdict{}
+	for _, v := range ev.Roles {
+		verdict[v.Key] = v
+	}
+	for _, r := range g.Roles {
+		if floors > g.Budget {
+			add(r.Key, constants.ScalingBlockedFloorsExceedQuota)
+		}
+		if float64(r.Floor)-r.Need >= float64(max(r.ReplicaGPUs, 1)) {
+			add(r.Key, constants.ScalingBlockedFloorPinned)
+		}
+		v := verdict[r.Key]
+		if v.Headroom < 0 && ev.Spare < 0 {
+			add(r.Key, constants.ScalingBlockedQuotaShort)
+		}
+		// Not "out of band": the targets already absorb floors, so a role
+		// whose GPUs are all pinned elsewhere sits in band at its shortfall.
+		// What the operator needs is the cause -- short, and nobody can give.
+		if v.Headroom < 0 && donorsAtFloor(r.Key) {
+			add(r.Key, constants.ScalingBlockedDonorsAtFloor)
+		}
+		if l.BackingOff(r.Key, now) {
+			add(r.Key, constants.ScalingBlockedReleaseTimeout)
+		}
+		if unfunded[r.Key] == allocation.ShareUnfundedNoCompatibleDonor {
+			add(r.Key, constants.ScalingBlockedNoCompatibleDonor)
+		}
+	}
+	for _, t := range l.Transfers() {
+		if t.State == allocation.ShareReleasing && t.Receiver != "" {
+			if _, planned := g.Origins[t.Receiver]; planned {
+				add(t.Receiver, constants.ScalingBlockedAwaitingRelease)
+			}
+		}
+	}
+	for k := range out {
+		slices.Sort(out[k])
+	}
+	return out
 }

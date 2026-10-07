@@ -38,6 +38,10 @@ type utilizationShareState struct {
 	// divergedSince is when a planned variant's running count first differed
 	// from its target with no transfer in flight; see reanchorShareTargets.
 	divergedSince map[string]time.Time
+	// blockedModels are the models the last active cycle published blocked
+	// reasons for (namespace/model), so a model that stops being planned has
+	// its reasons cleared.
+	blockedModels map[string]bool
 	// now is the clock; nil is time.Now. Tests set it.
 	now func() time.Time
 }
@@ -86,6 +90,11 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	// when nothing acts, so wakes and the warm pool stop withholding at once.
 	promised := map[string]map[string]int{}
 	defer func() { decision.PublishSharePromised(promised, now) }()
+	// Blocked reasons are published only while the optimizer acts: in shadow
+	// mode "blocked by the optimizer" would be false. Every exit clears what
+	// this cycle did not set.
+	blocked := map[string][]string{}
+	defer func() { st.publishBlocked(blocked) }()
 
 	us, selected, err := e.Config.UtilizationShare()
 	errText := ""
@@ -166,16 +175,27 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		var table []string
 		var actionable []string
 		roleIdx := map[string]int{}
+		roleByKey := map[string]allocation.ShareRole{}
+		for _, r := range g.Roles {
+			roleByKey[r.Key] = r
+		}
 		for _, v := range ev.Roles {
 			roleIdx[v.Key] = len(pg.Roles)
+			r := roleByKey[v.Key]
+			actual := math.NaN()
+			if r.Need > 0 && v.Committed > 0 {
+				actual = r.Need * g.Thresholds[v.Key] / float64(v.Committed)
+			}
 			o := g.Origins[v.Key]
 			pg.Roles = append(pg.Roles, metrics.UtilizationShareRole{
-				Namespace:  o.Namespace,
-				ModelName:  o.ModelID,
-				Role:       o.Role,
-				Headroom:   v.Headroom,
-				TargetGPUs: v.Continuous,
-				Actionable: v.Actionable,
+				Namespace:   o.Namespace,
+				ModelName:   o.ModelID,
+				Role:        o.Role,
+				Headroom:    v.Headroom,
+				TargetGPUs:  v.Continuous,
+				Actionable:  v.Actionable,
+				Actual:      actual,
+				FloorExcess: math.Max(0, float64(r.Floor)-r.Need),
 			})
 			table = append(table, fmt.Sprintf("%s held=%d target=%.2f integer=%d headroom=%s band=%t",
 				v.Key, v.Committed, v.Continuous, v.Integer, formatHeadroom(v.Headroom), v.InBand))
@@ -193,6 +213,10 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			act := e.actuateUtilizationShare(ctx, logger, us, g, ev, scaleTargets, now)
 			maps.Copy(overrides, act.overrides)
 			pg.Active = true
+			maps.Copy(blocked, act.blocked)
+			for reason, n := range act.withheld {
+				metrics.CountUtilizationShareWithheld(g.AcceleratorType, scope, reason, n)
+			}
 			pg.PromisedGPUs = float64(act.promised)
 			pg.ReserveDebtGPUs = float64(act.reserveDebt)
 			if act.promised > 0 {
@@ -270,5 +294,25 @@ func shareTimingSeries(tm allocation.ShareTimings, src allocation.ShareTimingSou
 		{Param: "fill_timeout", Source: derived("polling"), Seconds: tm.FillTimeout.Seconds()},
 		{Param: "reversal_hold", Source: derived("release", "window", "polling", "grace"), Seconds: tm.ReversalHold.Seconds()},
 		{Param: "swing_window", Source: derived("release", "window", "polling", "grace"), Seconds: tm.SwingWindow.Seconds()},
+	}
+}
+
+// publishBlocked sets this cycle's utilization-share blocked reasons, and
+// clears them for models that were published last cycle and are not now.
+func (st *utilizationShareState) publishBlocked(blocked map[string][]string) {
+	owned := constants.ScalingBlockedReasonsUtilizationShare
+	for key, reasons := range blocked {
+		ns, model, _ := strings.Cut(key, "/")
+		metrics.SetModelScalingBlockedReasons(ns, model, owned, reasons)
+	}
+	for key := range st.blockedModels {
+		if _, ok := blocked[key]; !ok {
+			ns, model, _ := strings.Cut(key, "/")
+			metrics.SetModelScalingBlockedReasons(ns, model, owned, nil)
+		}
+	}
+	st.blockedModels = map[string]bool{}
+	for key := range blocked {
+		st.blockedModels[key] = true
 	}
 }

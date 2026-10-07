@@ -618,6 +618,45 @@ var (
 	ScalingBlockedReasonsWake = []string{
 		ScalingBlockedNoWakeSignal,
 	}
+
+	// ScalingBlockedReasonsUtilizationShare are decided by the
+	// utilization-share optimizer while it acts
+	// (docs/proposals/utilization-share-optimizer.md, section 9).
+	ScalingBlockedReasonsUtilizationShare = []string{
+		ScalingBlockedAwaitingRelease,
+		ScalingBlockedQuotaShort,
+		ScalingBlockedFloorPinned,
+		ScalingBlockedFloorsExceedQuota,
+		ScalingBlockedDonorsAtFloor,
+		ScalingBlockedNoCompatibleDonor,
+		ScalingBlockedReleaseTimeout,
+	}
+)
+
+// Utilization-share reasons (values for the `reason` label of
+// WVAModelScalingBlocked). Each is set on the model of the role it describes.
+const (
+	// ScalingBlockedAwaitingRelease: the role receives a transfer whose donor
+	// has not released its GPUs yet.
+	ScalingBlockedAwaitingRelease = "awaiting-release"
+	// ScalingBlockedQuotaShort: the role holds less than its need and the
+	// group as a whole is short: no rebalance can cover it.
+	ScalingBlockedQuotaShort = "quota-short"
+	// ScalingBlockedFloorPinned: the role's floor holds at least a replica
+	// more than its need, GPUs the share would otherwise give to others.
+	ScalingBlockedFloorPinned = "floor-pinned"
+	// ScalingBlockedFloorsExceedQuota: the floors of the group's roles add up
+	// to more than its budget.
+	ScalingBlockedFloorsExceedQuota = "floors-exceed-quota"
+	// ScalingBlockedDonorsAtFloor: the role is short and out of band, and no
+	// other role is above its whole-replica target and floor to give.
+	ScalingBlockedDonorsAtFloor = "donors-at-floor"
+	// ScalingBlockedNoCompatibleDonor: the role is short and out of band, and
+	// no donor replica's pods can host one of its replicas (section 6.5).
+	ScalingBlockedNoCompatibleDonor = "no-compatible-donor"
+	// ScalingBlockedReleaseTimeout: the role's last release was aborted, and
+	// it is backing off before it is asked to give again.
+	ScalingBlockedReleaseTimeout = "release-timeout"
 )
 
 // Pod-mapping miss reasons (values for the `reason` label of WVAPodMappingMissTotal).

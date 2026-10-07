@@ -330,3 +330,38 @@ var _ = Describe("Reserve refill (§6.2)", func() {
 		Expect(l.Promised()).To(BeZero())
 	})
 })
+
+var _ = Describe("Why a receiver is not funded (§9)", func() {
+	// B is far short; A is the only other role. Over three cycles B is
+	// confirmed actionable, so a receiver that is still unfunded says why.
+	run := func(aFloor int, give, grow map[string]ShareVariant) SharePlan {
+		roles := []ShareRole{
+			{Key: "A", Weight: 1, Need: 8, Floor: aFloor, Ceiling: 64, ReplicaGPUs: 8},
+			{Key: "B", Weight: 1, Need: 24, Ceiling: 64, ReplicaGPUs: 8},
+		}
+		in := SharePlanInput{Roles: roles, Held: map[string]int{"A": 24, "B": 8},
+			Thresholds: map[string]float64{"A": 0.8, "B": 0.8}, Budget: 32, Tolerance: 0.15, Give: give, Grow: grow}
+		l := NewShareLedger()
+		var p SharePlan
+		for i := range 3 {
+			p = PlanShareTransfers(l, in, time.Unix(int64(30*i), 0), simTimings())
+			if len(p.Started) > 0 {
+				return p
+			}
+		}
+		return p
+	}
+	grow := map[string]ShareVariant{"B": {Name: "b", GPUs: 8, PodGPUs: []int{8}}}
+
+	It("names no-compatible-donor when no donor's pods fit the receiver's", func() {
+		p := run(0, map[string]ShareVariant{"A": {Name: "a", GPUs: 8, PodGPUs: []int{4, 4}}}, grow)
+		Expect(p.Started).To(BeEmpty())
+		Expect(p.Unfunded).To(HaveKeyWithValue("B", ShareUnfundedNoCompatibleDonor))
+	})
+
+	It("names nothing when the receiver is funded (control)", func() {
+		p := run(0, map[string]ShareVariant{"A": {Name: "a", GPUs: 8, PodGPUs: []int{8}}}, grow)
+		Expect(p.Started).NotTo(BeEmpty())
+		Expect(p.Unfunded).To(BeEmpty())
+	})
+})

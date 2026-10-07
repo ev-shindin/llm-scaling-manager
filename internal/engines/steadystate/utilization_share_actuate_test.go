@@ -748,3 +748,79 @@ func TestUtilizationShareLWSDonorGivesItsHighestGroup(t *testing.T) {
 		t.Fatalf("donor pods = %v, want the whole highest group d-2-*", names)
 	}
 }
+
+// While a transfer releases, its receiver's model carries awaiting-release on
+// wva_model_scaling_blocked; switched to shadow mode, the optimizer blocks
+// nothing and the reason is cleared.
+func TestUtilizationSharePublishesBlockedReasons(t *testing.T) {
+	reg := freshMetrics(t)
+	f := newShareFleet()
+	c := sharePods(t, f)
+	se := newShareEngine(t, f, c, time.Unix(0, 0))
+	se.untilStarted()
+	reasons := func() map[string][]string {
+		out := map[string][]string{}
+		for _, m := range family(t, reg, constants.WVAModelScalingBlocked) {
+			out[label(m, constants.LabelModelName)] = append(out[label(m, constants.LabelModelName)], label(m, constants.LabelReason))
+		}
+		return out
+	}
+	if got := reasons(); !slices.Contains(got["B"], constants.ScalingBlockedAwaitingRelease) {
+		t.Fatalf("want B awaiting-release while A releases, got %v", got)
+	}
+
+	setShadowPolicy(t, se.e.Config, selectedShadow)
+	se.cycle()
+	for model, rs := range reasons() {
+		for _, r := range rs {
+			if slices.Contains(constants.ScalingBlockedReasonsUtilizationShare, r) {
+				t.Fatalf("shadow mode left %s blocked by %s", model, r)
+			}
+		}
+	}
+}
+
+// The blocked reasons a group's state implies (section 9), each against the
+// state that does not imply it.
+func TestUtilizationShareBlockedReasonsFromGroupState(t *testing.T) {
+	build := func(aHeld, budget int) map[string][]string {
+		g := allocation.ShareGroup{
+			Budget: budget,
+			Roles: []allocation.ShareRole{
+				{Key: "ns/A/both", Weight: 1, Need: 2, Floor: 8, Ceiling: 64, ReplicaGPUs: 1},
+				{Key: "ns/B/both", Weight: 1, Need: 20, Floor: 1, Ceiling: 64, ReplicaGPUs: 1},
+			},
+			Committed:  map[string]int{"ns/A/both": aHeld, "ns/B/both": 2},
+			Thresholds: map[string]float64{"ns/A/both": 0.8, "ns/B/both": 0.8},
+			Origins: map[string]allocation.ShareRoleOrigin{
+				"ns/A/both": {Namespace: "ns", ModelID: "A"}, "ns/B/both": {Namespace: "ns", ModelID: "B"},
+			},
+		}
+		ev := allocation.EvaluateShare(g.Roles, g.Committed, g.Thresholds, g.Budget, 0.15)
+		return shareBlockedReasons(allocation.NewShareLedger(), g, ev, nil, time.Unix(0, 0))
+	}
+
+	got := build(8, 10)
+	for _, want := range []string{constants.ScalingBlockedQuotaShort, constants.ScalingBlockedDonorsAtFloor} {
+		if !slices.Contains(got["ns/B"], want) {
+			t.Errorf("B short with A at its floor: want %s, got %v", want, got["ns/B"])
+		}
+	}
+	if !slices.Contains(got["ns/A"], constants.ScalingBlockedFloorPinned) {
+		t.Errorf("A's floor holds 6 GPUs above its need: want floor-pinned, got %v", got["ns/A"])
+	}
+	if slices.Contains(got["ns/A"], constants.ScalingBlockedFloorsExceedQuota) {
+		t.Errorf("floors 9 fit a budget of 10: got %v", got["ns/A"])
+	}
+
+	// Controls: A above its floor can give; floors above the budget block both.
+	if got := build(9, 11); slices.Contains(got["ns/B"], constants.ScalingBlockedDonorsAtFloor) {
+		t.Errorf("A holds 9 over a floor of 8, so B has a donor: got %v", got["ns/B"])
+	}
+	got = build(8, 8)
+	for _, m := range []string{"ns/A", "ns/B"} {
+		if !slices.Contains(got[m], constants.ScalingBlockedFloorsExceedQuota) {
+			t.Errorf("floors 9 over a budget of 8: want floors-exceed-quota on %s, got %v", m, got[m])
+		}
+	}
+}

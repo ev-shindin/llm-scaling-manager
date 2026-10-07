@@ -57,7 +57,25 @@ type SharePlan struct {
 	// to pay it back.
 	ReserveDebt int
 	Refills     int
+	// Unfunded names, for each confirmed receiver that got nothing this cycle
+	// because no candidate donor's pods could host its replica, that reason
+	// (ShareUnfundedNoCompatibleDonor). A receiver held back by a hold, the
+	// pace or admission is not listed: those pass. A receiver with no donor at
+	// all is not either: then GPUs are idle, and the idle fill funds it.
+	Unfunded map[string]string
+	// Withheld counts what was not planned this cycle, by reason:
+	// ShareWithheldReversalHold (a pair skipped for rule 4) and
+	// ShareWithheldNotActionable (a role out of band with no whole replica to
+	// move, section 6.1 step 4).
+	Withheld map[string]int
 }
+
+// Reasons in SharePlan.Unfunded and SharePlan.Withheld.
+const (
+	ShareUnfundedNoCompatibleDonor = "no-compatible-donor"
+	ShareWithheldReversalHold      = "reversal-hold"
+	ShareWithheldNotActionable     = "not-actionable"
+)
 
 // ShareDebt is how far a committed allocation stands above the budget, or 0.
 func ShareDebt(committed map[string]int, budget int) int {
@@ -77,7 +95,7 @@ func ShareDebt(committed map[string]int, budget int) int {
 // replica's size funds it, which is valid wherever the donor pod ran (§6.5).
 // Per-node donor sets extend the donor choice, not this procedure.
 func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm ShareTimings) SharePlan {
-	var plan SharePlan
+	plan := SharePlan{Unfunded: map[string]string{}, Withheld: map[string]int{}}
 
 	// Rule 5: a swinging role is planned on its mean need.
 	raw := make(map[string]float64, len(in.Roles))
@@ -120,6 +138,9 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 	actionable := map[string]bool{}
 	for _, v := range plan.Evaluation.Roles {
 		actionable[v.Key] = v.Actionable
+		if !v.InBand && !v.Actionable {
+			plan.Withheld[ShareWithheldNotActionable]++
+		}
 	}
 	confirmed := l.Confirm(actionable)
 
@@ -201,6 +222,7 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 	work := maps.Clone(committed)
 	moved := map[string]int{}
 	for _, rc := range receivers {
+		candidates, misfits, funded := 0, 0, false
 		for _, dn := range donors {
 			if l.InFlight() >= ShareMaxConcurrentTransfers {
 				return plan
@@ -226,12 +248,15 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 				give = v
 			}
 			g, gd := max(grow.GPUs, 1), max(give.GPUs, 1)
+			candidates++
 			if !ShareCovers(give, grow) {
+				misfits++
 				continue // the donor's pods cannot host the receiver's (§6.5)
 			}
 			// Rule 4: a role that gave cannot receive, and one that received
 			// cannot give, within the hold.
 			if l.ReceivingHeld(rc, now, tm) || l.GivingHeld(dn, now, tm) {
+				plan.Withheld[ShareWithheldReversalHold]++
 				continue
 			}
 			if !isConfirmed(rc) && !isConfirmed(dn) {
@@ -256,6 +281,10 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 			work[rc] += g
 			moved[dn]++
 			moved[rc]++
+			funded = true
+		}
+		if !funded && isConfirmed(rc) && actionable[rc] && candidates > 0 && misfits == candidates {
+			plan.Unfunded[rc] = ShareUnfundedNoCompatibleDonor
 		}
 	}
 	return plan

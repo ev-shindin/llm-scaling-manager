@@ -51,6 +51,18 @@ const (
 	// not yet refilled (section 6.2).
 	WVAUtilizationShareReserveDebtGPUs = "wva_utilization_share_reserve_debt_gpus"
 
+	// WVAUtilizationShareWithheldTotal is a counter: transfers not planned, by
+	// reason (reversal-hold, not-actionable).
+	WVAUtilizationShareWithheldTotal = "wva_utilization_share_withheld_total"
+
+	// WVAUtilizationShareActual is a gauge: u_r, a role's utilization at the
+	// GPUs it holds, on the same scale as its scale-up threshold.
+	WVAUtilizationShareActual = "wva_utilization_share_actual"
+
+	// WVAUtilizationShareFloorExcessGPUs is a gauge: the GPUs a role's floor
+	// holds above its need (section 5.5).
+	WVAUtilizationShareFloorExcessGPUs = "wva_utilization_share_floor_excess_gpus"
+
 	// LabelParam names a derived timing; LabelSource is where its inputs came
 	// from.
 	LabelParam  = "param"

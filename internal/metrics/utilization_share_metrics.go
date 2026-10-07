@@ -23,6 +23,9 @@ var (
 	utilizationShareTransfers      *prometheus.CounterVec
 	utilizationSharePromisedGPUs   *prometheus.GaugeVec
 	utilizationShareReserveDebt    *prometheus.GaugeVec
+	utilizationShareActual         *prometheus.GaugeVec
+	utilizationShareFloorExcess    *prometheus.GaugeVec
+	utilizationShareWithheld       *prometheus.CounterVec
 	utilizationShareEffective      *prometheus.GaugeVec
 	utilizationShareSwinging       *prometheus.GaugeVec
 	utilizationShareRelease        *prometheus.HistogramVec
@@ -63,6 +66,20 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		"Utilization-share optimizer: GPUs released for a receiver and not yet held by it. "+
 			"Published only while the optimizer acts.",
 		groupLabels)
+	utilizationShareActual = gauge(constants.WVAUtilizationShareActual,
+		"Utilization-share optimizer: a role's utilization at the GPUs it holds, on the scale of its "+
+			"scale-up threshold. Absent for a role with no demand or no GPUs.",
+		roleLabels)
+	utilizationShareFloorExcess = gauge(constants.WVAUtilizationShareFloorExcessGPUs,
+		"Utilization-share optimizer: GPUs a role's floor holds above its need.",
+		roleLabels)
+	utilizationShareWithheld = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: constants.WVAUtilizationShareWithheldTotal,
+		Help: "Utilization-share optimizer: transfers not planned, by reason (reversal-hold, not-actionable).",
+	}, append(slices.Clone(groupLabels), constants.LabelReason))
+	if err := registry.Register(utilizationShareWithheld); err != nil {
+		return fmt.Errorf("failed to register utilization-share metric: %w", err)
+	}
 	utilizationShareReserveDebt = gauge(constants.WVAUtilizationShareReserveDebtGPUs,
 		"Utilization-share optimizer: reserve GPUs spent and not yet refilled. Published only while "+
 			"the optimizer acts.",
@@ -94,7 +111,7 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		utilizationShareHeadroom, utilizationShareTargetGPUs, utilizationShareActionable,
 		utilizationShareSpareGPUs, utilizationShareReplicasToMove,
 		utilizationSharePromisedGPUs, utilizationShareEffective, utilizationShareSwinging,
-		utilizationShareReserveDebt,
+		utilizationShareReserveDebt, utilizationShareActual, utilizationShareFloorExcess,
 	} {
 		if err := registry.Register(g); err != nil {
 			return fmt.Errorf("failed to register utilization-share metric: %w", err)
@@ -112,6 +129,9 @@ type UtilizationShareRole struct {
 	Actionable bool
 	// Swinging is published only for an active group.
 	Swinging bool
+	// Actual is u_r; NaN publishes no series. FloorExcess is in GPUs.
+	Actual      float64
+	FloorExcess float64
 }
 
 // UtilizationShareTiming is one derived timing of an active group.
@@ -213,6 +233,10 @@ func PublishUtilizationShare(groups []UtilizationShareGroup) {
 				actionable = 1
 			}
 			set(utilizationShareActionable, rl, actionable)
+			if !math.IsNaN(r.Actual) {
+				set(utilizationShareActual, rl, r.Actual)
+			}
+			set(utilizationShareFloorExcess, rl, r.FloorExcess)
 			if grp.Active {
 				swinging := 0.0
 				if r.Swinging {
@@ -251,4 +275,20 @@ func ObserveUtilizationShareRelease(acceleratorType, scope string, d time.Durati
 		l[constants.LabelControllerInstance] = controllerInstance
 	}
 	utilizationShareRelease.With(l).Observe(d.Seconds())
+}
+
+// CountUtilizationShareWithheld counts n transfers not planned for reason.
+func CountUtilizationShareWithheld(acceleratorType, scope, reason string, n int) {
+	if utilizationShareWithheld == nil || n <= 0 {
+		return
+	}
+	l := prometheus.Labels{
+		constants.LabelAcceleratorType: acceleratorType,
+		constants.LabelScope:           scope,
+		constants.LabelReason:          reason,
+	}
+	if controllerInstance != "" {
+		l[constants.LabelControllerInstance] = controllerInstance
+	}
+	utilizationShareWithheld.With(l).Add(float64(n))
 }
