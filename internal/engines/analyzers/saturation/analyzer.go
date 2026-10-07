@@ -444,9 +444,12 @@ func (a *SaturationAnalyzer) itlPhysicsKey(
 }
 
 // engineFingerprint returns the fingerprint of the engine configuration a
-// variant is running, or "" when the capacity store holds no parsed params
-// for it. Read from the store rather than re-parsed so the key matches the
-// digest published as wva_engine_config.
+// variant is running, or "" when the capacity store holds no parsed params for
+// it OR when what it holds was not fully read.
+//
+// Read from the store rather than re-parsed, so that when there IS a key it is
+// computed from the same record wva_engine_config publishes. It is not the
+// same as that label in every case -- see the incompleteness note below.
 func (a *SaturationAnalyzer) engineFingerprint(namespace, modelID, variantName string) string {
 	if a.capacityStore == nil {
 		return ""
@@ -459,6 +462,16 @@ func (a *SaturationAnalyzer) engineFingerprint(namespace, modelID, variantName s
 	// sharing key, and an empty fingerprint is how itlPhysicsKey is told to
 	// fall back to the per-variant window key -- so such a variant learns its
 	// own line and neither lends nor borrows one.
+	//
+	// THIS DIVERGES FROM wva_engine_config ON PURPOSE, and the doc comment
+	// above used to claim it could not: publishEngineConfig hashes the same
+	// record unconditionally, so an incomplete variant HAS a published
+	// fingerprint and no learned-state key under it. That asymmetry is the
+	// honest one -- the metric's job is to show what was read, including that
+	// the read was partial, and its `unresolved` label is non-empty for
+	// exactly these variants. Joining the two on `fingerprint` finds nothing
+	// for them, which is the correct answer to "what has this configuration
+	// learned": nothing, by design.
 	//
 	// Without this the digest would be doing the one thing it must not: an
 	// llm-d Deployment passing `--block-size $VLLM_BLOCK_SIZE` leaves the

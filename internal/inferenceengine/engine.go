@@ -50,6 +50,34 @@ func detectFromPodTemplate(tmpl *corev1.PodTemplateSpec) Engine {
 	if tmpl == nil {
 		return EngineVLLM
 	}
+
+	// A LAUNCH COMMAND FIRST, either engine's, before any image is consulted.
+	//
+	// The image check alone made a `sglang-router` sidecar beside a vLLM
+	// engine detect as SGLang, which then sent the SGLang parser looking for
+	// an SGLang launch command, finding none, and -- before ConfigContainers
+	// grew its cross-engine tier -- selecting the router as the thing whose
+	// flags describe the engine. The detection was the root of that, so it is
+	// fixed here too and not only worked around downstream.
+	//
+	// SGLang is still tested before vLLM, preserving the "conservative: only a
+	// strong signal makes it SGLang" rule of this package: the two predicates
+	// are disjoint in practice, and a pod carrying both launch commands is
+	// already beyond what either parser can describe.
+	for i := range tmpl.Spec.Containers {
+		if sglangLaunchCommand(&tmpl.Spec.Containers[i]) {
+			return EngineSGLang
+		}
+	}
+	for i := range tmpl.Spec.Containers {
+		if vllmLaunchCommand(&tmpl.Spec.Containers[i]) {
+			return EngineVLLM
+		}
+	}
+
+	// No launch command anywhere: fall back to the image, which is the
+	// historical signal and the right one for an engine whose entrypoint is
+	// baked in.
 	for i := range tmpl.Spec.Containers {
 		if isSGLangContainer(&tmpl.Spec.Containers[i]) {
 			return EngineSGLang
@@ -142,30 +170,54 @@ func ConfigContainers(tmpl *corev1.PodTemplateSpec, engine Engine) []corev1.Cont
 	all := tmpl.Spec.Containers
 
 	launches, images := sglangLaunchCommand, isSGLangContainer
+	otherLaunches := vllmLaunchCommand
 	if engine != EngineSGLang {
 		launches, images = vllmLaunchCommand, isVLLMContainer
+		otherLaunches = sglangLaunchCommand
 	}
 
-	var byCommand []corev1.Container
-	for i := range all {
-		if launches(&all[i]) {
-			byCommand = append(byCommand, all[i])
-		}
-	}
-	if len(byCommand) > 0 {
-		return byCommand
+	if sel := matching(all, launches); len(sel) > 0 {
+		return sel
 	}
 
-	var byImage []corev1.Container
-	for i := range all {
-		if images(&all[i]) {
-			byImage = append(byImage, all[i])
-		}
+	// EITHER ENGINE'S launch command beats an image, and this tier is why.
+	//
+	// Detect decides which engine a pod runs, and its image tier treats any
+	// container whose image contains "sglang" as a strong signal. So a
+	// `sglang-router` sidecar beside a vLLM engine makes Detect say SGLang,
+	// and asking for SGLang's launch command then matches nothing -- after
+	// which an image tier would select the ROUTER and nothing else. Measured:
+	// the engine's own --dtype, --block-size and --max-model-len all
+	// disappeared and the router's --page-size was hashed as the engine's
+	// configuration. That is the exact failure this function exists to
+	// prevent, made worse than the loop it replaced, which at least still
+	// read the engine's container.
+	//
+	// A container that demonstrably starts an inference server is the engine
+	// whichever server it starts. Taking it here, before any image is
+	// considered, means a misdetected engine costs the WRONG PARSER on the
+	// right container -- which mis-maps some flags -- rather than the right
+	// parser on a sidecar, which invents a configuration. The first is
+	// visible in the published flags; the second is not.
+	if sel := matching(all, otherLaunches); len(sel) > 0 {
+		return sel
 	}
-	if len(byImage) > 0 {
-		return byImage
+
+	if sel := matching(all, images); len(sel) > 0 {
+		return sel
 	}
 	return all
+}
+
+// matching returns the containers satisfying pred, in template order.
+func matching(all []corev1.Container, pred func(*corev1.Container) bool) []corev1.Container {
+	var out []corev1.Container
+	for i := range all {
+		if pred(&all[i]) {
+			out = append(out, all[i])
+		}
+	}
+	return out
 }
 
 // Present returns the deterministically-ordered set of distinct engines detected

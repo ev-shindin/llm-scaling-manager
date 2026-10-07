@@ -80,10 +80,19 @@ func applySGLangParam(key, value string, params *EngineParams) bool {
 		}
 		params.BlockSize = v
 	case "dtype":
+		if !usableWord(value) {
+			return false
+		}
 		params.WeightDtype = value
 	case "quantization":
+		if !usableWord(value) {
+			return false
+		}
 		params.Quantization = value
 	case "kv_cache_dtype":
+		if !usableWord(value) {
+			return false
+		}
 		params.KvCacheDtype = value
 	case "tp_size", "tensor_parallel_size", "tp":
 		v, err := strconv.Atoi(value)

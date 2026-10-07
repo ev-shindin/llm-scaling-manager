@@ -110,14 +110,24 @@ func TestConfigContainersSelectsTheSGLangServer(t *testing.T) {
 
 	eq(t, names(ConfigContainers(tmpl, EngineSGLang)), "sglang")
 
-	// And asking for the wrong engine must not silently return the other one's
-	// container: there is no vLLM here, so the fallback applies and the caller
-	// gets everything rather than a confident mis-selection.
+	// Asking for the WRONG engine still selects the container that launches an
+	// engine, and that is the fix for the worst thing this selector did.
+	//
+	// Detect used to be image-first, so a `sglang-router` sidecar beside a
+	// vLLM engine detected as SGLang; asking for SGLang's launch command then
+	// matched nothing and an image tier selected the ROUTER -- the engine's
+	// own --dtype, --block-size and --max-model-len vanished and the router's
+	// --page-size was hashed as the engine's configuration. Worse than the
+	// loop it replaced, which at least still read the engine.
+	//
+	// So either engine's launch command now beats any image. A misdetected
+	// engine costs the wrong PARSER on the right container, which mis-maps
+	// some flags and shows up in the published values; the alternative was the
+	// right parser on a sidecar, which invents a configuration that looks
+	// real. An earlier version of this test asserted the fallback-to-all here,
+	// which is what the code did before the cross-engine tier existed.
 	got := names(ConfigContainers(tmpl, EngineVLLM))
-	if len(got) != 2 {
-		t.Fatalf("vLLM selection over an SGLang pod = %v, want the fallback to "+
-			"all containers rather than a guess", got)
-	}
+	eq(t, got, "sglang")
 }
 
 func TestConfigContainersHandlesAnEmptyTemplate(t *testing.T) {

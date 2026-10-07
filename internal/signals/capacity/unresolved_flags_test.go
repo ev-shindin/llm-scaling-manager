@@ -76,8 +76,13 @@ func TestParserResolvesTheClusterFixture(t *testing.T) {
 		map[string]string{
 			"VLLM_MAX_MODEL_LEN":        "16384",
 			"VLLM_BLOCK_SIZE":           "128",
-			"VLLM_ACCELERATOR_MEM_UTIL": "0.9",
-			"VLLM_MAX_NUM_SEQ":          "256",
+			// NOT the parser defaults. A review neutered resolveRefs entirely
+			// and these two assertions did not fire, because 0.9 and 256 are
+			// also what the struct defaults to -- the same
+			// coincidence-with-defaults trap this whole commit is about,
+			// left in the test that proves the commit.
+			"VLLM_ACCELERATOR_MEM_UTIL": "0.85",
+			"VLLM_MAX_NUM_SEQ":          "512",
 			"TP_SIZE":                   "2",
 		})
 
@@ -91,14 +96,16 @@ func TestParserResolvesTheClusterFixture(t *testing.T) {
 	// ${VAR} is the shell's brace form and $(VAR) is Kubernetes' own, which the
 	// kubelet expands from the same env. Both have to resolve or a manifest
 	// using either is read wrong.
-	if p.MaxNumSeqs != 256 {
-		t.Errorf("MaxNumSeqs = %d, want 256 from ${VLLM_MAX_NUM_SEQ}", p.MaxNumSeqs)
+	if p.MaxNumSeqs != 512 {
+		t.Errorf("MaxNumSeqs = %d, want 512 from ${VLLM_MAX_NUM_SEQ} -- 256 is the "+
+			"default, so this must not be 256", p.MaxNumSeqs)
 	}
 	if p.TensorParallelSize != 2 {
 		t.Errorf("TensorParallelSize = %d, want 2 from $(TP_SIZE)", p.TensorParallelSize)
 	}
-	if p.GpuMemoryUtilization != 0.9 {
-		t.Errorf("GpuMemoryUtilization = %v, want 0.9", p.GpuMemoryUtilization)
+	if p.GpuMemoryUtilization != 0.85 {
+		t.Errorf("GpuMemoryUtilization = %v, want 0.85 -- 0.9 is the default, so "+
+			"this must not be 0.9", p.GpuMemoryUtilization)
 	}
 	if !p.Complete() {
 		t.Errorf("Unresolved = %v, want empty: every flag here is resolvable", p.Unresolved)
@@ -127,7 +134,16 @@ func TestParserRecordsWhatItCouldNotRead(t *testing.T) {
 		env:  nil,
 		want: "gpu_memory_utilization",
 	}, {
-		name: "a reference resolving through another reference is not chased",
+		// NOT "nested references are not chased" -- resolveRefs does not
+		// detect nesting as a class at all. It substitutes $OUTER with the
+		// literal "$INNER" and reports success, because OUTER *was* found.
+		// What then records the key is the value being unusable, and a review
+		// showed the original name claimed a general parser property that only
+		// held for integer flags: the same shape on --dtype was accepted as
+		// the engine's real setting with Complete() true. Both are covered now
+		// -- the numeric case here, the string case in
+		// TestStringFlagsCanFailToResolve -- and the name says what happens.
+		name: "a value that is still a reference after substitution",
 		cmd:  "vllm serve m --max-num-seqs $OUTER",
 		env:  map[string]string{"OUTER": "$INNER", "INNER": "512"},
 		want: "max_num_seqs",
@@ -179,15 +195,41 @@ func TestParserWillNotGuessAtAValueFromAConfigMap(t *testing.T) {
 }
 
 func TestParserHandlesTheDollarEscapeAndBareDollars(t *testing.T) {
-	// $$ is Kubernetes' escape for a reference it must not expand, and the
-	// sequence a manifest uses when it wants the shell to see one dollar.
-	// Neither it nor a lone trailing dollar is an unresolved reference.
-	p := parseShell("vllm serve m --dtype a$$b --quantization 100%", nil)
+	// $$ collapses to one literal dollar. This is KUBERNETES' field-expansion
+	// rule, not the shell's -- the kubelet collapses $$ unconditionally, and a
+	// review confirmed ours matches its algorithm byte for byte.
+	p := parseShell("vllm serve m --dtype a$$b", nil)
 	if p.WeightDtype != "a$b" {
 		t.Errorf("WeightDtype = %q, want %q: $$ is one literal dollar", p.WeightDtype, "a$b")
 	}
 	if !p.Complete() {
-		t.Errorf("Unresolved = %v, want empty: neither value is a reference", p.Unresolved)
+		t.Errorf("Unresolved = %v, want empty: $$ is not a reference", p.Unresolved)
+	}
+
+	// THE BARE-DOLLAR HALF, which the name claimed and nothing tested. A
+	// review broke the rule -- made a lone "$" count as unresolved -- and the
+	// whole package stayed green, because "a$$b" consumes both dollars
+	// together and never reaches the isolated-$ path at all. These do.
+	for _, tc := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"a trailing dollar", "fp8$", "fp8$"},
+		{"a dollar before a non-name character", "fp$-8", "fp$-8"},
+		{"a dollar before a digit", "fp$8", "fp$8"},
+		{"a lone dollar", "$", "$"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := parseShell("vllm serve m --quantization "+tc.value, nil)
+			if q.Quantization != tc.want {
+				t.Errorf("Quantization = %q, want %q", q.Quantization, tc.want)
+			}
+			if !q.Complete() {
+				t.Errorf("Unresolved = %v, want empty: %q names no variable, so it "+
+					"is a literal and not an unreadable reference", q.Unresolved, tc.value)
+			}
+		})
 	}
 }
 
@@ -256,23 +298,46 @@ func TestAnIncompleteReadCannotPassForAMeasuredOne(t *testing.T) {
 			"equality it never verified")
 	}
 
-	// And hashing alone is NOT enough, which is why Complete() exists: two
-	// deployments with the SAME unreadable flag agree on the digest while
-	// their real values may differ.
+	// And hashing alone is NOT enough, which is why Complete() exists. Stated
+	// as the assertion it actually is: two deployments whose block size came
+	// from DIFFERENT unreadable references hash IDENTICALLY, because only the
+	// flag key is recorded and not which variable was missing. So the digest
+	// cannot separate them and the completeness flag has to.
+	//
+	// An earlier version of this put that in an `if ... { t.Log }` branch,
+	// which a review proved dead: the condition can never hold, and replacing
+	// it with a nonsense always-true comparison changed the test's output not
+	// at all. A branch that only logs is a test that does not know what it is
+	// asserting.
 	otherUnread := parseShell("vllm serve m --block-size $ALSO_NOPE", nil)
 	if unread.Fingerprint() != otherUnread.Fingerprint() {
-		t.Log("note: two unreadable configs hash differently here only because " +
-			"the recorded KEY is the same; that is fine either way")
+		t.Errorf("two configs differing only in WHICH reference was unreadable "+
+			"hashed differently (%s vs %s). If that ever becomes true the digest "+
+			"is carrying the variable name, and this test's premise -- that "+
+			"Complete() is load-bearing because the digest cannot tell them "+
+			"apart -- needs re-deriving", unread.Fingerprint(), otherUnread.Fingerprint())
 	}
 	if unread.Complete() || otherUnread.Complete() {
 		t.Error("Complete() must be false for both, so neither may lend the other a line")
 	}
 }
 
-func TestFindCompatibleRefusesAnIncompleteRead(t *testing.T) {
-	// The reuse decision is the one that must not act on an absence of
-	// evidence: both records agree on every compared field, and both agree
-	// only because neither block size could be read.
+// FindCompatible deliberately does NOT refuse an incomplete read, and this
+// pins that -- because an earlier version of this very test asserted the
+// opposite and the gate it demanded was a regression.
+//
+// The result is used by estimateZeroReplicaCapacity as a MAX CLAMP on a
+// derived estimate (`if compatible.EffectiveCapacity < bounded`). Refusing the
+// record does not substitute something smaller; it REMOVES THE CEILING.
+// Measured by a review: 5,000 became 153,600, a 30x over-estimate of
+// per-replica capacity -- and an over-stated capacity under-orders replicas,
+// which this project has on record as breaking TTFT irrecoverably.
+//
+// The rule that came out of it: an unreadable flag withholds the NEW thing it
+// would authorise, and never changes a path that already existed.
+// IsCapacityCompatible was always a heuristic over parsed fields, and an
+// unresolved value defaulted before this work exactly as it does now.
+func TestFindCompatibleDoesNotGateOnCompleteness(t *testing.T) {
 	unread := parseShell("vllm serve m --block-size $NOPE", nil)
 	if unread.Complete() {
 		t.Fatal("the fixture must be an incomplete read, or this proves nothing")
@@ -282,32 +347,42 @@ func TestFindCompatibleRefusesAnIncompleteRead(t *testing.T) {
 	s.Update("ns", "m", "donor", Record{
 		AcceleratorName:   "H200",
 		GpuCount:          1,
-		EffectiveCapacity: 900_000,
+		EffectiveCapacity: 5000,
 		EngineParams:      &unread,
 		LearnedFrom:       LearnedFromLive,
 	})
 
-	if got := s.FindCompatible("m", "H200", 1, &unread); got != nil {
-		t.Error("FindCompatible reused a record whose engine configuration could " +
-			"not be read, on the strength of two identical defaults")
+	got := s.FindCompatible("m", "H200", 1, &unread)
+	if got == nil {
+		t.Fatal("FindCompatible refused an incomplete read. At its only caller the " +
+			"record is a CEILING on a derived estimate, so refusing it removes the " +
+			"ceiling and over-states per-replica capacity -- the direction that " +
+			"under-orders replicas and breaks TTFT irrecoverably.")
 	}
+	if got.EffectiveCapacity != 5000 {
+		t.Errorf("EffectiveCapacity = %d, want the donor's 5000", got.EffectiveCapacity)
+	}
+}
 
-	// The same donor, fully read, IS reusable -- or the gate above is just
-	// breaking the feature.
-	complete := parseShell("vllm serve m --block-size 128", nil)
-	if !complete.Complete() {
-		t.Fatalf("the control fixture is not complete: %v", complete.Unresolved)
+// And where the completeness gate DOES belong: the new sharing key. Covered
+// end to end in internal/engines/analyzers/saturation
+// (TestAnUnreadableConfigurationIsNotASharingKey); this states the division so
+// the next reader does not reinstate the one above.
+func TestCompletenessGatesTheKeyAndNotTheCapacityPath(t *testing.T) {
+	unread := parseShell("vllm serve m --block-size $NOPE", nil)
+	read := parseShell("vllm serve m --block-size 128", nil)
+
+	if !read.Complete() || unread.Complete() {
+		t.Fatalf("fixtures wrong: read=%v unread=%v", read.Unresolved, unread.Unresolved)
 	}
-	s2 := NewStore()
-	s2.Update("ns", "m", "donor", Record{
-		AcceleratorName:   "H200",
-		GpuCount:          1,
-		EffectiveCapacity: 900_000,
-		EngineParams:      &complete,
-		LearnedFrom:       LearnedFromLive,
-	})
-	if got := s2.FindCompatible("m", "H200", 1, &complete); got == nil {
-		t.Error("a fully-read configuration must still find its compatible record")
+	// The digest still differs, so an incomplete read cannot pass for a
+	// complete one wherever a digest is the key.
+	if read.Fingerprint() == unread.Fingerprint() {
+		t.Error("the two hash alike; the unresolved set is not reaching the digest")
+	}
+	// But capacity compatibility is unaffected -- that is the point.
+	if !unread.IsCapacityCompatible(&unread) {
+		t.Error("IsCapacityCompatible must stay reflexive over an incomplete read")
 	}
 }
 
@@ -337,6 +412,59 @@ func TestSGLangParserResolvesReferencesToo(t *testing.T) {
 	q := ParseEngineArgs(inferenceengine.EngineSGLang, scaletarget.NewDeploymentAccessor(bad))
 	if q.Complete() {
 		t.Error("an unresolvable SGLang page size was not recorded")
+	}
+}
+
+// The SGLang parser's container selection, which had NO test.
+//
+// A review reverted ParseSGLangArgs to walk every container -- reintroducing,
+// for SGLang alone, the exact "last one wins" bug the commit message says it
+// fixes -- and the whole tree stayed green. The vLLM side was pinned from the
+// parser, the SGLang side was not, which is the same "a well-identified helper
+// nobody calls" shape the wiring tests exist to catch, half-applied.
+func TestTheSGLangParserAlsoReadsOnlyTheEngineContainer(t *testing.T) {
+	engine := corev1.Container{
+		Name:    sglangContainer,
+		Image:   "lmsysorg/sglang:v0.4.3",
+		Command: []string{"/bin/sh", "-c"},
+		Args: []string{"python3 -m " + sglangLauncher + " --model-path m " +
+			"--page-size $SG_PAGE --context-length $SG_CTX --dtype bfloat16"},
+		Env: []corev1.EnvVar{
+			{Name: "SG_PAGE", Value: "64"},
+			{Name: "SG_CTX", Value: "8192"},
+		},
+	}
+	sidecar := corev1.Container{
+		Name:    "routing-proxy",
+		Image:   "ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.9.0",
+		Command: []string{"/app/proxy"},
+		// SGLang's own flag names, different values.
+		Args: []string{"--page-size", "1", "--context-length", "512",
+			"--dtype", "float16"},
+	}
+
+	d := shellDeployment("unused", nil)
+	d.Spec.Template.Spec.Containers = []corev1.Container{engine, sidecar}
+	p := ParseEngineArgs(inferenceengine.EngineSGLang, scaletarget.NewDeploymentAccessor(d))
+
+	if p.BlockSize != 64 {
+		t.Errorf("BlockSize = %d, want 64 from the engine -- 1 is the sidecar's",
+			p.BlockSize)
+	}
+	if p.MaxModelLen != 8192 {
+		t.Errorf("MaxModelLen = %d, want 8192 from the engine -- 512 is the sidecar's",
+			p.MaxModelLen)
+	}
+	if p.WeightDtype != "bfloat16" {
+		t.Errorf("WeightDtype = %q, want bfloat16 -- float16 is the sidecar's",
+			p.WeightDtype)
+	}
+	if !p.Complete() {
+		t.Errorf("Unresolved = %v, want empty: the engine's own env resolves both "+
+			"its references", p.Unresolved)
+	}
+	if p.Engine != inferenceengine.EngineSGLang {
+		t.Errorf("Engine = %q, want sglang", p.Engine)
 	}
 }
 

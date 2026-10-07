@@ -257,7 +257,54 @@ func resolveRefs(s string, env map[string]string) (string, bool) {
 			out.WriteByte('$')
 			continue
 		}
+		// THE LITERAL NAME FIRST. A Kubernetes env var name may contain a
+		// hyphen, so `${FOO-BAR}` can genuinely name one, and an env that
+		// defines it must win over reading it as "FOO or else BAR". (The
+		// shell cannot have such a variable and would always take the
+		// default; a manifest is not a shell, and the name that is actually
+		// defined is the better evidence.)
 		v, found := env[name]
+		if !found || v == "" {
+			// `${VAR:-default}`. The brace body is a shell EXPANSION, not a
+			// bare name, and llmdbench manifests use the default form
+			// routinely -- `${VLLM_MAX_MODEL_LEN:-16384}`. Taking the whole
+			// body as a name made every such flag unresolvable, which would
+			// have left a real fleet permanently incomplete.
+			//
+			// Only the default form is honoured, and as the shell has it:
+			// `:-` substitutes when the name is unset OR empty, `-` only when
+			// unset. Every other operator (`${VAR:4}`, `${#VAR}`,
+			// `${VAR%...}`) is left unresolved on purpose -- guessing at
+			// substring, length or suffix-strip semantics is how a parser
+			// invents a configuration, and an honest "could not read" is what
+			// the set is for.
+			if base, fb, ok := splitShellDefault(name); ok {
+				bv, bfound := env[base]
+				if bfound && !(bv == "" && fb.onEmpty) {
+					v, found = bv, true
+				} else {
+					out.WriteString(fb.value)
+					i = next - 1
+					continue
+				}
+			}
+		}
+		// A SUBSTITUTED VALUE THAT IS ITSELF A REFERENCE. The kubelet expands
+		// `$(OTHER)` between env vars, so `--dtype $D` with `D="$(E)"`
+		// resolves every lookup successfully and still yields "$(E)" -- which
+		// was then hashed as a verified dtype.
+		//
+		// Caught here, at substitution, and not by re-scanning the output:
+		// after `a$$b` becomes `a$b` the output is indistinguishable from an
+		// unexpanded `$b`, and an output scan rejected the legitimate escape.
+		// At this point the two are still separable, because an escape never
+		// reaches this branch at all.
+		if found && containsVarRef(v) {
+			resolved = false
+			out.WriteString(v)
+			i = next - 1
+			continue
+		}
 		if !found {
 			resolved = false
 			// Keep the reference in the output so a log or a label shows what
@@ -272,6 +319,30 @@ func resolveRefs(s string, env map[string]string) (string, bool) {
 	return out.String(), resolved
 }
 
+// shellDefault is the `:-` / `-` form's replacement text, and whether an empty
+// value counts as absent (`:-` says yes, `-` says no).
+type shellDefault struct {
+	value   string
+	onEmpty bool
+}
+
+// splitShellDefault separates `NAME:-default` or `NAME-default` into the name
+// and its fallback. A body carrying any other shell operator is returned
+// unchanged with no fallback, so resolveRefs records it as unread rather than
+// guessing at what the shell would have done.
+func splitShellDefault(body string) (string, shellDefault, bool) {
+	if i := strings.Index(body, ":-"); i > 0 {
+		return body[:i], shellDefault{value: body[i+2:], onEmpty: true}, true
+	}
+	// A bare "-". `FOO-BAR` is also a legal Kubernetes env var name, so
+	// resolveRefs looks the whole body up BEFORE calling this; by the time it
+	// gets here no variable of that name exists.
+	if i := strings.Index(body, "-"); i > 0 {
+		return body[:i], shellDefault{value: body[i+1:]}, true
+	}
+	return body, shellDefault{}, false
+}
+
 // varNameAt reads the variable name of a reference beginning at the "$" at
 // position i, returning the name and the index just past the reference.
 // It recognises ${NAME}, $(NAME) and bare $NAME.
@@ -281,12 +352,12 @@ func varNameAt(s string, i int) (name string, next int, ok bool) {
 	}
 	switch s[i+1] {
 	case '{', '(':
-		close := byte('}')
+		closer := byte('}')
 		if s[i+1] == '(' {
-			close = ')'
+			closer = ')'
 		}
 		for j := i + 2; j < len(s); j++ {
-			if s[j] == close {
+			if s[j] == closer {
 				if j == i+2 {
 					return "", 0, false // "${}" is not a reference
 				}
@@ -317,7 +388,11 @@ func varNameAt(s string, i int) (name string, next int, ok bool) {
 // `--model $MODEL_NAME` says nothing about capacity or latency and would
 // otherwise make every deployment's digest incomplete for no gain.
 func noteUnresolved(params *EngineParams, key string) {
-	if _, mapped := mappedValueKeys[key]; !mapped {
+	mapped := vllmValueKeys
+	if params.Engine == inferenceengine.EngineSGLang {
+		mapped = sglangValueKeys
+	}
+	if _, ok := mapped[key]; !ok {
 		return
 	}
 	if slices.Contains(params.Unresolved, key) {
@@ -327,16 +402,22 @@ func noteUnresolved(params *EngineParams, key string) {
 	slices.Sort(params.Unresolved)
 }
 
-// mappedValueKeys is every normalized flag key, across both engines, whose
-// VALUE lands in a field that is hashed or compared. Boolean flags are absent:
-// they carry no value, so there is nothing to fail to resolve.
+// vllmValueKeys and sglangValueKeys are the normalized flag keys whose VALUE
+// lands in a field that is hashed or compared, PER ENGINE. Boolean flags are
+// absent: they carry no value, so there is nothing to fail to resolve.
 //
-// One set rather than one per engine, deliberately. The two engines' key
-// namespaces do not collide, and a single set cannot drift out of step with
-// the dispatch in ParseEngineArgs -- which is how the singular --max-num-seq
-// came to be silently ignored for a while.
-var mappedValueKeys = map[string]struct{}{
-	// vLLM
+// Per engine rather than one combined set, because a combined one recorded
+// keys the running parser does not map. Measured: ParseVLLMArgs on
+// `--mem-fraction-static $NOPE` reported Unresolved=[mem_fraction_static] and
+// Complete()==false, though applyParam has no such case and the flag changed
+// nothing -- a FALSE incompleteness, which then switches off line sharing for
+// a configuration that was read perfectly well.
+//
+// Each set must track its own apply function. A key here that the apply
+// function does not handle over-reports; a key it handles that is missing here
+// under-reports, which is the silent default this whole mechanism exists to
+// catch. TestValueKeySetsMatchTheApplyFunctions pins both directions.
+var vllmValueKeys = map[string]struct{}{
 	"gpu_memory_utilization":  {},
 	"block_size":              {},
 	"kv_cache_dtype":          {},
@@ -348,10 +429,16 @@ var mappedValueKeys = map[string]struct{}{
 	"max_num_seq":             {},
 	"max_num_seqs":            {},
 	"max_model_len":           {},
-	// SGLang
+}
+
+var sglangValueKeys = map[string]struct{}{
 	"mem_fraction_static":  {},
 	"page_size":            {},
+	"dtype":                {},
+	"quantization":         {},
+	"kv_cache_dtype":       {},
 	"tp_size":              {},
+	"tensor_parallel_size": {},
 	"tp":                   {},
 	"max_running_requests": {},
 	"max_total_tokens":     {},
@@ -569,10 +656,19 @@ func applyParam(key, value string, params *EngineParams) bool {
 		}
 		params.BlockSize = v
 	case "kv_cache_dtype":
+		if !usableWord(value) {
+			return false
+		}
 		params.KvCacheDtype = value
 	case "dtype":
+		if !usableWord(value) {
+			return false
+		}
 		params.WeightDtype = value
 	case "quantization":
+		if !usableWord(value) {
+			return false
+		}
 		params.Quantization = value
 	case "tensor_parallel_size":
 		v, err := strconv.Atoi(value)
@@ -641,6 +737,57 @@ func applyParam(key, value string, params *EngineParams) bool {
 // them. If this file ever needs utils for another reason, collapse the two.
 func usableFraction(v float64) bool {
 	return !math.IsNaN(v) && !math.IsInf(v, 0) && v > 0 && v <= 1
+}
+
+// usableWord reports whether a STRING-valued flag's value is something to
+// believe, as opposed to something that only looks like a value.
+//
+// The numeric keys get this for free: strconv fails and the key is recorded as
+// unresolved. The string keys -- dtype, quantization, kv_cache_dtype -- had no
+// way to fail at all, so three inputs were taken as the engine's setting with
+// the configuration reported COMPLETE:
+//
+//	--dtype              with no value token  ->  ""
+//	--dtype=             explicitly empty     ->  ""
+//	--dtype $D  with D=""                     ->  ""
+//	--dtype $D  with D="$(E)"                 ->  "$(E)"
+//
+// The last is the one that matters: envValues reads env values literally, but
+// the kubelet expands `$(OTHER)` references BETWEEN env vars, so a legal
+// manifest produced weight_dtype="$(E)" hashed as a verified configuration.
+// And these two fields are the ones EngineParams' own comment calls out as
+// dominating inter-token latency -- the pair a false equality hurts most.
+//
+// An empty value is not a dtype. A value that is still a reference is caught
+// earlier, in resolveRefs, which is the only place the two cases are
+// separable -- see the note there.
+func usableWord(v string) bool {
+	return v != ""
+}
+
+// containsVarRef reports whether a value still holds something resolveRefs
+// would treat as a variable reference.
+//
+// Reached only AFTER resolution, so a reference here means the substituted
+// text itself contained one -- the kubelet expands `$(OTHER)` between env
+// vars, so `--dtype $D` with `D="$(E)"` yields `"$(E)"` with every lookup
+// having succeeded. It shares varNameAt with the resolver on purpose: a
+// second, independently-written notion of "looks like a reference" is how the
+// two would drift.
+func containsVarRef(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '$' {
+			continue
+		}
+		if i+1 < len(s) && s[i+1] == '$' {
+			i++ // an escaped literal dollar, not a reference
+			continue
+		}
+		if _, _, ok := varNameAt(s, i); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // IsCapacityCompatible checks whether two EngineParams configurations

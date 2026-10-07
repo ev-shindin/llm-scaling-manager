@@ -215,24 +215,30 @@ func (s *Store) FindCompatible(modelID, accelerator string, gpuCount int, params
 
 		// Must have compatible engine parameters.
 		//
-		// And both sides must have been fully READ. Two configurations can
-		// agree on every compared field while differing on exactly the flag
-		// neither side could be read for -- an llm-d Deployment passing
-		// `--block-size $VLLM_BLOCK_SIZE` leaves 16 on both, whatever the two
-		// engines actually run. That is an absence of evidence, not a match,
-		// and acting on it reuses one variant's MEASURED capacity as
-		// another's estimate on the strength of two identical defaults.
+		// COMPLETENESS IS DELIBERATELY NOT CHECKED, and a previous revision of
+		// this function got that wrong in the dangerous direction. The
+		// reasoning was that two configurations agreeing only because neither
+		// could be read is an absence of evidence, so the match should be
+		// refused -- and the comment claimed falling through was conservative.
+		// It is not, because of how the result is USED:
+		// estimateZeroReplicaCapacity (replica_capacity.go) takes it as a MAX
+		// CLAMP on a derived estimate, `if compatible.EffectiveCapacity <
+		// bounded`. Refusing the record does not substitute something smaller;
+		// it removes the ceiling. Measured: 5,000 became 153,600, a 30x
+		// over-estimate of per-replica capacity, and an over-stated capacity
+		// UNDER-orders replicas, which this project has on record as breaking
+		// TTFT irrecoverably.
 		//
-		// The gate is here rather than inside IsCapacityCompatible so that
-		// predicate stays reflexive; this is the only caller, and the only
-		// one that knows it is looking at a different variant. Falling
-		// through to the derived estimate is the conservative direction:
-		// over-estimating k2 breaks TTFT irrecoverably, under-estimating
-		// costs replicas.
+		// The general rule the episode taught: an unreadable flag is a reason
+		// to withhold the NEW thing it would authorise, never to change a path
+		// that already existed. IsCapacityCompatible was always a heuristic
+		// over parsed fields, and an unresolved value defaulted before this
+		// work just as it does now -- recording the gap made the uncertainty
+		// visible, it did not create it. So the completeness gate lives only
+		// where it gates something new: engineFingerprint, where refusing
+		// means a variant learns its own ITL line, which is exactly the
+		// behaviour that preceded line sharing.
 		if rec.EngineParams == nil || !rec.EngineParams.IsCapacityCompatible(params) {
-			continue
-		}
-		if !rec.EngineParams.Complete() || !params.Complete() {
 			continue
 		}
 

@@ -356,7 +356,16 @@ func TestFingerprintLabelsDescribeTheirValues(t *testing.T) {
 		mutate(&p)
 		got := p.FingerprintValues()
 
-		for j := range got {
+			// Bounded by NAMES, not by the values slice. A review shortened
+		// FingerprintValues by one and this loop simply never reached the
+		// last position, so the final label went unvalidated and the test
+		// still passed. A sibling length check catches that mutation, but a
+		// test should not depend on one.
+		if len(got) != len(names) {
+			t.Fatalf("%d values for %d labels: the pairing cannot be checked",
+				len(got), len(names))
+		}
+		for j := range names {
 			changed := got[j] != baseValues[j]
 			if j == i && !changed {
 				t.Errorf("label %q is at position %d but mutating that field did "+
