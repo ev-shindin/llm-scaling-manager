@@ -315,7 +315,7 @@ func TestSGLangParserResolvesReferencesToo(t *testing.T) {
 	// The resolution lives in the shared parse loop, so SGLang gets it. Pinned
 	// because the two parsers have drifted before.
 	d := shellDeployment(
-		"python3 -m " + sglangLauncher + " --model-path m "+
+		"python3 -m "+sglangLauncher+" --model-path m "+
 			"--mem-fraction-static $SG_MEM --page-size $SG_PAGE",
 		map[string]string{"SG_MEM": "0.8", "SG_PAGE": "64"})
 	d.Spec.Template.Spec.Containers[0].Name = sglangContainer
@@ -332,7 +332,7 @@ func TestSGLangParserResolvesReferencesToo(t *testing.T) {
 	}
 
 	bad := shellDeployment(
-		"python3 -m " + sglangLauncher + " --model-path m --page-size $SG_PAGE", nil)
+		"python3 -m "+sglangLauncher+" --model-path m --page-size $SG_PAGE", nil)
 	bad.Spec.Template.Spec.Containers[0].Name = sglangContainer
 	q := ParseEngineArgs(inferenceengine.EngineSGLang, scaletarget.NewDeploymentAccessor(bad))
 	if q.Complete() {
