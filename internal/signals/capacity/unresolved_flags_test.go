@@ -27,6 +27,13 @@ import (
 // digest, and that digest licenses one variant to price itself from a latency
 // line the other measured.
 
+// The SGLang fixture's container name and launcher module. Named because each
+// recurs, not because the values matter.
+const (
+	sglangContainer = "sglang"
+	sglangLauncher  = "sglang.launch_server"
+)
+
 // shellDeployment is the shape the cluster actually runs: the engine invoked
 // from `/bin/sh -c`, flag values as shell variable references, real values in
 // the container env.
@@ -308,10 +315,10 @@ func TestSGLangParserResolvesReferencesToo(t *testing.T) {
 	// The resolution lives in the shared parse loop, so SGLang gets it. Pinned
 	// because the two parsers have drifted before.
 	d := shellDeployment(
-		"python3 -m sglang.launch_server --model-path m "+
+		"python3 -m " + sglangLauncher + " --model-path m "+
 			"--mem-fraction-static $SG_MEM --page-size $SG_PAGE",
 		map[string]string{"SG_MEM": "0.8", "SG_PAGE": "64"})
-	d.Spec.Template.Spec.Containers[0].Name = "sglang"
+	d.Spec.Template.Spec.Containers[0].Name = sglangContainer
 	p := ParseEngineArgs(inferenceengine.EngineSGLang, scaletarget.NewDeploymentAccessor(d))
 
 	if p.GpuMemoryUtilization != 0.8 {
@@ -325,8 +332,8 @@ func TestSGLangParserResolvesReferencesToo(t *testing.T) {
 	}
 
 	bad := shellDeployment(
-		"python3 -m sglang.launch_server --model-path m --page-size $SG_PAGE", nil)
-	bad.Spec.Template.Spec.Containers[0].Name = "sglang"
+		"python3 -m " + sglangLauncher + " --model-path m --page-size $SG_PAGE", nil)
+	bad.Spec.Template.Spec.Containers[0].Name = sglangContainer
 	q := ParseEngineArgs(inferenceengine.EngineSGLang, scaletarget.NewDeploymentAccessor(bad))
 	if q.Complete() {
 		t.Error("an unresolvable SGLang page size was not recorded")
