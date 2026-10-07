@@ -356,7 +356,7 @@ func TestFingerprintLabelsDescribeTheirValues(t *testing.T) {
 		mutate(&p)
 		got := p.FingerprintValues()
 
-			// Bounded by NAMES, not by the values slice. A review shortened
+		// Bounded by NAMES, not by the values slice. A review shortened
 		// FingerprintValues by one and this loop simply never reached the
 		// last position, so the final label went unvalidated and the test
 		// still passed. A sibling length check catches that mutation, but a

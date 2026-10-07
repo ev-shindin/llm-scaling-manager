@@ -74,8 +74,8 @@ func TestParserResolvesTheClusterFixture(t *testing.T) {
 			"--max-num-batched-tokens 8192 "+
 			"--dtype bfloat16",
 		map[string]string{
-			"VLLM_MAX_MODEL_LEN":        "16384",
-			"VLLM_BLOCK_SIZE":           "128",
+			"VLLM_MAX_MODEL_LEN": "16384",
+			"VLLM_BLOCK_SIZE":    "128",
 			// NOT the parser defaults. A review neutered resolveRefs entirely
 			// and these two assertions did not fire, because 0.9 and 256 are
 			// also what the struct defaults to -- the same
@@ -455,7 +455,7 @@ func TestTheSGLangParserAlsoReadsOnlyTheEngineContainer(t *testing.T) {
 		t.Errorf("MaxModelLen = %d, want 8192 from the engine -- 512 is the sidecar's",
 			p.MaxModelLen)
 	}
-	if p.WeightDtype != "bfloat16" {
+	if p.WeightDtype != testWeightDtype {
 		t.Errorf("WeightDtype = %q, want bfloat16 -- float16 is the sidecar's",
 			p.WeightDtype)
 	}
@@ -557,7 +557,7 @@ func TestTheParserReadsOnlyTheEngineContainer(t *testing.T) {
 		t.Errorf("MaxModelLen = %d, want 16384 from the engine -- 512 is the sidecar's",
 			p.MaxModelLen)
 	}
-	if p.WeightDtype != "bfloat16" {
+	if p.WeightDtype != testWeightDtype {
 		t.Errorf("WeightDtype = %q, want bfloat16 from the engine -- float16 is the sidecar's",
 			p.WeightDtype)
 	}

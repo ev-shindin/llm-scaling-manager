@@ -280,7 +280,7 @@ func resolveRefs(s string, env map[string]string) (string, bool) {
 			// the set is for.
 			if base, fb, ok := splitShellDefault(name); ok {
 				bv, bfound := env[base]
-				if bfound && !(bv == "" && fb.onEmpty) {
+				if bfound && (bv != "" || !fb.onEmpty) {
 					v, found = bv, true
 				} else {
 					out.WriteString(fb.value)
@@ -417,11 +417,16 @@ func noteUnresolved(params *EngineParams, key string) {
 // function does not handle over-reports; a key it handles that is missing here
 // under-reports, which is the silent default this whole mechanism exists to
 // catch. TestValueKeySetsMatchTheApplyFunctions pins both directions.
+// keyDtype is named because goconst counts it across both parsers' case
+// labels and both key sets; the case labels stay literal, where a constant
+// would read worse than the flag name it stands for.
+const keyDtype = "dtype"
+
 var vllmValueKeys = map[string]struct{}{
 	"gpu_memory_utilization":  {},
 	"block_size":              {},
 	"kv_cache_dtype":          {},
-	"dtype":                   {},
+	keyDtype:                  {},
 	"quantization":            {},
 	"tensor_parallel_size":    {},
 	"num_gpu_blocks_override": {},
@@ -434,7 +439,7 @@ var vllmValueKeys = map[string]struct{}{
 var sglangValueKeys = map[string]struct{}{
 	"mem_fraction_static":  {},
 	"page_size":            {},
-	"dtype":                {},
+	keyDtype:               {},
 	"quantization":         {},
 	"kv_cache_dtype":       {},
 	"tp_size":              {},
