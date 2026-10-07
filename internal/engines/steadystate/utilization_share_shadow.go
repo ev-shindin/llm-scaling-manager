@@ -3,8 +3,10 @@ package steadystate
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"strings"
+	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
@@ -14,37 +16,61 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
 // utilizationShareState is what the engine remembers between cycles about the
 // utilization-share optimizer, so a standing condition is reported once per
 // change rather than once per cycle.
 type utilizationShareState struct {
-	lastConfigErr   string
-	lastIgnored     string
-	warnedActuation bool
-	lastWeightErrs  map[string]string
+	lastConfigErr  string
+	lastIgnored    string
+	lastWeightErrs map[string]string
+
+	// Actuation state (stage 2), dropped whenever the optimizer is not active.
+	// ledgers are per group (shareGroupKey); desired is each planned variant's
+	// target by namespace/variant; quietUntil is when a group's ledger may
+	// plan again after it was (re)built.
+	ledgers    map[string]*allocation.ShareLedger
+	desired    map[string]int
+	quietUntil map[string]time.Time
+	// now is the clock; nil is time.Now. Tests set it.
+	now func() time.Time
 }
 
-// evaluateUtilizationShare runs stage 1 of the utilization-share optimizer
+// resetActuation forgets every ledger. A transfer's donor marks stay on its
+// pods; when the optimizer is activated again, the rebuild reads them back and
+// removes those that are stale.
+func (st *utilizationShareState) resetActuation() {
+	st.ledgers, st.desired, st.quietUntil = nil, nil, nil
+}
+
+// evaluateUtilizationShare runs the utilization-share optimizer
 // (docs/proposals/utilization-share-optimizer.md, section 13): for every
 // enabled group it computes the targets, the tolerance band and the roles a
-// move could fix, and publishes them as metrics and one log line. It actuates
-// nothing -- the decisions this cycle come from today's optimizer either way.
+// move could fix, and publishes them as metrics and one log line.
+//
+// In shadow mode it actuates nothing and returns nil. With shadow: false it
+// runs each group's ledger (stage 2) and returns the target of every variant
+// it plans, keyed by namespace/variant, for the caller to apply over today's
+// decisions. A model it does not plan -- frozen, multi-accelerator, or in a
+// group that is not enabled -- keeps today's decision.
 //
 // constraints are the GPU constraints this cycle computed. With none there is
-// no finite budget to share, and nothing is evaluated.
+// no finite budget to share, and nothing is evaluated. scaleTargets are this
+// cycle's scale targets by namespace/model, then variant.
 func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []allocation.ModelScalingRequest,
-	constraints []*allocation.ResourceConstraints) {
+	constraints []*allocation.ResourceConstraints,
+	scaleTargets map[string]map[string]scaletarget.ScaleTargetAccessor) (overrides map[string]utilizationShareOverride) {
 	logger := ctrl.LoggerFrom(ctx).WithName("utilization-share")
 	st := &e.utilizationShare
-	// Shadow evaluation must never cost the cycle it rides on: the decisions
-	// are already made, and a bug here should lose this cycle's report, not the
-	// controller.
+	// The optimizer must never cost the cycle it rides on: a bug here loses
+	// this cycle's report and leaves today's decisions, not the controller.
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error(fmt.Errorf("panic: %v", r), "Utilization-share evaluation failed; skipping it this cycle")
 			metrics.PublishUtilizationShare(nil)
+			overrides = nil
 		}
 	}()
 
@@ -70,13 +96,17 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	}
 	if !selected || len(constraints) == 0 {
 		metrics.PublishUtilizationShare(nil)
-		return
+		st.resetActuation()
+		return nil
 	}
-	if !us.Shadow && !st.warnedActuation {
-		logger.Info("WARNING: utilizationShare is selected with shadow: false, but actuation is not built yet; " +
-			"evaluating in shadow mode only")
-		st.warnedActuation = true
+	if us.Shadow {
+		st.resetActuation()
 	}
+	now := time.Now()
+	if st.now != nil {
+		now = st.now()
+	}
+	seen := map[string]bool{}
 
 	weightErrs := map[string]string{}
 	groups := allocation.BuildShareGroups(requests, constraints, allocation.ShareGroupOptions{
@@ -141,6 +171,16 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		}
 		published = append(published, pg)
 
+		mode := "Shadow: utilization share would rebalance"
+		if !us.Shadow {
+			mode = "Utilization share: rebalancing"
+			seen[shareGroupKey(g)] = true
+			if overrides == nil {
+				overrides = map[string]utilizationShareOverride{}
+			}
+			maps.Copy(overrides, e.actuateUtilizationShare(ctx, logger, us, g, ev, scaleTargets, now))
+		}
+
 		kv := []any{
 			"accelerator", g.AcceleratorType, "scope", scope, "budget", g.Budget,
 			"spare", fmt.Sprintf("%.2f", ev.Spare), "wholeReplicaCoverage", ev.WholeReplicaCoverage,
@@ -148,11 +188,25 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		}
 		// Info only when a move would be planned, so a settled fleet stays quiet.
 		if len(actionable) > 0 {
-			logger.Info("Shadow: utilization share would rebalance", kv...)
+			logger.Info(mode, kv...)
 		}
 		logger.V(logging.DEBUG).Info("Shadow: utilization share evaluation", append(kv, "roles", table)...)
 	}
 	metrics.PublishUtilizationShare(published)
+	// A group that has gone (its last model left, its namespace disabled)
+	// takes its ledger with it; its variants return to today's optimizer.
+	for k := range st.ledgers {
+		if !seen[k] {
+			delete(st.ledgers, k)
+			delete(st.quietUntil, k)
+		}
+	}
+	for k := range st.desired {
+		if _, ok := overrides[k]; !ok {
+			delete(st.desired, k)
+		}
+	}
+	return overrides
 }
 
 func formatHeadroom(x float64) string {

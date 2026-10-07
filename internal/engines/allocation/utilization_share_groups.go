@@ -3,6 +3,7 @@ package allocation
 import (
 	"cmp"
 	"maps"
+	"math"
 	"slices"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -22,6 +23,20 @@ type ShareVariant struct {
 	GPUs int
 	// Current is its replica count now.
 	Current int
+	// Min and Max are its replica bounds; Max 0 is unbounded.
+	Min, Max int
+}
+
+func shareVariantOf(vc variantRecord, stateMap map[string]domain.VariantReplicaState) ShareVariant {
+	st := stateMap[vc.VariantName]
+	v := ShareVariant{Name: vc.VariantName, GPUs: gpusPerReplicaFromState(stateMap, vc.VariantName), Current: st.CurrentReplicas}
+	if st.MinReplicas != nil {
+		v.Min = *st.MinReplicas
+	}
+	if st.MaxReplicas != nil {
+		v.Max = *st.MaxReplicas
+	}
+	return v
 }
 
 // ShareRoleOrigin names the model and role a ShareRole was built from.
@@ -52,6 +67,13 @@ type ShareGroup struct {
 	// cheapest with room below its ceiling), as rescale reclaims and fills.
 	// A role absent from Give has nothing it can give.
 	Give, Grow map[string]ShareVariant
+	// Variants lists every variant of each planned role. Once the optimizer is
+	// active it owns all their targets, not only the ones a transfer touches.
+	Variants map[string][]ShareVariant
+	// PhysicalFree bounds what a fill may place this cycle: the cluster's free
+	// GPUs of the type, which a namespace quota can exceed (as in applyRescale).
+	// math.MaxInt when the cluster pool is unbounded or unknown.
+	PhysicalFree int
 	// Thresholds is each role's scale-up threshold k_r.
 	Thresholds map[string]float64
 	Origins    map[string]ShareRoleOrigin
@@ -105,6 +127,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 				Committed:       map[string]int{},
 				Give:            map[string]ShareVariant{},
 				Grow:            map[string]ShareVariant{},
+				Variants:        map[string][]ShareVariant{},
 				Thresholds:      map[string]float64{},
 				Origins:         map[string]ShareRoleOrigin{},
 			}
@@ -148,6 +171,9 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 			g.Thresholds[r.Key] = req.CompositeSignal.ScaleUpThreshold
 			g.Origins[r.Key] = o
 			vs := variantsForRole(variantsOnType(records, acc), r.role)
+			for _, vc := range vs {
+				g.Variants[r.Key] = append(g.Variants[r.Key], shareVariantOf(vc, stateMap))
+			}
 			if give, ok := shareGiveVariant(vs, stateMap); ok {
 				g.Give[r.Key] = give
 			}
@@ -177,6 +203,10 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 			continue
 		}
 		g.Budget = free + g.listed
+		g.PhysicalFree = math.MaxInt
+		if pf, ok := available[k.acc]; ok && pf >= 0 && pf < math.MaxInt {
+			g.PhysicalFree = pf
+		}
 		slices.SortFunc(g.Roles, func(a, b ShareRole) int { return cmp.Compare(a.Key, b.Key) })
 		slices.Sort(g.Frozen)
 		out = append(out, *g)
@@ -292,8 +322,7 @@ func shareGiveVariant(vs []variantRecord, stateMap map[string]domain.VariantRepl
 			floor = *st.MinReplicas
 		}
 		if st.CurrentReplicas > floor {
-			return ShareVariant{Name: sorted[i].VariantName, GPUs: gpusPerReplicaFromState(stateMap, sorted[i].VariantName),
-				Current: st.CurrentReplicas}, true
+			return shareVariantOf(sorted[i], stateMap), true
 		}
 	}
 	return ShareVariant{}, false
@@ -307,8 +336,7 @@ func shareGrowVariant(vs []variantRecord, stateMap map[string]domain.VariantRepl
 		if st.MaxReplicas != nil && *st.MaxReplicas > 0 && st.CurrentReplicas >= *st.MaxReplicas {
 			continue
 		}
-		return ShareVariant{Name: vc.VariantName, GPUs: gpusPerReplicaFromState(stateMap, vc.VariantName),
-			Current: st.CurrentReplicas}, true
+		return shareVariantOf(vc, stateMap), true
 	}
 	return ShareVariant{}, false
 }

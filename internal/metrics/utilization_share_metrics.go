@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -17,6 +18,7 @@ var (
 	utilizationShareActionable     *prometheus.GaugeVec
 	utilizationShareSpareGPUs      *prometheus.GaugeVec
 	utilizationShareReplicasToMove *prometheus.GaugeVec
+	utilizationShareTransfers      *prometheus.CounterVec
 )
 
 // registerUtilizationShareMetrics creates and registers the utilization-share
@@ -50,6 +52,13 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		"Utilization-share optimizer: replicas the whole-replica target would move. In shadow mode, "+
 			"what would be planned.",
 		groupLabels)
+	utilizationShareTransfers = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: constants.WVAUtilizationShareTransfersTotal,
+		Help: "Utilization-share optimizer: transfers that left the ledger, by outcome.",
+	}, append(slices.Clone(groupLabels), constants.LabelOutcome, constants.LabelUrgent))
+	if err := registry.Register(utilizationShareTransfers); err != nil {
+		return fmt.Errorf("failed to register utilization-share metric: %w", err)
+	}
 	for _, g := range []*prometheus.GaugeVec{
 		utilizationShareHeadroom, utilizationShareTargetGPUs, utilizationShareActionable,
 		utilizationShareSpareGPUs, utilizationShareReplicasToMove,
@@ -149,4 +158,21 @@ func PublishUtilizationShare(groups []UtilizationShareGroup) {
 			set(utilizationShareActionable, rl, actionable)
 		}
 	}
+}
+
+// CountUtilizationShareTransfer counts one transfer leaving a group's ledger.
+func CountUtilizationShareTransfer(acceleratorType, scope, outcome string, urgent bool) {
+	if utilizationShareTransfers == nil {
+		return
+	}
+	l := prometheus.Labels{
+		constants.LabelAcceleratorType: acceleratorType,
+		constants.LabelScope:           scope,
+		constants.LabelOutcome:         outcome,
+		constants.LabelUrgent:          strconv.FormatBool(urgent),
+	}
+	if controllerInstance != "" {
+		l[constants.LabelControllerInstance] = controllerInstance
+	}
+	utilizationShareTransfers.With(l).Inc()
 }

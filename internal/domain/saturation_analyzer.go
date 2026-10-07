@@ -23,6 +23,12 @@ const (
 	// deliberate, redistributive scale-down (not flappy demand), which downstream
 	// stabilization must not damp as if it were noise.
 	DecisionReasonRescale DecisionReason = "rescale"
+	// DecisionReasonUtilizationShare marks a target the utilization-share
+	// optimizer owns: a donor lowered or a receiver raised by a transfer, or an
+	// idle fill. The ledger, not the sticky scale-down hold, owns such a target
+	// -- a cancelled transfer must be able to lift a donor's lowered one
+	// (docs/proposals/utilization-share-optimizer.md, section 6.3).
+	DecisionReasonUtilizationShare DecisionReason = "utilization-share"
 	// DecisionReasonTest is used for test scenarios.
 	DecisionReasonTest DecisionReason = "test"
 )

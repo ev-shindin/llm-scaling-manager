@@ -1,6 +1,6 @@
 # Proposal: a utilization-share optimizer
 
-**Status:** stage 1 (shadow) built; stages 2–3 are design. See §13.
+**Status:** stage 1 (shadow) built; stage 2 (actuation) built for single-donor transfers, remaining pieces listed in §13; stage 3 is design.
 **Created:** 2026-10-05
 **Last Updated:** 2026-10-07
 
@@ -1527,6 +1527,15 @@ the admin decides what a class is worth, and no number a tenant writes can leave
 the range the classes span. An unknown class name is an error on that model's
 entry only, falling back to the weight-1 class with a WARN.
 
+A tenant still chooses its own class, and in the **cluster** group that choice
+is weighed against every other tenant's. So in a cluster-scope group a weight is
+honoured only when it comes from the installation's own scaling-policy map --
+the admin's. A `weightClass` or `weight` set in a namespace's local map (which a
+tenant may own) is ignored there, with a WARN naming the model, and the model
+gets the default class. In that namespace's own quota group, whose budget the
+tenant owns whole, the same weight counts: there it only orders the tenant's own
+models.
+
 ### 8.3 Validation must not cost the limiters
 
 Today a malformed entry is rejected whole, and rejecting the `default` entry drops
@@ -1827,16 +1836,44 @@ optimizer every cycle (§6.6).
    `internal/engines/allocation/utilization_share_{target,groups}.go` (§5 and
    §6.1), `internal/engines/steadystate/utilization_share_shadow.go` (the
    per-cycle evaluation) and `internal/metrics/utilization_share_metrics.go`.
-   Two simplifications are deliberate, and both close in stage 2:
-   - a group's committed GPUs are today's replica counts, not the
-     terminating-inclusive `HeldReplicas`, which only actuation needs;
-   - the transfers that would be planned are reported as **replicas to move**
-     (the integer target's shortfall). Pairing them into donor sets needs the
-     per-pod and per-node views of §6.5, which stage 2 builds with the ledger.
+   In shadow mode the transfers that would be planned are reported as
+   **replicas to move** (the integer target's shortfall).
 2. **Actuate with the full window**, on quota groups, P/D and multi-GPU
    replicas included — that is the fleet this is for. Ledger, promised GPUs,
    per-pod donor sets, cancel, timeouts, the engine's overlay. Correct, slow.
    `shadow: true` is the rollback, if stage 1 or 2 showed prefill under-read.
+
+   **Built:**
+   - committed GPUs are `HeldReplicas` (`internal/engines/variantmeta/held_replicas.go`):
+     scheduled, unfinished pods, terminating ones included, counted by group
+     on a LeaderWorkerSet;
+   - the ledger and planner (`utilization_share_{ledger,plan}.go`), sized by
+     each role's give and grow variants;
+   - the derived timings (`utilization_share_timing.go`, §8.4), from the
+     ScaledObject's scale-down window and polling interval (now carried on
+     `registry.Target`), the pod templates' termination grace, and the group's
+     measured releases;
+   - the engine side (`internal/engines/steadystate/utilization_share_actuate.go`):
+     - a ledger per group;
+     - donor pods marked with the lowest `pod-deletion-cost` and the transfer
+       annotation, unmarked on cancel or abort;
+     - receivers raised only at release;
+     - idle fills bounded by the cluster's physical free GPUs;
+     - the restart rebuild from the marks, with one fill timeout of quiet
+       after it;
+     - the overlay on the cycle's decisions under the `utilization-share`
+       reason, which the sticky scale-down hold stands down for;
+     - `wva_utilization_share_transfers_total`.
+
+   **Not yet built in stage 2:**
+   - per-pod donor *sets* across several donor pods, with the per-node
+     check (§6.5). A transfer has one donor role today, and a Deployment
+     donor gives one pod at a time.
+   - the `redirected` outcome, the withheld, swinging, promised,
+     effective-timing and release-time series of §9, and the
+     `awaiting-release` blocked reason.
+   - wake claims for scale-from-zero, and the warm pool's share of idle (§7).
+   - the kind e2e of §12.
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4).
 

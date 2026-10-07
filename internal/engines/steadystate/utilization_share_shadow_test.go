@@ -130,7 +130,7 @@ func TestUtilizationShareShadowReportsAWouldBeRebalance(t *testing.T) {
 		shadowRequest("C", "", 1000, 2),
 	}
 
-	e.evaluateUtilizationShare(ctx, reqs, fullQuota())
+	e.evaluateUtilizationShare(ctx, reqs, fullQuota(), nil)
 
 	got := logs.FilterMessage(shadowMessage).All()
 	if len(got) != 1 {
@@ -176,7 +176,7 @@ func TestUtilizationShareShadowIsQuietWhenSettled(t *testing.T) {
 		shadowRequest("C", "", 1000, 2),
 	}
 
-	e.evaluateUtilizationShare(ctx, reqs, fullQuota())
+	e.evaluateUtilizationShare(ctx, reqs, fullQuota(), nil)
 
 	if n := logs.FilterMessage(shadowMessage).Len(); n != 0 {
 		t.Fatalf("a settled fleet wrote %d would-rebalance lines", n)
@@ -201,7 +201,7 @@ func TestUtilizationShareShadowOnlyWhenSelected(t *testing.T) {
 	reg := freshMetrics(t)
 	ctx, logs := observe(t)
 	e := &Engine{Config: shadowConfig(t, "")}
-	e.evaluateUtilizationShare(ctx, reqs, fullQuota())
+	e.evaluateUtilizationShare(ctx, reqs, fullQuota(), nil)
 	if n := logs.FilterMessage(shadowMessage).Len(); n != 0 {
 		t.Fatalf("an unselected optimizer wrote %d lines", n)
 	}
@@ -213,7 +213,7 @@ func TestUtilizationShareShadowOnlyWhenSelected(t *testing.T) {
 	c := shadowConfig(t, "optimizer:\n  type: utilizationShare\n  utilizationShare:\n    tolerance: 2\n")
 	e = &Engine{Config: c}
 	for range 3 {
-		e.evaluateUtilizationShare(ctx, reqs, fullQuota())
+		e.evaluateUtilizationShare(ctx, reqs, fullQuota(), nil)
 	}
 	if n := logs.FilterMessage("Invalid optimizer block; keeping today's optimizer. The limiters are unaffected").Len(); n != 1 {
 		t.Fatalf("want the invalid block reported once across three cycles, got %d", n)
@@ -223,7 +223,7 @@ func TestUtilizationShareShadowOnlyWhenSelected(t *testing.T) {
 	}
 	setShadowPolicy(t, c, selectedShadow)
 	for range 2 {
-		e.evaluateUtilizationShare(ctx, reqs, fullQuota())
+		e.evaluateUtilizationShare(ctx, reqs, fullQuota(), nil)
 	}
 	if n := logs.FilterMessage("Optimizer block is valid again").Len(); n != 1 {
 		t.Fatalf("want the fix reported once, got %d", n)
@@ -239,28 +239,25 @@ func TestUtilizationShareShadowClearsWhenDeselected(t *testing.T) {
 	e := &Engine{Config: c}
 	reqs := []allocation.ModelScalingRequest{shadowRequest("A", "", 4000, 9)}
 
-	e.evaluateUtilizationShare(ctx, reqs, fullQuota())
+	e.evaluateUtilizationShare(ctx, reqs, fullQuota(), nil)
 	if n := len(family(t, reg, constants.WVAUtilizationShareTargetGPUs)); n != 1 {
 		t.Fatalf("want one series while selected, got %d", n)
 	}
 	setShadowPolicy(t, c, "")
-	e.evaluateUtilizationShare(ctx, reqs, fullQuota())
+	e.evaluateUtilizationShare(ctx, reqs, fullQuota(), nil)
 	if n := len(family(t, reg, constants.WVAUtilizationShareTargetGPUs)); n != 0 {
 		t.Fatalf("want no series once deselected, got %d", n)
 	}
 }
 
-// Standing conditions are reported once per change, not once per cycle: the
-// shadow-only warning when shadow is off, and a model's bad weight.
+// Standing conditions are reported once per change, not once per cycle: here,
+// a model's bad weight.
 func TestUtilizationShareShadowReportsStandingConditionsOnce(t *testing.T) {
 	ctx, logs := observe(t)
-	e := &Engine{Config: shadowConfig(t, "optimizer:\n  type: utilizationShare\n")}
+	e := &Engine{Config: shadowConfig(t, selectedShadow)}
 	reqs := []allocation.ModelScalingRequest{shadowRequest("A", "gold", 4000, 9), shadowRequest("B", "", 3000, 5)}
 	for range 3 {
-		e.evaluateUtilizationShare(ctx, reqs, fullQuota())
-	}
-	if n := logs.FilterMessageSnippet("actuation is not built yet").Len(); n != 1 {
-		t.Errorf("want the shadow-only warning once across three cycles, got %d", n)
+		e.evaluateUtilizationShare(ctx, reqs, fullQuota(), nil)
 	}
 	weight := logs.FilterMessageSnippet("invalid weight").All()
 	if len(weight) != 1 {
@@ -284,7 +281,7 @@ func TestUtilizationShareShadowScopesTenantWeights(t *testing.T) {
 
 	ctx, logs := observe(t)
 	e := &Engine{Config: c}
-	e.evaluateUtilizationShare(ctx, reqs, fullQuota())
+	e.evaluateUtilizationShare(ctx, reqs, fullQuota(), nil)
 	ignored := logs.FilterMessageSnippet("invalid weight").All()
 	if len(ignored) != 1 || ignored[0].ContextMap()["model"] != "ns/A" {
 		t.Fatalf("want the tenant's weight on ns/A reported as ignored in the cluster group, got %v", ignored)
@@ -295,7 +292,7 @@ func TestUtilizationShareShadowScopesTenantWeights(t *testing.T) {
 	nsQuota := []*allocation.ResourceConstraints{{
 		NamespacePools: map[string]map[string]allocation.ResourcePool{"ns": {"A100": {Limit: 16, Used: 14}}},
 	}}
-	e.evaluateUtilizationShare(ctx, reqs, nsQuota)
+	e.evaluateUtilizationShare(ctx, reqs, nsQuota, nil)
 	if n := logs.FilterMessageSnippet("invalid weight").Len(); n != 0 {
 		t.Fatalf("the tenant's weight must count in its own quota group, got %d warnings", n)
 	}

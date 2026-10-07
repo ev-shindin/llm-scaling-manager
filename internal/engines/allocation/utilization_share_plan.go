@@ -178,6 +178,7 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 			}
 			t := l.Start(ShareTransfer{
 				Donor: dn, Receiver: rc, GPUs: g, DonorGPUs: gd,
+				DonorVariant: in.Give[dn].Name, ReceiverVariant: in.Grow[rc].Name,
 				Urgent: float64(work[rc]) < rr.Need,
 			}, in.Held, now, tm)
 			plan.Started = append(plan.Started, t)

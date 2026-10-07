@@ -27,6 +27,13 @@ const (
 	// target would move. In shadow mode this is what would be planned.
 	WVAUtilizationShareReplicasToMove = "wva_utilization_share_replicas_to_move"
 
+	// WVAUtilizationShareTransfersTotal is a counter: transfers that left the
+	// ledger, by outcome (done, fill-timeout, cancelled, aborted).
+	WVAUtilizationShareTransfersTotal = "wva_utilization_share_transfers_total"
+
+	// LabelUrgent is "true" on a transfer whose receiver was below its need.
+	LabelUrgent = "urgent"
+
 	// LabelScope is the budget scope of a utilization-share group.
 	LabelScope = "scope"
 

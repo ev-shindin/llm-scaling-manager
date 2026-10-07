@@ -45,8 +45,14 @@ const (
 // state machine.
 type ShareTransfer struct {
 	ID       string
-	Donor    string // role key
+	Donor    string // role key; empty for a fill from idle GPUs
 	Receiver string // role key
+	// DonorVariant and ReceiverVariant are the variants the transfer acts on
+	// (ShareGroup.Give, ShareGroup.Grow); empty when the caller sizes by role.
+	DonorVariant, ReceiverVariant string
+	// DonorPods are the donor pods marked to be removed (namespace/name), so a
+	// cancel can unmark them (§6.5).
+	DonorPods []string
 	// GPUs is one receiver replica.
 	GPUs int
 	// DonorGPUs is one donor replica: at least GPUs. Without node information
@@ -113,7 +119,16 @@ type ShareLedger struct {
 	swingUntil        map[string]time.Time
 	needs             map[string][]shareNeedSample
 	confirm           map[string]int
+	// releases are the durations of recent completed releases, newest last,
+	// for the measured release time (§8.4).
+	releases []time.Duration
+	// released are the transfers that entered Filling since TakeReleased was
+	// last called: the cycle in which each receiver is raised.
+	released []ShareTransfer
 }
+
+// shareReleaseSamples is how many completed releases the ledger remembers.
+const shareReleaseSamples = 20
 
 // NewShareLedger returns an empty ledger.
 func NewShareLedger() *ShareLedger {
@@ -136,8 +151,52 @@ func (l *ShareLedger) Transfers() []ShareTransfer {
 	return out
 }
 
-// InFlight is how many transfers count against the concurrency limit.
-func (l *ShareLedger) InFlight() int { return len(l.transfers) }
+// InFlight is how many transfers count against the concurrency limit: those
+// with a donor. A fill from idle GPUs moves nothing and does not count.
+func (l *ShareLedger) InFlight() int {
+	n := 0
+	for _, t := range l.transfers {
+		if t.Donor != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// StartFill records a receiver raised into idle GPUs: no donor, so it starts in
+// Filling and ends when the receiver's pods are scheduled. Tracking it keeps
+// the next cycle, which does not yet see those pods held, from filling the same
+// GPUs again.
+func (l *ShareLedger) StartFill(receiver, variant string, gpus int, held map[string]int, now time.Time, tm ShareTimings) ShareTransfer {
+	l.nextID++
+	t := &ShareTransfer{
+		ID: fmt.Sprintf("f%d", l.nextID), Receiver: receiver, ReceiverVariant: variant,
+		GPUs: gpus, Entitled: true, State: ShareFilling, Started: now,
+		Deadline: now.Add(tm.FillTimeout), receiverBase: held[receiver],
+	}
+	l.transfers = append(l.transfers, t)
+	return *t
+}
+
+// Restore reinstates a Releasing transfer read back from its donor pods' marks
+// after a restart (§6.3). heldDonor is what the donor holds now; its marked
+// pods still hold their GPUs, so the release is observed against that.
+func (l *ShareLedger) Restore(t ShareTransfer, heldDonor int) {
+	if t.DonorGPUs < t.GPUs {
+		t.DonorGPUs = t.GPUs
+	}
+	t.State = ShareReleasing
+	t.donorBase = heldDonor
+	l.transfers = append(l.transfers, &t)
+}
+
+// TakeReleased returns the transfers that were released since the last call
+// and forgets them.
+func (l *ShareLedger) TakeReleased() []ShareTransfer {
+	out := l.released
+	l.released = nil
+	return out
+}
 
 // Committed returns each role's committed allocation Ḡ (§6.1 step 2): what it
 // holds, minus what it is still giving, plus what it is promised and does not
@@ -223,7 +282,7 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 	given := map[string]int{}
 	base := map[string]int{}
 	for _, t := range l.transfers {
-		if t.State != ShareReleasing {
+		if t.State != ShareReleasing || t.Donor == "" {
 			continue
 		}
 		if _, ok := base[t.Donor]; !ok {
@@ -231,9 +290,14 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 		}
 		given[t.Donor] += t.DonorGPUs
 		if held[t.Donor] <= base[t.Donor]-given[t.Donor] {
+			l.releases = append(l.releases, now.Sub(t.Started))
+			if len(l.releases) > shareReleaseSamples {
+				l.releases = l.releases[len(l.releases)-shareReleaseSamples:]
+			}
 			t.State = ShareFilling
 			t.Deadline = now.Add(tm.FillTimeout)
 			t.receiverBase = held[t.Receiver]
+			l.released = append(l.released, *t)
 		}
 	}
 	// A transfer released this cycle measures its receiver from now; one that
@@ -348,4 +412,32 @@ func (l *ShareLedger) Confirm(actionable map[string]bool) map[string]int {
 		out[k] = v
 	}
 	return out
+}
+
+// MeasuredRelease is the 90th percentile of recent completed releases, and
+// whether at least three have completed: too few say nothing about the tail.
+func (l *ShareLedger) MeasuredRelease() (time.Duration, bool) {
+	if len(l.releases) < 3 {
+		return 0, false
+	}
+	s := slices.Clone(l.releases)
+	slices.Sort(s)
+	i := min(len(s)-1, int(float64(len(s))*0.9))
+	return s[i], true
+}
+
+// SetDonorPods records the donor pods a transfer marked.
+func (l *ShareLedger) SetDonorPods(id string, pods []string) {
+	for _, t := range l.transfers {
+		if t.ID == id {
+			t.DonorPods = pods
+		}
+	}
+}
+
+// Forget drops a transfer that never took effect -- its donor pod could not be
+// marked -- without the holds a cancel sets: nothing moved, so nothing can
+// swing back.
+func (l *ShareLedger) Forget(id string) {
+	l.transfers = slices.DeleteFunc(l.transfers, func(t *ShareTransfer) bool { return t.ID == id })
 }
