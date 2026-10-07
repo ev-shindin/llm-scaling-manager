@@ -170,6 +170,11 @@ type Engine struct {
 	// optimizeV2 from what collection read.
 	scaleTargetUIDs map[string]types.UID
 
+	// utilizationShare is the utilization-share optimizer's between-cycle
+	// reporting state. Stage 1 evaluates in shadow only; see
+	// evaluateUtilizationShare.
+	utilizationShare utilizationShareState
+
 	// lastBlockedModels records, keyed identically, every model this engine has
 	// published wva_model_scaling_blocked reasons for. Same reason as
 	// lastAnalyzerSeries — a GaugeVec cannot enumerate its own children — but the
@@ -1263,6 +1268,10 @@ func (e *Engine) optimizeV2(
 		g.Rescale = e.resolveRescaleFlags(requests)
 	}
 	allDecisions := optimizer.Optimize(ctx, requests, constraints)
+	// The utilization-share optimizer runs beside today's in shadow mode: it
+	// reads this cycle's requests and constraints and publishes what it would
+	// do, and the decisions above are unchanged.
+	e.evaluateUtilizationShare(ctx, requests, constraints)
 	logScalingDecisions(ctx, requests, allDecisions)
 
 	logger.Info("V2 optimizer produced decisions",

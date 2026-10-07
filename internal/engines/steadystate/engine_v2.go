@@ -821,6 +821,8 @@ func (e *Engine) collectV2ModelRequest(
 		VariantStates:   variantStates,
 		Variants:        variantMetadata,
 		Priority:        config.Priority,
+		WeightClass:     config.WeightClass,
+		Weight:          config.Weight,
 		Disaggregated:   disaggregated,
 	}, nil
 }
