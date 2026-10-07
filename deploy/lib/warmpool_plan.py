@@ -29,7 +29,9 @@ COMMENT_COLUMN = 26
 
 # Where each kind keeps the pod template WVA would read. Mirrors
 # SO_POD_PATH_DEPLOYMENT / SO_POD_PATH_LWS in scaledobject.sh; the leader is the
-# right template for an LWS, since that is the Pod holding rank 0.
+# right template for an LWS, since that is the Pod holding rank 0. An LWS with
+# no leaderTemplate runs its leader from the workerTemplate (the LWS controller
+# builds the leader StatefulSet from it), so that is the fallback path.
 POD_PATH = {
     "deployment": ("deployment", ["spec", "template", "spec"]),
     "leaderworkerset": (
@@ -37,6 +39,23 @@ POD_PATH = {
         ["spec", "leaderWorkerTemplate", "leaderTemplate", "spec"],
     ),
 }
+POD_PATH_FALLBACK = {
+    "leaderworkerset": ["spec", "leaderWorkerTemplate", "workerTemplate", "spec"],
+}
+
+
+def pod_spec(obj, kind):
+    """Return the pod spec WVA would read for an object of this kind, or {}."""
+    _, path = POD_PATH[kind.lower()]
+    for candidate in [path, POD_PATH_FALLBACK.get(kind.lower())]:
+        if not candidate:
+            continue
+        spec = obj
+        for key in candidate:
+            spec = (spec or {}).get(key) or {}
+        if spec:
+            return spec
+    return {}
 
 
 def shape_of(namespace, target, kind="Deployment"):
@@ -46,7 +65,7 @@ def shape_of(namespace, target, kind="Deployment"):
     know is reported rather than guessed at, because guessing a shape wrong
     sizes a pool that then cannot start the model it was built for.
     """
-    resource, path = POD_PATH.get(kind.lower(), (None, None))
+    resource, _ = POD_PATH.get(kind.lower(), (None, None))
     if resource is None:
         return None
     proc = subprocess.run(
@@ -59,9 +78,7 @@ def shape_of(namespace, target, kind="Deployment"):
     )
     if proc.returncode != 0:
         return None
-    spec = json.loads(proc.stdout)
-    for key in path:
-        spec = (spec or {}).get(key) or {}
+    spec = pod_spec(json.loads(proc.stdout), kind)
 
     # llm-d declares its accelerator through nodeAffinity, not nodeSelector, so
     # reading only the latter finds nothing on a real deployment. Read both, and

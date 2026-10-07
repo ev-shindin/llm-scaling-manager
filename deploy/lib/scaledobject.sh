@@ -3285,6 +3285,8 @@ so_pause_target_gpus() {
         # internal/utils/scaletarget/{deployment,lws}.go:
         #   Deployment  sum over the pod templates containers.
         #   LWS         leader_GPUs + (size - 1) * worker_GPUs, size defaulting to 1.
+        #               With no leaderTemplate the LWS controller builds the leader
+        #               from the workerTemplate, so the leader holds worker_GPUs.
         #               .spec.replicas is the GROUP count, so this is per group --
         #               reading workerTemplate alone ignored both the leader and the
         #               group size and under-reported every LWS workload.
@@ -3303,7 +3305,8 @@ so_pause_target_gpus() {
                 | add ) ] | add // 0;
         ( if .spec.leaderWorkerTemplate then
             .spec.leaderWorkerTemplate as $t
-            | (if $t.leaderTemplate then gpus($t.leaderTemplate.spec.containers) else 0 end)
+            | (if $t.leaderTemplate then gpus($t.leaderTemplate.spec.containers)
+               else gpus($t.workerTemplate.spec.containers) end)
               + ((($t.size // 1) - 1) * gpus($t.workerTemplate.spec.containers))
           else
             gpus(.spec.template.spec.containers)

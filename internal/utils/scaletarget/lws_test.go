@@ -276,7 +276,9 @@ func TestLWSAccessor_GetTotalGPUsPerReplica(t *testing.T) {
 					},
 				},
 			},
-			expected: 4, // 0 (no leader GPUs) + (3-1)*2 = 0 + 4 = 4
+			// The LWS controller builds the leader from the worker template when
+			// there is no leader template, so the leader holds 2 GPUs too.
+			expected: 6, // 2 (leader runs the worker template) + (3-1)*2 = 6
 		},
 		{
 			name: "leader with no GPUs, workers have GPUs",

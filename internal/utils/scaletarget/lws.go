@@ -38,13 +38,12 @@ func (r *lwsAccessor) GetStatusReadyReplicas() int32 {
 	return r.lws.Status.ReadyReplicas
 }
 
-// leader_GPUs + (Size - 1) * worker_GPUs.
+// leader_GPUs + (Size - 1) * worker_GPUs. With no leader template the LWS
+// controller builds the leader from the worker template, so the leader then
+// holds the worker's GPUs -- GetLeaderPodTemplateSpec makes the same fallback.
 func (r *lwsAccessor) GetTotalGPUsPerReplica() int {
 	// r.lws is always not nil
-	leaderGPUs := 0
-	if r.lws.Spec.LeaderWorkerTemplate.LeaderTemplate != nil {
-		leaderGPUs = resources.GetContainersGPUs(r.lws.Spec.LeaderWorkerTemplate.LeaderTemplate.Spec.Containers)
-	}
+	leaderGPUs := resources.GetContainersGPUs(r.GetLeaderPodTemplateSpec().Spec.Containers)
 
 	workerGPUs := resources.GetContainersGPUs(r.lws.Spec.LeaderWorkerTemplate.WorkerTemplate.Spec.Containers)
 	total := leaderGPUs + (int(r.GetGroupSize())-1)*workerGPUs
