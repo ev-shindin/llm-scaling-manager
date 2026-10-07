@@ -232,8 +232,13 @@ func (a *SaturationAnalyzer) variantIsStale(key string, now time.Time, timeout t
 // timeout has no use for either. The saturated-throughput windows and the
 // decode-saturation memory go the same way -- the latter is per
 // namespace|model rather than per variant, but a model quiet for the timeout
-// has no use for it either. The returned count remains the number of
-// HISTORY entries evicted, which is what its callers report.
+// The returned count is NOT the k2-history count any more. It sums every map
+// this function sweeps -- k2 history, ITL windows, ITL baselines, start
+// estimates and start-outlier counters -- because the per-variant state was
+// split across separate loops when window-emptiness stopped being the
+// liveness test. On main only the history loop incremented it, and the word
+// "remains" was true then. Callers that log it must not label it as history;
+// see the caller in steadystate.
 func (a *SaturationAnalyzer) EvictStaleHistory(timeout time.Duration) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()

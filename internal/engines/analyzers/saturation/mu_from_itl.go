@@ -247,7 +247,8 @@ func deriveMu(model itl.Model, params *capacity.EngineParams,
 // fingerprint cannot be what tells it apart.
 //
 // What tells it apart is what it is running: a pool Pod hosts one awake engine
-// plus its sleepers, each keeping ~1.4 GiB of GPU residue (demand.go measured
+// plus its sleepers, each keeping ~1.4 GiB of GPU residue
+// (internal/warmpool/demand.go measured
 // 4.4 GiB free at 0.95 on an 80 GiB card). Its ITL(k) is the latency of an
 // engine sharing a card, which is not the latency of one of this variant's own
 // replicas -- and k itself is read against a KV budget the sleepers have

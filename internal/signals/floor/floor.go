@@ -132,6 +132,10 @@ type Term struct {
 // replica reads a short bucket and borrows the previous shape's mu; see "A
 // borrowed reading never outvotes a replica's own" in
 // docs/developer-guide/analyzer-evidence.md.
+//
+// A third kind of held reading arrives with this package's borrowed-LINE
+// routing; see borrowedReading below.
+
 // borrowedReading reports whether a replica's service rate is evidence about
 // something other than this variant's own current load, and so may hold a fleet
 // at its size but not grow it.

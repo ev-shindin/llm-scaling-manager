@@ -62,7 +62,9 @@ type ReplicaCapacity struct {
 	// It exists because the sentence above -- a derived figure "is never
 	// borrowed from another" -- stopped being true when a variant with no fit
 	// of its own was allowed to start from a sibling's line. That is a real
-	// saving, worth about sixty cycles, and it is evidence about a
+	// saving -- about 28 cycles, measured on run QT from load start, which an
+	// earlier anchor on the controller's boot inflated to ~60 -- and it is
+	// evidence about a
 	// CONFIGURATION rather than about this variant's load: the same line at
 	// the same k implies a different service rate for two variants serving
 	// different request shapes. So the floor may hold a fleet on it and must

@@ -280,7 +280,7 @@ func InitMetrics(registry prometheus.Registerer) error {
 	engineConfig = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: constants.WVAEngineConfig,
-			Help: "Always 1. Labels carry the engine-configuration fingerprint a variant runs and the launch flags it hashes, so a learned figure keyed on that fingerprint can be read back to the configuration it describes. Nothing is keyed on it yet.",
+			Help: "Always 1. Labels carry the engine-configuration fingerprint a variant runs and the launch flags it hashes, so a learned figure keyed on that fingerprint can be read back to the configuration it describes. The unresolved label names any flag the controller could not read, in which case the digest is built partly from defaults and is not used as a sharing key; empty is the good case.",
 		},
 		engineConfigLabels,
 	)

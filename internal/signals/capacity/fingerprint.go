@@ -21,6 +21,15 @@ import (
 // commit as any change to the field list, and treat "every fingerprint starts
 // cold once" as the expected cost.
 //
+// AND IT COVERS MORE THAN THE FIELD LIST. Changing how a hashed value is
+// DERIVED changes every digest just as surely as adding a field, and this PR
+// did it twice after bumping to 2 -- splitting the unresolved key sets per
+// engine, and recording string-flag failures. Two builds both stamped v=2
+// therefore produce different digests for the same Deployment. Nothing
+// persists a digest across a restart today, so no further bump is owed; the
+// rule to carry forward is that the version tracks the field list and the
+// values' derivation together.
+//
 // Version 2 adds the unresolved-flag set. Measured on a cluster: an
 // llm-d/llmdbench Deployment passes `--block-size $VLLM_BLOCK_SIZE`, the
 // parser could not read it, the field kept its default of 16 against a real

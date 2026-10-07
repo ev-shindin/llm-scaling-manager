@@ -273,8 +273,12 @@ const (
 	// models can share a configuration) and a reader cannot then tell which
 	// variant a row describes.
 	//
-	// Nothing reads it. It exists so the fingerprint is observable before
-	// anything is keyed on it.
+	// Nothing reads the METRIC -- no code and no dashboard queries it, and it
+	// exists to make the digest observable. The digest itself IS keyed on: it
+	// composes the learned-state key that decides whose ITL line a variant
+	// borrows (capacity.LearnedStateKey, via the analyzer's itlPhysicsKey).
+	// An earlier version of this comment said nothing was keyed on it, which
+	// was true when written and stopped being true in the same PR.
 	WVAEngineConfig = "wva_engine_config"
 
 	// LabelFingerprint is the engine-configuration digest, and
