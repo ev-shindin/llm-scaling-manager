@@ -644,6 +644,23 @@ func TestUtilizationShareRestoreRejectsForgedMarks(t *testing.T) {
 	if a := newShareEngine(t, f, c, clock).cycle()["ns/A-v"].Target; a != 8 {
 		t.Fatalf("control: a valid mark must be restored and lower A to 8, got %d", a)
 	}
+
+	// A reserve refill has no receiver; its mark is restored too, and one that
+	// claims to move GPUs to nobody is not.
+	for _, tc := range []struct {
+		name string
+		gpus int
+		want int
+	}{{"refill", 0, 8}, {"forged refill moving GPUs", 4, 9}} {
+		f := newShareFleet()
+		c := sharePods(t, f)
+		raw, _ := json.Marshal(transferMark{ID: "r", Donor: roleA, DonorVariant: "A-v", GPUs: tc.gpus, DonorGPUs: 1,
+			Started: clock.Add(-time.Minute)})
+		annotate(t, c, "A-v-0", map[string]string{utilizationShareTransferAnnotation: string(raw), podDeletionCostAnnotation: donorDeletionCost})
+		if a := newShareEngine(t, f, c, clock).cycle()["ns/A-v"].Target; a != tc.want {
+			t.Fatalf("%s: A = %d, want %d", tc.name, a, tc.want)
+		}
+	}
 }
 
 // After a restart, a marked pod that is already terminating is out of

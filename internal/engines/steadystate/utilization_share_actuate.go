@@ -57,11 +57,12 @@ type transferMark struct {
 // shareActuation is what one active cycle of a group did, for the caller to
 // apply and publish.
 type shareActuation struct {
-	overrides map[string]utilizationShareOverride
-	promised  int
-	timings   allocation.ShareTimings
-	sources   allocation.ShareTimingSource
-	swinging  []string
+	overrides   map[string]utilizationShareOverride
+	promised    int
+	reserveDebt int
+	timings     allocation.ShareTimings
+	sources     allocation.ShareTimingSource
+	swinging    []string
 }
 
 // utilizationShareOverride is a planned variant's target as the optimizer owns
@@ -153,6 +154,9 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		if t.Donor != "" {
 			metrics.ObserveUtilizationShareRelease(g.AcceleratorType, scope, now.Sub(t.Started))
 		}
+		if t.Donor != "" && t.Receiver == "" {
+			logger.Info("Utilization share: reserve refilled", "id", t.ID, "donor", t.Donor, "gpus", t.DonorGPUs)
+		}
 		if t.Donor != "" && t.ReceiverVariant != "" {
 			st.desired[variantKey(t.Receiver, t.ReceiverVariant)]++
 			logger.Info("Utilization share: released, raising the receiver", "id", t.ID,
@@ -166,6 +170,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	if now.Before(st.quietUntil[key]) {
 		out.overrides = e.shareOverrides(g, variantKey, "restart quiet period")
 		out.promised = l.Promised()
+		out.reserveDebt = shareDebtNow(l, held, g.Budget)
 		return out
 	}
 
@@ -205,6 +210,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	out.overrides = e.shareOverrides(g, variantKey, "utilization share")
 	out.promised = l.Promised()
 	out.swinging = plan.Swinging
+	out.reserveDebt = shareDebtNow(l, held, g.Budget)
 	return out
 }
 
@@ -543,11 +549,20 @@ func validTransferMark(raw string, m *transferMark, role string, give allocation
 		return "unparseable"
 	}
 	grow, ok := g.Grow[m.Receiver]
+	refill := m.Receiver == "" && m.ReceiverVariant == "" && m.GPUs == 0
 	switch {
 	case m.ID == "":
 		return "no id"
 	case m.Donor != role || m.DonorVariant != give.Name:
 		return "donor is not the variant the mark is on"
+	case refill:
+		if m.DonorGPUs != max(give.GPUs, 1) {
+			return "replica sizes do not match the variants"
+		}
+		if m.Started.After(now) {
+			return "starts in the future"
+		}
+		return ""
 	case !ok || m.Receiver == role || m.ReceiverVariant != grow.Name:
 		return "receiver is not a variant of this group that can grow"
 	case m.GPUs != max(grow.GPUs, 1) || m.DonorGPUs != max(give.GPUs, 1, m.GPUs):
@@ -650,4 +665,10 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 		allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, decision.LatestSharePromised(now)), now)
 	}
 	return decisions
+}
+
+// shareDebtNow is the reserve debt the ledger's committed allocation carries
+// against a budget: allocation.ShareDebt over this cycle's commitments.
+func shareDebtNow(l *allocation.ShareLedger, held map[string]int, budget int) int {
+	return allocation.ShareDebt(l.Committed(held), budget)
 }

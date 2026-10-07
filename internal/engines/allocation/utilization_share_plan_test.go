@@ -286,3 +286,47 @@ var _ = Describe("Pod shape in transfers (§6.5)", func() {
 		Expect(plan([]int{4, 4})).To(BeZero())
 	})
 })
+
+var _ = Describe("Reserve refill (§6.2)", func() {
+	// A is well above its need, B at it; together they hold 10 of a budget
+	// that, net of the reserve, is 8. The two over are reserve a wake spent.
+	roles := []ShareRole{
+		{Key: "A", Weight: 1, Need: 2, Floor: 1, Ceiling: 64, ReplicaGPUs: 1},
+		{Key: "B", Weight: 1, Need: 4, Floor: 1, Ceiling: 64, ReplicaGPUs: 1},
+	}
+	plan := func(budget int) (SharePlan, *ShareLedger) {
+		l := NewShareLedger()
+		in := SharePlanInput{Roles: roles, Held: map[string]int{"A": 6, "B": 4},
+			Thresholds: map[string]float64{"A": 0.8, "B": 0.8}, Budget: budget, Tolerance: 0.15}
+		return PlanShareTransfers(l, in, time.Unix(0, 0), simTimings()), l
+	}
+
+	It("pays the debt back from the best-off donor, raising nobody, without waiting for confirmation", func() {
+		p, l := plan(8)
+		Expect(p.ReserveDebt).To(Equal(2))
+		Expect(p.Refills).To(Equal(2))
+		for _, t := range p.Started {
+			Expect(t.Donor).To(Equal("A"))
+			Expect(t.Receiver).To(BeEmpty())
+			Expect(t.Entitled).To(BeTrue())
+		}
+		Expect(l.Committed(map[string]int{"A": 6, "B": 4})).To(Equal(map[string]int{"A": 4, "B": 4}),
+			"a refill books its GPUs to no receiver")
+	})
+
+	It("plans no refill when the group is within its budget (control)", func() {
+		p, _ := plan(10)
+		Expect(p.ReserveDebt).To(BeZero())
+		Expect(p.Refills).To(BeZero())
+	})
+
+	It("completes a refill at release", func() {
+		_, l := plan(8)
+		ends := l.Observe(map[string]int{"A": 4, "B": 4}, time.Unix(60, 0), simTimings())
+		Expect(ends).To(HaveLen(2))
+		for _, e := range ends {
+			Expect(e.Outcome).To(Equal(ShareOutcomeDone))
+		}
+		Expect(l.Promised()).To(BeZero())
+	})
+})

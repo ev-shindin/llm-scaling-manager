@@ -108,6 +108,14 @@ var _ = Describe("BuildShareGroups", func() {
 		Expect(g.Budget).To(Equal(13))
 	})
 
+	It("holds the reserve out of the budget (§7.2)", func() {
+		reqs := []ModelScalingRequest{shareReq("A", "ns", 4000, 9)}
+		cons := []*ResourceConstraints{{Pools: map[string]ResourcePool{"A100": {Limit: 16, Used: 12}}}}
+		without := BuildShareGroups(reqs, cons, ShareGroupOptions{ClusterIsQuota: true})[0]
+		with := BuildShareGroups(reqs, cons, ShareGroupOptions{ClusterIsQuota: true, ReserveGPUs: 2})[0]
+		Expect(without.Budget - with.Budget).To(Equal(2))
+	})
+
 	It("skips a disabled namespace-quota group and keeps the others", func() {
 		reqs := []ModelScalingRequest{shareReq("A", "team-a", 4000, 4), shareReq("B", "team-b", 3000, 4)}
 		cons := []*ResourceConstraints{{

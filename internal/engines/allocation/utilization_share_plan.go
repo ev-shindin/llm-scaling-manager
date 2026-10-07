@@ -51,6 +51,21 @@ type SharePlan struct {
 	Evaluation ShareEvaluation
 	// Swinging lists the roles planned on their mean need this cycle.
 	Swinging []string
+	// ReserveDebt is how far the committed allocation stood above the budget
+	// before this cycle's refills: reserve a wake spent, or anything else that
+	// put the group over (section 6.2). Refills is how many transfers started
+	// to pay it back.
+	ReserveDebt int
+	Refills     int
+}
+
+// ShareDebt is how far a committed allocation stands above the budget, or 0.
+func ShareDebt(committed map[string]int, budget int) int {
+	debt := -budget
+	for _, c := range committed {
+		debt += c
+	}
+	return max(0, debt)
 }
 
 // PlanShareTransfers runs one planning cycle for a group: the swing rule, the
@@ -107,6 +122,59 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 		actionable[v.Key] = v.Actionable
 	}
 	confirmed := l.Confirm(actionable)
+
+	// Reserve refill (section 6.2). Committed GPUs above the budget are a debt:
+	// a wake took reserve, or a variant was scaled past its target from
+	// outside. It is an entitled receiver, paid back before any rebalance and
+	// without the confirmation a rebalance needs, by transfers with a donor and
+	// no receiver: the donor is lowered and nobody is raised. A donor gives
+	// only above its whole-replica target and its floor, best-off first.
+	plan.ReserveDebt = ShareDebt(committed, in.Budget)
+	if debt := plan.ReserveDebt; debt > 0 {
+		var cands []string
+		for _, r := range roles {
+			if c := committed[r.Key]; c > integ[r.Key] && c > r.Floor {
+				cands = append(cands, r.Key)
+			}
+		}
+		zc := func(k string) float64 {
+			r := byKey[k]
+			return ShareScore(float64(committed[k]), r.Need, r.Weight)
+		}
+		slices.SortFunc(cands, func(a, b string) int { return cmp.Or(cmp.Compare(zc(b), zc(a)), cmp.Compare(a, b)) })
+		for _, dn := range cands {
+			if debt <= 0 || l.InFlight() >= ShareMaxConcurrentTransfers {
+				break
+			}
+			give := ShareVariant{GPUs: byKey[dn].ReplicaGPUs}
+			if in.Give != nil {
+				v, ok := in.Give[dn]
+				if !ok {
+					continue
+				}
+				give = v
+			}
+			gd := max(give.GPUs, 1)
+			if l.GivingHeld(dn, now, tm) {
+				continue
+			}
+			// The same pace as a rebalance: up to ShareMaxReplicasPerCycle
+			// replicas per role, never below its whole-replica target or floor.
+			left := committed[dn]
+			for n := 0; n < ShareMaxReplicasPerCycle && debt > 0 && l.InFlight() < ShareMaxConcurrentTransfers; n++ {
+				if left-gd < byKey[dn].Floor || left-gd < integ[dn] {
+					break
+				}
+				t := l.Start(ShareTransfer{Donor: dn, DonorGPUs: gd, DonorVariant: give.Name, Entitled: true}, in.Held, now, tm)
+				plan.Started = append(plan.Started, t)
+				plan.Refills++
+				debt -= gd
+				left -= gd
+			}
+		}
+		committed = l.Committed(in.Held)
+	}
+
 	isConfirmed := func(k string) bool { return confirmed[k] >= ShareConfirmCycles }
 	if !slices.ContainsFunc(slices.Collect(maps.Keys(confirmed)), isConfirmed) {
 		return plan

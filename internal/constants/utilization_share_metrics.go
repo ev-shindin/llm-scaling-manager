@@ -47,6 +47,10 @@ const (
 	// donor's GPUs released.
 	WVAUtilizationShareReleaseSeconds = "wva_utilization_share_release_seconds"
 
+	// WVAUtilizationShareReserveDebtGPUs is a gauge: reserve GPUs spent and
+	// not yet refilled (section 6.2).
+	WVAUtilizationShareReserveDebtGPUs = "wva_utilization_share_reserve_debt_gpus"
+
 	// LabelParam names a derived timing; LabelSource is where its inputs came
 	// from.
 	LabelParam  = "param"

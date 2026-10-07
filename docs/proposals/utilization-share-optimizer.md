@@ -1875,6 +1875,18 @@ optimizer every cycle (§6.6).
        after it;
      - the overlay on the cycle's decisions under the `utilization-share`
        reason, which the sticky scale-down hold stands down for;
+     - the reserve (section 7.2). `reserveGPUs` comes out of every group's
+       budget, so those quota GPUs stay free for a wake. Committed GPUs above
+       the budget are reserve debt (`wva_utilization_share_reserve_debt_gpus`).
+       The planner pays it back first, without waiting for confirmation, by
+       refill transfers: a donor above its whole-replica target and its floor
+       is lowered, and no receiver is raised.
+       Unlike section 6.2, the debt is derived (committed minus budget), not kept
+       in a separate ledger. Section 6.2 warned against deriving it because a
+       fixed consumer's unfunded gap would read as debt, but fixed consumers are
+       outside this budget. Debt therefore also covers a planned variant scaled
+       past its target from outside the optimizer, which the refill likewise
+       takes back.
      - restoring from marks only what this controller would have written. A
        mark is read from the donor variant's own pods (Deployment pods are
        matched by ReplicaSet ownership, not only by labels). It must name that
@@ -1901,9 +1913,9 @@ optimizer every cycle (§6.6).
    - donor *sets* across several donor replicas, with the per-node check
      (§6.5). A transfer has one donor replica today, so a receiver larger
      than every donor replica's pods is not funded at all.
-   - the `redirected` outcome; the `_withheld_total`, `_actual`,
-     `_floor_excess_gpus` and `_reserve_debt_gpus` series of §9; and the
-     `awaiting-release` blocked reason.
+   - the `redirected` outcome; the `_withheld_total`, `_actual` and
+     `_floor_excess_gpus` series of §9; and the `awaiting-release` blocked
+     reason.
    - wake *claims*: a wake that scores lower than a Releasing transfer's
      receiver redirecting it (§6.3). Until then a wake never takes promised
      GPUs and waits for idle ones -- at most a fill timeout. The warm pool's

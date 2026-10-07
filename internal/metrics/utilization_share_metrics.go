@@ -22,6 +22,7 @@ var (
 	utilizationShareReplicasToMove *prometheus.GaugeVec
 	utilizationShareTransfers      *prometheus.CounterVec
 	utilizationSharePromisedGPUs   *prometheus.GaugeVec
+	utilizationShareReserveDebt    *prometheus.GaugeVec
 	utilizationShareEffective      *prometheus.GaugeVec
 	utilizationShareSwinging       *prometheus.GaugeVec
 	utilizationShareRelease        *prometheus.HistogramVec
@@ -62,6 +63,10 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		"Utilization-share optimizer: GPUs released for a receiver and not yet held by it. "+
 			"Published only while the optimizer acts.",
 		groupLabels)
+	utilizationShareReserveDebt = gauge(constants.WVAUtilizationShareReserveDebtGPUs,
+		"Utilization-share optimizer: reserve GPUs spent and not yet refilled. Published only while "+
+			"the optimizer acts.",
+		groupLabels)
 	utilizationShareEffective = gauge(constants.WVAUtilizationShareEffectiveSeconds,
 		"Utilization-share optimizer: a derived timing in force, in seconds, and where its inputs came "+
 			"from (scaledobject, pod, measured, default). Published only while the optimizer acts.",
@@ -89,6 +94,7 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		utilizationShareHeadroom, utilizationShareTargetGPUs, utilizationShareActionable,
 		utilizationShareSpareGPUs, utilizationShareReplicasToMove,
 		utilizationSharePromisedGPUs, utilizationShareEffective, utilizationShareSwinging,
+		utilizationShareReserveDebt,
 	} {
 		if err := registry.Register(g); err != nil {
 			return fmt.Errorf("failed to register utilization-share metric: %w", err)
@@ -124,9 +130,10 @@ type UtilizationShareGroup struct {
 	Roles          []UtilizationShareRole
 	// Active is true when the optimizer acts on this group; the fields below
 	// are published only then.
-	Active       bool
-	PromisedGPUs float64
-	Timings      []UtilizationShareTiming
+	Active          bool
+	PromisedGPUs    float64
+	ReserveDebtGPUs float64
+	Timings         []UtilizationShareTiming
 }
 
 // utilizationSharePublished is the series the last PublishUtilizationShare set,
@@ -180,6 +187,7 @@ func PublishUtilizationShare(groups []UtilizationShareGroup) {
 		set(utilizationShareReplicasToMove, gl, float64(grp.ReplicasToMove))
 		if grp.Active {
 			set(utilizationSharePromisedGPUs, gl, grp.PromisedGPUs)
+			set(utilizationShareReserveDebt, gl, grp.ReserveDebtGPUs)
 			for _, tm := range grp.Timings {
 				tl := maps.Clone(gl)
 				tl[constants.LabelParam] = tm.Param

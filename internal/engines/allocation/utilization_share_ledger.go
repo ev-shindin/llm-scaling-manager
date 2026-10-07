@@ -242,9 +242,13 @@ func (l *ShareLedger) Committed(held map[string]int) map[string]int {
 		switch t.State {
 		case ShareReleasing:
 			out[t.Donor] -= t.DonorGPUs
-			out[t.Receiver] += t.GPUs
+			if t.Receiver != "" { // a reserve refill raises nobody
+				out[t.Receiver] += t.GPUs
+			}
 		case ShareFilling:
-			out[t.Receiver] += t.GPUs
+			if t.Receiver != "" {
+				out[t.Receiver] += t.GPUs
+			}
 		}
 	}
 	return out

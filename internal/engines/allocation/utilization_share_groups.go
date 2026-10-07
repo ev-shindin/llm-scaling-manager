@@ -129,6 +129,11 @@ type ShareGroupOptions struct {
 	// An excluded model is frozen: today's optimizer keeps it, and its GPUs
 	// stay outside the group's budget.
 	Exclude func(req ModelScalingRequest, clusterScope bool) string
+	// ReserveGPUs are held out of every group's budget, so a scale-from-zero
+	// wake finds them free in the quota without waiting for a transfer
+	// (proposal section 7.2). Spending them leaves the group over its budget,
+	// which the planner pays back first (SharePlan.Refills).
+	ReserveGPUs int
 }
 
 // BuildShareGroups turns one cycle's requests and constraints into the groups
@@ -240,7 +245,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		if g.listed > MaxShareBudgetGPUs-free {
 			continue
 		}
-		g.Budget = free + g.listed
+		g.Budget = max(0, free+g.listed-opts.ReserveGPUs)
 		g.PhysicalFree = math.MaxInt
 		if pf, ok := available[k.acc]; ok && pf >= 0 && pf < math.MaxInt {
 			g.PhysicalFree = pf

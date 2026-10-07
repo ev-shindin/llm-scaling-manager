@@ -121,6 +121,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	groups := allocation.BuildShareGroups(requests, constraints, allocation.ShareGroupOptions{
 		ClusterIsQuota:   e.Config.EffectiveLimiterMode() == config.LimiterTypeQuota,
 		PhysicalGroups:   us.PhysicalGroups,
+		ReserveGPUs:      us.ReserveGPUs,
 		NamespaceEnabled: us.EnabledForNamespace,
 		Weight: func(req allocation.ModelScalingRequest, _ bool) float64 {
 			w, err := us.Weight(req.WeightClass, req.Weight)
@@ -193,6 +194,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			maps.Copy(overrides, act.overrides)
 			pg.Active = true
 			pg.PromisedGPUs = float64(act.promised)
+			pg.ReserveDebtGPUs = float64(act.reserveDebt)
 			if act.promised > 0 {
 				if promised[g.Scope] == nil {
 					promised[g.Scope] = map[string]int{}
