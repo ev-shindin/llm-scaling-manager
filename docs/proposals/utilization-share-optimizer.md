@@ -1886,6 +1886,25 @@ optimizer every cycle (§6.6).
        no more than its floor. It does not also require the role to be out
        of band: the continuous targets already absorb floors, so a role whose
        GPUs are all pinned elsewhere sits in band at its shortfall.
+     - wake claims (section 6.3), through one mutex-guarded store in
+       `internal/decision`:
+       - Each pass, every active group publishes the transfers still
+         Releasing for a receiver, with the receiver's score at what it holds
+         and the donor pods' GPU shape.
+       - A scale-from-zero wake that found no capacity tries a claim, with
+         its cheapest decode variant. A claim succeeds when the wake scores
+         strictly lower (ties go to the receiver) and its replica fits the
+         donor pods (`decision.PodsCover`, which `ShareCovers` now uses
+         too). The wake's own namespace group is tried first, then the
+         cluster group, where a namespace with its own map claims nothing.
+       - The steady-state engine applies its group's claims before observing
+         releases. The transfer becomes a release with no receiver, so the
+         wake's waiting pod takes the hole, and its donor marks are
+         rewritten to match.
+       - Counted as `outcome="redirected"` on `_transfers_total`, and on
+         `_claims_total` with `redirected`, `refused-score`, `refused-fit` or
+         `none-releasing`. A refused claim is counted once per change, since
+         the wake loop runs at 10 Hz.
      - the reserve (section 7.2). `reserveGPUs` comes out of every group's
        budget, so those quota GPUs stay free for a wake. Committed GPUs above
        the budget are reserve debt (`wva_utilization_share_reserve_debt_gpus`).
@@ -1924,15 +1943,14 @@ optimizer every cycle (§6.6).
    - donor *sets* across several donor replicas, with the per-node check
      (§6.5). A transfer has one donor replica today, so a receiver larger
      than every donor replica's pods is not funded at all.
-   - the `redirected` outcome and `_claims_total` (wake claims, below);
-     `_donors_per_transfer` (donor sets, above); and the `release-taken` and
+   - `_donors_per_transfer` (donor sets, above); and the `release-taken` and
      `release-shape-mismatch` reasons, which need the per-node view of
      section 6.5. A fill timeout is counted (`outcome="fill-timeout"`) but
      not yet attributed.
-   - wake *claims*: a wake that scores lower than a Releasing transfer's
-     receiver redirecting it (§6.3). Until then a wake never takes promised
-     GPUs and waits for idle ones -- at most a fill timeout. The warm pool's
-     own carve-out from idle (§7.2) is not built either.
+   - a claim for a model that must wake a prefill with its decode: one claim
+     funds one replica, so such a wake waits for idle GPUs or its own
+     transfer. The warm pool's own carve-out from idle (section 7.2) is not
+     built either.
    - the P/D and multi-GPU kind e2e. The single-role e2e is built
      (`test/e2e/utilization_share_test.go`): shadow evaluates and touches
      nothing. Active, an idle model's marked pod is the one its ReplicaSet

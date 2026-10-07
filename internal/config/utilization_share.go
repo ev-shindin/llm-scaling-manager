@@ -352,3 +352,24 @@ func (c *Config) NamespaceHasLocalPolicy(namespace string) bool {
 	defer c.mu.RUnlock()
 	return len(c.saturation.namespaceConfigs[namespace]) > 0
 }
+
+// UtilizationShareWakeScores returns a parked model's score in the
+// utilization-share optimizer, -w, for a wake's claim on a releasing transfer
+// (docs/proposals/utilization-share-optimizer.md, section 6.3): zNamespace in
+// its namespace's own quota group, zCluster in the cluster group. A namespace
+// with its own scaling-policy map is not planned in the cluster group (section
+// 8.2), so there its wakes claim nothing: zCluster is +Inf. ok is false when
+// the optimizer is not acting.
+func (c *Config) UtilizationShareWakeScores(namespace, modelID string) (zNamespace, zCluster float64, ok bool) {
+	us, selected, err := c.UtilizationShare()
+	if err != nil || !selected || us.Shadow {
+		return 0, 0, false
+	}
+	policy := ResolveScalingPolicy(c.ScalingPolicyConfigForNamespace(namespace), modelID, namespace)
+	w, _ := us.Weight(policy.WeightClass, policy.Weight) // an invalid weight resolves to the default class
+	zNamespace, zCluster = -w, -w
+	if c.NamespaceHasLocalPolicy(namespace) {
+		zCluster = math.Inf(1)
+	}
+	return zNamespace, zCluster, true
+}

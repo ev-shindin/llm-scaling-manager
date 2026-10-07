@@ -65,9 +65,11 @@ type shareActuation struct {
 	blocked map[string][]string
 	// withheld counts this cycle's withheld transfers by reason.
 	withheld map[string]int
-	timings  allocation.ShareTimings
-	sources  allocation.ShareTimingSource
-	swinging []string
+	// claimable are the group's transfers a wake may still claim.
+	claimable []decision.ShareClaimable
+	timings   allocation.ShareTimings
+	sources   allocation.ShareTimingSource
+	swinging  []string
 }
 
 // utilizationShareOverride is a planned variant's target as the optimizer owns
@@ -140,6 +142,20 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	}
 
 	held := g.Committed
+	// Wake claims first, before Observe: a claim made against a Releasing
+	// transfer must be applied before a release turns it into Filling.
+	for _, c := range decision.DefaultShareClaims.Take(g.Scope, g.AcceleratorType) {
+		prev, ok := l.Redirect(c.ID)
+		if !ok {
+			logger.Info("Utilization share: a wake claimed a transfer that is no longer releasing; ignored",
+				"id", c.ID, "wake", c.Wake)
+			continue
+		}
+		metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, string(allocation.ShareOutcomeRedirected), prev.Urgent)
+		e.remarkDonorPods(ctx, logger, l, c.ID)
+		logger.Info("Utilization share: transfer redirected to a woken model; its receiver is planned again",
+			"id", c.ID, "wake", c.Wake, "receiver", prev.Receiver, "donor", prev.Donor)
+	}
 	for _, end := range l.Observe(held, now, tm) {
 		t := end.Transfer
 		metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, string(end.Outcome), t.Urgent)
@@ -177,6 +193,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		out.promised = l.Promised()
 		out.reserveDebt = shareDebtNow(l, held, g.Budget)
 		out.blocked = shareBlockedReasons(l, g, ev, nil, now)
+		out.claimable = shareClaimable(l, g, held)
 		return out
 	}
 
@@ -219,6 +236,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	out.reserveDebt = shareDebtNow(l, held, g.Budget)
 	out.blocked = shareBlockedReasons(l, g, ev, plan.Unfunded, now)
 	out.withheld = plan.Withheld
+	out.claimable = shareClaimable(l, g, held)
 	return out
 }
 
@@ -751,4 +769,74 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 		slices.Sort(out[k])
 	}
 	return out
+}
+
+// shareClaimable lists the group's transfers a wake may claim: still
+// releasing, for a receiver, each with the receiver's score at what it holds
+// now and the shape of the donor pods it releases (section 6.3).
+func shareClaimable(l *allocation.ShareLedger, g allocation.ShareGroup, held map[string]int) []decision.ShareClaimable {
+	roles := map[string]allocation.ShareRole{}
+	for _, r := range g.Roles {
+		roles[r.Key] = r
+	}
+	var out []decision.ShareClaimable
+	for _, t := range l.Transfers() {
+		if t.State != allocation.ShareReleasing || t.Receiver == "" {
+			continue
+		}
+		r, ok := roles[t.Receiver]
+		if !ok {
+			continue
+		}
+		var pods []int
+		for _, v := range g.Variants[t.Donor] {
+			if v.Name == t.DonorVariant {
+				pods = v.PodGPUs
+			}
+		}
+		out = append(out, decision.ShareClaimable{
+			ID:           t.ID,
+			ReceiverZ:    allocation.ShareScore(float64(held[t.Receiver]), r.Need, r.Weight),
+			DonorPodGPUs: pods,
+			DonorGPUs:    t.DonorGPUs,
+		})
+	}
+	return out
+}
+
+// remarkDonorPods rewrites a redirected transfer's marks on its donor pods, so
+// a restart restores it as the release-with-no-receiver it now is, not as the
+// transfer to its original receiver.
+func (e *Engine) remarkDonorPods(ctx context.Context, logger logr.Logger, l *allocation.ShareLedger, id string) {
+	if e.client == nil {
+		return
+	}
+	i := slices.IndexFunc(l.Transfers(), func(t allocation.ShareTransfer) bool { return t.ID == id })
+	if i < 0 {
+		return
+	}
+	t := l.Transfers()[i]
+	raw, err := json.Marshal(transferMark{ID: t.ID, Donor: t.Donor, DonorVariant: t.DonorVariant,
+		DonorGPUs: t.DonorGPUs, Started: t.Started})
+	if err != nil {
+		return
+	}
+	for _, key := range t.DonorPods {
+		ns, name, _ := strings.Cut(key, "/")
+		var p corev1.Pod
+		if err := e.client.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &p); err != nil {
+			if !apierrors.IsNotFound(err) {
+				logger.Info("WARNING: could not read a donor pod to re-mark it", "pod", key, "error", err.Error())
+			}
+			continue
+		}
+		if !markedFor(&p, id) {
+			continue
+		}
+		patch := client.MergeFrom(p.DeepCopy())
+		p.Annotations[utilizationShareTransferAnnotation] = string(raw)
+		if err := e.client.Patch(ctx, &p, patch); err != nil {
+			logger.Info("WARNING: could not re-mark a donor pod", "pod", key, "error", err.Error())
+		}
+	}
 }

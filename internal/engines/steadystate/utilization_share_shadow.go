@@ -95,6 +95,9 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	// this cycle did not set.
 	blocked := map[string][]string{}
 	defer func() { st.publishBlocked(blocked) }()
+	// What a wake may claim, republished every pass: empty when nothing acts.
+	claimable := map[string][]decision.ShareClaimable{}
+	defer func() { decision.DefaultShareClaims.Publish(claimable, now) }()
 
 	us, selected, err := e.Config.UtilizationShare()
 	errText := ""
@@ -214,6 +217,9 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			maps.Copy(overrides, act.overrides)
 			pg.Active = true
 			maps.Copy(blocked, act.blocked)
+			if len(act.claimable) > 0 {
+				claimable[decision.ShareGroupKey(g.Scope, g.AcceleratorType)] = act.claimable
+			}
 			for reason, n := range act.withheld {
 				metrics.CountUtilizationShareWithheld(g.AcceleratorType, scope, reason, n)
 			}

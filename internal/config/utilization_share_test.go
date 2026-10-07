@@ -341,3 +341,30 @@ var _ = Describe("Config.NamespaceHasLocalPolicy", func() {
 		Expect(c.NamespaceHasLocalPolicy("tenant-b")).To(BeFalse())
 	})
 })
+
+var _ = Describe("Config.UtilizationShareWakeScores", func() {
+	It("scores a parked model -w, and refuses cluster-wide claims from a namespace with its own map", func() {
+		c := NewTestConfig()
+		p := parsePolicy(quotaLimiters)
+		p.Optimizer = &OptimizerConfig{Type: OptimizerTypeUtilizationShare}
+		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: p})
+		zNs, zCl, ok := c.UtilizationShareWakeScores("ns", "m")
+		Expect(ok).To(BeTrue())
+		Expect(zNs).To(Equal(-1.0))
+		Expect(zCl).To(Equal(-1.0))
+
+		c.UpdateScalingPolicyConfigForNamespace("tenant", map[string]ScalingPolicy{GlobalDefaultsKey: {WeightClass: "critical"}})
+		zNs, zCl, _ = c.UtilizationShareWakeScores("tenant", "m")
+		Expect(zNs).To(BeNumerically("<", -1.0), "its own map counts in its own quota group")
+		Expect(math.IsInf(zCl, 1)).To(BeTrue(), "a tenant-set weight claims nothing cluster-wide")
+	})
+
+	It("is off in shadow mode", func() {
+		c := NewTestConfig()
+		p := parsePolicy(quotaLimiters)
+		p.Optimizer = &OptimizerConfig{Type: OptimizerTypeUtilizationShare, UtilizationShare: &UtilizationShareConfig{Shadow: true}}
+		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: p})
+		_, _, ok := c.UtilizationShareWakeScores("ns", "m")
+		Expect(ok).To(BeFalse())
+	})
+})

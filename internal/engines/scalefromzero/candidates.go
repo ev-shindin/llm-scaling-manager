@@ -121,6 +121,7 @@ func (e *Engine) buildCandidates(
 			Role:            variantmeta.RoleFromScaleTarget(scaleTarget),
 			Accelerator:     candidateAccelerator(&va, scaleTarget),
 			GPUsPerReplica:  scaleTarget.GetTotalGPUsPerReplica(),
+			PodGPUs:         scaletarget.PodGPUs(scaleTarget),
 			Cost:            resolveVariantCost(ctx, va),
 		})
 	}

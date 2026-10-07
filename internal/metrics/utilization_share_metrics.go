@@ -26,6 +26,7 @@ var (
 	utilizationShareActual         *prometheus.GaugeVec
 	utilizationShareFloorExcess    *prometheus.GaugeVec
 	utilizationShareWithheld       *prometheus.CounterVec
+	utilizationShareClaims         *prometheus.CounterVec
 	utilizationShareEffective      *prometheus.GaugeVec
 	utilizationShareSwinging       *prometheus.GaugeVec
 	utilizationShareRelease        *prometheus.HistogramVec
@@ -78,6 +79,13 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		Help: "Utilization-share optimizer: transfers not planned, by reason (reversal-hold, not-actionable).",
 	}, append(slices.Clone(groupLabels), constants.LabelReason))
 	if err := registry.Register(utilizationShareWithheld); err != nil {
+		return fmt.Errorf("failed to register utilization-share metric: %w", err)
+	}
+	utilizationShareClaims = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: constants.WVAUtilizationShareClaimsTotal,
+		Help: "Utilization-share optimizer: scale-from-zero wake claims on releasing transfers, by outcome.",
+	}, append(slices.Clone(groupLabels), constants.LabelOutcome))
+	if err := registry.Register(utilizationShareClaims); err != nil {
 		return fmt.Errorf("failed to register utilization-share metric: %w", err)
 	}
 	utilizationShareReserveDebt = gauge(constants.WVAUtilizationShareReserveDebtGPUs,
@@ -291,4 +299,20 @@ func CountUtilizationShareWithheld(acceleratorType, scope, reason string, n int)
 		l[constants.LabelControllerInstance] = controllerInstance
 	}
 	utilizationShareWithheld.With(l).Add(float64(n))
+}
+
+// CountUtilizationShareClaim counts one wake claim outcome.
+func CountUtilizationShareClaim(acceleratorType, scope, outcome string) {
+	if utilizationShareClaims == nil {
+		return
+	}
+	l := prometheus.Labels{
+		constants.LabelAcceleratorType: acceleratorType,
+		constants.LabelScope:           scope,
+		constants.LabelOutcome:         outcome,
+	}
+	if controllerInstance != "" {
+		l[constants.LabelControllerInstance] = controllerInstance
+	}
+	utilizationShareClaims.With(l).Inc()
 }

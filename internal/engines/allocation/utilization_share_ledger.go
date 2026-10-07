@@ -38,6 +38,9 @@ const (
 	ShareOutcomeFillTimeout ShareTransferOutcome = "fill-timeout"
 	ShareOutcomeCancelled   ShareTransferOutcome = "cancelled"
 	ShareOutcomeAborted     ShareTransferOutcome = "aborted"
+	// ShareOutcomeRedirected counts a transfer a wake claimed (section 6.3);
+	// it stays in the ledger as a release with no receiver.
+	ShareOutcomeRedirected ShareTransferOutcome = "redirected"
 )
 
 // ShareTransfer moves one receiver replica: Donor gives GPUs, Receiver gets
@@ -391,6 +394,22 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 func (l *ShareLedger) ReceivingHeld(role string, now time.Time, tm ShareTimings) bool {
 	t, ok := l.lastGave[role]
 	return ok && now.Sub(t) < tm.ReversalHold
+}
+
+// Redirect hands a Releasing transfer's GPUs to a woken model (section 6.3):
+// the release proceeds, nobody is raised at release -- the wake's own pod is
+// already waiting for the hole -- and the original receiver, no longer
+// committed the GPUs, is planned again. It returns the transfer as it was, and
+// false when no transfer of that ID is still Releasing. A claim sets no hold.
+func (l *ShareLedger) Redirect(id string) (ShareTransfer, bool) {
+	for _, t := range l.transfers {
+		if t.ID == id && t.State == ShareReleasing && t.Receiver != "" {
+			prev := *t
+			t.Receiver, t.ReceiverVariant, t.GPUs, t.Urgent = "", "", 0, false
+			return prev, true
+		}
+	}
+	return ShareTransfer{}, false
 }
 
 // BackingOff reports whether role is backing off after an aborted release.

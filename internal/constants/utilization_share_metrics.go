@@ -63,6 +63,11 @@ const (
 	// holds above its need (section 5.5).
 	WVAUtilizationShareFloorExcessGPUs = "wva_utilization_share_floor_excess_gpus"
 
+	// WVAUtilizationShareClaimsTotal is a counter: wake claims on releasing
+	// transfers, by outcome (redirected, refused-score, refused-fit,
+	// none-releasing).
+	WVAUtilizationShareClaimsTotal = "wva_utilization_share_claims_total"
+
 	// LabelParam names a derived timing; LabelSource is where its inputs came
 	// from.
 	LabelParam  = "param"

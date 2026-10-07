@@ -6,6 +6,7 @@ import (
 	"math"
 	"slices"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
@@ -35,22 +36,7 @@ type ShareVariant struct {
 // The donor's surplus returns to the free budget. With either shape unknown it
 // falls back to the replicas' totals.
 func ShareCovers(donor, receiver ShareVariant) bool {
-	if len(donor.PodGPUs) == 0 || len(receiver.PodGPUs) == 0 {
-		return max(donor.GPUs, 1) >= max(receiver.GPUs, 1)
-	}
-	if len(receiver.PodGPUs) > len(donor.PodGPUs) {
-		return false
-	}
-	d := slices.Sorted(slices.Values(donor.PodGPUs))
-	r := slices.Sorted(slices.Values(receiver.PodGPUs))
-	slices.Reverse(d)
-	slices.Reverse(r)
-	for i := range r {
-		if d[i] < r[i] {
-			return false
-		}
-	}
-	return true
+	return decision.PodsCover(donor.PodGPUs, donor.GPUs, receiver.PodGPUs, receiver.GPUs)
 }
 
 func shareVariantOf(vc variantRecord, stateMap map[string]domain.VariantReplicaState) ShareVariant {

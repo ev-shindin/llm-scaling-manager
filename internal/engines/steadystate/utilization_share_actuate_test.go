@@ -824,3 +824,39 @@ func TestUtilizationShareBlockedReasonsFromGroupState(t *testing.T) {
 		}
 	}
 }
+
+// A wake that claims a releasing transfer (section 6.3) takes its GPUs: at
+// release the original receiver is not raised -- the wake's own pod is
+// waiting for the hole -- and the donor's mark is rewritten so a restart
+// cannot hand the GPUs back to the receiver. Control: without the claim the
+// receiver is raised at release (TestUtilizationShareActuatesScaleDownFirst).
+func TestUtilizationShareWakeClaimRedirectsATransfer(t *testing.T) {
+	f := newShareFleet()
+	c := sharePods(t, f)
+	se := newShareEngine(t, f, c, time.Unix(0, 0))
+	decision.DefaultShareClaims.Take("", "A100") // claims from other tests
+	started := se.untilStarted()
+
+	// A parked standard model wakes: z = -1, below B's (short, weight 1).
+	claim, outcome := decision.DefaultShareClaims.Claim("ns", "A100", nil, 1, -1, -1, "ns/W-v", se.clock)
+	if outcome != decision.ShareClaimRedirected {
+		t.Fatalf("want the wake to claim a releasing transfer, got %q", outcome)
+	}
+	se.cycle() // applies the claim
+	var remarked bool
+	for _, p := range markedPods(t, c) {
+		var m transferMark
+		if json.Unmarshal([]byte(p.Annotations[utilizationShareTransferAnnotation]), &m) == nil && m.ID == claim.ID {
+			remarked = m.Receiver == "" && m.GPUs == 0
+		}
+	}
+	if !remarked {
+		t.Fatalf("the claimed transfer's donor mark still names its receiver")
+	}
+
+	f.current["A"] -= started
+	o := se.cycle()
+	if want := 5 + started - 1; o["ns/B-v"].Target != want {
+		t.Fatalf("B = %d after the release, want %d: the claimed replica's GPUs went to the wake", o["ns/B-v"].Target, want)
+	}
+}
