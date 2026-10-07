@@ -3,6 +3,8 @@ package metrics
 import (
 	"fmt"
 	"math"
+	"slices"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -78,27 +80,55 @@ type UtilizationShareGroup struct {
 	Roles          []UtilizationShareRole
 }
 
-// PublishUtilizationShare replaces every utilization-share series with this
-// cycle's evaluation. Calling it with no groups clears them all, which is what
-// a cycle that does not run the optimizer must do: a stale headroom reading
-// outliving the optimizer would describe a fleet nothing is sizing.
+// utilizationSharePublished is the series the last PublishUtilizationShare set,
+// per gauge, so the next call can delete only those that are gone. It is
+// written by the single optimize loop only.
+var utilizationSharePublished = map[*prometheus.GaugeVec]map[string]prometheus.Labels{}
+
+func seriesKey(l prometheus.Labels) string {
+	parts := make([]string, 0, len(l))
+	for k, v := range l {
+		parts = append(parts, k+"="+v)
+	}
+	slices.Sort(parts)
+	return strings.Join(parts, ",")
+}
+
+// PublishUtilizationShare makes the utilization-share series exactly this
+// cycle's evaluation. It sets every current series first and only then deletes
+// the ones that are gone, so a scrape never lands on an empty set -- a gap the
+// actionable gauge's alerts would read as "nothing to do". Calling it with no
+// groups clears them all, which is what a cycle that does not run the optimizer
+// must do: a stale headroom reading would describe a fleet nothing is sizing.
 func PublishUtilizationShare(groups []UtilizationShareGroup) {
 	if utilizationShareHeadroom == nil {
 		return
 	}
-	for _, g := range []*prometheus.GaugeVec{
-		utilizationShareHeadroom, utilizationShareTargetGPUs, utilizationShareActionable,
-		utilizationShareSpareGPUs, utilizationShareReplicasToMove,
-	} {
-		g.Reset()
+	current := map[*prometheus.GaugeVec]map[string]prometheus.Labels{}
+	set := func(g *prometheus.GaugeVec, l prometheus.Labels, v float64) {
+		g.With(l).Set(v)
+		if current[g] == nil {
+			current[g] = map[string]prometheus.Labels{}
+		}
+		current[g][seriesKey(l)] = l
 	}
+	defer func() {
+		for g, prev := range utilizationSharePublished {
+			for k, l := range prev {
+				if _, ok := current[g][k]; !ok {
+					g.Delete(l)
+				}
+			}
+		}
+		utilizationSharePublished = current
+	}()
 	for _, grp := range groups {
 		gl := prometheus.Labels{constants.LabelAcceleratorType: grp.AcceleratorType, constants.LabelScope: grp.Scope}
 		if controllerInstance != "" {
 			gl[constants.LabelControllerInstance] = controllerInstance
 		}
-		utilizationShareSpareGPUs.With(gl).Set(grp.SpareGPUs)
-		utilizationShareReplicasToMove.With(gl).Set(float64(grp.ReplicasToMove))
+		set(utilizationShareSpareGPUs, gl, grp.SpareGPUs)
+		set(utilizationShareReplicasToMove, gl, float64(grp.ReplicasToMove))
 		for _, r := range grp.Roles {
 			rl := prometheus.Labels{
 				constants.LabelNamespace: r.Namespace,
@@ -109,14 +139,14 @@ func PublishUtilizationShare(groups []UtilizationShareGroup) {
 				rl[constants.LabelControllerInstance] = controllerInstance
 			}
 			if !math.IsNaN(r.Headroom) {
-				utilizationShareHeadroom.With(rl).Set(r.Headroom)
+				set(utilizationShareHeadroom, rl, r.Headroom)
 			}
-			utilizationShareTargetGPUs.With(rl).Set(r.TargetGPUs)
+			set(utilizationShareTargetGPUs, rl, r.TargetGPUs)
 			actionable := 0.0
 			if r.Actionable {
 				actionable = 1
 			}
-			utilizationShareActionable.With(rl).Set(actionable)
+			set(utilizationShareActionable, rl, actionable)
 		}
 	}
 }

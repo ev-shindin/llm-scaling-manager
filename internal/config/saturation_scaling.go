@@ -181,8 +181,9 @@ type ScalingPolicy struct {
 	WeightClass string `yaml:"weightClass,omitempty"`
 
 	// Weight is this model's numeric weight for the utilization-share optimizer,
-	// clamped into the range the weight classes span. Zero means unset.
-	Weight float64 `yaml:"weight,omitempty"`
+	// clamped into the range the weight classes span. It decodes leniently and
+	// is checked when resolved, never by Validate (see ModelWeight).
+	Weight ModelWeight `yaml:"weight,omitempty"`
 }
 
 // ScaleToZeroEnvelope is the scale-to-zero policy for a scaling entry, and the
@@ -493,8 +494,8 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	}
 	// The weight is one choice expressed one of two ways, so an override that
 	// states either replaces both: a model that names a class must not inherit a
-	// number from the default entry, which Validate would reject as both set.
-	if override.WeightClass != "" || override.Weight != 0 {
+	// number from the default entry, which would read as both set.
+	if override.WeightClass != "" || !override.Weight.IsZero() {
 		c.WeightClass = override.WeightClass
 		c.Weight = override.Weight
 	}
@@ -542,9 +543,6 @@ func (c *ScalingPolicy) Validate() error {
 	}
 	if c.Priority < 0 {
 		return fmt.Errorf("priority must be >= 0, got %.2f", c.Priority)
-	}
-	if err := c.validateWeight(); err != nil {
-		return err
 	}
 
 	// V2 threshold range/consistency checks apply whenever the fields are set,

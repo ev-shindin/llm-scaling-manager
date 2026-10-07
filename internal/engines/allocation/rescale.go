@@ -590,24 +590,28 @@ func roleDemandGPUs(satNamed NamedAnalyzerResult, records []variantRecord, state
 			demand = rc.TotalDemand
 		}
 	}
-	best := 0.0
-	bestGPUs := 1
-	for _, vc := range sortByCostEfficiencyAsc(variantsForRole(variantsOnType(records, accType), role)) {
-		if vc.PerReplicaCapacity <= 0 {
-			continue
-		}
-		best = vc.PerReplicaCapacity
-		bestGPUs = gpusPerReplicaFromState(stateMap, vc.VariantName)
-		break
-	}
-	if best <= 0 {
+	best, bestGPUs, ok := bestVariantForRole(records, stateMap, accType, role)
+	if !ok {
 		return 0
 	}
-	replicas := int(math.Ceil(demand / best))
+	replicas := int(math.Ceil(demand / best.PerReplicaCapacity))
 	if replicas < 0 {
 		replicas = 0
 	}
 	return replicas * bestGPUs
+}
+
+// bestVariantForRole returns a role's most cost-efficient variant on accType
+// that carries a capacity reading, with its GPUs per replica. ok is false when
+// no variant of the role has one: nothing can size a replica of it.
+func bestVariantForRole(records []variantRecord, stateMap map[string]domain.VariantReplicaState,
+	accType, role string) (best variantRecord, gpusPerReplica int, ok bool) {
+	for _, vc := range sortByCostEfficiencyAsc(variantsForRole(variantsOnType(records, accType), role)) {
+		if vc.PerReplicaCapacity > 0 {
+			return vc, gpusPerReplicaFromState(stateMap, vc.VariantName), true
+		}
+	}
+	return variantRecord{}, 0, false
 }
 
 // variantsOnType filters variants to those on accType.

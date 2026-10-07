@@ -3,6 +3,7 @@ package allocation
 import (
 	"context"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
@@ -101,7 +102,7 @@ type ModelScalingRequest struct {
 	// scaling-policy entry states it (at most one is set). They are resolved
 	// against the weight classes in force by config.UtilizationShare.Weight.
 	WeightClass string
-	Weight      float64
+	Weight      config.ModelWeight
 }
 
 // ScalingOptimizer makes final scaling decisions for all models.

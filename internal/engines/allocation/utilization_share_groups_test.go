@@ -196,3 +196,116 @@ var _ = Describe("BuildShareGroups", func() {
 		Expect(BuildShareGroups(reqs, unlimited, ShareGroupOptions{ClusterIsQuota: true})).To(BeEmpty())
 	})
 })
+
+// shareVariant is one variant of a multi-variant fixture.
+type shareVariant struct {
+	name          string
+	gpus, current int
+	cost, prc     float64
+	min, max      *int
+}
+
+// shareReqVariants builds model "m" in namespace "ns" from several variants.
+func shareReqVariants(demand float64, vs ...shareVariant) ModelScalingRequest {
+	fx := &satEntryFixture{ModelID: "m", Namespace: "ns", TotalDemand: demand}
+	req := ModelScalingRequest{ModelID: "m", Namespace: "ns"}
+	for _, v := range vs {
+		fx.VariantCapacities = append(fx.VariantCapacities, vcFixture{
+			VariantName: v.name, AcceleratorName: "A100", Cost: v.cost, ReplicaCount: v.current, PerReplicaCapacity: v.prc,
+		})
+		req.VariantStates = append(req.VariantStates, domain.VariantReplicaState{
+			VariantName: v.name, CurrentReplicas: v.current, GPUsPerReplica: v.gpus, MinReplicas: v.min, MaxReplicas: v.max,
+		})
+	}
+	req = withSatEntry(fx, req)
+	req.CompositeSignal.ScaleUpThreshold = 0.8
+	return req
+}
+
+var _ = Describe("BuildShareGroups: floors, ceilings and replica sizes", func() {
+	roomy := []*ResourceConstraints{{Pools: map[string]ResourcePool{"A100": {Limit: 64, Used: 0}}}}
+
+	only := func(req ModelScalingRequest) ShareRole {
+		g := BuildShareGroups([]ModelScalingRequest{req}, roomy, ShareGroupOptions{ClusterIsQuota: true})
+		ExpectWithOffset(1, g).To(HaveLen(1))
+		ExpectWithOffset(1, g[0].Roles).To(HaveLen(1))
+		return g[0].Roles[0]
+	}
+
+	It("sums floors and ceilings over a role's variants, each at its own replica size", func() {
+		r := only(shareReqVariants(4000,
+			shareVariant{name: "big", gpus: 4, cost: 5, prc: 4000, min: ptrInt(1), max: ptrInt(2)},
+			shareVariant{name: "small", gpus: 1, cost: 2, prc: 1000, min: ptrInt(2), max: ptrInt(3)},
+		))
+		Expect(r.Floor).To(Equal(1*4 + 2*1))
+		Expect(r.Ceiling).To(Equal(2*4 + 3*1))
+		// The most cost-efficient variant (5/4000 < 2/1000) sizes the role:
+		// one replica is 4 GPUs, and a GPU of it serves 1000.
+		Expect(r.ReplicaGPUs).To(Equal(4))
+		Expect(r.Need).To(BeNumerically("~", 4000/0.8/1000, 1e-9))
+	})
+
+	It("leaves a role unbounded when any of its variants has no ceiling", func() {
+		r := only(shareReqVariants(4000,
+			shareVariant{name: "big", gpus: 4, cost: 5, prc: 4000, max: ptrInt(2)},
+			shareVariant{name: "small", gpus: 1, cost: 2, prc: 1000},
+		))
+		Expect(r.Ceiling).To(BeZero())
+		Expect(r.Floor).To(BeZero())
+	})
+
+	It("freezes an aggregated model with demand but no measured capacity", func() {
+		req := shareReqVariants(4000, shareVariant{name: "v", gpus: 1, cost: 5, prc: 0, current: 2})
+		g := BuildShareGroups([]ModelScalingRequest{req}, roomy, ShareGroupOptions{ClusterIsQuota: true})
+		Expect(g).To(HaveLen(1))
+		Expect(g[0].Roles).To(BeEmpty())
+		Expect(g[0].Frozen).To(ConsistOf(ContainSubstring("no measured capacity")))
+	})
+
+	It("plans a model with no demand and no capacity reading at its floor", func() {
+		r := only(shareReqVariants(0, shareVariant{name: "v", gpus: 2, cost: 5, prc: 0, min: ptrInt(1)}))
+		Expect(r.Need).To(BeZero())
+		Expect(r.Floor).To(Equal(2))
+		Expect(r.ReplicaGPUs).To(Equal(2))
+	})
+})
+
+var _ = Describe("BuildShareGroups: scopes and bounds", func() {
+	It("builds a namespace-quota group beside the cluster group, each with its own budget", func() {
+		reqs := []ModelScalingRequest{shareReq("A", "team-a", 4000, 4), shareReq("B", "other", 3000, 8)}
+		cons := []*ResourceConstraints{{
+			Pools:          map[string]ResourcePool{"A100": {Limit: 16, Used: 12}},
+			NamespacePools: map[string]map[string]ResourcePool{"team-a": {"A100": {Limit: 8, Used: 4}}},
+		}}
+		groups := BuildShareGroups(reqs, cons, ShareGroupOptions{ClusterIsQuota: true})
+		Expect(groups).To(HaveLen(2))
+		Expect(groups[0].Scope).To(BeEmpty())
+		Expect(groups[0].Budget).To(Equal(4 + 8)) // the cluster's free 4 + B's 8
+		Expect(groups[1].Scope).To(Equal("team-a"))
+		Expect(groups[1].Budget).To(Equal(4 + 4)) // team-a's free 4 + A's 4
+	})
+
+	It("builds a namespace-quota group even when the cluster budget is the physical inventory", func() {
+		reqs := []ModelScalingRequest{shareReq("A", "team-a", 4000, 4)}
+		cons := []*ResourceConstraints{{NamespacePools: map[string]map[string]ResourcePool{"team-a": {"A100": {Limit: 8, Used: 4}}}}}
+		Expect(BuildShareGroups(reqs, cons, ShareGroupOptions{ClusterIsQuota: false})).To(HaveLen(1))
+	})
+
+	It("skips a namespace whose quota does not list the model's accelerator, rather than borrowing the cluster pool", func() {
+		reqs := []ModelScalingRequest{shareReq("A", "team-a", 4000, 4)}
+		cons := []*ResourceConstraints{{
+			Pools:          map[string]ResourcePool{"A100": {Limit: 16, Used: 4}},
+			NamespacePools: map[string]map[string]ResourcePool{"team-a": {"H100": {Limit: 8, Used: 0}}},
+		}}
+		Expect(BuildShareGroups(reqs, cons, ShareGroupOptions{ClusterIsQuota: true})).To(BeEmpty())
+	})
+
+	It("skips an unlimited namespace pool and a budget no cluster could hold", func() {
+		reqs := []ModelScalingRequest{shareReq("A", "team-a", 4000, 4)}
+		unlimited := []*ResourceConstraints{{NamespacePools: map[string]map[string]ResourcePool{"team-a": {"A100": {Limit: -1}}}}}
+		Expect(BuildShareGroups(reqs, unlimited, ShareGroupOptions{})).To(BeEmpty())
+
+		huge := []*ResourceConstraints{{Pools: map[string]ResourcePool{"A100": {Limit: MaxShareBudgetGPUs + 1, Used: 0}}}}
+		Expect(BuildShareGroups([]ModelScalingRequest{shareReq("A", "ns", 4000, 4)}, huge, ShareGroupOptions{ClusterIsQuota: true})).To(BeEmpty())
+	})
+})

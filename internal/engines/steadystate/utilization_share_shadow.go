@@ -13,6 +13,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 )
 
 // utilizationShareState is what the engine remembers between cycles about the
@@ -37,6 +38,15 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	constraints []*allocation.ResourceConstraints) {
 	logger := ctrl.LoggerFrom(ctx).WithName("utilization-share")
 	st := &e.utilizationShare
+	// Shadow evaluation must never cost the cycle it rides on: the decisions
+	// are already made, and a bug here should lose this cycle's report, not the
+	// controller.
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error(fmt.Errorf("panic: %v", r), "Utilization-share evaluation failed; skipping it this cycle")
+			metrics.PublishUtilizationShare(nil)
+		}
+	}()
 
 	us, selected, err := e.Config.UtilizationShare()
 	errText := ""
@@ -76,7 +86,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		Weight: func(req allocation.ModelScalingRequest) float64 {
 			w, err := us.Weight(req.WeightClass, req.Weight)
 			if err != nil {
-				weightErrs[req.Namespace+"/"+req.ModelID] = err.Error()
+				weightErrs[utils.GetNamespacedKey(req.Namespace, req.ModelID)] = err.Error()
 			}
 			return w
 		},

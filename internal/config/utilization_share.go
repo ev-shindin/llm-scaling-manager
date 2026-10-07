@@ -204,32 +204,80 @@ func (u UtilizationShare) DisabledNamespaces() []string {
 
 // Weight resolves a model's weight from its scaling-policy entry. A class name
 // takes the class's weight; a number is clamped into [MinWeight, MaxWeight];
-// neither takes the default class. An unknown class falls back to the default
-// class and is reported through the error, which the caller logs: it is an
-// error on that model's entry only.
-func (u UtilizationShare) Weight(class string, weight float64) (float64, error) {
+// neither takes the default class.
+//
+// Every problem with the two fields -- an unknown class, both set, a number
+// that is not finite and positive, a value that did not decode -- falls back
+// to the default class and is reported through the error, which the caller
+// logs. None of them fails the scaling-policy entry: the "default" entry also
+// carries the limiters, and a typo in a weight must not drop them (§8.3).
+func (u UtilizationShare) Weight(class string, weight ModelWeight) (float64, error) {
+	def := u.Classes[u.DefaultClass]
 	switch {
+	case weight.Err() != nil:
+		return def, fmt.Errorf("%w, using %q", weight.Err(), u.DefaultClass)
+	case class != "" && weight.IsSet():
+		return def, fmt.Errorf("weight and weightClass are mutually exclusive (weight=%v weightClass=%q), using %q",
+			weight.Value(), class, u.DefaultClass)
 	case class != "":
 		if w, ok := u.Classes[class]; ok {
 			return w, nil
 		}
-		return u.Classes[u.DefaultClass], fmt.Errorf("unknown weightClass %q, using %q", class, u.DefaultClass)
-	case weight != 0:
-		return math.Min(math.Max(weight, u.MinWeight), u.MaxWeight), nil
+		return def, fmt.Errorf("unknown weightClass %q, using %q", class, u.DefaultClass)
+	case weight.IsSet():
+		v := weight.Value()
+		if !(v > 0) || math.IsInf(v, 0) {
+			return def, fmt.Errorf("weight must be a finite number > 0, got %v, using %q", v, u.DefaultClass)
+		}
+		return math.Min(math.Max(v, u.MinWeight), u.MaxWeight), nil
 	default:
-		return u.Classes[u.DefaultClass], nil
+		return def, nil
 	}
 }
 
-// validateWeight checks a scaling-policy entry's per-model weight fields.
-func (c *ScalingPolicy) validateWeight() error {
-	if c.Weight != 0 && c.WeightClass != "" {
-		return fmt.Errorf("weight and weightClass are mutually exclusive, got weight=%v weightClass=%q", c.Weight, c.WeightClass)
+// ModelWeight is a scaling-policy entry's numeric weight. It decodes leniently:
+// a value that is not a number is recorded rather than returned, so it cannot
+// fail the entry -- and, on the "default" entry, drop the limiters with it.
+// UtilizationShare.Weight reports it and falls back to the default class.
+type ModelWeight struct {
+	value float64
+	set   bool
+	err   error
+}
+
+// NewModelWeight returns a set weight.
+func NewModelWeight(v float64) ModelWeight { return ModelWeight{value: v, set: true} }
+
+// Value is the weight as written; meaningful only when IsSet.
+func (w ModelWeight) Value() float64 { return w.value }
+
+// IsSet reports whether the entry stated a numeric weight that decoded.
+func (w ModelWeight) IsSet() bool { return w.set }
+
+// Err is the decode error of a weight that was written but is not a number.
+func (w ModelWeight) Err() error { return w.err }
+
+// IsZero reports whether the entry said nothing about the weight, so yaml's
+// omitempty and Merge can tell "unset" from a stated value.
+func (w ModelWeight) IsZero() bool { return !w.set && w.err == nil }
+
+// UnmarshalYAML records a non-numeric value instead of failing the entry.
+func (w *ModelWeight) UnmarshalYAML(node *yaml.Node) error {
+	var v float64
+	if err := node.Decode(&v); err != nil {
+		*w = ModelWeight{err: fmt.Errorf("weight: %w", err)}
+		return nil
 	}
-	if c.Weight != 0 && (!(c.Weight > 0) || math.IsInf(c.Weight, 0)) {
-		return fmt.Errorf("weight must be a finite number > 0, got %v", c.Weight)
-	}
+	*w = ModelWeight{value: v, set: true}
 	return nil
+}
+
+// MarshalYAML writes the weight back as a number.
+func (w ModelWeight) MarshalYAML() (any, error) {
+	if !w.set {
+		return nil, nil
+	}
+	return w.value, nil
 }
 
 // UtilizationShare returns the utilization-share settings in force, and whether
@@ -247,7 +295,7 @@ func (c *Config) UtilizationShare() (settings UtilizationShare, selected bool, e
 	if c.saturation.clusterPolicy != nil {
 		opt = c.saturation.clusterPolicy.Optimizer
 	} else {
-		opt = c.saturation.global["default"].Optimizer
+		opt = c.saturation.global[GlobalDefaultsKey].Optimizer
 	}
 	if opt == nil {
 		return UtilizationShare{}, false, nil

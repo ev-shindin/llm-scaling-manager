@@ -3,11 +3,17 @@ package allocation
 import (
 	"cmp"
 	"maps"
-	"math"
 	"slices"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
+
+// MaxShareBudgetGPUs bounds the budget a group is evaluated over. No cluster
+// holds a million GPUs of one type, so a larger budget is a quota written as
+// "effectively unlimited", and it is treated as unlimited: sharing it would
+// mean placing replicas one at a time across a bound nothing enforces. It also
+// keeps free + held clear of integer overflow.
+const MaxShareBudgetGPUs = 1 << 20
 
 // ShareRoleOrigin names the model and role a ShareRole was built from.
 type ShareRoleOrigin struct {
@@ -108,7 +114,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 
 		roles, why := shareRolesForRequest(req, records, acc, opts.Weight)
 		if why != "" {
-			g.Frozen = append(g.Frozen, req.Namespace+"/"+req.ModelID+": "+why)
+			g.Frozen = append(g.Frozen, modelKey(req)+": "+why)
 			continue
 		}
 		stateMap := buildStateMap(req.VariantStates)
@@ -130,12 +136,15 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		if k.scope != "" {
 			free, ok = availableByNS[k.scope][k.acc]
 		}
-		if !ok || free < 0 || free == math.MaxInt {
-			continue // unlimited or unknown: nothing to "use all of" (proposal §7.3)
+		if !ok || free < 0 || free > MaxShareBudgetGPUs {
+			continue // unlimited, unknown, or no real bound: nothing to "use all of" (proposal §7.3)
 		}
 		held := 0
 		for _, c := range g.Committed {
 			held += c
+		}
+		if held > MaxShareBudgetGPUs-free {
+			continue
 		}
 		g.Budget = free + held
 		slices.SortFunc(g.Roles, func(a, b ShareRole) int { return cmp.Compare(a.Key, b.Key) })
@@ -181,20 +190,10 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 			demand = rc.TotalDemand
 		}
 		vs := variantsForRole(variantsOnType(records, acc), role)
-		var best *variantRecord
-		for _, vc := range sortByCostEfficiencyAsc(vs) {
-			if vc.PerReplicaCapacity > 0 {
-				best = &vc
-				break
-			}
-		}
-		g := 0
-		if best != nil {
-			g = gpusPerReplicaFromState(stateMap, best.VariantName)
-		}
+		best, g, measured := bestVariantForRole(records, stateMap, acc, role)
 		need := 0.0
 		if demand > 0 {
-			if best == nil || g <= 0 {
+			if !measured {
 				return nil, "role " + role + " has demand but no measured capacity"
 			}
 			// need = demand / scale-up threshold, in GPUs of the role's most
@@ -202,28 +201,14 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 			perGPU := best.PerReplicaCapacity / float64(g)
 			need = demand / sig.ScaleUpThreshold / perGPU
 		}
-		floor, ceiling, bounded := 0, 0, true
-		for _, vc := range vs {
-			gv := gpusPerReplicaFromState(stateMap, vc.VariantName)
-			st := stateMap[vc.VariantName]
-			if st.MinReplicas != nil && *st.MinReplicas > 0 {
-				floor += *st.MinReplicas * gv
-			}
-			if st.MaxReplicas != nil && *st.MaxReplicas > 0 {
-				ceiling += *st.MaxReplicas * gv
-			} else {
-				bounded = false
-			}
-		}
-		if !bounded {
-			ceiling = 0
-		}
-		if g <= 0 && len(vs) > 0 {
+		if !measured && len(vs) > 0 {
 			g = gpusPerReplicaFromState(stateMap, vs[0].VariantName)
 		}
+		floor := roleFloorGPUs(records, stateMap, acc, role)
+		ceiling := roleCeilingGPUs(vs, stateMap)
 		out = append(out, shareRoleInput{
 			ShareRole: ShareRole{
-				Key:         req.Namespace + "/" + req.ModelID + "/" + role,
+				Key:         modelKey(req) + "/" + role,
 				Weight:      w,
 				Need:        need,
 				Floor:       floor,
@@ -234,4 +219,19 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 		})
 	}
 	return out, ""
+}
+
+// roleCeilingGPUs is the GPUs a role's maxReplicas allow, summed over its
+// variants. Zero means unbounded: one variant without a ceiling lets the role
+// grow without limit.
+func roleCeilingGPUs(variants []variantRecord, stateMap map[string]domain.VariantReplicaState) int {
+	ceiling := 0
+	for _, vc := range variants {
+		st := stateMap[vc.VariantName]
+		if st.MaxReplicas == nil || *st.MaxReplicas <= 0 {
+			return 0
+		}
+		ceiling += *st.MaxReplicas * gpusPerReplicaFromState(stateMap, vc.VariantName)
+	}
+	return ceiling
 }

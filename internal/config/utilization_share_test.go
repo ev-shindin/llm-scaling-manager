@@ -97,45 +97,78 @@ var _ = Describe("UtilizationShare.Weight", func() {
 	})
 
 	DescribeTable("resolves a model's weight",
-		func(class string, weight, want float64, wantErr bool) {
+		func(class string, weight ModelWeight, want float64, wantErr string) {
 			got, err := us.Weight(class, weight)
 			Expect(got).To(Equal(want))
-			if wantErr {
-				Expect(err).To(HaveOccurred())
-			} else {
+			if wantErr == "" {
 				Expect(err).NotTo(HaveOccurred())
+			} else {
+				Expect(err).To(MatchError(ContainSubstring(wantErr)))
 			}
 		},
-		Entry("a class", "critical", 0.0, 4.0, false),
-		Entry("neither: the default class", "", 0.0, 1.0, false),
-		Entry("a number inside the range", "", 2.5, 2.5, false),
-		Entry("a number above the range is clamped", "", 1e6, 4.0, false),
-		Entry("a number below the range is clamped", "", 0.01, 0.5, false),
-		Entry("an unknown class falls back to the default and reports", "gold", 0.0, 1.0, true),
+		Entry("a class", "critical", ModelWeight{}, 4.0, ""),
+		Entry("neither: the default class", "", ModelWeight{}, 1.0, ""),
+		Entry("a number inside the range", "", NewModelWeight(2.5), 2.5, ""),
+		Entry("a number above the range is clamped", "", NewModelWeight(1e6), 4.0, ""),
+		Entry("a number below the range is clamped", "", NewModelWeight(0.01), 0.5, ""),
+		Entry("an unknown class falls back and reports", "gold", ModelWeight{}, 1.0, "unknown weightClass"),
+		Entry("both set falls back and reports", "critical", NewModelWeight(2), 1.0, "mutually exclusive"),
+		Entry("a negative number falls back and reports", "", NewModelWeight(-1), 1.0, "finite number > 0"),
+		Entry("NaN falls back and reports", "", NewModelWeight(math.NaN()), 1.0, "finite number > 0"),
+		Entry("infinity falls back and reports", "", NewModelWeight(math.Inf(1)), 1.0, "finite number > 0"),
+		Entry("zero falls back and reports", "", NewModelWeight(0), 1.0, "finite number > 0"),
 	)
+
+	It("reports a weight that did not decode, and falls back", func() {
+		p := parsePolicy("weight: high\n")
+		Expect(p.Weight.Err()).To(HaveOccurred())
+		got, err := us.Weight(p.WeightClass, p.Weight)
+		Expect(got).To(Equal(1.0))
+		Expect(err).To(MatchError(ContainSubstring("weight")))
+	})
 })
 
 var _ = Describe("ScalingPolicy weight fields", func() {
-	It("rejects an entry setting both weight and weightClass", func() {
-		p := ScalingPolicy{Weight: 2, WeightClass: "important"}
-		Expect(p.validateWeight()).To(MatchError(ContainSubstring("mutually exclusive")))
-	})
-
-	DescribeTable("rejects a non-positive or non-finite weight",
-		func(w float64) {
-			Expect((&ScalingPolicy{Weight: w}).validateWeight()).To(HaveOccurred())
+	// §8.3: the "default" entry carries the limiters, so no weight problem may
+	// fail it. Negative control: before ModelWeight, `weight: high` failed the
+	// whole entry's decode, and both-set or a negative weight failed Validate.
+	DescribeTable("never fail the entry, so the limiters survive",
+		func(fields string) {
+			var p ScalingPolicy
+			Expect(yaml.Unmarshal([]byte(quotaLimiters+fields), &p)).To(Succeed())
+			p.ApplyDefaults()
+			Expect(p.Validate()).To(Succeed())
+			Expect(p.Limiters).To(HaveLen(1))
 		},
-		Entry("negative", -1.0),
-		Entry("NaN", math.NaN()),
-		Entry("infinite", math.Inf(1)),
+		Entry("a type error", "weight: high\n"),
+		Entry("both set", "weight: 2\nweightClass: critical\n"),
+		Entry("a negative weight", "weight: -1\n"),
+		Entry("an unknown class", "weightClass: gold\n"),
 	)
 
+	It("decodes a numeric weight and leaves an absent one unset", func() {
+		Expect(parsePolicy("weight: 2.5\n").Weight).To(Equal(NewModelWeight(2.5)))
+		Expect(parsePolicy("priority: 2\n").Weight.IsZero()).To(BeTrue())
+	})
+
 	It("lets an override's class replace an inherited number, not join it", func() {
-		base := ScalingPolicy{Weight: 3}
+		base := ScalingPolicy{Weight: NewModelWeight(3)}
 		base.Merge(ScalingPolicy{WeightClass: "critical"})
 		Expect(base.WeightClass).To(Equal("critical"))
-		Expect(base.Weight).To(BeZero())
-		Expect(base.validateWeight()).To(Succeed())
+		Expect(base.Weight.IsZero()).To(BeTrue())
+	})
+
+	It("lets an override's number replace an inherited class", func() {
+		base := ScalingPolicy{WeightClass: "critical"}
+		base.Merge(ScalingPolicy{Weight: NewModelWeight(2)})
+		Expect(base.WeightClass).To(BeEmpty())
+		Expect(base.Weight).To(Equal(NewModelWeight(2)))
+	})
+
+	It("keeps the inherited weight when the override states none", func() {
+		base := ScalingPolicy{WeightClass: "important"}
+		base.Merge(ScalingPolicy{Priority: 2})
+		Expect(base.WeightClass).To(Equal("important"))
 	})
 
 	It("does not merge the optimizer block from an override", func() {
@@ -260,5 +293,41 @@ optimizer:
 		Expect(err).NotTo(HaveOccurred())
 		Expect(selected).To(BeFalse())
 		Expect(c.IgnoredOptimizerNamespaces()).To(Equal([]string{"tenant-a"}))
+	})
+})
+
+var _ = Describe("Config.UtilizationShare edge cases", func() {
+	var c *Config
+	BeforeEach(func() { c = NewTestConfig() })
+
+	It("is not selected by a block without a type, and is not an error", func() {
+		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: parsePolicy(quotaLimiters + `
+optimizer:
+  utilizationShare:
+    shadow: true
+`)})
+		_, selected, err := c.UtilizationShare()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(selected).To(BeFalse())
+	})
+
+	It("reports a block that is not a mapping, and keeps the limiters", func() {
+		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: parsePolicy(quotaLimiters + "optimizer: utilizationShare\n")})
+		_, selected, err := c.UtilizationShare()
+		Expect(selected).To(BeFalse())
+		Expect(err).To(MatchError(ContainSubstring("optimizer")))
+		Expect(c.EffectiveLimiterMode()).To(Equal(LimiterTypeQuota))
+	})
+
+	It("ignores the global map's optimizer once a separated cluster policy has none", func() {
+		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: parsePolicy(quotaLimiters + `
+optimizer:
+  type: utilizationShare
+`)})
+		policy := parsePolicy(quotaLimiters)
+		c.UpdateClusterPolicy(&policy)
+		_, selected, err := c.UtilizationShare()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(selected).To(BeFalse())
 	})
 })

@@ -285,3 +285,36 @@ var _ = Describe("EvaluateShare", func() {
 		}
 	})
 })
+
+var _ = Describe("share targets: edge cases", func() {
+	It("re-shares what a ceiling refuses by weight, not equally", func() {
+		// A capped at 6; B (weight 2) and C (weight 1) share the rest so that
+		// B's headroom is twice C's.
+		roles := []ShareRole{role("A", 1, 5, 0, 6, 1), role("B", 2, 4, 0, 0, 1), role("C", 1, 4, 0, 0, 1)}
+		t := ContinuousShareTargets(roles, 24)
+		Expect(t["A"]).To(Equal(6.0))
+		Expect(t["B"] + t["C"]).To(BeNumerically("~", 18, 1e-9))
+		Expect(t["B"]/4 - 1).To(BeNumerically("~", 2*(t["C"]/4-1), 1e-9))
+	})
+
+	It("pins a ceiling in the short regime too", func() {
+		roles := []ShareRole{role("A", 4, 10, 0, 3, 1), role("B", 1, 10, 0, 0, 1)}
+		t := ContinuousShareTargets(roles, 10)
+		Expect(t["A"]).To(Equal(3.0))
+		Expect(t["B"]).To(BeNumerically("~", 7, 1e-9))
+	})
+
+	It("holds every role at its floor when the floors exceed the budget, without going negative", func() {
+		roles := []ShareRole{role("A", 1, 5, 4, 0, 1), role("B", 1, 5, 4, 0, 1)}
+		Expect(IntegerShareTargets(roles, 6)).To(Equal(map[string]int{"A": 4, "B": 4}))
+		for _, v := range ContinuousShareTargets(roles, 6) {
+			Expect(v).To(BeNumerically(">=", 0))
+		}
+	})
+
+	It("allocates nothing above the floors when no role has demand", func() {
+		roles := []ShareRole{role("A", 1, 0, 1, 0, 1), role("B", 2, 0, 2, 0, 1)}
+		Expect(IntegerShareTargets(roles, 16)).To(Equal(map[string]int{"A": 1, "B": 2}))
+		Expect(ContinuousShareTargets(roles, 16)).To(Equal(map[string]float64{"A": 1, "B": 2}))
+	})
+})
