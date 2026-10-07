@@ -665,7 +665,7 @@ func applyParam(key, value string, params *EngineParams) bool {
 			return false
 		}
 		params.KvCacheDtype = value
-	case "dtype":
+	case keyDtype:
 		if !usableWord(value) {
 			return false
 		}

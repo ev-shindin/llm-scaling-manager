@@ -63,7 +63,7 @@ func TestStringFlagsCanFailToResolve(t *testing.T) {
 
 	// A real dtype still lands, or the guard is rejecting everything.
 	ok := parseShell("vllm serve m --dtype bfloat16", nil)
-	if ok.WeightDtype != "bfloat16" || !ok.Complete() {
+	if ok.WeightDtype != testWeightDtype || !ok.Complete() {
 		t.Fatalf("a usable dtype became %q (Unresolved=%v): the guard is too strict",
 			ok.WeightDtype, ok.Unresolved)
 	}
@@ -109,8 +109,8 @@ func TestShellDefaultExpansionsResolve(t *testing.T) {
 	// A Kubernetes env var name may contain a hyphen, so an env that defines
 	// the literal body must win over reading it as "name or else default".
 	lit := parseShell("vllm serve m --dtype ${FOO-BAR}",
-		map[string]string{"FOO-BAR": "bfloat16", "FOO": "float16"})
-	if lit.WeightDtype != "bfloat16" {
+		map[string]string{"FOO-BAR": testWeightDtype, "FOO": "float16"})
+	if lit.WeightDtype != testWeightDtype {
 		t.Errorf("WeightDtype=%q, want bfloat16: the literal env name must win",
 			lit.WeightDtype)
 	}
@@ -217,13 +217,13 @@ func TestSelectionIsStillOrderDependentWhenSeveralContainersMatch(t *testing.T) 
 		}
 	}
 
-	ab := two(eng("a", "bfloat16"), eng("b", "float16"))
-	ba := two(eng("b", "float16"), eng("a", "bfloat16"))
+	ab := two(eng("a", testWeightDtype), eng("b", "float16"))
+	ba := two(eng("b", "float16"), eng("a", testWeightDtype))
 
 	// This is the CURRENT behaviour, asserted so a future change to it is a
 	// deliberate one: two containers that both launch an engine are both
 	// selected, and the later wins.
-	if ab.WeightDtype != "float16" || ba.WeightDtype != "bfloat16" {
+	if ab.WeightDtype != "float16" || ba.WeightDtype != testWeightDtype {
 		t.Fatalf("expected last-wins over two launching containers, got %q then %q",
 			ab.WeightDtype, ba.WeightDtype)
 	}

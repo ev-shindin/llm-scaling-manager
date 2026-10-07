@@ -79,7 +79,7 @@ func applySGLangParam(key, value string, params *EngineParams) bool {
 			return false
 		}
 		params.BlockSize = v
-	case "dtype":
+	case keyDtype:
 		if !usableWord(value) {
 			return false
 		}
