@@ -25,14 +25,25 @@ const (
 	wvaConfigMapLabelValue = "workload-variant-autoscaler"
 )
 
-// QuotaOption adjusts the quota entry SetNamespaceQuota writes.
-type QuotaOption func(entry map[string]any)
+// QuotaOption adjusts the quota entry SetNamespaceQuota writes, and the default
+// policy document it is written into.
+type QuotaOption func(entry, doc map[string]any)
 
 // WithKueue bounds the entry by Kueue, re-read every refreshInterval. A short
 // interval keeps a spec that flips Kueue objects from waiting on the default.
 func WithKueue(refreshInterval string) QuotaOption {
-	return func(entry map[string]any) {
+	return func(entry, _ map[string]any) {
 		entry["kueue"] = map[string]any{"enabled": true, "refreshInterval": refreshInterval}
+	}
+}
+
+// WithOptimizer sets the default entry's optimizer block. The optimizer is
+// configured beside the limiters and only there
+// (docs/proposals/utilization-share-optimizer.md, section 8.1), so it is
+// written by the same call that writes the quota.
+func WithOptimizer(block map[string]any) QuotaOption {
+	return func(_, doc map[string]any) {
+		doc["optimizer"] = block
 	}
 }
 
@@ -98,7 +109,7 @@ func SetNamespaceQuota(
 		},
 	}
 	for _, opt := range opts {
-		opt(entry)
+		opt(entry, doc)
 	}
 	doc["limiters"] = []any{entry}
 	merged, err := yaml.Marshal(doc)

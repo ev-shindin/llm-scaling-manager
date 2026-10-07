@@ -1908,7 +1908,12 @@ optimizer every cycle (§6.6).
      receiver redirecting it (§6.3). Until then a wake never takes promised
      GPUs and waits for idle ones -- at most a fill timeout. The warm pool's
      own carve-out from idle (§7.2) is not built either.
-   - the kind e2e of §12.
+   - the P/D and multi-GPU kind e2e. The single-role e2e is built
+     (`test/e2e/utilization_share_test.go`): shadow evaluates and touches
+     nothing. Active, an idle model's marked pod is the one its ReplicaSet
+     removes, and the loaded model grows only after the release. Its first
+     cluster run found that the engine keyed scale targets by Deployment
+     name, not variant name, so no donor could be marked.
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4).
 

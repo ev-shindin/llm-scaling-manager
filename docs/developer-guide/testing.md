@@ -217,6 +217,22 @@ nothing installs them, and the spec runs when the cluster serves the kinds and
 skips — saying so in the `-v` output — when it does not. The script leaves a
 cluster that already has the CRDs untouched and exits 0.
 
+**Utilization-share optimizer (full suite).** `utilization_share_test.go`
+(label `utilization-share`) runs the optimizer of
+[the proposal](../proposals/utilization-share-optimizer.md) against a real
+ReplicaSet, HPA and KEDA. It needs nothing beyond the standard infra.
+- **Setup:** one namespace has a 4-GPU quota on the discovered accelerator. An
+  idle model A holds 3 GPUs, and model B, under load, holds 1.
+- **Shadow phase, the negative control:** the group must be evaluated (the
+  `wva_utilization_share_*` series appear, with B short), and no pod is marked.
+- **Active phase:**
+  - an A pod gets the donor mark;
+  - the ReplicaSet removes exactly that pod;
+  - B is raised only once the marked pod starts terminating;
+  - the transfer ends `done`.
+- **Duration:** about 7 minutes. Run it alone with
+  `FOCUS="Utilization share" make test-e2e-full`.
+
 **Install script tuning (optional, same variables as `deploy/install.sh`):**
 
 - **`SKIP_HELM_REPO_UPDATE`**: When set to **`true`**, `helm repo update` is skipped during installs (faster, less network churn). Default runs `helm repo update` to refresh repo indexes.
