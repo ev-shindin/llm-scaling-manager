@@ -1848,7 +1848,11 @@ optimizer every cycle (§6.6).
      scheduled, unfinished pods, terminating ones included, counted by group
      on a LeaderWorkerSet;
    - the ledger and planner (`utilization_share_{ledger,plan}.go`), sized by
-     each role's give and grow variants;
+     each role's give and grow variants. A transfer is admitted only when
+     the donor replica's pods cover the receiver replica's, each receiver
+     pod by a donor pod of its own at least its size (`ShareCovers`, from
+     each variant's per-pod GPUs, leader first). Two 4-GPU donor pods never
+     fund one 8-GPU receiver pod;
    - the derived timings (`utilization_share_timing.go`, §8.4), from the
      ScaledObject's scale-down window and polling interval (now carried on
      `registry.Target`), the pod templates' termination grace, and the group's
@@ -1872,9 +1876,9 @@ optimizer every cycle (§6.6).
        `_release_seconds` histogram.
 
    **Not yet built in stage 2:**
-   - per-pod donor *sets* across several donor pods, with the per-node
-     check (§6.5). A transfer has one donor role today, and a Deployment
-     donor gives one pod at a time.
+   - donor *sets* across several donor replicas, with the per-node check
+     (§6.5). A transfer has one donor replica today, so a receiver larger
+     than every donor replica's pods is not funded at all.
    - the `redirected` outcome; the `_withheld_total`, `_actual`,
      `_floor_excess_gpus` and `_reserve_debt_gpus` series of §9; and the
      `awaiting-release` blocked reason.

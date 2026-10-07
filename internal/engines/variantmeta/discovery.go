@@ -128,6 +128,7 @@ func Discover(
 			StuckReplicas:   stuckReplicas,
 			HeldReplicas:    heldReplicas,
 			HeldKnown:       heldKnown,
+			PodGPUs:         scaletarget.PodGPUs(scaleTarget),
 			MinReplicas:     minReplicas,
 			MaxReplicas:     maxReplicas,
 		})

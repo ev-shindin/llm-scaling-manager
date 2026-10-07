@@ -241,3 +241,48 @@ var _ = Describe("PlanShareTransfers against the §6.7 scenarios", func() {
 		Expect(wasted).To(BeNumerically(">", 0))
 	})
 })
+
+var _ = Describe("Pod shape in transfers (§6.5)", func() {
+	DescribeTable("ShareCovers",
+		func(donor, receiver ShareVariant, want bool) {
+			Expect(ShareCovers(donor, receiver)).To(Equal(want))
+		},
+		Entry("an 8-GPU pod funds a 4-GPU pod", ShareVariant{GPUs: 8, PodGPUs: []int{8}}, ShareVariant{GPUs: 4, PodGPUs: []int{4}}, true),
+		Entry("two 4-GPU pods do not fund one 8-GPU pod: nothing shows they share a node",
+			ShareVariant{GPUs: 8, PodGPUs: []int{4, 4}}, ShareVariant{GPUs: 8, PodGPUs: []int{8}}, false),
+		Entry("one 8-GPU pod does not fund two 4-GPU pods", ShareVariant{GPUs: 8, PodGPUs: []int{8}}, ShareVariant{GPUs: 8, PodGPUs: []int{4, 4}}, false),
+		Entry("a 2x8 group funds a 2x4 group", ShareVariant{GPUs: 16, PodGPUs: []int{8, 8}}, ShareVariant{GPUs: 8, PodGPUs: []int{4, 4}}, true),
+		Entry("a CPU leader is matched last", ShareVariant{GPUs: 16, PodGPUs: []int{0, 8, 8}}, ShareVariant{GPUs: 8, PodGPUs: []int{8}}, true),
+		Entry("unknown shape falls back to totals", ShareVariant{GPUs: 8}, ShareVariant{GPUs: 8, PodGPUs: []int{8}}, true),
+		Entry("unknown shape, smaller total", ShareVariant{GPUs: 4}, ShareVariant{GPUs: 8}, false),
+	)
+
+	// A is over-provisioned and B short, at equal weights; one replica of
+	// either is 8 GPUs. Only the pod shape decides whether A can fund B.
+	plan := func(donorPods []int) int {
+		roles := []ShareRole{
+			{Key: "A", Weight: 1, Need: 8, Ceiling: 64, ReplicaGPUs: 8},
+			{Key: "B", Weight: 1, Need: 24, Ceiling: 64, ReplicaGPUs: 8},
+		}
+		in := SharePlanInput{
+			Roles: roles, Held: map[string]int{"A": 24, "B": 8}, Thresholds: map[string]float64{"A": 0.8, "B": 0.8},
+			Budget: 32, Tolerance: 0.15,
+			Give: map[string]ShareVariant{"A": {Name: "a", GPUs: 8, PodGPUs: donorPods}},
+			Grow: map[string]ShareVariant{"B": {Name: "b", GPUs: 8, PodGPUs: []int{8}}},
+		}
+		l := NewShareLedger()
+		started := 0
+		for i := range 3 {
+			started += len(PlanShareTransfers(l, in, time.Unix(int64(30*i), 0), simTimings()).Started)
+		}
+		return started
+	}
+
+	It("moves a replica when a donor pod can host the receiver's pod", func() {
+		Expect(plan([]int{8})).To(BeNumerically(">", 0))
+	})
+
+	It("moves nothing when only smaller donor pods add up to the receiver's (negative control above)", func() {
+		Expect(plan([]int{4, 4})).To(BeZero())
+	})
+})

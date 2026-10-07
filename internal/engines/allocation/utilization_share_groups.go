@@ -25,6 +25,32 @@ type ShareVariant struct {
 	Current int
 	// Min and Max are its replica bounds; Max 0 is unbounded.
 	Min, Max int
+	// PodGPUs is each pod's GPUs in one replica; nil when unknown.
+	PodGPUs []int
+}
+
+// ShareCovers reports whether a donor replica's pods can fund a receiver
+// replica's (§6.5): every receiver pod needs a donor pod of its own at least
+// its size, since nothing shows that several smaller donor pods share a node.
+// The donor's surplus returns to the free budget. With either shape unknown it
+// falls back to the replicas' totals.
+func ShareCovers(donor, receiver ShareVariant) bool {
+	if len(donor.PodGPUs) == 0 || len(receiver.PodGPUs) == 0 {
+		return max(donor.GPUs, 1) >= max(receiver.GPUs, 1)
+	}
+	if len(receiver.PodGPUs) > len(donor.PodGPUs) {
+		return false
+	}
+	d := slices.Sorted(slices.Values(donor.PodGPUs))
+	r := slices.Sorted(slices.Values(receiver.PodGPUs))
+	slices.Reverse(d)
+	slices.Reverse(r)
+	for i := range r {
+		if d[i] < r[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func shareVariantOf(vc variantRecord, stateMap map[string]domain.VariantReplicaState) ShareVariant {
@@ -36,6 +62,7 @@ func shareVariantOf(vc variantRecord, stateMap map[string]domain.VariantReplicaS
 	if st.MaxReplicas != nil {
 		v.Max = *st.MaxReplicas
 	}
+	v.PodGPUs = st.PodGPUs
 	return v
 }
 

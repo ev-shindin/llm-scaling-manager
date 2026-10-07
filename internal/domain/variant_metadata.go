@@ -56,6 +56,11 @@ type VariantMetadata struct {
 	// CurrentReplicas.
 	HeldReplicas int
 	HeldKnown    bool
+	// PodGPUs is the GPUs each pod of one replica requests, leader first: one
+	// entry for a Deployment, the group size for a LeaderWorkerSet. Nil when
+	// no pod requests a GPU explicitly, where GPUsPerReplica's default of 1
+	// says nothing about shape.
+	PodGPUs []int
 	// MinReplicas/MaxReplicas are the scaling bounds; nil means unset.
 	MinReplicas *int
 	MaxReplicas *int
@@ -79,6 +84,7 @@ func (m VariantMetadata) ToReplicaState() VariantReplicaState {
 		StuckReplicas:   m.StuckReplicas,
 		HeldReplicas:    m.HeldReplicas,
 		HeldKnown:       m.HeldKnown,
+		PodGPUs:         m.PodGPUs,
 		GPUsPerReplica:  m.GPUsPerReplica,
 		Role:            m.Role,
 		AcceleratorName: m.AcceleratorName,

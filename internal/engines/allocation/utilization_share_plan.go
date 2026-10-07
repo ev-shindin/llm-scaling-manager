@@ -141,23 +141,25 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 				continue
 			}
 			rr, dr := byKey[rc], byKey[dn]
-			g, gd := max(rr.ReplicaGPUs, 1), max(dr.ReplicaGPUs, 1)
+			grow := ShareVariant{GPUs: rr.ReplicaGPUs}
+			give := ShareVariant{GPUs: dr.ReplicaGPUs}
 			if in.Grow != nil {
 				v, ok := in.Grow[rc]
 				if !ok {
 					continue
 				}
-				g = max(v.GPUs, 1)
+				grow = v
 			}
 			if in.Give != nil {
 				v, ok := in.Give[dn]
 				if !ok {
 					continue
 				}
-				gd = max(v.GPUs, 1)
+				give = v
 			}
-			if gd < g {
-				continue // one donor pod must cover one receiver pod (§6.5)
+			g, gd := max(grow.GPUs, 1), max(give.GPUs, 1)
+			if !ShareCovers(give, grow) {
+				continue // the donor's pods cannot host the receiver's (§6.5)
 			}
 			// Rule 4: a role that gave cannot receive, and one that received
 			// cannot give, within the hold.

@@ -919,3 +919,18 @@ func TestLWSAccessor_GetName_GetNamespace_Nil(t *testing.T) {
 	accessor := NewLWSAccessor(nil)
 	assert.Nil(t, accessor)
 }
+
+// PodGPUs is the shape the utilization-share optimizer matches donor pods to
+// receiver pods by. A LeaderWorkerSet with no leader template runs its leader
+// from the worker template, so that leader holds the worker's GPUs.
+func TestPodGPUs(t *testing.T) {
+	gpu := corev1.ResourceName("nvidia.com/gpu")
+	noLeader := lwsWithGPURequests(2, gpu, "8", "8")
+	noLeader.Spec.LeaderWorkerTemplate.LeaderTemplate = nil
+
+	assert.Equal(t, []int{0, 8, 8}, PodGPUs(NewLWSAccessor(lwsWithGPURequests(3, gpu, "0", "8"))), "a CPU leader")
+	assert.Equal(t, []int{4, 4}, PodGPUs(NewLWSAccessor(lwsWithGPURequests(2, gpu, "4", "4"))))
+	assert.Equal(t, []int{8, 8}, PodGPUs(NewLWSAccessor(noLeader)), "the leader runs the worker template")
+	assert.Nil(t, PodGPUs(NewLWSAccessor(lwsWithGPURequests(2, gpu, "0", "0"))), "no GPU requested: shape unknown")
+	assert.Nil(t, PodGPUs(nil))
+}

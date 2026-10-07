@@ -260,6 +260,8 @@ type VariantReplicaState struct {
 	// VariantMetadata.HeldReplicas. HeldKnown false means it could not be read.
 	HeldReplicas int
 	HeldKnown    bool
+	// PodGPUs is each pod's GPUs in one replica; see VariantMetadata.PodGPUs.
+	PodGPUs []int
 	// GPUsPerReplica is the number of GPUs required per replica, extracted from
 	// the deployment's container resource requests (nvidia.com/gpu, amd.com/gpu, etc.).
 	// Defaults to 1 if no GPU requests are found.
