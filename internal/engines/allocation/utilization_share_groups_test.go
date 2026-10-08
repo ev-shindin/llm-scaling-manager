@@ -116,6 +116,23 @@ var _ = Describe("BuildShareGroups", func() {
 		Expect(without.Budget - with.Budget).To(Equal(2))
 	})
 
+	It("carves the warm pools' unheld target out of the budget of the group they plan in (§7.2)", func() {
+		reqs := []ModelScalingRequest{shareReq("A", "ns", 4000, 9)}
+		cons := []*ResourceConstraints{{Pools: map[string]ResourcePool{"A100": {Limit: 16, Used: 12}}}}
+		without := BuildShareGroups(reqs, cons, ShareGroupOptions{ClusterIsQuota: true})[0]
+		with := BuildShareGroups(reqs, cons, ShareGroupOptions{ClusterIsQuota: true,
+			PoolUnheld: map[string]map[string]int{"pools": {"A100": 3, "H100": 5}}})[0]
+		Expect(without.Budget-with.Budget).To(Equal(3), "only the group's accelerator is carved")
+		Expect(with.PoolCarve).To(Equal(3))
+	})
+
+	It("charges a namespace with its own quota group its pools' carve-out, not the cluster group", func() {
+		Expect(poolCarve(map[string]map[string]int{"own": {"A100": 2}, "other": {"A100": 3}}, "A100", "own",
+			func(string) bool { return true })).To(Equal(2))
+		Expect(poolCarve(map[string]map[string]int{"own": {"A100": 2}, "other": {"A100": 3}}, "A100", "",
+			func(ns string) bool { return ns == "own" })).To(Equal(3), "the cluster group carves only namespaces without a group")
+	})
+
 	It("skips a disabled namespace-quota group and keeps the others", func() {
 		reqs := []ModelScalingRequest{shareReq("A", "team-a", 4000, 4), shareReq("B", "team-b", 3000, 4)}
 		cons := []*ResourceConstraints{{

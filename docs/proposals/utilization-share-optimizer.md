@@ -2007,26 +2007,34 @@ optimizer every cycle (§6.6).
        one accelerator (`ShareClaimStore.ClaimSet`: replicas matched largest
        first, each preferring the best-off receiver's transfer, backtracking
        when a later replica would be left without one). A role already serving
-       is not claimed for. If one of the pair's transfers moves on before the
-       steady-state engine applies the claims, that redirect fails and the pair
-       is half funded; its other role waits for idle GPUs, as before.
+       is not claimed for. The steady-state engine applies one wake's claims
+       all or none too: if any of them has moved on by the time it takes them,
+       none is redirected and their receivers keep their promises.
      - the kind e2e, single role and P/D: shadow evaluates and touches nothing.
        Active, an idle model's marked pod is the one its ReplicaSet removes,
        and the loaded model grows only after the release. A P/D decode LWS
        grows by one group funded by two of an idle model's replicas as one
-       set, raised only after both released. The first cluster run found that
-       the engine keyed scale targets by Deployment name, not variant name, so
-       no donor could be marked.
+       set, raised only after both released. On nodes with every other GPU
+       taken by pause pods outside WVA, a 2-GPU receiver pod is funded by two
+       1-GPU donor pods the node-aware search planned on one node. The first
+       cluster run found that the engine keyed scale targets by Deployment
+       name, not variant name, so no donor could be marked.
+     - the warm pool's carve-out (section 7.2). Each reconcile pass, a pool
+       publishes the part of its target it does not hold: its size after the
+       contention hold, before the headroom cap, times its Pods' GPUs, less
+       what it holds (`decision.WarmPoolUnheldStore`, believed five minutes).
+       It is taken out of the budget of the group its namespace plans in --
+       the namespace's own quota group, else the cluster group -- so the
+       optimizer leaves those GPUs free and the pool's headroom sees them. A
+       pool yielding to a denied model publishes nothing, and an empty pass
+       clears the figure.
+     - re-planning after a wrong pod: the GPUs that did come free are idle,
+       and the idle fill raises the receiver only where its pods fit the free
+       node picture (`ShareFitPods`, in its domain when it has one), spending
+       it. Without node information the fill counts GPUs, as before.
 
-   **Not yet built in stage 2:**
-   - the warm pool's own carve-out from idle (section 7.2): the pool publishes
-     no GPU target to carve from.
-   - re-planning a receiver from the holes that did open after a wrong pod
-     went; the transfer ends and the next plan starts afresh instead.
-   - a node-aware e2e: the kind emulator's GPUs are all on one node, with
-     more GPUs than the test quota, so the receiver's pods always fit the
-     node's free GPUs and the node-aware search defers to the node-blind one.
-     It is covered by unit tests only.
+   **Not yet built in stage 2:** nothing beyond item 3. The refill pace guard
+   remains untestable while the concurrency limit (2) equals the pace (2).
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4).
 

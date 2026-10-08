@@ -32,6 +32,10 @@ type ShareClaim struct {
 	Scope, Accelerator, ID string
 	// Wake names the woken variant (namespace/variant), for the log.
 	Wake string
+	// Model is the woken model (namespace/model). The claims one wake made
+	// together -- a decode and its prefill -- share it, and are applied all
+	// or none.
+	Model string
 }
 
 // Claim outcomes, the outcome label of wva_utilization_share_claims_total.
@@ -165,7 +169,8 @@ func (s *ShareClaimStore) ClaimSet(scope, accelerator string, wakes []ShareWake,
 	}
 	claims := make([]ShareClaim, 0, len(order))
 	for i, w := range order {
-		claims = append(claims, ShareClaim{Scope: scope, Accelerator: accelerator, ID: entries[pick[i]].ID, Wake: w.Variant})
+		claims = append(claims, ShareClaim{Scope: scope, Accelerator: accelerator, ID: entries[pick[i]].ID,
+			Wake: w.Variant, Model: model})
 	}
 	s.claimable[key] = slices.DeleteFunc(slices.Clone(entries), func(e ShareClaimable) bool {
 		return slices.ContainsFunc(claims, func(c ShareClaim) bool { return c.ID == e.ID })

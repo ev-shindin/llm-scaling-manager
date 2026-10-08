@@ -233,6 +233,28 @@ ReplicaSet, HPA and KEDA. It needs nothing beyond the standard infra.
 - **Duration:** about 7 minutes. Run it alone with
   `FOCUS="Utilization share" make test-e2e-full`.
 
+Two more specs share the label and the `FOCUS`. Both skip when no node has
+enough GPUs of one product.
+- **`utilization_share_pd_test.go`, a P/D model on LeaderWorkerSets.**
+  - Setup: a 7-GPU quota. Idle model A has four 1-GPU replicas. Model B's
+    decode LWS runs one group of two 1-GPU pods, and its prefill LWS one pod.
+  - B's decode grows by a group. Two of A's replicas fund it as one donor set,
+    and the decode LWS is raised only after both have released.
+  - The set is read from the controller's log (`transfer started`, `released,
+    raising the receiver`, `transfer ended`), because it can finish within
+    about 30 seconds, faster than a poll reliably catches the donor marks.
+- **`utilization_share_nodes_test.go`, node-aware donor sets.**
+  - Setup: a 6-GPU quota. Idle model A has four 1-GPU replicas, and model B
+    one 2-GPU replica.
+  - Every other free GPU on the product's nodes is taken by a
+    `registry.k8s.io/pause` pod in a separate namespace, outside WVA.
+  - No single A pod holds B's pod, so only the node-aware search can fund it:
+    the controller must log a set of two A pods with `"planned": true`, raise
+    B only after both have released, and B's second pod must run.
+  - The fill is what makes the node search matter. On an emulator with spare
+    GPUs, the receiver's pods would fit free GPUs and the search would defer to
+    the node-blind one.
+
 **Install script tuning (optional, same variables as `deploy/install.sh`):**
 
 - **`SKIP_HELM_REPO_UPDATE`**: When set to **`true`**, `helm repo update` is skipped during installs (faster, less network churn). Default runs `helm repo update` to refresh repo indexes.

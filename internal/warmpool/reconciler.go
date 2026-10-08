@@ -393,6 +393,9 @@ func (r *Reconciler) Once(ctx context.Context) (policy.Plan, error) {
 	}
 
 	var merged policy.Plan
+	// What the pools want and do not hold, per accelerator: the carve-out the
+	// utilization-share optimizer keeps free for them (proposal section 7.2).
+	unheld := map[string]int{}
 	for _, spec := range pools {
 		mine := MembershipsIn(memberships, spec.Name)
 		theirs := VariantsFor(variants, spec, pools)
@@ -432,9 +435,16 @@ func (r *Reconciler) Once(ctx context.Context) (policy.Plan, error) {
 		lent := lentPods(mine)
 		r.report(ctx, spec, mine, theirs, free, lent)
 		r.apply(ctx, spec, plan)
-		r.publishSize(ctx, spec, mine, lent)
+		if acc, target, ok := r.publishSize(ctx, spec, mine, lent); ok {
+			if held := warmPoolGPUsByAccelerator(mine)[acc]; target > held {
+				unheld[acc] += target - held
+			}
+		}
 		merged = mergePlans(merged, plan)
 	}
+	// Every completed pass, empty included: a pool deleted or no longer
+	// short stops holding GPUs free at once.
+	decision.DefaultWarmPoolUnheld.Publish(r.Namespace, unheld, r.now())
 	r.forgetVanishedVariants(variants)
 	return merged, nil
 }
@@ -594,9 +604,14 @@ func acceleratorsIn(memberships []pool.Membership) string {
 // Published on every pass, unconditionally. It is a level, not an edge: KEDA
 // polls for it, and a size withheld because "nothing changed" would read as no
 // decision at all the first time KEDA asked after a restart.
-func (r *Reconciler) publishSize(ctx context.Context, spec PoolSpec, memberships []pool.Membership, lent int) {
+//
+// It returns the pool's accelerator and its target in GPUs -- its size after
+// the contention hold and before the headroom cap, which is what the
+// utilization-share optimizer's carve-out exists to relieve -- and false when
+// the pool is not sized here or names no single accelerator or device count.
+func (r *Reconciler) publishSize(ctx context.Context, spec PoolSpec, memberships []pool.Membership, lent int) (string, int, bool) {
 	if r.PublishSize == nil || spec.Deployment == "" {
-		return
+		return "", 0, false
 	}
 	want := SizeFor(spec.Config.SleepMinSize, lent)
 
@@ -658,6 +673,8 @@ func (r *Reconciler) publishSize(ctx context.Context, spec PoolSpec, memberships
 	// allowance answered or the pool simply stopped wanting more: a wait that
 	// recurs later at the same version -- a snapshot that aged out -- is a new
 	// wait and is said again.
+	accelerator, perPod := soleAccelerator(memberships), gpusPerUnit(memberships)
+	target := want * perPod
 	awaiting := false
 	defer func() {
 		if !awaiting {
@@ -698,6 +715,7 @@ func (r *Reconciler) publishSize(ctx context.Context, spec PoolSpec, memberships
 		}
 	}
 	r.PublishSize(r.Namespace, spec.Deployment, int32(want)) //nolint:gosec // small counts
+	return accelerator, target, accelerator != "" && perPod > 0
 }
 
 // heldPods counts the distinct Pods a pool holds, empty ones included: an empty

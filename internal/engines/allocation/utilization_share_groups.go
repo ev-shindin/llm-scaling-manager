@@ -87,6 +87,8 @@ type ShareGroup struct {
 	// GPUs of the type, which a namespace quota can exceed (as in applyRescale).
 	// math.MaxInt when the cluster pool is unbounded or unknown.
 	PhysicalFree int
+	// PoolCarve is the warm pools' unheld target taken out of Budget.
+	PoolCarve int
 	// Thresholds is each role's scale-up threshold k_r.
 	Thresholds map[string]float64
 	Origins    map[string]ShareRoleOrigin
@@ -120,6 +122,12 @@ type ShareGroupOptions struct {
 	// (proposal section 7.2). Spending them leaves the group over its budget,
 	// which the planner pays back first (SharePlan.Refills).
 	ReserveGPUs int
+	// PoolUnheld is, per namespace and accelerator, what the warm pools want
+	// and do not hold. It is carved out of the budget of the group the
+	// namespace plans in -- its own quota group where it has one, else the
+	// cluster group -- so the pools can grow into GPUs the optimizer would
+	// otherwise fill (proposal section 7.2).
+	PoolUnheld map[string]map[string]int
 }
 
 // BuildShareGroups turns one cycle's requests and constraints into the groups
@@ -231,7 +239,11 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		if g.listed > MaxShareBudgetGPUs-free {
 			continue
 		}
-		g.Budget = max(0, free+g.listed-opts.ReserveGPUs)
+		g.PoolCarve = poolCarve(opts.PoolUnheld, k.acc, k.scope, func(ns string) bool {
+			_, own := groups[key{k.acc, ns}]
+			return own
+		})
+		g.Budget = max(0, free+g.listed-opts.ReserveGPUs-g.PoolCarve)
 		g.PhysicalFree = math.MaxInt
 		if pf, ok := available[k.acc]; ok && pf >= 0 && pf < math.MaxInt {
 			g.PhysicalFree = pf
@@ -368,4 +380,20 @@ func shareGrowVariant(vs []variantRecord, stateMap map[string]domain.VariantRepl
 		return shareVariantOf(vc, stateMap), true
 	}
 	return ShareVariant{}, false
+}
+
+// poolCarve is a group's share of the warm pools' unheld target: a namespace
+// group's own, or for the cluster group every namespace's that has no group of
+// its own on the accelerator.
+func poolCarve(unheld map[string]map[string]int, acc, scope string, ownGroup func(ns string) bool) int {
+	if scope != "" {
+		return max(0, unheld[scope][acc])
+	}
+	sum := 0
+	for ns, byType := range unheld {
+		if !ownGroup(ns) {
+			sum += max(0, byType[acc])
+		}
+	}
+	return sum
 }

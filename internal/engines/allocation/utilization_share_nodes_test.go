@@ -331,3 +331,34 @@ var _ = Describe("Node-aware donor sets: guards and shapes (§6.5)", func() {
 		Expect(units["A"][0].Pods[0].Name).To(Equal("ns/a-1"), "the set's donor pod is not offered again")
 	})
 })
+
+var _ = Describe("ShareFitPods", func() {
+	nodes := func() map[string]ShareNode {
+		return map[string]ShareNode{
+			"n1": {Free: 4, Labels: map[string]string{"rack": "r1"}},
+			"n2": {Free: 2, Labels: map[string]string{"rack": "r2"}},
+			"n3": {Free: 2, Labels: map[string]string{"rack": "r2"}},
+		}
+	}
+	It("places largest first into the smallest node that holds each, and spends it", func() {
+		n := nodes()
+		Expect(ShareFitPods(n, []int{2, 4}, "")).To(BeTrue())
+		Expect(n["n1"].Free + n["n2"].Free + n["n3"].Free).To(Equal(2))
+		Expect(n["n1"].Free).To(BeZero(), "the 4-GPU pod takes the only node it fits")
+	})
+	It("spends nothing when a pod does not fit", func() {
+		n := nodes()
+		Expect(ShareFitPods(n, []int{4, 4}, "")).To(BeFalse())
+		Expect(n).To(Equal(nodes()))
+	})
+	It("keeps a domain receiver in one domain, trying each", func() {
+		// r1 (n1: 4) cannot hold a 3 and a 2; r2 (n2: 3, n3: 2) can.
+		n := nodes()
+		n["n2"] = ShareNode{Free: 3, Labels: map[string]string{"rack": "r2"}}
+		Expect(ShareFitPods(n, []int{3, 2}, "rack")).To(BeTrue())
+		Expect(n["n1"].Free).To(Equal(4), "r1 is untouched")
+		Expect(n["n2"].Free + n["n3"].Free).To(BeZero())
+		Expect(ShareFitPods(nodes(), []int{4, 2}, "rack")).To(BeFalse(), "no single rack holds 4 and 2")
+		Expect(ShareFitPods(nodes(), []int{4, 2}, "")).To(BeTrue(), "without a domain, any nodes do (control)")
+	})
+})

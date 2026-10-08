@@ -29,6 +29,9 @@ type nodeFleet struct {
 	c     client.Client
 	se    *shareEngine
 	nodes map[string]decision.NodeGPU
+	// quotaFree is what the quota limiter reports free: 0 in the fixture,
+	// which holds its 16 GPUs fully used.
+	quotaFree int
 }
 
 func newNodeFleet(t *testing.T) *nodeFleet {
@@ -77,7 +80,9 @@ func (nf *nodeFleet) cycle(withNodes bool) map[string]utilizationShareOverride {
 			st.PodGPUs = []int{1}
 		}
 	}
-	return nf.se.e.evaluateUtilizationShare(nf.se.ctx, out, fullQuota(), nf.f.scaleTargets())
+	quota := []*allocation.ResourceConstraints{{Pools: map[string]allocation.ResourcePool{
+		"A100": {Limit: 16, Used: 16 - nf.quotaFree}}}}
+	return nf.se.e.evaluateUtilizationShare(nf.se.ctx, out, quota, nf.f.scaleTargets())
 }
 
 // untilMarked cycles until some pod is marked, and returns the marked names.
@@ -302,6 +307,45 @@ func TestUtilizationShareAttributesAFillTimeout(t *testing.T) {
 			}
 			if taken != tc.want {
 				t.Fatalf("release-taken on B: %v, want %v", taken, tc.want)
+			}
+		})
+	}
+}
+
+// After a wrong pod went, the receiver is re-planned from the GPUs that did
+// come free: the idle fill raises it only where its pods fit. Two 1-GPU holes
+// on two nodes cannot host B's 2-GPU pod, so B is not raised into a Pending
+// pod; once a node shows room for it, B is filled.
+func TestUtilizationShareReplansFromTheHolesThatOpened(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		room  int // free GPUs on n-A-v-0 after the wrong pods went
+		wantB int
+	}{
+		{"the open holes are too small", 1, 5},
+		{"a node has room for B's pod", 2, 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nf := newNodeFleet(t)
+			if got := nf.untilMarked(t, true); !slices.Equal(got, []string{"A-v-5", "A-v-6"}) {
+				t.Fatalf("setup: marked %v", got)
+			}
+			nf.deletePods(t, "A-v-0", "A-v-1")
+			nf.f.current["A"] -= 2
+			nf.quotaFree = 2 // the quota sees the two GPUs A gave up
+			// What the refresher would see: those two nodes freed their GPU.
+			nf.nodes["n-A-v-0"] = decision.NodeGPU{Accelerator: "A100", Capacity: tc.room, Used: 0}
+			nf.nodes["n-A-v-1"] = decision.NodeGPU{Accelerator: "A100", Capacity: 1, Used: 0}
+			// The first change of B's target, if any: in the fixture B's new pod
+			// never lands, so a later fill timeout would fill again.
+			b := 5
+			for range 6 {
+				if b = nf.cycle(true)["ns/B-v"].Target; b != 5 {
+					break
+				}
+			}
+			if b != tc.wantB {
+				t.Fatalf("B = %d, want %d", b, tc.wantB)
 			}
 		})
 	}

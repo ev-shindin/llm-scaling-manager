@@ -528,7 +528,7 @@ func (l *ShareLedger) ReceivingHeld(role string, now time.Time, tm ShareTimings)
 // fill does not raise another receiver into the hole the wake's pod waits for.
 func (l *ShareLedger) Redirect(id string, now time.Time, hold time.Duration) (ShareTransfer, bool) {
 	for _, t := range l.transfers {
-		if t.ID == id && t.State == ShareReleasing && t.Receiver != "" && t.SetID == "" {
+		if t.ID == id && redirectable(t) {
 			prev := *t
 			t.Receiver, t.ReceiverVariant, t.GPUs, t.Urgent = "", "", 0, false
 			l.wakeHolds = append(l.wakeHolds, shareWakeHold{gpus: t.DonorGPUs, until: now.Add(hold)})
@@ -536,6 +536,16 @@ func (l *ShareLedger) Redirect(id string, now time.Time, hold time.Duration) (Sh
 		}
 	}
 	return ShareTransfer{}, false
+}
+
+// Redirectable reports whether Redirect would take transfer id: it is still
+// releasing, for a receiver, and not part of a donor set.
+func (l *ShareLedger) Redirectable(id string) bool {
+	return slices.ContainsFunc(l.transfers, func(t *ShareTransfer) bool { return t.ID == id && redirectable(t) })
+}
+
+func redirectable(t *ShareTransfer) bool {
+	return t.State == ShareReleasing && t.Receiver != "" && t.SetID == ""
 }
 
 // WakeHeld is the GPUs held for woken models now.

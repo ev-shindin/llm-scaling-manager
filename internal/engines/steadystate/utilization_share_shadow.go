@@ -137,6 +137,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		ClusterIsQuota:   e.Config.EffectiveLimiterMode() == config.LimiterTypeQuota,
 		PhysicalGroups:   us.PhysicalGroups,
 		ReserveGPUs:      us.ReserveGPUs,
+		PoolUnheld:       decision.DefaultWarmPoolUnheld.Latest(decision.WarmPoolUnheldMaxAge, now),
 		NamespaceEnabled: us.EnabledForNamespace,
 		Weight: func(req allocation.ModelScalingRequest, _ bool) float64 {
 			w, err := us.Weight(req.WeightClass, req.Weight)
@@ -244,7 +245,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		published = append(published, pg)
 
 		kv := []any{
-			"accelerator", g.AcceleratorType, "scope", scope, "budget", g.Budget,
+			"accelerator", g.AcceleratorType, "scope", scope, "budget", g.Budget, "poolCarve", g.PoolCarve,
 			"spare", fmt.Sprintf("%.2f", ev.Spare), "wholeReplicaCoverage", ev.WholeReplicaCoverage,
 			"replicasToMove", ev.ReplicasToMove, "actionable", actionable, "frozen", g.Frozen,
 		}

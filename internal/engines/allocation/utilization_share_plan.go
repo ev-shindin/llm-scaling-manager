@@ -106,6 +106,10 @@ type SharePlan struct {
 	// ShareWithheldNotActionable (a role out of band with no whole replica to
 	// move, section 6.1 step 4).
 	Withheld map[string]int
+	// Nodes is the node picture this cycle's node-aware sets left: their
+	// placements spent, for the idle fill to place into. Nil without node
+	// information.
+	Nodes map[string]ShareNode
 }
 
 // Reasons in SharePlan.Unfunded and SharePlan.Withheld.
@@ -137,6 +141,7 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 	// Node state is spent as node-aware sets start within the cycle; work on
 	// copies, never the caller's.
 	in.Nodes, in.DonorUnits = maps.Clone(in.Nodes), maps.Clone(in.DonorUnits)
+	plan.Nodes = in.Nodes
 
 	// Rule 5: a swinging role is planned on its mean need.
 	raw := make(map[string]float64, len(in.Roles))
@@ -732,4 +737,56 @@ func withdrawNodeSet(nodes map[string]ShareNode, units map[string][]ShareUnit, s
 			return slices.ContainsFunc(u.Pods, func(p SharePod) bool { return gone[p.Name] })
 		})
 	}
+}
+
+// ShareFitPods places one replica's pods, largest first, each into the node
+// with the smallest free count that holds it, and spends what it placed. A
+// receiver with an exclusive topology (domainKey) is placed in one domain,
+// each tried in turn; a node without the label is in none. It reports
+// whether every pod fitted, and spends nothing when not.
+func ShareFitPods(nodes map[string]ShareNode, podGPUs []int, domainKey string) bool {
+	names := slices.Sorted(maps.Keys(nodes))
+	domains := []string{""}
+	if domainKey != "" {
+		domains = nil
+		for _, n := range names {
+			if v := nodes[n].Labels[domainKey]; v != "" && !slices.Contains(domains, v) {
+				domains = append(domains, v)
+			}
+		}
+		slices.Sort(domains)
+	}
+	need := slices.Sorted(slices.Values(podGPUs))
+	slices.Reverse(need)
+	for _, domain := range domains {
+		free := map[string]int{}
+		for _, n := range names {
+			if domainKey == "" || nodes[n].Labels[domainKey] == domain {
+				free[n] = nodes[n].Free
+			}
+		}
+		fits := true
+		for _, p := range need {
+			best := ""
+			for _, n := range names {
+				if f, ok := free[n]; ok && f >= p && (best == "" || f < free[best]) {
+					best = n
+				}
+			}
+			if best == "" {
+				fits = false
+				break
+			}
+			free[best] -= p
+		}
+		if fits {
+			for n, f := range free {
+				info := nodes[n]
+				info.Free = f
+				nodes[n] = info
+			}
+			return true
+		}
+	}
+	return false
 }
