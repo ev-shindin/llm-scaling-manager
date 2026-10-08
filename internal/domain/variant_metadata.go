@@ -48,6 +48,19 @@ type VariantMetadata struct {
 	DesiredReplicas int
 	ReadyReplicas   int
 	PendingReplicas int
+	// HeldReplicas counts the replicas holding GPUs: scheduled and not
+	// finished, TERMINATING ones included -- a pod being deleted keeps its GPUs
+	// through its drain and grace period, which CurrentReplicas
+	// (status.replicas) stops counting the moment deletion starts. HeldKnown is
+	// false when the pods could not be listed; consumers then fall back to
+	// CurrentReplicas.
+	HeldReplicas int
+	HeldKnown    bool
+	// PodGPUs is the GPUs each pod of one replica requests, leader first: one
+	// entry for a Deployment, the group size for a LeaderWorkerSet. Nil when
+	// no pod requests a GPU explicitly, where GPUsPerReplica's default of 1
+	// says nothing about shape.
+	PodGPUs []int
 	// MinReplicas/MaxReplicas are the scaling bounds; nil means unset.
 	MinReplicas *int
 	MaxReplicas *int
@@ -69,6 +82,9 @@ func (m VariantMetadata) ToReplicaState() VariantReplicaState {
 		PendingReplicas: m.PendingReplicas,
 		PendingAges:     m.PendingAges,
 		StuckReplicas:   m.StuckReplicas,
+		HeldReplicas:    m.HeldReplicas,
+		HeldKnown:       m.HeldKnown,
+		PodGPUs:         m.PodGPUs,
 		GPUsPerReplica:  m.GPUsPerReplica,
 		Role:            m.Role,
 		AcceleratorName: m.AcceleratorName,

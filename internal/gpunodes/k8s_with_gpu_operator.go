@@ -7,7 +7,9 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/resources"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -119,9 +121,10 @@ func (d *K8sWithGpuOperator) listGPUNodes(ctx context.Context) (map[string]NodeI
 			ni, exists := nodes[node.Name]
 			if !exists {
 				ni = NodeInfo{
-					Name:         node.Name,
-					Labels:       copyStringMap(node.Labels),
-					Accelerators: make(map[string]AcceleratorModelInfo),
+					Name:          node.Name,
+					Labels:        copyStringMap(node.Labels),
+					Accelerators:  make(map[string]AcceleratorModelInfo),
+					Unschedulable: node.Spec.Unschedulable,
 				}
 			}
 			// i915 and xe resources use the same gpu.intel.com/product label, so
@@ -222,14 +225,49 @@ func (d *K8sWithGpuOperator) DiscoverUsageByNamespace(ctx context.Context) (map[
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to discover node GPU types: %w", err)
 	}
+	byType, byNamespace, _, err := d.usageWalk(ctx, nodeGPUType)
+	return byType, byNamespace, err
+}
 
+// DiscoverUsageWithNodes returns DiscoverUsageByNamespace's two views and, from
+// the same pod walk, each GPU node's accelerator, capacity, requested GPUs and
+// labels. The utilization-share optimizer places a receiver's pods into the
+// holes donors open on particular nodes, which needs the per-node picture
+// (docs/proposals/utilization-share-optimizer.md, section 6.5).
+func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[string]int, map[string]map[string]int, map[string]decision.NodeGPU, error) {
+	nodes, err := d.listGPUNodes(ctx)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to discover GPU nodes: %w", err)
+	}
+	nodeGPUType := nodeGPUTypesOf(nodes)
+	byType, byNamespace, byNode, err := d.usageWalk(ctx, nodeGPUType)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	out := make(map[string]decision.NodeGPU, len(nodeGPUType))
+	for name, model := range nodeGPUType {
+		out[name] = decision.NodeGPU{
+			Accelerator:   model,
+			Capacity:      nodes[name].Accelerators[model].Count,
+			Used:          byNode[name],
+			Labels:        nodes[name].Labels,
+			Unschedulable: nodes[name].Unschedulable,
+		}
+	}
+	return byType, byNamespace, out, nil
+}
+
+// usageWalk is the one pod walk behind every usage view: GPUs requested by
+// pods occupying GPU nodes, per accelerator type, per namespace and per node.
+func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[string]string) (map[string]int, map[string]map[string]int, map[string]int, error) {
 	var podList corev1.PodList
 	if err := d.Client.List(ctx, &podList); err != nil {
-		return nil, nil, fmt.Errorf("failed to list pods: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to list pods: %w", err)
 	}
 
 	usageByType := make(map[string]int)
 	usageByNamespace := make(map[string]map[string]int)
+	usageByNode := make(map[string]int)
 
 	for _, pod := range podList.Items {
 		if pod.Spec.NodeName == "" {
@@ -245,11 +283,12 @@ func (d *K8sWithGpuOperator) DiscoverUsageByNamespace(ctx context.Context) (map[
 			continue
 		}
 
-		gpuCount := getPodGPURequests(&pod)
+		gpuCount := resources.PodGPURequests(&pod)
 		if gpuCount <= 0 {
 			continue
 		}
 		usageByType[gpuType] += gpuCount
+		usageByNode[pod.Spec.NodeName] += gpuCount
 		perType, seen := usageByNamespace[pod.Namespace]
 		if !seen {
 			perType = make(map[string]int)
@@ -258,7 +297,7 @@ func (d *K8sWithGpuOperator) DiscoverUsageByNamespace(ctx context.Context) (map[
 		perType[gpuType] += gpuCount
 	}
 
-	return usageByType, usageByNamespace, nil
+	return usageByType, usageByNamespace, usageByNode, nil
 }
 
 // discoverNodeGPUTypes returns a map of node name to GPU type (model name).
@@ -277,7 +316,12 @@ func (d *K8sWithGpuOperator) discoverNodeGPUTypes(ctx context.Context) (map[stri
 	if err != nil {
 		return nil, err
 	}
+	return nodeGPUTypesOf(nodes), nil
+}
 
+// nodeGPUTypesOf projects listed nodes onto one accelerator model per node,
+// with discoverNodeGPUTypes' tie-break.
+func nodeGPUTypesOf(nodes map[string]NodeInfo) map[string]string {
 	out := make(map[string]string, len(nodes))
 	for name, n := range nodes {
 		// Iterate vendor resources in REVERSE order and break on first match so
@@ -306,47 +350,7 @@ func (d *K8sWithGpuOperator) discoverNodeGPUTypes(ctx context.Context) (map[stri
 			}
 		}
 	}
-	return out, nil
-}
-
-// getPodGPURequests returns the total GPU requests for a pod across all containers.
-// For regular containers, GPUs are summed (they run concurrently).
-// For init containers, we take the max (they run sequentially).
-// The final result is max(initContainerMax, regularContainerSum) since init containers
-// complete before regular containers start.
-func getPodGPURequests(pod *corev1.Pod) int {
-	// Sum GPU requests from regular containers (run concurrently)
-	regularTotal := 0
-	for _, container := range pod.Spec.Containers {
-		for _, res := range constants.VendorResources {
-			resName := corev1.ResourceName(res.ResourceName)
-			if qty, ok := container.Resources.Requests[resName]; ok {
-				regularTotal += int(qty.Value())
-			}
-		}
-	}
-
-	// Find max GPU request from init containers (run sequentially)
-	initMax := 0
-	for _, container := range pod.Spec.InitContainers {
-		containerGPUs := 0
-		for _, res := range constants.VendorResources {
-			resName := corev1.ResourceName(res.ResourceName)
-			if qty, ok := container.Resources.Requests[resName]; ok {
-				containerGPUs += int(qty.Value())
-			}
-		}
-		if containerGPUs > initMax {
-			initMax = containerGPUs
-		}
-	}
-
-	// Return max of init containers and regular containers
-	// (init containers finish before regular containers start)
-	if initMax > regularTotal {
-		return initMax
-	}
-	return regularTotal
+	return out
 }
 
 // Ensure K8sWithGpuOperator implements FullDiscovery

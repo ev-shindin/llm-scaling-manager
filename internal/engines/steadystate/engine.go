@@ -170,6 +170,11 @@ type Engine struct {
 	// optimizeV2 from what collection read.
 	scaleTargetUIDs map[string]types.UID
 
+	// utilizationShare is the utilization-share optimizer's between-cycle
+	// state: what it reported, and the transfer ledgers it acts on unless its
+	// policy is in shadow mode; see evaluateUtilizationShare.
+	utilizationShare utilizationShareState
+
 	// lastBlockedModels records, keyed identically, every model this engine has
 	// published wva_model_scaling_blocked reasons for. Same reason as
 	// lastAnalyzerSeries — a GaugeVec cannot enumerate its own children — but the
@@ -1089,7 +1094,10 @@ func (e *Engine) selectV2Optimizer(
 	// fleet was not idle either, and so a live cluster with one no-change variant
 	// never published headroom at all -- the pool read "unknown" forever and
 	// grew past a one-GPU quota unopposed.
-	allocation.PublishNamespaceHeadroom(constraints, time.Now())
+	// GPUs the utilization-share optimizer has promised to a receiver are
+	// withheld from the pool (section 6.3 of its proposal).
+	now := time.Now()
+	allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, decision.LatestSharePromised(now)), now)
 	return optimizer, constraints
 }
 
@@ -1149,6 +1157,12 @@ func (e *Engine) optimizeV2(
 	// applyScaleToZeroEnforcement needs them to gate the enforcer. Captured here
 	// because data.scaleTargets is only in scope during this collection loop.
 	modelScaleTargets := make(map[string]map[string]scaletarget.ScaleTargetAccessor)
+	// variantScaleTargets is the same accessors keyed by namespace/variant, for
+	// the utilization-share optimizer, which plans variants. The model's map
+	// above is keyed by scale-target name, and a variant is rarely named after
+	// its Deployment (a KEDA-discovered variant is named after its
+	// ScaledObject).
+	variantScaleTargets := make(map[string]scaletarget.ScaleTargetAccessor)
 
 	for groupKey, modelVAs := range modelGroups {
 		modelID := modelVAs[0].Spec.ModelID
@@ -1195,6 +1209,12 @@ func (e *Engine) optimizeV2(
 		requests = append(requests, *req)
 		modelReplicaMetrics[modelID] = data.replicaMetrics
 		modelScaleTargets[utils.GetNamespacedKey(namespace, modelID)] = data.scaleTargets
+		for i := range modelVAs {
+			va := &modelVAs[i]
+			if t, ok := data.scaleTargets[utils.GetNamespacedKey(va.Namespace, va.GetScaleTargetName())]; ok {
+				variantScaleTargets[utils.GetNamespacedKey(va.Namespace, va.Name)] = t
+			}
+		}
 	}
 
 	if len(requests) == 0 {
@@ -1262,7 +1282,7 @@ func (e *Engine) optimizeV2(
 	if g, ok := optimizer.(*allocation.GreedyByScoreOptimizer); ok {
 		g.Rescale = e.resolveRescaleFlags(requests)
 	}
-	allDecisions := optimizer.Optimize(ctx, requests, constraints)
+	allDecisions := e.decideV2(ctx, optimizer, requests, constraints, variantScaleTargets)
 	logScalingDecisions(ctx, requests, allDecisions)
 
 	logger.Info("V2 optimizer produced decisions",

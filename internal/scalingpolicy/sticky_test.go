@@ -197,6 +197,20 @@ func TestHoldPublishedScaleDown_LeavesALimitedDecisionAlone(t *testing.T) {
 	assert.False(t, held)
 	assert.Equal(t, 2, out.TargetReplicas)
 }
+func TestHoldPublishedScaleDown_LeavesAUtilizationShareTargetAlone(t *testing.T) {
+	// The utilization-share ledger restores a donor whose transfer it
+	// cancelled: target back at the running count, above the lowered value it
+	// published. Negative control: the same decision with an ordinary reason is
+	// held at the published 1, and the cancel never takes effect.
+	d := decisionFor(2, 2, 20676)
+	_, heldOrdinary := hold(d, 1, true)
+	assert.True(t, heldOrdinary, "control: without the reason the hold keeps the lowered value")
+
+	d.SetDecisionReason(domain.ActionNoChange, domain.DecisionReasonUtilizationShare, "transfer cancelled")
+	out, held := hold(d, 1, true)
+	assert.False(t, held)
+	assert.Equal(t, 2, out.TargetReplicas)
+}
 func TestHoldPublishedScaleDown_InertWhenTheShareIsUnknown(t *testing.T) {
 	// The variant reported no rows while a sibling did: its demand cannot be
 	// priced, and 0 would read as "never saturated".

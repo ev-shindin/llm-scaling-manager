@@ -216,6 +216,12 @@ func DiscoverAcceleratorProduct(ctx context.Context, k8sClient *kubernetes.Clien
 	return key, product, ok
 }
 
+// DiscoverAccelerator is DiscoverAcceleratorProduct plus the vendor's
+// resource name, for a caller that requests the GPUs itself (WithLWSGPUs).
+func DiscoverAccelerator(ctx context.Context, k8sClient *kubernetes.Clientset) (key, product, resourceName string, ok bool) {
+	return discoverAccelerator(ctx, k8sClient)
+}
+
 // discoverAccelerator also reports the vendor's RESOURCE name, which a caller
 // needs to ask for one of these GPUs: the product label and the resource are a
 // pair (amd.com/gpu.product-name goes with amd.com/gpu), and mixing them across
@@ -287,10 +293,12 @@ func discoverAccelerator(ctx context.Context, k8sClient *kubernetes.Clientset) (
 	return totals[best].key, totals[best].product, totals[best].resource, true
 }
 
-// WithGPURequest sets the pod's GPU resource request/limit, which is how WVA
-// derives GPUs-per-replica (scaletarget.GetTotalGPUsPerReplica).
-func WithGPURequest(count int64) ModelServiceOption {
+// WithGPUs requests count GPUs of the named vendor resource on every container,
+// as a request and a limit. Pass the resource the accelerator pin discovered
+// (DiscoverAccelerator), so it matches the pin's nodeSelector.
+func WithGPUs(resourceName string, count int64) ModelServiceOption {
 	return func(d *appsv1.Deployment) {
+		qty := *resource.NewQuantity(count, resource.DecimalSI)
 		for i := range d.Spec.Template.Spec.Containers {
 			c := &d.Spec.Template.Spec.Containers[i]
 			if c.Resources.Requests == nil {
@@ -299,11 +307,17 @@ func WithGPURequest(count int64) ModelServiceOption {
 			if c.Resources.Limits == nil {
 				c.Resources.Limits = corev1.ResourceList{}
 			}
-			qty := *resource.NewQuantity(count, resource.DecimalSI)
-			c.Resources.Requests["nvidia.com/gpu"] = qty
-			c.Resources.Limits["nvidia.com/gpu"] = qty
+			c.Resources.Requests[corev1.ResourceName(resourceName)] = qty
+			c.Resources.Limits[corev1.ResourceName(resourceName)] = qty
 		}
 	}
+}
+
+// WithGPURequest sets the pod's nvidia.com/gpu request/limit, which is how WVA
+// derives GPUs-per-replica (scaletarget.GetTotalGPUsPerReplica). On a node of
+// another vendor use WithGPUs with the discovered resource name.
+func WithGPURequest(count int64) ModelServiceOption {
+	return WithGPUs("nvidia.com/gpu", count)
 }
 
 // CreateModelService creates the model-server Deployment only (name + "-decode").

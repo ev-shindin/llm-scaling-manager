@@ -56,7 +56,7 @@ for fn in so_model_id so_resolve_env_ref; do
     }
 done
 
-EXPECT_CASES=24
+EXPECT_CASES=29
 RAN=0
 FAILED=0
 
@@ -217,6 +217,29 @@ JSON
         'Qwen/Qwen3-0.6B' \
         "$(so_resolve_env_ref "$(so_model_id "$r_args")" "$r_envs")"
 fi
+
+# ----------------------------------------------------------------------------
+# so_pause_target_gpus: GPUs one replica of a scale target holds
+# ----------------------------------------------------------------------------
+# The function reads the target with kubectl; a stub serves the fixture. The
+# LWS cases pin the controller's arithmetic (GetTotalGPUsPerReplica): the leader
+# runs the workerTemplate when there is no leaderTemplate.
+declare -F so_pause_target_gpus >/dev/null || {
+    printf 'FATAL: so_pause_target_gpus is not defined after sourcing the library.
+' >&2
+    exit 1
+}
+SO_FIXTURE=''
+kubectl() { printf '%s' "$SO_FIXTURE"; }
+gpus_of() { SO_FIXTURE="$1"; so_pause_target_gpus ns kind name; }
+c() { printf '{"name":"c","resources":{"requests":{"%s":"%s"}}}' "$1" "$2"; }
+
+check 'pause GPUs: a Deployment sums its containers' '3'     "$(gpus_of "{\"spec\":{\"template\":{\"spec\":{\"containers\":[$(c nvidia.com/gpu 2),$(c nvidia.com/gpu 1)]}}}}")"
+check 'pause GPUs: an LWS without a leaderTemplate runs the worker as leader' '8'     "$(gpus_of "{\"spec\":{\"leaderWorkerTemplate\":{\"size\":2,\"workerTemplate\":{\"spec\":{\"containers\":[$(c amd.com/gpu 4)]}}}}}")"
+check 'pause GPUs: an LWS with a leaderTemplate counts it once' '10'     "$(gpus_of "{\"spec\":{\"leaderWorkerTemplate\":{\"size\":3,\"leaderTemplate\":{\"spec\":{\"containers\":[$(c nvidia.com/gpu 2)]}},\"workerTemplate\":{\"spec\":{\"containers\":[$(c nvidia.com/gpu 4)]}}}}}")"
+check 'pause GPUs: an LWS of size 1 without a leaderTemplate is one worker' '4'     "$(gpus_of "{\"spec\":{\"leaderWorkerTemplate\":{\"workerTemplate\":{\"spec\":{\"containers\":[$(c nvidia.com/gpu 4)]}}}}}")"
+check 'pause GPUs: no request reads as one GPU, as the controller defaults' '1'     "$(gpus_of '{"spec":{"template":{"spec":{"containers":[{"name":"c"}]}}}}')"
+unset -f kubectl
 
 # ----------------------------------------------------------------------------
 

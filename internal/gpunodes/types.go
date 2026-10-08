@@ -18,4 +18,6 @@ type NodeInfo struct {
 	// Accelerators is a map of accelerator model name (e.g., "NVIDIA-A100-PCIE-80GB")
 	// to AcceleratorModelInfo (count, memory).
 	Accelerators map[string]AcceleratorModelInfo
+	// Unschedulable is set on a cordoned node: nothing new lands on it.
+	Unschedulable bool
 }

@@ -151,6 +151,12 @@ func HoldPublishedScaleDown(d domain.VariantDecision, published int, publishedAt
 	if d.PerReplicaCapacity <= 0 || d.ScaleUpThreshold <= 0 || d.TotalDemand < 0 {
 		return d, false // nothing to price the published count with
 	}
+	if d.ReasonCategory() == domain.DecisionReasonUtilizationShare {
+		// The utilization-share ledger owns this target. Holding a published
+		// lower value against it would keep a cancelled transfer's donor
+		// lowered after the ledger restored it.
+		return d, false
+	}
 	if d.WasLimited {
 		// A target a GPU limiter bound is the limiter's answer, and its reason
 		// is what the ResourceConstrained event has to carry. The hold would

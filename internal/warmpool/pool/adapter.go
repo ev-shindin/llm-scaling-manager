@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 )
 
@@ -919,7 +920,7 @@ func (a *Adapter) setLabels(ctx context.Context, p *corev1.Pod, labels map[strin
 // Deletion costs the ReplicaSet controller reads when choosing a scale-down
 // victim; it removes the cheapest. Relative values only.
 const (
-	deletionCostAnnotation = "controller.kubernetes.io/pod-deletion-cost"
+	deletionCostAnnotation = constants.PodDeletionCostAnnotation
 	deletionCostLent       = "1000"
 	deletionCostIdle       = "0"
 )

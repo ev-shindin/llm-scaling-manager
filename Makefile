@@ -2618,6 +2618,8 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# comparison the scenario exists for cannot happen. A cluster run only ever
 	@# exercises the happy path, so the rules are asserted offline.
 	@python3 hack/check-add-variant.py
+	@echo "Checking the pod spec the warm pool planner reads..."
+	@python3 hack/check-warmpool-plan.py
 	@echo "Checking for mangled line continuations..."
 	@# `bash -n` cannot catch this: `cmd \n | grep ...` is SYNTACTICALLY VALID —
 	@# the \n becomes a literal argument. It shipped once, in the limiter path,

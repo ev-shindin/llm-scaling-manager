@@ -495,6 +495,32 @@ var _ = Describe("collectV2ModelRequest Disaggregated flag", func() {
 	})
 })
 
+// A dropped assignment here would give every model the default weight, and
+// nothing else would notice: the shadow evaluation builds on these fields.
+var _ = Describe("collectV2ModelRequest weight", func() {
+	collect := func(cfg config.ScalingPolicy) *allocation.ModelScalingRequest {
+		fakeSat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{}}
+		e := &Engine{
+			saturationV2Analyzer: fakeSat,
+			analyzersSnapshot:    []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: fakeSat}},
+			started:              true,
+		}
+		cfg.ScaleUpThreshold, cfg.ScaleDownBoundary = 0.85, 0.70
+		req, err := e.collectV2ModelRequest(context.Background(), "m", "ns", nil, cfg,
+			[]domain.VariantReplicaState{{VariantName: "v1"}}, nil, nil, nil, nil, 0)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		return req
+	}
+
+	It("carries the model's weight class", func() {
+		Expect(collect(config.ScalingPolicy{WeightClass: "critical"}).WeightClass).To(Equal("critical"))
+	})
+
+	It("carries the model's numeric weight", func() {
+		Expect(collect(config.ScalingPolicy{Weight: config.NewModelWeight(3)}).Weight).To(Equal(config.NewModelWeight(3)))
+	})
+})
+
 func decisionsByVariant(decisions []domain.VariantDecision) map[string]domain.VariantDecision {
 	m := make(map[string]domain.VariantDecision, len(decisions))
 	for _, d := range decisions {

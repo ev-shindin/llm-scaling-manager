@@ -35,6 +35,62 @@ func (f *fakeDiscovery) DiscoverUsageByNamespace(context.Context) (map[string]in
 	return f.byType, f.byNamespace, nil
 }
 
+// nodeDiscovery additionally reports the per-node view.
+type nodeDiscovery struct {
+	fakeDiscovery
+	nodes map[string]decision.NodeGPU
+}
+
+func (f *nodeDiscovery) DiscoverUsageWithNodes(context.Context) (map[string]int, map[string]map[string]int, map[string]decision.NodeGPU, error) {
+	f.calls.Add(1)
+	if f.err != nil {
+		return nil, nil, nil, f.err
+	}
+	return f.byType, f.byNamespace, f.nodes, nil
+}
+
+var _ = Describe("Refresher with node information", func() {
+	It("publishes the per-node view from the same observation", func() {
+		usage, nodes := decision.NewGPUUsageStore(), &decision.NodeGPUStore{}
+		disc := &nodeDiscovery{
+			fakeDiscovery: fakeDiscovery{byType: map[string]int{"A100": 5}},
+			nodes: map[string]decision.NodeGPU{
+				"n1": {Accelerator: "A100", Capacity: 8, Used: 5, Labels: map[string]string{"rack": "r1"}},
+			},
+		}
+		r := &Refresher{Store: usage, Nodes: nodes, Discovery: disc}
+		Expect(r.Refresh(context.Background())).To(Succeed())
+		Expect(disc.Calls()).To(Equal(1), "one walk for both views")
+
+		snap, ok := usage.Get()
+		Expect(ok).To(BeTrue())
+		Expect(snap.ByType).To(HaveKeyWithValue("A100", 5))
+		got := nodes.Latest(time.Minute, time.Now())
+		Expect(got).To(HaveKeyWithValue("n1", decision.NodeGPU{Accelerator: "A100", Capacity: 8, Used: 5,
+			Labels: map[string]string{"rack": "r1"}}))
+		Expect(got["n1"].Free()).To(Equal(3))
+	})
+
+	It("keeps the last node view when a look fails", func() {
+		nodes := &decision.NodeGPUStore{}
+		disc := &nodeDiscovery{nodes: map[string]decision.NodeGPU{"n1": {Accelerator: "A100", Capacity: 8}}}
+		r := &Refresher{Store: decision.NewGPUUsageStore(), Nodes: nodes, Discovery: disc}
+		Expect(r.Refresh(context.Background())).To(Succeed())
+		disc.err = errors.New("the node API is unreachable")
+		Expect(r.Refresh(context.Background())).ToNot(Succeed())
+		Expect(nodes.Latest(time.Minute, time.Now())).To(HaveKey("n1"))
+	})
+})
+
+var _ = Describe("NodeGPUStore", func() {
+	It("reports nothing once the snapshot is older than the bound", func() {
+		s, t0 := &decision.NodeGPUStore{}, time.Unix(1000, 0)
+		s.Publish(map[string]decision.NodeGPU{"n1": {Capacity: 8}}, t0)
+		Expect(s.Latest(time.Minute, t0.Add(59*time.Second))).To(HaveKey("n1"))
+		Expect(s.Latest(time.Minute, t0.Add(61*time.Second))).To(BeNil(), "a stale picture places pods into filled holes")
+	})
+})
+
 var _ = Describe("Refresher", func() {
 	var (
 		ctx   context.Context

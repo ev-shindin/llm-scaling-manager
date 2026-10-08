@@ -39,6 +39,9 @@ type Candidate struct {
 	Accelerator string
 	// GPUsPerReplica is what one replica consumes; waking is always one replica.
 	GPUsPerReplica int
+	// PodGPUs is each pod's GPUs in that replica, leader first; nil when no
+	// pod requests a GPU explicitly.
+	PodGPUs []int
 	// Cost is the variant's declared cost, used to rank equally-feasible options.
 	Cost float64
 }

@@ -25,14 +25,29 @@ const (
 	wvaConfigMapLabelValue = "workload-variant-autoscaler"
 )
 
-// QuotaOption adjusts the quota entry SetNamespaceQuota writes.
-type QuotaOption func(entry map[string]any)
+// quotaLimiterName names the limiter SetNamespaceQuota writes, so a sweep can
+// tell the suite's own entry from one an operator declared.
+const quotaLimiterName = "e2e-warm-pool-quota"
+
+// QuotaOption adjusts the quota entry SetNamespaceQuota writes, and the default
+// policy document it is written into.
+type QuotaOption func(entry, doc map[string]any)
 
 // WithKueue bounds the entry by Kueue, re-read every refreshInterval. A short
 // interval keeps a spec that flips Kueue objects from waiting on the default.
 func WithKueue(refreshInterval string) QuotaOption {
-	return func(entry map[string]any) {
+	return func(entry, _ map[string]any) {
 		entry["kueue"] = map[string]any{"enabled": true, "refreshInterval": refreshInterval}
+	}
+}
+
+// WithOptimizer sets the default entry's optimizer block. The optimizer is
+// configured beside the limiters and only there
+// (docs/proposals/utilization-share-optimizer.md, section 8.1), so it is
+// written by the same call that writes the quota.
+func WithOptimizer(block map[string]any) QuotaOption {
+	return func(_, doc map[string]any) {
+		doc["optimizer"] = block
 	}
 }
 
@@ -90,7 +105,7 @@ func SetNamespaceQuota(
 		}
 	}
 	entry := map[string]any{
-		"name":  "e2e-warm-pool-quota",
+		"name":  quotaLimiterName,
 		"type":  "quota",
 		"scope": "namespace",
 		"namespaceQuotas": map[string]any{
@@ -98,7 +113,7 @@ func SetNamespaceQuota(
 		},
 	}
 	for _, opt := range opts {
-		opt(entry)
+		opt(entry, doc)
 	}
 	doc["limiters"] = []any{entry}
 	merged, err := yaml.Marshal(doc)
@@ -171,4 +186,57 @@ func SetNamespaceQuota(
 		_, err = cms.Update(ctx, restored, metav1.UpdateOptions{})
 		return err
 	}, nil
+}
+
+// ClearLeftoverQuota removes what SetNamespaceQuota wrote and a run never
+// restored -- it was interrupted, or a restore failed: the suite's limiter, and
+// the optimizer block written with it. It reports whether anything was removed.
+//
+// A leftover quota names a namespace that no longer exists, and a namespace
+// quota bounds every namespace it does not list at zero: each later
+// scale-from-zero spec is then refused with no-capacity and waits five minutes
+// for an activation that cannot come.
+func ClearLeftoverQuota(ctx context.Context, clientset *kubernetes.Clientset, configNamespace, configName string) (bool, error) {
+	cms := clientset.CoreV1().ConfigMaps(configNamespace)
+	cm, err := cms.Get(ctx, configName, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", configName, err)
+	}
+	raw := cm.Data[defaultEntryKey]
+	if raw == "" {
+		return false, nil
+	}
+	doc := map[string]any{}
+	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
+		return false, fmt.Errorf("parse %s entry: %w", defaultEntryKey, err)
+	}
+	limiters, _ := doc["limiters"].([]any)
+	kept := make([]any, 0, len(limiters))
+	for _, l := range limiters {
+		if m, ok := l.(map[string]any); ok && m["name"] == quotaLimiterName {
+			continue
+		}
+		kept = append(kept, l)
+	}
+	if len(kept) == len(limiters) {
+		return false, nil
+	}
+	if len(kept) == 0 {
+		delete(doc, "limiters")
+	} else {
+		doc["limiters"] = kept
+	}
+	delete(doc, "optimizer")
+	merged, err := yaml.Marshal(doc)
+	if err != nil {
+		return false, fmt.Errorf("marshal %s entry: %w", defaultEntryKey, err)
+	}
+	cm.Data[defaultEntryKey] = string(merged)
+	if _, err := cms.Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
+		return false, fmt.Errorf("update %s: %w", configName, err)
+	}
+	return true, nil
 }

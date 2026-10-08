@@ -7,6 +7,7 @@ import (
 	"time"
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -532,5 +533,34 @@ func TestTargetCarriesScaledObjectLabels(t *testing.T) {
 	so.Labels["inference.optimization/acceleratorName"] = "mutated"
 	if target.Labels["inference.optimization/acceleratorName"] != "A100" {
 		t.Error("the target must not alias the object's label map")
+	}
+}
+
+// TestTargetFromScaledObjectCarriesReleaseTiming: the scale-down window and the
+// polling interval are what a release takes, and the utilization-share
+// optimizer derives its timings from them. Unset, they stay nil, so the
+// consumer applies the HPA's and KEDA's defaults rather than a zero.
+func TestTargetFromScaledObjectCarriesReleaseTiming(t *testing.T) {
+	so := scaledObject("chat-so", testTarget, nil, nil)
+	if target := TargetFromScaledObject(so); target.ScaleDownWindowSeconds != nil || target.PollingIntervalSeconds != nil {
+		t.Fatalf("unset timings must stay nil, have window %v polling %v",
+			target.ScaleDownWindowSeconds, target.PollingIntervalSeconds)
+	}
+
+	window, polling := int32(60), int32(15)
+	so.Spec.PollingInterval = &polling
+	so.Spec.Advanced = &kedav1alpha1.AdvancedConfig{
+		HorizontalPodAutoscalerConfig: &kedav1alpha1.HorizontalPodAutoscalerConfig{
+			Behavior: &autoscalingv2.HorizontalPodAutoscalerBehavior{
+				ScaleDown: &autoscalingv2.HPAScalingRules{StabilizationWindowSeconds: &window},
+			},
+		},
+	}
+	target := TargetFromScaledObject(so)
+	if target.ScaleDownWindowSeconds == nil || *target.ScaleDownWindowSeconds != 60 {
+		t.Errorf("window = %v, want 60", target.ScaleDownWindowSeconds)
+	}
+	if target.PollingIntervalSeconds == nil || *target.PollingIntervalSeconds != 15 {
+		t.Errorf("polling = %v, want 15", target.PollingIntervalSeconds)
 	}
 }

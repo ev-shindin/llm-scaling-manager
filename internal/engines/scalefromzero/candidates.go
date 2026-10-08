@@ -121,6 +121,7 @@ func (e *Engine) buildCandidates(
 			Role:            variantmeta.RoleFromScaleTarget(scaleTarget),
 			Accelerator:     candidateAccelerator(&va, scaleTarget),
 			GPUsPerReplica:  scaleTarget.GetTotalGPUsPerReplica(),
+			PodGPUs:         scaletarget.PodGPUs(scaleTarget),
 			Cost:            resolveVariantCost(ctx, va),
 		})
 	}
@@ -240,6 +241,12 @@ func (e *Engine) gpuConstraints(ctx context.Context, namespace string) []*alloca
 		}
 		constraints = append(constraints, c)
 	}
+	// A wake may not take GPUs the utilization-share optimizer has promised
+	// to a receiver: they are released but not yet held, and taking them would
+	// leave the receiver Pending until its fill timeout. Claiming them by
+	// score (section 6.3 of that proposal) is not built; a wake waits for idle
+	// GPUs instead.
+	constraints = allocation.WithholdPromised(constraints, decision.LatestSharePromised(time.Now()))
 	e.logBudgets(ctx, namespace, constraints, views)
 	return constraints
 }

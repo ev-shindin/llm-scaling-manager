@@ -23,6 +23,12 @@ const (
 	// deliberate, redistributive scale-down (not flappy demand), which downstream
 	// stabilization must not damp as if it were noise.
 	DecisionReasonRescale DecisionReason = "rescale"
+	// DecisionReasonUtilizationShare marks a target the utilization-share
+	// optimizer owns: a donor lowered or a receiver raised by a transfer, or an
+	// idle fill. The ledger, not the sticky scale-down hold, owns such a target
+	// -- a cancelled transfer must be able to lift a donor's lowered one
+	// (docs/proposals/utilization-share-optimizer.md, section 6.3).
+	DecisionReasonUtilizationShare DecisionReason = "utilization-share"
 	// DecisionReasonTest is used for test scenarios.
 	DecisionReasonTest DecisionReason = "test"
 )
@@ -250,6 +256,12 @@ type VariantReplicaState struct {
 	// StuckReplicas is how many of this variant's Pods are not Ready and not
 	// starting either. See domain.VariantCapacity.StuckReplicas.
 	StuckReplicas int
+	// HeldReplicas counts replicas holding GPUs, terminating ones included; see
+	// VariantMetadata.HeldReplicas. HeldKnown false means it could not be read.
+	HeldReplicas int
+	HeldKnown    bool
+	// PodGPUs is each pod's GPUs in one replica; see VariantMetadata.PodGPUs.
+	PodGPUs []int
 	// GPUsPerReplica is the number of GPUs required per replica, extracted from
 	// the deployment's container resource requests (nvidia.com/gpu, amd.com/gpu, etc.).
 	// Defaults to 1 if no GPU requests are found.

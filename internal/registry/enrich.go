@@ -183,7 +183,13 @@ func TargetFromScaledObject(so *kedav1alpha1.ScaledObject) Target {
 		// GetHPAMaxReplicas applies KEDA's default rather than reporting nil, so
 		// an omitted maxReplicaCount reads as the ceiling KEDA will actually
 		// enforce instead of "unbounded".
-		MaxReplicas: ptr(so.GetHPAMaxReplicas()),
+		MaxReplicas:            ptr(so.GetHPAMaxReplicas()),
+		PollingIntervalSeconds: so.Spec.PollingInterval,
+	}
+	if a := so.Spec.Advanced; a != nil && a.HorizontalPodAutoscalerConfig != nil {
+		if b := a.HorizontalPodAutoscalerConfig.Behavior; b != nil && b.ScaleDown != nil {
+			t.ScaleDownWindowSeconds = b.ScaleDown.StabilizationWindowSeconds
+		}
 	}
 	if so.Spec.ScaleTargetRef == nil {
 		return t

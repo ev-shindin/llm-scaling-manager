@@ -110,6 +110,7 @@ func Discover(
 		}
 
 		pendingAges, stuckReplicas := pendingAgeSeconds(ctx, k8sClient, va.Namespace, scaleTarget, time.Now())
+		heldReplicas, heldKnown := heldReplicaCount(ctx, k8sClient, va.Namespace, scaleTarget)
 		metas = append(metas, domain.VariantMetadata{
 			VariantName:     va.Name,
 			ModelID:         va.Spec.ModelID,
@@ -125,6 +126,9 @@ func Discover(
 			PendingReplicas: pendingReplicas,
 			PendingAges:     pendingAges,
 			StuckReplicas:   stuckReplicas,
+			HeldReplicas:    heldReplicas,
+			HeldKnown:       heldKnown,
+			PodGPUs:         scaletarget.PodGPUs(scaleTarget),
 			MinReplicas:     minReplicas,
 			MaxReplicas:     maxReplicas,
 		})
@@ -305,7 +309,7 @@ func pendingAgeSeconds(
 	var stuck int
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if pod.DeletionTimestamp != nil || podReadyNow(pod) {
+		if pod.DeletionTimestamp != nil || PodReady(pod) {
 			continue
 		}
 		// "Not Ready" is not "starting". A Pod that is stopped rather than
@@ -391,9 +395,9 @@ func podStarting(p *corev1.Pod) bool {
 	return true
 }
 
-// podReadyNow reports the Pod's Ready condition, which is what decides whether
+// PodReady reports the Pod's Ready condition, which is what decides whether
 // anything routes to it -- the phase alone stays Running while probes fail.
-func podReadyNow(p *corev1.Pod) bool {
+func PodReady(p *corev1.Pod) bool {
 	for _, c := range p.Status.Conditions {
 		if c.Type == corev1.PodReady {
 			return c.Status == corev1.ConditionTrue

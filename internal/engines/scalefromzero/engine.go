@@ -143,7 +143,11 @@ type Engine struct {
 	VariantEnricher *registry.Enricher
 	// lastRefusal remembers, per model, the last reason a wake was refused, so a
 	// verdict repeated every 100ms is logged once rather than continuously.
-	refusalMu   sync.Mutex
+	refusalMu sync.Mutex
+	// lastClaim is each model's last share-claim outcome, so the 10 Hz loop
+	// counts a refused claim once per change, not once per tick. Guarded by
+	// refusalMu.
+	lastClaim   map[string]string
 	lastRefusal map[string]SelectionOutcome
 	// lastBudgets remembers, per namespace, the GPU budgets last reported for
 	// placement, so the picture is logged when it CHANGES rather than on every
@@ -511,6 +515,13 @@ func (e *Engine) processInactiveModel(
 		Constraints:    constraints,
 		RequirePrefill: e.requirePrefill(group.modelID, group.namespace),
 	})
+	if len(selected) == 0 && outcome == OutcomeNoCapacity {
+		// No idle GPUs and no reserve: a transfer still releasing for another
+		// receiver may be claimed (utilization-share optimizer, section 6.3).
+		if set, ok := e.claimShareTransfer(ctx, group, candidates, constraints, covered); ok {
+			selected = set
+		}
+	}
 	if len(selected) == 0 {
 		if outcome == OutcomeAlreadyServing {
 			// The steady state for every serving model with a queue. Not a

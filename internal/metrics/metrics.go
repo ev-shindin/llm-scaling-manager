@@ -724,6 +724,9 @@ func InitMetrics(registry prometheus.Registerer) error {
 	if err := registry.Register(analyzerTarget); err != nil {
 		return fmt.Errorf("failed to register analyzerTarget metric: %w", err)
 	}
+	if err := registerUtilizationShareMetrics(registry); err != nil {
+		return err
+	}
 
 	return nil
 }
