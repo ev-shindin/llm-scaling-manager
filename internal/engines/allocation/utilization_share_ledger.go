@@ -38,10 +38,18 @@ func (s ShareTransferState) String() string {
 type ShareTransferOutcome string
 
 const (
-	ShareOutcomeDone        ShareTransferOutcome = "done"
+	// ShareOutcomeDone counts a transfer whose receiver holds the GPUs, and
+	// an idle fill that landed.
+	ShareOutcomeDone ShareTransferOutcome = "done"
+	// ShareOutcomeFillTimeout counts a transfer whose receiver did not take
+	// the released GPUs within the fill timeout; it keeps its target.
 	ShareOutcomeFillTimeout ShareTransferOutcome = "fill-timeout"
-	ShareOutcomeCancelled   ShareTransferOutcome = "cancelled"
-	ShareOutcomeAborted     ShareTransferOutcome = "aborted"
+	// ShareOutcomeCancelled counts a release called off on a clear reversal,
+	// while it was still free (section 6.7 rule 3).
+	ShareOutcomeCancelled ShareTransferOutcome = "cancelled"
+	// ShareOutcomeAborted counts a release that did not land within the
+	// release timeout; its donor is restored and backs off.
+	ShareOutcomeAborted ShareTransferOutcome = "aborted"
 	// ShareOutcomeRedirected counts a transfer a wake claimed (section 6.3);
 	// it stays in the ledger as a release with no receiver.
 	ShareOutcomeRedirected ShareTransferOutcome = "redirected"
@@ -517,21 +525,21 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 		switch {
 		case t.State == ShareReleasing && broken(t):
 			// Not the donor's failure: no back-off.
-			ended = append(ended, ShareTransferEnd{*t, ShareOutcomeAborted})
+			ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeAborted})
 			continue
 		case t.State == ShareReleasing && wrongPod(t) && !t.plannedUnknown:
 			// The donor did give; its GPUs return to the budget for the next
 			// plan. No back-off: the donor released, and promptly.
-			ended = append(ended, ShareTransferEnd{*t, ShareOutcomeWrongPod})
+			ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeWrongPod})
 			wrong = append(wrong, t)
 			continue
 		case t.State == ShareReleasing && !now.Before(t.Deadline) && t.IsSetPrimary() && releasable[t]:
 			// Its own donor released; a contributor did not. Not this
 			// donor's failure: no back-off.
-			ended = append(ended, ShareTransferEnd{*t, ShareOutcomeAborted})
+			ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeAborted})
 			continue
 		case t.State == ShareReleasing && !now.Before(t.Deadline):
-			ended = append(ended, ShareTransferEnd{*t, ShareOutcomeAborted})
+			ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeAborted})
 			if t.Donor != "" {
 				// Back off one release timeout, doubling per consecutive
 				// abort up to 16x; a release that lands resets it.
@@ -558,17 +566,17 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 			}
 			got[t.Receiver] += t.GPUs
 			if held[t.Receiver] >= rbase[t.Receiver]+got[t.Receiver] {
-				ended = append(ended, ShareTransferEnd{*t, ShareOutcomeDone})
+				ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeDone})
 				filled = append(filled, t)
 				continue
 			}
 			if !now.Before(t.Deadline) {
-				ended = append(ended, ShareTransferEnd{*t, ShareOutcomeFillTimeout})
+				ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeFillTimeout})
 				continue
 			}
 		case t.State == ShareFilling:
 			if !now.Before(t.Deadline) {
-				ended = append(ended, ShareTransferEnd{*t, ShareOutcomeFillTimeout})
+				ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeFillTimeout})
 				continue
 			}
 		}
@@ -601,7 +609,7 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 	if len(gone) > 0 {
 		l.transfers = slices.DeleteFunc(l.transfers, func(t *ShareTransfer) bool {
 			if t.State == ShareReleasing && gone[t.SetID] && !t.IsSetPrimary() {
-				ended = append(ended, ShareTransferEnd{*t, ShareOutcomeAborted})
+				ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeAborted})
 				return true
 			}
 			return false

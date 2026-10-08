@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -42,6 +43,8 @@ type utilizationShareState struct {
 	// floorHeavy are the groups whose floors hold more than half their
 	// budget above need: reported once per change (reportFloorHeavy).
 	floorHeavy map[string]bool
+	// lastActionable is, per group, the actionable roles last logged.
+	lastActionable map[string]string
 
 	// Actuation state (stage 2), dropped whenever the optimizer is not active.
 	// ledgers are per group (shareGroupKey); desired is each planned variant's
@@ -94,16 +97,14 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	// this cycle's report and leaves today's decisions, not the controller.
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Error(fmt.Errorf("panic: %v", r), "Utilization-share evaluation failed; skipping it this cycle")
+			logger.Error(fmt.Errorf("panic: %v\n%s", r, debug.Stack()),
+				"Utilization share: evaluation failed; skipping it this cycle")
 			metrics.PublishUtilizationShare(nil)
 			overrides = nil
 		}
 	}()
 
-	now := time.Now()
-	if st.now != nil {
-		now = st.now()
-	}
+	now := st.clock()
 	// What the active groups have promised, published on every exit: empty
 	// when nothing acts, so wakes and the warm pool stop withholding at once.
 	promised := map[string]map[string]int{}
@@ -134,15 +135,15 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	}
 	if errText != st.lastConfigErr {
 		if err != nil {
-			logger.Error(err, "Invalid optimizer block; keeping today's optimizer. The limiters are unaffected")
+			logger.Error(err, "Utilization share: invalid optimizer block; keeping today's optimizer. The limiters are unaffected")
 		} else if st.lastConfigErr != "" {
-			logger.Info("Optimizer block is valid again")
+			logger.Info("Utilization share: the optimizer block is valid again")
 		}
 		st.lastConfigErr = errText
 	}
 	if ignored := strings.Join(e.Config.IgnoredOptimizerNamespaces(), ","); ignored != st.lastIgnored {
 		if ignored != "" {
-			logger.Info("ignoring optimizer blocks in namespace-local scaling-policy maps; "+
+			logger.Info("Utilization share: ignoring optimizer blocks in namespace-local scaling-policy maps; "+
 				"the optimizer is configured only beside limiters:", "namespaces", ignored)
 		}
 		st.lastIgnored = ignored
@@ -210,7 +211,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	})
 	for model, msg := range weightErrs {
 		if st.lastWeightErrs[model] != msg {
-			logger.Info("invalid weight on a model's scaling-policy entry", "model", model, "error", msg)
+			logger.Info("Utilization share: invalid weight on a model's scaling-policy entry", "model", model, "error", msg)
 		}
 	}
 	st.lastWeightErrs = weightErrs
@@ -263,7 +264,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			}
 		}
 		st.reportFloorHeavy(logger, shareGroupKey(g), floorExcess, g.Budget)
-		mode := "Shadow: utilization share would rebalance"
+		mode := "Utilization share: would rebalance (shadow)"
 		if !us.Shadow {
 			mode = "Utilization share: rebalancing"
 			seen[shareGroupKey(g)] = true
@@ -303,11 +304,18 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			"spare", fmt.Sprintf("%.2f", ev.Spare), "wholeReplicaCoverage", ev.WholeReplicaCoverage,
 			"replicasToMove", ev.ReplicasToMove, "actionable", actionable, "frozen", g.Frozen,
 		}
-		// Info only when a move would be planned, so a settled fleet stays quiet.
-		if len(actionable) > 0 {
-			logger.Info(mode, kv...)
+		// Info when the roles a move would fix change, so a settled fleet -- or
+		// one whose short roles nothing can fund -- stays quiet.
+		if joined := strings.Join(actionable, ","); joined != st.lastActionable[shareGroupKey(g)] {
+			if st.lastActionable == nil {
+				st.lastActionable = map[string]string{}
+			}
+			st.lastActionable[shareGroupKey(g)] = joined
+			if joined != "" {
+				logger.Info(mode, kv...)
+			}
 		}
-		logger.V(logging.DEBUG).Info("Shadow: utilization share evaluation", append(kv, "roles", table)...)
+		logger.V(logging.DEBUG).Info("Utilization share: evaluation", append(kv, "roles", table)...)
 	}
 	metrics.PublishUtilizationShare(published)
 	e.dropVanishedGroups(ctx, logger, seen, now)
@@ -474,7 +482,7 @@ func (st *utilizationShareState) reportUnmatchedNamespaces(logger logr.Logger, u
 	}
 	st.lastUnmatched = joined
 	if joined != "" {
-		logger.Info("Optimizer namespaces block disables namespaces no namespace quota names; it has no effect on them",
+		logger.Info("Utilization share: the namespaces block disables namespaces no namespace quota names; it has no effect on them",
 			"namespaces", joined)
 	}
 }
@@ -497,4 +505,12 @@ func (st *utilizationShareState) reportFloorHeavy(logger logr.Logger, group stri
 			"see wva_utilization_share_floor_excess_gpus for whose", "group", group,
 			"floorExcessGPUs", excess, "budget", budget)
 	}
+}
+
+// clock is the optimizer's time: now, or the test's clock.
+func (st *utilizationShareState) clock() time.Time {
+	if st.now != nil {
+		return st.now()
+	}
+	return time.Now()
 }

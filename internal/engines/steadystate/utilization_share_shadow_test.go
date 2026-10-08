@@ -20,7 +20,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
-const shadowMessage = "Shadow: utilization share would rebalance"
+const shadowMessage = "Utilization share: would rebalance (shadow)"
 
 const selectedShadow = "optimizer:\n  type: utilizationShare\n  utilizationShare:\n    shadow: true\n"
 
@@ -215,7 +215,7 @@ func TestUtilizationShareShadowOnlyWhenSelected(t *testing.T) {
 	for range 3 {
 		e.evaluateUtilizationShare(ctx, reqs, fullQuota(), nil)
 	}
-	if n := logs.FilterMessage("Invalid optimizer block; keeping today's optimizer. The limiters are unaffected").Len(); n != 1 {
+	if n := logs.FilterMessage("Utilization share: invalid optimizer block; keeping today's optimizer. The limiters are unaffected").Len(); n != 1 {
 		t.Fatalf("want the invalid block reported once across three cycles, got %d", n)
 	}
 	if n := logs.FilterMessage(shadowMessage).Len(); n != 0 {
@@ -225,7 +225,7 @@ func TestUtilizationShareShadowOnlyWhenSelected(t *testing.T) {
 	for range 2 {
 		e.evaluateUtilizationShare(ctx, reqs, fullQuota(), nil)
 	}
-	if n := logs.FilterMessage("Optimizer block is valid again").Len(); n != 1 {
+	if n := logs.FilterMessage("Utilization share: the optimizer block is valid again").Len(); n != 1 {
 		t.Fatalf("want the fix reported once, got %d", n)
 	}
 }

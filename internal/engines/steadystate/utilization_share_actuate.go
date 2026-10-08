@@ -75,7 +75,9 @@ type utilizationShareOverride struct {
 	Why    string
 }
 
-func shareGroupKey(g allocation.ShareGroup) string { return g.AcceleratorType + "|" + g.Scope }
+func shareGroupKey(g allocation.ShareGroup) string {
+	return decision.ShareGroupKey(g.Scope, g.AcceleratorType)
+}
 
 // actuateUtilizationShare runs one active cycle for a group (stage 2): observe,
 // plan, mark, fill. It returns each planned variant's target, keyed by
@@ -124,7 +126,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			// Without the marks the ledger would start blind to releases in
 			// flight; it is not created, so the read is retried next cycle,
 			// and nothing is planned meanwhile.
-			logger.Error(err, "utilization share could not read transfer marks; retrying next cycle")
+			logger.Error(err, "Utilization share: could not read transfer marks; retrying next cycle")
 			return shareActuation{overrides: e.shareOverrides(g, variantKey, "reading transfer marks"),
 				timings: tm, sources: src}
 		}
@@ -180,14 +182,14 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			reason := shareFillTimeoutCause(g.AcceleratorType, pending, e.shareNodes(now))
 			l.FillBlocked(t.Receiver, reason, now.Add(tm.ReleaseTimeout))
 			if reason != "" {
-				logger.Info("utilization share: the receiver's pods stayed Pending after its GPUs were released",
+				logger.Info("Utilization share: the receiver's pods stayed Pending after its GPUs were released",
 					"id", t.ID, "receiver", t.Receiver, "reason", reason)
 			}
 		}
 		if end.Outcome == allocation.ShareOutcomeWrongPod {
 			// The donor stays lowered: it did shrink. Its surviving planned
 			// pods are unmarked, so a later transfer may choose them again.
-			logger.Info("utilization share: the donor lost a pod other than the planned one; "+
+			logger.Info("Utilization share: the donor lost a pod other than the planned one; "+
 				"the receiver is not raised into a hole that did not open",
 				"id", t.ID, "donor", t.Donor, "planned", t.PlannedPods)
 			e.unmarkDonorPods(ctx, logger, t)
@@ -274,7 +276,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 				// nothing.
 				for j := range markedPods[t.ID] {
 					if err := e.unmarkPod(ctx, &markedPods[t.ID][j]); err != nil {
-						logger.Error(err, "could not unmark a donor pod", "pod", marked[t.ID][j])
+						logger.Error(err, "Utilization share: could not unmark a donor pod", "pod", marked[t.ID][j])
 					}
 				}
 			}
@@ -282,7 +284,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			// marked -- not Ready, all already given -- is the same next
 			// cycle, and its receiver would never try another donor.
 			l.MarkFailed(failedDonor, now, tm)
-			logger.Error(failed, "utilization share could not mark a donor pod; transfer not started",
+			logger.Error(failed, "Utilization share: could not mark a donor pod; transfer not started",
 				"id", set[0].ID, "donors", len(set), "donor", failedDonor)
 			continue
 		}
@@ -544,7 +546,7 @@ func (e *Engine) reanchorShareTargets(logger logr.Logger, l *allocation.ShareLed
 				continue
 			}
 			if now.Sub(since) >= tm.ReleaseTimeout {
-				logger.Info("utilization share target re-anchored to the running count; "+
+				logger.Info("Utilization share: target re-anchored to the running count; "+
 					"something outside the optimizer kept the variant off its target",
 					"variant", k, "target", st.desired[k], "running", v.Current, "since", since)
 				st.desired[k] = v.Current
@@ -564,13 +566,13 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 	decisions := optimizer.Optimize(ctx, requests, constraints)
 	if overrides := e.evaluateUtilizationShare(ctx, requests, constraints, scaleTargets); len(overrides) > 0 {
 		applied := applyUtilizationShareOverrides(decisions, overrides)
-		ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("Utilization share set planned targets", "variants", applied)
+		ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("Utilization share: set planned targets", "variants", applied)
 	}
 	// Republish the warm pool's headroom with this pass's promises withheld,
 	// so a transfer that started filling this cycle is not open to the pool
 	// until the next one (section 6.3).
 	if len(constraints) > 0 {
-		now := time.Now()
+		now := e.utilizationShare.clock()
 		allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, decision.LatestSharePromised(now)), now)
 	}
 	return decisions

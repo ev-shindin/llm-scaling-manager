@@ -197,3 +197,26 @@ func TestUtilizationShareClusterNamespacesCanary(t *testing.T) {
 	setShadowPolicy(t, se.e.Config, "optimizer:\n  type: utilizationShare\n  utilizationShare:\n    clusterNamespaces: [ns]\n")
 	se.untilStarted()
 }
+
+// The would-rebalance line is logged when the roles a move would fix change,
+// not every cycle: a short role nothing can fund would otherwise repeat it
+// forever.
+func TestUtilizationShareLogsAWouldBeRebalanceOncePerChange(t *testing.T) {
+	f := newShareFleet()
+	ctx, logs := observe(t)
+	se := newShareEngine(t, f, sharePods(t, f), time.Unix(0, 0))
+	se.ctx = ctx
+	setShadowPolicy(t, se.e.Config, selectedShadow)
+	for range 5 {
+		se.cycle()
+	}
+	if n := logs.FilterMessage(shadowMessage).Len(); n != 1 {
+		t.Fatalf("logged %d times over five unchanged cycles, want once", n)
+	}
+	f.demand["B"] = 100 // B no longer short: the set changes
+	f.demand["C"] = 9000
+	se.cycle()
+	if n := logs.FilterMessage(shadowMessage).Len(); n != 2 {
+		t.Fatalf("a changed set was not logged: %d lines", n)
+	}
+}

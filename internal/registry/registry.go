@@ -88,11 +88,12 @@ type Target struct {
 	// ScaleDownWindowSeconds is the ScaledObject's HPA scale-down stabilization
 	// window (spec.advanced.horizontalPodAutoscalerConfig.behavior.scaleDown.
 	// stabilizationWindowSeconds); nil when unset, and the HPA default of 300 s
-	// applies. PollingIntervalSeconds is KEDA's pollingInterval; nil means
-	// KEDA's default of 30 s. The utilization-share optimizer derives how long
-	// a release takes from both (docs/proposals/utilization-share-optimizer.md,
-	// section 8.4).
+	// applies. The utilization-share optimizer derives how long a release takes
+	// from it (docs/proposals/utilization-share-optimizer.md, section 8.4).
 	ScaleDownWindowSeconds *int32
+	// PollingIntervalSeconds is the ScaledObject's KEDA pollingInterval; nil
+	// means KEDA's default of 30 s. The utilization-share optimizer derives
+	// how long a release and a fill take from it.
 	PollingIntervalSeconds *int32
 }
 

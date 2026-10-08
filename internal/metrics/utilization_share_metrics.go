@@ -83,24 +83,15 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		Help: "Utilization-share optimizer: transfers not planned, by reason (reversal-hold, not-actionable). " +
 			"Counted only while the optimizer acts.",
 	}, append(slices.Clone(groupLabels), constants.LabelReason))
-	if err := registry.Register(utilizationShareWithheld); err != nil {
-		return fmt.Errorf("failed to register utilization-share metric: %w", err)
-	}
 	utilizationShareClaims = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: constants.WVAUtilizationShareClaimsTotal,
 		Help: "Utilization-share optimizer: scale-from-zero wake claims on releasing transfers, by outcome.",
 	}, append(slices.Clone(groupLabels), constants.LabelOutcome))
-	if err := registry.Register(utilizationShareClaims); err != nil {
-		return fmt.Errorf("failed to register utilization-share metric: %w", err)
-	}
 	utilizationShareDonorsPer = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    constants.WVAUtilizationShareDonorsPerTransfer,
 		Help:    "Utilization-share optimizer: donor replicas funding one receiver replica.",
 		Buckets: []float64{1, 2, 3, 4},
 	}, groupLabels)
-	if err := registry.Register(utilizationShareDonorsPer); err != nil {
-		return fmt.Errorf("failed to register utilization-share metric: %w", err)
-	}
 	utilizationShareReserveDebt = gauge(constants.WVAUtilizationShareReserveDebtGPUs,
 		"Utilization-share optimizer: reserve GPUs spent and not yet refilled. Published only while "+
 			"the optimizer acts.",
@@ -118,16 +109,10 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		Help:    "Utilization-share optimizer: time from a transfer's start to its donor's GPUs being released.",
 		Buckets: []float64{30, 60, 120, 240, 360, 480, 600, 900, 1200, 1800},
 	}, groupLabels)
-	if err := registry.Register(utilizationShareRelease); err != nil {
-		return fmt.Errorf("failed to register utilization-share metric: %w", err)
-	}
 	utilizationShareTransfers = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: constants.WVAUtilizationShareTransfersTotal,
 		Help: "Utilization-share optimizer: transfers that left the ledger, by outcome.",
 	}, append(slices.Clone(groupLabels), constants.LabelOutcome, constants.LabelUrgent))
-	if err := registry.Register(utilizationShareTransfers); err != nil {
-		return fmt.Errorf("failed to register utilization-share metric: %w", err)
-	}
 	modeLabels := []string{constants.LabelMode}
 	if controllerInstance != "" {
 		modeLabels = append(modeLabels, constants.LabelControllerInstance)
@@ -139,15 +124,16 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		"Utilization-share optimizer: a group's transfers in flight, by state (releasing, filling). "+
 			"Published only while the optimizer acts.",
 		append(slices.Clone(groupLabels), constants.LabelState))
-	for _, g := range []*prometheus.GaugeVec{
+	for _, c := range []prometheus.Collector{
 		utilizationShareHeadroom, utilizationShareTargetGPUs, utilizationShareActionable,
 		utilizationShareSpareGPUs, utilizationShareReplicasToMove,
 		utilizationSharePromisedGPUs, utilizationShareEffective, utilizationShareSwinging,
 		utilizationShareReserveDebt, utilizationShareActual, utilizationShareFloorExcess,
 		utilizationShareMode, utilizationShareInFlight,
+		utilizationShareWithheld, utilizationShareClaims, utilizationShareDonorsPer, utilizationShareRelease, utilizationShareTransfers,
 	} {
-		if err := registry.Register(g); err != nil {
-			return fmt.Errorf("failed to register utilization-share metric: %w", err)
+		if err := registry.Register(c); err != nil {
+			return fmt.Errorf("failed to register utilization-share metric %T: %w", c, err)
 		}
 	}
 	return nil

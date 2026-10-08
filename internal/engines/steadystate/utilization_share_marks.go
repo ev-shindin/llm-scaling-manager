@@ -215,7 +215,7 @@ func (e *Engine) unmarkDonorPods(ctx context.Context, logger logr.Logger, t allo
 			if !apierrors.IsNotFound(err) {
 				// Not "gone": the mark stays, and a restart inside the
 				// release timeout would restore the transfer. Say so.
-				logger.Error(err, "could not read a donor pod to unmark it", "pod", key)
+				logger.Error(err, "Utilization share: could not read a donor pod to unmark it", "pod", key)
 				failed++
 			}
 			continue
@@ -224,7 +224,7 @@ func (e *Engine) unmarkDonorPods(ctx context.Context, logger logr.Logger, t allo
 			continue // marked for another transfer since: not this one's to clear
 		}
 		if err := e.unmarkPod(ctx, &p); err != nil {
-			logger.Error(err, "could not unmark a donor pod", "pod", key)
+			logger.Error(err, "Utilization share: could not unmark a donor pod", "pod", key)
 			failed++
 		}
 	}
@@ -306,7 +306,7 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 			key := utils.GetNamespacedKey(p.Namespace, p.Name)
 			var m transferMark
 			if why := validTransferMark(raw, &m, role, give, g, now); why != "" {
-				logger.Info("utilization share removed a transfer mark it did not write", "pod", key, "reason", why)
+				logger.Info("Utilization share: removed a transfer mark it did not write", "pod", key, "reason", why)
 				invalid = append(invalid, key)
 				continue
 			}
@@ -335,7 +335,7 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 	order = slices.DeleteFunc(order, func(id string) bool {
 		f := byID[id]
 		if idRoles[f.mark.ID] > 1 {
-			logger.Info("utilization share removed a transfer mark whose id another donor's pods also carry",
+			logger.Info("Utilization share: removed a transfer mark whose id another donor's pods also carry",
 				"id", f.mark.ID, "pods", f.pods)
 			invalid = append(invalid, f.pods...)
 			return true
@@ -362,7 +362,7 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 		f := byID[id]
 		if s := f.mark.SetID; s != "" {
 			if takes, ok := primaryTakes[s]; !ok || setGives[s] < takes {
-				logger.Info("utilization share removed an incomplete donor-set mark", "set", s, "pods", f.pods)
+				logger.Info("Utilization share: removed an incomplete donor-set mark", "set", s, "pods", f.pods)
 				invalid = append(invalid, f.pods...)
 				return true
 			}
@@ -445,7 +445,7 @@ func (e *Engine) remarkDonorPods(ctx context.Context, logger logr.Logger, l *all
 		var p corev1.Pod
 		if err := e.client.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &p); err != nil {
 			if !apierrors.IsNotFound(err) {
-				logger.Error(err, "could not read a donor pod to re-mark it", "pod", key)
+				logger.Error(err, "Utilization share: could not read a donor pod to re-mark it", "pod", key)
 			}
 			continue
 		}
@@ -463,7 +463,7 @@ func (e *Engine) remarkDonorPods(ctx context.Context, logger logr.Logger, l *all
 		patch := client.MergeFrom(p.DeepCopy())
 		p.Annotations[utilizationShareTransferAnnotation] = string(raw)
 		if err := e.client.Patch(ctx, &p, patch); err != nil {
-			logger.Error(err, "could not re-mark a donor pod", "pod", key)
+			logger.Error(err, "Utilization share: could not re-mark a donor pod", "pod", key)
 		}
 	}
 }
@@ -555,7 +555,7 @@ func (e *Engine) sweepShareMarks(ctx context.Context, logger logr.Logger) {
 	}
 	var pods corev1.PodList
 	if err := e.client.List(ctx, &pods); err != nil {
-		logger.Error(err, "utilization share could not list pods to remove its marks; retrying next cycle")
+		logger.Error(err, "Utilization share: could not list pods to remove its marks; retrying next cycle")
 		return
 	}
 	instance := metrics.GetControllerInstance()
@@ -573,7 +573,7 @@ func (e *Engine) sweepShareMarks(ctx context.Context, logger logr.Logger) {
 		ours = append(ours, utils.GetNamespacedKey(p.Namespace, p.Name))
 	}
 	if len(ours) > 0 {
-		logger.Info("utilization share is removing the marks it left on pods while it was not acting", "pods", len(ours))
+		logger.Info("Utilization share: removing the marks it left on pods while it was not acting", "pods", len(ours))
 		if e.unmarkDonorPods(ctx, logger, allocation.ShareTransfer{DonorPods: ours}) > 0 {
 			return
 		}

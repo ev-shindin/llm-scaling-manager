@@ -43,9 +43,15 @@ type ShareClaim struct {
 
 // Claim outcomes, the outcome label of wva_utilization_share_claims_total.
 const (
-	ShareClaimRedirected    = "redirected"
-	ShareClaimRefusedScore  = "refused-score"
-	ShareClaimRefusedFit    = "refused-fit"
+	// ShareClaimRedirected is a claim made: the transfer's GPUs go to the wake.
+	ShareClaimRedirected = "redirected"
+	// ShareClaimRefusedScore is a wake that does not outrank any releasing
+	// transfer's receiver.
+	ShareClaimRefusedScore = "refused-score"
+	// ShareClaimRefusedFit is a wake whose replica the released donor pods
+	// cannot host.
+	ShareClaimRefusedFit = "refused-fit"
+	// ShareClaimNoneReleasing is a wake that found no transfer releasing.
 	ShareClaimNoneReleasing = "none-releasing"
 )
 
