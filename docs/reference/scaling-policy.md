@@ -310,6 +310,74 @@ decode's figure down to the built-in fallback, and under-pricing a queue is the
 failure the key exists to fix. Writing it on one variant and leaving it off the
 others is the simplest way to get this right.
 
+### `disableLearnedStateReuse`
+
+Makes every variant learn from its own readings alone. Off by default.
+
+```yaml
+default:
+  disableLearnedStateReuse: true
+```
+
+It resolves through the normal per-entry overlay, so it can also be set on a
+named tier or a per-model entry — which is usually what you want, since the
+case it exists for is one variant, not the fleet:
+
+```yaml
+models:
+  - modelID: meta-llama/Llama-3.1-8B
+    disableLearnedStateReuse: true
+```
+
+One direction only: an entry can turn reuse **off** where the default leaves it
+on, but cannot turn it back **on** where the default turned it off. Check the
+`Effective scaling policy` log line for `disableLearnedStateReuse` to confirm
+what a model actually resolved to.
+
+Normally a variant with nothing measured yet is priced from a sibling that
+runs the **same engine configuration** on the same accelerator and GPU count.
+That is what lets a scaled-out variant price its first decision from something
+other than a guess, and it happens two ways:
+
+| path | what is reused |
+| --- | --- |
+| the shared ITL line | the inter-token-latency model `ITL(k) = A·k + B` another variant fitted, used to derive this one's service rate |
+| the cross-variant capacity figure | another variant's measured per-replica capacity, as the estimate for a variant with no record of its own |
+
+Setting this key stops **both**. The variant keeps learning; it just no longer
+starts from anyone else's measurement. Nothing already stored is cleared.
+
+It does **not** remove any capacity *ceiling*. A sibling's figure is also used
+in one place as an upper bound on an estimate, and that stays — a bound only
+ever lowers a capacity, and lowering capacity orders *more* replicas, which is
+the safe direction. The switch withholds a sibling's figure where it would
+*become* this variant's answer, never where it only limits it.
+
+**When to set it.** Reuse rests on a fingerprint over the engine flags the
+scaling manager could read from the deployment. A configuration it reads
+*wrong* rather than not at all still produces a confident fingerprint — SGLang
+flags parsed as vLLM read as a complete set of vLLM defaults, and would share
+state with every other default configuration of that model. If a variant is
+being priced from a sibling that is not really like it, this is the switch that
+stops it.
+
+A variant whose flags the manager could not read is **already** excluded from
+sharing, so this key is not what you need for that case. Read
+`wva_engine_config` to tell them apart:
+
+| what you see | what it means |
+| --- | --- |
+| a series with a non-empty `unresolved` label | one or more flags could not be read. The variant is **already** excluded from sharing, and `unresolved` names the flags to fix (usually a value that comes from a ConfigMap or `valueFrom`, which the manager cannot read). This key would change nothing. |
+| **no series at all** | there is no parsed engine configuration for the variant — no capacity record yet, or nothing readable in the pod template. Also already excluded. |
+| a series with `unresolved` empty | the configuration was read in full and the variant **is** sharing, keyed on `fingerprint`. This is the case the key is for. |
+
+So set it when a variant has a complete-looking fingerprint and is still being
+priced from a sibling it is not really like — the wrong-parser case above.
+
+**What it costs.** A variant with no readings of its own and no sibling to
+borrow from prices its first decisions from its deployment-derived capacity
+alone, which is a weaker estimate. Expect a slower first ramp.
+
 ### Default Configuration
 
 Since v0.9.0 the shipped `default` entry selects **V2** (token/capacity-based) via

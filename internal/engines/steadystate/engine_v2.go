@@ -21,6 +21,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
@@ -56,6 +57,18 @@ func (e *Engine) runV2AnalysisOnly(
 		e.capacityStore.LoadFromScaleTarget(namespace, modelID, va.Name, accelerator, gpuCount, scaleTarget)
 		logger.V(logging.DEBUG).Info("Pre-populated capacity store from scale target",
 			"variant", va.Name, "accelerator", accelerator, "gpuCount", gpuCount)
+		// Publish the engine-configuration fingerprint. Read back from the
+		// store rather than re-parsed, so the published digest is the one the
+		// rest of the pipeline will key on -- including when the record was
+		// learned live and LoadFromScaleTarget deliberately left it alone.
+		//
+		// The digest is keyed on -- it composes the learned-state key for ITL
+		// line sharing -- and publishing it here is what makes that key
+		// explicable on a dashboard. Note the two can diverge by design: a
+		// configuration the parser could not fully read is published WITH its
+		// unresolved label and withheld as a sharing key, so a variant can
+		// appear here and have no learned state filed under it.
+		e.publishEngineConfig(namespace, modelID, va.Name, accelerator, gpuCount)
 	}
 
 	// 2. Build AnalyzerInput
@@ -253,6 +266,79 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 	e.evictStaleAnalyzerSeries(namespace, modelID, current)
 }
 
+// publishEngineConfig records wva_engine_config for one variant from the
+// capacity store's record. A variant with no record, or a record with no
+// parsed params, publishes nothing: an absent series is the honest signal for
+// "the configuration could not be read", and a partial one would be read as a
+// configuration.
+func (e *Engine) publishEngineConfig(namespace, modelID, variantName, accelerator string, gpuCount int) {
+	if e.capacityStore == nil || e.metricsEmitter == nil {
+		return
+	}
+	rec := e.capacityStore.Get(namespace, modelID, variantName)
+	if rec == nil || rec.EngineParams == nil {
+		return
+	}
+	e.metricsEmitter.RecordEngineConfig(
+		namespace, modelID, variantName, accelerator, gpuCount,
+		rec.EngineParams.Fingerprint(),
+		capacity.FingerprintVersion,
+		rec.EngineParams.FingerprintValues(),
+	)
+}
+
+// staleHistoryEvictor is the part of the saturation analyzer this file needs.
+// saturationV2Analyzer is typed domain.Analyzer so tests can inject, so the
+// eviction entry point is reached through an assertion rather than a direct
+// call.
+type staleHistoryEvictor interface {
+	EvictStaleHistory(timeout time.Duration) int
+}
+
+// evictStaleLearnedState sweeps the two stores of learned per-variant state
+// whose eviction functions existed with no caller at all.
+//
+// The saturation analyzer's EvictStaleHistory takes the k2 history and, beside
+// it, the accelerator memo, the saturated-throughput windows, the ITL windows,
+// the learned baseline, the start estimate and the decode-saturation memory.
+// The baseline and the start estimate are swept on their OWN liveness
+// timestamp, not keyed to the window: an ITL window is empty whenever a
+// healthy fleet sits below the observable k, and keying them to it deleted the
+// learned state of the fleets that were doing fine. The capacity store's EvictStale takes its records.
+// Both are keyed by variant, so until now a renamed, deleted or recreated
+// variant left its entry behind for the lifetime of the process -- exactly the
+// leak the analyzer's own comment describes: "one window per variant that has
+// EVER been seen, including deleted and renamed ones".
+//
+// Here rather than on a timer because this is the one place that runs once per
+// cycle for the whole fleet, which is where this engine's other prunes already
+// live. The timeouts are long -- 24h for history, 7 days for records -- so the
+// scan is cheap and on almost every cycle evicts nothing, which is why it logs
+// only when it does something.
+func (e *Engine) evictStaleLearnedState(ctx context.Context) {
+	// analyzerEntries, NOT history: the sweep spans five maps -- k2 history,
+	// ITL windows, ITL baselines, start estimates and start-outlier counters --
+	// and the method's own doc says a caller must not label the sum as history.
+	// This caller did exactly that, which two reviewers caught independently.
+	// The local is renamed too, because `history` is where the wrong label came
+	// from.
+	analyzerEntries := 0
+	if evictor, ok := e.saturationV2Analyzer.(staleHistoryEvictor); ok {
+		analyzerEntries = evictor.EvictStaleHistory(capacity.HistoryEvictionTimeout)
+	}
+	records := 0
+	if e.capacityStore != nil {
+		records = e.capacityStore.EvictStale(capacity.EvictionTimeout)
+	}
+	if analyzerEntries > 0 || records > 0 {
+		ctrl.LoggerFrom(ctx).Info("evicted stale learned state",
+			"analyzerStateEntries", analyzerEntries,
+			"capacityRecords", records,
+			"historyTimeout", capacity.HistoryEvictionTimeout,
+			"recordTimeout", capacity.EvictionTimeout)
+	}
+}
+
 // zeroObservedReplicas sets wva_analyzer_observed_replicas to 0 for every
 // (analyzer, variant) this model published last cycle. Called on the cycle
 // that skips analysis because the model had no replica rows at all: the
@@ -281,6 +367,9 @@ func (e *Engine) evictStaleAnalyzerSeries(namespace, modelID string, current ana
 		if _, still := current.target[prev]; !still {
 			e.metricsEmitter.DeleteAnalyzerTarget(prev.analyzer, namespace, modelID, prev.variant)
 			e.metricsEmitter.DeleteAnalyzerObservedReplicas(prev.analyzer, namespace, modelID, prev.variant)
+			// The config series is per variant, not per analyzer, so this is
+			// idempotent when several analyzers report the same variant.
+			e.metricsEmitter.DeleteEngineConfig(namespace, modelID, prev.variant)
 		}
 	}
 	e.lastAnalyzerSeries[modelKey] = current
@@ -305,6 +394,7 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 	for modelKey, series := range e.lastAnalyzerSeries {
 		if !activeKeys[modelKey] {
 			e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
+			e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
 			delete(e.lastAnalyzerSeries, modelKey)
 		}
 	}
@@ -319,6 +409,7 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 func (e *Engine) evictAllAnalyzerSeries() {
 	for modelKey, series := range e.lastAnalyzerSeries {
 		e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
+		e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
 		delete(e.lastAnalyzerSeries, modelKey)
 	}
 }

@@ -473,8 +473,14 @@ func fleetHasMeasuredItself(replicas []capacity.ReplicaCapacity) bool {
 		// arriving now, on the cycle it arrives, so there is nothing left to
 		// wait for -- and waiting is what cost the 2026-09-23 run its fleet,
 		// since an over-provisioned fleet never saturates to be caught.
-		own := rc.SaturatedThroughputDerived ||
+		// A figure derived from a BORROWED line is not the fleet having
+		// measured itself. Without this the hold released on sight of a
+		// sibling's line, which also cleared staleShape in the same cycle and
+		// so removed the only other thing standing between a borrowed line and
+		// an order.
+		own := (rc.SaturatedThroughputDerived && !rc.SaturatedThroughputLineBorrowed) ||
 			(rc.SaturatedThroughput > 0 && !rc.SaturatedThroughputBorrowed &&
+				!rc.SaturatedThroughputLineBorrowed &&
 				rc.SaturatedThroughputSamples >= floor.MinThroughputSamplesToOrder)
 		measured[rc.VariantName] = measured[rc.VariantName] || own
 	}

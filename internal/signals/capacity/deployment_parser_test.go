@@ -184,6 +184,8 @@ var _ = Describe("ParseVLLMArgs", func() {
 			Expect(params.GpuMemoryUtilization).To(Equal(0.9))
 			Expect(params.BlockSize).To(Equal(int64(16)))
 			Expect(params.KvCacheDtype).To(Equal("auto"))
+			Expect(params.WeightDtype).To(Equal("auto"))
+			Expect(params.Quantization).To(BeEmpty())
 			Expect(params.TensorParallelSize).To(Equal(1))
 			Expect(params.MaxNumSeqs).To(Equal(int64(256)))
 			Expect(params.NumGpuBlocksOverride).To(Equal(int64(0)))
@@ -212,12 +214,36 @@ var _ = Describe("ParseVLLMArgs", func() {
 
 			Expect(params.GpuMemoryUtilization).To(Equal(0.85))
 			Expect(params.BlockSize).To(Equal(int64(32)))
-			Expect(params.KvCacheDtype).To(Equal("fp8"))
+			Expect(params.KvCacheDtype).To(Equal(testQuantization))
 			Expect(params.TensorParallelSize).To(Equal(4))
 			Expect(params.MaxNumBatchedTokens).To(Equal(int64(4096)))
 			Expect(params.MaxNumSeqs).To(Equal(int64(128)))
 			Expect(params.MaxModelLen).To(Equal(int64(8192)))
 			Expect(params.EffectiveMaxBatchedTokens).To(Equal(int64(4096)))
+		})
+	})
+
+	Describe("Weight dtype and quantization", func() {
+		It("should parse --dtype and --quantization, which are not kv-cache-dtype", func() {
+			// These three are independent flags and were conflated once: only
+			// --kv-cache-dtype was parsed, so an FP8-weight and a BF16-weight
+			// serving of one model were indistinguishable.
+			deploy := makeTestDeployment(
+				"--dtype=bfloat16",
+				"--quantization=fp8",
+				"--kv-cache-dtype=auto",
+			)
+			params := ParseVLLMArgs(scaletarget.NewDeploymentAccessor(deploy))
+
+			Expect(params.WeightDtype).To(Equal(testWeightDtype))
+			Expect(params.Quantization).To(Equal(testQuantization))
+			Expect(params.KvCacheDtype).To(Equal("auto"))
+		})
+
+		It("should parse --dtype in the space-separated form too", func() {
+			deploy := makeTestDeployment("--dtype", "float16")
+			params := ParseVLLMArgs(scaletarget.NewDeploymentAccessor(deploy))
+			Expect(params.WeightDtype).To(Equal("float16"))
 		})
 	})
 
@@ -362,7 +388,7 @@ var _ = Describe("IsCapacityCompatible", func() {
 		resolveEffectiveMaxBatchedTokens(&p1)
 		p2 := defaultEngineParams()
 		resolveEffectiveMaxBatchedTokens(&p2)
-		p2.KvCacheDtype = "fp8"
+		p2.KvCacheDtype = testQuantization
 		Expect(p1.IsCapacityCompatible(&p2)).To(BeFalse())
 	})
 
@@ -432,13 +458,72 @@ var _ = Describe("IsCapacityCompatible", func() {
 		Expect(p2.IsCapacityCompatible(&p1)).To(BeFalse())
 	})
 
-	It("should ignore non-capacity fields like MaxNumSeqs and MaxModelLen", func() {
+	It("should return false when MaxNumSeqs differs", func() {
+		// S caps N_steady in the k2 derivation and caps the sequence count the
+		// derived mu prices at, so two engines differing only in --max-num-seqs
+		// have a different compute bound AND a different mu. Reusing one's
+		// record for the other mis-sizes a zero-replica variant.
 		p1 := defaultEngineParams()
 		resolveEffectiveMaxBatchedTokens(&p1)
 		p2 := defaultEngineParams()
 		resolveEffectiveMaxBatchedTokens(&p2)
 		p2.MaxNumSeqs = 512
-		p2.MaxModelLen = 16384
+		Expect(p1.MaxNumSeqs).NotTo(Equal(p2.MaxNumSeqs))
+		Expect(p1.IsCapacityCompatible(&p2)).To(BeFalse())
+	})
+
+	It("should return false when MaxModelLen differs on the chunked-prefill path", func() {
+		// MaxModelLen reaches EffectiveMaxBatchedTokens only when chunked
+		// prefill is OFF. With it on -- the V1 default -- the resolver returns
+		// 8192 for both, so the two differ in MaxModelLen and in nothing else
+		// this predicate used to look at. That is the case this pins.
+		p1 := defaultEngineParams()
+		p1.IsV1Engine = true
+		p1.ChunkedPrefillEnabled = true
+		p1.MaxModelLen = 8192
+		resolveEffectiveMaxBatchedTokens(&p1)
+		p2 := defaultEngineParams()
+		p2.IsV1Engine = true
+		p2.ChunkedPrefillEnabled = true
+		p2.MaxModelLen = 131072
+		resolveEffectiveMaxBatchedTokens(&p2)
+
+		Expect(p1.EffectiveMaxBatchedTokens).To(Equal(p2.EffectiveMaxBatchedTokens),
+			"the resolver must hide MaxModelLen here, or this test proves nothing")
+		Expect(p1.IsCapacityCompatible(&p2)).To(BeFalse())
+	})
+
+	It("should return false when WeightDtype differs", func() {
+		// Weight dtype changes how much of the GPU the weights occupy and so
+		// how much is left for KV at the same GpuMemoryUtilization -- k1
+		// genuinely differs, and the ITL line differs by more.
+		p1 := defaultEngineParams()
+		resolveEffectiveMaxBatchedTokens(&p1)
+		p2 := defaultEngineParams()
+		resolveEffectiveMaxBatchedTokens(&p2)
+		p2.WeightDtype = testWeightDtype
+		Expect(p1.WeightDtype).NotTo(Equal(p2.WeightDtype))
+		Expect(p1.IsCapacityCompatible(&p2)).To(BeFalse())
+	})
+
+	It("should return false when Quantization differs", func() {
+		p1 := defaultEngineParams()
+		resolveEffectiveMaxBatchedTokens(&p1)
+		p2 := defaultEngineParams()
+		resolveEffectiveMaxBatchedTokens(&p2)
+		p2.Quantization = testQuantization
+		Expect(p1.Quantization).To(BeEmpty())
+		Expect(p1.IsCapacityCompatible(&p2)).To(BeFalse())
+	})
+
+	It("should still ignore EnforceEager, which changes latency and not capacity", func() {
+		// No CUDA graphs changes the ITL line, so it belongs in a latency key.
+		// It does not change how much KV fits or how many sequences run, so a
+		// capacity record stays reusable across it.
+		p1 := defaultEngineParams()
+		resolveEffectiveMaxBatchedTokens(&p1)
+		p2 := defaultEngineParams()
+		resolveEffectiveMaxBatchedTokens(&p2)
 		p2.EnforceEager = true
 		Expect(p1.IsCapacityCompatible(&p2)).To(BeTrue())
 	})

@@ -65,6 +65,50 @@ type ScalingPolicy struct {
 	// needs a way to stop it that does not involve a new image.
 	DisableShapeChangeHold bool `yaml:"disableShapeChangeHold,omitempty"`
 
+	// DisableLearnedStateReuse makes every variant learn from its own
+	// readings alone: no ITL line is shared between variants, and no
+	// zero-replica variant takes a capacity figure from a sibling. It does
+	// not disable learning, and it does not clear anything already stored —
+	// it stops the two paths by which one variant's measurement prices
+	// another's decision.
+	//
+	// Both paths are covered because an operator asking for this wants one
+	// thing, and either path alone leaves it half-done:
+	//
+	//   - the fingerprint-keyed ITL line (analyzer.go, itlPhysicsKey). Off,
+	//     the key falls back to the per-variant form, which is the same
+	//     degradation an unreadable engine configuration already produces.
+	//   - the cross-variant capacity estimate for a variant with no record
+	//     of its own (replica_capacity.go, lookupCompatibleCapacity), where a
+	//     sibling's record IS this variant's answer.
+	//
+	// AND IT DELIBERATELY DOES NOT TOUCH THE CLAMPS. estimateStoredCapacity
+	// also consults a compatible sibling, but as a MAX clamp -- it only ever
+	// lowers the estimate. Withholding a clamp RAISES capacity, and an
+	// over-stated capacity orders fewer replicas, which this project has on
+	// record as breaking TTFT irrecoverably (store.go measured 5,000 becoming
+	// 153,600 when that record was withheld for a different reason).
+	//
+	// A first version of this switch gated that clamp too, which would have
+	// made an operator asking "stop pricing this variant from a sibling"
+	// silently also lose their capacity ceiling. A ceiling is conservatism,
+	// not a borrow. The rule is: gate where a sibling's figure BECOMES this
+	// variant's answer, never where it only bounds it.
+	//
+	// It is a switch because reuse rests on a fingerprint over 14 parsed
+	// fields, and a configuration the parser reads WRONG rather than not at
+	// all still produces a confident key: SGLang flags parsed as vLLM read as
+	// a complete set of vLLM defaults, and would share state with every other
+	// default configuration of that model. That residual is documented where
+	// the key is built and cannot be closed from inside the parser, so the
+	// remedy has to be an operator-facing one. Without it, the only ways out
+	// are editing FingerprintVersion — which flushes reuse for every model on
+	// the cluster — or a new image.
+	//
+	// Reuse is on by default: it is what lets a scaled-out variant price its
+	// first decision from something other than a guess.
+	DisableLearnedStateReuse bool `yaml:"disableLearnedStateReuse,omitempty"`
+
 	// ShapeChangeHoldSeconds overrides how long the fleet is withheld from
 	// release after its shape changes, when nothing settles the hold sooner.
 	// Zero takes the default.
@@ -475,6 +519,29 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	}
 	if len(override.Analyzers) > 0 {
 		c.Analyzers = override.Analyzers
+	}
+	// MERGED, so the key works where an operator would actually reach for it.
+	//
+	// A review caught it missing: without this it is silently dropped from a
+	// named tier and from a per-model override, and happens to work only from
+	// a `default:` entry because that one is taken wholesale as the base. The
+	// case the key exists for -- ONE variant being priced from a sibling it is
+	// not really like -- is per-model by nature, so default-entry-only would
+	// have been the wrong scope for it.
+	//
+	// ONE-WAY, like every other override here: a true turns reuse off for the
+	// model, and a false is indistinguishable from "not set" so it cannot turn
+	// it back ON where the default disabled it. That is the `omitempty` bool
+	// idiom this struct uses throughout. If re-enabling per model is ever
+	// wanted, this needs to become a *bool the way ScaleToZeroEnvelope.Enabled
+	// did, for exactly this reason.
+	//
+	// DisableShapeChangeHold and ShapeChangeHoldSeconds have the same gap and
+	// are deliberately left alone here: they are not this change's to fix, and
+	// fixing them silently would alter behaviour for configs that already rely
+	// on the current scope.
+	if override.DisableLearnedStateReuse {
+		c.DisableLearnedStateReuse = true
 	}
 	// Merged FIELD BY FIELD, not wholesale. The envelope carries two independent
 	// settings, so replacing it would make an override that sets only

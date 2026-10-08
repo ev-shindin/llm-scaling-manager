@@ -263,6 +263,38 @@ const (
 	// WVAReplicaStartSecondsEstimate.
 	LabelStartSource = "source"
 
+	// WVAEngineConfig is a per-variant gauge, always 1, whose labels carry the
+	// engine-configuration fingerprint and the flags that produced it.
+	//
+	// One series per variant: the flag labels are functionally determined by
+	// the variant, so they add width and not cardinality. It is published as
+	// one wide series rather than as a fingerprint-keyed info metric joined to
+	// a variant metric, because the join's natural shape is many-to-one (two
+	// models can share a configuration) and a reader cannot then tell which
+	// variant a row describes.
+	//
+	// Nothing reads the METRIC -- no code and no dashboard queries it, and it
+	// exists to make the digest observable. The digest itself IS keyed on: it
+	// composes the learned-state key that decides whose ITL line a variant
+	// borrows (capacity.LearnedStateKey, via the analyzer's itlPhysicsKey).
+	// An earlier version of this comment said nothing was keyed on it, which
+	// was true when written and stopped being true in the same PR.
+	WVAEngineConfig = "wva_engine_config"
+
+	// LabelFingerprint is the engine-configuration digest, and
+	// LabelFingerprintVersion the hash's own version -- published beside it
+	// because the hash's input set is a wire format, and a bump means every
+	// stored key stops matching.
+	LabelFingerprint        = "fingerprint"
+	LabelFingerprintVersion = "fingerprint_version"
+
+	// LabelAccelerator and LabelGPUsPerReplica complete the key that learned
+	// state is filed under: (model, accelerator, gpus, fingerprint). They are
+	// labels rather than hashed into the digest so an operator can ask "this
+	// configuration on H200 versus H100" without a join.
+	LabelAccelerator    = "accelerator"
+	LabelGPUsPerReplica = "gpus"
+
 	// WVAModelsProcessed is a gauge that tracks the number of models processed in the last optimization cycle.
 	WVAModelsProcessed = "wva_models_processed"
 
@@ -729,3 +761,40 @@ const (
 const (
 	UnitContinuous = "continuous"
 )
+
+// EngineConfigFlagLabels are the engine-flag labels on WVAEngineConfig, in the
+// order their values arrive from EngineParams.FingerprintValues.
+//
+// It lives here, in a leaf package, so that capacity (which pairs values to
+// it) and metrics (which publishes it) read one list instead of two that can
+// drift. The order is POSITIONAL against FingerprintValues, and
+// TestFingerprintLabelsDescribeTheirValues pins that pairing.
+//
+// REORDERING THIS DOES NOT CHANGE ANY DIGEST, and an earlier version of this
+// comment said it did -- which would have sent a maintainer to bump
+// FingerprintVersion, flushing every learned key on the cluster, for a pure
+// relabel. Fingerprint() hashes its own `name=` list in fingerprint.go and
+// deliberately does not read these names, exactly so that relabelling the
+// metric cannot reshuffle stored digests. Getting this list wrong mislabels
+// the metric; it does not mis-key anything.
+var EngineConfigFlagLabels = []string{
+	"engine",
+	"weight_dtype",
+	"quantization",
+	"gpu_memory_utilization",
+	"block_size",
+	"kv_cache_dtype",
+	"tensor_parallel_size",
+	"num_gpu_blocks_override",
+	"total_kv_tokens_override",
+	"effective_max_batched_tokens",
+	"max_num_seqs",
+	"max_model_len",
+	"enforce_eager",
+	// Which of the labels above are the engine's real settings and which
+	// are defaults that replaced something this controller could not read.
+	// Empty is the good case. Published because the gap is otherwise
+	// invisible: a block_size of 16 reads identically whether the engine
+	// runs 16 or the flag was "$VLLM_BLOCK_SIZE" and nothing resolved it.
+	"unresolved",
+}

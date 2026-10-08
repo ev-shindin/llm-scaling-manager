@@ -3,6 +3,7 @@ package saturation
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -103,8 +104,17 @@ type cycle struct {
 	muInput       float64
 	muShortWindow bool
 
-	// fitLines: one ITL(k) line per decode variant.
-	itlModels map[string]itl.Model
+	// newCycle: the engine-configuration fingerprint per variant. It decides
+	// WHOSE fitted line a variant may borrow when it has none of its own --
+	// not which window its own readings go into, which is always its own.
+	fpByVariant map[string]string
+
+	// fitLines: one ITL(k) line per decode variant, and for each one whether
+	// it was BORROWED from a sibling that shares the engine configuration
+	// rather than fitted from this variant's own readings. A borrowed line may
+	// hold the fleet but not grow it -- see priceReplicas.
+	itlModels   map[string]itl.Model
+	itlBorrowed map[string]bool
 }
 
 // demandParts is what priceDemand produces and applyFloorAndHolds consumes.
@@ -138,10 +148,27 @@ func (a *SaturationAnalyzer) newCycle(
 	c.gpusByVariant = make(map[string]int, len(input.VariantStates))
 	c.rolesByVariant = make(map[string]string, len(input.VariantStates))
 	c.accelByVariant = make(map[string]string, len(input.VariantStates))
+	c.fpByVariant = make(map[string]string, len(input.VariantStates))
 	for _, vs := range input.VariantStates {
 		c.gpusByVariant[vs.VariantName] = vs.GPUsPerReplica
 		c.rolesByVariant[vs.VariantName] = vs.Role
 		c.accelByVariant[vs.VariantName] = vs.AcceleratorName
+		// Resolved once per cycle, here, because the ITL window is keyed by
+		// it and reading the store per replica would take its lock on every
+		// row. An empty fingerprint is a usable answer: itlPhysicsKey falls
+		// back to the variant key and pools nothing.
+		//
+		// Which is exactly what DisableLearnedStateReuse wants, so it is
+		// expressed by withholding the fingerprint rather than by a second
+		// branch inside the key function. The operator switch and an
+		// unreadable engine configuration then reach the same code path, and
+		// there is only one of them to reason about.
+		if cfg.DisableLearnedStateReuse {
+			c.fpByVariant[vs.VariantName] = ""
+		} else {
+			c.fpByVariant[vs.VariantName] = a.engineFingerprint(
+				input.Namespace, input.ModelID, vs.VariantName)
+		}
 	}
 
 	// Whether the decode role is saturated this cycle decides what a
@@ -247,7 +274,32 @@ func (c *cycle) resolvePricing() {
 // saturated under (mu_from_itl.go).
 func (c *cycle) fitLines() {
 	c.itlModels = make(map[string]itl.Model, len(c.gpusByVariant))
+	c.itlBorrowed = make(map[string]bool, len(c.gpusByVariant))
+	variants := make([]string, 0, len(c.gpusByVariant))
 	for variant := range c.gpusByVariant {
+		variants = append(variants, variant)
+	}
+	// Sorted so a cycle's log reads the same way twice, and because the order
+	// DOES still decide something.
+	//
+	// An earlier comment here claimed it did not -- that "a line is only ever
+	// borrowed from a PREVIOUS cycle's publication". That is false, and was
+	// measured to be: publishLine writes a.itlLines and borrowLine reads it
+	// inside this one loop, so a lender sorting before a borrower is borrowed
+	// from in the SAME cycle. Renaming the lender from `a-fitter` to
+	// `z-fitter` flips a first-cycle borrow from happening to not happening,
+	// on otherwise identical input.
+	//
+	// Sorting is what makes that deterministic, which is the property worth
+	// having: the alternative is a borrow that depends on Go's map iteration
+	// order and so differs between two runs of the same fleet. What sorting
+	// does NOT give is the BEST lender -- publishLine overwrites
+	// unconditionally, so with two publishers on one fingerprint the stored
+	// line is the alphabetically greatest variant's, whatever its fit quality.
+	// itl.Model carries neither the tier nor the sample count, so there is
+	// nothing to tie-break on here yet; that is a known gap, not a property.
+	sort.Strings(variants)
+	for _, variant := range variants {
 		// Decode only. ITL is the latency between GENERATED tokens, and
 		// deriveMu divides a token rate by an output length; prefill emits
 		// about one token per request -- its work is the prompt -- so the
@@ -263,21 +315,48 @@ func (c *cycle) fitLines() {
 		// decode. A P/D fleet projects its prefill backlog too, and leaving
 		// prefill out meant it published neither series, so a run could not even
 		// be reviewed for it.
-		c.a.noteReplicaStart(c.a.itlWindowKey(c.input.Namespace, c.input.ModelID, variant,
-			c.accelByVariant[variant], c.gpusByVariant[variant]),
+		variantKey := c.a.itlWindowKey(c.input.Namespace, c.input.ModelID, variant,
+			c.accelByVariant[variant], c.gpusByVariant[variant])
+		c.a.noteReplicaStart(variantKey,
 			c.input.Namespace, variant, c.input.ReplicaMetrics, c.logger)
 
 		if canonicalRole(c.rolesByVariant[variant]) != domain.RoleDecode {
 			continue
 		}
-		// Keyed by what ITL(k) is a property of: the accelerator and how many
-		// of them a replica has. Pooling two GPU products under one key is the
+		// Fit this variant's OWN readings first, into its own window, keyed
+		// by what ITL(k) is a property of: the accelerator and how many of
+		// them a replica has. Pooling two GPU products under one key is the
 		// bug stableAccelerator exists to prevent for k2 (the k1<->k2
 		// oscillation of PR #40 on a heterogeneous cluster), and a blended
 		// ITL line is meaningless for either product.
-		key := c.a.itlWindowKey(c.input.Namespace, c.input.ModelID, variant,
-			c.accelByVariant[variant], c.gpusByVariant[variant])
-		c.itlModels[variant] = c.a.noteITL(key, c.input.ReplicaMetrics, variant, c.a.now(), c.logger)
+		own := c.a.noteITL(variantKey, c.input.ReplicaMetrics, variant, c.a.now(), c.logger)
+		physicsKey := c.a.itlPhysicsKey(c.input.Namespace, c.input.ModelID, variant,
+			c.accelByVariant[variant], c.gpusByVariant[variant], c.fpByVariant[variant])
+
+		if !own.IsZero() {
+			// A measured line becomes the line for this engine configuration,
+			// so a sibling with nothing of its own can start from it.
+			c.a.publishLine(physicsKey, variantKey, own, c.a.now())
+			c.itlModels[variant] = own
+			continue
+		}
+
+		// Nothing of its own. Borrow the line another variant measured for the
+		// same configuration, if there is one. This is the saving the
+		// fingerprint was built for: a rename, a second identical variant or
+		// the same deployment in another namespace gets a line immediately
+		// instead of paying the ~28 cycles a fit takes -- measured from load
+		// start on run QT, which is the figure a controller-boot anchor had
+		// inflated to ~60.
+		borrowed, from, ok := c.a.borrowLine(physicsKey, variantKey)
+		if !ok {
+			continue
+		}
+		c.itlModels[variant] = borrowed
+		c.itlBorrowed[variant] = true
+		c.logger.V(logging.DEFAULT).Info("itl-line-borrowed",
+			"variant", variant, "from", from, "physicsKey", physicsKey,
+			"a", borrowed.A, "b", borrowed.B)
 	}
 }
 
@@ -341,6 +420,13 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				"rate", derived.rate, "seqs", derived.seqs, "tokenSec", derived.tokenSec,
 				"kPrice", kPrice, "itlAtKPrice", itlModel.ITLAt(kPrice),
 				"itlA", itlModel.A, "itlB", itlModel.B, "itlZero", itlModel.IsZero(),
+				// Whose line it is. Without this the record reports a rate
+				// built on a sibling's physics identically to one built on the
+				// variant's own, and the two carry different authority
+				// downstream: a borrowed line may hold a fleet and not grow
+				// one. itl-line-borrowed says it once per cycle; this says it
+				// beside the number it produced.
+				"lineBorrowed", c.itlBorrowed[rm.VariantName],
 				"avgOutputTokens", fleetShape.AvgOutputTokens,
 				"muDivisor", c.muDivisor,
 				"avgInputTokens", fleetShape.AvgInputTokens,
@@ -356,6 +442,17 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			role, c.accelByVariant[rm.VariantName], c.stableOutput, c.fleetOutput, c.stableInput,
 			c.fleetHitRate, derived, downstreamSaturated, c.logger)
 		if rc != nil {
+			// A derived figure inherits the borrowed-ness of the line it came
+			// from. Set here rather than threaded through
+			// computeReplicaCapacity's parameter list, because it is a
+			// property of the CYCLE's line resolution (fitLines) and not of
+			// the replica being priced.
+			// Only when the derived figure is the one in use. A variant
+			// holding a borrowed line but priced from its OWN measured window
+			// is not relying on the borrow, and flagging it would deny it an
+			// order it has earned.
+			rc.SaturatedThroughputLineBorrowed =
+				rc.SaturatedThroughputDerived && c.itlBorrowed[rm.VariantName]
 			replicaCapacities = append(replicaCapacities, *rc)
 		}
 	}
@@ -382,7 +479,8 @@ func (c *cycle) settleShape(caps []capacity.ReplicaCapacity) {
 // and adds what the router is holding and no pod has started.
 func (c *cycle) priceDemand(caps []capacity.ReplicaCapacity) demandParts {
 	variantCapacities := c.a.aggregateByVariant(caps, c.input.ReplicaMetrics,
-		c.input.VariantStates, c.input.ModelID, c.input.Namespace, c.cfg.KvCacheThreshold, c.logger)
+		c.input.VariantStates, c.input.ModelID, c.input.Namespace, c.cfg.KvCacheThreshold,
+		c.cfg.DisableLearnedStateReuse, c.logger)
 
 	// Model-level demand D (the analyzer owns demand attribution). Supply,
 	// utilization, and RoleCapacities are assembled downstream by the engine's

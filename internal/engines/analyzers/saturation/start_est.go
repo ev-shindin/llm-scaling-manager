@@ -77,9 +77,11 @@ const (
 // a count of cycles rather than of starts.
 //
 // The bookkeeping for that is bounded HERE, by forgetting Pods this variant no
-// longer reports, rather than by the analyzer's EvictStaleHistory -- which has no
-// caller on the reconcile path (analyzer_test.go says so where it tests the
-// throughput window). A set keyed per Pod is the fastest-growing state on this
+// longer reports. EvictStaleHistory sweeps it too, as a backstop for a variant
+// that disappears entirely -- it DOES have a caller on the reconcile path now
+// (steadystate.evictStaleLearnedState, once per cycle), which is why the
+// already-counted branch below re-stamps rather than leaving an entry to
+// expire under a live Pod. A set keyed per Pod is the fastest-growing state on this
 // struct, so it cannot be left to a sweep that does not run.
 func (a *SaturationAnalyzer) noteReplicaStart(
 	key, namespace, variantName string,
@@ -96,6 +98,11 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 	present := make(map[string]struct{}, len(replicas))
 
 	a.mu.Lock()
+	// This runs for every role, so it is what bounds the start estimate of a
+	// prefill or RoleBoth variant: noteITL stamps decode keys only, and the
+	// sweep that used to reach these maps through the ITL window map could
+	// never visit a key that has no window.
+	a.noteVariantSeen(key, a.now())
 	for _, rm := range replicas {
 		if rm.VariantName != variantName || rm.FromWarmPool || rm.PodName == "" {
 			continue
@@ -116,6 +123,21 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 			continue
 		}
 		if _, counted := a.startSeenPods[seen]; counted {
+			// Re-stamp. The entry is what says "this Pod's start is already in
+			// the estimate", and it used to be written once and never
+			// refreshed -- which was safe only while evictStartSeenPods had no
+			// caller. With the per-cycle sweep wired up, a Pod Ready for
+			// longer than the timeout lost this record and its start was
+			// folded into the EWMA a second time, then once per timeout for
+			// the rest of its life. That breaks the invariant above: the
+			// estimate would drift toward whatever the longest-lived replica
+			// measured, and wva_replica_start_seconds would count cycles
+			// rather than starts.
+			//
+			// Refreshing keeps the sweep for the case its own comment names --
+			// a variant that disappears entirely and is never reported again
+			// -- while a Pod still being reported never ages out.
+			a.startSeenPods[seen] = a.now()
 			continue
 		}
 		cur, measured := a.startSeconds[key]
@@ -233,10 +255,12 @@ func startSource(measured bool) string {
 // evictStartSeenPods drops bookkeeping older than the timeout.
 //
 // A backstop only: noteReplicaStart already forgets a Pod the cycle it stops
-// reporting, which is what actually bounds the map, because EvictStaleHistory
-// has no caller on the reconcile path. Kept so that a variant which disappears
-// entirely -- never reported again, so never pruned by its own cycle -- does not
-// leave entries behind if a caller is ever added.
+// reporting, which is what actually bounds the map. This exists for the one
+// case that cannot reach -- a variant which disappears entirely, never
+// reported again, so never pruned by its own cycle. EvictStaleHistory now has
+// a caller (steadystate.evictStaleLearnedState), so this runs every cycle, and
+// noteReplicaStart re-stamps a Pod it still sees precisely so that a live Pod
+// is never swept out from under its own "already counted" record.
 func (a *SaturationAnalyzer) evictStartSeenPods(now time.Time, timeout time.Duration) int {
 	dropped := 0
 	for pod, seen := range a.startSeenPods {

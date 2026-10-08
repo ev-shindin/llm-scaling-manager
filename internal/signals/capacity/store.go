@@ -169,7 +169,11 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 // given timeout. This prevents unbounded memory growth from deleted or
 // long-unused variants. Use a long timeout (EvictionTimeout, seven days)
 // since historical capacity data is valuable for zero-replica estimation.
-// No caller on the reconcile path today.
+//
+// Called once per cycle from steadystate.evictStaleLearnedState. The comment
+// here used to say there was no caller on the reconcile path, which was true
+// when written; this is the fourth comment of that kind the same commit
+// falsified, so if a sweep is ever unwired again, look for the others.
 func (s *Store) EvictStale(timeout time.Duration) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -209,7 +213,52 @@ func (s *Store) FindCompatible(modelID, accelerator string, gpuCount int, params
 			continue
 		}
 
-		// Must have compatible engine parameters
+		// Must have compatible engine parameters.
+		//
+		// COMPLETENESS IS DELIBERATELY NOT CHECKED. Two revisions got this
+		// wrong in opposite ways, so both are recorded.
+		//
+		// The first ADDED a Complete() gate here. That is a regression,
+		// because of how one of the two callers uses the result:
+		// estimateStoredCapacity (saturation/replica_capacity.go) takes it as
+		// a MAX CLAMP on a derived estimate, `if compatible.EffectiveCapacity
+		// < bounded`. Refusing the record does not substitute something
+		// smaller; it removes the ceiling. Measured: 5,000 became 153,600, a
+		// 30x over-estimate of per-replica capacity -- and an over-stated
+		// capacity UNDER-orders replicas, which this project has on record as
+		// breaking TTFT irrecoverably.
+		//
+		// The second was the comment that replaced it, which justified the
+		// removal by calling that the ONLY caller. It is not. The other is
+		// lookupCompatibleCapacity (same file), consumed in aggregate.go,
+		// where the record IS the estimate --
+		// `perReplicaCapacity = float64(rec.EffectiveCapacity)` -- for a
+		// variant with no record of its own. There, refusing would not remove
+		// a ceiling; it would fall through to satReasonNoData. So "refusing
+		// only ever removes a ceiling" was false, and the conclusion needs a
+		// different reason.
+		//
+		// THE REASON THAT HOLDS: an unreadable flag withholds the NEW thing it
+		// would authorise and never changes a path that already existed.
+		// Cross-variant capacity borrowing predates this work;
+		// IsCapacityCompatible was always a heuristic over parsed fields, and
+		// an unresolved value defaulted before the set existed exactly as it
+		// does now. Recording the gap made the uncertainty visible, it did not
+		// create it, and making it newly fatal would be this work changing a
+		// decision it did not improve. The one gate is engineFingerprint,
+		// where refusing means a variant learns its own ITL line -- the
+		// behaviour that preceded line sharing.
+		//
+		// What the borrow at the second call site DOES get is a log line
+		// naming the donor's unresolved set, so the uncertainty is visible
+		// where it is acted on: the `donorUnresolved` field on
+		// variant-capacity-source in aggregate.go.
+		//
+		// That field is named here because this comment asserted it before it
+		// existed. A review checked and found the log line carried only
+		// LearnedFrom, which made the one place the uncertainty is acted on
+		// the one place it was invisible -- so the mitigation this paragraph
+		// offers for not gating on completeness was not actually there.
 		if rec.EngineParams == nil || !rec.EngineParams.IsCapacityCompatible(params) {
 			continue
 		}

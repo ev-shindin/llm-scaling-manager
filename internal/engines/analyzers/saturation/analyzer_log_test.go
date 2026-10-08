@@ -60,6 +60,11 @@ var logContract = map[string][]string{
 		"demandBeforeFloor", "residentDemand", "flooredTo", // what changed
 		"arrivalRate", "backlogRequests", "drainSeconds", "saturatedThroughput", "perReplicaCapacity", "replicasImplied", // and from which terms
 		"heldAtFleet", "heldWhy", // and whether the floor was allowed to order on them
+		// heldAtFleet is NOT sufficient on its own. The hold is a cap
+		// (`if floor > hold`), so heldAtFleet=false covers two states: mu was
+		// orderable, or it was not and the cap sat above an already-small
+		// floor. These two separate them.
+		"mayOrder", "borrowedOnly",
 	},
 	// Prefill's share of the scheduler queue is dropped while prefill has no
 	// mu (throughput_floor.go); the line is what explains the gap between
@@ -95,13 +100,18 @@ var logContract = map[string][]string{
 		"variant", "pod", // join keys
 		"ok", "rate", "seqs", "tokenSec", // the result and its two factors
 		"kPrice", "itlAtKPrice", "itlA", "itlB", "itlZero", // the line and where it is read
+		// and whose line it is: a borrowed one may hold a fleet and not grow one
+		"lineBorrowed",
 		"avgOutputTokens", "muDivisor", // the shape's [5m] output length beside the short-window one mu is actually divided by
 		"kvReqPerSeq", "replicaKvTokens", "maxNumSeqs", // and the budget
 	},
 	"replica-capacity-skipped":        {"modelID", "namespace", "variant", "reason"},
 	"replica-capacity-store-fallback": {"modelID", "namespace", "variant", "reason"},
-	"variant-capacity-source":         {"modelID", "namespace", "variant", "reason"},
-	"zero-replica-capacity-estimate":  {"modelID", "namespace", "variant", "source"},
+	// donorUnresolved is deliberately NOT required here: it rides only on the
+	// borrow branch, and the no-data branch logs this same message with no
+	// donor at all. TestLogContract_BorrowNamesAnIncompleteDonor pins it.
+	"variant-capacity-source":        {"modelID", "namespace", "variant", "reason"},
+	"zero-replica-capacity-estimate": {"modelID", "namespace", "variant", "source"},
 }
 
 // The report tool keeps its own list of the messages it collects
@@ -507,6 +517,53 @@ func TestLogContract_BorrowedCapacityNamesItsDonor(t *testing.T) {
 	assert.Contains(t, stringField(t, fields, "reason"), "borrowed from a compatible variant")
 	assert.Equal(t, float64(9000), fields["perReplicaCapacity"])
 	assert.Equal(t, capacity.LearnedFromLive, stringField(t, fields, "engineParamsSource"))
+	// The donor's unresolved set, empty here because this donor was read in
+	// full. Asserted as the CONTROL for the case below -- on its own, an empty
+	// slice is also what an absent field looks like.
+	assert.Empty(t, fields["donorUnresolved"],
+		"a fully-read donor must report an empty set, not a missing field")
+}
+
+// AND THE CASE THAT MATTERS: a donor whose own configuration was NOT read in
+// full still lends its capacity, because FindCompatible deliberately does not
+// gate on completeness -- an unreadable flag defaulted on both sides compares
+// equal, so the borrow can rest on an equality nothing verified. The capacity
+// store's comment offered this log line as the mitigation for that, and a
+// review found the line did not actually carry it.
+func TestLogContract_BorrowNamesAnIncompleteDonor(t *testing.T) {
+	ctx, logs := observedCtx(t)
+
+	incomplete := deploymentParams()
+	incomplete.Unresolved = []string{"block_size", "max_model_len"}
+
+	store := capacity.NewStore()
+	store.Update("test-ns", "test-model", "variant-borrow", capacity.Record{
+		AcceleratorName: "H100", GpuCount: 1,
+		EffectiveCapacity: 0, TotalKvCapacityTokens: 0,
+		EngineParams: incomplete,
+		LearnedFrom:  "deployment",
+	})
+	store.Update("test-ns", "test-model", "variant-donor", capacity.Record{
+		AcceleratorName: "H100", GpuCount: 1,
+		EffectiveCapacity: 9000,
+		EngineParams:      incomplete,
+		LearnedFrom:       capacity.LearnedFromLive,
+	})
+	analyzer := NewSaturationAnalyzer(store)
+
+	_, err := analyzer.Analyze(ctx, makeAnalyzerInput(nil, []domain.VariantReplicaState{
+		{VariantName: "variant-borrow", AcceleratorName: "H100", CurrentReplicas: 0, GPUsPerReplica: 1},
+	}))
+	require.NoError(t, err)
+
+	fields := requireLogged(t, logs, "variant-capacity-source")
+	assert.Contains(t, stringField(t, fields, "reason"), "borrowed from a compatible variant",
+		"the borrow must still happen -- completeness is deliberately not a gate here")
+	// []any, not []string: the observed field holds what zapr put there, and a
+	// logged []string arrives as []interface{}. Asserted in order, because
+	// Unresolved is kept sorted so it is stable enough to hash.
+	assert.Equal(t, []any{"block_size", "max_model_len"}, fields["donorUnresolved"],
+		"the donor's unresolved flags must be named where the borrow is acted on")
 }
 
 func TestLogContract_NoDataVariantSaysSo(t *testing.T) {

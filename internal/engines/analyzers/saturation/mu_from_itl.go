@@ -235,8 +235,28 @@ func deriveMu(model itl.Model, params *capacity.EngineParams,
 //
 // Ready replicas of the variant itself only, and only where both halves of the
 // pair are present: a pod still failing its readiness probe, or one lent by the
-// warm pool running on the pool's own engine settings, is not a reading of what
-// one of this variant's replicas does. Above itl.DefaultMaxObservableK the
+// warm pool, is not a reading of what one of this variant's replicas does.
+//
+// Why the warm-pool exclusion, stated correctly -- an earlier version of this
+// comment said a lent pod runs "the pool's own engine settings", and that is
+// false by construction. warmpool.EngineOptionsFrom derives the warm copy's
+// command line from the ordinary replicas' own PodSpec precisely so the two
+// MATCH (a different --gpu-memory-utilization is a different torch.compile
+// cache key), and warmableFlags covers every flag the fingerprint hashes. By
+// default a lent pod therefore hashes to the SAME engine configuration, so the
+// fingerprint cannot be what tells it apart.
+//
+// What tells it apart is what it is running: a pool Pod hosts one awake engine
+// plus its sleepers, each keeping ~1.4 GiB of GPU residue
+// (internal/warmpool/demand.go measured
+// 4.4 GiB free at 0.95 on an 80 GiB card). Its ITL(k) is the latency of an
+// engine sharing a card, which is not the latency of one of this variant's own
+// replicas -- and k itself is read against a KV budget the sleepers have
+// already eaten into. A pool that does set an explicit GPUMemoryUtilization
+// does also change the digest, but the exclusion cannot rest on that: zero
+// inherits the workload's value, and zero is the default.
+//
+// Above itl.DefaultMaxObservableK the
 // engine preempts rather than slowing down and the line stops describing it, so
 // those readings are left out too.
 //
@@ -254,6 +274,11 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	// rather than serialising every other model's cycle behind this one's
 	// scan, fit and two Info calls.
 	a.mu.Lock()
+	// Before anything else: this variant has been reported, which is what the
+	// sweep ages its learned state on. An empty window is not evidence of a
+	// gone variant -- Window.Add admits only a band of k, so a healthy
+	// under-utilised fleet holds nothing while reporting every cycle.
+	a.noteVariantSeen(key, now)
 	w, ok := a.itlWindows[key]
 	if !ok {
 		w = itl.NewWindow(

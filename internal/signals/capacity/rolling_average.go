@@ -139,8 +139,10 @@ func (r *RollingAverage) Median() float64 {
 // created and never added to is fresh for one timeout.
 //
 // The saturation analyzer's EvictStaleHistory sweeps whole entries on the
-// same measure, but it has no caller on the reconcile path, so a window can outlive the behaviour it
-// describes. Callers that fold a fresh observation in check this first: an
+// same measure, and it is called once per cycle from
+// steadystate.evictStaleLearnedState. Readers check this anyway, because a
+// window can go stale between sweeps and because the read must not depend on
+// the sweep having run: an
 // average carried over a long gap is worse than no average, because it looks
 // like data and is weighted like data.
 func (r *RollingAverage) Stale(timeout time.Duration) bool {

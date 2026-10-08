@@ -93,6 +93,22 @@ type Term struct {
 	// and a run that shows only the resulting fleet cannot tell a cap that
 	// granted one replica from a queue that only justified one.
 	QueueJustifiedReplicas float64
+	// MayOrder and BorrowedOnly are the two gates that decide whether the
+	// hold branch runs at all, reported whether or not it changed the floor.
+	//
+	// They are here because Held alone is ambiguous in the case that matters.
+	// The hold is a CAP -- `if floor > hold` -- so Held stays false both when
+	// the role's mu was orderable and when it was not but the cap sat above an
+	// already-small floor. A run that set out to test whether a borrowed line
+	// pins an idle fleet got Held=false on every record and could not tell
+	// which had happened; it needed a second reading of the source to rule out
+	// the first. One cycle's ambiguity cost a 25-minute cluster run.
+	//
+	// BorrowedOnly is the role-level gate, true until some replica of the role
+	// contributes a reading of its own, so it is not implied by any one
+	// replica's borrowed flag.
+	MayOrder     bool
+	BorrowedOnly bool
 }
 
 // Estimate computes the per-role floor from lambda, the
@@ -132,6 +148,31 @@ type Term struct {
 // replica reads a short bucket and borrows the previous shape's mu; see "A
 // borrowed reading never outvotes a replica's own" in
 // docs/developer-guide/analyzer-evidence.md.
+//
+// A third kind of held reading arrives with this package's borrowed-LINE
+// routing; see borrowedReading below.
+
+// borrowedReading reports whether a replica's service rate is evidence about
+// something other than this variant's own current load, and so may hold a fleet
+// at its size but not grow it.
+//
+// Two kinds, and they are different in origin but identical in consequence. A
+// reading borrowed from a neighbouring SHAPE bucket is wrong in a known
+// direction. A figure derived from an ITL line borrowed from a sibling that
+// merely shares an engine configuration is evidence about that CONFIGURATION:
+// at a fixed k the resident sequence count is k*C/KVreq, and KVreq is the
+// shape, so the same line implies different service rates for two variants
+// serving different request shapes.
+//
+// A derived figure from the variant's OWN line is not borrowed and keeps its
+// licence to order without a sample count.
+func borrowedReading(rc capacity.ReplicaCapacity) bool {
+	if rc.SaturatedThroughputLineBorrowed {
+		return true
+	}
+	return rc.SaturatedThroughputBorrowed && !rc.SaturatedThroughputDerived
+}
+
 func Estimate(
 	lambda float64,
 	replicas []capacity.ReplicaCapacity,
@@ -209,6 +250,11 @@ func Estimate(
 	smallestP := make(map[string]float64)
 	// The same, from the replicas whose reading is a neighbouring bucket's;
 	// taken only for a role none of whose replicas reads its own.
+	// lineBorrowed records, per role, that what was routed as borrowed came
+	// from a borrowed ITL LINE rather than a neighbouring shape bucket -- so
+	// the hold can name which, instead of reporting a bucket borrow for
+	// something else entirely.
+	lineBorrowed := make(map[string]bool)
 	borrowedCosts := make(map[string][]float64)
 	borrowedMus := make(map[string][]float64)
 	mayOrder := make(map[string]bool)
@@ -230,9 +276,25 @@ func Estimate(
 		// this variant's own ITL(k), so it is neither borrowed from another
 		// shape's bucket nor a count of samples -- the two fields below
 		// describe the measured window that was not used.
-		if rc.SaturatedThroughputBorrowed && !rc.SaturatedThroughputDerived {
+		// A figure derived from a BORROWED line is routed here too, and that
+		// is the whole implementation of "may hold the fleet, may not grow
+		// it": this branch keeps borrowedOnly[role] true, which applies the
+		// cap below and names the reason, and it continues before mayOrder is
+		// ever set.
+		//
+		// An earlier version of this instead added !LineBorrowed to the
+		// mayOrder disjunction, which did nothing at all. The analyzer stamps
+		// MinDerivedThroughputSamples -- equal to MinThroughputSamplesToOrder
+		// by construction -- onto every derived figure, so the SAMPLE half of
+		// that disjunction re-admitted exactly what the derived half had just
+		// excluded. Gating a decision in one of two disjuncts gates nothing;
+		// the reading has to be routed, not annotated.
+		if borrowedReading(rc) {
 			borrowedCosts[role] = append(borrowedCosts[role], p/rc.SaturatedThroughput)
 			borrowedMus[role] = append(borrowedMus[role], rc.SaturatedThroughput)
+			if rc.SaturatedThroughputLineBorrowed {
+				lineBorrowed[role] = true
+			}
 			continue
 		}
 		costs[role] = append(costs[role], p/rc.SaturatedThroughput)
@@ -252,6 +314,8 @@ func Estimate(
 		// window while the rate it compares against is averaged over a minute.
 		// It is now a diagnostic only -- saturation.noteLineMismatch says
 		// why -- so this file is back to one disjunction.
+		// Reaching here means the reading is this variant's own: a borrowed
+		// line, like a borrowed bucket, took the branch above and continued.
 		if rc.SaturatedThroughputDerived ||
 			(rc.SaturatedThroughputSamples >= MinThroughputSamplesToOrder && !staleShape) {
 			mayOrder[role] = true
@@ -384,6 +448,10 @@ func Estimate(
 				floor = step
 			}
 		}
+		// Recorded before the hold branch, so they describe the gates as they
+		// were evaluated whether or not the cap went on to bind.
+		term.MayOrder = mayOrder[role]
+		term.BorrowedOnly = borrowedOnly[role]
 		if !mayOrder[role] && scaleUpThreshold > 0 {
 			// A hold, not an order, on either. Letting a single reading
 			// order one replica was tried twice and dropped: against the
@@ -420,9 +488,25 @@ func Estimate(
 				term.HeldWhy = "single-sample"
 				if borrowedOnly[role] {
 					term.HeldWhy = "borrowed"
+					if lineBorrowed[role] {
+						term.HeldWhy = "borrowed-line"
+					}
 				}
 				if staleShape {
-					term.HeldWhy = "shape-change"
+					// Both reasons can hold at once, and the cap is the same
+					// number either way -- but what an operator has to fix is
+					// not. Overwriting made every borrow invisible in a cycle
+					// that also had a stale shape, which is most cycles while
+					// a fleet is still ramping into a new shape, so the one
+					// reason that gets named is the one that goes away on its
+					// own. The composed value keeps the borrow visible; the
+					// single-sample case still reads as "shape-change" alone,
+					// because a stale shape is the reason that bounds it.
+					if borrowedOnly[role] {
+						term.HeldWhy += "+shape-change"
+					} else {
+						term.HeldWhy = "shape-change"
+					}
 				}
 			}
 		}

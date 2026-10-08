@@ -54,4 +54,21 @@ type ReplicaCapacity struct {
 	// shape's window -- the two fields above describe the measured window
 	// that was NOT used, and are left alone so they stay honest about it.
 	SaturatedThroughputDerived bool
+	// SaturatedThroughputLineBorrowed is set when the ITL(k) model the derived
+	// figure came from was BORROWED from a sibling variant that shares this
+	// one's engine configuration, rather than fitted from this variant's own
+	// readings.
+	//
+	// It exists because the sentence above -- a derived figure "is never
+	// borrowed from another" -- stopped being true when a variant with no fit
+	// of its own was allowed to start from a sibling's line. That is a real
+	// saving -- about 28 cycles, measured on run QT from load start, which an
+	// earlier anchor on the controller's boot inflated to ~60 -- and it is
+	// evidence about a
+	// CONFIGURATION rather than about this variant's load: the same line at
+	// the same k implies a different service rate for two variants serving
+	// different request shapes. So the floor may hold a fleet on it and must
+	// not GROW one on it, which is the same rule it already applies to a
+	// reading borrowed from a neighbouring shape bucket.
+	SaturatedThroughputLineBorrowed bool
 }

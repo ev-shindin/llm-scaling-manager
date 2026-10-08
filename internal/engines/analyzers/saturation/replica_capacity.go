@@ -529,10 +529,23 @@ func (a *SaturationAnalyzer) computeK2(
 
 	// Priority 2: Historical — lock must cover Average() since Add() mutates
 	// the same slice from Priority 1 under the same lock.
+	//
+	// Stale() is checked here for the same reason the write path above checks
+	// it, and it was missing. Without it this read would return a window the
+	// sweep is about to delete, which made wiring EvictStaleHistory up a
+	// BEHAVIOUR change rather than the memory fix it was presented as: a k2
+	// older than HistoryEvictionTimeout used to be returned as
+	// K2SrcHistorical, and after the sweep it falls through to the derived
+	// figure instead. A derived k2 above the measured one raises
+	// effectiveCapacity and orders FEWER replicas, which is the direction this
+	// project has recorded as breaking TTFT irrecoverably. With the guard, a
+	// stale entry is ignored whether or not the sweep has reached it yet, so
+	// the two agree and the sweep is neutral again.
 	a.mu.Lock()
 	var histAvg float64
 	var histLen int
-	if ra, ok := a.computeCapacityHistory[historyKey]; ok {
+	if ra, ok := a.computeCapacityHistory[historyKey]; ok &&
+		!ra.Stale(capacity.HistoryEvictionTimeout) {
 		histAvg = ra.Average()
 		histLen = ra.Len()
 	}
@@ -601,10 +614,24 @@ func (a *SaturationAnalyzer) computeK2(
 // capacity estimation for zero-replica variants that have no prior data.
 // The search is cross-namespace since capacity depends on hardware + config,
 // not namespace.
-func (a *SaturationAnalyzer) lookupCompatibleCapacity(namespace, modelID, variantName, accelerator string, gpuCount int) *capacity.Record {
+func (a *SaturationAnalyzer) lookupCompatibleCapacity(namespace, modelID, variantName, accelerator string, gpuCount int, reuseDisabled bool) *capacity.Record {
 	// Get EngineParams for this variant (from deployment-derived record)
 	rec := a.capacityStore.Get(namespace, modelID, variantName)
 	if rec == nil || rec.EngineParams == nil {
+		return nil
+	}
+	// Refused outright when reuse is off: this whole function exists to price
+	// a variant from a sibling's measurement, which is the thing the switch
+	// withholds. The caller's remaining branches fall back to the variant's
+	// own figures.
+	// Refused outright when reuse is off: this whole function exists to price a
+	// variant from a SIBLING's measurement, which is what the switch withholds.
+	// The caller's remaining branches fall back to the variant's own figures.
+	//
+	// This is the only capacity path the switch gates. estimateStoredCapacity's
+	// compatible-variant bound is deliberately left alone -- it is a max clamp,
+	// and withholding a clamp raises the estimate and orders FEWER replicas.
+	if reuseDisabled {
 		return nil
 	}
 	return a.capacityStore.FindCompatible(modelID, accelerator, gpuCount, rec.EngineParams)
@@ -666,6 +693,23 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 			}
 
 			// Bound by compatible variant's live EffectiveCapacity (already min(k1,k2))
+			//
+			// DisableLearnedStateReuse DELIBERATELY DOES NOT REACH HERE, and a
+			// first version of it did, which was a defect.
+			//
+			// This is a MAX clamp: it only ever LOWERS the estimate. Removing
+			// it raises capacity, and an over-stated capacity orders FEWER
+			// replicas -- the direction this project has on record as breaking
+			// TTFT irrecoverably. store.go measured it when the record was
+			// withheld for a different reason: 5,000 became 153,600.
+			//
+			// So an operator asking "stop pricing this variant from a sibling's
+			// measurement" must not silently get "and remove your capacity
+			// ceiling" as well. A ceiling is conservatism, not a borrow. The
+			// switch gates the two places a sibling's figure BECOMES this
+			// variant's answer -- the shared ITL line, and
+			// lookupCompatibleCapacity, where the record IS the estimate -- and
+			// leaves every clamp alone.
 			if compatible := a.capacityStore.FindCompatible(modelID, accelerator, gpuCount, rec.EngineParams); compatible != nil && compatible.LearnedFrom == capacity.LearnedFromLive && compatible.EffectiveCapacity > 0 {
 				if compatible.EffectiveCapacity < bounded {
 					bounded = compatible.EffectiveCapacity
