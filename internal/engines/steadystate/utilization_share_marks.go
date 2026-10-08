@@ -168,9 +168,11 @@ func (e *Engine) markDonorPods(ctx context.Context, t allocation.ShareTransfer,
 
 // unmarkDonorPods removes a cancelled or aborted transfer's marks, so the pods
 // are no longer first in line and no restart resurrects the transfer.
-func (e *Engine) unmarkDonorPods(ctx context.Context, logger logr.Logger, t allocation.ShareTransfer) {
+//
+// It reports how many pods it could not unmark; callers that retry use it.
+func (e *Engine) unmarkDonorPods(ctx context.Context, logger logr.Logger, t allocation.ShareTransfer) (failed int) {
 	if e.client == nil {
-		return
+		return 0
 	}
 	for _, key := range t.DonorPods {
 		ns, name, _ := strings.Cut(key, "/")
@@ -180,6 +182,7 @@ func (e *Engine) unmarkDonorPods(ctx context.Context, logger logr.Logger, t allo
 				// Not "gone": the mark stays, and a restart inside the
 				// release timeout would restore the transfer. Say so.
 				logger.Error(err, "could not read a donor pod to unmark it", "pod", key)
+				failed++
 			}
 			continue
 		}
@@ -197,8 +200,10 @@ func (e *Engine) unmarkDonorPods(ctx context.Context, logger logr.Logger, t allo
 		delete(p.Annotations, utilizationShareTransferAnnotation)
 		if err := e.client.Patch(ctx, &p, patch); err != nil {
 			logger.Error(err, "could not unmark a donor pod", "pod", key)
+			failed++
 		}
 	}
+	return failed
 }
 
 // markedFor reports whether a pod's transfer mark names the transfer id.
@@ -497,7 +502,8 @@ func (e *Engine) dropShareActuation(ctx context.Context, logger logr.Logger) {
 // are empty until the first acting cycle restores them, so a restart into
 // shadow mode, or with the optimizer removed, would otherwise leave its pods
 // at our deletion cost for good. Marks of another controller instance are
-// left alone. A failed list is retried next cycle.
+// left alone. A failed list, or a pod it could not unmark, is retried next
+// cycle.
 func (e *Engine) sweepShareMarks(ctx context.Context, logger logr.Logger) {
 	st := &e.utilizationShare
 	if st.swept || e.client == nil {
@@ -523,8 +529,10 @@ func (e *Engine) sweepShareMarks(ctx context.Context, logger logr.Logger) {
 		ours = append(ours, utils.GetNamespacedKey(p.Namespace, p.Name))
 	}
 	if len(ours) > 0 {
-		logger.Info("utilization share removed the marks it left on pods while it was not acting", "pods", len(ours))
-		e.unmarkDonorPods(ctx, logger, allocation.ShareTransfer{DonorPods: ours})
+		logger.Info("utilization share is removing the marks it left on pods while it was not acting", "pods", len(ours))
+		if e.unmarkDonorPods(ctx, logger, allocation.ShareTransfer{DonorPods: ours}) > 0 {
+			return
+		}
 	}
 	st.swept = true
 }

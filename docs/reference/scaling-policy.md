@@ -348,8 +348,9 @@ JSON, including the pod's previous deletion cost) and
 `controller.kubernetes.io/pod-deletion-cost: "-1000"`, so the ReplicaSet removes
 that pod and not a sibling. A restarted controller rebuilds its in-flight
 transfers from these marks. The controller removes both, restoring the pod's
-previous deletion cost, when the transfer ends, and when the optimizer is switched
-to shadow or off, including across a controller restart. Each controller removes
+previous deletion cost, when the transfer ends, when the optimizer is switched to
+shadow or off (including across a controller restart), and when no quota has been
+read for two minutes. Each controller removes
 only the marks it wrote (they record its `CONTROLLER_INSTANCE`). Downgrading to a version
 without the optimizer leaves them behind; see
 [marks left after a downgrade](troubleshooting.md#transfer-marks-left-on-pods-after-a-downgrade).

@@ -136,3 +136,27 @@ func counterSum(t *testing.T, r *prometheus.Registry, name string, want map[stri
 	}
 	return sum
 }
+
+// A sweep that could not unmark a pod tries again the next cycle, rather than
+// recording the sweep as done.
+func TestUtilizationShareRetriesASweepThatCouldNotUnmark(t *testing.T) {
+	f := newShareFleet()
+	fresh := sharePods(t, f)
+	se := newShareEngine(t, f, fresh, time.Unix(0, 0))
+	se.untilStarted()
+	if len(markedPods(t, fresh)) == 0 {
+		t.Fatal("setup: no pod marked")
+	}
+	down := true
+	restarted := newShareEngine(t, f, failing(fresh, nil, func() bool { return down }), se.clock.Add(30*time.Second))
+	setShadowPolicy(t, restarted.e.Config, selectedShadow)
+	restarted.cycle()
+	if len(markedPods(t, fresh)) == 0 {
+		t.Fatal("setup: the patch was meant to fail")
+	}
+	down = false
+	restarted.cycle()
+	if m := markedPods(t, fresh); len(m) != 0 {
+		t.Fatalf("%d pods still marked: the failed sweep was not retried", len(m))
+	}
+}

@@ -171,7 +171,7 @@ func TestUtilizationShareUnmarksAVanishedGroup(t *testing.T) {
 	if got := o["ns/A-v"].Target; got != 9-given {
 		t.Fatalf("A's target while its group is missing = %d, want %d held", got, 9-given)
 	}
-	se.clock = se.clock.Add(shareNoBoundGrace)
+	se.clock = se.clock.Add(shareAbsenceGrace)
 	se.e.evaluateUtilizationShare(se.ctx, nil, fullQuota(), f.scaleTargets())
 	if m := markedPods(t, c); len(m) != 0 {
 		t.Fatalf("%d pods still marked after their group vanished", len(m))
@@ -196,9 +196,9 @@ func TestUtilizationShareRestartsAGroupsAbsenceWhenItReturns(t *testing.T) {
 		se.e.evaluateUtilizationShare(se.ctx, r, fullQuota(), f.scaleTargets())
 	}
 	step(30*time.Second, false)
-	step(shareNoBoundGrace-time.Minute, true) // back before the grace ran out
+	step(shareAbsenceGrace-time.Minute, true) // back before the grace ran out
 	step(30*time.Second, false)
-	step(shareNoBoundGrace-time.Minute, false)
+	step(shareAbsenceGrace-time.Minute, false)
 	if len(se.e.utilizationShare.ledgers) != 1 {
 		t.Fatal("the absence was counted from before the group returned")
 	}
@@ -219,12 +219,15 @@ func TestUtilizationShareHoldsInFlightTargetsWhileNoBoundIsRead(t *testing.T) {
 	if len(se.e.utilizationShare.ledgers) == 0 {
 		t.Fatal("the ledger was dropped on the first cycle with no bound")
 	}
-	se.clock = se.clock.Add(shareNoBoundGrace)
+	se.clock = se.clock.Add(shareAbsenceGrace)
 	if o := se.e.evaluateUtilizationShare(se.ctx, f.requests(), nil, f.scaleTargets()); len(o) != 0 {
 		t.Fatalf("targets still held past the grace: %v", o)
 	}
 	if len(se.e.utilizationShare.ledgers) != 0 {
 		t.Fatal("the ledger outlived the grace")
+	}
+	if m := markedPods(t, c); len(m) != 0 {
+		t.Fatalf("%d pods still marked with no bound past the grace: nothing is left to share", len(m))
 	}
 }
 
@@ -274,9 +277,9 @@ func TestUtilizationShareRestartsTheNoBoundGraceWhenABoundIsRead(t *testing.T) {
 		return se.e.evaluateUtilizationShare(se.ctx, f.requests(), q, f.scaleTargets())
 	}
 	step(30*time.Second, false)
-	step(shareNoBoundGrace-time.Minute, true)
+	step(shareAbsenceGrace-time.Minute, true)
 	step(30*time.Second, false)
-	o := step(shareNoBoundGrace-time.Minute, false)
+	o := step(shareAbsenceGrace-time.Minute, false)
 	if got, ok := o["ns/A-v"]; !ok || got.Target > 9-given {
 		t.Fatalf("A's target %+v (present %v): the grace counted from the first failed read", got, ok)
 	}

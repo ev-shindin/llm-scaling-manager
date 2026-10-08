@@ -32,8 +32,8 @@ type utilizationShareState struct {
 	// namespace quota for, comma-joined: reported once per change.
 	lastUnmatched string
 	// noBoundSince is when the cycles began to see no constraints at all;
-	// zero while they see some. goneSince is when each ledger's group was
-	// last missing from a cycle that saw constraints. See shareNoBoundGrace.
+	// zero while they see some. goneSince is when each ledger's group began
+	// to be missing from cycles that saw constraints. See shareAbsenceGrace.
 	noBoundSince time.Time
 	goneSince    map[string]time.Time
 	// swept is set once the marks a stopped optimizer left are removed, and
@@ -147,16 +147,16 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		// No bound this cycle -- possibly a failed read. For a grace the
 		// ledgers stay and the variants their transfers move keep their
 		// targets: a fill has no mark to be restored from. Past it the bound
-		// is gone, not unread; the marks stay, and a later cycle restores the
-		// releases from them.
+		// is gone, not unread, and there is nothing to share: as when the
+		// optimizer is switched off, its marks go with its ledgers.
 		metrics.PublishUtilizationShare(nil)
 		if st.noBoundSince.IsZero() {
 			st.noBoundSince = now
 		}
-		if !us.Shadow && now.Sub(st.noBoundSince) < shareNoBoundGrace {
+		if !us.Shadow && now.Sub(st.noBoundSince) < shareAbsenceGrace {
 			return st.holdInFlight(nil, "utilization share: no bound read this cycle; transfer in flight")
 		}
-		st.resetActuation()
+		e.dropShareActuation(ctx, logger)
 		return nil
 	}
 	st.noBoundSince = time.Time{}
@@ -231,6 +231,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 				actual = r.Need * g.Thresholds[v.Key] / float64(v.Committed)
 			}
 			o := g.Origins[v.Key]
+			excess := math.Max(0, float64(r.Floor)-r.Need)
 			pg.Roles = append(pg.Roles, metrics.UtilizationShareRole{
 				Namespace:   o.Namespace,
 				ModelName:   o.ModelID,
@@ -239,9 +240,9 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 				TargetGPUs:  v.Continuous,
 				Actionable:  v.Actionable,
 				Actual:      actual,
-				FloorExcess: math.Max(0, float64(r.Floor)-r.Need),
+				FloorExcess: excess,
 			})
-			floorExcess += math.Max(0, float64(r.Floor)-r.Need)
+			floorExcess += excess
 			table = append(table, fmt.Sprintf("%s held=%d target=%.2f integer=%d headroom=%s band=%t",
 				v.Key, v.Committed, v.Continuous, v.Integer, formatHeadroom(v.Headroom), v.InBand))
 			if v.Actionable {
@@ -295,11 +296,18 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		logger.V(logging.DEBUG).Info("Shadow: utilization share evaluation", append(kv, "roles", table)...)
 	}
 	metrics.PublishUtilizationShare(published)
-	// A group that has gone (its last model left, its namespace disabled)
-	// takes its ledger with it, and its marks: its variants return to
-	// today's optimizer, with pods that carry no deletion cost of ours. A
-	// group missing for less than the grace -- a failed collection -- keeps
-	// both, and the variants its transfers move keep their targets.
+	e.dropVanishedGroups(ctx, logger, seen, now)
+	return st.holdInFlight(overrides, "utilization share: transfer in flight")
+}
+
+// dropVanishedGroups drops the ledger of a group that has gone (its last model
+// left, its namespace disabled) and its marks: its variants return to today's
+// optimizer, with pods that carry no deletion cost of ours. A group missing for
+// less than shareAbsenceGrace -- a failed collection -- keeps both, and the
+// variants its transfers move keep their targets. seen are the groups this
+// cycle acted on.
+func (e *Engine) dropVanishedGroups(ctx context.Context, logger logr.Logger, seen map[string]bool, now time.Time) {
+	st := &e.utilizationShare
 	if st.goneSince == nil {
 		st.goneSince = map[string]time.Time{}
 	}
@@ -311,7 +319,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		if _, ok := st.goneSince[k]; !ok {
 			st.goneSince[k] = now
 		}
-		if now.Sub(st.goneSince[k]) < shareNoBoundGrace {
+		if now.Sub(st.goneSince[k]) < shareAbsenceGrace {
 			continue
 		}
 		for _, t := range l.Transfers() {
@@ -321,14 +329,13 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		delete(st.quietUntil, k)
 		delete(st.goneSince, k)
 	}
-	return st.holdInFlight(overrides, "utilization share: transfer in flight")
 }
 
-// shareNoBoundGrace is how long cycles that read no constraint, or miss a
+// shareAbsenceGrace is how long cycles that read no constraint, or miss a
 // group, keep the transfers in flight: long enough to ride out a failed read,
 // short enough that a bound or group really removed releases the variants
 // promptly.
-const shareNoBoundGrace = 2 * time.Minute
+const shareAbsenceGrace = 2 * time.Minute
 
 // holdInFlight adds to overrides the targets of the variants a live transfer
 // still moves and this cycle did not plan, and forgets every other target.

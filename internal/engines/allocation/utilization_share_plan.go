@@ -139,9 +139,10 @@ func ShareDebt(committed map[string]int, budget int) int {
 // (proposal §6.1-§6.3, §6.7). It changes the ledger and returns what it did;
 // the caller has already applied this cycle's observations (ShareLedger.Observe).
 //
-// It plans single-donor transfers: one donor replica at least the receiver
-// replica's size funds it, which is valid wherever the donor pod ran (§6.5).
-// Per-node donor sets extend the donor choice, not this procedure.
+// A receiver is funded by one donor replica at least its replica's size where
+// it can be, which is valid wherever the donor pod ran; otherwise by a donor
+// set -- several donor replicas whose pods open one fitting hole together
+// (§6.5, fundBySet).
 func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm ShareTimings) SharePlan {
 	// Node state is spent as node-aware sets start within the cycle; work on
 	// copies, never the caller's.
