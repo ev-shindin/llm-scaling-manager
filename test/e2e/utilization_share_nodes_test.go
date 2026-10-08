@@ -54,13 +54,13 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 		if !ok {
 			Skip("no GPU product label on any schedulable node")
 		}
-		if n := fixtures.AllocatableGPUsForProduct(ctx, k8sClient, product); n < quotaGPUs {
+		// A's pods all go to the largest schedulable node of the product: the
+		// spec needs two of them on one node, and that must not be left to the
+		// scheduler.
+		pinNode, n := fixtures.LargestNodeForProduct(ctx, k8sClient, product)
+		if n < quotaGPUs {
 			Skip(fmt.Sprintf("needs a node with %d %s GPUs, the largest has %d", quotaGPUs, product, n))
 		}
-		// A's pods all go to the largest node of the product: the spec needs
-		// two of them on one node, and that must not be left to the scheduler.
-		pinNode := largestGPUNode(key, product, gpuResName)
-		Expect(pinNode).NotTo(BeEmpty(), "no schedulable %s node", product)
 
 		for _, prefix := range []string{"ushn-", "ushn-filler-"} {
 			nsObj, err := k8sClient.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
@@ -224,21 +224,3 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 		}, 8*time.Minute, 10*time.Second).Should(Succeed())
 	})
 })
-
-// largestGPUNode is the schedulable node of product with the most allocatable
-// resourceName, or "".
-func largestGPUNode(key, product, resourceName string) string {
-	nodes, err := k8sClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: key + "=" + product})
-	Expect(err).NotTo(HaveOccurred())
-	best, most := "", int64(0)
-	for _, n := range nodes.Items {
-		if n.Spec.Unschedulable {
-			continue
-		}
-		q := n.Status.Allocatable[corev1.ResourceName(resourceName)]
-		if v := q.Value(); v > most {
-			best, most = n.Name, v
-		}
-	}
-	return best
-}

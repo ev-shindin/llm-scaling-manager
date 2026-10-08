@@ -24,6 +24,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
@@ -46,6 +47,9 @@ type transferMark struct {
 	// PrevCost is the pod's deletion cost before the mark, restored when the
 	// mark is removed; nil when it had none.
 	PrevCost *string `json:"prevCost,omitempty"`
+	// Instance is the CONTROLLER_INSTANCE that wrote the mark: a controller
+	// sweeps only its own marks (sweepShareMarks).
+	Instance string `json:"instance,omitempty"`
 }
 
 // donorPods lists the pods a donor variant would release: on a Deployment, its
@@ -133,7 +137,7 @@ func (e *Engine) markDonorPods(ctx context.Context, t allocation.ShareTransfer,
 		p := &pods[i]
 		mark := transferMark{ID: t.ID, Donor: t.Donor, Receiver: t.Receiver, DonorVariant: t.DonorVariant,
 			ReceiverVariant: t.ReceiverVariant, GPUs: t.GPUs, DonorGPUs: t.DonorGPUs, Started: t.Started, SetID: t.SetID,
-			Planned: len(t.PlannedPods) > 0}
+			Planned: len(t.PlannedPods) > 0, Instance: metrics.GetControllerInstance()}
 		// The pod's own deletion cost, restored with the mark's removal. One a
 		// stale mark of ours wrote is not the user's.
 		if prev, ok := p.Annotations[podDeletionCostAnnotation]; ok {
@@ -272,11 +276,6 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 			f.live = f.live || p.DeletionTimestamp == nil
 		}
 	}
-	// A donor set restores whole or not at all (section 6.5): a primary, and
-	// members whose donor replicas together cover the receiver's replica. A
-	// member without its primary, or a set that gives less than its receiver
-	// takes, is a mark this controller did not write -- or the rest of it is
-	// gone -- and every member is removed.
 	// A transfer has one donor: an ID found under two roles is at least one
 	// mark this controller did not write -- a set's second primary among them
 	// -- and every pod carrying it is unmarked.
@@ -294,6 +293,11 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 		}
 		return false
 	})
+	// A donor set restores whole or not at all (section 6.5): a primary, and
+	// members whose donor replicas together cover the receiver's replica. A
+	// member without its primary, or a set that gives less than its receiver
+	// takes, is a mark this controller did not write -- or the rest of it is
+	// gone -- and every member is removed.
 	setGives, primaryTakes := map[string]int{}, map[string]int{}
 	for _, id := range order {
 		m := byID[id].mark
@@ -402,7 +406,8 @@ func (e *Engine) remarkDonorPods(ctx context.Context, logger logr.Logger, l *all
 		var old transferMark
 		_ = json.Unmarshal([]byte(p.Annotations[utilizationShareTransferAnnotation]), &old)
 		raw, err := json.Marshal(transferMark{ID: t.ID, Donor: t.Donor, DonorVariant: t.DonorVariant,
-			DonorGPUs: t.DonorGPUs, Started: t.Started, Planned: len(t.PlannedPods) > 0, PrevCost: old.PrevCost})
+			DonorGPUs: t.DonorGPUs, Started: t.Started, Planned: len(t.PlannedPods) > 0, PrevCost: old.PrevCost,
+			Instance: metrics.GetControllerInstance()})
 		if err != nil {
 			continue
 		}
@@ -484,4 +489,42 @@ func (e *Engine) dropShareActuation(ctx context.Context, logger logr.Logger) {
 		}
 	}
 	e.utilizationShare.resetActuation()
+	e.sweepShareMarks(ctx, logger)
+}
+
+// sweepShareMarks removes, once each time the optimizer stops acting, every
+// mark this controller wrote that no ledger holds: after a restart the ledgers
+// are empty until the first acting cycle restores them, so a restart into
+// shadow mode, or with the optimizer removed, would otherwise leave its pods
+// at our deletion cost for good. Marks of another controller instance are
+// left alone. A failed list is retried next cycle.
+func (e *Engine) sweepShareMarks(ctx context.Context, logger logr.Logger) {
+	st := &e.utilizationShare
+	if st.swept || e.client == nil {
+		return
+	}
+	var pods corev1.PodList
+	if err := e.client.List(ctx, &pods); err != nil {
+		logger.Error(err, "utilization share could not list pods to remove its marks; retrying next cycle")
+		return
+	}
+	instance := metrics.GetControllerInstance()
+	var ours []string
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		raw, ok := p.Annotations[utilizationShareTransferAnnotation]
+		if !ok {
+			continue
+		}
+		var m transferMark
+		if json.Unmarshal([]byte(raw), &m) != nil || m.ID == "" || m.Instance != instance {
+			continue
+		}
+		ours = append(ours, utils.GetNamespacedKey(p.Namespace, p.Name))
+	}
+	if len(ours) > 0 {
+		logger.Info("utilization share removed the marks it left on pods while it was not acting", "pods", len(ours))
+		e.unmarkDonorPods(ctx, logger, allocation.ShareTransfer{DonorPods: ours})
+	}
+	st.swept = true
 }

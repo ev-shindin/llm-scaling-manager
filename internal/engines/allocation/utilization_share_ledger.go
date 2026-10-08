@@ -2,6 +2,8 @@ package allocation
 
 import (
 	"fmt"
+	"iter"
+	"maps"
 	"slices"
 	"strconv"
 	"time"
@@ -863,16 +865,13 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		}
 	}
 	// A role recorded before Retain first ran starts its absence now.
-	for _, m := range []map[string]time.Time{l.giveAfter, l.lastGave, l.lastGot, l.swingUntil} {
-		for r := range m {
+	recorded := []iter.Seq[string]{maps.Keys(l.aborts), maps.Keys(l.giveAfter), maps.Keys(l.fillBlocked),
+		maps.Keys(l.lastGave), maps.Keys(l.lastGot), maps.Keys(l.moves), maps.Keys(l.swingUntil), maps.Keys(l.needs)}
+	for _, roles := range recorded {
+		for r := range roles {
 			if _, ok := l.seen[r]; !ok {
 				l.seen[r] = now
 			}
-		}
-	}
-	for r := range l.aborts {
-		if _, ok := l.seen[r]; !ok {
-			l.seen[r] = now
 		}
 	}
 	horizon := max(tm.ReversalHold, 2*tm.SwingWindow, tm.ReleaseTimeout<<4)

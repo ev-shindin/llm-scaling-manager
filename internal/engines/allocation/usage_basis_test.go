@@ -3,6 +3,8 @@ package allocation
 import (
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 )
 
@@ -138,5 +140,43 @@ func TestGPUUsageViewsMissingBasis(t *testing.T) {
 	full := GPUUsageViews{PhysicalByType: map[string]int{}, ManagedByType: map[string]int{}}
 	if _, missing := full.MissingBasis(both); missing {
 		t.Error("both views were observed; empty is a measurement, not a gap")
+	}
+}
+
+// The refresher walks nodes for a physical limiter always, and for an active
+// utilization-share optimizer only on a cluster-scoped install: a
+// namespace-scoped one may not list nodes.
+func TestNodeUsageWanted(t *testing.T) {
+	policy := func(doc string) *config.Config {
+		var p config.ScalingPolicy
+		if err := yaml.Unmarshal([]byte(doc), &p); err != nil {
+			t.Fatal(err)
+		}
+		c := config.NewTestConfig()
+		c.UpdateScalingPolicyConfig(map[string]config.ScalingPolicy{config.GlobalDefaultsKey: p})
+		return c
+	}
+	quota := "limiters:\n  - type: quota\n    name: q\n    scope: cluster\n    quotas:\n      A100: 16\n"
+	share := "optimizer:\n  type: utilizationShare\n"
+	shadow := share + "  utilizationShare:\n    shadow: true\n"
+	inventory := "limiters:\n  - type: inventory\n    name: gpu\n"
+	for _, tc := range []struct {
+		name            string
+		doc             string
+		namespaceScoped bool
+		want            bool
+	}{
+		{"quota alone", quota, false, false},
+		{"quota and an active optimizer", quota + share, false, true},
+		{"the same, namespace-scoped", quota + share, true, false},
+		{"quota and a shadow optimizer", quota + shadow, false, false},
+		{"a physical limiter", inventory, false, true},
+		{"a physical limiter, namespace-scoped", inventory, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NodeUsageWanted(policy(tc.doc), tc.namespaceScoped); got != tc.want {
+				t.Fatalf("NodeUsageWanted = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

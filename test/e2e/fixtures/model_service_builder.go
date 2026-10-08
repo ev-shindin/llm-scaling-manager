@@ -70,14 +70,23 @@ func WithAcceleratorNodeSelectorKV(key, productName string) ModelServiceOption {
 // largest single node rather than a sum, because filling is per-node -- a pod
 // cannot straddle two.
 func AllocatableGPUsForProduct(ctx context.Context, k8sClient *kubernetes.Clientset, product string) int {
+	_, gpus := LargestNodeForProduct(ctx, k8sClient, product)
+	return gpus
+}
+
+// LargestNodeForProduct is the schedulable node carrying product that
+// advertises the most GPUs, and that number; "" and 0 when there is none. A
+// cordoned node, or one with a NoSchedule or NoExecute taint, is not
+// schedulable: a spec that pins pods to it would leave them Pending.
+func LargestNodeForProduct(ctx context.Context, k8sClient *kubernetes.Clientset, product string) (string, int) {
 	nodes, err := k8sClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return 0
+		return "", 0
 	}
-	best := 0
+	bestNode, best := "", 0
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
-		schedulable := true
+		schedulable := !node.Spec.Unschedulable
 		for _, t := range node.Spec.Taints {
 			if t.Effect == corev1.TaintEffectNoSchedule || t.Effect == corev1.TaintEffectNoExecute {
 				schedulable = false
@@ -101,12 +110,12 @@ func AllocatableGPUsForProduct(ctx context.Context, k8sClient *kubernetes.Client
 			}
 			if q, ok := node.Status.Allocatable[corev1.ResourceName(vendor.ResourceName)]; ok {
 				if n := int(q.Value()); n > best {
-					best = n
+					bestNode, best = node.Name, n
 				}
 			}
 		}
 	}
-	return best
+	return bestNode, best
 }
 
 // NoAcceleratorPinAnnotation opts a workload OUT of the default pin below.

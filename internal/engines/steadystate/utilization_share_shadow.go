@@ -32,8 +32,16 @@ type utilizationShareState struct {
 	// namespace quota for, comma-joined: reported once per change.
 	lastUnmatched string
 	// noBoundSince is when the cycles began to see no constraints at all;
-	// zero while they see some. See shareNoBoundGrace.
+	// zero while they see some. goneSince is when each ledger's group was
+	// last missing from a cycle that saw constraints. See shareNoBoundGrace.
 	noBoundSince time.Time
+	goneSince    map[string]time.Time
+	// swept is set once the marks a stopped optimizer left are removed, and
+	// cleared while it acts. See sweepShareMarks.
+	swept bool
+	// floorHeavy are the groups whose floors hold more than half their
+	// budget above need: reported once per change (reportFloorHeavy).
+	floorHeavy map[string]bool
 
 	// Actuation state (stage 2), dropped whenever the optimizer is not active.
 	// ledgers are per group (shareGroupKey); desired is each planned variant's
@@ -60,7 +68,7 @@ type utilizationShareState struct {
 // pods; when the optimizer is activated again, the rebuild reads them back and
 // removes those that are stale.
 func (st *utilizationShareState) resetActuation() {
-	st.ledgers, st.desired, st.quietUntil, st.divergedSince = nil, nil, nil, nil
+	st.ledgers, st.desired, st.quietUntil, st.divergedSince, st.goneSince = nil, nil, nil, nil, nil
 }
 
 // evaluateUtilizationShare runs the utilization-share optimizer
@@ -145,7 +153,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		if st.noBoundSince.IsZero() {
 			st.noBoundSince = now
 		}
-		if now.Sub(st.noBoundSince) < shareNoBoundGrace {
+		if !us.Shadow && now.Sub(st.noBoundSince) < shareNoBoundGrace {
 			return st.holdInFlight(nil, "utilization share: no bound read this cycle; transfer in flight")
 		}
 		st.resetActuation()
@@ -154,6 +162,8 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	st.noBoundSince = time.Time{}
 	if us.Shadow {
 		e.dropShareActuation(ctx, logger)
+	} else {
+		st.swept = false
 	}
 	st.reportUnmatchedNamespaces(logger, us, constraints)
 	seen := map[string]bool{}
@@ -207,6 +217,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		}
 		var table []string
 		var actionable []string
+		floorExcess := 0.0
 		roleIdx := map[string]int{}
 		roleByKey := map[string]allocation.ShareRole{}
 		for _, r := range g.Roles {
@@ -230,12 +241,14 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 				Actual:      actual,
 				FloorExcess: math.Max(0, float64(r.Floor)-r.Need),
 			})
+			floorExcess += math.Max(0, float64(r.Floor)-r.Need)
 			table = append(table, fmt.Sprintf("%s held=%d target=%.2f integer=%d headroom=%s band=%t",
 				v.Key, v.Committed, v.Continuous, v.Integer, formatHeadroom(v.Headroom), v.InBand))
 			if v.Actionable {
 				actionable = append(actionable, v.Key)
 			}
 		}
+		st.reportFloorHeavy(logger, shareGroupKey(g), floorExcess, g.Budget)
 		mode := "Shadow: utilization share would rebalance"
 		if !us.Shadow {
 			mode = "Utilization share: rebalancing"
@@ -284,22 +297,37 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	metrics.PublishUtilizationShare(published)
 	// A group that has gone (its last model left, its namespace disabled)
 	// takes its ledger with it, and its marks: its variants return to
-	// today's optimizer, with pods that carry no deletion cost of ours.
+	// today's optimizer, with pods that carry no deletion cost of ours. A
+	// group missing for less than the grace -- a failed collection -- keeps
+	// both, and the variants its transfers move keep their targets.
+	if st.goneSince == nil {
+		st.goneSince = map[string]time.Time{}
+	}
 	for k, l := range st.ledgers {
-		if !seen[k] {
-			for _, t := range l.Transfers() {
-				e.unmarkDonorPods(ctx, logger, t)
-			}
-			delete(st.ledgers, k)
-			delete(st.quietUntil, k)
+		if seen[k] {
+			delete(st.goneSince, k)
+			continue
 		}
+		if _, ok := st.goneSince[k]; !ok {
+			st.goneSince[k] = now
+		}
+		if now.Sub(st.goneSince[k]) < shareNoBoundGrace {
+			continue
+		}
+		for _, t := range l.Transfers() {
+			e.unmarkDonorPods(ctx, logger, t)
+		}
+		delete(st.ledgers, k)
+		delete(st.quietUntil, k)
+		delete(st.goneSince, k)
 	}
 	return st.holdInFlight(overrides, "utilization share: transfer in flight")
 }
 
-// shareNoBoundGrace is how long cycles that read no constraint keep the
-// transfers in flight: long enough to ride out a failed read, short enough
-// that a bound really removed releases the variants promptly.
+// shareNoBoundGrace is how long cycles that read no constraint, or miss a
+// group, keep the transfers in flight: long enough to ride out a failed read,
+// short enough that a bound or group really removed releases the variants
+// promptly.
 const shareNoBoundGrace = 2 * time.Minute
 
 // holdInFlight adds to overrides the targets of the variants a live transfer
@@ -420,5 +448,25 @@ func (st *utilizationShareState) reportUnmatchedNamespaces(logger logr.Logger, u
 	if joined != "" {
 		logger.Info("Optimizer namespaces block disables namespaces no namespace quota names; it has no effect on them",
 			"namespaces", joined)
+	}
+}
+
+// reportFloorHeavy logs, once per change, a group whose floors hold more than
+// half its budget above their models' need: the optimizer can share only what
+// floors leave, and the floor_excess series shows whose floors they are
+// (proposal section 5.5).
+func (st *utilizationShareState) reportFloorHeavy(logger logr.Logger, group string, excess float64, budget int) {
+	heavy := budget > 0 && excess > float64(budget)/2
+	if st.floorHeavy[group] == heavy {
+		return
+	}
+	if st.floorHeavy == nil {
+		st.floorHeavy = map[string]bool{}
+	}
+	st.floorHeavy[group] = heavy
+	if heavy {
+		logger.Info("Utilization share: floors hold more than half the group's budget above their models' need; "+
+			"see wva_utilization_share_floor_excess_gpus for whose", "group", group,
+			"floorExcessGPUs", excess, "budget", budget)
 	}
 }

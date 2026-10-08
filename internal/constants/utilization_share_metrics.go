@@ -28,7 +28,8 @@ const (
 	WVAUtilizationShareReplicasToMove = "wva_utilization_share_replicas_to_move"
 
 	// WVAUtilizationShareTransfersTotal is a counter: transfers that left the
-	// ledger, by outcome (done, fill-timeout, cancelled, aborted).
+	// ledger, by outcome (done, fill-timeout, cancelled, aborted, redirected,
+	// wrong-pod).
 	WVAUtilizationShareTransfersTotal = "wva_utilization_share_transfers_total"
 
 	// WVAUtilizationSharePromisedGPUs is a gauge: P, GPUs released for a
@@ -65,7 +66,7 @@ const (
 
 	// WVAUtilizationShareClaimsTotal is a counter: wake claims on releasing
 	// transfers, by outcome (redirected, refused-score, refused-fit,
-	// none-releasing).
+	// refused-held, none-releasing).
 	WVAUtilizationShareClaimsTotal = "wva_utilization_share_claims_total"
 
 	// WVAUtilizationShareDonorsPerTransfer is a histogram: the donor replicas

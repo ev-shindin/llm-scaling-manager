@@ -151,22 +151,56 @@ func TestUtilizationShareKeepsAnInFlightDonorsTarget(t *testing.T) {
 }
 
 // A group that vanishes -- its last model gone, its namespace disabled --
-// takes its marks with its ledger, as switching the optimizer off does.
+// takes its marks with its ledger, as switching the optimizer off does. One
+// missing for less than the grace -- a failed collection -- keeps both.
 func TestUtilizationShareUnmarksAVanishedGroup(t *testing.T) {
 	f := newShareFleet()
 	c := sharePods(t, f)
 	se := newShareEngine(t, f, c, time.Unix(0, 0))
-	se.untilStarted()
-	if len(markedPods(t, c)) == 0 {
+	given := se.untilStarted()
+	marked := len(markedPods(t, c))
+	if marked == 0 {
 		t.Fatal("setup: no pod marked")
 	}
 	se.clock = se.clock.Add(30 * time.Second)
+	o := se.e.evaluateUtilizationShare(se.ctx, nil, fullQuota(), f.scaleTargets())
+	if n := len(markedPods(t, c)); n != marked || len(se.e.utilizationShare.ledgers) != 1 {
+		t.Fatalf("a group missing for one cycle lost its state: %d marked (was %d), %d ledgers",
+			n, marked, len(se.e.utilizationShare.ledgers))
+	}
+	if got := o["ns/A-v"].Target; got != 9-given {
+		t.Fatalf("A's target while its group is missing = %d, want %d held", got, 9-given)
+	}
+	se.clock = se.clock.Add(shareNoBoundGrace)
 	se.e.evaluateUtilizationShare(se.ctx, nil, fullQuota(), f.scaleTargets())
 	if m := markedPods(t, c); len(m) != 0 {
 		t.Fatalf("%d pods still marked after their group vanished", len(m))
 	}
 	if len(se.e.utilizationShare.ledgers) != 0 {
 		t.Fatal("the vanished group's ledger was kept")
+	}
+}
+
+// A group back within the grace starts its absence afresh the next time.
+func TestUtilizationShareRestartsAGroupsAbsenceWhenItReturns(t *testing.T) {
+	f := newShareFleet()
+	c := sharePods(t, f)
+	se := newShareEngine(t, f, c, time.Unix(0, 0))
+	se.untilStarted()
+	step := func(d time.Duration, reqs bool) {
+		se.clock = se.clock.Add(d)
+		r := f.requests()
+		if !reqs {
+			r = nil
+		}
+		se.e.evaluateUtilizationShare(se.ctx, r, fullQuota(), f.scaleTargets())
+	}
+	step(30*time.Second, false)
+	step(shareNoBoundGrace-time.Minute, true) // back before the grace ran out
+	step(30*time.Second, false)
+	step(shareNoBoundGrace-time.Minute, false)
+	if len(se.e.utilizationShare.ledgers) != 1 {
+		t.Fatal("the absence was counted from before the group returned")
 	}
 }
 
@@ -222,5 +256,79 @@ func TestUtilizationShareRestoreRejectsAnIDUnderTwoDonors(t *testing.T) {
 	}
 	if n := len(markedPods(t, c)); n != 0 {
 		t.Fatalf("%d pods still marked", n)
+	}
+}
+
+// A bound read again resets the grace: a later failed read counts from then.
+func TestUtilizationShareRestartsTheNoBoundGraceWhenABoundIsRead(t *testing.T) {
+	f := newShareFleet()
+	c := sharePods(t, f)
+	se := newShareEngine(t, f, c, time.Unix(0, 0))
+	given := se.untilStarted()
+	step := func(d time.Duration, constraints bool) map[string]utilizationShareOverride {
+		se.clock = se.clock.Add(d)
+		q := fullQuota()
+		if !constraints {
+			q = nil
+		}
+		return se.e.evaluateUtilizationShare(se.ctx, f.requests(), q, f.scaleTargets())
+	}
+	step(30*time.Second, false)
+	step(shareNoBoundGrace-time.Minute, true)
+	step(30*time.Second, false)
+	o := step(shareNoBoundGrace-time.Minute, false)
+	if got, ok := o["ns/A-v"]; !ok || got.Target > 9-given {
+		t.Fatalf("A's target %+v (present %v): the grace counted from the first failed read", got, ok)
+	}
+}
+
+// Switched to shadow while no bound is read, the optimizer holds nothing.
+func TestUtilizationShareHoldsNothingInShadowWithoutABound(t *testing.T) {
+	f := newShareFleet()
+	c := sharePods(t, f)
+	se := newShareEngine(t, f, c, time.Unix(0, 0))
+	se.untilStarted()
+	setShadowPolicy(t, se.e.Config, selectedShadow)
+	se.clock = se.clock.Add(30 * time.Second)
+	if o := se.e.evaluateUtilizationShare(se.ctx, f.requests(), nil, f.scaleTargets()); len(o) != 0 {
+		t.Fatalf("shadow mode held targets: %v", o)
+	}
+}
+
+// A controller restarted into shadow mode has no ledger to unmark from: it
+// sweeps the marks it wrote, and gives back the user's deletion cost. A mark
+// another controller instance wrote is left alone.
+func TestUtilizationShareSweepsItsMarksAfterARestartIntoShadow(t *testing.T) {
+	f := newShareFleet()
+	c := sharePods(t, f)
+	for i := range f.current["A"] {
+		annotate(t, c, "A-v-"+string(rune('0'+i)), map[string]string{podDeletionCostAnnotation: "500"})
+	}
+	se := newShareEngine(t, f, c, time.Unix(0, 0))
+	se.untilStarted()
+	marked := markedPods(t, c)
+	if len(marked) == 0 {
+		t.Fatal("setup: no pod marked")
+	}
+	other, _ := json.Marshal(transferMark{ID: "x-t1", Donor: "ns/C/" + domain.RoleBoth, Instance: "other"})
+	annotate(t, c, "C-v-0", map[string]string{utilizationShareTransferAnnotation: string(other)})
+
+	restarted := newShareEngine(t, f, c, se.clock.Add(30*time.Second))
+	setShadowPolicy(t, restarted.e.Config, selectedShadow)
+	restarted.cycle()
+	left := markedPods(t, c)
+	if len(left) != 1 || left[0].Name != "C-v-0" {
+		names := make([]string, 0, len(left))
+		for _, p := range left {
+			names = append(names, p.Name)
+		}
+		t.Fatalf("marked after the sweep: %v, want only the other instance's C-v-0", names)
+	}
+	var p corev1.Pod
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: marked[0].Name}, &p); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Annotations[podDeletionCostAnnotation]; got != "500" {
+		t.Fatalf("deletion cost %q after the sweep, want the user's 500", got)
 	}
 }

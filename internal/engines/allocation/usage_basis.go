@@ -86,6 +86,18 @@ func PhysicalUsageConfigured(cfg *config.Config) bool {
 	}
 }
 
+// NodeUsageWanted reports whether the GPU usage refresher should walk the
+// nodes and their pods every interval. A physical limiter reads the result.
+// So does the utilization-share optimizer, which places a receiver's pods into
+// the holes donors open, quota or not -- but not on a namespace-scoped install.
+// Nodes are cluster-scoped: its role cannot list them, an informer that cannot
+// list never syncs, and its cache holds only its own namespace's pods, so the
+// picture would show other tenants' GPUs as free. It plans without node
+// information instead.
+func NodeUsageWanted(cfg *config.Config, namespaceScoped bool) bool {
+	return PhysicalUsageConfigured(cfg) || (cfg.UtilizationShareActive() && !namespaceScoped)
+}
+
 // GPUUsageViews carries both measures of current GPU usage so a caller can serve
 // a mixed set of providers from one place.
 //

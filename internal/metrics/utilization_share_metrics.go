@@ -77,7 +77,8 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		roleLabels)
 	utilizationShareWithheld = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: constants.WVAUtilizationShareWithheldTotal,
-		Help: "Utilization-share optimizer: transfers not planned, by reason (reversal-hold, not-actionable).",
+		Help: "Utilization-share optimizer: transfers not planned, by reason (reversal-hold, not-actionable). " +
+			"Counted only while the optimizer acts.",
 	}, append(slices.Clone(groupLabels), constants.LabelReason))
 	if err := registry.Register(utilizationShareWithheld); err != nil {
 		return fmt.Errorf("failed to register utilization-share metric: %w", err)
