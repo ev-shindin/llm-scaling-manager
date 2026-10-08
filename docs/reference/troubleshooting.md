@@ -139,3 +139,116 @@ For e2e-style deploys, **`deploy/install-epp.sh`** enables EPP flow control when
 2. **Inference gateway not receiving requests**:
    
    **Solution**: Verify that requests are being routed through the inference gateway and not directly to model server endpoints.
+
+## Utilization-Share Optimizer
+
+Configuration: [`optimizer` in the scaling policy](scaling-policy.md#optimizer-cluster-default-only-live).
+Metrics and blocked reasons: [utilization-share metrics](prometheus.md#utilization-share-optimizer-metrics).
+
+### The optimizer evaluates but never moves anything
+
+Work down the list in order.
+
+1. **Is it selected at all?** No `wva_utilization_share_*` series means it is
+   off. The log says why: `Invalid optimizer block; keeping today's optimizer`
+   (a misspelled key or a value out of range), or `needs a limiters: list` (no
+   budget to share). A block in a namespace-local scaling-policy map is ignored:
+   `ignoring optimizer blocks in namespace-local scaling-policy maps`.
+2. **Is it in shadow mode?** The log says `Shadow: utilization share would
+   rebalance` rather than `Utilization share: rebalancing`, and
+   `wva_utilization_share_promised_gpus` is absent: it is published only while
+   the optimizer acts. Set `shadow: false` (or remove the key) to act.
+3. **Is the model planned?** The two lines above, and at `--v=4` the per-cycle
+   `Shadow: utilization share evaluation`, carry a `frozen` field listing the
+   group's models left to today's optimizer this cycle, with the reason: no live
+   analyzer result, a role with demand but no measured capacity, or a
+   namespace-local scaling-policy map (not planned in the cluster group). A model
+   whose variants run on more than one accelerator type, one in a namespace with
+   `enabled: false`, or one under only a `gpu-inventory` limiter without
+   `physicalGroups: true` is in no group at all and publishes no role series.
+4. **Is any role actionable?** `wva_utilization_share_actionable` is `1` only
+   for a role outside its tolerance band *and* off its whole-replica target. All
+   `0` means the fleet is already where the optimizer wants it, or every
+   imbalance is smaller than one replica; `wva_utilization_share_withheld_total{reason="not-actionable"}`
+   counts the latter.
+5. **Does it stay actionable?** A role must be actionable on **two consecutive
+   cycles** before a transfer is planned for it, so a role that flickers in and
+   out of band never moves. At most two replicas move per role per cycle and two
+   transfers run per group at once.
+6. **Is it held?** `withheld_total{reason="reversal-hold"}` rising means a role
+   that just gave is being kept from receiving (or the reverse) until the hold in
+   `wva_utilization_share_effective_seconds{param="reversal_hold"}` passes. That
+   is the anti-oscillation rule working, not a fault.
+7. **Did the controller just restart?** After a restart it plans nothing for one
+   fill timeout while it rebuilds in-flight transfers from the pod marks; the log
+   line `Utilization share: ledger started` carries `planningFrom`.
+8. **Could it not mark the donor?** `utilization share could not mark a donor pod;
+   transfer not started` means the donor had a pod that was not Ready (the
+   ReplicaSet removes a not-Ready pod first, so the choice of pod cannot be
+   steered) or no pod left to give. The donor backs off and is retried.
+
+If transfers do start but the model still does not grow, read its
+`wva_model_scaling_blocked` reasons.
+
+### A model shows `no-compatible-donor`
+
+**Symptom**: `wva_model_scaling_blocked{reason="no-compatible-donor"} == 1` on a
+model that is short, while other models on the same accelerator type hold more
+than they need.
+
+**What it means**: every one of the model's pods needs a donor pod at least as
+large to take its place: a 4-GPU pod cannot be funded by two 2-GPU pods, since
+nothing shows the two share a node. Here no donor in the group has pods large
+enough, so no transfer can be planned for this model.
+
+**What to do**: the optimizer has no setting that changes this. Give the model
+GPUs another way: raise the quota for that accelerator type, or lower a model
+whose pods are at least as large. If the model has pods of more than one size
+(P/D roles with different GPU counts), each role is judged on its own pods; check
+which role is short with `wva_utilization_share_headroom < 0`.
+
+### Transfer marks left on pods after a downgrade
+
+**Symptom**: after moving to a version without the utilization-share optimizer,
+some pods still carry `llm-d.ai/utilization-share-transfer` and
+`controller.kubernetes.io/pod-deletion-cost: "-1000"`, so the ReplicaSet removes
+them first on every scale-down.
+
+**Prevention**: before downgrading, set `shadow: true` (or remove the `optimizer:`
+block) and wait one optimization cycle. The controller removes the marks it wrote
+and restores each pod's previous deletion cost. Check that none are left:
+
+```bash
+kubectl get pods -A -o json | jq -r '.items[]
+  | select(.metadata.annotations["llm-d.ai/utilization-share-transfer"] != null)
+  | .metadata.namespace + "/" + .metadata.name'
+```
+
+**Cleanup after the fact**: the mark records the pod's deletion cost from before
+the transfer as `prevCost`; restore it, or remove the cost when the mark has
+none, and remove the mark:
+
+```bash
+kubectl get pods -A -o json \
+  | jq -r '.items[]
+      | select(.metadata.annotations["llm-d.ai/utilization-share-transfer"] != null)
+      | [.metadata.namespace, .metadata.name,
+         ((.metadata.annotations["llm-d.ai/utilization-share-transfer"] | fromjson? | .prevCost) // "none")]
+      | @tsv' \
+  | while read -r ns pod prev; do
+      if [ "$prev" = "none" ]; then
+        kubectl annotate pod -n "$ns" "$pod" \
+          llm-d.ai/utilization-share-transfer- \
+          controller.kubernetes.io/pod-deletion-cost-
+      else
+        kubectl annotate pod -n "$ns" "$pod" --overwrite \
+          llm-d.ai/utilization-share-transfer- \
+          "controller.kubernetes.io/pod-deletion-cost=$prev"
+      fi
+    done
+```
+
+A mark that is not valid JSON is treated as having no previous cost. If several
+controllers with different `CONTROLLER_INSTANCE` values share the cluster, each
+mark names its writer in its `instance` field; run the cleanup only for the
+instances that were downgraded, by adding that field to the `select`.

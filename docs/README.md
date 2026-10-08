@@ -61,7 +61,7 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 - **[After the install](reference/operations.md)** — verifying it worked, and first-line troubleshooting
 - **[Watching what the scaling manager decides](reference/monitoring.md)** — the dashboard, who owns it, and the metrics that answer specific questions
 - **[The cycle log](reference/cycle-log.md)** — the two lines the scaling manager emits per cycle, their fields and reason codes: the page that answers "why did it scale?"
-- **[Scaling policy](reference/scaling-policy.md)** — thresholds, tiers, scale-to-zero, limiters
+- **[Scaling policy](reference/scaling-policy.md)** — thresholds, tiers, scale-to-zero, limiters, the utilization-share optimizer
 - **[Preparing a workload](reference/workload-preparation.md)** — the model cache, draining before scale-down, `make workload-patch`
 - **[Install methods](reference/install-methods.md)** — installer, kustomize, and per-platform entry points
 - **[The GPU limiter](reference/gpu-limiter.md)** and **[the quota limiter](reference/quota-limiter.md)** — bounding the scaling manager by real accelerators, and by declared caps

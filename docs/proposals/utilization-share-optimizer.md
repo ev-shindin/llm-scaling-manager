@@ -410,11 +410,10 @@ Five cases:
      responsible** (`causedBy: <namespace>/C minReplicas`), so the owner of the
      starved model can see it is not their quota or their weight. A, at +0 %, is
      not short and reports nothing; its zero headroom is visible in its
-     headroom series. The cause is carried on a Kubernetes **Event** on B's scale
-     target (reason `QuotaShort`, message naming the cause) and in the per-cycle
-     log line — not as a metric label, which would be unbounded.
-   - A group whose floors hold more than half the budget above their need logs
-     a WARN once per change.
+     headroom series. The cause is carried in the per-cycle log line — not as a
+     metric label, which would be unbounded.
+   - A group whose floors hold more than half the budget above their need is
+     logged once per change, naming the excess; `floor_excess_gpus` says whose.
 
    The bound on a floor is admission, not this optimizer: in a cluster-scoped
    install a per-namespace `ResourceQuota` caps what any tenant's floors can
@@ -509,7 +508,11 @@ positive reported headroom before any transfer acts on it.
 There is **no P/D-specific switch**. The fleet this is built for is P/D, so a
 switch that takes P/D models out is the same as turning the optimizer off.
 Rollback is `shadow: true` (keep measuring, stop acting) or removing
-`optimizer.type` (§8).
+`optimizer.type` (§8). Either removes every donor-pod mark this controller wrote
+and gives each pod back the deletion cost it had before -- including after a
+restart, when no ledger holds them yet. A downgrade to a version without the
+optimizer does not: switch to `shadow: true` first, let one cycle pass, then
+downgrade.
 
 **Fixed consumers.** Models this optimizer does not size — multi-accelerator
 models, below — are sized by today's path and never give GPUs away. But they
@@ -1482,8 +1485,10 @@ default:
     type: utilizationShare          # absent → today's selection (cost-aware / greedy)
 ```
 
-That is a complete configuration. Every other key is optional, and the common
-case needs none of them:
+That is a complete configuration, and it acts at once: `shadow` defaults to
+false. Run it with `shadow: true` first and read the series of §9 before
+letting it move GPUs. Every other key is optional, and the common case needs
+none of them:
 
 ```yaml
     utilizationShare:
@@ -1512,8 +1517,9 @@ which quota groups take part.
   does nothing else. It lives in the same top-level ConfigMap, so on a
   cluster-scoped install it is the admin's decision about a tenant, not the
   tenant's decision about themselves. It cannot touch a cluster-scope group.
-- An `optimizer:` block in a **namespace-local** map is ignored and reported once
-  at WARN, so whoever wrote it learns it had no effect rather than assuming it did.
+- An `optimizer:` block in a **namespace-local** map is ignored and logged once
+  per change, so whoever wrote it learns it had no effect rather than assuming it
+  did. So is a `namespaces:` entry that no namespace quota names.
 
 ### 8.2 The per-model weight
 
@@ -1530,7 +1536,7 @@ On a cluster-scoped install these entries can be tenant-written, which is why th
 classes and the clamp live in the top-level policy: a tenant chooses *which* class,
 the admin decides what a class is worth, and no number a tenant writes can leave
 the range the classes span. An unknown class name is an error on that model's
-entry only, falling back to the weight-1 class with a WARN.
+entry only, falling back to the weight-1 class, logged once per change.
 
 A namespace's own scaling-policy map replaces the installation's for that
 namespace, so whoever writes it sets every input its models are sized by:
@@ -1592,7 +1598,7 @@ it takes: one rule changed reproduces each oscillation.
 | confirmation | 2 cycles | part of the decide-to-serve latency the other values assume |
 | pace | 2 replicas per role per cycle, 2 transfers in flight per group | simulated at these values |
 | idle floor | 0.05 utilization | stops idle models churning; not a preference |
-| floor warning | floors holding half the budget above need | decides only when a WARN is logged |
+| floor warning | floors holding half the budget above need | decides only when a line is logged |
 
 If field data argues for a different constant, the simulator is re-run with it
 first and the constant changed second. It does not become a knob.
@@ -1600,8 +1606,8 @@ first and the constant changed second. It does not become a knob.
 **Every derived value is reported with its source.** One log line per group when
 any of them changes, and a gauge
 `wva_utilization_share_effective_seconds{param, source}` (`param` =
-`release`, `releaseTimeout`, `reversalHold`, `latency`, `swingWindow`,
-`fillTimeout`; `source` = `measured`, `scaledobject`, `pod`, `default`). An operator can always
+`window`, `release_timeout`, `fill_timeout`, `reversal_hold`, `swing_window`;
+`source` = `measured`, `scaledobject`, `pod`, `default`). An operator can always
 see the value in force. That is what quietly disappears when a setting is
 removed, and it must not.
 
@@ -1612,28 +1618,28 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 
 | series | labels | meaning |
 | --- | --- | --- |
-| `wva_utilization_share_headroom` | model, `role`, `exported_namespace` | `x_r`: the spike the role absorbs before scaling (negative = short) |
-| `wva_utilization_share_target_gpus` | model, `role`, `exported_namespace` | `Ĝ_r`, the continuous target the band is judged against, in GPUs |
-| `wva_utilization_share_actionable` | model, `role`, `exported_namespace` | 1 when the role is out of band and off its integer target — a move could fix it (§6.1) |
-| `wva_utilization_share_replicas_to_move` | `accelerator`, `scope` | replicas the integer target would move; in shadow mode, what would be planned |
-| `wva_utilization_share_withheld_total` | `accelerator`, `scope`, `reason` | transfers not planned: `reversal-hold` (§6.7 rule 4) / `not-actionable` (§6.1 step 4). The swing rule withholds nothing; it changes the need a role is planned on, reported by `wva_utilization_share_swinging` |
-| `wva_utilization_share_swinging` | model, `role`, `exported_namespace` | 1 while a role is planned on its mean need (§6.7 rule 5) |
-| `wva_utilization_share_actual` | model, `role`, `exported_namespace` | `u_r` |
-| `wva_utilization_share_spare_gpus` | `accelerator`, `scope` | `S`; negative when the quota is short |
-| `wva_utilization_share_floor_excess_gpus` | model, `role`, `exported_namespace` | GPUs a floor holds above need (§5.5) |
-| `wva_utilization_share_transfers_total` | `accelerator`, `scope`, `outcome`, `urgent` | `done` / `fill-timeout` / `cancelled` / `aborted` / `redirected` / `wrong-pod` |
-| `wva_utilization_share_reserve_debt_gpus` | `accelerator`, `scope` | `reserveDebt`: reserve GPUs spent and not yet refilled (§6.2) |
-| `wva_utilization_share_effective_seconds` | `accelerator`, `scope`, `param`, `source` | the derived timings in force and where each came from (§8.4) |
-| `wva_utilization_share_promised_gpus` | `accelerator`, `scope` | `P`: GPUs released for a receiver and not yet held by it — withheld from the warm pool, from wakes and from plans (§6.3) |
-| `wva_utilization_share_release_seconds` | `accelerator`, `scope` | histogram, Releasing → Released |
+| `wva_utilization_share_headroom` | `model_name`, `role`, `exported_namespace` | `x_r`: the spike the role absorbs before scaling (negative = short) |
+| `wva_utilization_share_target_gpus` | `model_name`, `role`, `exported_namespace` | `Ĝ_r`, the continuous target the band is judged against, in GPUs |
+| `wva_utilization_share_actionable` | `model_name`, `role`, `exported_namespace` | 1 when the role is out of band and off its integer target — a move could fix it (§6.1) |
+| `wva_utilization_share_replicas_to_move` | `accelerator_type`, `scope` | replicas the integer target would move; in shadow mode, what would be planned |
+| `wva_utilization_share_withheld_total` | `accelerator_type`, `scope`, `reason` | transfers not planned: `reversal-hold` (§6.7 rule 4) / `not-actionable` (§6.1 step 4). The swing rule withholds nothing; it changes the need a role is planned on, reported by `wva_utilization_share_swinging` |
+| `wva_utilization_share_swinging` | `model_name`, `role`, `exported_namespace` | 1 while a role is planned on its mean need (§6.7 rule 5) |
+| `wva_utilization_share_actual` | `model_name`, `role`, `exported_namespace` | `u_r` |
+| `wva_utilization_share_spare_gpus` | `accelerator_type`, `scope` | `S`; negative when the quota is short |
+| `wva_utilization_share_floor_excess_gpus` | `model_name`, `role`, `exported_namespace` | GPUs a floor holds above need (§5.5) |
+| `wva_utilization_share_transfers_total` | `accelerator_type`, `scope`, `outcome`, `urgent` | `done` / `fill-timeout` / `cancelled` / `aborted` / `redirected` / `wrong-pod` |
+| `wva_utilization_share_reserve_debt_gpus` | `accelerator_type`, `scope` | `reserveDebt`: reserve GPUs spent and not yet refilled (§6.2) |
+| `wva_utilization_share_effective_seconds` | `accelerator_type`, `scope`, `param`, `source` | the derived timings in force and where each came from (§8.4) |
+| `wva_utilization_share_promised_gpus` | `accelerator_type`, `scope` | `P`: GPUs released for a receiver and not yet held by it — withheld from the warm pool, from wakes and from plans (§6.3) |
+| `wva_utilization_share_release_seconds` | `accelerator_type`, `scope` | histogram, Releasing → Released |
 | `wva_model_scaling_blocked` | `reason="awaiting-release"` | receiver waiting on a donor |
-| `wva_model_scaling_blocked` | `reason="quota-short"` | below need; the cause (load, whose floor, or which woken model) is on a `QuotaShort` Event and in the log |
+| `wva_model_scaling_blocked` | `reason="quota-short"` | below need; the cause (load, whose floor, or which woken model) is in the log |
 | `wva_model_scaling_blocked` | `reason="floor-pinned"` | floor above the share (§5.5) |
 | `wva_model_scaling_blocked` | `reason="floors-exceed-quota"` | `Σ F > B_net` |
 | `wva_model_scaling_blocked` | `reason="donors-at-floor"` | out of band, no donor can give |
 | `wva_model_scaling_blocked` | `reason="no-compatible-donor"` | out of band, and no donor set opens a fitting hole for every pod of a receiver replica — without node information, no single donor pod is large enough (§6.5) |
-| `wva_utilization_share_claims_total` | `accelerator`, `scope`, `outcome` | wake claims on Releasing transfers: `redirected` / `refused-score` / `refused-fit` / `refused-held` / `none-releasing` |
-| `wva_utilization_share_donors_per_transfer` | `accelerator`, `scope` | histogram: donor replicas funding one receiver replica |
+| `wva_utilization_share_claims_total` | `accelerator_type`, `scope`, `outcome` | wake claims on Releasing transfers: `redirected` / `refused-score` / `refused-fit` / `refused-held` / `none-releasing` |
+| `wva_utilization_share_donors_per_transfer` | `accelerator_type`, `scope` | histogram: donor replicas funding one receiver replica |
 | `wva_model_scaling_blocked` | `reason="release-shape-mismatch"` | GPUs released but the receiver's replica does not fit them (§6.5) |
 | `wva_model_scaling_blocked` | `reason="release-taken"` | GPUs released, then occupied by a pod WVA did not place (§6.3) |
 | `wva_model_scaling_blocked` | `reason="release-timeout"` | aborted transfer |
@@ -1716,7 +1722,7 @@ optimizer every cycle (§6.6).
   of a P/D model within one replica of equal headroom above their floors; floors
   and ceilings respected; deterministic under shuffled input.
 - **Floors:** one fixture per case of §5.5. Case 3 asserts the starved model's
-  `QuotaShort` Event on B names C's floor, A gets none, and `floorExcessGPUs`
+  log line for B names C's floor, A gets none, and `floorExcessGPUs`
   equals the excess;
   a pinned role never triggers a rebalance; `Σ F > B_net` plans nothing; a raised
   floor opens a transfer without waiting for confirmation; a donor at its floor

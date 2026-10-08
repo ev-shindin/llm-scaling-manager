@@ -250,6 +250,19 @@ kubectl port-forward -n $NS svc/wva-controller-manager-metrics-service 8443:8443
 curl -sk https://localhost:8443/metrics | grep -E '^wva_'
 ```
 
+**What would the utilization-share optimizer do, and is it doing it?** — only
+when an [`optimizer:` block](scaling-policy.md#optimizer-cluster-default-only-live)
+is set. Full list, with labels:
+[utilization-share metrics](prometheus.md#utilization-share-optimizer-metrics).
+
+| metric | meaning |
+| --- | --- |
+| `wva_utilization_share_actionable == 1` | roles a move would fix now. Published in shadow mode too: this is what shadow mode is for |
+| `wva_utilization_share_replicas_to_move` | replicas the target would move, per group |
+| `wva_utilization_share_spare_gpus` | below `0` = the quota cannot cover every role's need; rebalancing cannot fix that |
+| `wva_utilization_share_transfers_total` | by `outcome`: `done` is healthy; rising `aborted` or `fill-timeout` means transfers are not landing |
+| `wva_model_scaling_blocked{reason=...}` | which model the optimizer is holding back, and why ([reasons](prometheus.md#wva_model_scaling_blocked-reasons-set-by-the-utilization-share-optimizer)); set only while it acts |
+
 ### The logs
 
 Useful when a metric tells you *which* model is wrong and you want to know *why*.
@@ -259,6 +272,9 @@ Useful when a metric tells you *which* model is wrong and you want to know *why*
 | `scaling-decision` | what the scaling manager decided for a model, and the replica counts | Info |
 | `Effective scaling policy` | which policy tier a model resolved to | Info |
 | `GPU limiter (re)built from config` | a `limiters:` edit took effect, live | Info |
+| `Shadow: utilization share would rebalance` | shadow mode found a move it would make; carries `actionable` and `frozen` | Info |
+| `Utilization share: rebalancing` | the optimizer is acting on a group | Info |
+| `Utilization share: transfer` | a transfer ended (with its `outcome`), was cancelled, or was redirected to a wake | Info |
 | `Collected replica metrics` | metrics are arriving | **`-v=4`** |
 
 The controller runs at `-v=2` by default, so `Collected replica metrics` prints

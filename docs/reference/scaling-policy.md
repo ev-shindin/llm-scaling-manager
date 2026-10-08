@@ -222,6 +222,143 @@ default: |
 - With no `limiters:` block **nothing bounds scaling** — that is the shipped
   default, and the controller says so at startup: "scaling is UNCONSTRAINED".
 
+### `optimizer` (cluster-default only, live)
+
+The `optimizer:` block, beside `limiters:` in the same `default` entry, selects
+the **utilization-share optimizer**. Without it, a quota that runs out is first
+come, first served: whichever model scaled up earlier keeps its GPUs, and a model
+that needs them later waits. With it, the GPUs a quota allows are shared out on
+purpose. Every role (the decode and prefill of a P/D model, or the one role of an
+aggregated model) is first given its *need* — the GPUs that put it exactly at its
+`scaleUpThreshold` — and what is left is shared as headroom above that need, in
+proportion to each model's weight. When the GPUs no longer match those targets,
+the optimizer *transfers* replicas: it scales a donor down, waits until its GPUs
+are actually released, and only then scales the receiver up.
+
+The design and its reasoning are in the
+[utilization-share optimizer proposal](../proposals/utilization-share-optimizer.md);
+this section covers what you set and what you will see.
+
+**It needs a budget.** The optimizer shares the GPUs a limiter allows, so it
+needs a `limiters:` list. Without one it stays off and the controller logs
+`needs a limiters: list: there is no budget to share`. It plans:
+
+- one group per namespace that a namespace quota (`scope: namespace`) covers, per
+  accelerator type;
+- one cluster group per accelerator type for every other model, when the cluster
+  limiter is a `quota`. Under a `gpu-inventory` limiter alone there is no cluster
+  group unless you set `physicalGroups: true` (see the table).
+
+A model whose variants run on more than one accelerator type, or whose analyzer
+result is not live this cycle, is left to today's optimizer for that cycle.
+
+**Start in shadow mode.** `shadow` defaults to `false`, so
+`optimizer: {type: utilizationShare}` on its own **acts**: it moves replicas
+between models from the next cycle. Turn it on in shadow first, read what it
+would do, and switch `shadow` off when the numbers look right:
+
+```yaml
+default: |
+  analyzers:
+    - type: saturation
+  limiters:
+    - type: quota
+      name: cluster-h100
+      scope: cluster
+      quotas: { H100: 32 }
+  optimizer:
+    type: utilizationShare
+    utilizationShare:
+      shadow: true          # compute, publish and log; move nothing
+```
+
+In shadow mode every evaluation metric is published
+([utilization-share metrics](prometheus.md#utilization-share-optimizer-metrics)),
+and the controller logs `Shadow: utilization share would rebalance` whenever a
+move would be planned. `wva_utilization_share_actionable == 1` names the roles it
+would move; `wva_utilization_share_replicas_to_move` says how many replicas.
+
+| Key (under `utilizationShare:`) | Default | Meaning |
+| --- | --- | --- |
+| `tolerance` | `0.15` | How far a role's GPUs may be from its target, as a fraction of the target, before a move is considered. Must be greater than 0 and less than 1. Wider means fewer, larger moves. |
+| `reserveGPUs` | `0` | GPUs held out of the shared budget so a scale-from-zero wake can start at once instead of waiting for a transfer. |
+| `shadow` | `false` | Compute, publish and log everything; actuate nothing. |
+| `physicalGroups` | `false` | Also plan groups bounded only by the physical GPU inventory (no quota), where spending the whole budget means holding every GPU of that type. |
+| `weightClasses` | `best-effort: 0.5`, `standard: 1`, `important: 2`, `critical: 4` | Class names and their weights. Replaces the defaults whole when set. Exactly one class must have weight `1`; it is the default class. |
+| `namespaces.<ns>.enabled` | `true` | `false` keeps that namespace's quota group on today's optimizer. |
+
+Nothing else is configurable. The timings a transfer runs on — how long a release
+may take, how long a receiver may stay Pending, how long a role that gave must wait
+before it receives — are derived from each donor's ScaledObject (scale-down
+window, polling interval) and pod template (termination grace), and from the
+releases the group has measured. `wva_utilization_share_effective_seconds` shows
+the values in force and where each came from.
+
+**Weights.** A model's weight decides how much of the spare headroom its roles
+get and, when the quota is short, whose shortfall counts most: a role of weight 2
+gets twice the headroom of a role of weight 1 relative to its need, and is cut
+last. Set it per model with **one** of:
+
+```yaml
+  # a per-model override (or the default entry, for every model)
+  ibm_granite-13b.production: |
+    model_id: ibm/granite-13b
+    namespace: production
+    weightClass: important     # a class name from weightClasses
+    # weight: 1.5              # or a number, clamped into the range the classes span
+```
+
+A model that sets neither gets the default class. An unknown class, a weight that
+is not a positive number, or both fields set fall back to the default class and
+log `invalid weight on a model's scaling-policy entry`; none of them rejects the
+entry. A number outside the classes' range (0.5 to 4 with the default classes) is
+clamped into it.
+
+A namespace with its own namespace-local scaling-policy map sets its models'
+weights and thresholds itself. Such a model is planned in its namespace's own
+quota group, which that namespace owns whole, but **not** in the cluster group,
+where its weight would be weighed against other tenants'; there today's optimizer
+keeps it.
+
+**Disabling one namespace:**
+
+```yaml
+  optimizer:
+    type: utilizationShare
+    utilizationShare:
+      namespaces:
+        team-a: { enabled: false }
+```
+
+This applies to namespace quota groups only. A name that no namespace quota covers
+disables nothing, and the controller logs
+`Optimizer namespaces block disables namespaces no namespace quota names`.
+
+**Where the block is read.** Like `limiters:`, only from the cluster `default`
+entry, and live: an edit takes effect on the next cycle. An `optimizer:` block in
+a namespace-local scaling-policy map has no effect; the controller logs
+`ignoring optimizer blocks in namespace-local scaling-policy maps` with the
+namespaces. A malformed block (an unknown key, a value out of range) turns only
+the optimizer off and logs `Invalid optimizer block; keeping today's optimizer`;
+the limiters in the same entry keep working.
+
+**What it writes on pods.** While a transfer releases, each donor pod it chose
+carries two annotations: `llm-d.ai/utilization-share-transfer` (the transfer, as
+JSON, including the pod's previous deletion cost) and
+`controller.kubernetes.io/pod-deletion-cost: "-1000"`, so the ReplicaSet removes
+that pod and not a sibling. A restarted controller rebuilds its in-flight
+transfers from these marks. The controller removes both, restoring the pod's
+previous deletion cost, when the transfer ends, and when the optimizer is switched
+to shadow or off, including across a controller restart. Each controller removes
+only the marks it wrote (they record its `CONTROLLER_INSTANCE`). Downgrading to a version
+without the optimizer leaves them behind; see
+[marks left after a downgrade](troubleshooting.md#transfer-marks-left-on-pods-after-a-downgrade).
+
+**Namespace-scoped installs** cannot list nodes, so the optimizer plans by GPU
+count alone: it does not check that the GPUs a donor frees are on a node where
+the receiver's pod fits, and the two blocked reasons that need node information
+(`release-taken`, `release-shape-mismatch`) never appear.
+
 ## Configuration
 
 ### ConfigMap Structure
