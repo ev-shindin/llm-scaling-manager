@@ -82,10 +82,14 @@ func (e *Engine) claimShareTransfer(ctx context.Context, group modelGroup, candi
 		}
 		last, lastAcc = outcome, acc
 	}
-	// A refused claim is counted once per change: this loop runs at 10 Hz. Its
-	// scope is the wake's own namespace -- which group refused is not known.
+	// A refused claim is counted once per change: this loop runs at 10 Hz.
+	// Under the scope of the group it was refused in, as a redirect is.
 	if last != "" && e.claimOutcomeChanged(group.key(), last) {
-		metrics.CountUtilizationShareClaim(lastAcc, group.namespace, last)
+		label := scope
+		if label == "" {
+			label = constants.UtilizationShareClusterScope
+		}
+		metrics.CountUtilizationShareClaim(lastAcc, label, last)
 	}
 	return nil, false
 }

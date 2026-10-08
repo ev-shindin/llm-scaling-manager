@@ -171,8 +171,8 @@ type Engine struct {
 	scaleTargetUIDs map[string]types.UID
 
 	// utilizationShare is the utilization-share optimizer's between-cycle
-	// reporting state. Stage 1 evaluates in shadow only; see
-	// evaluateUtilizationShare.
+	// state: what it reported, and the transfer ledgers it acts on unless its
+	// policy is in shadow mode; see evaluateUtilizationShare.
 	utilizationShare utilizationShareState
 
 	// lastBlockedModels records, keyed identically, every model this engine has

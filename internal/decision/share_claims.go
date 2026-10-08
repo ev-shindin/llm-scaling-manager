@@ -35,6 +35,10 @@ type ShareClaim struct {
 	// Model is the woken model (namespace/model), for the log. The claims
 	// one wake made together -- a decode and its prefill -- share it.
 	Model string
+	// at is when the claim was made: a claim no engine took within
+	// ShareClaimMaxAge -- its group went to shadow or away -- is dropped, so
+	// it cannot redirect a transfer restored much later under the same ID.
+	at time.Time
 }
 
 // Claim outcomes, the outcome label of wva_utilization_share_claims_total.
@@ -82,6 +86,8 @@ func (s *ShareClaimStore) Publish(claimable map[string][]ShareClaimable, now tim
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// A claim no engine has taken within ShareClaimMaxAge never will be.
+	s.claims = slices.DeleteFunc(s.claims, func(cl ShareClaim) bool { return now.Sub(cl.at) > ShareClaimMaxAge })
 	// A transfer already claimed and not yet taken stays out: the engine still
 	// lists it until it applies the claim, and a second wake must not claim
 	// the same hole.
@@ -174,6 +180,9 @@ func (s *ShareClaimStore) ClaimSet(scope, accelerator string, wakes []ShareWake,
 	s.claimable[key] = slices.DeleteFunc(slices.Clone(entries), func(e ShareClaimable) bool {
 		return slices.ContainsFunc(claims, func(c ShareClaim) bool { return c.ID == e.ID })
 	})
+	for i := range claims {
+		claims[i].at = now
+	}
 	s.claims = append(s.claims, claims...)
 	if s.lastClaim == nil {
 		s.lastClaim = map[string]time.Time{}

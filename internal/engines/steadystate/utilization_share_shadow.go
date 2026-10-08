@@ -117,18 +117,26 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	}
 	if ignored := strings.Join(e.Config.IgnoredOptimizerNamespaces(), ","); ignored != st.lastIgnored {
 		if ignored != "" {
-			logger.Info("WARNING: ignoring optimizer blocks in namespace-local scaling-policy maps; "+
+			logger.Info("ignoring optimizer blocks in namespace-local scaling-policy maps; "+
 				"the optimizer is configured only beside limiters:", "namespaces", ignored)
 		}
 		st.lastIgnored = ignored
 	}
-	if !selected || len(constraints) == 0 {
+	if !selected {
+		// Switched off: our marks go with the ledgers.
+		metrics.PublishUtilizationShare(nil)
+		e.dropShareActuation(ctx, logger)
+		return nil
+	}
+	if len(constraints) == 0 {
+		// No bound this cycle -- possibly a failed read. The marks stay, and a
+		// later cycle restores the transfers from them.
 		metrics.PublishUtilizationShare(nil)
 		st.resetActuation()
 		return nil
 	}
 	if us.Shadow {
-		st.resetActuation()
+		e.dropShareActuation(ctx, logger)
 	}
 	seen := map[string]bool{}
 
@@ -161,7 +169,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	})
 	for model, msg := range weightErrs {
 		if st.lastWeightErrs[model] != msg {
-			logger.Info("WARNING: invalid weight on a model's scaling-policy entry", "model", model, "error", msg)
+			logger.Info("invalid weight on a model's scaling-policy entry", "model", model, "error", msg)
 		}
 	}
 	st.lastWeightErrs = weightErrs
@@ -264,8 +272,30 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			delete(st.quietUntil, k)
 		}
 	}
-	for k := range st.desired {
-		if _, ok := overrides[k]; !ok {
+	// A variant a live transfer still moves keeps its target while its model is
+	// out of the group for a cycle -- frozen, or not collected: dropping it
+	// would lose the transfer's decrement, and the donor would never shrink.
+	touched := map[string]bool{}
+	for _, l := range st.ledgers {
+		for _, t := range l.Transfers() {
+			if k := transferVariantKey(t.Donor, t.DonorVariant); k != "" {
+				touched[k] = true
+			}
+			if k := transferVariantKey(t.Receiver, t.ReceiverVariant); k != "" {
+				touched[k] = true
+			}
+		}
+	}
+	for k, d := range st.desired {
+		_, planned := overrides[k]
+		switch {
+		case planned:
+		case touched[k]:
+			if overrides == nil {
+				overrides = map[string]utilizationShareOverride{}
+			}
+			overrides[k] = utilizationShareOverride{Target: d, Why: "utilization share: transfer in flight"}
+		default:
 			delete(st.desired, k)
 			delete(st.divergedSince, k)
 		}
@@ -325,4 +355,14 @@ func (st *utilizationShareState) publishBlocked(blocked map[string][]string) {
 	for key := range blocked {
 		st.blockedModels[key] = true
 	}
+}
+
+// transferVariantKey is the namespace/variant key of a transfer's role and
+// variant (role keys are namespace/model/role), or "" for none.
+func transferVariantKey(role, variant string) string {
+	ns, _, ok := strings.Cut(role, "/")
+	if !ok || variant == "" {
+		return ""
+	}
+	return utils.GetNamespacedKey(ns, variant)
 }

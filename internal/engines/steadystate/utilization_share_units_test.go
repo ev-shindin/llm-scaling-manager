@@ -36,7 +36,7 @@ func unitPod(name, node string, gpus int64, ready bool, marked bool) corev1.Pod 
 // pod first, wherever it runs; a LeaderWorkerSet its group as one unit.
 func TestShareDonorUnits(t *testing.T) {
 	names := func(lws bool, pods ...corev1.Pod) [][]string {
-		units := shareDonorUnits(lws, pods)
+		units := shareDonorUnits(lws, pods, annotated)
 		out := make([][]string, 0, len(units))
 		for _, u := range units {
 			n := make([]string, 0, len(u.Pods))
@@ -73,7 +73,7 @@ func TestShareDonorUnits(t *testing.T) {
 			}
 		})
 	}
-	if u := shareDonorUnits(false, []corev1.Pod{unitPod("a", "n1", 2, true, false)}); u[0].Pods[0].GPUs != 2 {
+	if u := shareDonorUnits(false, []corev1.Pod{unitPod("a", "n1", 2, true, false)}, annotated); u[0].Pods[0].GPUs != 2 {
 		t.Fatalf("a unit counts its pod's requested GPUs, got %d", u[0].Pods[0].GPUs)
 	}
 }
@@ -126,4 +126,10 @@ func TestUtilizationSharePlannedMarkSurvivesARestart(t *testing.T) {
 	if b := nf.cycle(true)["ns/B-v"].Target; b != 5 {
 		t.Fatalf("B = %d after a restart and a wrong pod, want 5", b)
 	}
+}
+
+// annotated treats any transfer annotation as another transfer's.
+func annotated(p *corev1.Pod) bool {
+	_, ok := p.Annotations[utilizationShareTransferAnnotation]
+	return ok
 }

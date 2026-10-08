@@ -1591,7 +1591,7 @@ func (r *Reconciler) carveFor(ctx context.Context, spec PoolSpec, memberships []
 	if !p.reported {
 		p.reported = true
 		r.carveStall[name] = p
-		log.FromContext(ctx).Info("WARNING: warm pool made no progress into the GPUs kept free for it; "+
+		log.FromContext(ctx).Info("warm pool made no progress into the GPUs kept free for it; "+
 			"no longer keeping them free", "pool", name, "accelerator", accelerator,
 			"target", target, "held", held, "for", CarveStall.String())
 	}

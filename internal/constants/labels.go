@@ -74,6 +74,11 @@ const (
 	// even if the namespace has VAs or opt-in labels.
 	// This provides explicit control to exclude namespaces from WVA management.
 	NamespaceExcludeAnnotationKey = "wva.llmd.ai/exclude"
+
+	// PodDeletionCostAnnotation is the pod annotation the ReplicaSet controller
+	// reads when choosing a scale-down victim: it removes the cheapest first.
+	// The warm pool and the utilization-share optimizer both steer with it.
+	PodDeletionCostAnnotation = "controller.kubernetes.io/pod-deletion-cost"
 )
 
 // AnnotationValueTrue is the canonical string value for boolean annotations and labels.

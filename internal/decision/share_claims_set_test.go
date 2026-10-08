@@ -43,3 +43,26 @@ func TestShareClaimStorePrefersTheBestOffReceiver(t *testing.T) {
 		t.Fatalf("want X, got %v", claims)
 	}
 }
+
+// A claim no engine takes -- its group went to shadow or away -- expires, so
+// it cannot redirect a transfer restored much later under the same ID.
+func TestShareClaimStoreDropsUntakenClaims(t *testing.T) {
+	t0 := time.Unix(0, 0)
+	cluster := ShareGroupKey("", "A100")
+	s := claimStore(map[string][]ShareClaimable{cluster: {{ID: "x", ReceiverZ: 0, DonorGPUs: 1}}}, t0)
+	if _, outcome := s.Claim("", "A100", nil, 1, -1, "ns/m", "ns/w", t0); outcome != ShareClaimRedirected {
+		t.Fatalf("setup: %q", outcome)
+	}
+	s.Publish(nil, t0.Add(ShareClaimMaxAge))
+	if got := s.Take("", "A100"); len(got) != 1 {
+		t.Fatalf("within the bound the claim stays: %v", got)
+	}
+	s = claimStore(map[string][]ShareClaimable{cluster: {{ID: "y", ReceiverZ: 0, DonorGPUs: 1}}}, t0)
+	if _, outcome := s.Claim("", "A100", nil, 1, -1, "ns/m", "ns/w", t0); outcome != ShareClaimRedirected {
+		t.Fatalf("setup: %q", outcome)
+	}
+	s.Publish(nil, t0.Add(ShareClaimMaxAge+time.Second))
+	if got := s.Take("", "A100"); len(got) != 0 {
+		t.Fatalf("an untaken claim past the bound was kept: %v", got)
+	}
+}
