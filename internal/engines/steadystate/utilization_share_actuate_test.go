@@ -129,7 +129,7 @@ func TestUtilizationShareActuatesScaleDownFirst(t *testing.T) {
 
 	// The quiet period: the targets are what runs, and no pod is marked.
 	o := cycle()
-	if o["ns/A-v"].Target != 9 || o["ns/B-v"].Target != 5 || o["ns/C-v"].Target != 2 {
+	if targetOf(o, "ns/A-v") != 9 || targetOf(o, "ns/B-v") != 5 || targetOf(o, "ns/C-v") != 2 {
 		t.Fatalf("quiet period must hold the running counts, got %+v", o)
 	}
 	if logs.FilterMessageSnippet("ledger started").Len() != 1 {
@@ -139,15 +139,15 @@ func TestUtilizationShareActuatesScaleDownFirst(t *testing.T) {
 	started := 0
 	for range 20 {
 		o = cycle()
-		if started = 9 - o["ns/A-v"].Target; started > 0 {
+		if started = 9 - targetOf(o, "ns/A-v"); started > 0 {
 			break
 		}
 	}
 	if started < 1 || started > allocation.ShareMaxConcurrentTransfers {
-		t.Fatalf("want A lowered by 1..%d once planning starts, got A=%d", allocation.ShareMaxConcurrentTransfers, o["ns/A-v"].Target)
+		t.Fatalf("want A lowered by 1..%d once planning starts, got A=%d", allocation.ShareMaxConcurrentTransfers, targetOf(o, "ns/A-v"))
 	}
-	if o["ns/B-v"].Target != 5 {
-		t.Fatalf("B must not be raised before A's GPUs are released, got B=%d", o["ns/B-v"].Target)
+	if targetOf(o, "ns/B-v") != 5 {
+		t.Fatalf("B must not be raised before A's GPUs are released, got B=%d", targetOf(o, "ns/B-v"))
 	}
 	marked := markedPods(t, c)
 	if len(marked) != started {
@@ -166,15 +166,15 @@ func TestUtilizationShareActuatesScaleDownFirst(t *testing.T) {
 
 	// Still releasing: B stays where it is.
 	o = cycle()
-	if o["ns/B-v"].Target != 5 {
-		t.Fatalf("B raised while A still holds its GPUs: B=%d", o["ns/B-v"].Target)
+	if targetOf(o, "ns/B-v") != 5 {
+		t.Fatalf("B raised while A still holds its GPUs: B=%d", targetOf(o, "ns/B-v"))
 	}
 
 	// A's pods are gone: B is raised by what A gave.
 	f.current["A"] -= started
 	o = cycle()
-	if o["ns/B-v"].Target != 5+started {
-		t.Fatalf("want B raised to %d once A released, got %d", 5+started, o["ns/B-v"].Target)
+	if targetOf(o, "ns/B-v") != 5+started {
+		t.Fatalf("want B raised to %d once A released, got %d", 5+started, targetOf(o, "ns/B-v"))
 	}
 }
 
@@ -223,7 +223,7 @@ func TestUtilizationShareRestoresTransfersFromMarks(t *testing.T) {
 			for range 20 {
 				clock = clock.Add(30 * time.Second)
 				o := first.evaluateUtilizationShare(ctx, f.requests(), fullQuota(), f.scaleTargets())
-				if started = 9 - o["ns/A-v"].Target; started > 0 {
+				if started = 9 - targetOf(o, "ns/A-v"); started > 0 {
 					break
 				}
 			}
@@ -239,7 +239,7 @@ func TestUtilizationShareRestoresTransfersFromMarks(t *testing.T) {
 			if tc.alive {
 				want, wantMarked = 9-started, started
 			}
-			if got := o["ns/A-v"].Target; got != want {
+			if got := targetOf(o, "ns/A-v"); got != want {
 				t.Fatalf("A target after restart = %d, want %d", got, want)
 			}
 			if n := len(markedPods(t, c)); n != wantMarked {
@@ -390,7 +390,7 @@ func TestUtilizationShareActivePublishesActuationSeries(t *testing.T) {
 			started := 0
 			for range 20 {
 				if o := cycle(); o != nil {
-					if started = 9 - o["ns/A-v"].Target; started > 0 {
+					if started = 9 - targetOf(o, "ns/A-v"); started > 0 {
 						break
 					}
 				}
@@ -451,7 +451,7 @@ func TestUtilizationSharePublishesPromisedGPUs(t *testing.T) {
 			started := 0
 			for range 20 {
 				if o := cycle(); o != nil {
-					if started = 9 - o["ns/A-v"].Target; started > 0 {
+					if started = 9 - targetOf(o, "ns/A-v"); started > 0 {
 						break
 					}
 				}
@@ -503,7 +503,7 @@ func (se *shareEngine) cycle() map[string]utilizationShareOverride {
 func (se *shareEngine) untilStarted() int {
 	se.t.Helper()
 	for range 20 {
-		if started := 9 - se.cycle()["ns/A-v"].Target; started > 0 {
+		if started := 9 - targetOf(se.cycle(), "ns/A-v"); started > 0 {
 			return started
 		}
 	}
@@ -558,8 +558,8 @@ func TestUtilizationShareAbortRestoresTheDonorAndBacksOff(t *testing.T) {
 	if n := len(markedPods(t, c)); n != 0 {
 		t.Fatalf("%d donor pods still marked 30 minutes after the transfer started", n)
 	}
-	if o["ns/A-v"].Target != 9 {
-		t.Fatalf("A target after the abort = %d, want 9 restored", o["ns/A-v"].Target)
+	if targetOf(o, "ns/A-v") != 9 {
+		t.Fatalf("A target after the abort = %d, want 9 restored", targetOf(o, "ns/A-v"))
 	}
 	if got := counterSum(t, r, constants.WVAUtilizationShareTransfersTotal,
 		map[string]string{constants.LabelOutcome: string(allocation.ShareOutcomeAborted)}); got != float64(len(ids)) {
@@ -568,9 +568,9 @@ func TestUtilizationShareAbortRestoresTheDonorAndBacksOff(t *testing.T) {
 	// The back-off is at least one release timeout, which is how long the
 	// aborted attempt took.
 	for se.clock.Before(aborted.Add(aborted.Sub(start) - time.Minute)) {
-		if o = se.cycle(); o["ns/A-v"].Target != 9 || len(markedPods(t, c)) != 0 {
+		if o = se.cycle(); targetOf(o, "ns/A-v") != 9 || len(markedPods(t, c)) != 0 {
 			t.Fatalf("A asked to give again %s after an abort: target %d, %d marked",
-				se.clock.Sub(aborted), o["ns/A-v"].Target, len(markedPods(t, c)))
+				se.clock.Sub(aborted), targetOf(o, "ns/A-v"), len(markedPods(t, c)))
 		}
 	}
 }
@@ -591,7 +591,7 @@ func TestUtilizationShareRefusesADonorWithANotReadyPod(t *testing.T) {
 	}
 	se := newShareEngine(t, f, c, time.Unix(0, 0))
 	for range 20 {
-		if a := se.cycle()["ns/A-v"].Target; a != 9 {
+		if a := targetOf(se.cycle(), "ns/A-v"); a != 9 {
 			t.Fatalf("A lowered to %d although one of its pods is not Ready", a)
 		}
 	}
@@ -634,8 +634,8 @@ func TestUtilizationShareRestoreRejectsForgedMarks(t *testing.T) {
 
 			se := newShareEngine(t, f, c, clock)
 			o := se.cycle()
-			if o["ns/A-v"].Target != 9 || o["ns/B-v"].Target != 5 {
-				t.Fatalf("a forged mark moved targets: A=%d B=%d", o["ns/A-v"].Target, o["ns/B-v"].Target)
+			if targetOf(o, "ns/A-v") != 9 || targetOf(o, "ns/B-v") != 5 {
+				t.Fatalf("a forged mark moved targets: A=%d B=%d", targetOf(o, "ns/A-v"), targetOf(o, "ns/B-v"))
 			}
 			if n := len(markedPods(t, c)); n != 0 {
 				t.Fatalf("the forged mark was left on the pod")
@@ -657,7 +657,7 @@ func TestUtilizationShareRestoreRejectsForgedMarks(t *testing.T) {
 	raw, _ := json.Marshal(transferMark{ID: "x", Donor: roleA, Receiver: roleB, DonorVariant: "A-v", ReceiverVariant: "B-v",
 		GPUs: 1, DonorGPUs: 1, Started: clock.Add(-time.Minute)})
 	annotate(t, c, "A-v-0", map[string]string{utilizationShareTransferAnnotation: string(raw), podDeletionCostAnnotation: donorDeletionCost})
-	if a := newShareEngine(t, f, c, clock).cycle()["ns/A-v"].Target; a != 8 {
+	if a := targetOf(newShareEngine(t, f, c, clock).cycle(), "ns/A-v"); a != 8 {
 		t.Fatalf("control: a valid mark must be restored and lower A to 8, got %d", a)
 	}
 
@@ -673,7 +673,7 @@ func TestUtilizationShareRestoreRejectsForgedMarks(t *testing.T) {
 		raw, _ := json.Marshal(transferMark{ID: "r", Donor: roleA, DonorVariant: "A-v", GPUs: tc.gpus, DonorGPUs: 1,
 			Started: clock.Add(-time.Minute)})
 		annotate(t, c, "A-v-0", map[string]string{utilizationShareTransferAnnotation: string(raw), podDeletionCostAnnotation: donorDeletionCost})
-		if a := newShareEngine(t, f, c, clock).cycle()["ns/A-v"].Target; a != tc.want {
+		if a := targetOf(newShareEngine(t, f, c, clock).cycle(), "ns/A-v"); a != tc.want {
 			t.Fatalf("%s: A = %d, want %d", tc.name, a, tc.want)
 		}
 	}
@@ -700,13 +700,13 @@ func TestUtilizationShareRestoredTerminatingMarkIsNotRestoredTwice(t *testing.T)
 	f.current["A"] = 8 // status.replicas no longer counts the terminating pod
 
 	restarted := newShareEngine(t, f, c, first.clock)
-	if a := restarted.cycle()["ns/A-v"].Target; a != 8 {
+	if a := targetOf(restarted.cycle(), "ns/A-v"); a != 8 {
 		t.Fatalf("A after restart = %d, want 8: the terminating pod is already out of the count", a)
 	}
 	// Every cycle, through the abort and after it: a raise right at the
 	// abort would otherwise be undone by the re-anchor before a final check.
 	for i := range 60 {
-		if a := restarted.cycle()["ns/A-v"].Target; a > 8 {
+		if a := targetOf(restarted.cycle(), "ns/A-v"); a > 8 {
 			t.Fatalf("cycle %d: A raised to %d by the abort of a transfer that never lowered it", i, a)
 		}
 	}
@@ -721,7 +721,7 @@ func TestUtilizationShareConcurrentTransfersMarkDistinctPods(t *testing.T) {
 	se.untilStarted()
 	most := 0
 	for i := range 15 { // inside the release timeout: nothing has ended yet
-		given := 9 - se.cycle()["ns/A-v"].Target
+		given := 9 - targetOf(se.cycle(), "ns/A-v")
 		if marked := len(markedPods(t, c)); marked != given {
 			t.Fatalf("cycle %d: A gave %d replicas but %d distinct pods are marked", i, given, marked)
 		}
@@ -873,8 +873,8 @@ func TestUtilizationShareWakeClaimRedirectsATransfer(t *testing.T) {
 
 	f.current["A"] -= started
 	o := se.cycle()
-	if want := 5 + started - 1; o["ns/B-v"].Target != want {
-		t.Fatalf("B = %d after the release, want %d: the claimed replica's GPUs went to the wake", o["ns/B-v"].Target, want)
+	if want := 5 + started - 1; targetOf(o, "ns/B-v") != want {
+		t.Fatalf("B = %d after the release, want %d: the claimed replica's GPUs went to the wake", targetOf(o, "ns/B-v"), want)
 	}
 }
 
@@ -926,12 +926,12 @@ func TestUtilizationShareFundsAReplicaFromADonorSet(t *testing.T) {
 	donorOf := func(p corev1.Pod) string { return strings.TrimSuffix(p.Labels["app"], "-decode") }
 
 	f.current[donorOf(marked[0])]--
-	if o := cycle(); o["ns/B-v"].Target != 5 {
-		t.Fatalf("B raised to %d with one of its two holes open", o["ns/B-v"].Target)
+	if o := cycle(); targetOf(o, "ns/B-v") != 5 {
+		t.Fatalf("B raised to %d with one of its two holes open", targetOf(o, "ns/B-v"))
 	}
 	f.current[donorOf(marked[1])]--
-	if o := cycle(); o["ns/B-v"].Target != 6 {
-		t.Fatalf("B = %d once both donors released, want 6", o["ns/B-v"].Target)
+	if o := cycle(); targetOf(o, "ns/B-v") != 6 {
+		t.Fatalf("B = %d once both donors released, want 6", targetOf(o, "ns/B-v"))
 	}
 }
 
@@ -975,7 +975,7 @@ func TestUtilizationShareRestoresDonorSetsWhole(t *testing.T) {
 				}
 			}
 			o := e.evaluateUtilizationShare(ctx, reqs, fullQuota(), f.scaleTargets())
-			if got := o["ns/A-v"].Target; got != tc.wantA {
+			if got := targetOf(o, "ns/A-v"); got != tc.wantA {
 				t.Fatalf("A = %d after restart, want %d", got, tc.wantA)
 			}
 		})

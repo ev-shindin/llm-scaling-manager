@@ -53,8 +53,12 @@ type transferMark struct {
 }
 
 // donorPods lists the pods a donor variant would release: on a Deployment, its
-// ready pods not being deleted; on a LeaderWorkerSet, the pods of its
-// highest-index group, which LWS removes first and does not steer by cost.
+// active pods; on a LeaderWorkerSet, the pods of its highest-index group, which
+// LWS removes first and does not steer by cost. Pods that finished
+// (Succeeded, Failed) or are being deleted are not active, as the ReplicaSet
+// counts them. A donor with an active pod not yet scheduled cannot be steered
+// -- the ReplicaSet removes an unscheduled pod before it consults the cost, and
+// LWS's highest group may be that pod's -- and is refused.
 func (e *Engine) donorPods(ctx context.Context, acc scaletarget.ScaleTargetAccessor, namespace string) ([]corev1.Pod, error) {
 	lws := scaletarget.IsLeaderWorkerSet(acc)
 	list, err := variantmeta.ListVariantPods(ctx, e.client, namespace, acc)
@@ -64,8 +68,11 @@ func (e *Engine) donorPods(ctx context.Context, acc scaletarget.ScaleTargetAcces
 	var pods []corev1.Pod
 	maxGroup := -1
 	for _, p := range list {
-		if p.DeletionTimestamp != nil || p.Spec.NodeName == "" {
+		if p.DeletionTimestamp != nil || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 			continue
+		}
+		if p.Spec.NodeName == "" {
+			return nil, fmt.Errorf("%s has a pod not yet scheduled (%s); its victim cannot be steered", acc.GetName(), p.Name)
 		}
 		if lws {
 			if i, err := strconv.Atoi(p.Labels[lwsv1.GroupIndexLabelKey]); err == nil && i > maxGroup {
@@ -85,6 +92,16 @@ func (e *Engine) donorPods(ctx context.Context, acc scaletarget.ScaleTargetAcces
 	return pods, nil
 }
 
+// podDeletionCost is a pod's deletion cost, 0 when it has none or an invalid
+// one, as the ReplicaSet reads it.
+func podDeletionCost(p *corev1.Pod) int64 {
+	v, err := strconv.ParseInt(p.Annotations[podDeletionCostAnnotation], 10, 32)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
 // markDonorPods marks the pod a transfer's donor gives: the lowest deletion
 // cost, so the ReplicaSet removes it and not a sibling, and the transfer
 // annotation, so a restarted controller finds it (§6.3, §6.5). It prefers a
@@ -94,8 +111,12 @@ func (e *Engine) donorPods(ctx context.Context, acc scaletarget.ScaleTargetAcces
 // marked reports whether a pod already belongs to another transfer: a live
 // one in the ledger, or one marked earlier this cycle -- the client reads
 // through a cache that may not show that patch yet.
+//
+// It returns the pods it marked as the API server returned them: a rollback in
+// the same cycle unmarks those, not a cached read that does not show the mark
+// yet.
 func (e *Engine) markDonorPods(ctx context.Context, t allocation.ShareTransfer,
-	acc scaletarget.ScaleTargetAccessor, namespace string, marked func(*corev1.Pod) bool) ([]string, error) {
+	acc scaletarget.ScaleTargetAccessor, namespace string, marked func(*corev1.Pod) bool) ([]corev1.Pod, error) {
 	if e.client == nil || acc == nil {
 		return nil, fmt.Errorf("no client or scale target for donor variant %q", t.DonorVariant)
 	}
@@ -129,10 +150,14 @@ func (e *Engine) markDonorPods(ctx context.Context, t allocation.ShareTransfer,
 				t.DonorVariant, len(t.PlannedPods)-len(pods), len(t.PlannedPods))
 		}
 	} else if !scaletarget.IsLeaderWorkerSet(acc) {
-		slices.SortFunc(pods, func(a, b corev1.Pod) int { return cmp.Compare(a.Name, b.Name) })
+		// The pod the ReplicaSet would remove anyway, or the least protected:
+		// the lowest deletion cost a user set, then the name.
+		slices.SortFunc(pods, func(a, b corev1.Pod) int {
+			return cmp.Or(cmp.Compare(podDeletionCost(&a), podDeletionCost(&b)), cmp.Compare(a.Name, b.Name))
+		})
 		pods = pods[:1]
 	}
-	var done []string
+	var done []corev1.Pod
 	for i := range pods {
 		p := &pods[i]
 		mark := transferMark{ID: t.ID, Donor: t.Donor, Receiver: t.Receiver, DonorVariant: t.DonorVariant,
@@ -161,9 +186,18 @@ func (e *Engine) markDonorPods(ctx context.Context, t allocation.ShareTransfer,
 		if err := e.client.Patch(ctx, p, patch); err != nil {
 			return done, err
 		}
-		done = append(done, utils.GetNamespacedKey(p.Namespace, p.Name))
+		done = append(done, *p)
 	}
 	return done, nil
+}
+
+// podKeys are the pods' namespace/name keys.
+func podKeys(pods []corev1.Pod) []string {
+	keys := make([]string, 0, len(pods))
+	for i := range pods {
+		keys = append(keys, utils.GetNamespacedKey(pods[i].Namespace, pods[i].Name))
+	}
+	return keys
 }
 
 // unmarkDonorPods removes a cancelled or aborted transfer's marks, so the pods
@@ -189,21 +223,31 @@ func (e *Engine) unmarkDonorPods(ctx context.Context, logger logr.Logger, t allo
 		if t.ID != "" && !markedFor(&p, t.ID) {
 			continue // marked for another transfer since: not this one's to clear
 		}
-		patch := client.MergeFrom(p.DeepCopy())
-		var m transferMark
-		_ = json.Unmarshal([]byte(p.Annotations[utilizationShareTransferAnnotation]), &m)
-		if m.PrevCost != nil {
-			p.Annotations[podDeletionCostAnnotation] = *m.PrevCost // the user's, back
-		} else {
-			delete(p.Annotations, podDeletionCostAnnotation)
-		}
-		delete(p.Annotations, utilizationShareTransferAnnotation)
-		if err := e.client.Patch(ctx, &p, patch); err != nil {
+		if err := e.unmarkPod(ctx, &p); err != nil {
 			logger.Error(err, "could not unmark a donor pod", "pod", key)
 			failed++
 		}
 	}
 	return failed
+}
+
+// unmarkPod removes the transfer mark from p, as given: the transfer
+// annotation, and our deletion cost -- giving back the cost the pod had before
+// the mark, unless someone set another since.
+func (e *Engine) unmarkPod(ctx context.Context, p *corev1.Pod) error {
+	patch := client.MergeFrom(p.DeepCopy())
+	var m transferMark
+	_ = json.Unmarshal([]byte(p.Annotations[utilizationShareTransferAnnotation]), &m)
+	switch {
+	case p.Annotations[podDeletionCostAnnotation] != donorDeletionCost:
+		// Set since the mark -- by the user, or another controller: theirs.
+	case m.PrevCost != nil && validDeletionCost(*m.PrevCost):
+		p.Annotations[podDeletionCostAnnotation] = *m.PrevCost // the user's, back
+	default:
+		delete(p.Annotations, podDeletionCostAnnotation)
+	}
+	delete(p.Annotations, utilizationShareTransferAnnotation)
+	return e.client.Patch(ctx, p, patch)
 }
 
 // markedFor reports whether a pod's transfer mark names the transfer id.
@@ -535,4 +579,12 @@ func (e *Engine) sweepShareMarks(ctx context.Context, logger logr.Logger) {
 		}
 	}
 	st.swept = true
+}
+
+// validDeletionCost reports whether v is a pod-deletion-cost the API server
+// accepts (an int32). A prevCost that is not -- a forged mark -- is not
+// restored: the patch would be refused every time, and the mark never cleared.
+func validDeletionCost(v string) bool {
+	_, err := strconv.ParseInt(v, 10, 32)
+	return err == nil
 }

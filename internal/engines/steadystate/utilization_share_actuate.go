@@ -197,7 +197,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 
 	out := shareActuation{timings: tm, sources: src}
 	if now.Before(st.quietUntil[key]) {
-		out.overrides = e.shareOverrides(g, variantKey, "restart quiet period")
+		out.overrides = e.quietOverrides(l, g, variantKey)
 		out.promised = l.Promised() + l.WakeHeld(now)
 		out.reserveDebt = shareDebtNow(l, held, g.Budget)
 		out.blocked = shareBlockedReasons(l, g, ev, nil, now)
@@ -232,12 +232,13 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	ownedMark := shareMarkOwned(l, taken)
 	for _, set := range shareStartedSets(plan.Started) {
 		marked := map[string][]string{}
+		markedPods := map[string][]corev1.Pod{}
 		var failed error
 		failedDonor := ""
 		for _, t := range set {
 			pods, err := e.markDonorPods(ctx, t, accessor(t.Donor, t.DonorVariant), g.Origins[t.Donor].Namespace, ownedMark)
-			marked[t.ID] = pods
-			for _, p := range pods {
+			markedPods[t.ID], marked[t.ID] = pods, podKeys(pods)
+			for _, p := range marked[t.ID] {
 				taken[p] = true
 			}
 			if err != nil {
@@ -251,7 +252,14 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			for i := len(set) - 1; i >= 0; i-- {
 				t := set[i]
 				l.Forget(t.ID)
-				e.unmarkDonorPods(ctx, logger, allocation.ShareTransfer{ID: t.ID, DonorPods: marked[t.ID]})
+				// The pods as the mark's patch returned them: the cache may
+				// not show the mark yet, and an unmark from it would patch
+				// nothing.
+				for j := range markedPods[t.ID] {
+					if err := e.unmarkPod(ctx, &markedPods[t.ID][j]); err != nil {
+						logger.Error(err, "could not unmark a donor pod", "pod", marked[t.ID][j])
+					}
+				}
 			}
 			// The donor backs off as after an abort: a pod that cannot be
 			// marked -- not Ready, all already given -- is the same next
@@ -366,6 +374,35 @@ func (e *Engine) shareOverrides(g allocation.ShareGroup, variantKey func(string,
 			}
 			e.utilizationShare.desired[k] = d
 			out[k] = utilizationShareOverride{Target: d, Why: why}
+		}
+	}
+	return out
+}
+
+// quietOverrides are a group's targets while its ledger is quiet after a
+// (re)start: the variants a restored transfer moves keep the targets the
+// restore set, and every other variant is left to today's optimizer, its
+// desired count following what it runs -- a model must not be frozen for a
+// fill timeout because the controller restarted.
+func (e *Engine) quietOverrides(l *allocation.ShareLedger, g allocation.ShareGroup,
+	variantKey func(string, string) string) map[string]utilizationShareOverride {
+	touched := map[string]bool{}
+	for _, t := range l.Transfers() {
+		touched[variantKey(t.Donor, t.DonorVariant)] = true
+		if t.Receiver != "" {
+			touched[variantKey(t.Receiver, t.ReceiverVariant)] = true
+		}
+	}
+	all := e.shareOverrides(g, variantKey, "utilization share: restored transfer in flight")
+	out := map[string]utilizationShareOverride{}
+	for role, vs := range g.Variants {
+		for _, v := range vs {
+			k := variantKey(role, v.Name)
+			if touched[k] {
+				out[k] = all[k]
+			} else {
+				e.utilizationShare.desired[k] = v.Current
+			}
 		}
 	}
 	return out

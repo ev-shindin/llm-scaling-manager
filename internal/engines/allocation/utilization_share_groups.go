@@ -304,6 +304,15 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 			g = gpusPerReplicaFromState(stateMap, vs[0].VariantName)
 		}
 		floor := roleFloorGPUs(records, stateMap, acc, role)
+		// A role that holds a replica never gives its last one: parking a
+		// model is scale-to-zero's decision -- with its retention and its
+		// cheapest-variant rule -- not a transfer's (proposal section 7.2).
+		for _, v := range vs {
+			if stateMap[v.VariantName].CurrentReplicas > 0 {
+				floor = max(floor, gpusPerReplicaFromState(stateMap, v.VariantName))
+				break
+			}
+		}
 		ceiling := roleCeilingGPUs(vs, stateMap)
 		out = append(out, shareRoleInput{
 			ShareRole: ShareRole{

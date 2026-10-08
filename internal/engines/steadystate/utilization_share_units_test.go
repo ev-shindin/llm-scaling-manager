@@ -123,8 +123,10 @@ func TestUtilizationSharePlannedMarkSurvivesARestart(t *testing.T) {
 	nf.cycle(true) // restores from the marks
 	nf.deletePods(t, "A-v-0", "A-v-1")
 	nf.f.current["A"] -= 2
-	if b := nf.cycle(true)["ns/B-v"].Target; b != 5 {
-		t.Fatalf("B = %d after a restart and a wrong pod, want 5", b)
+	// Not raised: held at its 5, or -- the transfer gone and the ledger quiet
+	// -- left to today's optimizer.
+	if b, ok := nf.cycle(true)["ns/B-v"]; ok && b.Target != 5 {
+		t.Fatalf("B = %d after a restart and a wrong pod, want 5", b.Target)
 	}
 }
 

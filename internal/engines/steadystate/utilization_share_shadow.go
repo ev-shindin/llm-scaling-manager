@@ -322,8 +322,12 @@ func (e *Engine) dropVanishedGroups(ctx context.Context, logger logr.Logger, see
 		if now.Sub(st.goneSince[k]) < shareAbsenceGrace {
 			continue
 		}
+		failed := 0
 		for _, t := range l.Transfers() {
-			e.unmarkDonorPods(ctx, logger, t)
+			failed += e.unmarkDonorPods(ctx, logger, t)
+		}
+		if failed > 0 {
+			continue // the ledger still names the marks: retried next cycle
 		}
 		delete(st.ledgers, k)
 		delete(st.quietUntil, k)

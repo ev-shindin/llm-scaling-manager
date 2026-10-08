@@ -1,6 +1,8 @@
 package allocation
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"iter"
 	"maps"
@@ -213,15 +215,20 @@ type shareUndo struct {
 }
 
 // shareWakeHold is GPUs held for a woken model until a time.
+// shareWakeHold is a redirected transfer's GPUs, held for the woken model:
+// for as long as the release takes (id names the transfer, until is zero), then
+// for hold more, while the wake's pod lands.
 type shareWakeHold struct {
 	gpus  int
+	id    string
+	hold  time.Duration
 	until time.Time
 }
 
 // NewShareLedger returns an empty ledger.
 func NewShareLedger() *ShareLedger {
 	return &ShareLedger{
-		incarnation: strconv.FormatInt(time.Now().UnixNano(), 36),
+		incarnation: newIncarnation(),
 		undo:        map[string]shareUndo{},
 		aborts:      map[string]int{},
 		giveAfter:   map[string]time.Time{},
@@ -480,6 +487,11 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 		}
 		t.State = ShareFilling
 		t.Deadline = now.Add(tm.FillTimeout)
+		for i := range l.wakeHolds {
+			if h := &l.wakeHolds[i]; h.id == t.ID && h.until.IsZero() {
+				h.until = now.Add(h.hold) // the hole is open: the wake's pod has hold to land
+			}
+		}
 		_, seen := held[t.Receiver]
 		t.receiverBase = held[t.Receiver]
 		t.receiverBaseUnset = t.Receiver != "" && !seen
@@ -620,14 +632,16 @@ func (l *ShareLedger) ReceivingHeld(role string, now time.Time, tm ShareTimings)
 //
 // A donor set's member is never redirected: its holes fund one receiver
 // replica together, and one member's hole is not what a wake needs. The GPUs
-// redirected are held for the wake until hold expires (WakeHeld), so an idle
-// fill does not raise another receiver into the hole the wake's pod waits for.
+// redirected are held for the wake (WakeHeld) until hold after the release
+// lands -- not after the redirect: a release takes a whole scale-down window --
+// so an idle fill does not raise another receiver into the hole the wake's pod
+// waits for. A release that aborts opens no hole, and its hold goes.
 func (l *ShareLedger) Redirect(id string, now time.Time, hold time.Duration) (ShareTransfer, bool) {
 	for _, t := range l.transfers {
 		if t.ID == id && redirectable(t) {
 			prev := *t
 			t.Receiver, t.ReceiverVariant, t.GPUs, t.Urgent = "", "", 0, false
-			l.wakeHolds = append(l.wakeHolds, shareWakeHold{gpus: t.DonorGPUs, until: now.Add(hold)})
+			l.wakeHolds = append(l.wakeHolds, shareWakeHold{gpus: t.DonorGPUs, id: t.ID, hold: hold})
 			return prev, true
 		}
 	}
@@ -642,7 +656,14 @@ func redirectable(t *ShareTransfer) bool {
 
 // WakeHeld is the GPUs held for woken models now.
 func (l *ShareLedger) WakeHeld(now time.Time) int {
-	l.wakeHolds = slices.DeleteFunc(l.wakeHolds, func(h shareWakeHold) bool { return !now.Before(h.until) })
+	l.wakeHolds = slices.DeleteFunc(l.wakeHolds, func(h shareWakeHold) bool {
+		if h.until.IsZero() {
+			// Still releasing, or the release ended without landing.
+			t, ok := l.Transfer(h.id)
+			return !ok || t.State != ShareReleasing
+		}
+		return !now.Before(h.until)
+	})
 	n := 0
 	for _, h := range l.wakeHolds {
 		n += h.gpus
@@ -889,4 +910,16 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		delete(l.swingUntil, r)
 		delete(l.needs, r)
 	}
+}
+
+// newIncarnation is a random prefix for a ledger's transfer IDs. Random, not a
+// clock: an ID a tenant can predict from one it saw on its own pod could be
+// forged onto its pods to collide with another tenant's transfer, which a
+// restart then drops as a duplicate.
+func newIncarnation() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(b)
 }

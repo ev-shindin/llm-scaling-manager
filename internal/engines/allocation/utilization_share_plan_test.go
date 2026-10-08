@@ -500,13 +500,33 @@ var _ = Describe("Donor-set integrity and wake holds (§6.3, §6.5)", func() {
 		Expect(ok).To(BeFalse())
 	})
 
-	It("holds a redirected transfer's GPUs for the wake until the hold expires", func() {
+	It("holds a redirected transfer's GPUs for the wake until the hold expires after the release", func() {
 		l := NewShareLedger()
-		t := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 8}, map[string]int{"A": 8}, t0, tm)
+		long := ShareTimings{Window: time.Minute, ReleaseTimeout: time.Hour, FillTimeout: time.Hour,
+			ReversalHold: time.Minute, SwingWindow: time.Minute}
+		held := map[string]int{"A": 8, "B": 0}
+		t := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 8, DonorGPUs: 8}, held, t0, long)
 		_, ok := l.Redirect(t.ID, t0, 2*time.Minute)
 		Expect(ok).To(BeTrue())
-		Expect(l.WakeHeld(t0.Add(time.Minute))).To(Equal(8))
-		Expect(l.WakeHeld(t0.Add(2 * time.Minute))).To(BeZero())
+		// The release takes far longer than the hold: the GPUs stay held.
+		l.Observe(held, t0.Add(10*time.Minute), long)
+		Expect(l.WakeHeld(t0.Add(10 * time.Minute))).To(Equal(8), "the hold lapsed before the hole opened")
+		// The donor's pod goes at minute 11: the wake has two minutes from then.
+		held["A"] = 0
+		l.Observe(held, t0.Add(11*time.Minute), long)
+		Expect(l.WakeHeld(t0.Add(12 * time.Minute))).To(Equal(8))
+		Expect(l.WakeHeld(t0.Add(13 * time.Minute))).To(BeZero())
+	})
+
+	It("drops the hold of a redirected release that aborts: no hole opens", func() {
+		l := NewShareLedger()
+		held := map[string]int{"A": 8, "B": 0}
+		t := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 8, DonorGPUs: 8}, held, t0, tm)
+		_, ok := l.Redirect(t.ID, t0, time.Hour)
+		Expect(ok).To(BeTrue())
+		at := t0.Add(tm.ReleaseTimeout)
+		Expect(l.Observe(held, at, tm)).To(ConsistOf(HaveField("Outcome", ShareOutcomeAborted)))
+		Expect(l.WakeHeld(at)).To(BeZero())
 	})
 })
 

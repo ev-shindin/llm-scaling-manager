@@ -3,6 +3,7 @@ package steadystate
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr/funcr"
 	"k8s.io/utils/ptr"
@@ -100,5 +101,29 @@ func TestUtilizationShareReportsFloorHeavyGroupsOnce(t *testing.T) {
 	st.reportFloorHeavy(logger, "g", 6, 10)
 	if len(lines) != 2 {
 		t.Fatalf("a relapse was not reported: %q", lines)
+	}
+}
+
+// The evaluation sums the floors' excess over need per group and reports it
+// against the group's budget: a fleet whose floors hold most of the quota is
+// logged once, across cycles.
+func TestUtilizationShareEvaluationReportsAFloorHeavyGroup(t *testing.T) {
+	f := newShareFleet()
+	f.demand = map[string]float64{"A": 100, "B": 100, "C": 100} // all near idle
+	ctx, logs := observe(t)
+	se := newShareEngine(t, f, sharePods(t, f), time.Unix(0, 0))
+	se.ctx = ctx
+	setShadowPolicy(t, se.e.Config, selectedShadow)
+	reqs := f.requests()
+	floor := 6 // three floors of 6 on a 16-GPU quota: far above the idle models' need
+	for i := range reqs {
+		reqs[i].VariantStates[0].MinReplicas = &floor
+	}
+	for range 3 {
+		se.clock = se.clock.Add(30 * time.Second)
+		se.e.evaluateUtilizationShare(se.ctx, reqs, fullQuota(), f.scaleTargets())
+	}
+	if n := logs.FilterMessageSnippet("floors hold more than half").Len(); n != 1 {
+		t.Fatalf("floor-heavy group logged %d times over three cycles, want once", n)
 	}
 }
