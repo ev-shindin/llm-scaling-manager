@@ -1,8 +1,8 @@
 # Proposal: a utilization-share optimizer
 
-**Status:** stage 1 (shadow) built; stage 2 (actuation) built for single-donor transfers, remaining pieces listed in §13; stage 3 is design.
+**Status:** stage 1 (shadow) and stage 2 (actuation, donor sets included) built; what stage 2 does not yet do is listed in §13. Stage 3 (a short window for urgent transfers) is design.
 **Created:** 2026-10-05
-**Last Updated:** 2026-10-07
+**Last Updated:** 2026-10-08
 
 ## Summary
 
@@ -983,7 +983,7 @@ holds a previously published lower target against a higher new one. A donor's
 lowered target is the optimizer's own answer and must not be lifted by a later
 cycle's ordinary decision; a cancelled transfer must be able to lift it. Both are
 expressed by tagging transfer decisions with a new
-`DecisionReasonUtilizationRebalance` and letting the hold treat that reason like
+`DecisionReasonUtilizationShare` (built as `utilization-share`) and letting the hold treat that reason like
 `WasLimited`: the ledger, not the hold, owns that variant's target while the
 transfer lives.
 
@@ -1278,7 +1278,8 @@ replicas. Every figure is a mean of five seeds.
 4. **Hold a pair from reversing** (§6.2). A role that gave cannot receive, and
    one that received cannot give, for two release times measured from the transfer's start, or from its cancellation. That is
    about one release time after it completes. The hold blocks only the opposite
-   direction.
+   direction. It holds an urgent receiver (one below its need) as well; that
+   role shows the blocked reason `reversal-hold` while it waits.
 5. **Plan a swinging role on its mean need.** A role whose transfers change
    direction twice within eight decide-to-serve latencies (about 96 minutes) is
    following load it cannot catch. For the next such window it is planned on its
@@ -1504,12 +1505,18 @@ none of them:
       namespaces:                   # per namespace-quota group
         research:
           enabled: false            # this group keeps the greedy path
+      clusterNamespaces: []         # non-empty: the cluster groups plan only these namespaces' models (a canary)
 ```
 
-Six keys, each a decision only an operator can make: how far off target is
+Seven keys, each a decision only an operator can make: how far off target is
 worth a move, whether wakes may skip the queue, whether to act at all, whether
-WVA may hold every GPU of a type, what the priority classes are worth, and
-which quota groups take part.
+WVA may hold every GPU of a type, what the priority classes are worth, which
+namespace quota groups take part, and which namespaces a cluster group plans.
+
+`shadow` stays default `false`: that is a decision, not an oversight. The
+operator who writes `type: utilizationShare` asked for it to act; the reference
+documentation tells them to start with `shadow: true`, and
+`wva_utilization_share_mode` reports which mode is in force.
 
 - `optimizer.type` is a selector, not a flag, so a later optimizer is one more
   value rather than another boolean beside `enableRescale`.
@@ -1517,6 +1524,12 @@ which quota groups take part.
   does nothing else. It lives in the same top-level ConfigMap, so on a
   cluster-scoped install it is the admin's decision about a tenant, not the
   tenant's decision about themselves. It cannot touch a cluster-scope group.
+- `clusterNamespaces:` is the cluster group's counterpart, inverted: when
+  non-empty, the cluster groups plan only the models of the listed namespaces
+  (`UtilizationShare.InClusterGroup`). Every other model is frozen there
+  (`namespace not in utilizationShare.clusterNamespaces`), today's optimizer
+  keeps it, and its GPUs stay outside the group's budget. It is how a cluster
+  quota is canaried; an empty entry is a validation error.
 - An `optimizer:` block in a **namespace-local** map is ignored and logged once
   per change, so whoever wrote it learns it had no effect rather than assuming it
   did. So is a `namespaces:` entry that no namespace quota names.
@@ -1582,10 +1595,10 @@ it takes: one rule changed reproduces each oscillation.
 | value | derived from |
 | --- | --- |
 | release time | **measured**: the p90 of this group's completed releases (`wva_utilization_share_release_seconds`). Until enough have completed, the configured bound below |
-| configured release bound | the donor's ScaledObject `spec.advanced.horizontalPodAutoscalerConfig.behavior.scaleDown`: the stabilization window (300 s if unset), plus the time its `policies` need to remove the replicas being given (a Pods/Percent policy per period paces a release past the window — why a ten-replica release measured 420 s, not 300), plus the HPA's 15 s sync and the KEDA `pollingInterval`, plus the donor pods' `terminationGracePeriodSeconds` from the scale target's pod template (leader and worker templates for an LWS) |
-| release timeout | 1.5 × the configured release bound + 2 cycles — from configured values, an upper bound, so a release that is merely rate-limited is not aborted |
+| configured release bound | the stabilization window of the donors' ScaledObjects (`spec.advanced.horizontalPodAutoscalerConfig.behavior.scaleDown.stabilizationWindowSeconds`, 300 s if unset), plus the HPA's 15 s sync, plus the KEDA `pollingInterval` (30 s if unset), plus the donor pods' `terminationGracePeriodSeconds` from the scale target's pod template (leader and worker templates for an LWS; 30 s if unset). Each input is the **largest among the group's donors**: the timings are per group, set by its slowest donor, not per transfer. The scale-down `policies` are **not** included: a Pods/Percent policy that paces a release past the window (why a ten-replica release measured 420 s, not 300) is covered only by the 1.5× margin of the timeout below, and, once three releases have completed, by the measured release time |
+| release timeout | 1.5 × the configured release bound + 2 cycles — from configured values, an upper bound, so a release that is merely slow is not aborted |
 | reversal hold | 2 × release time, from a transfer's start or cancellation — the *measured* time, so a long drain grace that is rarely used does not stretch it |
-| decide-to-serve latency | **measured** from the transfers the ledger has completed: decision to the receiver's pods Ready. Until one has, release time + 5 minutes of pod start and model load + 3 cycles |
+| decide-to-serve latency | release time + a fixed 5-minute estimate of pod start and model load + 3 cycles. Measuring it (decision to the receiver's pods Ready) from the transfers the ledger has completed is not built (§13) |
 | swing window | 8 × decide-to-serve latency |
 | fill timeout | the KEDA `pollingInterval` + the HPA's 15 s sync + 2 cycles + 1 minute of scheduling — Filling ends at *scheduled*, so this covers the scale-up's way through KEDA and the HPA and the scheduler, not model load. For an LWS receiver, + 1 minute for gang scheduling |
 | weight clamp | the smallest and largest class weights |
@@ -1603,12 +1616,13 @@ it takes: one rule changed reproduces each oscillation.
 If field data argues for a different constant, the simulator is re-run with it
 first and the constant changed second. It does not become a knob.
 
-**Every derived value is reported with its source.** One log line per group when
-any of them changes, and a gauge
+**Every derived value is reported with its source.** A gauge
 `wva_utilization_share_effective_seconds{param, source}` (`param` =
-`window`, `release_timeout`, `fill_timeout`, `reversal_hold`, `swing_window`;
-`source` = `measured`, `scaledobject`, `pod`, `default`). An operator can always
-see the value in force. That is what quietly disappears when a setting is
+`window`, `release-timeout`, `fill-timeout`, `reversal-hold`, `swing-window`;
+`source` = `measured`, `scaledobject`, `pod`, `default`), and the sources in the
+`Utilization share: ledger started` line when a group's ledger is (re)built. A
+log line per group whenever a value changes is not built (§13). An operator can
+always see the value in force. That is what quietly disappears when a setting is
 removed, and it must not.
 
 ## 9. Observability
@@ -1633,7 +1647,7 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_utilization_share_promised_gpus` | `accelerator_type`, `scope` | `P`: GPUs released for a receiver and not yet held by it — withheld from the warm pool, from wakes and from plans (§6.3) |
 | `wva_utilization_share_release_seconds` | `accelerator_type`, `scope` | histogram, Releasing → Released |
 | `wva_model_scaling_blocked` | `reason="awaiting-release"` | receiver waiting on a donor |
-| `wva_model_scaling_blocked` | `reason="quota-short"` | below need; the cause (load, whose floor, or which woken model) is in the log |
+| `wva_model_scaling_blocked` | `reason="quota-short"` | below need, and the group as a whole is short. Naming the cause in the log (`causedBy`: load, whose floor, or which woken model) is not built (§13) |
 | `wva_model_scaling_blocked` | `reason="floor-pinned"` | floor above the share (§5.5) |
 | `wva_model_scaling_blocked` | `reason="floors-exceed-quota"` | `Σ F > B_net` |
 | `wva_model_scaling_blocked` | `reason="donors-at-floor"` | out of band, no donor can give |
@@ -1642,12 +1656,39 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_utilization_share_donors_per_transfer` | `accelerator_type`, `scope` | histogram: donor replicas funding one receiver replica |
 | `wva_model_scaling_blocked` | `reason="release-shape-mismatch"` | GPUs released but the receiver's replica does not fit them (§6.5) |
 | `wva_model_scaling_blocked` | `reason="release-taken"` | GPUs released, then occupied by a pod WVA did not place (§6.3) |
-| `wva_model_scaling_blocked` | `reason="release-timeout"` | aborted transfer |
+| `wva_model_scaling_blocked` | `reason="release-timeout"` | the role's last release was aborted; it backs off before giving again. Only an aborted release |
+| `wva_model_scaling_blocked` | `reason="donor-not-steerable"` | the role's pods could not be marked when it was asked to give (a pod not Ready or not scheduled, or the patch failed); it backs off as after an abort |
+| `wva_model_scaling_blocked` | `reason="reversal-hold"` | short and actionable, but it gave within the reversal hold (§6.7 rule 4). Urgent receivers (below need) are held too, by decision; this reason makes that wait visible |
+| `wva_model_scaling_blocked` | `reason="swinging"` | planned on its mean need (§6.7 rule 5) |
+| `wva_model_scaling_blocked` | `reason="transfer-limit"` | short and actionable, while the group already has the most donor transfers in flight (2) |
+| `wva_utilization_share_mode` | `mode` | 1 for the mode in force — `off` / `invalid` / `shadow` / `active` — 0 for the others; always published, so an alert needs no `absent()` |
+| `wva_utilization_share_in_flight` | `accelerator_type`, `scope`, `state` | transfers in flight by `state` (`releasing`, `filling`), idle fills included; while acting |
 
-One `V(DEBUG)` line per group per cycle carries the whole table — `w, d, N, G, F,
-headroom, u, û` per role, the band verdict, and the ledger — so "why did my model
-lose a replica" is answerable from one line. Every transfer decision carries
-`DecisionReasonUtilizationRebalance`.
+The two gauges at the end are the exceptions to "reasons, not gauges": neither is a
+condition on a model. The mode is one series set per controller, and the
+in-flight count is per group.
+
+Gauges are replaced each cycle and deleted when the optimizer stops; the
+counters and histograms are not deleted, and keep their values.
+
+Transfers are also recorded as Kubernetes Events on the donor's and the
+receiver's scale targets (`internal/engines/steadystate/utilization_share_events.go`),
+for the model owner who reads `kubectl describe`, not the controller's log:
+`UtilizationShareGiving` and `UtilizationShareReceiving` at start,
+`UtilizationShareReceived` when a transfer lands, and the warnings
+`UtilizationShareReleaseAborted`, `UtilizationShareWrongPod` and
+`UtilizationShareFillTimedOut`. An Event names the other party only within its
+own namespace; across namespaces it says "a model in another namespace of its
+quota group".
+
+Every log line the optimizer writes starts `Utilization share:`. The
+`would rebalance (shadow)` and `rebalancing` Info lines are written when a
+group's set of actionable roles changes, not every cycle. One `V(DEBUG)` line per
+group per cycle, `Utilization share: evaluation`, carries the whole table —
+each role's held GPUs, continuous and integer target, headroom and band
+verdict — so "why did my model lose a replica" is answerable from one line.
+Every target the optimizer sets carries the decision reason `utilization-share`
+(`DecisionReasonUtilizationShare`).
 
 ## 10. Why a separate optimizer, not a rescale flag
 
@@ -1693,7 +1734,7 @@ moves.
 | mark chosen donor pods with `controller.kubernetes.io/pod-deletion-cost` (pod `patch` is already granted) | `internal/engines/steadystate` (actuation of a transfer) |
 | `optimizer:` block (six optional keys), `weight` / `weightClass` on model entries, defaults, independent validation | `internal/config/saturation_scaling.go` |
 | the constants of §8.4, in one file, each citing §6.7 | `internal/engines/allocation/utilization_share_constants.go` |
-| derived timings (§8.4): measured release and decide-to-serve latency from the ledger; configured bounds from the ScaledObject and pod template | `internal/engines/allocation/utilization_share_timing.go` |
+| derived timings (§8.4): measured release from the ledger, decide-to-serve latency estimated from it; configured bounds from the ScaledObject and pod template | `internal/engines/allocation/utilization_share_timing.go` |
 | extend `registry.Target` (today only `MinReplicas`/`MaxReplicas`) with `spec.advanced.horizontalPodAutoscalerConfig.behavior.scaleDown` (window and policies) and `pollingInterval`; read `terminationGracePeriodSeconds` from the scale target's pod template(s) | `internal/registry/enrich.go` (`TargetFromScaledObject`), `internal/utils/scaletarget` |
 | LWS pods in the held/donor listing: worker pods and group identity (`leaderworkerset.sigs.k8s.io/group-index`), no early return for group size > 1 | `internal/engines/variantmeta/discovery.go` |
 | top-level-policy-only accessor, read like `effectiveLimitersLocked`; clone in `UpdateClusterPolicy` | `internal/config/config.go` |
@@ -1887,8 +1928,11 @@ optimizer every cycle (§6.6).
      - section 9's `_withheld_total`, `_actual` and `_floor_excess_gpus`, and
        the utilization-share reasons on `wva_model_scaling_blocked`:
        `awaiting-release`, `quota-short`, `floor-pinned`,
-       `floors-exceed-quota`, `donors-at-floor`, `no-compatible-donor` and
-       `release-timeout`. They are a third reason-owner set, published only
+       `floors-exceed-quota`, `donors-at-floor`, `no-compatible-donor`,
+       `release-timeout` (an aborted release only), `donor-not-steerable` (a
+       donor whose pods could not be marked), `reversal-hold`, `swinging` and
+       `transfer-limit`, plus `release-taken` and `release-shape-mismatch`
+       below. They are a third reason-owner set, published only
        while the optimizer acts (in shadow mode "blocked by the optimizer"
        would be false) and cleared when a model stops being planned.
        `donors-at-floor` means the role is short and every other role holds
@@ -1965,8 +2009,25 @@ optimizer every cycle (§6.6).
        zero), with no transfer in flight, returns to its running count after
        one release timeout, with a WARN;
      - `wva_utilization_share_transfers_total`, and, for an active group,
-       `_promised_gpus`, `_effective_seconds`, `_swinging` and the
-       `_release_seconds` histogram.
+       `_promised_gpus`, `_effective_seconds`, `_swinging`, `_in_flight` and
+       the `_release_seconds` histogram; `wva_utilization_share_mode`, always.
+     - the transfer Events on the donor's and receiver's scale targets
+       (section 9), naming the other party only within its own namespace.
+     - `clusterNamespaces` (section 8.1), the cluster-quota canary.
+     - a role that holds a replica never gives its last one: its floor is at
+       least one replica, so parking stays scale-to-zero's decision (section
+       7.2).
+     - donor pod choice on a Deployment: the lowest existing deletion cost,
+       then the name. A donor with a pod not Ready (Deployment) or not yet
+       scheduled is refused and backs off (`donor-not-steerable`). Unmarking
+       restores the previous cost only if the pod still carries ours.
+     - marks record the controller's `CONTROLLER_INSTANCE`, and the sweep that
+       runs when the optimizer stops acting removes only its own.
+     - node-aware placement skips cordoned, not-Ready and
+       `NoSchedule`/`NoExecute`-tainted nodes.
+     - the restart quiet period pins only the variants that restored
+       transfers move; the group's other models are left to today's
+       optimizer meanwhile.
      - the per-node half of donor sets (section 6.5):
        - the usage refresher's one pod walk also yields each GPU node's
          capacity, requested GPUs and labels
@@ -2063,8 +2124,31 @@ optimizer every cycle (§6.6).
        node picture (`ShareFitPods`, in its domain when it has one), spending
        it. Without node information the fill counts GPUs, as before.
 
-   **Not yet built in stage 2:** nothing beyond item 3. The refill pace guard
-   remains untestable while the concurrency limit (2) equals the pace (2).
+   **Not yet built in stage 2** (the design above describes them; the code does
+   not do them):
+   - funding for **fixed consumers** (§5.6) and for an **owed, raised floor**
+     (§5.5 case 5) as entitled receivers. The only entitled transfers built are
+     the reserve refill and the idle fill; a multi-accelerator model is simply
+     frozen, its GPUs outside the budget;
+   - the `causedBy` field on `quota-short` (§5.5 case 3), naming the floor
+     responsible in the log line;
+   - the log line when a model sets `priority` without a weight (§5.3);
+     `priority` is ignored silently;
+   - matching the receiver's `nodeSelector`, affinity and tolerations in
+     node-aware placement (§6.5). Only nodes a new pod cannot land on at all
+     are skipped; a receiver restricted to some nodes can be planned into a
+     hole it cannot use, and the transfer ends `fill-timeout`;
+   - the scale-down `policies` in the release bound (§8.4): the bound is the
+     stabilization window + 15 s + polling + grace only;
+   - a **measured** decide-to-serve latency (§8.4): the code uses release
+     time + a fixed 5-minute load estimate + 3 cycles;
+   - a log line per group whenever a derived timing changes (§8.4): the
+     timings' sources are logged once, when a ledger starts.
+
+   Decisions taken while building, not gaps: `shadow` stays default `false`
+   (§8.1), and the reversal hold applies to urgent receivers too (§6.7 rule 4,
+   reported as `reversal-hold`). The refill pace guard remains untestable
+   while the concurrency limit (2) equals the pace (2).
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4).
 

@@ -149,21 +149,26 @@ Metrics and blocked reasons: [utilization-share metrics](prometheus.md#utilizati
 
 Work down the list in order.
 
-1. **Is it selected at all?** No `wva_utilization_share_*` series means it is
-   off. The log says why: `Invalid optimizer block; keeping today's optimizer`
-   (a misspelled key or a value out of range), or `needs a limiters: list` (no
-   budget to share). A block in a namespace-local scaling-policy map is ignored:
+1. **Is it selected at all?** `wva_utilization_share_mode` says: `off`,
+   `invalid`, `shadow` or `active` is `1`. For `invalid` or `off`, the log says
+   why: `Utilization share: invalid optimizer block; keeping today's optimizer`
+   (a misspelled key, a value out of range, an empty `clusterNamespaces` entry,
+   or `needs a limiters: list`, no budget to share). A block in a
+   namespace-local scaling-policy map is ignored:
    `ignoring optimizer blocks in namespace-local scaling-policy maps`.
-2. **Is it in shadow mode?** The log says `Shadow: utilization share would
-   rebalance` rather than `Utilization share: rebalancing`, and
-   `wva_utilization_share_promised_gpus` is absent: it is published only while
-   the optimizer acts. Set `shadow: false` (or remove the key) to act.
+2. **Is it in shadow mode?** `wva_utilization_share_mode{mode="shadow"} == 1`;
+   the log says `Utilization share: would rebalance (shadow)` rather than
+   `Utilization share: rebalancing`, and `wva_utilization_share_promised_gpus` is
+   absent: it is published only while the optimizer acts. Set `shadow: false`
+   (or remove the key) to act. Both lines are written when the set of actionable
+   roles changes, not every cycle, so a quiet log is not a stopped optimizer.
 3. **Is the model planned?** The two lines above, and at `--v=4` the per-cycle
-   `Shadow: utilization share evaluation`, carry a `frozen` field listing the
+   `Utilization share: evaluation`, carry a `frozen` field listing the
    group's models left to today's optimizer this cycle, with the reason: no live
-   analyzer result, a role with demand but no measured capacity, or a
-   namespace-local scaling-policy map (not planned in the cluster group). A model
-   whose variants run on more than one accelerator type, one in a namespace with
+   analyzer result, a role with demand but no measured capacity, a
+   namespace-local scaling-policy map (not planned in the cluster group), or a
+   namespace not in `clusterNamespaces`. A model whose variants run on more than
+   one accelerator type, one in a namespace with
    `enabled: false`, or one under only a `gpu-inventory` limiter without
    `physicalGroups: true` is in no group at all and publishes no role series.
 4. **Is any role actionable?** `wva_utilization_share_actionable` is `1` only
@@ -175,17 +180,32 @@ Work down the list in order.
    cycles** before a transfer is planned for it, so a role that flickers in and
    out of band never moves. At most two replicas move per role per cycle and two
    transfers run per group at once.
-6. **Is it held?** `withheld_total{reason="reversal-hold"}` rising means a role
-   that just gave is being kept from receiving (or the reverse) until the hold in
-   `wva_utilization_share_effective_seconds{param="reversal_hold"}` passes. That
-   is the anti-oscillation rule working, not a fault.
-7. **Did the controller just restart?** After a restart it plans nothing for one
-   fill timeout while it rebuilds in-flight transfers from the pod marks; the log
-   line `Utilization share: ledger started` carries `planningFrom`.
-8. **Could it not mark the donor?** `utilization share could not mark a donor pod;
-   transfer not started` means the donor had a pod that was not Ready (the
-   ReplicaSet removes a not-Ready pod first, so the choice of pod cannot be
-   steered) or no pod left to give. The donor backs off and is retried.
+6. **Is it held?** `withheld_total{reason="reversal-hold"}` rising, or the
+   model's blocked reason `reversal-hold`, means a role that just gave is being
+   kept from receiving (or the reverse) until the hold in
+   `wva_utilization_share_effective_seconds{param="reversal-hold"}` passes. That
+   is the anti-oscillation rule working, not a fault. Its worst case: a role that
+   gave cannot receive for the whole hold, about twice a release time from the
+   start of the transfer it gave in, **even when it is now below its need**
+   (urgent receivers are held too). With a 300 s scale-down window that is on the
+   order of 12 minutes.
+7. **Is it swinging, or at the transfer limit?** Blocked reason `swinging`
+   (`wva_utilization_share_swinging == 1`) means the role reversed direction
+   twice within the swing window and is planned on its mean need, not its
+   current one, so it may look short and still not receive. `transfer-limit`
+   means the group already runs two transfers with a donor; it clears as they
+   land.
+8. **Did the controller just restart?** After a restart, the variants that
+   restored transfers move are pinned at their restored targets for one fill
+   timeout while the ledger settles; no new transfer is planned in that group
+   meanwhile, and the group's other models are left to today's optimizer. The
+   log line `Utilization share: ledger started` carries `planningFrom`.
+9. **Could it not mark the donor?** `Utilization share: could not mark a donor pod;
+   transfer not started` means the donor had a pod that was not Ready (on a
+   Deployment) or not yet scheduled (the ReplicaSet removes such a pod before it
+   reads the deletion cost, so the choice of pod cannot be steered), had no pod
+   left to give, or the patch failed. The donor backs off, shows the blocked
+   reason `donor-not-steerable`, and is retried after the back-off.
 
 If transfers do start but the model still does not grow, read its
 `wva_model_scaling_blocked` reasons.

@@ -257,11 +257,57 @@ is set. Full list, with labels:
 
 | metric | meaning |
 | --- | --- |
+| `wva_utilization_share_mode{mode=...} == 1` | which state it is in: `off`, `invalid` (the block did not validate), `shadow` or `active`. Always published |
 | `wva_utilization_share_actionable == 1` | roles a move would fix now. Published in shadow mode too: this is what shadow mode is for |
 | `wva_utilization_share_replicas_to_move` | replicas the target would move, per group |
 | `wva_utilization_share_spare_gpus` | below `0` = the quota cannot cover every role's need; rebalancing cannot fix that |
+| `wva_utilization_share_in_flight{state=...}` | transfers per group still `releasing` or `filling`; while it acts |
 | `wva_utilization_share_transfers_total` | by `outcome`: `done` is healthy; rising `aborted` or `fill-timeout` means transfers are not landing |
 | `wva_model_scaling_blocked{reason=...}` | which model the optimizer is holding back, and why ([reasons](prometheus.md#wva_model_scaling_blocked-reasons-set-by-the-utilization-share-optimizer)); set only while it acts |
+
+Alerts worth having once it is configured (adjust the `for:` to a few of your
+release times; `wva_utilization_share_effective_seconds{param="release-timeout"}`
+is one):
+
+```promql
+# The optimizer block is broken: today's optimizer is running instead.
+wva_utilization_share_mode{mode="invalid"} == 1
+
+# You configured it, but the controller reports it off (for example, the
+# limiters: list was removed, or the block was edited out by mistake).
+wva_utilization_share_mode{mode="off"} == 1
+
+# A group has had releasing transfers for longer than a release should take
+# (alert with for: 30m or so). Check the donors' scale-down windows and pods.
+wva_utilization_share_in_flight{state="releasing"} > 0
+
+# A model held back by the optimizer for a reason it will not clear by itself.
+wva_model_scaling_blocked{reason=~"donor-not-steerable|no-compatible-donor|floors-exceed-quota|release-taken|release-shape-mismatch"} == 1
+```
+
+#### Events on the models' scale targets
+
+While it acts, the optimizer records each transfer as Kubernetes Events on the
+Deployment or LeaderWorkerSet it moves, so a model's owner can read why it shrank
+or grew without the controller's log:
+
+```bash
+kubectl describe deployment <name> -n <namespace>     # or: leaderworkerset <name>
+kubectl get events -n <namespace> --field-selector reason=UtilizationShareGiving
+```
+
+| reason | type | on | when |
+| --- | --- | --- | --- |
+| `UtilizationShareGiving` | Normal | donor | a transfer started: it gives one replica; names the pod-deletion cost the marked pod carries |
+| `UtilizationShareReceiving` | Normal | receiver | a transfer started for it; it is raised once the donor's replica is released |
+| `UtilizationShareReceived` | Normal | receiver | the transfer landed: it holds the GPUs |
+| `UtilizationShareReleaseAborted` | Warning | donor | its replica was not released within the release timeout; its count is restored and it is not asked again for a while |
+| `UtilizationShareWrongPod` | Warning | donor | a pod other than the marked one went; the receiver is not raised |
+| `UtilizationShareFillTimedOut` | Warning | receiver | its new replica did not take the released GPUs within the fill timeout; it keeps its target |
+
+An Event names the other model only when it is in the same namespace; otherwise
+it says "a model in another namespace of its quota group", so one tenant's Events
+never name another tenant's models.
 
 ### The logs
 
@@ -272,9 +318,13 @@ Useful when a metric tells you *which* model is wrong and you want to know *why*
 | `scaling-decision` | what the scaling manager decided for a model, and the replica counts | Info |
 | `Effective scaling policy` | which policy tier a model resolved to | Info |
 | `GPU limiter (re)built from config` | a `limiters:` edit took effect, live | Info |
-| `Shadow: utilization share would rebalance` | shadow mode found a move it would make; carries `actionable` and `frozen` | Info |
-| `Utilization share: rebalancing` | the optimizer is acting on a group | Info |
-| `Utilization share: transfer` | a transfer ended (with its `outcome`), was cancelled, or was redirected to a wake | Info |
+| `Utilization share:` | every line the utilization-share optimizer writes; narrow with the rows below | Info / Error |
+| `Utilization share: would rebalance (shadow)` | shadow mode found moves it would make; carries `actionable` and `frozen`. Logged when the set of actionable roles changes, not every cycle | Info |
+| `Utilization share: rebalancing` | the optimizer is acting on a group with actionable roles; same fields, same once-per-change rule | Info |
+| `Utilization share: transfer` | a transfer started, ended (with its `outcome`), was cancelled, or was redirected to a wake | Info |
+| `Utilization share: could not mark a donor pod` | a transfer was not started; the donor backs off (`donor-not-steerable`) | Error |
+| `Utilization share: invalid optimizer block` | the block did not validate; today's optimizer runs | Error |
+| `Utilization share: evaluation` | the per-group table, every cycle | **`-v=4`** |
 | `Collected replica metrics` | metrics are arriving | **`-v=4`** |
 
 The controller runs at `-v=2` by default, so `Collected replica metrics` prints

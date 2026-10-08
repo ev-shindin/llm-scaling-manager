@@ -55,11 +55,13 @@ Read the review first; the implementation design says what was built.
 - **[Scale-from-zero: the missing signal](scale-from-zero-missing-signal.md)** —
   why a parked model needs a push, and where it comes from.
 - **[Priority scoping](priority-scoping.md)** — parked. Read before redesigning.
-- **[Utilization-share optimizer](utilization-share-optimizer.md)** — design.
-  Spend the whole quota: every model gets what it needs, and the spare is shared
-  as headroom by weight. Rebalance by transfer when a model leaves a tolerance
-  band, scaling down first and scaling up only into GPUs the donor has actually
-  released. Built for P/D models on multi-GPU replicas.
+- **[Utilization-share optimizer](utilization-share-optimizer.md)** — built:
+  shadow mode and actuation (stages 1 and 2); the short window for urgent
+  transfers (stage 3) is design. Spend the whole quota: every model gets what it
+  needs, and the spare is shared as headroom by weight. Rebalance by transfer
+  when a model leaves a tolerance band, scaling down first and scaling up only
+  into GPUs the donor has actually released. Built for P/D models on multi-GPU
+  replicas; what stage 2 does not yet do is listed in its §13.
 - **[A release the swap can survive](managed-keda-behavior.md)** — measured: a
   ten-replica release takes 420 s under a 300 s stabilization window, so a role
   waiting on GPUs another role has been told to free waits that long. Proposes

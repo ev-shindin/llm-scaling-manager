@@ -3,8 +3,9 @@ package constants
 // Utilization-share optimizer metrics (docs/proposals/utilization-share-optimizer.md,
 // section 9). Role-keyed series carry namespace, model_name and role; group-keyed
 // series carry accelerator_type and scope (a namespace for a namespace-quota
-// group, "cluster" for the cluster group). Every series is replaced each cycle,
-// so a model or group that leaves takes its series with it.
+// group, "cluster" for the cluster group). Every gauge series is replaced each
+// cycle, so a model or group that leaves takes its gauges with it; counters and
+// histograms accumulate for the life of the process.
 const (
 	// WVAUtilizationShareHeadroom is a gauge: x_r, the traffic spike a role
 	// absorbs before it must scale, as a fraction of its need (negative when the

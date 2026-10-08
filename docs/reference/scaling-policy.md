@@ -240,7 +240,8 @@ The design and its reasoning are in the
 this section covers what you set and what you will see.
 
 **It needs a budget.** The optimizer shares the GPUs a limiter allows, so it
-needs a `limiters:` list. Without one it stays off and the controller logs
+needs a `limiters:` list. Without one it stays off (`wva_utilization_share_mode`
+reports `invalid`) and the controller logs
 `needs a limiters: list: there is no budget to share`. It plans:
 
 - one group per namespace that a namespace quota (`scope: namespace`) covers, per
@@ -274,8 +275,8 @@ default: |
 
 In shadow mode every evaluation metric is published
 ([utilization-share metrics](prometheus.md#utilization-share-optimizer-metrics)),
-and the controller logs `Shadow: utilization share would rebalance` whenever a
-move would be planned. `wva_utilization_share_actionable == 1` names the roles it
+and the controller logs `Utilization share: would rebalance (shadow)` whenever the
+set of roles it would move changes (not every cycle). `wva_utilization_share_actionable == 1` names the roles it
 would move; `wva_utilization_share_replicas_to_move` says how many replicas.
 
 | Key (under `utilizationShare:`) | Default | Meaning |
@@ -286,13 +287,17 @@ would move; `wva_utilization_share_replicas_to_move` says how many replicas.
 | `physicalGroups` | `false` | Also plan groups bounded only by the physical GPU inventory (no quota), where spending the whole budget means holding every GPU of that type. |
 | `weightClasses` | `best-effort: 0.5`, `standard: 1`, `important: 2`, `critical: 4` | Class names and their weights. Replaces the defaults whole when set. Exactly one class must have weight `1`; it is the default class. |
 | `namespaces.<ns>.enabled` | `true` | `false` keeps that namespace's quota group on today's optimizer. |
+| `clusterNamespaces` | empty (every namespace) | A list of namespaces. When set, the cluster groups plan only the models of these namespaces; every other model is left to today's optimizer. A canary for a cluster quota. An empty entry (`""`) makes the block invalid. Does not affect namespace quota groups. |
 
 Nothing else is configurable. The timings a transfer runs on — how long a release
 may take, how long a receiver may stay Pending, how long a role that gave must wait
-before it receives — are derived from each donor's ScaledObject (scale-down
-window, polling interval) and pod template (termination grace), and from the
-releases the group has measured. `wva_utilization_share_effective_seconds` shows
-the values in force and where each came from.
+before it receives — are derived per group, not per donor: from the slowest
+donor configuration in the group (the longest scale-down window and polling
+interval among the donors' ScaledObjects, and the longest termination grace among
+their pod templates), and from the releases the group has measured. One model with
+a 30-minute scale-down window therefore stretches every transfer in its group.
+`wva_utilization_share_effective_seconds` shows the values in force and where each
+came from.
 
 **Weights.** A model's weight decides how much of the spare headroom its roles
 get and, when the quota is short, whose shortfall counts most: a role of weight 2
@@ -332,15 +337,34 @@ keeps it.
 
 This applies to namespace quota groups only. A name that no namespace quota covers
 disables nothing, and the controller logs
-`Optimizer namespaces block disables namespaces no namespace quota names`.
+`Utilization share: the namespaces block disables namespaces no namespace quota names`.
+
+**A canary on a cluster quota.** `namespaces:` cannot narrow a cluster group;
+`clusterNamespaces:` does. With it set, the cluster group of each accelerator type
+plans only the models of the listed namespaces, sharing among them the quota's
+free GPUs plus what they hold. Every other model stays on today's optimizer, and
+the GPUs it holds stay outside the group. Start with one or two namespaces whose
+owners agreed to it, then widen the list or remove it (empty plans every
+namespace):
+
+```yaml
+  optimizer:
+    type: utilizationShare
+    utilizationShare:
+      clusterNamespaces: [team-canary, team-b]
+```
+
+A model left out this way is listed in the log line's `frozen` field as
+`namespace not in utilizationShare.clusterNamespaces`.
 
 **Where the block is read.** Like `limiters:`, only from the cluster `default`
 entry, and live: an edit takes effect on the next cycle. An `optimizer:` block in
 a namespace-local scaling-policy map has no effect; the controller logs
 `ignoring optimizer blocks in namespace-local scaling-policy maps` with the
 namespaces. A malformed block (an unknown key, a value out of range) turns only
-the optimizer off and logs `Invalid optimizer block; keeping today's optimizer`;
-the limiters in the same entry keep working.
+the optimizer off and logs `Utilization share: invalid optimizer block; keeping today's optimizer`;
+the limiters in the same entry keep working. `wva_utilization_share_mode` says
+which state is in force (`off`, `invalid`, `shadow` or `active`).
 
 **What it writes on pods.** While a transfer releases, each donor pod it chose
 carries two annotations: `llm-d.ai/utilization-share-transfer` (the transfer, as
@@ -350,8 +374,13 @@ that pod and not a sibling. A restarted controller rebuilds its in-flight
 transfers from these marks. The controller removes both, restoring the pod's
 previous deletion cost, when the transfer ends, when the optimizer is switched to
 shadow or off (including across a controller restart), and when no quota has been
-read for two minutes. Each controller removes
-only the marks it wrote (they record its `CONTROLLER_INSTANCE`). Downgrading to a version
+read for two minutes. When it removes a mark it restores the previous cost only
+if the pod still carries `-1000`: a deletion cost someone else set after the mark
+is left as they set it. Each mark records the `CONTROLLER_INSTANCE` that wrote it,
+and the sweep after a restart or switch-off removes only that instance's marks, so
+**several controllers sharing a cluster must each set a distinct
+`CONTROLLER_INSTANCE`**; with the same value, one controller's sweep removes the
+other's live marks. Downgrading to a version
 without the optimizer leaves them behind; see
 [marks left after a downgrade](troubleshooting.md#transfer-marks-left-on-pods-after-a-downgrade).
 
@@ -359,6 +388,47 @@ without the optimizer leaves them behind; see
 count alone: it does not check that the GPUs a donor frees are on a node where
 the receiver's pod fits, and the two blocked reasons that need node information
 (`release-taken`, `release-shape-mismatch`) never appear.
+
+With node information, placement counts only nodes a new pod can land on: cordoned
+nodes, nodes that are not Ready and nodes with a `NoSchedule` or `NoExecute` taint
+are skipped. It does **not** match the receiver's `nodeSelector`, affinity or
+tolerations, so a receiver restricted to some nodes can be planned into a hole it
+cannot use; that transfer then ends `fill-timeout`, and the receiver keeps its
+raised target until the scheduler places it.
+
+#### For model owners: what the optimizer may take, and how to protect a model
+
+**What can be taken.** Only replicas above the model's floor (its
+`minReplicaCount`, per variant) and above its whole-replica target. While the
+quota covers every model's need, targets sit at or above need, so only headroom
+moves. When the quota is short (`quota-short`), targets fall below need and a
+model can lose a replica it needs if another, weighted, is worse off. A role that
+holds a replica never gives its last one: taking a model to zero is
+scale-to-zero's decision, with its own retention, never a transfer's.
+
+**How to protect a model.** Raise its `minReplicaCount` (a floor is never taken,
+but it is paid for by every other model in the group: see `floor-pinned`), or
+give it a higher `weightClass`. The optimizer does not read `priority`; only
+`weight`/`weightClass` decide shares. On a cluster-scoped install a model is
+planned in a cluster group only when its namespace has no scaling-policy map of
+its own, so its weight is the one the admin's policy resolves (the `default`
+entry, a tier, or an override there).
+
+**How a replica leaves.** A transfer lowers the donor's target, and the pod goes
+through an ordinary scale-down (the ReplicaSet, or LeaderWorkerSet for an LWS).
+In-flight requests are protected only by what the model server does on
+termination: its `preStop` hook and `terminationGracePeriodSeconds`. Set them to
+drain. The grace also lengthens every transfer in the group (it is part of the
+release bound).
+
+**Which pod leaves.** On a Deployment the optimizer marks the pod with the lowest
+existing `controller.kubernetes.io/pod-deletion-cost` (ties broken by name), so a
+cost you set to protect a pod is respected. A Deployment with any pod not Ready,
+or any variant with a pod not yet scheduled, is not asked to give: the ReplicaSet
+removes such pods before it reads the cost, so the choice could not be steered.
+That donor backs off and shows the blocked reason `donor-not-steerable`. On a
+LeaderWorkerSet the highest-index group goes, as LWS removes it; its deletion cost
+is not consulted.
 
 ## Configuration
 
