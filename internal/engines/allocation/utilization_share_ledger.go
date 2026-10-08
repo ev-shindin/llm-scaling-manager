@@ -96,6 +96,9 @@ type ShareTransfer struct {
 	// started and the receiver's when it entered Filling; release and fill are
 	// observed against them.
 	donorBase, receiverBase int
+	// fillingSince is when the transfer entered Filling: a fill that
+	// completes later is inside its receiverBase only if it landed before.
+	fillingSince time.Time
 	// setReleased is, on a set's primary, the GPUs its contributors have
 	// released while it still waits: promised to its receiver. setPending is
 	// how many contributors have not released yet. A primary whose pending
@@ -252,7 +255,7 @@ func (l *ShareLedger) StartFill(receiver, variant string, gpus int, held map[str
 	t := &ShareTransfer{
 		ID: fmt.Sprintf("%s-f%d", l.incarnation, l.nextID), Receiver: receiver, ReceiverVariant: variant,
 		GPUs: gpus, Entitled: true, State: ShareFilling, Started: now,
-		Deadline: now.Add(tm.FillTimeout), receiverBase: held[receiver],
+		Deadline: now.Add(tm.FillTimeout), receiverBase: held[receiver], fillingSince: now,
 	}
 	l.transfers = append(l.transfers, t)
 	return *t
@@ -412,6 +415,12 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 		if t.State != ShareReleasing || t.Donor == "" {
 			continue
 		}
+		if _, seen := held[t.Donor]; !seen {
+			// Not planned this cycle -- its collection failed, or it is frozen:
+			// nothing shows what it holds, and zero is not an answer. The
+			// release timeout still bounds the wait.
+			continue
+		}
 		if _, ok := base[t.Donor]; !ok {
 			base[t.Donor] = t.donorBase
 		}
@@ -461,7 +470,9 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 		t.State = ShareFilling
 		t.Deadline = now.Add(tm.FillTimeout)
 		t.receiverBase = held[t.Receiver]
+		t.fillingSince = now
 		l.released = append(l.released, *t)
+		l.rebaseDonor(t, now)
 		delete(l.aborts, t.Donor)
 		delete(l.giveAfter, t.Donor)
 	}
@@ -471,7 +482,9 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 	got := map[string]int{}
 	rbase := map[string]int{}
 	keep := l.transfers[:0]
+	var filled, wrong []*ShareTransfer
 	for _, t := range l.transfers {
+		_, receiverSeen := held[t.Receiver]
 		switch {
 		case t.State == ShareReleasing && broken(t):
 			// Not the donor's failure: no back-off.
@@ -481,6 +494,12 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 			// The donor did give; its GPUs return to the budget for the next
 			// plan. No back-off: the donor released, and promptly.
 			ended = append(ended, ShareTransferEnd{*t, ShareOutcomeWrongPod})
+			wrong = append(wrong, t)
+			continue
+		case t.State == ShareReleasing && !now.Before(t.Deadline) && t.IsSetPrimary() && releasable[t]:
+			// Its own donor released; a contributor did not. Not this
+			// donor's failure: no back-off.
+			ended = append(ended, ShareTransferEnd{*t, ShareOutcomeAborted})
 			continue
 		case t.State == ShareReleasing && !now.Before(t.Deadline):
 			ended = append(ended, ShareTransferEnd{*t, ShareOutcomeAborted})
@@ -492,15 +511,24 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 				l.giveAfter[t.Donor] = now.Add(backoff)
 			}
 			continue
-		case t.State == ShareFilling:
+		case t.State == ShareFilling && (receiverSeen || t.Receiver == ""):
+			// A receiver not planned this cycle shows nothing about what it
+			// holds: only its fill timeout can end it. A transfer with no
+			// receiver -- a contributor, a refill -- completes at its release.
 			if _, ok := rbase[t.Receiver]; !ok {
 				rbase[t.Receiver] = t.receiverBase
 			}
 			got[t.Receiver] += t.GPUs
 			if held[t.Receiver] >= rbase[t.Receiver]+got[t.Receiver] {
 				ended = append(ended, ShareTransferEnd{*t, ShareOutcomeDone})
+				filled = append(filled, t)
 				continue
 			}
+			if !now.Before(t.Deadline) {
+				ended = append(ended, ShareTransferEnd{*t, ShareOutcomeFillTimeout})
+				continue
+			}
+		case t.State == ShareFilling:
 			if !now.Before(t.Deadline) {
 				ended = append(ended, ShareTransferEnd{*t, ShareOutcomeFillTimeout})
 				continue
@@ -509,7 +537,51 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 		keep = append(keep, t)
 	}
 	l.transfers = keep
+	// After the filtering above, which rewrites the slice in place: a donor
+	// that lost a pod other than the planned one did shrink.
+	for _, t := range wrong {
+		l.rebaseDonor(t, now)
+	}
+	// A fill that landed is inside the receiver's held count from now on: the
+	// receiver's other fills, measured from before it landed, count it in.
+	for _, f := range filled {
+		for _, u := range l.transfers {
+			if u.State == ShareFilling && u.Receiver == f.Receiver && u.Receiver != "" && u.fillingSince.Before(now) {
+				u.receiverBase += f.GPUs
+			}
+		}
+	}
+	// A set whose primary ended while releasing will never raise its receiver:
+	// its contributors still releasing end with it, so their donors are given
+	// back instead of shrinking for nobody. Not their donors' failure.
+	gone := map[string]bool{}
+	for _, e := range ended {
+		if e.Transfer.IsSetPrimary() && e.Outcome != ShareOutcomeDone {
+			gone[e.Transfer.ID] = true
+		}
+	}
+	if len(gone) > 0 {
+		l.transfers = slices.DeleteFunc(l.transfers, func(t *ShareTransfer) bool {
+			if t.State == ShareReleasing && gone[t.SetID] && !t.IsSetPrimary() {
+				ended = append(ended, ShareTransferEnd{*t, ShareOutcomeAborted})
+				return true
+			}
+			return false
+		})
+	}
 	return ended
+}
+
+// rebaseDonor records that t's donor released t's GPUs: the donor's other
+// transfers still releasing, measured from before it did, count it out. Without
+// this, the next one in line would be measured against a base that still holds
+// t's GPUs and release before its own pod went.
+func (l *ShareLedger) rebaseDonor(t *ShareTransfer, now time.Time) {
+	for _, u := range l.transfers {
+		if u != t && u.State == ShareReleasing && u.Donor == t.Donor && u.Started.Before(now) {
+			u.donorBase -= t.DonorGPUs
+		}
+	}
 }
 
 // ReceivingHeld reports whether role may not receive now: it gave within the
@@ -743,3 +815,14 @@ func (l *ShareLedger) SetFillShort(roles []string) {
 
 // FillShort reports whether the last idle fill left role below its target.
 func (l *ShareLedger) FillShort(role string) bool { return l.fillShort[role] }
+
+// MarkFailed backs donor off as an abort does: its pods could not be marked
+// for a transfer, and planning it again next cycle would fail the same way
+// while its receiver never tries another donor.
+func (l *ShareLedger) MarkFailed(donor string, now time.Time, tm ShareTimings) {
+	if donor == "" {
+		return
+	}
+	l.aborts[donor]++
+	l.giveAfter[donor] = now.Add(tm.ReleaseTimeout << min(l.aborts[donor]-1, 4))
+}

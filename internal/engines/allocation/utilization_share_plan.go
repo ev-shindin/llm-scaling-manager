@@ -300,6 +300,17 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 			if moved[rc] >= ShareMaxReplicasPerCycle || moved[dn] >= ShareMaxReplicasPerCycle {
 				continue
 			}
+			// A receiver funded up to its whole-replica target takes no more,
+			// and a donor down to its own gives no more: past either, the next
+			// plan would only move the replica back. Defence in depth: with
+			// the surplus above the targets equal to the shortfall below them
+			// and two replicas per role per cycle, no fleet reaches it today.
+			if work[rc] >= integ[rc] {
+				break
+			}
+			if work[dn] <= integ[dn] {
+				continue
+			}
 			rr, dr := byKey[rc], byKey[dn]
 			grow := ShareVariant{GPUs: rr.ReplicaGPUs}
 			give := ShareVariant{GPUs: dr.ReplicaGPUs}

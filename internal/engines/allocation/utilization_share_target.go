@@ -97,9 +97,15 @@ func ContinuousShareTargets(roles []ShareRole, budget float64) map[string]float6
 		active = append(active, r)
 	}
 	// Each pass solves for the common factor over the unpinned roles, then pins
-	// every role the solution would take past its floor or ceiling. A pinned
-	// role's GPUs leave the pool; the rest are solved again. Each pass pins at
-	// least one role or finishes, so it ends within len(roles) passes.
+	// the roles the solution takes past a bound -- but only on the side that
+	// overshoots more. Pinning a ceiling frees GPUs that can lift a role the
+	// same pass found below its floor, and pinning a floor takes GPUs that can
+	// bring a role below its ceiling: pinning both sides at once fixes a role
+	// at a bound the true solution does not hold it at. The side with the
+	// larger total violation is at its bound in the solution, so it is safe to
+	// pin. A pinned role's GPUs leave the pool; the rest are solved again. Each
+	// pass pins at least one role or finishes, so it ends within len(roles)
+	// passes.
 	for len(active) > 0 {
 		sumN, sumWN, sumNoverW := 0.0, 0.0, 0.0
 		for _, r := range active {
@@ -114,16 +120,26 @@ func ContinuousShareTargets(roles []ShareRole, budget float64) map[string]float6
 			}
 			return r.Need * (1 + spare/sumNoverW/r.Weight)
 		}
+		over, under := 0.0, 0.0
+		for _, r := range active {
+			g := target(r)
+			if g > r.ceiling() {
+				over += g - r.ceiling()
+			} else if g < float64(r.Floor) {
+				under += float64(r.Floor) - g
+			}
+		}
+		pinCeilings, pinFloors := over >= under, under >= over
 		var keep []ShareRole
 		pinned := false
 		for _, r := range active {
 			g := target(r)
 			switch {
-			case g < float64(r.Floor):
+			case pinFloors && g < float64(r.Floor):
 				out[r.Key] = float64(r.Floor)
 				pool -= float64(r.Floor)
 				pinned = true
-			case g > r.ceiling():
+			case pinCeilings && g > r.ceiling():
 				out[r.Key] = r.ceiling()
 				pool -= r.ceiling()
 				pinned = true

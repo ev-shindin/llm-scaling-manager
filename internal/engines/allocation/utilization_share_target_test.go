@@ -33,6 +33,28 @@ func sumInts(m map[string]int) int {
 }
 
 var _ = Describe("ContinuousShareTargets", func() {
+	// A role pinned at its ceiling frees GPUs for the others; a role the same
+	// pass found below its floor may rise above it once they are re-shared.
+	// Pinning both in one pass left GPUs unassigned (surplus) or a role held at
+	// a floor it should leave.
+	DescribeTable("uses the whole budget when ceilings and floors bind together",
+		func(roles []ShareRole, budget float64, want map[string]float64) {
+			t := ContinuousShareTargets(roles, budget)
+			sum := 0.0
+			for k, w := range want {
+				Expect(t[k]).To(BeNumerically("~", w, 1e-9), k)
+				sum += t[k]
+			}
+			Expect(sum).To(BeNumerically("~", budget, 1e-9), "every GPU of the budget is assigned")
+		},
+		Entry("surplus: A capped, B lifted past its floor",
+			[]ShareRole{{Key: "A", Weight: 1, Need: 10, Ceiling: 10}, {Key: "B", Weight: 1, Need: 1, Floor: 3}},
+			30.0, map[string]float64{"A": 10, "B": 20}),
+		Entry("shortfall: A capped, B given what A cannot take",
+			[]ShareRole{{Key: "A", Weight: 1, Need: 10, Ceiling: 2}, {Key: "B", Weight: 1, Need: 10, Floor: 6}},
+			10.0, map[string]float64{"A": 2, "B": 8}),
+	)
+
 	It("shares the spare as headroom proportional to weight (§5.1)", func() {
 		t := ContinuousShareTargets(threeModels(), 16)
 		Expect(t["A"]).To(BeNumerically("~", 9.0, 1e-9))
