@@ -396,6 +396,7 @@ check-import-direction: ## Fail on a pipeline package importing one above it (th
 
 .PHONY: check-doc-comment-owner
 check-doc-comment-owner: ## Fail on a doc comment describing a different declaration than it sits on
+	@python3 hack/check_doc_comment_owner_test.py
 	@python3 hack/check-doc-comment-owner.py
 
 .PHONY: test

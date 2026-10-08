@@ -71,6 +71,38 @@ func TestTheWrongParserDoesNotReportACompleteConfiguration(t *testing.T) {
 		}
 	})
 
+	// THE LIMIT, recorded rather than left to be discovered. The signal is
+	// "a flag belonging to the OTHER engine", so it cannot fire when the
+	// misread container's flags fall entirely inside the subset both appliers
+	// map: dtype, quantization, kv_cache_dtype, tensor_parallel_size. Every
+	// flag then reads fine, nothing is unknown, and the parse reports complete
+	// while the UNSHARED fields hold the wrong engine's defaults.
+	//
+	// A reviewer measured this and it is real. Asserting it keeps the comment
+	// at mappedValueKeys honest -- an earlier version of that comment claimed
+	// the literal-value case was closed in general, when it is closed only
+	// where the two flag sets differ.
+	t.Run("but NOT when every flag is one both engines map", func(t *testing.T) {
+		d := shellDeployment("vllm serve m --dtype bfloat16 --quantization fp8 "+
+			"--kv-cache-dtype fp8 --tensor-parallel-size 2", nil)
+		d.Spec.Template.Spec.Containers[0].Name = sglangContainer
+		p := ParseSGLangArgs(scaletarget.NewDeploymentAccessor(d))
+
+		if !p.Complete() {
+			t.Errorf("Unresolved = %v, want empty: every flag here is mapped by BOTH "+
+				"appliers, so nothing is unknown and this limit no longer holds -- "+
+				"if that is deliberate, the WHAT REMAINS note at mappedValueKeys "+
+				"needs re-deriving", p.Unresolved)
+		}
+		// And the cost of that silence: a field neither flag set, holding the
+		// wrong engine's default.
+		if p.BlockSize != 1 {
+			t.Errorf("BlockSize = %d, want SGLang's page-size default of 1 -- the "+
+				"point of this case is that the misread parser's default stands "+
+				"where vLLM's 16 belongs, with no signal", p.BlockSize)
+		}
+	})
+
 	// THE CONTROL, and the reason the fix is not simply "record every unknown
 	// flag". A deployment carries plenty of flags that have nothing to do with
 	// capacity, and recording those would make every configuration incomplete

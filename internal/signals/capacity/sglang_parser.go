@@ -60,11 +60,12 @@ func ParseSGLangArgs(scaleTarget scaletarget.ScaleTargetAccessor) EngineParams {
 }
 
 // applySGLangParam sets the corresponding EngineParams field from a normalized
-// SGLang flag key and its string value, returning false when it recognised the
-// key and could not use the value -- the caller then records the key, so a
-// default standing in for an unreadable value is distinguishable from the
-// engine's real setting. The default is still preserved either way, matching
-// the vLLM parser.
+// SGLang flag key and its string value, returning applyUnusable when it
+// recognised the key and could not use the value, applyUnknown when it does
+// not map the key, and applyOK otherwise -- the caller records the key in the
+// first two cases, so a default standing in for an unreadable value is
+// distinguishable from the engine's real setting. The default is still
+// preserved either way, matching the vLLM parser.
 func applySGLangParam(key, value string, params *EngineParams) applyResult {
 	switch key {
 	case "mem_fraction_static":

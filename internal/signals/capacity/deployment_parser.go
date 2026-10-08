@@ -120,6 +120,15 @@ type EngineParams struct {
 	//     is not the case below
 	//   - a flag we map whose value token is missing entirely
 	//
+	// AND ONE CAUSE OF A DIFFERENT CLASS, which is why the list above says
+	// "seven" and this is counted separately: a flag THIS parser does not map
+	// that the OTHER engine does. There is no field below it holding a
+	// default -- there is no field at all -- and what it records is not "a
+	// value I could not read" but "the wrong parser is reading this
+	// container", so every field it did not set is a default standing in for
+	// something unknown. See mappedValueKeys and parseArgsWith's applyUnknown
+	// arm.
+	//
 	// Sorted and deduplicated, so it is stable enough to hash.
 	Unresolved []string
 }
@@ -280,8 +289,9 @@ const keyDtype = "dtype"
 // misdetected, and ConfigContainers deliberately prefers the right CONTAINER
 // over the right parser.
 //
-// IT NOW CATCHES BOTH HALVES, and the comment that stood here said it could
-// not -- so this paragraph is the correction as much as the description.
+// IT NOW CATCHES THE LITERAL-VALUE HALF TOO, which the comment that stood
+// here said was impossible -- so this paragraph is the correction as much as
+// the description.
 //
 // The gap was that noteUnresolved only ran when resolveRefs failed or when
 // apply REJECTED a value. An unmapped key fell through apply's switch as a
@@ -299,11 +309,26 @@ const keyDtype = "dtype"
 // TestTheWrongParserDoesNotReportACompleteConfiguration pins both directions
 // and the control that a flag neither engine maps is still ignored.
 //
-// WHAT REMAINS is narrower and is the all-containers fallback's own risk, not
-// this set's: a misdetected pod whose selected container carries NO flag either
-// engine maps has nothing for this to catch. Such a configuration is
-// indistinguishable from a deliberately minimal one, and ConfigContainers'
-// fourth tier documents that case.
+// WHAT REMAINS, stated precisely, because this set only fires when the two
+// parsers' flag sets DIFFER:
+//
+//  1. A misread container whose flags fall entirely inside the SHARED subset
+//     -- dtype, quantization, kv_cache_dtype, tensor_parallel_size, which both
+//     appliers map. Every flag then reads fine and nothing is unknown, so the
+//     parse reports complete while every UNSHARED field silently holds the
+//     wrong engine's default. Measured: the SGLang parser over
+//     `--dtype bfloat16 --quantization fp8 --kv-cache-dtype fp8
+//     --tensor-parallel-size 2` gives Complete() == true with BlockSize 1,
+//     SGLang's page-size default, where the vLLM engine's default is 16.
+//     TestTheWrongParserDoesNotReportACompleteConfiguration records it as a
+//     known limit beside the cases that do fire.
+//  2. A misread container carrying NO flag either engine maps -- nothing to
+//     catch, and indistinguishable from a deliberately minimal configuration.
+//     That is ConfigContainers' fourth-tier risk rather than this set's.
+//
+// Both are narrower than what this catches, and neither is closable here: the
+// signal is "a flag belonging to the other engine", and in both cases there
+// is no such flag.
 var mappedValueKeys = map[string]struct{}{
 	// vLLM
 	"gpu_memory_utilization":  {},
@@ -355,9 +380,16 @@ func parseArgs(args []string, params *EngineParams, env map[string]string) {
 // the apply fails, the key is recorded in params.Unresolved -- the field then
 // holds a default, and the digest has to know that it does.
 //
-// apply returns false when it recognised the key and could not use the value.
-// An unrecognised key returns true: there is nothing to record about a flag
-// this parser does not map.
+// apply reports which of three things happened (applyResult), and the switch
+// below acts on each:
+//
+//   - applyUnusable -- recognised the key, could not use the value. Recorded.
+//   - applyUnknown  -- not a flag this parser maps. Recorded ONLY when the
+//     other engine maps it, because that means the wrong parser is reading
+//     this container. An earlier version of this comment said an unrecognised
+//     key had "nothing to record", which is the proposition the three-state
+//     result exists to falsify.
+//   - applyOK       -- recognised and used.
 func parseArgsWith(args []string, params *EngineParams, env map[string]string,
 	apply paramApplier) {
 	for i := 0; i < len(args); i++ {
@@ -440,8 +472,9 @@ func parseArgsWith(args []string, params *EngineParams, env map[string]string,
 }
 
 // applyParam sets the corresponding EngineParams field from a normalized key
-// and its string value, returning false when it recognised the key and could
-// not use the value.
+// and its string value, returning applyUnusable when it recognised the key and
+// could not use the value, applyUnknown when it does not map the key at all,
+// and applyOK otherwise.
 //
 // The default is still preserved on failure -- that part is unchanged, and is
 // the right graceful degradation for an operator-controlled arg. What changed
