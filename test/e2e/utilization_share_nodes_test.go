@@ -106,6 +106,23 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 			g.Expect(b.Status.ReadyReplicas).To(Equal(int32(1)))
 		}, time.Duration(cfg.PodReadyTimeout)*time.Second, time.Duration(cfg.PollIntervalSec)*time.Second).Should(Succeed())
 
+		// The spec needs two of A's pods on one node. One GPU node (the
+		// emulator) gives that; a scheduler spreading A one pod per node
+		// leaves no such node, and the spec would only time out.
+		pods, err := k8sClient.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: "app=" + depA})
+		Expect(err).NotTo(HaveOccurred())
+		perNode := map[string]int{}
+		for _, p := range pods.Items {
+			perNode[p.Spec.NodeName]++
+		}
+		shared := false
+		for _, n := range perNode {
+			shared = shared || n >= 2
+		}
+		if !shared {
+			Skip(fmt.Sprintf("no node holds two of A's pods (%v): nothing for a node-aware set to combine", perNode))
+		}
+
 		By("Waiting for earlier specs' pods to finish terminating on the product's nodes")
 		// The scheduler counts a terminating pod's GPUs as used, so a fill
 		// taken while one remains leaves GPUs that come free later -- and

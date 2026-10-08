@@ -168,6 +168,9 @@ type ShareLedger struct {
 	// fillBlocked is, per receiver, why its last fill timed out
 	// (release-taken or release-shape-mismatch) and until when it is reported.
 	fillBlocked map[string]shareFillBlock
+	// fillShort are the receivers the last idle fill left below their target:
+	// the planner does not leave them to the fill again (SetFillShort).
+	fillShort map[string]bool
 
 	lastGave, lastGot map[string]time.Time
 	moves             map[string][]shareMove
@@ -724,3 +727,19 @@ func (l *ShareLedger) FillBlockedReason(role string, now time.Time) string {
 	}
 	return b.reason
 }
+
+// SetFillShort records the receivers the idle fill left below their target
+// this cycle, replacing the last record. The planner leaves a receiver whose
+// pods fit free GPUs to the fill only when the fill did not leave it short:
+// the fill checks what the planner does not (GPUs held for a wake, the
+// cluster's physical free GPUs, the nodes other sets just spent), and a
+// receiver deferred to a fill that keeps refusing it would never be funded.
+func (l *ShareLedger) SetFillShort(roles []string) {
+	l.fillShort = map[string]bool{}
+	for _, r := range roles {
+		l.fillShort[r] = true
+	}
+}
+
+// FillShort reports whether the last idle fill left role below its target.
+func (l *ShareLedger) FillShort(role string) bool { return l.fillShort[role] }

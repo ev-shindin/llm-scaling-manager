@@ -1974,7 +1974,14 @@ optimizer every cycle (§6.6).
          replicas than the receiver's quota -- none, when its pods fit free
          GPUs on a cluster whose quota is smaller than its nodes -- donor
          replicas from any node make it up. (The kind e2e found this: with
-         free GPUs on the node and the quota spent, nothing was funded.) The search runs before the node-blind
+         free GPUs on the node and the quota spent, nothing was funded.)
+         When the pods fit free GPUs and the quota has the receiver's replica
+         idle -- measured as the fill measures it, less what is held for
+         wakes and capped by the cluster's free GPUs -- the receiver is left
+         to the idle fill: no donor shrinks, neither another domain nor the
+         node-blind search is tried, and it is not reported unfunded. The fill
+         records whom it leaves short, and the planner does not leave those to
+         it again, so a mismatch between the two costs a cycle, not a stall. The search runs before the node-blind
          one, which remains the fallback. The whole set passes the same
          admission as a node-blind set, the concurrency limit counted across
          all its donors.

@@ -37,10 +37,43 @@ func TestFillIdleSharePlacesADomainReceiverInOneDomain(t *testing.T) {
 				"n2": {Free: 4, Labels: map[string]string{"rack": "r2"}},
 			}
 			key := func(role, variant string) string { return role + "/" + variant }
-			e.fillIdleShare(logr.Discard(), allocation.NewShareLedger(), g, ev, map[string]int{"B": 8}, nodes,
-				tc.domains, key, time.Unix(0, 0), allocation.ShareTimings{FillTimeout: time.Minute})
+			e.fillIdleShare(logr.Discard(), allocation.NewShareLedger(), g, ev, map[string]int{"B": 8},
+				shareFit{nodes: nodes, domains: tc.domains}, key, time.Unix(0, 0), allocation.ShareTimings{FillTimeout: time.Minute})
 			if got := e.utilizationShare.desired["B/b"]; got != tc.want {
 				t.Fatalf("B raised by %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// The fill tells the planner whom it left short, so a receiver the planner
+// left to it -- its pods fit free GPUs, its quota idle -- is not left to it
+// again when the fill cannot fund it (here: no physical GPU free). Control:
+// a fill that funds the receiver does not report it.
+func TestFillIdleShareRecordsWhoItLeftShort(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		physicalFree int
+		short        bool
+	}{
+		{"no physical GPU free", 0, true},
+		{"funded (control)", math.MaxInt, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &Engine{}
+			e.utilizationShare.desired = map[string]int{}
+			l := allocation.NewShareLedger()
+			g := allocation.ShareGroup{
+				AcceleratorType: "A100", Budget: 16, PhysicalFree: tc.physicalFree,
+				Roles: []allocation.ShareRole{{Key: "B", Weight: 1, Need: 16, Ceiling: 16, ReplicaGPUs: 8}},
+				Grow:  map[string]allocation.ShareVariant{"B": {Name: "b", GPUs: 8, PodGPUs: []int{8}}},
+			}
+			ev := allocation.ShareEvaluation{Roles: []allocation.ShareRoleVerdict{{Key: "B", Integer: 16}}}
+			key := func(role, variant string) string { return role + "/" + variant }
+			e.fillIdleShare(logr.Discard(), l, g, ev, map[string]int{"B": 8}, shareFit{}, key, time.Unix(0, 0),
+				allocation.ShareTimings{FillTimeout: time.Minute})
+			if got := l.FillShort("B"); got != tc.short {
+				t.Fatalf("FillShort(B) = %v, want %v", got, tc.short)
 			}
 		})
 	}

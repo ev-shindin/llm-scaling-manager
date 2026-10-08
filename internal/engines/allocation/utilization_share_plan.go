@@ -50,6 +50,12 @@ type SharePlanInput struct {
 	// DomainKey is, per receiver role, the node label all its pods' holes must
 	// share (a LeaderWorkerSet's exclusive topology), or "".
 	DomainKey map[string]string
+	// WakeHeld and PhysicalFree are what the idle fill subtracts from the
+	// group's idle quota and caps it by (GPUs held for woken models, the
+	// cluster's free GPUs of the type; math.MaxInt when unbounded), so the
+	// planner leaves a receiver to the fill only when the fill can fund it.
+	// A zero PhysicalFree means none is free.
+	WakeHeld, PhysicalFree int
 }
 
 // ShareNode is one node's free GPUs and labels.
@@ -355,11 +361,18 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 			// nothing, each donor pod is a hole of its own size -- true on any
 			// node, but blind to a domain, so not for a receiver that has one.
 			var set []shareDonor
+			deferred := false
 			if in.Nodes != nil {
 				var left map[string]int
-				if set, left = shareNodeSet(l, in, rc, donors, work, moved, byKey, cont, z, isConfirmed, now, tm); len(set) > 0 {
+				set, left, deferred = shareNodeSet(l, in, rc, donors, work, moved, byKey, cont, z, isConfirmed, now, tm)
+				if len(set) > 0 {
 					withdrawNodeSet(in.Nodes, in.DonorUnits, set, left)
 				}
+			}
+			if deferred {
+				// Its pods fit free GPUs and the quota has room: the idle
+				// fill funds it, and no donor shrinks for it.
+				continue
 			}
 			if len(set) == 0 && in.DomainKey[rc] == "" {
 				set = shareDonorSet(l, in, rc, donors, work, moved, byKey, cont, z, isConfirmed, now, tm)
@@ -550,13 +563,13 @@ func startShareSet(l *ShareLedger, in SharePlanInput, rc string, set []shareDono
 // the same admission as shareDonorSet.
 func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string, work, moved map[string]int,
 	byKey map[string]ShareRole, cont map[string]float64, z func(string, int) float64,
-	isConfirmed func(string) bool, now time.Time, tm ShareTimings) ([]shareDonor, map[string]int) {
+	isConfirmed func(string) bool, now time.Time, tm ShareTimings) ([]shareDonor, map[string]int, bool) {
 	grow, ok := in.Grow[rc]
 	if !ok || len(grow.PodGPUs) == 0 || in.Give == nil || in.DonorUnits == nil {
-		return nil, nil
+		return nil, nil, false
 	}
 	if l.ReceivingHeld(rc, now, tm) || moved[rc] >= ShareMaxReplicasPerCycle {
-		return nil, nil
+		return nil, nil, false
 	}
 	// Each domain is tried in turn: fixing it at the first placement would
 	// refuse receivers another domain fits.
@@ -569,10 +582,13 @@ func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string,
 		if !ok {
 			continue
 		}
-		if len(search.set) == 0 && shareIdle(in, work) >= max(grow.GPUs, 1) {
+		if len(search.set) == 0 && shareIdle(in, work) >= max(grow.GPUs, 1) && !l.FillShort(rc) {
 			// The pods fit free GPUs and the quota has room: the idle fill
-			// funds this receiver without shrinking anyone.
-			continue
+			// funds this receiver without shrinking anyone -- unless the last
+			// fill left it short, for a reason only the fill sees. Not
+			// another domain, nor the node-blind search: either would shrink
+			// donors for GPUs nobody needed.
+			return nil, nil, true
 		}
 		// The placement may need fewer donor replicas than the receiver's
 		// quota -- or none, where its pods fit free GPUs. Free GPUs place a
@@ -582,9 +598,9 @@ func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string,
 			!admitShareSet(l, in, rc, search.set, search.taken, work, byKey, cont, z, isConfirmed) {
 			continue
 		}
-		return search.set, hole
+		return search.set, hole, false
 	}
-	return nil, nil
+	return nil, nil, false
 }
 
 // place puts every receiver pod, largest first, on one of nodes: into the
@@ -713,13 +729,15 @@ func (s *shareNodeSearch) topUp(g int, hole map[string]int) bool {
 	return gives() >= g
 }
 
-// shareIdle is the group's quota no role commits.
+// shareIdle is the GPUs the idle fill could place now, measured as the fill
+// measures them: the group's quota no role commits, less what is held for
+// woken models, capped by the cluster's free GPUs.
 func shareIdle(in SharePlanInput, work map[string]int) int {
-	idle := in.Budget
+	idle := in.Budget - in.WakeHeld
 	for _, w := range work {
 		idle -= w
 	}
-	return idle
+	return min(idle, in.PhysicalFree)
 }
 
 // take adds a donor replica to the set: every node its pods run on gains

@@ -407,6 +407,7 @@ func (r *Reconciler) Once(ctx context.Context) (policy.Plan, error) {
 	// What the pools want and do not hold, per accelerator: the carve-out the
 	// utilization-share optimizer keeps free for them (proposal section 7.2).
 	unheld := map[string]int{}
+	carved := map[string]bool{}
 	for _, spec := range pools {
 		mine := MembershipsIn(memberships, spec.Name)
 		theirs := VariantsFor(variants, spec, pools)
@@ -446,18 +447,28 @@ func (r *Reconciler) Once(ctx context.Context) (policy.Plan, error) {
 		lent := lentPods(mine)
 		r.report(ctx, spec, mine, theirs, free, lent)
 		r.apply(ctx, spec, plan)
-		var shape *PoolShape
-		if r.Shape != nil && spec.Deployment != "" {
-			if sh, ok := r.Shape(ctx, r.Namespace, spec.Deployment); ok {
-				shape = &sh
+		if size, ok := r.publishSize(ctx, spec, mine, lent); ok {
+			var shape *PoolShape
+			if r.Shape != nil {
+				if sh, ok := r.Shape(ctx, r.Namespace, spec.Deployment); ok {
+					shape = &sh
+				}
 			}
-		}
-		if acc, target, ok := r.publishSize(ctx, spec, mine, lent, shape); ok {
-			if short := r.carveFor(ctx, spec, mine, shape, acc, target); short > 0 {
-				unheld[acc] += short
+			if acc, perPod := poolUnit(mine, shape); acc != "" && perPod > 0 {
+				carved[r.metricName(spec)] = true
+				if short := r.carveFor(ctx, spec, mine, shape, acc, size*perPod); short > 0 {
+					unheld[acc] += short
+				}
 			}
 		}
 		merged = mergePlans(merged, plan)
+	}
+	// A pool gone, or no longer carved for, keeps no stall record: one that
+	// comes back starts its grace afresh.
+	for name := range r.carveStall {
+		if !carved[name] {
+			delete(r.carveStall, name)
+		}
 	}
 	// Every completed pass, empty included: a pool deleted or no longer
 	// short stops holding GPUs free at once.
@@ -622,14 +633,12 @@ func acceleratorsIn(memberships []pool.Membership) string {
 // polls for it, and a size withheld because "nothing changed" would read as no
 // decision at all the first time KEDA asked after a restart.
 //
-// It returns the pool's accelerator and its target in GPUs -- its size after
-// the contention hold and before the headroom cap, which is what the
-// utilization-share optimizer's carve-out exists to relieve -- and false when
-// the pool is not sized here or names no single accelerator or device count.
-func (r *Reconciler) publishSize(ctx context.Context, spec PoolSpec, memberships []pool.Membership, lent int,
-	shape *PoolShape) (string, int, bool) {
+// It returns the pool's target size in Pods -- after the contention hold and
+// before the headroom cap, which is what the utilization-share optimizer's
+// carve-out exists to relieve -- and false when the pool is not sized here.
+func (r *Reconciler) publishSize(ctx context.Context, spec PoolSpec, memberships []pool.Membership, lent int) (int, bool) {
 	if r.PublishSize == nil || spec.Deployment == "" {
-		return "", 0, false
+		return 0, false
 	}
 	want := SizeFor(spec.Config.SleepMinSize, lent)
 
@@ -691,18 +700,7 @@ func (r *Reconciler) publishSize(ctx context.Context, spec PoolSpec, memberships
 	// allowance answered or the pool simply stopped wanting more: a wait that
 	// recurs later at the same version -- a snapshot that aged out -- is a new
 	// wait and is said again.
-	accelerator, perPod := soleAccelerator(memberships), gpusPerUnit(memberships)
-	if shape != nil {
-		// No member to read yet -- typically the first Pod of a pool in a full
-		// quota, which is exactly the Pod the carve-out exists for.
-		if accelerator == "" {
-			accelerator = shape.Accelerator
-		}
-		if perPod == 0 {
-			perPod = shape.PodGPUs
-		}
-	}
-	target := want * perPod
+	target := want
 	awaiting := false
 	defer func() {
 		if !awaiting {
@@ -743,7 +741,7 @@ func (r *Reconciler) publishSize(ctx context.Context, spec PoolSpec, memberships
 		}
 	}
 	r.PublishSize(r.Namespace, spec.Deployment, int32(want)) //nolint:gosec // small counts
-	return accelerator, target, accelerator != "" && perPod > 0
+	return target, true
 }
 
 // heldPods counts the distinct Pods a pool holds, empty ones included: an empty
@@ -1539,7 +1537,8 @@ func lentPodsByVariant(memberships []pool.Membership, variants []policy.VariantD
 
 // PoolShape is what a pool Deployment states about its Pods.
 type PoolShape struct {
-	// Accelerator is the product its template pins by nodeSelector, or "".
+	// Accelerator is the product its template requires, by nodeSelector or
+	// required nodeAffinity (pool.AcceleratorRequiredBy), or "".
 	Accelerator string
 	// PodGPUs is the GPUs its template asks per Pod.
 	PodGPUs int
@@ -1597,4 +1596,21 @@ func (r *Reconciler) carveFor(ctx context.Context, spec PoolSpec, memberships []
 			"target", target, "held", held, "for", CarveStall.String())
 	}
 	return 0
+}
+
+// poolUnit is a pool's accelerator and GPUs per Pod: read from its members,
+// else from its Deployment's shape -- a pool with no member yet, typically the
+// first Pod of a pool in a full quota, which is exactly the Pod the
+// carve-out exists for.
+func poolUnit(memberships []pool.Membership, shape *PoolShape) (string, int) {
+	accelerator, perPod := soleAccelerator(memberships), gpusPerUnit(memberships)
+	if shape != nil {
+		if accelerator == "" {
+			accelerator = shape.Accelerator
+		}
+		if perPod == 0 {
+			perPod = shape.PodGPUs
+		}
+	}
+	return accelerator, perPod
 }

@@ -238,6 +238,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	plan := allocation.PlanShareTransfers(l, allocation.SharePlanInput{
 		Roles: g.Roles, Held: held, Thresholds: g.Thresholds, Budget: g.Budget, Tolerance: us.Tolerance,
 		Give: g.Give, Grow: g.Grow, Nodes: nodes, DonorUnits: units, DomainKey: domains,
+		WakeHeld: l.WakeHeld(now), PhysicalFree: g.PhysicalFree,
 	}, now, tm)
 	for _, id := range plan.Cancelled {
 		t := before[id]
@@ -284,7 +285,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		}
 	}
 
-	e.fillIdleShare(logger, l, g, ev, held, plan.Nodes, domains, variantKey, now, tm)
+	e.fillIdleShare(logger, l, g, ev, held, shareFit{nodes: plan.Nodes, domains: domains}, variantKey, now, tm)
 	out.overrides = e.shareOverrides(g, variantKey, "utilization share")
 	out.promised = l.Promised() + l.WakeHeld(now)
 	out.swinging = plan.Swinging
@@ -295,20 +296,23 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	return out
 }
 
-// fillIdleShare raises receivers below their whole-replica target into GPUs
-// nobody holds or has been promised, with no transfer and no wait (§6.2).
+// fillIdleShare raises receivers below their whole-replica target into the
+// group's idle GPUs -- budget no role commits, less what is held for a woken
+// model, capped by the cluster's free GPUs -- lowest score first, with no
+// transfer and no wait (§6.2), and records who it leaves short
+// (ShareLedger.SetFillShort).
 //
-// With node information (nodes: the free GPUs this cycle's node-aware sets
-// left), a replica is filled only when its pods fit the nodes -- in its
-// domain, for a receiver with one -- and its placement is spent. The nodes'
-// free GPUs already exclude what is promised or held for a wake; a promised
-// pod that is bound but not yet held is then subtracted twice, which only
-// delays a fill until it is held. This is
-// what re-plans a receiver after a donor lost the wrong pod: the GPUs that did
-// come free are idle, and they fund it only where its pods fit.
+// With node information (fit.nodes: the free GPUs this cycle's node-aware sets
+// left), a replica is filled only where its pods fit the nodes -- in its
+// domain, for a receiver with one -- and its placement is spent. That is what
+// re-plans a receiver after a donor lost the wrong pod: the GPUs that did come
+// free are idle, and they fund it only where its pods fit. A receiver whose pod
+// shape is unknown is filled by count. The nodes' free GPUs already exclude
+// what is promised or held for a wake, so a promised pod bound but not yet
+// held is subtracted twice; that only delays a fill until it is held.
 func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g allocation.ShareGroup,
-	ev allocation.ShareEvaluation, held map[string]int, nodes map[string]allocation.ShareNode,
-	domains map[string]string, variantKey func(string, string) string, now time.Time, tm allocation.ShareTimings) {
+	ev allocation.ShareEvaluation, held map[string]int, fit shareFit, variantKey func(string, string) string,
+	now time.Time, tm allocation.ShareTimings) {
 	committed := l.Committed(held)
 	// GPUs redirected to a woken model are its, however idle they look.
 	idle := g.Budget - l.WakeHeld(now)
@@ -316,9 +320,6 @@ func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g 
 		idle -= c
 	}
 	idle = min(idle, g.PhysicalFree)
-	if idle <= 0 {
-		return
-	}
 	integer := map[string]int{}
 	for _, v := range ev.Roles {
 		integer[v.Key] = v.Integer
@@ -337,13 +338,21 @@ func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g 
 		return allocation.ShareScore(float64(committed[k]), roles[k].Need, roles[k].Weight)
 	}
 	slices.SortFunc(receivers, func(a, b string) int { return cmp.Or(cmp.Compare(z(a), z(b)), cmp.Compare(a, b)) })
+	// Whoever is still short when the fill is done is told to the planner.
+	defer func() {
+		short := slices.DeleteFunc(slices.Clone(receivers), func(rc string) bool { return committed[rc] >= integer[rc] })
+		l.SetFillShort(short)
+	}()
+	if idle <= 0 {
+		return
+	}
 	for _, rc := range receivers {
 		grow := g.Grow[rc]
 		for n := 0; n < allocation.ShareMaxReplicasPerCycle && idle >= grow.GPUs && committed[rc] < integer[rc]; n++ {
 			// A receiver whose pod shape is unknown is filled by count, as
 			// without node information: guessing one large pod would refuse
 			// a multi-pod replica that fits.
-			if nodes != nil && len(grow.PodGPUs) > 0 && !allocation.ShareFitPods(nodes, grow.PodGPUs, domains[rc]) {
+			if fit.nodes != nil && len(grow.PodGPUs) > 0 && !allocation.ShareFitPods(fit.nodes, grow.PodGPUs, fit.domains[rc]) {
 				logger.V(logging.DEBUG).Info("Utilization share: idle GPUs do not fit the receiver's pods on any node",
 					"receiver", rc, "pods", grow.PodGPUs)
 				break
@@ -1236,4 +1245,11 @@ func shareFreeNodes(snap map[string]decision.NodeGPU, accelerator string, reserv
 		reserved--
 	}
 	return nodes
+}
+
+// shareFit is the node picture the idle fill places into: the nodes' free
+// GPUs, nil without node information, and each receiver's topology domain.
+type shareFit struct {
+	nodes   map[string]allocation.ShareNode
+	domains map[string]string
 }

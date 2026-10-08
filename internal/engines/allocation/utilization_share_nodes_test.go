@@ -1,6 +1,8 @@
 package allocation
 
 import (
+	"maps"
+	"math"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -201,6 +203,9 @@ var _ = Describe("Node-aware donor sets: guards and shapes (§6.5)", func() {
 	pod8 := func(name, node string) ShareUnit {
 		return ShareUnit{Pods: []SharePod{{Name: name, Node: node, GPUs: 8}}}
 	}
+	// prepare, when set, readies the ledger before planning.
+	var prepare func(*ShareLedger)
+	BeforeEach(func() { prepare = nil })
 	plan := func(receiverPods []int, nodes map[string]ShareNode, a, c []ShareUnit, mut func(*SharePlanInput)) SharePlan {
 		g := 0
 		for _, p := range receiverPods {
@@ -218,14 +223,18 @@ var _ = Describe("Node-aware donor sets: guards and shapes (§6.5)", func() {
 				"A": {Name: "a", GPUs: 8, PodGPUs: []int{8}},
 				"C": {Name: "c", GPUs: 8, PodGPUs: []int{8}},
 			},
-			Grow:       map[string]ShareVariant{"B": {Name: "b", GPUs: g, PodGPUs: receiverPods}},
-			Nodes:      nodes,
-			DonorUnits: map[string][]ShareUnit{"A": a, "C": c},
+			Grow:         map[string]ShareVariant{"B": {Name: "b", GPUs: g, PodGPUs: receiverPods}},
+			Nodes:        nodes,
+			DonorUnits:   map[string][]ShareUnit{"A": a, "C": c},
+			PhysicalFree: math.MaxInt, // unbounded, as the engine passes it
 		}
 		if mut != nil {
 			mut(&in)
 		}
 		l := NewShareLedger()
+		if prepare != nil {
+			prepare(l)
+		}
 		var p SharePlan
 		for i := range 3 {
 			if p = PlanShareTransfers(l, in, time.Unix(int64(30*i), 0), simTimings()); len(p.Started) > 0 {
@@ -352,6 +361,67 @@ var _ = Describe("Node-aware donor sets: guards and shapes (§6.5)", func() {
 		Expect(p.Started).To(BeEmpty(), "no donor need shrink")
 	})
 
+	// B's two 4-GPU pods fit n1's free GPUs; A's and C's 4-GPU pods would fund
+	// them pod for pod -- the node-blind search's case.
+	fourPods := func(in *SharePlanInput) {
+		in.Give["A"] = ShareVariant{Name: "a", GPUs: 4, PodGPUs: []int{4}}
+		in.Give["C"] = ShareVariant{Name: "c", GPUs: 4, PodGPUs: []int{4}}
+		in.Roles[0].ReplicaGPUs, in.Roles[2].ReplicaGPUs = 4, 4
+	}
+	// A donor replica of one 4-GPU pod on n2, where nothing is free.
+	four := func(name string) ShareUnit {
+		return ShareUnit{Pods: []SharePod{{Name: name, Node: "n2", GPUs: 4}}}
+	}
+	It("does not fall back to the node-blind search once it has left a receiver to the idle fill", func() {
+		p := plan([]int{4, 4}, map[string]ShareNode{"n1": {Free: 8}, "n2": {}},
+			[]ShareUnit{four("ns/a-0")}, []ShareUnit{four("ns/c-0")}, func(in *SharePlanInput) {
+				fourPods(in)
+				in.Budget += 8
+			})
+		Expect(p.Started).To(BeEmpty(), "the fill funds B; neither A nor C need shrink")
+		Expect(p.Unfunded).NotTo(HaveKey("B"), "a receiver left to the fill is not unfunded")
+	})
+
+	It("funds the same receiver from donors when the quota is spent (control)", func() {
+		p := plan([]int{4, 4}, map[string]ShareNode{"n1": {Free: 8}, "n2": {}},
+			[]ShareUnit{four("ns/a-0")}, []ShareUnit{four("ns/c-0")}, fourPods)
+		Expect(p.Started).To(HaveLen(2))
+	})
+
+	It("does not move on to another domain once one fits the receiver in free GPUs", func() {
+		nodes := map[string]ShareNode{
+			"n1": {Free: 8, Labels: map[string]string{"rack": "r1"}},
+			"n2": {Labels: map[string]string{"rack": "r2"}},
+		}
+		p := plan([]int{4, 4}, nodes, []ShareUnit{four("ns/a-0")}, []ShareUnit{four("ns/c-0")},
+			func(in *SharePlanInput) {
+				fourPods(in)
+				in.Budget += 8
+				in.DomainKey = map[string]string{"B": "rack"}
+			})
+		Expect(p.Started).To(BeEmpty(), "r1 holds B in free GPUs; r2's donors need not shrink")
+	})
+
+	It("counts GPUs held for a woken model against the idle it leaves to the fill", func() {
+		p := plan([]int{4, 4}, map[string]ShareNode{"n1": {Free: 8}, "n2": {}},
+			[]ShareUnit{four("ns/a-0")}, []ShareUnit{four("ns/c-0")}, func(in *SharePlanInput) {
+				fourPods(in)
+				in.Budget += 8
+				in.WakeHeld = 8 // the idle quota is a wake's
+			})
+		Expect(p.Started).To(HaveLen(2), "the fill could not fund B: donors must")
+	})
+
+	It("does not leave a receiver to a fill that left it short last cycle", func() {
+		prepare = func(l *ShareLedger) { l.SetFillShort([]string{"B"}) }
+		p := plan([]int{4, 4}, map[string]ShareNode{"n1": {Free: 8}, "n2": {}},
+			[]ShareUnit{four("ns/a-0")}, []ShareUnit{four("ns/c-0")}, func(in *SharePlanInput) {
+				fourPods(in)
+				in.Budget += 8
+			})
+		Expect(p.Started).To(HaveLen(2))
+	})
+
 	It("returns the node state its sets left, for the idle fill", func() {
 		// B's two 4-GPU pods: one into n1's 4 free GPUs, one into the hole
 		// a-0 opens on n2. n1's free GPUs are now B's.
@@ -413,4 +483,30 @@ var _ = Describe("Fill-blocked reasons", func() {
 		Expect(l.FillBlockedReason("B", t0.Add(time.Minute))).To(BeEmpty())
 		Expect(l.fillBlocked).NotTo(HaveKey("B"))
 	})
+})
+
+var _ = Describe("Placement agrees between the planner and the fill", func() {
+	// Where no donor is needed, the planner's node search and the idle fill
+	// place a replica the same way: or the fill would refuse what the planner
+	// left to it, or the reverse.
+	DescribeTable("the same holes are left",
+		func(free map[string]int, pods []int) {
+			nodes := map[string]ShareNode{}
+			for n, f := range free {
+				nodes[n] = ShareNode{Free: f}
+			}
+			search := shareNodeSearch{in: SharePlanInput{Nodes: nodes}, taken: map[string]int{}, used: map[shareUnitRef]bool{}}
+			hole, placed := search.place(pods, shareNodesInDomain(nodes, "", ""))
+			fit := maps.Clone(nodes)
+			Expect(ShareFitPods(fit, pods, "")).To(Equal(placed))
+			if placed {
+				for n := range nodes {
+					Expect(fit[n].Free).To(Equal(hole[n]), "node %s", n)
+				}
+			}
+		},
+		Entry("best fit across nodes", map[string]int{"n1": 4, "n2": 6, "n3": 8}, []int{4, 6}),
+		Entry("a tie broken by name", map[string]int{"a": 4, "b": 4}, []int{4}),
+		Entry("does not fit", map[string]int{"n1": 3, "n2": 3}, []int{4}),
+	)
 })
