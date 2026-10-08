@@ -102,7 +102,7 @@ type EngineParams struct {
 	//     reported resolved, so `--dtype=${FOO` set the field to the literal
 	//     "${FOO" and still read as Complete. A lone or trailing `$`, and a
 	//     `$` before a byte that cannot begin a name, are deliberately NOT
-	//     here -- they are not references at all (see startsBracedRef)
+	//     here -- they are not references at all (see startsDelimitedRef)
 	//   - a reference that RESOLVED to a value which is itself a reference.
 	//     The kubelet expands `$(OTHER)` between env vars, so the lookup
 	//     succeeds and the result is still unusable; this is the one the
@@ -304,7 +304,7 @@ func resolveRefs(s string, env map[string]string) (string, bool) {
 			// string. That is the same false-equality this field exists to
 			// prevent, reached by a malformed reference instead of an
 			// unreadable one.
-			if startsBracedRef(s, i) {
+			if startsDelimitedRef(s, i) {
 				resolved = false
 			}
 			out.WriteByte('$')
@@ -367,20 +367,24 @@ func resolveRefs(s string, env map[string]string) (string, bool) {
 	return out.String(), resolved
 }
 
-// varNameAt reads the variable name of a reference beginning at the "$" at
-// position i, returning the name and the index just past the reference.
-// It recognises ${NAME}, $(NAME) and bare $NAME.
-// startsBracedRef reports whether the "$" at i opens a `${` or `$(` form,
+// startsDelimitedRef reports whether the "$" at i opens a `${` or `$(` form,
 // whether or not that form turns out to be well-formed.
 //
 // It is the difference between "this was never a reference" and "this was a
 // reference I could not read", which varNameAt collapses into one ok=false and
 // which resolveRefs has to tell apart: only the second may leave a value
 // looking verified when it is not.
-func startsBracedRef(s string, i int) bool {
+//
+// DELIMITED, not "braced": it is true for `$(` as well, and a reader checking
+// whether `$(FOO` with no closer gets recorded would read "braced" and
+// conclude it does not. That is exactly the case this exists for.
+func startsDelimitedRef(s string, i int) bool {
 	return i+1 < len(s) && (s[i+1] == '{' || s[i+1] == '(')
 }
 
+// varNameAt reads the variable name of a reference beginning at the "$" at
+// position i, returning the name and the index just past the reference.
+// It recognises ${NAME}, $(NAME) and bare $NAME.
 func varNameAt(s string, i int) (name string, next int, ok bool) {
 	if i+1 >= len(s) {
 		return "", 0, false

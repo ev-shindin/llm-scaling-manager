@@ -319,6 +319,21 @@ default:
   disableLearnedStateReuse: true
 ```
 
+It resolves through the normal per-entry overlay, so it can also be set on a
+named tier or a per-model entry — which is usually what you want, since the
+case it exists for is one variant, not the fleet:
+
+```yaml
+models:
+  - modelID: meta-llama/Llama-3.1-8B
+    disableLearnedStateReuse: true
+```
+
+One direction only: an entry can turn reuse **off** where the default leaves it
+on, but cannot turn it back **on** where the default turned it off. Check the
+`Effective scaling policy` log line for `disableLearnedStateReuse` to confirm
+what a model actually resolved to.
+
 Normally a variant with nothing measured yet is priced from a sibling that
 runs the **same engine configuration** on the same accelerator and GPU count.
 That is what lets a scaled-out variant price its first decision from something
@@ -331,6 +346,12 @@ other than a guess, and it happens two ways:
 
 Setting this key stops **both**. The variant keeps learning; it just no longer
 starts from anyone else's measurement. Nothing already stored is cleared.
+
+It does **not** remove any capacity *ceiling*. A sibling's figure is also used
+in one place as an upper bound on an estimate, and that stays — a bound only
+ever lowers a capacity, and lowering capacity orders *more* replicas, which is
+the safe direction. The switch withholds a sibling's figure where it would
+*become* this variant's answer, never where it only limits it.
 
 **When to set it.** Reuse rests on a fingerprint over the engine flags the
 scaling manager could read from the deployment. A configuration it reads

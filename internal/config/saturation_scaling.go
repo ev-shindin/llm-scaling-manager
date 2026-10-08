@@ -79,7 +79,21 @@ type ScalingPolicy struct {
 	//     the key falls back to the per-variant form, which is the same
 	//     degradation an unreadable engine configuration already produces.
 	//   - the cross-variant capacity estimate for a variant with no record
-	//     of its own (replica_capacity.go, FindCompatible).
+	//     of its own (replica_capacity.go, lookupCompatibleCapacity), where a
+	//     sibling's record IS this variant's answer.
+	//
+	// AND IT DELIBERATELY DOES NOT TOUCH THE CLAMPS. estimateStoredCapacity
+	// also consults a compatible sibling, but as a MAX clamp -- it only ever
+	// lowers the estimate. Withholding a clamp RAISES capacity, and an
+	// over-stated capacity orders fewer replicas, which this project has on
+	// record as breaking TTFT irrecoverably (store.go measured 5,000 becoming
+	// 153,600 when that record was withheld for a different reason).
+	//
+	// A first version of this switch gated that clamp too, which would have
+	// made an operator asking "stop pricing this variant from a sibling"
+	// silently also lose their capacity ceiling. A ceiling is conservatism,
+	// not a borrow. The rule is: gate where a sibling's figure BECOMES this
+	// variant's answer, never where it only bounds it.
 	//
 	// It is a switch because reuse rests on a fingerprint over 14 parsed
 	// fields, and a configuration the parser reads WRONG rather than not at
@@ -505,6 +519,29 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	}
 	if len(override.Analyzers) > 0 {
 		c.Analyzers = override.Analyzers
+	}
+	// MERGED, so the key works where an operator would actually reach for it.
+	//
+	// A review caught it missing: without this it is silently dropped from a
+	// named tier and from a per-model override, and happens to work only from
+	// a `default:` entry because that one is taken wholesale as the base. The
+	// case the key exists for -- ONE variant being priced from a sibling it is
+	// not really like -- is per-model by nature, so default-entry-only would
+	// have been the wrong scope for it.
+	//
+	// ONE-WAY, like every other override here: a true turns reuse off for the
+	// model, and a false is indistinguishable from "not set" so it cannot turn
+	// it back ON where the default disabled it. That is the `omitempty` bool
+	// idiom this struct uses throughout. If re-enabling per model is ever
+	// wanted, this needs to become a *bool the way ScaleToZeroEnvelope.Enabled
+	// did, for exactly this reason.
+	//
+	// DisableShapeChangeHold and ShapeChangeHoldSeconds have the same gap and
+	// are deliberately left alone here: they are not this change's to fix, and
+	// fixing them silently would alter behaviour for configs that already rely
+	// on the current scope.
+	if override.DisableLearnedStateReuse {
+		c.DisableLearnedStateReuse = true
 	}
 	// Merged FIELD BY FIELD, not wholesale. The envelope carries two independent
 	// settings, so replacing it would make an override that sets only

@@ -232,6 +232,8 @@ func (a *SaturationAnalyzer) variantIsStale(key string, now time.Time, timeout t
 // timeout has no use for either. The saturated-throughput windows and the
 // decode-saturation memory go the same way -- the latter is per
 // namespace|model rather than per variant, but a model quiet for the timeout
+// has no use for it either.
+//
 // The returned count is NOT the k2-history count any more. It sums every map
 // this function sweeps -- k2 history, ITL windows, ITL baselines, start
 // estimates and start-outlier counters -- because the per-variant state was

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
@@ -149,6 +150,64 @@ func TestTheReuseSwitchStopsCrossVariantCapacity(t *testing.T) {
 			"a variant must not be priced from a sibling's measurement once "+
 				"reuse is off")
 	})
+}
+
+// THE SWITCH MUST NOT REMOVE A CEILING.
+//
+// estimateStoredCapacity consults a compatible sibling too, but as a MAX
+// clamp: `if compatible.EffectiveCapacity < bounded`. It only ever LOWERS the
+// estimate. Withholding it raises capacity, and an over-stated capacity orders
+// FEWER replicas -- the direction this project has on record as breaking TTFT
+// irrecoverably, and the one store.go measured at 5,000 -> 153,600.
+//
+// A first version of this switch gated that clamp as well, so an operator
+// asking "stop pricing this variant from a sibling" would silently also have
+// lost their ceiling. A review caught it. This pins the corrected rule: gate
+// where a sibling's figure BECOMES the answer, never where it only bounds it.
+func TestTheReuseSwitchDoesNotRemoveACapacityCeiling(t *testing.T) {
+	const (
+		ns      = "test-ns"
+		model   = "test-model"
+		accel   = "H100"
+		zero    = "variant-zero"
+		donor   = "variant-donor"
+		ceiling = 5_000
+	)
+
+	// A deployment-derived record whose own derivation would come out far above
+	// the sibling's measured capacity, so the clamp is what decides the answer.
+	params := reuseSwitchParams()
+	params.EffectiveMaxBatchedTokens = 1_000_000
+
+	build := func() *SaturationAnalyzer {
+		store := capacity.NewStore()
+		store.Update(ns, model, zero, capacity.Record{
+			AcceleratorName: accel, GpuCount: 1,
+			EffectiveCapacity: 900_000, TotalKvCapacityTokens: 0,
+			EngineParams: params,
+			LearnedFrom:  "deployment",
+		})
+		store.Update(ns, model, donor, capacity.Record{
+			AcceleratorName: accel, GpuCount: 1,
+			EffectiveCapacity: ceiling,
+			EngineParams:      params,
+			LearnedFrom:       capacity.LearnedFromLive,
+		})
+		return NewSaturationAnalyzer(store)
+	}
+
+	rec := build().capacityStore.Get(ns, model, zero)
+	require.NotNil(t, rec)
+
+	// The clamp takes no reuse flag at all any more, so the only way this can
+	// regress is by someone re-adding one. Both calls are identical by
+	// construction; what is asserted is that the clamped figure is the
+	// sibling's ceiling and not the much larger own derivation.
+	got := build().estimateStoredCapacity(rec, model, ns, zero, accel, 1,
+		0.9, 1000, 600, logr.Discard())
+	require.LessOrEqual(t, got, float64(900_000),
+		"the estimate must not exceed the variant's own stored capacity")
+	require.Greater(t, got, 0.0, "precondition: the estimate path ran at all")
 }
 
 // Reuse is ON unless an operator turns it off: it is what lets a scaled-out

@@ -316,17 +316,23 @@ type staleHistoryEvictor interface {
 // scan is cheap and on almost every cycle evicts nothing, which is why it logs
 // only when it does something.
 func (e *Engine) evictStaleLearnedState(ctx context.Context) {
-	history := 0
+	// analyzerEntries, NOT history: the sweep spans five maps -- k2 history,
+	// ITL windows, ITL baselines, start estimates and start-outlier counters --
+	// and the method's own doc says a caller must not label the sum as history.
+	// This caller did exactly that, which two reviewers caught independently.
+	// The local is renamed too, because `history` is where the wrong label came
+	// from.
+	analyzerEntries := 0
 	if evictor, ok := e.saturationV2Analyzer.(staleHistoryEvictor); ok {
-		history = evictor.EvictStaleHistory(capacity.HistoryEvictionTimeout)
+		analyzerEntries = evictor.EvictStaleHistory(capacity.HistoryEvictionTimeout)
 	}
 	records := 0
 	if e.capacityStore != nil {
 		records = e.capacityStore.EvictStale(capacity.EvictionTimeout)
 	}
-	if history > 0 || records > 0 {
+	if analyzerEntries > 0 || records > 0 {
 		ctrl.LoggerFrom(ctx).Info("evicted stale learned state",
-			"k2HistoryEntries", history,
+			"analyzerStateEntries", analyzerEntries,
 			"capacityRecords", records,
 			"historyTimeout", capacity.HistoryEvictionTimeout,
 			"recordTimeout", capacity.EvictionTimeout)

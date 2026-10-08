@@ -51,14 +51,14 @@ func TestChangeReporter_EachMethodKeepsItsOwnKey(t *testing.T) {
 	assert.Len(t, r.seen, 4)
 	assert.Equal(t, "unknown|gold", r.seen["ns/v"])
 	assert.Equal(t, "conflict|gold|gold,silver", r.seen["ns|m"])
-	assert.Equal(t, "gold|0.000|0.000|0.000|0.000|0", r.seen["effective|ns|m"])
+	assert.Equal(t, "gold|0.000|0.000|0.000|0.000|0|false", r.seen["effective|ns|m"])
 	assert.Equal(t, "false", r.seen["accel|ns/v"])
 }
 
 func TestChangeReporter_AModelOnNoTierIsReportedAsTheDefaultEntry(t *testing.T) {
 	r := NewChangeReporter()
 	r.ReportEffectivePolicy(context.Background(), "ns", "m", "", config.ScalingPolicy{})
-	assert.Equal(t, "(default entry)|0.000|0.000|0.000|0.000|0", r.seen["effective|ns|m"],
+	assert.Equal(t, "(default entry)|0.000|0.000|0.000|0.000|0|false", r.seen["effective|ns|m"],
 		"an empty tier name reads as the default entry, not as an empty string")
 }
 

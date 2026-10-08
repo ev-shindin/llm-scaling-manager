@@ -178,7 +178,7 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 			// No ready replicas — use stored capacity, enhanced with k2 derivation
 			// for deployment-derived records when workload data is available.
 			perReplicaCapacity = a.estimateStoredCapacity(rec, modelID, namespace, vs.VariantName, accelerator, vs.GPUsPerReplica,
-				kvCacheThreshold, modelAvgInput, modelAvgOutput, reuseDisabled, logger)
+				kvCacheThreshold, modelAvgInput, modelAvgOutput, logger)
 			capacityLabel = satReasonP0Store
 		} else if rec := a.lookupCompatibleCapacity(namespace, modelID, vs.VariantName, accelerator, vs.GPUsPerReplica, reuseDisabled); rec != nil {
 			// No own record — try cross-variant estimation from a compatible variant

@@ -763,12 +763,20 @@ const (
 )
 
 // EngineConfigFlagLabels are the engine-flag labels on WVAEngineConfig, in the
-// exact order the fingerprint hashes the fields.
+// order their values arrive from EngineParams.FingerprintValues.
 //
-// It lives here, in a leaf package, so that capacity (which hashes them) and
-// metrics (which publishes them) read one list instead of two that can drift.
-// The order is part of the fingerprint's wire format: reordering changes every
-// digest, so it is as much a version bump as adding a field.
+// It lives here, in a leaf package, so that capacity (which pairs values to
+// it) and metrics (which publishes it) read one list instead of two that can
+// drift. The order is POSITIONAL against FingerprintValues, and
+// TestFingerprintLabelsDescribeTheirValues pins that pairing.
+//
+// REORDERING THIS DOES NOT CHANGE ANY DIGEST, and an earlier version of this
+// comment said it did -- which would have sent a maintainer to bump
+// FingerprintVersion, flushing every learned key on the cluster, for a pure
+// relabel. Fingerprint() hashes its own `name=` list in fingerprint.go and
+// deliberately does not read these names, exactly so that relabelling the
+// metric cannot reshuffle stored digests. Getting this list wrong mislabels
+// the metric; it does not mis-key anything.
 var EngineConfigFlagLabels = []string{
 	"engine",
 	"weight_dtype",
