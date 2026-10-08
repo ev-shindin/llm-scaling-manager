@@ -163,12 +163,7 @@ func (r *Refresher) Refresh(ctx context.Context) error {
 			return fmt.Errorf("discovering GPU usage: %w", err)
 		}
 		r.store().Publish(byType, byNamespace)
-		published := make(map[string]decision.NodeGPU, len(nodes))
-		for name, n := range nodes {
-			published[name] = decision.NodeGPU{Accelerator: n.Accelerator, Capacity: n.Capacity, Used: n.Used,
-				Labels: n.Labels, Unschedulable: n.Unschedulable}
-		}
-		r.nodeStore().Publish(published, time.Now())
+		r.nodeStore().Publish(nodes, time.Now())
 		log.FromContext(ctx).V(logging.DEBUG).Info("Refreshed cluster GPU usage",
 			"gpusInUse", byType, "namespaces", len(byNamespace), "nodes", len(nodes))
 		return nil

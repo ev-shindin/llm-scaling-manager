@@ -46,57 +46,41 @@ func (e *Engine) claimShareTransfer(ctx context.Context, group modelGroup, candi
 	decodes, prefills := splitByRole(candidates)
 	sortByCost(decodes)
 	sortByCost(prefills)
-	// Each role the wake must start is a list of candidates; a role it need
-	// not start is one empty slot.
-	none := []Candidate{{}}
-	if covered.decode {
-		decodes = none
-	}
-	if !e.requirePrefill(group.modelID, group.namespace) || covered.prefill {
-		prefills = none
-	}
+	needPrefill := e.requirePrefill(group.modelID, group.namespace) && !covered.prefill
 	last, lastAcc := "", ""
-	for _, d := range decodes {
-		for _, p := range prefills {
-			var set []Candidate
-			for _, c := range []Candidate{d, p} {
-				if c.VariantName != "" {
-					set = append(set, c)
-				}
-			}
-			if len(set) == 0 || !sameResolvedAccelerator(set) {
-				continue
-			}
-			acc := set[0].Accelerator
-			wakes := make([]decision.ShareWake, 0, len(set))
-			for _, c := range set {
-				wakes = append(wakes, decision.ShareWake{Pods: c.PodGPUs, GPUs: c.GPUsPerReplica,
-					Variant: utils.GetNamespacedKey(group.namespace, c.VariantName)})
-			}
-			claims, outcome := decision.DefaultShareClaims.ClaimSet(scope, acc, wakes, z,
-				utils.GetNamespacedKey(group.namespace, group.modelID), time.Now())
-			if outcome == decision.ShareClaimRedirected {
-				scope := claims[0].Scope
-				if scope == "" {
-					scope = constants.UtilizationShareClusterScope
-				}
-				metrics.CountUtilizationShareClaim(acc, scope, outcome)
-				e.claimOutcomeChanged(group.key(), "")
-				ids := make([]string, 0, len(claims))
-				for _, c := range claims {
-					ids = append(ids, c.ID)
-				}
-				variants := make([]string, 0, len(set))
-				for _, c := range set {
-					variants = append(variants, c.VariantName)
-				}
-				ctrl.LoggerFrom(ctx).Info("Scale-from-zero: woke a model by claiming releasing utilization-share transfers",
-					"namespace", group.namespace, "modelID", group.modelID, "variants", variants,
-					"transfers", ids, "scope", scope)
-				return set, true
-			}
-			last, lastAcc = outcome, acc
+	for _, set := range shareWakeSets(decodes, prefills, !covered.decode, needPrefill) {
+		if !sameResolvedAccelerator(set) {
+			continue
 		}
+		acc := set[0].Accelerator
+		wakes := make([]decision.ShareWake, 0, len(set))
+		for _, c := range set {
+			wakes = append(wakes, decision.ShareWake{Pods: c.PodGPUs, GPUs: c.GPUsPerReplica,
+				Variant: utils.GetNamespacedKey(group.namespace, c.VariantName)})
+		}
+		claims, outcome := decision.DefaultShareClaims.ClaimSet(scope, acc, wakes, z,
+			utils.GetNamespacedKey(group.namespace, group.modelID), time.Now())
+		if outcome == decision.ShareClaimRedirected {
+			scope := claims[0].Scope
+			if scope == "" {
+				scope = constants.UtilizationShareClusterScope
+			}
+			metrics.CountUtilizationShareClaim(acc, scope, outcome)
+			e.claimOutcomeChanged(group.key(), "")
+			ids := make([]string, 0, len(claims))
+			for _, c := range claims {
+				ids = append(ids, c.ID)
+			}
+			variants := make([]string, 0, len(set))
+			for _, c := range set {
+				variants = append(variants, c.VariantName)
+			}
+			ctrl.LoggerFrom(ctx).Info("Scale-from-zero: woke a model by claiming releasing utilization-share transfers",
+				"namespace", group.namespace, "modelID", group.modelID, "variants", variants,
+				"transfers", ids, "scope", scope)
+			return set, true
+		}
+		last, lastAcc = outcome, acc
 	}
 	// A refused claim is counted once per change: this loop runs at 10 Hz. Its
 	// scope is the wake's own namespace -- which group refused is not known.
@@ -134,4 +118,30 @@ func (e *Engine) claimOutcomeChanged(key, outcome string) bool {
 	}
 	e.lastClaim[key] = outcome
 	return true
+}
+
+// shareWakeSets lists the sets of variants a wake may claim for, in order of
+// preference: one candidate per role it must start -- the decode unless one
+// serves, the prefill when the model requires one and none serves -- every
+// decode with every prefill, cheapest decode first (candidates are sorted by
+// cost). Nil when there is no role to start.
+func shareWakeSets(decodes, prefills []Candidate, needDecode, needPrefill bool) [][]Candidate {
+	var out [][]Candidate
+	switch {
+	case needDecode && needPrefill:
+		for _, d := range decodes {
+			for _, p := range prefills {
+				out = append(out, []Candidate{d, p})
+			}
+		}
+	case needDecode:
+		for _, d := range decodes {
+			out = append(out, []Candidate{d})
+		}
+	case needPrefill:
+		for _, p := range prefills {
+			out = append(out, []Candidate{p})
+		}
+	}
+	return out
 }

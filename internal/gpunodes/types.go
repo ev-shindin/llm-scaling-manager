@@ -21,13 +21,3 @@ type NodeInfo struct {
 	// Unschedulable is set on a cordoned node: nothing new lands on it.
 	Unschedulable bool
 }
-
-// NodeGPUs is one GPU node's accelerator, its capacity, the GPUs pods
-// scheduled to it request, its labels, and whether it is cordoned.
-type NodeGPUs struct {
-	Accelerator   string
-	Capacity      int
-	Used          int
-	Labels        map[string]string
-	Unschedulable bool
-}

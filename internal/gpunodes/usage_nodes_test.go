@@ -11,6 +11,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 )
 
 func TestDiscoverUsageWithNodes(t *testing.T) {
@@ -48,7 +50,7 @@ func TestDiscoverUsageWithNodes(t *testing.T) {
 	assert.Equal(t, 2, byNamespace["x"]["AMD-MI300X-192G"])
 	assert.Equal(t, 4, byNamespace["y"]["AMD-MI300X-192G"])
 	require.Len(t, nodes, 2)
-	assert.Equal(t, NodeGPUs{Accelerator: "AMD-MI300X-192G", Capacity: 8, Used: 5,
+	assert.Equal(t, decision.NodeGPU{Accelerator: "AMD-MI300X-192G", Capacity: 8, Used: 5,
 		Labels: map[string]string{"amd.com/gpu.product-name": "AMD-MI300X-192G", "rack": "r1"}}, nodes["n1"])
 	assert.Equal(t, 1, nodes["n2"].Used, "a finished pod holds no GPU")
 

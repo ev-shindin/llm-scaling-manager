@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -158,5 +159,37 @@ func TestClaimShareTransferNeedsOneAccelerator(t *testing.T) {
 				t.Fatalf("claimed %v, want %v", ok, tc.want)
 			}
 		})
+	}
+}
+
+// The sets a wake claims for: one candidate per role it must start, decode
+// with prefill when both, cheapest decode first.
+func TestShareWakeSets(t *testing.T) {
+	d1, d2 := cand("d1", domain.RoleDecode, "A100", 1, 1), cand("d2", domain.RoleDecode, "A100", 1, 2)
+	p1 := cand("p1", domain.RolePrefill, "A100", 1, 1)
+	names := func(sets [][]Candidate) []string {
+		out := make([]string, 0, len(sets))
+		for _, s := range sets {
+			var b strings.Builder
+			for _, c := range s {
+				b.WriteString(c.VariantName + "+")
+			}
+			out = append(out, b.String())
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name                    string
+		needDecode, needPrefill bool
+		want                    []string
+	}{
+		{"decode and prefill", true, true, []string{"d1+p1+", "d2+p1+"}},
+		{"decode only", true, false, []string{"d1+", "d2+"}},
+		{"prefill only: a decode serves", false, true, []string{"p1+"}},
+		{"nothing to start", false, false, nil},
+	} {
+		if got := names(shareWakeSets([]Candidate{d1, d2}, []Candidate{p1}, tc.needDecode, tc.needPrefill)); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

@@ -403,3 +403,14 @@ var _ = Describe("ShareFitPods", func() {
 		Expect(ShareFitPods(nodes(), []int{4, 2}, "")).To(BeTrue(), "without a domain, any nodes do (control)")
 	})
 })
+
+var _ = Describe("Fill-blocked reasons", func() {
+	It("drops an expired reason rather than keeping it forever", func() {
+		l := NewShareLedger()
+		t0 := time.Unix(0, 0)
+		l.FillBlocked("B", "release-taken", t0.Add(time.Minute))
+		Expect(l.FillBlockedReason("B", t0)).To(Equal("release-taken"))
+		Expect(l.FillBlockedReason("B", t0.Add(time.Minute))).To(BeEmpty())
+		Expect(l.fillBlocked).NotTo(HaveKey("B"))
+	})
+})

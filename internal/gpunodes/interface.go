@@ -1,6 +1,10 @@
 package gpunodes
 
-import "context"
+import (
+	"context"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
+)
 
 // CapacityDiscovery defines the interface for discovering accelerator capacity in the cluster.
 type CapacityDiscovery interface {
@@ -56,5 +60,5 @@ type FullDiscovery interface {
 // walk as the namespaced one. Optional: a discovery that cannot provide it
 // leaves the per-node consumers without node information, which they handle.
 type NodeUsageDiscovery interface {
-	DiscoverUsageWithNodes(ctx context.Context) (map[string]int, map[string]map[string]int, map[string]NodeGPUs, error)
+	DiscoverUsageWithNodes(ctx context.Context) (map[string]int, map[string]map[string]int, map[string]decision.NodeGPU, error)
 }

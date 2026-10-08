@@ -715,7 +715,11 @@ func (l *ShareLedger) FillBlocked(role, reason string, until time.Time) {
 // while it is still reported, or "".
 func (l *ShareLedger) FillBlockedReason(role string, now time.Time) string {
 	b, ok := l.fillBlocked[role]
-	if !ok || !now.Before(b.until) {
+	if !ok {
+		return ""
+	}
+	if !now.Before(b.until) {
+		delete(l.fillBlocked, role) // expired: a role that is gone is not kept
 		return ""
 	}
 	return b.reason

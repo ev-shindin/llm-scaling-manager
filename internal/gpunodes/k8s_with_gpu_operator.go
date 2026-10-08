@@ -7,6 +7,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/resources"
 	corev1 "k8s.io/api/core/v1"
@@ -233,7 +234,7 @@ func (d *K8sWithGpuOperator) DiscoverUsageByNamespace(ctx context.Context) (map[
 // labels. The utilization-share optimizer places a receiver's pods into the
 // holes donors open on particular nodes, which needs the per-node picture
 // (docs/proposals/utilization-share-optimizer.md, section 6.5).
-func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[string]int, map[string]map[string]int, map[string]NodeGPUs, error) {
+func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[string]int, map[string]map[string]int, map[string]decision.NodeGPU, error) {
 	nodes, err := d.listGPUNodes(ctx)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to discover GPU nodes: %w", err)
@@ -243,9 +244,9 @@ func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[st
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	out := make(map[string]NodeGPUs, len(nodeGPUType))
+	out := make(map[string]decision.NodeGPU, len(nodeGPUType))
 	for name, model := range nodeGPUType {
-		out[name] = NodeGPUs{
+		out[name] = decision.NodeGPU{
 			Accelerator:   model,
 			Capacity:      nodes[name].Accelerators[model].Count,
 			Used:          byNode[name],
