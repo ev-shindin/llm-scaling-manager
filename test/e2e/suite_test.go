@@ -215,6 +215,15 @@ var _ = BeforeSuite(func() {
 	if k8sClient != nil && crClient != nil {
 		cleanupTestResources(ctx, k8sClient, crClient, cfg.LLMDNamespace)
 	}
+	// The same holds for a quota a spec declared: left in the policy, it names
+	// a namespace that is gone and bounds every other namespace at zero.
+	if k8sClient != nil {
+		cleared, err := fixtures.ClearLeftoverQuota(ctx, k8sClient, cfg.WVANamespace, scalingPolicyConfigMapName())
+		Expect(err).NotTo(HaveOccurred(), "could not clear a quota an earlier run left in the scaling policy")
+		if cleared {
+			GinkgoWriter.Println("Cleared a quota an earlier run left in the scaling policy ConfigMap")
+		}
+	}
 
 	GinkgoWriter.Println("BeforeSuite completed successfully - infrastructure ready")
 })
