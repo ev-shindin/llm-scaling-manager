@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
@@ -27,6 +28,12 @@ type utilizationShareState struct {
 	lastConfigErr  string
 	lastIgnored    string
 	lastWeightErrs map[string]string
+	// lastUnmatched are the disabled namespaces the last cycle found no
+	// namespace quota for, comma-joined: reported once per change.
+	lastUnmatched string
+	// noBoundSince is when the cycles began to see no constraints at all;
+	// zero while they see some. See shareNoBoundGrace.
+	noBoundSince time.Time
 
 	// Actuation state (stage 2), dropped whenever the optimizer is not active.
 	// ledgers are per group (shareGroupKey); desired is each planned variant's
@@ -129,15 +136,26 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		return nil
 	}
 	if len(constraints) == 0 {
-		// No bound this cycle -- possibly a failed read. The marks stay, and a
-		// later cycle restores the transfers from them.
+		// No bound this cycle -- possibly a failed read. For a grace the
+		// ledgers stay and the variants their transfers move keep their
+		// targets: a fill has no mark to be restored from. Past it the bound
+		// is gone, not unread; the marks stay, and a later cycle restores the
+		// releases from them.
 		metrics.PublishUtilizationShare(nil)
+		if st.noBoundSince.IsZero() {
+			st.noBoundSince = now
+		}
+		if now.Sub(st.noBoundSince) < shareNoBoundGrace {
+			return st.holdInFlight(nil, "utilization share: no bound read this cycle; transfer in flight")
+		}
 		st.resetActuation()
 		return nil
 	}
+	st.noBoundSince = time.Time{}
 	if us.Shadow {
 		e.dropShareActuation(ctx, logger)
 	}
+	st.reportUnmatchedNamespaces(logger, us, constraints)
 	seen := map[string]bool{}
 
 	weightErrs := map[string]string{}
@@ -265,16 +283,32 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	}
 	metrics.PublishUtilizationShare(published)
 	// A group that has gone (its last model left, its namespace disabled)
-	// takes its ledger with it; its variants return to today's optimizer.
-	for k := range st.ledgers {
+	// takes its ledger with it, and its marks: its variants return to
+	// today's optimizer, with pods that carry no deletion cost of ours.
+	for k, l := range st.ledgers {
 		if !seen[k] {
+			for _, t := range l.Transfers() {
+				e.unmarkDonorPods(ctx, logger, t)
+			}
 			delete(st.ledgers, k)
 			delete(st.quietUntil, k)
 		}
 	}
-	// A variant a live transfer still moves keeps its target while its model is
-	// out of the group for a cycle -- frozen, or not collected: dropping it
-	// would lose the transfer's decrement, and the donor would never shrink.
+	return st.holdInFlight(overrides, "utilization share: transfer in flight")
+}
+
+// shareNoBoundGrace is how long cycles that read no constraint keep the
+// transfers in flight: long enough to ride out a failed read, short enough
+// that a bound really removed releases the variants promptly.
+const shareNoBoundGrace = 2 * time.Minute
+
+// holdInFlight adds to overrides the targets of the variants a live transfer
+// still moves and this cycle did not plan, and forgets every other target.
+// Such a variant keeps its target while its model is out of the group for a
+// cycle -- frozen, or not collected -- or no bound was read: dropping it would
+// lose the transfer's decrement, and the donor would never shrink.
+func (st *utilizationShareState) holdInFlight(overrides map[string]utilizationShareOverride,
+	why string) map[string]utilizationShareOverride {
 	touched := map[string]bool{}
 	for _, l := range st.ledgers {
 		for _, t := range l.Transfers() {
@@ -294,7 +328,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			if overrides == nil {
 				overrides = map[string]utilizationShareOverride{}
 			}
-			overrides[k] = utilizationShareOverride{Target: d, Why: "utilization share: transfer in flight"}
+			overrides[k] = utilizationShareOverride{Target: d, Why: why}
 		default:
 			delete(st.desired, k)
 			delete(st.divergedSince, k)
@@ -365,4 +399,26 @@ func transferVariantKey(role, variant string) string {
 		return ""
 	}
 	return utils.GetNamespacedKey(ns, variant)
+}
+
+// reportUnmatchedNamespaces logs, once per change, the namespaces the
+// optimizer's namespaces block disables but no namespace quota names: a
+// misspelled name, or a namespace whose quota was removed, disables nothing.
+func (st *utilizationShareState) reportUnmatchedNamespaces(logger logr.Logger, us config.UtilizationShare,
+	constraints []*allocation.ResourceConstraints) {
+	var unmatched []string
+	for _, ns := range us.DisabledNamespaces() {
+		if _, nsScoped := allocation.GPUBudgets(constraints, ns); !nsScoped {
+			unmatched = append(unmatched, ns)
+		}
+	}
+	joined := strings.Join(unmatched, ",")
+	if joined == st.lastUnmatched {
+		return
+	}
+	st.lastUnmatched = joined
+	if joined != "" {
+		logger.Info("Optimizer namespaces block disables namespaces no namespace quota names; it has no effect on them",
+			"namespaces", joined)
+	}
 }

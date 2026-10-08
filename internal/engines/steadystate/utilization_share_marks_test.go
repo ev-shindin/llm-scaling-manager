@@ -9,6 +9,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
 // A transfer annotation no live transfer owns -- put in a pod template, or
@@ -145,5 +147,80 @@ func TestUtilizationShareKeepsAnInFlightDonorsTarget(t *testing.T) {
 	o := se.e.evaluateUtilizationShare(se.ctx, withoutA, fullQuota(), f.scaleTargets())
 	if got, ok := o["ns/A-v"]; !ok || got.Target != 9-given {
 		t.Fatalf("A's target while it is out of the group: %+v (present %v), want %d", got, ok, 9-given)
+	}
+}
+
+// A group that vanishes -- its last model gone, its namespace disabled --
+// takes its marks with its ledger, as switching the optimizer off does.
+func TestUtilizationShareUnmarksAVanishedGroup(t *testing.T) {
+	f := newShareFleet()
+	c := sharePods(t, f)
+	se := newShareEngine(t, f, c, time.Unix(0, 0))
+	se.untilStarted()
+	if len(markedPods(t, c)) == 0 {
+		t.Fatal("setup: no pod marked")
+	}
+	se.clock = se.clock.Add(30 * time.Second)
+	se.e.evaluateUtilizationShare(se.ctx, nil, fullQuota(), f.scaleTargets())
+	if m := markedPods(t, c); len(m) != 0 {
+		t.Fatalf("%d pods still marked after their group vanished", len(m))
+	}
+	if len(se.e.utilizationShare.ledgers) != 0 {
+		t.Fatal("the vanished group's ledger was kept")
+	}
+}
+
+// A cycle that reads no constraint -- possibly a failed read -- holds the
+// targets of the variants transfers move, for a grace; past it the state goes.
+func TestUtilizationShareHoldsInFlightTargetsWhileNoBoundIsRead(t *testing.T) {
+	f := newShareFleet()
+	c := sharePods(t, f)
+	se := newShareEngine(t, f, c, time.Unix(0, 0))
+	given := se.untilStarted()
+	se.clock = se.clock.Add(30 * time.Second)
+	o := se.e.evaluateUtilizationShare(se.ctx, f.requests(), nil, f.scaleTargets())
+	if got, ok := o["ns/A-v"]; !ok || got.Target != 9-given {
+		t.Fatalf("A's target with no bound read: %+v (present %v), want %d", got, ok, 9-given)
+	}
+	if len(se.e.utilizationShare.ledgers) == 0 {
+		t.Fatal("the ledger was dropped on the first cycle with no bound")
+	}
+	se.clock = se.clock.Add(shareNoBoundGrace)
+	if o := se.e.evaluateUtilizationShare(se.ctx, f.requests(), nil, f.scaleTargets()); len(o) != 0 {
+		t.Fatalf("targets still held past the grace: %v", o)
+	}
+	if len(se.e.utilizationShare.ledgers) != 0 {
+		t.Fatal("the ledger outlived the grace")
+	}
+}
+
+// A transfer has one donor: a mark carrying the id of a transfer from another
+// donor -- a copied mark, a forged second primary -- is not restored, and
+// neither is the transfer it copies.
+func TestUtilizationShareRestoreRejectsAnIDUnderTwoDonors(t *testing.T) {
+	f := newShareFleet()
+	c := sharePods(t, f)
+	se := newShareEngine(t, f, c, time.Unix(0, 0))
+	se.untilStarted()
+	marked := markedPods(t, c)
+	if len(marked) != 1 {
+		t.Fatalf("setup: want one marked pod, got %d", len(marked))
+	}
+	var m transferMark
+	if err := json.Unmarshal([]byte(marked[0].Annotations[utilizationShareTransferAnnotation]), &m); err != nil {
+		t.Fatal(err)
+	}
+	// Onto C, neither this transfer's donor nor its receiver: the copy is
+	// valid on its own, and only its id gives it away.
+	m.Donor, m.DonorVariant = "ns/C/"+domain.RoleBoth, "C-v"
+	raw, _ := json.Marshal(m)
+	annotate(t, c, "C-v-0", map[string]string{utilizationShareTransferAnnotation: string(raw)})
+
+	restarted := newShareEngine(t, f, c, se.clock.Add(30*time.Second))
+	if got := restarted.cycle()["ns/A-v"].Target; got != 9 {
+		t.Fatalf("A target after restart = %d, want 9: the copied id restored a transfer", got)
+	}
+	if n := len(markedPods(t, c)); n != 0 {
+		t.Fatalf("%d pods still marked", n)
 	}
 }

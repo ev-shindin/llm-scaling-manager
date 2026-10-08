@@ -1112,7 +1112,9 @@ judged by that label on `NodeInfo.Labels`. A set that frees holes in two domains
 is invalid for such a receiver, however many GPUs it frees.
 
 **Without node information** (a quota-only installation that does not read
-nodes, or a cycle in which node discovery failed), only the first row of the
+nodes, a namespace-scoped installation -- which may not list nodes, and whose
+cache holds only its own namespace's pods -- or a cycle in which node discovery
+failed), only the first row of the
 table is usable. **Each receiver pod must be funded by one donor pod at least
 its size**, and different receiver pods by different donor pods. Several smaller
 donor pods are never combined, however many GPUs they add up to, because nothing

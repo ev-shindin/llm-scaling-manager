@@ -277,6 +277,23 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 	// member without its primary, or a set that gives less than its receiver
 	// takes, is a mark this controller did not write -- or the rest of it is
 	// gone -- and every member is removed.
+	// A transfer has one donor: an ID found under two roles is at least one
+	// mark this controller did not write -- a set's second primary among them
+	// -- and every pod carrying it is unmarked.
+	idRoles := map[string]int{}
+	for _, id := range order {
+		idRoles[byID[id].mark.ID]++
+	}
+	order = slices.DeleteFunc(order, func(id string) bool {
+		f := byID[id]
+		if idRoles[f.mark.ID] > 1 {
+			logger.Info("utilization share removed a transfer mark whose id another donor's pods also carry",
+				"id", f.mark.ID, "pods", f.pods)
+			invalid = append(invalid, f.pods...)
+			return true
+		}
+		return false
+	})
 	setGives, primaryTakes := map[string]int{}, map[string]int{}
 	for _, id := range order {
 		m := byID[id].mark

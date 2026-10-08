@@ -564,8 +564,14 @@ func main() {
 		Discovery: gpunodes.NewK8sWithGpuOperator(mgr.GetClient()),
 		// The utilization-share optimizer reads the per-node picture to place a
 		// receiver's pods into the holes donors open (section 6.5 of its
-		// proposal), quota or not.
-		Periodic: func() bool { return allocation.PhysicalUsageConfigured(cfg) || cfg.UtilizationShareActive() },
+		// proposal), quota or not -- but not on a namespace-scoped install. Nodes
+		// are cluster-scoped: its role cannot list them, an informer that cannot
+		// list never syncs, and its cache holds only its own namespace's pods,
+		// so the picture would show other tenants' GPUs as free. It plans
+		// without node information instead.
+		Periodic: func() bool {
+			return allocation.PhysicalUsageConfigured(cfg) || (cfg.UtilizationShareActive() && watchNS == "")
+		},
 	}
 	if err := mgr.Add(usageRefresher); err != nil {
 		setupLog.Error(err, "unable to add the GPU usage refresher to the manager")

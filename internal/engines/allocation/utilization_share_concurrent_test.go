@@ -75,3 +75,28 @@ var _ = Describe("Concurrent transfers on one role (§6.3)", func() {
 			"A released: the set failed on C, not on A")
 	})
 })
+
+var _ = Describe("A receiver out of the group as its transfer enters Filling", func() {
+	// Timeouts far beyond the steps: only the fill check can end the transfer.
+	tm := ShareTimings{Window: time.Minute, ReleaseTimeout: time.Hour, FillTimeout: time.Hour,
+		ReversalHold: time.Minute, SwingWindow: time.Minute}
+	t0 := time.Unix(0, 0)
+
+	It("is not filled the moment it returns: its base is taken when it is seen", func() {
+		l := NewShareLedger()
+		held := map[string]int{"A": 4, "B": 2}
+		t1 := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 1, DonorGPUs: 1}, held, t0, tm)
+		// A gives while B is out of the group (frozen, not collected).
+		l.Observe(map[string]int{"A": 3}, t0.Add(time.Minute), tm)
+		got, _ := l.Transfer(t1.ID)
+		Expect(got.State).To(Equal(ShareFilling), "setup")
+		// B returns at the 2 GPUs it always held: nothing landed.
+		ends := l.Observe(map[string]int{"A": 3, "B": 2}, t0.Add(2*time.Minute), tm)
+		Expect(ends).To(BeEmpty(), "filled on return although no pod landed")
+		ends = l.Observe(map[string]int{"A": 3, "B": 2}, t0.Add(3*time.Minute), tm)
+		Expect(ends).To(BeEmpty())
+		// Its pod lands.
+		ends = l.Observe(map[string]int{"A": 3, "B": 3}, t0.Add(4*time.Minute), tm)
+		Expect(ends).To(ConsistOf(HaveField("Outcome", ShareOutcomeDone)))
+	})
+})

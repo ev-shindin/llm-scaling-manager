@@ -99,6 +99,11 @@ type ShareTransfer struct {
 	// fillingSince is when the transfer entered Filling: a fill that
 	// completes later is inside its receiverBase only if it landed before.
 	fillingSince time.Time
+	// receiverBaseUnset is set when the receiver was out of the group as the
+	// transfer entered Filling: its held count then was not seen, and a base of
+	// zero would complete the fill the moment it returned. The base is taken
+	// from the first cycle it is seen.
+	receiverBaseUnset bool
 	// setReleased is, on a set's primary, the GPUs its contributors have
 	// released while it still waits: promised to its receiver. setPending is
 	// how many contributors have not released yet. A primary whose pending
@@ -186,6 +191,9 @@ type ShareLedger struct {
 	// released are the transfers that entered Filling since TakeReleased was
 	// last called: the cycle in which each receiver is raised.
 	released []ShareTransfer
+	// seen is when each role was last in the group or in a live transfer:
+	// Retain forgets the history of a role gone longer than any window reads.
+	seen map[string]time.Time
 }
 
 // shareReleaseSamples is how many completed releases the ledger remembers.
@@ -222,6 +230,7 @@ func NewShareLedger() *ShareLedger {
 		swingUntil:  map[string]time.Time{},
 		needs:       map[string][]shareNeedSample{},
 		confirm:     map[string]int{},
+		seen:        map[string]time.Time{},
 	}
 }
 
@@ -469,7 +478,9 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 		}
 		t.State = ShareFilling
 		t.Deadline = now.Add(tm.FillTimeout)
+		_, seen := held[t.Receiver]
 		t.receiverBase = held[t.Receiver]
+		t.receiverBaseUnset = t.Receiver != "" && !seen
 		t.fillingSince = now
 		l.released = append(l.released, *t)
 		l.rebaseDonor(t, now)
@@ -515,6 +526,14 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 			// A receiver not planned this cycle shows nothing about what it
 			// holds: only its fill timeout can end it. A transfer with no
 			// receiver -- a contributor, a refill -- completes at its release.
+			if t.receiverBaseUnset {
+				// Seen for the first time since it entered Filling: measured
+				// from now, and judged from the next cycle. A pod that landed
+				// while it was unseen ends it at its fill timeout instead,
+				// which leaves the receiver's target.
+				t.receiverBase, t.receiverBaseUnset, t.fillingSince = held[t.Receiver], false, now
+				break
+			}
 			if _, ok := rbase[t.Receiver]; !ok {
 				rbase[t.Receiver] = t.receiverBase
 			}
@@ -825,4 +844,50 @@ func (l *ShareLedger) MarkFailed(donor string, now time.Time, tm ShareTimings) {
 	}
 	l.aborts[donor]++
 	l.giveAfter[donor] = now.Add(tm.ReleaseTimeout << min(l.aborts[donor]-1, 4))
+}
+
+// Retain forgets the per-role history of roles that have been out of the group
+// -- and out of every live transfer -- for longer than any window that reads
+// it: the reversal hold, the swing window and its mean, the longest abort
+// back-off. A role absent for a cycle or two (frozen, not collected) keeps its
+// history; a deleted model's is dropped instead of kept for the life of the
+// controller.
+func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
+	for _, r := range present {
+		l.seen[r] = now
+	}
+	for _, t := range l.transfers {
+		l.seen[t.Donor] = now
+		if t.Receiver != "" {
+			l.seen[t.Receiver] = now
+		}
+	}
+	// A role recorded before Retain first ran starts its absence now.
+	for _, m := range []map[string]time.Time{l.giveAfter, l.lastGave, l.lastGot, l.swingUntil} {
+		for r := range m {
+			if _, ok := l.seen[r]; !ok {
+				l.seen[r] = now
+			}
+		}
+	}
+	for r := range l.aborts {
+		if _, ok := l.seen[r]; !ok {
+			l.seen[r] = now
+		}
+	}
+	horizon := max(tm.ReversalHold, 2*tm.SwingWindow, tm.ReleaseTimeout<<4)
+	for r, at := range l.seen {
+		if now.Sub(at) <= horizon {
+			continue
+		}
+		delete(l.seen, r)
+		delete(l.aborts, r)
+		delete(l.giveAfter, r)
+		delete(l.fillBlocked, r)
+		delete(l.lastGave, r)
+		delete(l.lastGot, r)
+		delete(l.moves, r)
+		delete(l.swingUntil, r)
+		delete(l.needs, r)
+	}
 }

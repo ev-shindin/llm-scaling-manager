@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -142,6 +143,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			"id", c.ID, "wake", c.Wake, "model", c.Model, "receiver", prev.Receiver, "donor", prev.Donor)
 	}
 	l.PlannedRunning(e.plannedRunning(ctx, logger, l))
+	l.Retain(slices.Collect(maps.Keys(held)), now, tm)
 	for _, end := range l.Observe(held, now, tm) {
 		t := end.Transfer
 		metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, string(end.Outcome), t.Urgent)
