@@ -118,6 +118,11 @@ case "$args" in
         echo "MODELS ${FC_MODELS-unsloth/Meta-Llama-3.1-8B-Instruct Qwen/Qwen3-8B}"; fi
       exit 0 ;;
   *"rollout restart"*|*"rollout status"*) exit 0 ;;
+  # The scaling policy the share arms rewrite, and the query Pod that reads
+  # the controller's mode back. PQUERY_OUT is what that Pod printed.
+  *"get configmap wva-scaling-policy-config"*) printf '%s' "${POLICY_TEXT:-}"; exit 0 ;;
+  *"get pod pquery-"*"jsonpath={.status.phase}"*) echo "Succeeded"; exit 0 ;;
+  *"logs pquery-"*) echo "${PQUERY_OUT:-}"; exit 0 ;;
   *"get pvc"*) [ "${HAS_PVC:-1}" = "1" ] && exit 0; exit 1 ;;
   *"get pods -l llm-d.ai/warm-pool"*)
       [ "${POOL_EXISTS:-0}" = "1" ] && echo "wva-warm-pool-twomodel-abc"
@@ -154,8 +159,10 @@ run_verb() {
         GATEWAYS="${GATEWAYS:-1}" HAS_PVC="${HAS_PVC:-1}" \
         NODE_GPUS="${NODE_GPUS:-8}" MIXED_ACCEL="${MIXED_ACCEL:-0}" \
         RESIDENT_JSON="${RESIDENT_JSON:-[]}" \
+        POLICY_TEXT="${POLICY_TEXT:-}" PQUERY_OUT="${PQUERY_OUT:-}" \
+        SHARE_MODE_TIMEOUT=1 SHARE_MODE_POLL=1 \
         WARM_GATE_TIMEOUT=1 \
-        bash "$SCRIPT" "$@" 2>&1)"
+        ${VERB_TIMEOUT:+timeout "$VERB_TIMEOUT"} bash "$SCRIPT" "$@" 2>&1)"
     RC=$?
 }
 
@@ -182,6 +189,47 @@ elif ! printf '%s' "$OUT" | grep -q 'pool-delete'; then
     fail "'run nopool' refused without naming the fix: $OUT"
 else
     ok "'run nopool' with a pool present is refused"
+fi
+
+# The utilization-share arms compare two optimizers under ONE quota. Without a
+# quota the optimizer has no budget, reports `invalid`, and the arm would be
+# today's optimizer under the name share.
+case_begin
+POLICY_TEXT='limiters: []' VERB_TIMEOUT=60 run_verb run share
+if [ "$RC" -eq 0 ]; then
+    fail "'run share' was accepted under a policy with no quota limiter"
+elif ! printf '%s' "$OUT" | grep -q 'WVA_LIMITER=quota'; then
+    fail "'run share' refused without naming the fix: $OUT"
+elif grep -q 'CALL\[.*patch configmap' "$CALLS" 2>/dev/null || grep -q 'CALL\[apply' "$CALLS" 2>/dev/null; then
+    fail "'run share' changed something before refusing: $(cat "$CALLS")"
+else
+    ok "'run share' with no quota in the policy is refused, before anything is written"
+fi
+
+# The policy is intent; the controller's mode is the fact. A controller that
+# never re-read the policy is still running the previous arm.
+QUOTA_POLICY='limiters:
+  - name: q
+    type: quota
+    scope: namespace
+    namespaceQuotas:
+      ns-under-test:
+        H200: 5'
+case_begin
+POLICY_TEXT="$QUOTA_POLICY" PQUERY_OUT='RESULT {"max by (mode) (wva_utilization_share_mode{namespace=\"ns-under-test\"})": [{"metric": {"mode": "off"}, "value": [0, "1"]}]}' \
+    VERB_TIMEOUT=60 run_verb run share
+if [ "$RC" -eq 0 ]; then
+    fail "'run share' started while the controller reported mode off; it would measure today's optimizer as share"
+elif ! printf '%s' "$OUT" | grep -q 'not running the optimizer mode'; then
+    fail "'run share' refused without naming the mode as the reason: $OUT"
+elif ! grep 'patch configmap wva-scaling-policy-config' "$CALLS" | grep -q 'shadow: false'; then
+    fail "'run share' did not write an acting optimizer block into the policy: $(cat "$CALLS")"
+elif ! grep 'patch configmap wva-scaling-policy-config' "$CALLS" | grep -q 'H200: 5'; then
+    fail "'run share' dropped the quota when it wrote the optimizer block: $(cat "$CALLS")"
+elif grep -q 'CALL\[apply' "$CALLS" 2>/dev/null; then
+    fail "'run share' started the load before the mode was confirmed: $(cat "$CALLS")"
+else
+    ok "'run share' writes the acting block, keeps the quota, and waits for the controller to report it"
 fi
 
 # A COLD pool is the worst result this scenario can produce: the arm runs to
@@ -537,7 +585,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=32
+CASES_EXPECTED=34
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

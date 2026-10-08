@@ -22,7 +22,8 @@ import json
 import os
 import sys
 
-COLORS = {"nopool": "#7f7f7f", "pool": "#1f77b4", "floor": "#ff7f0e", "pool1": "#2ca02c"}
+COLORS = {"nopool": "#7f7f7f", "pool": "#1f77b4", "floor": "#ff7f0e", "pool1": "#2ca02c",
+          "today": "#7f7f7f", "shadow": "#bcbd22", "share": "#d62728"}
 EXTRA_COLORS = ["#9467bd", "#8c564b", "#e377c2", "#17becf"]
 
 

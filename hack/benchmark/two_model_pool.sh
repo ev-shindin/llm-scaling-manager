@@ -757,6 +757,117 @@ else:
     ok "the EPP flow-control queue is live for both models"
 }
 
+# ---------------------------------------------------------------------------
+# The utilization-share arms: today, shadow, share
+# ---------------------------------------------------------------------------
+# Three arms on the same traffic under the same quota, differing ONLY in the
+# policy's `optimizer:` block: none (today's optimizer), the utilization-share
+# optimizer in shadow (computes, moves nothing), and the same acting. The quota
+# is set once at standup (WVA_LIMITER=quota WVA_QUOTAS=...), never per arm, and
+# each arm keeps the policy it ran under so the report can refuse two arms whose
+# limiters differ.
+
+is_share_arm() { case "$1" in today|shadow|share) return 0 ;; esac; return 1; }
+
+# The mode the controller must report before an arm's load starts.
+share_arm_mode() {
+    case "$1" in today) echo off ;; shadow) echo shadow ;; share) echo active ;; esac
+}
+
+# Run PromQL queries from inside the cluster, where Prometheus is reachable, and
+# print one JSON object {query: result}. Queries go in through the environment,
+# not spliced into the program text, so no quoting can change what is asked.
+# EVAL_TIME (unix seconds) evaluates every query at that instant; empty is now.
+prom_queries() {
+    local eval_time="$1"; shift
+    local url; url="$(prometheus_base_url)"
+    [ -n "$url" ] || { warn "could not read PROMETHEUS_BASE_URL from wva-manager-config in $WVA_NS"; return 1; }
+    local queries; queries="$(jq -cn '$ARGS.positional' --args "$@")"
+    local pod="pquery-$(date +%s)-$RANDOM"
+    k run "$pod" --restart=Never --quiet --image="$(load_image)" \
+        --env="PROM_URL=$url" --env="QUERIES=$queries" --env="EVAL_TIME=$eval_time" \
+        --command -- python3 -c '
+import json, os, ssl, urllib.parse, urllib.request
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+out = {}
+for q in json.loads(os.environ["QUERIES"]):
+    params = {"query": q}
+    if os.environ.get("EVAL_TIME"):
+        params["time"] = os.environ["EVAL_TIME"]
+    try:
+        r = json.loads(urllib.request.urlopen(os.environ["PROM_URL"] + "/api/v1/query?" + urllib.parse.urlencode(params), timeout=60, context=ctx).read().decode())
+        out[q] = r["data"]["result"] if r.get("status") == "success" else {"error": r.get("error", "query failed")}
+    except Exception as e:
+        out[q] = {"error": str(e)}
+print("RESULT " + json.dumps(out))
+' >/dev/null 2>&1 || { warn "could not start a query Pod"; return 1; }
+    local waited=0
+    while [ "$waited" -lt 240 ]; do
+        case "$(k get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null)" in
+            Succeeded|Failed) break ;;
+        esac
+        sleep 3
+        waited=$(( waited + 3 ))
+    done
+    local out; out="$(k logs "$pod" 2>&1)"
+    k delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1
+    printf '%s\n' "$out" | sed -n 's/^RESULT //p' | grep . || { warn "the query Pod returned nothing: $out"; return 1; }
+}
+
+# Write the arm's `optimizer:` block into the policy every controller reads,
+# replacing whatever block is there and touching nothing else.
+set_share_policy() {
+    local arm="$1" current updated
+    current="$(kc -n "$WVA_NS" get configmap wva-scaling-policy-config -o jsonpath='{.data.default}' 2>&1)" || \
+        die "could not read the scaling policy in $WVA_NS: $current"
+    # The comparison is under a quota, and the optimizer has no budget without
+    # one -- it would report `invalid` and the arm would measure today's
+    # optimizer under the wrong name.
+    printf '%s\n' "$current" | grep -Eq '^[[:space:]-]*type:[[:space:]]*quota[[:space:]]*$' || \
+        die "the scaling policy in $WVA_NS declares no quota limiter. Stand up with WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=<n>' -- the share arms compare the optimizers under one quota."
+    updated="$(python3 "$HERE/two_model_share_report.py" --rewrite-policy "$arm" <<<"$current")" || \
+        die "could not rewrite the policy for arm $arm"
+    kc -n "$WVA_NS" patch configmap wva-scaling-policy-config --type=merge \
+        -p "$(jq -cn --arg d "$updated" '{data:{"default":$d}}')" >/dev/null || \
+        die "could not write the policy for arm $arm"
+}
+
+# The policy is intent; the controller's mode gauge is the fact. Wait until
+# Prometheus shows the mode this arm needs. On a namespace-scoped install whose
+# policy lives in another namespace the policy is read once, at start, and this
+# is where that shows: the wait times out instead of measuring the wrong arm.
+wait_share_mode() {
+    local want="$1" deadline=$(( $(date +%s) + ${SHARE_MODE_TIMEOUT:-300} )) res
+    local q="max by (mode) (wva_utilization_share_mode{namespace=\"$WVA_NS\"})"
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        res="$(prom_queries "" "$q")" && \
+            [ "$(jq -r --arg q "$q" --arg m "$want" '[.[$q][]? | select(.metric.mode==$m) | .value[1]] | first // ""' <<<"$res")" = "1" ] && {
+                ok "the controller reports utilization-share mode '$want'"
+                return 0
+            }
+        sleep "${SHARE_MODE_POLL:-15}"
+    done
+    warn "the controller did not report mode '$want' within ${SHARE_MODE_TIMEOUT:-300}s. Last answer: ${res:-<none>}"
+    return 1
+}
+
+# What the optimizer did over the arm's window, read at the window's end:
+# transfers by outcome, model-seconds held back by reason, seconds a replica
+# move was planned (the shadow arm's evidence) and the mode it held throughout.
+capture_share_metrics() {
+    local out="$1" end="$2" window="$3" step=15
+    local sel="namespace=\"$WVA_NS\""
+    prom_queries "$end" \
+        "sum by (outcome) (increase(wva_utilization_share_transfers_total{$sel}[${window}s]))" \
+        "sum by (reason) (count_over_time((wva_model_scaling_blocked{$sel} == 1)[${window}s:${step}s])) * $step" \
+        "count_over_time((max(wva_utilization_share_replicas_to_move{$sel}) > 0)[${window}s:${step}s]) * $step" \
+        "min by (mode) (min_over_time(wva_utilization_share_mode{$sel}[${window}s]))" \
+        > "$out.tmp" && [ -s "$out.tmp" ] && mv "$out.tmp" "$out" || {
+            rm -f "$out.tmp"
+            warn "could not read the optimizer's metrics for this arm; the report will say so"
+        }
+}
+
 verb_verify() {
     need_ns
     local hostport
@@ -1363,8 +1474,8 @@ verb_run() {
     need_ns
     local arm="${1:-}"
     case "$arm" in
-        pool|nopool|floor) ;;
-        *) die "run takes an arm: nopool, pool or floor (got '${arm:-<none>}')" ;;
+        pool|nopool|floor|today|shadow|share) ;;
+        *) die "run takes an arm: nopool, pool or floor; or today, shadow or share for the utilization-share comparison (got '${arm:-<none>}')" ;;
     esac
     local have_pool=0
     k get deploy "wva-warm-pool-$POOL_NAME" >/dev/null 2>&1 && have_pool=1
@@ -1384,6 +1495,14 @@ verb_run() {
         floor="$FLOOR_REPLICAS"
         set_fleet_floor "$floor"
         wait_fleet_at "$floor" || die "the fleet did not reach the floor of $floor per model"
+    fi
+    # The utilization-share arms differ only in the policy's optimizer block.
+    # Set it, then wait for the controller to SAY it runs that mode: an arm
+    # whose policy was never read measures the previous arm under a new name.
+    if is_share_arm "$arm"; then
+        set_share_policy "$arm"
+        wait_share_mode "$(share_arm_mode "$arm")" || \
+            die "the controller is not running the optimizer mode arm $arm needs, so this arm would measure the wrong thing"
     fi
     # A pool arm on a COLD pool is the worst result this scenario can produce:
     # it runs to completion, produces a full table, and reports the cost of a
@@ -1407,6 +1526,12 @@ verb_run() {
     printf '{"arm":"%s","max_replicas_per_model":%s,"min_replicas_per_model":%s,"pool_replicas":%s,"gpus_per_replica":%s}\n' \
         "$arm" "$ceiling" "$floor" "$([ "$arm" = pool ] && echo "$POOL_REPLICAS" || echo 0)" "$GPUS_PER_REPLICA" \
         > "$out_dir/budget.json"
+    # The policy this arm ran under, kept with its results: the report refuses
+    # two share arms whose limiters differ.
+    if is_share_arm "$arm"; then
+        kc -n "$WVA_NS" get configmap wva-scaling-policy-config -o jsonpath='{.data.default}' \
+            > "$out_dir/policy.yaml" 2>/dev/null || warn "could not keep the policy this arm ran under"
+    fi
 
     # The two inference-perf profiles and the phase table they were built from,
     # rendered here and kept with the results. The report refuses two arms whose
@@ -1607,6 +1732,9 @@ verb_run() {
     trap - INT TERM HUP
     run_cleanup
     RUN_JOB=""
+    if is_share_arm "$arm"; then
+        capture_share_metrics "$out_dir/share.json" "$(( start_at + total ))" "$total"
+    fi
     # The timed capture above is the one that matters. This only fills in when
     # it did not run at all -- it never overwrites, because a late capture is
     # precisely the one that has lost the added replicas.
@@ -1780,7 +1908,8 @@ verb_report() {
     local d name
     for d in "$OUT_ROOT"/*/; do
         name="$(basename "$d")"
-        case "$name" in nopool|pool|floor) continue ;; esac
+        # The utilization-share arms have their own report: report-share.
+        case "$name" in nopool|pool|floor|today|shadow|share) continue ;; esac
         [ -s "$d/meta.json" ] && extra+=(--arm "$name=${d%/}")
     done
     [ "${#extra[@]}" -gt 0 ] || die "only the nopool arm has results in $OUT_ROOT; run the pool and/or floor arm first"
@@ -1791,6 +1920,31 @@ verb_report() {
         --model-a "$MODEL_A" --model-b "$MODEL_B" \
         --json "$OUT_ROOT/report.json" \
         | tee "$OUT_ROOT/report.md"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || die "the report failed"
+    python3 "$HERE/two_model_plots.py" --json "$OUT_ROOT/report.json" --out "$OUT_ROOT" \
+        && ok "report.md, report.json and the SVG plots are in $OUT_ROOT" \
+        || warn "the plots failed; the report itself is in $OUT_ROOT/report.md"
+}
+
+# The utilization-share comparison: today is the baseline, shadow and share are
+# judged against it on the same TTFT and accelerator-second tables as the pool
+# arms, and then on what the optimizer itself recorded.
+verb_report_share() {
+    local a="$OUT_ROOT/today"
+    [ -s "$a/meta.json" ] || die "no today results in $a -- the today arm is the baseline the share arms are compared against"
+    local extra=() n
+    for n in shadow share; do
+        [ -s "$OUT_ROOT/$n/meta.json" ] && extra+=(--arm "$n=$OUT_ROOT/$n")
+    done
+    [ "${#extra[@]}" -gt 0 ] || die "only the today arm has results in $OUT_ROOT; run the shadow and/or share arm first"
+    {
+        python3 "$HERE/two_model_report.py" \
+            --nopool "$a" "${extra[@]}" --baseline-name today \
+            --model-a "$MODEL_A" --model-b "$MODEL_B" \
+            --json "$OUT_ROOT/report.json" || exit 1
+        echo
+        python3 "$HERE/two_model_share_report.py" --out-root "$OUT_ROOT" || exit 1
+    } | tee "$OUT_ROOT/report.md"
     [ "${PIPESTATUS[0]}" -eq 0 ] || die "the report failed"
     python3 "$HERE/two_model_plots.py" --json "$OUT_ROOT/report.json" --out "$OUT_ROOT" \
         && ok "report.md, report.json and the SVG plots are in $OUT_ROOT" \
@@ -1836,6 +1990,7 @@ case "${1:-}" in
     reset)       shift; verb_reset "$@" ;;
     run)         shift; verb_run "$@" ;;
     report)      shift; verb_report "$@" ;;
+    report-share) shift; verb_report_share "$@" ;;
     status)      shift; verb_status "$@" ;;
     teardown)    shift; verb_teardown "$@" ;;
     residency)   shift; need_ns; pool_residency ;;
