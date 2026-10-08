@@ -335,7 +335,21 @@ var _ = Describe("Node-aware donor sets: guards and shapes (§6.5)", func() {
 			})
 		Expect(p.Started).To(HaveLen(2), "a set of two A replicas paying for B's replica")
 		Expect(p.Started[0].Receiver).To(Equal("B"))
-		Expect(planned(p)).To(ConsistOf("ns/a-0", "ns/a-1"))
+		Expect(planned(p)).To(BeEmpty(), "they only pay quota: any of A's pods may go")
+	})
+
+	It("leaves a receiver whose pod fits free GPUs to the idle fill when the quota has room", func() {
+		four := func(name string) ShareUnit {
+			return ShareUnit{Pods: []SharePod{{Name: name, Node: "n2", GPUs: 4}}}
+		}
+		p := plan([]int{8}, map[string]ShareNode{"n1": {Free: 8}, "n2": {}},
+			[]ShareUnit{four("ns/a-0"), four("ns/a-1")}, nil, func(in *SharePlanInput) {
+				in.Give["A"] = ShareVariant{Name: "a", GPUs: 4, PodGPUs: []int{4}}
+				in.Roles[0].ReplicaGPUs = 4
+				delete(in.Give, "C")
+				in.Budget += 8 // 8 idle GPUs: B's replica
+			})
+		Expect(p.Started).To(BeEmpty(), "no donor need shrink")
 	})
 
 	It("returns the node state its sets left, for the idle fill", func() {
@@ -351,7 +365,7 @@ var _ = Describe("Node-aware donor sets: guards and shapes (§6.5)", func() {
 		nodes := map[string]ShareNode{"n1": {Free: 4}, "n2": {Free: 8}}
 		units := map[string][]ShareUnit{"A": {pod8("ns/a-0", "n1"), pod8("ns/a-1", "n2")}}
 		// The set took a-0, placing a 12-GPU pod on n1: 4 free + 8 donated.
-		withdrawNodeSet(nodes, units, []shareDonor{{role: "A", planned: []string{"ns/a-0"}}}, map[string]int{"n1": 0, "n2": 8})
+		withdrawNodeSet(nodes, units, []shareDonor{{role: "A", unit: []string{"ns/a-0"}}}, map[string]int{"n1": 0, "n2": 8})
 		Expect(nodes["n1"].Free).To(BeZero(), "the free GPUs went to this receiver")
 		Expect(nodes["n2"].Free).To(Equal(8), "an untouched node keeps its free GPUs")
 		Expect(units["A"]).To(HaveLen(1))

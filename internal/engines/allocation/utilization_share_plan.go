@@ -394,8 +394,10 @@ type shareDonor struct {
 	role, variant string
 	pods          []int
 	gpus          int
-	// planned are the donor pods a node-aware set chose (namespace/name).
-	planned []string
+	// planned are the donor pods a node-aware set chose (namespace/name):
+	// the ones that must go. unit is every pod of the replica the set took,
+	// planned or not, so the cycle stops offering it.
+	planned, unit []string
 }
 
 // shareDonorSet looks for donor replicas that together fund one replica of
@@ -567,6 +569,11 @@ func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string,
 		if !ok {
 			continue
 		}
+		if len(search.set) == 0 && shareIdle(in, work) >= max(grow.GPUs, 1) {
+			// The pods fit free GPUs and the quota has room: the idle fill
+			// funds this receiver without shrinking anyone.
+			continue
+		}
 		// The placement may need fewer donor replicas than the receiver's
 		// quota -- or none, where its pods fit free GPUs. Free GPUs place a
 		// pod; they never pay for it: donor replicas from any node make up
@@ -604,7 +611,7 @@ func (s *shareNodeSearch) place(podGPUs []int, nodes []string) (map[string]int, 
 				return nil, false
 			}
 			for _, r := range units {
-				s.take(r, hole)
+				s.take(r, hole, true)
 			}
 		}
 		hole[best] -= p
@@ -700,22 +707,37 @@ func (s *shareNodeSearch) topUp(g int, hole map[string]int) bool {
 			if s.used[r] || !s.canGive(dn, 1, 1) {
 				continue
 			}
-			s.take(r, hole)
+			s.take(r, hole, false)
 		}
 	}
 	return gives() >= g
 }
 
+// shareIdle is the group's quota no role commits.
+func shareIdle(in SharePlanInput, work map[string]int) int {
+	idle := in.Budget
+	for _, w := range work {
+		idle -= w
+	}
+	return idle
+}
+
 // take adds a donor replica to the set: every node its pods run on gains
-// their GPUs as a hole.
-func (s *shareNodeSearch) take(r shareUnitRef, hole map[string]int) {
+// their GPUs as a hole. planned marks its pods as the ones that must go --
+// true for a replica that opens a hole, false for one that only pays quota,
+// where any of the donor's pods will do and the which-pod check would only
+// abort a transfer for nothing.
+func (s *shareNodeSearch) take(r shareUnitRef, hole map[string]int, planned bool) {
 	s.used[r] = true
 	s.taken[r.donor]++
 	give := s.in.Give[r.donor]
 	d := shareDonor{role: r.donor, variant: give.Name, gpus: max(give.GPUs, 1)}
 	for _, pod := range s.in.DonorUnits[r.donor][r.unit].Pods {
 		hole[pod.Node] += pod.GPUs
-		d.planned = append(d.planned, pod.Name)
+		d.unit = append(d.unit, pod.Name)
+		if planned {
+			d.planned = append(d.planned, pod.Name)
+		}
 	}
 	s.set = append(s.set, d)
 }
@@ -731,7 +753,7 @@ func withdrawNodeSet(nodes map[string]ShareNode, units map[string][]ShareUnit, s
 	}
 	gone := map[string]bool{}
 	for _, d := range set {
-		for _, p := range d.planned {
+		for _, p := range d.unit {
 			gone[p] = true
 		}
 	}
