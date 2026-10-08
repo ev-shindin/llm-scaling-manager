@@ -639,10 +639,14 @@ PD_SINGLE_STACK="${PD_SINGLE_STACK:-0}"
 PD_ENDPOINT="${PD_ENDPOINT:-}"
 
 # Every model Deployment and its role, one "<deployment> <role>" per line.
+# The modelservice chart puts llm-d.ai/role on the POD TEMPLATE, not on the
+# Deployment, so a label selector on Deployments finds nothing; the template is
+# also where the ScaledObject planner reads it (deploy/lib/scaledobject.sh).
 role_deploys() {
     if [ "$PD_SINGLE_STACK" = 1 ]; then
-        k get deploy -l 'llm-d.ai/role in (prefill,decode)' -o json 2>/dev/null | jq -r '
-            .items[] | .metadata.name + " " + .metadata.labels["llm-d.ai/role"]'
+        k get deploy -o json 2>/dev/null | jq -r '
+            .items[] | (.spec.template.metadata.labels["llm-d.ai/role"] // "") as $r
+            | select($r == "prefill" or $r == "decode") | .metadata.name + " " + $r'
         return
     fi
     local s d
@@ -662,7 +666,7 @@ role_max() { if [ "$1" = prefill ]; then echo "$MAX_PREFILL"; else echo "$MAX_DE
 so_role() {
     local target
     target="$(k get scaledobject "$1" -o jsonpath='{.spec.scaleTargetRef.name}' 2>/dev/null)"
-    if [ -n "$target" ] && [ "$(k get deploy "$target" -o jsonpath='{.metadata.labels.llm-d\.ai/role}' 2>/dev/null)" = prefill ]; then
+    if [ -n "$target" ] && [ "$(k get deploy "$target" -o jsonpath='{.spec.template.metadata.labels.llm-d\.ai/role}' 2>/dev/null)" = prefill ]; then
         echo prefill
     else
         echo decode

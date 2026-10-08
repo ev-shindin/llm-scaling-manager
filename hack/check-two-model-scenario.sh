@@ -65,12 +65,20 @@ case "$args" in
       exit 0 ;;
   *"get scaledobject pd-prefill-wva"*"scaleTargetRef"*) echo "pd-prefill"; exit 0 ;;
   *"get scaledobject pd-decode-wva"*"scaleTargetRef"*) echo "pd-decode"; exit 0 ;;
-  *"get deploy -l llm-d.ai/role in (prefill,decode) -o json"*)
-      echo '{"items":[{"metadata":{"name":"pd-decode","labels":{"llm-d.ai/role":"decode"}}},
-                      {"metadata":{"name":"pd-prefill","labels":{"llm-d.ai/role":"prefill"}}}]}'
-      exit 0 ;;
-  *"get deploy pd-prefill -o jsonpath={.metadata.labels"*) echo "prefill"; exit 0 ;;
-  *"get deploy pd-decode -o jsonpath={.metadata.labels"*) echo "decode"; exit 0 ;;
+  # As the modelservice chart renders them: the role is on the pod template,
+  # and the Deployment's own labels carry none -- plus an EPP with no role.
+  *"get deploy -o json"*)
+      if [ "${PD_STUB:-0}" = "1" ]; then
+        echo '{"items":[
+          {"metadata":{"name":"pd-decode","labels":{"helm.sh/chart":"llm-d-modelservice"}},
+           "spec":{"template":{"metadata":{"labels":{"llm-d.ai/role":"decode"}}}}},
+          {"metadata":{"name":"pd-prefill","labels":{"helm.sh/chart":"llm-d-modelservice"}},
+           "spec":{"template":{"metadata":{"labels":{"llm-d.ai/role":"prefill"}}}}},
+          {"metadata":{"name":"pd-router-epp"},"spec":{"template":{"metadata":{"labels":{}}}}}]}'
+        exit 0
+      fi ;;&
+  *"get deploy pd-prefill -o jsonpath={.spec.template.metadata.labels"*) echo "prefill"; exit 0 ;;
+  *"get deploy pd-decode -o jsonpath={.spec.template.metadata.labels"*) echo "decode"; exit 0 ;;
   *"get deploy wva-warm-pool-"*)
       [ "${POOL_EXISTS:-0}" = "1" ] && exit 0
       echo 'Error from server (NotFound): deployments.apps "wva-warm-pool-x" not found' >&2
