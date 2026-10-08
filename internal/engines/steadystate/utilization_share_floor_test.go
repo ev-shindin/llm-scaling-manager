@@ -36,18 +36,21 @@ func TestUtilizationShareNeverGivesTheLastReplica(t *testing.T) {
 	}
 }
 
-// A ledger that has just started is quiet for a fill timeout -- it plans
-// nothing -- but it does not freeze the models: with no transfer restored,
-// every variant is left to today's optimizer meanwhile.
-func TestUtilizationShareQuietPeriodFreezesNothingItDidNotRestore(t *testing.T) {
+// A ledger that has just started is quiet for a fill timeout: it plans
+// nothing, and every planned variant holds what it runs. Today's optimizer
+// must not lower one model and raise another meanwhile -- a fill in flight
+// before a restart has no mark, and its receiver's pods wait for those GPUs.
+func TestUtilizationShareQuietPeriodHoldsEveryPlannedVariant(t *testing.T) {
 	f := newShareFleet()
 	se := newShareEngine(t, f, sharePods(t, f), time.Unix(0, 0))
 	o := se.cycle()
 	if len(se.e.utilizationShare.ledgers) != 1 {
 		t.Fatal("setup: the ledger did not start")
 	}
-	if len(o) != 0 {
-		t.Fatalf("the quiet period pinned %d variants no transfer moves: %v", len(o), o)
+	for k, want := range map[string]int{"ns/A-v": 9, "ns/B-v": 5, "ns/C-v": 2} {
+		if got, ok := o[k]; !ok || got.Target != want {
+			t.Fatalf("%s during the quiet period: %+v (present %v), want held at %d", k, got, ok, want)
+		}
 	}
 }
 

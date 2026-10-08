@@ -215,7 +215,12 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 
 	out := shareActuation{timings: tm, sources: src}
 	if now.Before(st.quietUntil[key]) {
-		out.overrides = e.quietOverrides(l, g, variantKey)
+		// Every planned variant holds what it runs or was restored to: after a
+		// restart a fill in flight has no mark, and its receiver's Pending pods
+		// must not lose their GPUs to another model's scale-up meanwhile --
+		// today's optimizer would lower one model and raise another in the same
+		// cycle, the race this optimizer exists to prevent.
+		out.overrides = e.shareOverrides(g, variantKey, "restart quiet period")
 		out.promised = l.Promised() + l.WakeHeld(now)
 		out.reserveDebt = shareDebtNow(l, held, g.Budget)
 		out.blocked = shareBlockedReasons(l, g, ev, nil, now, tm)
@@ -395,35 +400,6 @@ func (e *Engine) shareOverrides(g allocation.ShareGroup, variantKey func(string,
 			}
 			e.utilizationShare.desired[k] = d
 			out[k] = utilizationShareOverride{Target: d, Why: why}
-		}
-	}
-	return out
-}
-
-// quietOverrides are a group's targets while its ledger is quiet after a
-// (re)start: the variants a restored transfer moves keep the targets the
-// restore set, and every other variant is left to today's optimizer, its
-// desired count following what it runs -- a model must not be frozen for a
-// fill timeout because the controller restarted.
-func (e *Engine) quietOverrides(l *allocation.ShareLedger, g allocation.ShareGroup,
-	variantKey func(string, string) string) map[string]utilizationShareOverride {
-	touched := map[string]bool{}
-	for _, t := range l.Transfers() {
-		touched[variantKey(t.Donor, t.DonorVariant)] = true
-		if t.Receiver != "" {
-			touched[variantKey(t.Receiver, t.ReceiverVariant)] = true
-		}
-	}
-	all := e.shareOverrides(g, variantKey, "utilization share: restored transfer in flight")
-	out := map[string]utilizationShareOverride{}
-	for role, vs := range g.Variants {
-		for _, v := range vs {
-			k := variantKey(role, v.Name)
-			if touched[k] {
-				out[k] = all[k]
-			} else {
-				e.utilizationShare.desired[k] = v.Current
-			}
 		}
 	}
 	return out

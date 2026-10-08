@@ -390,8 +390,10 @@ the receiver's pod fits, and the two blocked reasons that need node information
 (`release-taken`, `release-shape-mismatch`) never appear.
 
 With node information, placement counts only nodes a new pod can land on: cordoned
-nodes, nodes that are not Ready and nodes with a `NoSchedule` or `NoExecute` taint
-are skipped. It does **not** match the receiver's `nodeSelector`, affinity or
+nodes, nodes that are not Ready and nodes with a Kubernetes node-condition taint
+(`node.kubernetes.io/...`, such as `unreachable`) are skipped. Other taints, such
+as a GPU pool's own, are not read, because the pods the pool exists for tolerate
+them. It does **not** match the receiver's `nodeSelector`, affinity or
 tolerations, so a receiver restricted to some nodes can be planned into a hole it
 cannot use; that transfer then ends `fill-timeout`, and the receiver keeps its
 raised target until the scheduler places it.

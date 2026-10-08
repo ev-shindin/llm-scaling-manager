@@ -75,7 +75,9 @@ func TestDiscoverUsageWithNodesMarksCordonedNodes(t *testing.T) {
 		}
 	}
 	tainted := mk("tainted", false)
-	tainted.Spec.Taints = []corev1.Taint{{Key: "dedicated", Effect: corev1.TaintEffectNoSchedule}}
+	tainted.Spec.Taints = []corev1.Taint{{Key: "node.kubernetes.io/unreachable", Effect: corev1.TaintEffectNoExecute}}
+	gpuPool := mk("gpu-pool", false)
+	gpuPool.Spec.Taints = []corev1.Taint{{Key: "nvidia.com/gpu", Effect: corev1.TaintEffectNoSchedule}}
 	preferred := mk("preferred", false)
 	preferred.Spec.Taints = []corev1.Taint{{Key: "soft", Effect: corev1.TaintEffectPreferNoSchedule}}
 	notReady := mk("not-ready", false)
@@ -83,12 +85,13 @@ func TestDiscoverUsageWithNodesMarksCordonedNodes(t *testing.T) {
 	ready := mk("ready", false)
 	ready.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(mk("open", false), mk("cordoned", true),
-		tainted, preferred, notReady, ready).Build()
+		tainted, gpuPool, preferred, notReady, ready).Build()
 	_, _, nodes, err := NewK8sWithGpuOperator(c).DiscoverUsageWithNodes(context.Background())
 	require.NoError(t, err)
 	assert.False(t, nodes["open"].Unschedulable)
 	assert.True(t, nodes["cordoned"].Unschedulable)
-	assert.True(t, nodes["tainted"].Unschedulable, "a NoSchedule taint refuses new pods")
+	assert.True(t, nodes["tainted"].Unschedulable, "a node-condition taint refuses new pods")
+	assert.False(t, nodes["gpu-pool"].Unschedulable, "a GPU pool's own taint is tolerated by its pods")
 	assert.False(t, nodes["preferred"].Unschedulable, "PreferNoSchedule does not")
 	assert.True(t, nodes["not-ready"].Unschedulable)
 	assert.False(t, nodes["ready"].Unschedulable)

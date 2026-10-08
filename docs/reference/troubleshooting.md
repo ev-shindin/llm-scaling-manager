@@ -195,11 +195,14 @@ Work down the list in order.
    current one, so it may look short and still not receive. `transfer-limit`
    means the group already runs two transfers with a donor; it clears as they
    land.
-8. **Did the controller just restart?** After a restart, the variants that
-   restored transfers move are pinned at their restored targets for one fill
-   timeout while the ledger settles; no new transfer is planned in that group
-   meanwhile, and the group's other models are left to today's optimizer. The
-   log line `Utilization share: ledger started` carries `planningFrom`.
+8. **Did the controller just restart?** After a restart -- and after the
+   optimizer starts acting, or a group first appears -- every planned model of
+   the group holds what it runs (or its restored target) for one fill timeout,
+   about three minutes with default timings, and nothing in it scales:
+   a fill in flight before the restart has no mark, and its receiver's pods
+   must not lose their GPUs meanwhile. Expect this freeze on every upgrade or
+   leader change. The log line `Utilization share: ledger started` carries
+   `planningFrom`.
 9. **Could it not mark the donor?** `Utilization share: could not mark a donor pod;
    transfer not started` means the donor had a pod that was not Ready (on a
    Deployment) or not yet scheduled (the ReplicaSet removes such a pod before it

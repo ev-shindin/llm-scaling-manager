@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -357,14 +358,18 @@ func nodeGPUTypesOf(nodes map[string]NodeInfo) map[string]string {
 var _ FullDiscovery = (*K8sWithGpuOperator)(nil)
 
 // refusesNewPods reports whether no new pod can land on node: it is cordoned,
-// not Ready, or carries a NoSchedule or NoExecute taint. A placement that
-// counted on its free GPUs would open a hole nobody can use.
+// not Ready, or carries a NoSchedule or NoExecute node-condition taint
+// (node.kubernetes.io/...: not-ready, unreachable, a pressure). A placement
+// that counted on its free GPUs would open a hole nobody can use. Other taints
+// are not read: a GPU pool's own taint is tolerated by the pods it exists for,
+// and matching a receiver's tolerations is not built.
 func refusesNewPods(node *corev1.Node) bool {
 	if node.Spec.Unschedulable {
 		return true
 	}
 	for _, t := range node.Spec.Taints {
-		if t.Effect == corev1.TaintEffectNoSchedule || t.Effect == corev1.TaintEffectNoExecute {
+		if strings.HasPrefix(t.Key, "node.kubernetes.io/") &&
+			(t.Effect == corev1.TaintEffectNoSchedule || t.Effect == corev1.TaintEffectNoExecute) {
 			return true
 		}
 	}

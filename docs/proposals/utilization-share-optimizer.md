@@ -2023,11 +2023,14 @@ optimizer every cycle (§6.6).
        restores the previous cost only if the pod still carries ours.
      - marks record the controller's `CONTROLLER_INSTANCE`, and the sweep that
        runs when the optimizer stops acting removes only its own.
-     - node-aware placement skips cordoned, not-Ready and
-       `NoSchedule`/`NoExecute`-tainted nodes.
-     - the restart quiet period pins only the variants that restored
-       transfers move; the group's other models are left to today's
-       optimizer meanwhile.
+     - node-aware placement skips cordoned and not-Ready nodes, and nodes
+       with a `node.kubernetes.io/...` `NoSchedule`/`NoExecute` taint; a
+       pool's own taints are not read (its pods tolerate them).
+     - the restart quiet period still pins every planned variant for one
+       fill timeout. Leaving the unrestored ones to today's optimizer was
+       tried and reverted: today's optimizer lowered one model and raised
+       another in the same cycle, the race the quiet period exists to
+       prevent while a fill in flight has no mark.
      - the per-node half of donor sets (section 6.5):
        - the usage refresher's one pod walk also yields each GPU node's
          capacity, requested GPUs and labels
