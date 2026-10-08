@@ -19,14 +19,16 @@ import (
 // llm-d/llmdbench Deployment runs the engine through a shell wrapper and puts
 // the flag VALUES in the container env --
 // `--block-size $VLLM_BLOCK_SIZE` with `VLLM_BLOCK_SIZE=128`. ParseInt failed
-// on the literal "$VLLM_BLOCK_SIZE", BlockSize kept its default of 16, and
-// `wva_engine_config` reported block_size=16 for an engine running 128.
-// `--max-model-len $VLLM_MAX_MODEL_LEN` reported 0 against a real 16384.
+// on the literal "$VLLM_BLOCK_SIZE", BlockSize kept its default of 16, and the
+// capacity derivation ran on 16 for an engine running 128.
+// `--max-model-len $VLLM_MAX_MODEL_LEN` read 0 against a real 16384.
 //
-// Why that is a defect and not an inaccuracy: these fields key a SHARING
-// decision. A silently-defaulted field makes two different engines hash to one
-// digest, and that digest licenses one variant to price itself from a latency
-// line the other measured.
+// Why that is a defect and not an inaccuracy: these fields decide whether two
+// variants count as the same capacity configuration (IsCapacityCompatible). A
+// silently-defaulted field makes two different engines compare EQUAL, which
+// licenses one variant to be priced from a figure measured on the other. An
+// over-stated capacity orders too few replicas, which is the direction this
+// project treats as the dangerous one.
 
 // The SGLang fixture's container name and launcher module. Named because each
 // recurs, not because the values matter.
@@ -141,9 +143,10 @@ func TestParserRecordsWhatItCouldNotRead(t *testing.T) {
 		// What then records the key is the value being unusable, and a review
 		// showed the original name claimed a general parser property that only
 		// held for integer flags: the same shape on --dtype was accepted as
-		// the engine's real setting with Complete() true. Both are covered now
-		// -- the numeric case here, the string case in
-		// TestStringFlagsCanFailToResolve -- and the name says what happens.
+		// the engine's real setting with Complete() true. The numeric case is
+		// this one; the string case is TestAMalformedReferenceIsNotALiteral's
+		// --dtype subtests, and the name here says what happens rather than
+		// claiming a general property.
 		name: "a value that is still a reference after substitution",
 		cmd:  "vllm serve m --max-num-seqs $OUTER",
 		env:  map[string]string{"OUTER": "$INNER", "INNER": "512"},

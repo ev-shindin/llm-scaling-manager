@@ -81,16 +81,23 @@ type EngineParams struct {
 	// the command line with the values as shell variables --
 	// `--block-size $VLLM_BLOCK_SIZE` with VLLM_BLOCK_SIZE=128 in the
 	// container env. ParseInt fails on "$VLLM_BLOCK_SIZE", the field kept its
-	// default of 16, and `wva_engine_config` reported block_size=16 for an
-	// engine running 128. `--max-model-len $VLLM_MAX_MODEL_LEN` reported 0
-	// against a real 16384.
+	// default of 16, and the capacity derivation ran on 16 for an engine
+	// running 128. `--max-model-len $VLLM_MAX_MODEL_LEN` read 0 against a real
+	// 16384. Both figures were read back off a running fleet.
 	//
-	// Why that is worse than merely inaccurate: these fields key a SHARING
-	// decision. A field that silently defaults makes two genuinely different
-	// engines hash to one digest -- a false equality, which is the dangerous
-	// direction, because it licenses one variant to borrow a latency line
-	// measured on the other. Recording the gap is what lets the digest refuse
-	// to assert an equality it never verified; see Complete and Fingerprint.
+	// Why that is worse than merely inaccurate: these fields decide whether
+	// two variants count as the same capacity configuration
+	// (IsCapacityCompatible). A field that silently defaults makes two
+	// genuinely different engines compare EQUAL -- a false equality, which is
+	// the dangerous direction, because it licenses one variant to be priced
+	// from a figure measured on the other, and an over-stated capacity orders
+	// too few replicas.
+	//
+	// Recording the gap is what lets a later consumer refuse to assert an
+	// equality nothing verified. Complete() is that predicate. It has no
+	// production caller in this change -- see its own doc comment -- and is
+	// included because the mechanism is incoherent without a way to ask the
+	// question.
 	//
 	// Seven causes reach this list, all the same class:
 	//   - a variable reference nothing could resolve (not in the container's
@@ -220,11 +227,11 @@ func ParseVLLMArgs(scaleTarget scaletarget.ScaleTargetAccessor) EngineParams {
 // .Value left every test green. The reason is that an empty substitution fails
 // downstream anyway -- strconv rejects "" for the numeric keys and usableWord
 // rejects it for the string ones -- so the key is recorded either way. Two
-// tests claimed to pin this exclusion and neither could; see
-// TestAnUnreadableReferenceIsRecorded for what they actually prove. The
-// exclusion stays because it is correct at the point it is written and the
-// first mapped field that tolerates an empty value would make it load-bearing
-// with no warning.
+// tests claimed to pin this exclusion and neither could; what they actually
+// prove is that the key lands in Unresolved, which is true with or without the
+// exclusion. The exclusion stays because it is correct at the point it is
+// written, and the first mapped field that tolerates an empty value would make
+// it load-bearing with no warning.
 func envValues(container *corev1.Container) map[string]string {
 	env := make(map[string]string, len(container.Env))
 	for _, e := range container.Env {
@@ -869,15 +876,17 @@ func containsVarRef(s string) bool {
 // stating because the first version of this change got it wrong. Gating the
 // predicate on Complete() makes it non-reflexive: a variant whose
 // --gpu-memory-utilization could not be read stops being compatible with
-// ITSELF, which TestFingerprintAgreesWithCapacityCompatibilityOnNaN exists to
-// forbid. An equality that is not reflexive is the wrong shape for a
-// comparison.
+// ITSELF. An equality that is not reflexive is the wrong shape for a
+// comparison, and TestCapacityCompatibilityStaysReflexive forbids it.
 //
-// The rule that an unreadable flag is an absence of evidence is real, but it
-// is NOT enforced here and not at Store.FindCompatible either -- see the long
-// note in FindCompatible for why, and for the measured 30x over-estimate that
-// came of enforcing it there. The only place it gates anything is
-// engineFingerprint, which withholds the SHARING key.
+// The rule that an unreadable flag is an absence of evidence is real, and it
+// is deliberately enforced NOWHERE in this change: not here, and not at
+// Store.FindCompatible, where refusing a record was measured to turn 5,000
+// into 153,600 -- a 30x OVER-estimate of per-replica capacity, and an
+// over-stated capacity orders FEWER replicas. The rule is that an unreadable
+// flag withholds only what is NEW; it never changes a path that already
+// existed. Unresolved is therefore recorded and not yet acted on. Its first
+// consumer is the learned-state sharing key, which is not in this change.
 func (p *EngineParams) IsCapacityCompatible(other *EngineParams) bool {
 	if p == nil || other == nil {
 		return false
