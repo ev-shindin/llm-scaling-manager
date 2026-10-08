@@ -178,16 +178,43 @@ var _ = Describe("Utilization share optimizer", Label("full", "utilization-share
 			Expect(p.Labels["app"]).To(Equal(depA), "only model A has GPUs to give")
 			Expect(p.Annotations["controller.kubernetes.io/pod-deletion-cost"]).To(Equal("-1000"))
 		}
-		markedName := marked[0].Name
-		GinkgoWriter.Printf("donor pod marked: %s\n", markedName)
+		// Every marked pod, not only the first: the optimizer may start a second
+		// transfer from A before the first lands, and the ReplicaSet removes
+		// whichever marked pod it ranks first. Any of them leaving releases a GPU.
+		markedNames := map[string]bool{}
+		for _, p := range marked {
+			markedNames[p.Name] = true
+		}
+		GinkgoWriter.Printf("donor pod marked: %s\n", marked[0].Name)
+		livePods := func(g Gomega, dep string) map[string]bool {
+			pods, err := k8sClient.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: "app=" + dep})
+			g.Expect(err).NotTo(HaveOccurred())
+			live := map[string]bool{}
+			for _, p := range pods.Items {
+				if p.DeletionTimestamp == nil {
+					live[p.Name] = true
+				}
+			}
+			return live
+		}
+		before := livePods(Default, depA)
 
-		By("Watching the release and the raise: the marked pod must start terminating before B grows")
+		By("Watching the release and the raise: a marked pod must start terminating before B grows")
 		var released, raised time.Time
+		var leaving []string
 		Eventually(func(g Gomega) {
 			now := time.Now()
 			if released.IsZero() {
-				p, err := k8sClient.CoreV1().Pods(ns).Get(ctx, markedName, metav1.GetOptions{})
-				if err != nil || p.DeletionTimestamp != nil {
+				for _, p := range markedSharePods(ns) {
+					markedNames[p.Name] = true
+				}
+				live := livePods(g, depA)
+				for name := range before {
+					if !live[name] {
+						leaving = append(leaving, name)
+					}
+				}
+				if len(leaving) > 0 {
 					released = now
 				}
 			}
@@ -196,24 +223,24 @@ var _ = Describe("Utilization share optimizer", Label("full", "utilization-share
 			if raised.IsZero() && *b.Spec.Replicas >= 2 {
 				raised = now
 			}
-			g.Expect(released.IsZero()).To(BeFalse(), "the marked pod is still running")
+			g.Expect(released.IsZero()).To(BeFalse(), "no marked pod has left")
 			g.Expect(raised.IsZero()).To(BeFalse(), "B has not been raised")
 		}, 12*time.Minute, time.Second).Should(Succeed())
-		GinkgoWriter.Printf("marked pod released at +%s, B raised at +%s\n",
+		GinkgoWriter.Printf("%v left at +%s, B raised at +%s\n", leaving,
 			released.Sub(switched).Round(time.Second), raised.Sub(switched).Round(time.Second))
 		Expect(raised).NotTo(BeTemporally("<", released), "B was raised before A's GPUs were released")
 
-		By("Checking the ReplicaSet removed exactly the marked pod")
+		By("Checking the ReplicaSet removed only marked pods")
+		for _, name := range leaving {
+			Expect(markedNames).To(HaveKey(name), "the ReplicaSet removed %s, which no transfer marked", name)
+		}
 		Eventually(func(g Gomega) {
-			pods, err := k8sClient.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: "app=" + depA})
-			g.Expect(err).NotTo(HaveOccurred())
-			var live []string
-			for _, p := range pods.Items {
-				if p.DeletionTimestamp == nil {
-					live = append(live, p.Name)
+			live := livePods(g, depA)
+			for name := range before {
+				if !live[name] {
+					g.Expect(markedNames).To(HaveKey(name), "the ReplicaSet removed %s, which no transfer marked", name)
 				}
 			}
-			g.Expect(live).NotTo(ContainElement(markedName))
 			g.Expect(len(live)).To(BeNumerically("<=", 2))
 		}, 3*time.Minute, 5*time.Second).Should(Succeed())
 

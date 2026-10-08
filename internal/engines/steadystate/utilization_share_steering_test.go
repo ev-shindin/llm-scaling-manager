@@ -97,6 +97,35 @@ func TestUtilizationShareMarksBelowAUsersLowCost(t *testing.T) {
 	}
 }
 
+// Two transfers from one donor at once: the second mark is not set below the
+// first, which is ours and not a cost a user set. Below it, the ReplicaSet
+// removed the second transfer's pod first.
+func TestUtilizationShareSecondMarkIsNotBelowTheFirst(t *testing.T) {
+	f := newShareFleet()
+	c := sharePods(t, f)
+	se := newShareEngine(t, f, c, time.Unix(0, 0))
+	acc := f.scaleTargets()["ns/A-v"]
+	var first []corev1.Pod
+	for i, id := range []string{"x-t1-ab", "x-t2-cd"} {
+		tr := allocation.ShareTransfer{ID: id, Donor: roleA, DonorVariant: "A-v", Receiver: roleB,
+			ReceiverVariant: "B-v", GPUs: 1, DonorGPUs: 1, Started: time.Unix(0, 0)}
+		pods, err := se.e.markDonorPods(se.ctx, tr, acc, "ns", func(p *corev1.Pod) bool {
+			return len(first) > 0 && p.Name == first[0].Name
+		})
+		if err != nil || len(pods) != 1 {
+			t.Fatalf("transfer %d: %v, %d pods", i+1, err, len(pods))
+		}
+		if got := pods[0].Annotations[podDeletionCostAnnotation]; got != donorDeletionCost {
+			t.Fatalf("transfer %d marked %s at cost %s, want %s", i+1, pods[0].Name, got, donorDeletionCost)
+		}
+		if i == 0 {
+			first = pods
+		} else if pods[0].Name == first[0].Name {
+			t.Fatalf("both transfers marked %s", pods[0].Name)
+		}
+	}
+}
+
 // A mark on a donor pod names its receiver only within the donor's namespace:
 // a tenant reading its own pods learns nothing of another tenant's models.
 func TestUtilizationShareMarkHidesAReceiverInAnotherNamespace(t *testing.T) {

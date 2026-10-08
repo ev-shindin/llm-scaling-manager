@@ -179,12 +179,15 @@ func (e *Engine) markDonorPods(ctx context.Context, t allocation.ShareTransfer,
 			}
 		}
 	}
-	cost := markCost(pods)
 	// A pod another transfer has marked is that transfer's: a second
 	// concurrent transfer from the same donor gives a different pod, or none.
 	// A mark no live transfer owns -- forged in a pod template, or left by a
 	// transfer long gone -- holds nothing back.
 	pods = slices.DeleteFunc(pods, func(p corev1.Pod) bool { return marked(&p) })
+	// The cost is taken over the pods left: a live transfer's mark is ours, not
+	// a cost a user set, and going below it would remove this transfer's pod
+	// before that one's.
+	cost := markCost(pods)
 	if len(pods) == 0 {
 		return nil, fmt.Errorf("donor variant %q has no unmarked pod to give", t.DonorVariant)
 	}
@@ -661,7 +664,8 @@ func sameNamespace(a, b string) bool {
 
 // markCost is the deletion cost a donor's marked pods get: below every
 // sibling's, so the ReplicaSet removes them first -- donorDeletionCost, or
-// lower when a user set a sibling lower still.
+// lower when a user set a sibling lower still. pods holds no pod a live
+// transfer has marked.
 func markCost(pods []corev1.Pod) string {
 	lowest := int64(0)
 	for i := range pods {
