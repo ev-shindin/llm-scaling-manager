@@ -227,12 +227,9 @@ var _ = Describe("Saturation V2 engine", Label("smoke", "full"), Ordered, func()
 		// grows is equally consistent with WVA recommending nothing and with KEDA
 		// never wiring the metric that carries the recommendation -- and the
 		// second reads as the first for the whole timeout. Measured at 20-35s on
-		// kind, so 120s is generous; failing here is a different diagnosis, not a
-		// slower one.
-		Eventually(func(g Gomega) {
-			expectKEDAExternalMetricWired(g, cfg.LLMDNamespace, modelDecodeDeployment)
-		}, 120*time.Second, time.Duration(cfg.PollIntervalSec)*time.Second).
-			Should(Succeed())
+		// kind, so the budget is generous; failing here is a different diagnosis,
+		// not a slower one.
+		waitForKEDAExternalMetricWired(cfg.LLMDNamespace, modelDecodeDeployment, scalerBaseName)
 
 		By("Asserting KEDA actuates scale-up to ≥ 2 replicas")
 		// Chain: WVA (15 s interval) → wva_desired_replicas=2 → KEDA (5 s poll) →

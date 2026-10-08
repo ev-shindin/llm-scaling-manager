@@ -592,6 +592,37 @@ func expectKEDAExternalMetricWired(g Gomega, namespace, scaleTargetDeployment st
 		scaleTargetDeployment, carried)
 }
 
+// waitForKEDAExternalMetricWired waits for expectKEDAExternalMetricWired, and
+// recreates the ScaledObject once when KEDA wired nothing.
+//
+// KEDA asks the external scaler for the metric spec when it reconciles the
+// ScaledObject, and only then. A ScaledObject created while KEDA's connection
+// to the scaler is still broken -- seconds after a controller restart, before
+// KEDA's gRPC client has reconnected -- gets "got empty metric spec", an HPA
+// on the CPU default, and no second attempt: KEDA reconciles again only on a
+// spec change. Measured twice on kind: the spec registered its ScaledObject at
+// 18:09:03, KEDA's dial timed out at 18:09:03, and its first successful call to
+// the new controller came at 18:09:08 -- after which the HPA stayed unwired for
+// the whole timeout while WVA published desired=2 every cycle.
+//
+// That is KEDA's wiring, not WVA's decision, so it is recovered rather than
+// failed, once and loudly: the ScaledObject is recreated after waitBefore and
+// must then wire within the rest of the budget. A second failure is reported
+// with the guard's own diagnosis.
+func waitForKEDAExternalMetricWired(namespace, scaleTargetDeployment, scaledObjectName string) {
+	const waitBefore = 45 * time.Second
+	poll := time.Duration(cfg.PollIntervalSec) * time.Second
+	wired := func(g Gomega) { expectKEDAExternalMetricWired(g, namespace, scaleTargetDeployment) }
+	if InterceptGomegaFailure(func() { Eventually(wired, waitBefore, poll).Should(Succeed()) }) == nil {
+		return
+	}
+	GinkgoWriter.Printf("KEDA did not wire its external metric onto the HPA for %s within %s; "+
+		"recreating ScaledObject %s once so KEDA asks the scaler for the metric spec again\n",
+		scaleTargetDeployment, waitBefore, scaledObjectName)
+	Expect(fixtures.RecreateScaledObject(ctx, crClient, namespace, scaledObjectName)).To(Succeed())
+	Eventually(wired, 120*time.Second, poll).Should(Succeed())
+}
+
 func expectWVADesiredReplicasConsumed(g Gomega, namespace, scaleTargetDeployment string) {
 	hpaList, err := k8sClient.AutoscalingV2().HorizontalPodAutoscalers(namespace).List(ctx, metav1.ListOptions{})
 	g.Expect(err).NotTo(HaveOccurred())

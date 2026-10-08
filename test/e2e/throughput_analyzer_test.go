@@ -530,11 +530,8 @@ var _ = Describe("Multi-analyzer engine scale-up (saturation-driven, throughput 
 		// the metric that carries the recommendation. This spec restarts WVA and
 		// registers the ScaledObject seconds later, which is exactly the shape
 		// that once left the HPA on the CPU default for the whole timeout (see
-		// waitForWVALeadership). Measured at 20-35 s on kind; 120 s is generous.
-		Eventually(func(g Gomega) {
-			expectKEDAExternalMetricWired(g, cfg.LLMDNamespace, modelDecodeDeployment)
-		}, 120*time.Second, time.Duration(cfg.PollIntervalSec)*time.Second).
-			Should(Succeed())
+		// waitForWVALeadership). Measured at 20-35 s on kind; the budget is generous.
+		waitForKEDAExternalMetricWired(cfg.LLMDNamespace, modelDecodeDeployment, modelSvcName)
 
 		By("Asserting KEDA actuates scale-up above MinReplicas")
 		// Faked kv-cache-usage=0.9 > scaleUpThreshold=0.85 deterministically drives a

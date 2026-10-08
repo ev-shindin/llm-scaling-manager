@@ -349,6 +349,41 @@ func DeleteScaledObject(ctx context.Context, crClient client.Client, namespace, 
 	return nil
 }
 
+// RecreateScaledObject deletes the ScaledObject, waits for KEDA to finalize
+// it, and creates it again with the same spec, labels and annotations. KEDA
+// derives an HPA's metrics only when it reconciles a ScaledObject whose spec
+// changed, so this is the one way to make it ask the external scaler for the
+// metric spec again.
+func RecreateScaledObject(ctx context.Context, crClient client.Client, namespace, name string) error {
+	old := scaledObjectRef(namespace, name)
+	if err := crClient.Get(ctx, client.ObjectKeyFromObject(old), old); err != nil {
+		return fmt.Errorf("get ScaledObject %s: %w", old.Name, err)
+	}
+	if err := crClient.Delete(ctx, old); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("delete ScaledObject %s: %w", old.Name, err)
+	}
+	gone := wait.PollUntilContextTimeout(ctx, time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+		err := crClient.Get(ctx, client.ObjectKeyFromObject(old), scaledObjectRef(namespace, name))
+		return errors.IsNotFound(err), nil
+	})
+	if gone != nil {
+		return fmt.Errorf("ScaledObject %s was not finalized: %w", old.Name, gone)
+	}
+	fresh := &kedav1alpha1.ScaledObject{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   old.Namespace,
+			Name:        old.Name,
+			Labels:      old.Labels,
+			Annotations: old.Annotations,
+		},
+		Spec: old.Spec,
+	}
+	if err := crClient.Create(ctx, fresh); err != nil {
+		return fmt.Errorf("create ScaledObject %s: %w", old.Name, err)
+	}
+	return nil
+}
+
 // EnsureScaledObject creates or replaces the ScaledObject (idempotent for test setup).
 func EnsureScaledObject(
 	ctx context.Context,
