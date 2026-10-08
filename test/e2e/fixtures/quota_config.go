@@ -196,7 +196,7 @@ func SetNamespaceQuota(
 // quota bounds every namespace it does not list at zero: each later
 // scale-from-zero spec is then refused with no-capacity and waits five minutes
 // for an activation that cannot come.
-func ClearLeftoverQuota(ctx context.Context, clientset *kubernetes.Clientset, configNamespace, configName string) (bool, error) {
+func ClearLeftoverQuota(ctx context.Context, clientset kubernetes.Interface, configNamespace, configName string) (bool, error) {
 	cms := clientset.CoreV1().ConfigMaps(configNamespace)
 	cm, err := cms.Get(ctx, configName, metav1.GetOptions{})
 	if errors.IsNotFound(err) {

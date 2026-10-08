@@ -61,3 +61,22 @@ func TestDiscoverUsageWithNodes(t *testing.T) {
 	}
 	assert.Equal(t, byType["AMD-MI300X-192G"], sum)
 }
+
+// A cordoned node is reported as such, so a placement does not count on its
+// free GPUs.
+func TestDiscoverUsageWithNodesMarksCordonedNodes(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	mk := func(name string, cordoned bool) *corev1.Node {
+		return &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"amd.com/gpu.product-name": "AMD-MI300X-192G"}},
+			Spec:       corev1.NodeSpec{Unschedulable: cordoned},
+			Status:     corev1.NodeStatus{Allocatable: corev1.ResourceList{"amd.com/gpu": resource.MustParse("8")}},
+		}
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(mk("open", false), mk("cordoned", true)).Build()
+	_, _, nodes, err := NewK8sWithGpuOperator(c).DiscoverUsageWithNodes(context.Background())
+	require.NoError(t, err)
+	assert.False(t, nodes["open"].Unschedulable)
+	assert.True(t, nodes["cordoned"].Unschedulable)
+}

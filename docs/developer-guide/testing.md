@@ -233,8 +233,10 @@ ReplicaSet, HPA and KEDA. It needs nothing beyond the standard infra.
 - **Duration:** about 7 minutes. Run it alone with
   `FOCUS="Utilization share" make test-e2e-full`.
 
-Two more specs share the label and the `FOCUS`. Both skip when no node has
-enough GPUs of one product.
+Two more specs share the label and the `FOCUS`. All three skip when no
+schedulable node carries a GPU product label, and the two below also skip when
+no node has enough GPUs of one product. A skip reports as success, so read the
+`-v` output: on the kind emulator all three must run.
 - **`utilization_share_pd_test.go`, a P/D model on LeaderWorkerSets.**
   - Setup: a 7-GPU quota. Idle model A has four 1-GPU replicas. Model B's
     decode LWS runs one group of two 1-GPU pods, and its prefill LWS one pod.
@@ -244,8 +246,9 @@ enough GPUs of one product.
     raising the receiver`, `transfer ended`), because it can finish within
     about 30 seconds, faster than a poll reliably catches the donor marks.
 - **`utilization_share_nodes_test.go`, node-aware donor sets.**
-  - Setup: a 6-GPU quota. Idle model A has four 1-GPU replicas, and model B
-    one 2-GPU replica.
+  - Setup: a 6-GPU quota. Idle model A has four 1-GPU replicas, pinned to the
+    product's largest node so that two of them share it, and model B one
+    2-GPU replica.
   - Every other free GPU on the product's nodes is taken by a
     `registry.k8s.io/pause` pod in a separate namespace, outside WVA.
   - No single A pod holds B's pod, so only the node-aware search can fund it:

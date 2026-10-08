@@ -396,7 +396,7 @@ check-import-direction: ## Fail on a pipeline package importing one above it (th
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest helm check-import-direction ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" PATH="$(LOCALBIN):$(PATH)" go test $$(go list ./... | grep -v /e2e | grep -v /benchmark) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" PATH="$(LOCALBIN):$(PATH)" go test $$(go list ./... | grep -v /e2e | grep -v /benchmark) ./test/e2e/fixtures/ -coverprofile cover.out
 
 # Creates a multi-node Kind cluster
 # Adds emulated GPU labels and capacities per node

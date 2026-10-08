@@ -57,6 +57,10 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 		if n := fixtures.AllocatableGPUsForProduct(ctx, k8sClient, product); n < quotaGPUs {
 			Skip(fmt.Sprintf("needs a node with %d %s GPUs, the largest has %d", quotaGPUs, product, n))
 		}
+		// A's pods all go to the largest node of the product: the spec needs
+		// two of them on one node, and that must not be left to the scheduler.
+		pinNode := largestGPUNode(key, product, gpuResName)
+		Expect(pinNode).NotTo(BeEmpty(), "no schedulable %s node", product)
 
 		for _, prefix := range []string{"ushn-", "ushn-filler-"} {
 			nsObj, err := k8sClient.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
@@ -83,7 +87,13 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 
 		By("Creating idle model A at four 1-GPU replicas, and model B at one 2-GPU replica")
 		Expect(fixtures.EnsureModelService(ctx, k8sClient, ns, msA, msA+"-pool", modelA, cfg.UseSimulator, 2,
-			func(d *appsv1.Deployment) { d.Spec.Replicas = ptr.To(int32(4)) })).To(Succeed())
+			func(d *appsv1.Deployment) {
+				d.Spec.Replicas = ptr.To(int32(4))
+				if d.Spec.Template.Spec.NodeSelector == nil {
+					d.Spec.Template.Spec.NodeSelector = map[string]string{}
+				}
+				d.Spec.Template.Spec.NodeSelector[corev1.LabelHostname] = pinNode
+			})).To(Succeed())
 		Expect(fixtures.EnsureModelService(ctx, k8sClient, ns, msB, msB+"-pool", modelB, cfg.UseSimulator, 2,
 			func(d *appsv1.Deployment) { d.Spec.Replicas = ptr.To(int32(1)) },
 			fixtures.WithGPUs(gpuResName, 2))).To(Succeed())
@@ -106,9 +116,7 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 			g.Expect(b.Status.ReadyReplicas).To(Equal(int32(1)))
 		}, time.Duration(cfg.PodReadyTimeout)*time.Second, time.Duration(cfg.PollIntervalSec)*time.Second).Should(Succeed())
 
-		// The spec needs two of A's pods on one node. One GPU node (the
-		// emulator) gives that; a scheduler spreading A one pod per node
-		// leaves no such node, and the spec would only time out.
+		// The spec needs two of A's pods on one node; they are pinned to one.
 		pods, err := k8sClient.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: "app=" + depA})
 		Expect(err).NotTo(HaveOccurred())
 		perNode := map[string]int{}
@@ -119,9 +127,7 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 		for _, n := range perNode {
 			shared = shared || n >= 2
 		}
-		if !shared {
-			Skip(fmt.Sprintf("no node holds two of A's pods (%v): nothing for a node-aware set to combine", perNode))
-		}
+		Expect(shared).To(BeTrue(), "no node holds two of A's pods (%v), although they are pinned to %s", perNode, pinNode)
 
 		By("Waiting for earlier specs' pods to finish terminating on the product's nodes")
 		// The scheduler counts a terminating pod's GPUs as used, so a fill
@@ -218,3 +224,21 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 		}, 8*time.Minute, 10*time.Second).Should(Succeed())
 	})
 })
+
+// largestGPUNode is the schedulable node of product with the most allocatable
+// resourceName, or "".
+func largestGPUNode(key, product, resourceName string) string {
+	nodes, err := k8sClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: key + "=" + product})
+	Expect(err).NotTo(HaveOccurred())
+	best, most := "", int64(0)
+	for _, n := range nodes.Items {
+		if n.Spec.Unschedulable {
+			continue
+		}
+		q := n.Status.Allocatable[corev1.ResourceName(resourceName)]
+		if v := q.Value(); v > most {
+			best, most = n.Name, v
+		}
+	}
+	return best
+}

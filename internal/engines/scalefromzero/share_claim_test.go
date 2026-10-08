@@ -33,6 +33,11 @@ func shareConfig(t *testing.T, shadow bool) *config.Config {
 // A wake with no capacity claims a releasing transfer with its cheapest decode
 // variant when the optimizer acts; in shadow mode it claims nothing.
 func TestClaimShareTransfer(t *testing.T) {
+	// The store is global: leave nothing in it for later tests.
+	t.Cleanup(func() {
+		decision.DefaultShareClaims.Take("", "A100")
+		decision.DefaultShareClaims.Publish(nil, time.Now())
+	})
 	group := modelGroup{namespace: selNS, modelID: "m"}
 	candidates := []Candidate{
 		cand("pricey", domain.RoleDecode, "A100", 1, 9),

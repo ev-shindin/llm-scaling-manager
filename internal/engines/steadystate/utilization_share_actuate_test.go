@@ -528,6 +528,7 @@ func annotate(t *testing.T, c client.Client, name string, ann map[string]string)
 // cannot resurrect the transfer, and the donor backs off instead of being
 // asked again at once, which would loop start/abort forever (section 6.3).
 func TestUtilizationShareAbortRestoresTheDonorAndBacksOff(t *testing.T) {
+	r := freshMetrics(t)
 	f := newShareFleet()
 	c := sharePods(t, f)
 	se := newShareEngine(t, f, c, time.Unix(0, 0))
@@ -537,8 +538,18 @@ func TestUtilizationShareAbortRestoresTheDonorAndBacksOff(t *testing.T) {
 	}
 	start := se.clock
 	var o map[string]utilizationShareOverride
+	ids := map[string]bool{}
+	seen := func() {
+		for _, l := range se.e.utilizationShare.ledgers {
+			for _, tr := range l.Transfers() {
+				ids[tr.ID] = true
+			}
+		}
+	}
+	seen()
 	for range 60 { // A's pods never go: well past the release timeout
 		o = se.cycle()
+		seen()
 		if len(markedPods(t, c)) == 0 {
 			break
 		}
@@ -549,6 +560,10 @@ func TestUtilizationShareAbortRestoresTheDonorAndBacksOff(t *testing.T) {
 	}
 	if o["ns/A-v"].Target != 9 {
 		t.Fatalf("A target after the abort = %d, want 9 restored", o["ns/A-v"].Target)
+	}
+	if got := counterSum(t, r, constants.WVAUtilizationShareTransfersTotal,
+		map[string]string{constants.LabelOutcome: string(allocation.ShareOutcomeAborted)}); got != float64(len(ids)) {
+		t.Fatalf("aborted transfers counted %v, want each of the %d that started once", got, len(ids))
 	}
 	// The back-off is at least one release timeout, which is how long the
 	// aborted attempt took.

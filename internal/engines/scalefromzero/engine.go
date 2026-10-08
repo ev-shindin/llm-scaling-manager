@@ -507,21 +507,7 @@ func (e *Engine) processInactiveModel(
 	}
 
 	constraints := e.gpuConstraints(ctx, group.namespace)
-	selected, outcome := selectServingSet(SelectionInput{
-		Namespace:      group.namespace,
-		Candidates:     candidates,
-		DecodeCovered:  covered.decode,
-		PrefillCovered: covered.prefill,
-		Constraints:    constraints,
-		RequirePrefill: e.requirePrefill(group.modelID, group.namespace),
-	})
-	if len(selected) == 0 && outcome == OutcomeNoCapacity {
-		// No idle GPUs and no reserve: a transfer still releasing for another
-		// receiver may be claimed (utilization-share optimizer, section 6.3).
-		if set, ok := e.claimShareTransfer(ctx, group, candidates, constraints, covered); ok {
-			selected = set
-		}
-	}
+	selected, outcome := e.selectOrClaim(ctx, group, candidates, covered, constraints)
 	if len(selected) == 0 {
 		if outcome == OutcomeAlreadyServing {
 			// The steady state for every serving model with a queue. Not a
@@ -744,4 +730,26 @@ func observeCompletedWakes(
 			metrics.ObserveWakeDuration(va.Namespace, va.Spec.ModelID, took.Seconds())
 		}
 	}
+}
+
+// selectOrClaim selects the variants a wake starts. When no idle GPU and no
+// reserve can host them, a transfer still releasing for another receiver may
+// be claimed instead (utilization-share optimizer, section 6.3); outcome is
+// the selection's either way.
+func (e *Engine) selectOrClaim(ctx context.Context, group modelGroup, candidates []Candidate, covered coverage,
+	constraints []*allocation.ResourceConstraints) ([]Candidate, SelectionOutcome) {
+	selected, outcome := selectServingSet(SelectionInput{
+		Namespace:      group.namespace,
+		Candidates:     candidates,
+		DecodeCovered:  covered.decode,
+		PrefillCovered: covered.prefill,
+		Constraints:    constraints,
+		RequirePrefill: e.requirePrefill(group.modelID, group.namespace),
+	})
+	if len(selected) == 0 && outcome == OutcomeNoCapacity {
+		if set, ok := e.claimShareTransfer(ctx, group, candidates, constraints, covered); ok {
+			selected = set
+		}
+	}
+	return selected, outcome
 }
