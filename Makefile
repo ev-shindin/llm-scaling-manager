@@ -394,8 +394,12 @@ dashboards-check: ## Fail if a Grafana dashboard has overlapping panels, duplica
 check-import-direction: ## Fail on a pipeline package importing one above it (the engine-structure proposal, PR #87)
 	@bash hack/check-import-direction.sh
 
+.PHONY: check-doc-comment-owner
+check-doc-comment-owner: ## Fail on a doc comment describing a different declaration than it sits on
+	@python3 hack/check-doc-comment-owner.py
+
 .PHONY: test
-test: manifests generate fmt vet setup-envtest helm check-import-direction ## Run tests.
+test: manifests generate fmt vet setup-envtest helm check-import-direction check-doc-comment-owner ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" PATH="$(LOCALBIN):$(PATH)" go test $$(go list ./... | grep -v /e2e | grep -v /benchmark) -coverprofile cover.out
 
 # Creates a multi-node Kind cluster
