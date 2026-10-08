@@ -364,25 +364,49 @@ a namespace-local scaling-policy map has no effect; the controller logs
 namespaces. A malformed block (an unknown key, a value out of range) turns only
 the optimizer off and logs `Utilization share: invalid optimizer block; keeping today's optimizer`;
 the limiters in the same entry keep working. `wva_utilization_share_mode` says
-which state is in force (`off`, `invalid`, `shadow` or `active`).
+which state is in force (`off`, `invalid`, `shadow` or `active`); the leader
+publishes it at the start of every cycle, from its first, including cycles with
+no active model, and on any cycle it is not `active` it also removes the marks
+described below.
+
+On a **namespace-scoped install whose cluster policy lives in a separate policy
+namespace**, the controller cannot watch that namespace: it reads the policy when
+it starts, and an edit there takes effect only after a controller restart. That
+includes switching the optimizer to `shadow` or off, and so the pre-downgrade
+step in [marks left after a downgrade](troubleshooting.md#transfer-marks-left-on-pods-after-a-downgrade):
+edit, then restart the controller, then wait a cycle.
 
 **What it writes on pods.** While a transfer releases, each donor pod it chose
 carries two annotations: `llm-d.ai/utilization-share-transfer` (the transfer, as
 JSON, including the pod's previous deletion cost) and
-`controller.kubernetes.io/pod-deletion-cost: "-1000"`, so the ReplicaSet removes
-that pod and not a sibling. A restarted controller rebuilds its in-flight
-transfers from these marks. The controller removes both, restoring the pod's
-previous deletion cost, when the transfer ends, when the optimizer is switched to
-shadow or off (including across a controller restart), and when no quota has been
-read for two minutes. When it removes a mark it restores the previous cost only
-if the pod still carries `-1000`: a deletion cost someone else set after the mark
-is left as they set it. Each mark records the `CONTROLLER_INSTANCE` that wrote it,
-and the sweep after a restart or switch-off removes only that instance's marks, so
-**several controllers sharing a cluster must each set a distinct
-`CONTROLLER_INSTANCE`**; with the same value, one controller's sweep removes the
-other's live marks. Downgrading to a version
-without the optimizer leaves them behind; see
-[marks left after a downgrade](troubleshooting.md#transfer-marks-left-on-pods-after-a-downgrade).
+`controller.kubernetes.io/pod-deletion-cost`, set below every sibling's so the
+ReplicaSet removes that pod and not a sibling: `-1000`, or one below the lowest
+cost a user set on a sibling when that is lower still. The mark records the cost
+it wrote in its `cost` field (absent means `-1000`). A restarted controller
+rebuilds its in-flight transfers from these marks. The controller removes both,
+restoring the pod's previous deletion cost, when the transfer ends, when the
+optimizer is switched to shadow or off (including across a controller restart),
+and when no quota has been read for two minutes. When it removes a mark it
+restores the previous cost only if the pod still carries exactly the cost the
+mark wrote: a deletion cost someone else set after the mark is left as they set
+it.
+
+A mark sits on the donor tenant's pod, so it names the receiver only when the
+receiver is in the donor's namespace. A transfer to a model in another namespace
+writes a mark with no receiver; after a controller restart it is restored as a
+release with no receiver: the donor still releases, and the receiver is planned
+again once the restart's quiet period (one fill timeout) ends. Transfer IDs end
+in a random part, so an ID seen on one pod does not predict another.
+
+Each mark records the `CONTROLLER_INSTANCE` that wrote it in its `instance` field
+(omitted when the variable is unset), and the sweep after a restart or
+switch-off removes only that instance's marks, so **several controllers sharing a
+cluster must each set a distinct `CONTROLLER_INSTANCE`**; with the same value, one
+controller's sweep removes the other's live marks. For the same reason, renaming
+a controller's `CONTROLLER_INSTANCE` orphans the marks it wrote under the old
+name: switch to shadow and wait a cycle before renaming, or clean them up as for
+a downgrade. Downgrading to a version without the optimizer leaves them behind;
+see [marks left after a downgrade](troubleshooting.md#transfer-marks-left-on-pods-after-a-downgrade).
 
 **Namespace-scoped installs** cannot list nodes, so the optimizer plans by GPU
 count alone: it does not check that the GPUs a donor frees are on a node where
@@ -390,8 +414,11 @@ the receiver's pod fits, and the two blocked reasons that need node information
 (`release-taken`, `release-shape-mismatch`) never appear.
 
 With node information, placement counts only nodes a new pod can land on: cordoned
-nodes, nodes that are not Ready and nodes with a Kubernetes node-condition taint
-(`node.kubernetes.io/...`, such as `unreachable`) are skipped. Other taints, such
+nodes, nodes that are not Ready, nodes with a Kubernetes node-condition taint
+(`node.kubernetes.io/...`, such as `unreachable`) and nodes a cluster autoscaler
+is removing (a `ToBeDeletedByClusterAutoscaler`, `karpenter.sh/disrupted` or
+`karpenter.sh/disruption` taint) are skipped; only `NoSchedule` and `NoExecute`
+taints count. Other taints, such
 as a GPU pool's own, are not read, because the pods the pool exists for tolerate
 them. It does **not** match the receiver's `nodeSelector`, affinity or
 tolerations, so a receiver restricted to some nodes can be planned into a hole it
@@ -406,7 +433,11 @@ quota covers every model's need, targets sit at or above need, so only headroom
 moves. When the quota is short (`quota-short`), targets fall below need and a
 model can lose a replica it needs if another, weighted, is worse off. A role that
 holds a replica never gives its last one: taking a model to zero is
-scale-to-zero's decision, with its own retention, never a transfer's.
+scale-to-zero's decision, with its own retention, never a transfer's. That last
+replica is kept, but it is not reported as a floor: `floor-pinned`,
+`floors-exceed-quota`, `wva_utilization_share_floor_excess_gpus` and the
+`floors hold more than half the group's budget` log line count only the
+`minReplicaCount` you configured.
 
 **How to protect a model.** Raise its `minReplicaCount` (a floor is never taken,
 but it is paid for by every other model in the group: see `floor-pinned`), or
@@ -425,12 +456,47 @@ release bound).
 
 **Which pod leaves.** On a Deployment the optimizer marks the pod with the lowest
 existing `controller.kubernetes.io/pod-deletion-cost` (ties broken by name), so a
-cost you set to protect a pod is respected. A Deployment with any pod not Ready,
-or any variant with a pod not yet scheduled, is not asked to give: the ReplicaSet
-removes such pods before it reads the cost, so the choice could not be steered.
-That donor backs off and shows the blocked reason `donor-not-steerable`. On a
-LeaderWorkerSet the highest-index group goes, as LWS removes it; its deletion cost
-is not consulted.
+cost you set to protect a pod is respected. With node information, when it plans
+which node's GPUs to free, it likewise takes a donor's pods lowest cost first,
+then by name, so a pod you protected goes last. The marked pod's cost is set
+below every sibling's: `-1000`, or one below the lowest cost you set on a sibling
+when that is lower.
+
+A Deployment is not asked to give, and backs off with the blocked reason
+`donor-not-steerable` and a `UtilizationShareDonorNotSteerable` Event, when the
+choice of pod could not be steered:
+
+- a pod is not Ready or not yet scheduled: the ReplicaSet removes such pods
+  before it reads the cost;
+- it is mid-rollout, with live pods of more than one ReplicaSet: the Deployment
+  controller splits a scale-down across them, and a cost ranks pods only within
+  one.
+
+On a LeaderWorkerSet the highest-index group goes, as LWS removes it; its
+deletion cost is not consulted. The highest index is taken over the LWS's own
+pods (the ones its StatefulSets own), terminating ones included; a pod that only
+carries the LWS's labels is ignored. If that highest group is terminating or not
+yet scheduled, the donor is refused the same way, since LWS would remove that
+group and not the next.
+
+**Reading the blocked reasons of a P/D model.** `wva_model_scaling_blocked` has
+no `role` label, so a reason on a P/D model may come from its decode or its
+prefill role. Check `wva_utilization_share_headroom` and
+`wva_utilization_share_actionable` by `role` to see which one is short.
+
+**Caveats for operators.**
+
+- **Lowering a quota below what the scaling manager holds bounds growth only.**
+  Nothing is evicted to meet the new quota. The group's budget becomes what its
+  planned models hold, and spare GPUs and `quota-short` are judged against that;
+  the fleet shrinks to the new quota only as models scale down on their own.
+- **Free GPUs can be counted by more than one group in a cycle.** Each group
+  plans over the quota's free GPUs as its limiter reports them, and so do the
+  models left to today's optimizer: the models a `clusterNamespaces` canary
+  leaves out, and, under a cluster quota, the other namespace quota groups. Two
+  of them can plan into the same free GPUs in one cycle. The overshoot is short
+  and the quota limiter bounds it; the canary does not reserve free GPUs for its
+  namespaces.
 
 ## Configuration
 

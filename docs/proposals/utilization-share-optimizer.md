@@ -1648,8 +1648,8 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_utilization_share_release_seconds` | `accelerator_type`, `scope` | histogram, Releasing → Released |
 | `wva_model_scaling_blocked` | `reason="awaiting-release"` | receiver waiting on a donor |
 | `wva_model_scaling_blocked` | `reason="quota-short"` | below need, and the group as a whole is short. Naming the cause in the log (`causedBy`: load, whose floor, or which woken model) is not built (§13) |
-| `wva_model_scaling_blocked` | `reason="floor-pinned"` | floor above the share (§5.5) |
-| `wva_model_scaling_blocked` | `reason="floors-exceed-quota"` | `Σ F > B_net` |
+| `wva_model_scaling_blocked` | `reason="floor-pinned"` | floor above the share (§5.5); only the configured `minReplicaCount` counts, not the last replica a running role keeps (§7.2) |
+| `wva_model_scaling_blocked` | `reason="floors-exceed-quota"` | `Σ F > B_net`, over the configured floors only (`ShareRole.MinFloor`) |
 | `wva_model_scaling_blocked` | `reason="donors-at-floor"` | out of band, no donor can give |
 | `wva_model_scaling_blocked` | `reason="no-compatible-donor"` | out of band, and no donor set opens a fitting hole for every pod of a receiver replica — without node information, no single donor pod is large enough (§6.5) |
 | `wva_utilization_share_claims_total` | `accelerator_type`, `scope`, `outcome` | wake claims on Releasing transfers: `redirected` / `refused-score` / `refused-fit` / `refused-held` / `none-releasing` |
@@ -1657,29 +1657,41 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_model_scaling_blocked` | `reason="release-shape-mismatch"` | GPUs released but the receiver's replica does not fit them (§6.5) |
 | `wva_model_scaling_blocked` | `reason="release-taken"` | GPUs released, then occupied by a pod WVA did not place (§6.3) |
 | `wva_model_scaling_blocked` | `reason="release-timeout"` | the role's last release was aborted; it backs off before giving again. Only an aborted release |
-| `wva_model_scaling_blocked` | `reason="donor-not-steerable"` | the role's pods could not be marked when it was asked to give (a pod not Ready or not scheduled, or the patch failed); it backs off as after an abort |
+| `wva_model_scaling_blocked` | `reason="donor-not-steerable"` | the role's pods could not be marked when it was asked to give (a Deployment pod not Ready or not scheduled, a Deployment mid-rollout, an LWS whose highest group is terminating or unscheduled, or the patch failed); it backs off as after an abort, and the reason lasts only the back-off |
 | `wva_model_scaling_blocked` | `reason="reversal-hold"` | short and actionable, but it gave within the reversal hold (§6.7 rule 4). Urgent receivers (below need) are held too, by decision; this reason makes that wait visible |
 | `wva_model_scaling_blocked` | `reason="swinging"` | planned on its mean need (§6.7 rule 5) |
 | `wva_model_scaling_blocked` | `reason="transfer-limit"` | short and actionable, while the group already has the most donor transfers in flight (2) |
-| `wva_utilization_share_mode` | `mode` | 1 for the mode in force — `off` / `invalid` / `shadow` / `active` — 0 for the others; always published, so an alert needs no `absent()` |
+| `wva_utilization_share_mode` | `mode` | 1 for the mode in force — `off` / `invalid` / `shadow` / `active` — 0 for the others; published by the leader at the start of every cycle, from its first, including cycles with no active model, so an alert needs no `absent()` |
 | `wva_utilization_share_in_flight` | `accelerator_type`, `scope`, `state` | transfers in flight by `state` (`releasing`, `filling`), idle fills included; while acting |
 
 The two gauges at the end are the exceptions to "reasons, not gauges": neither is a
 condition on a model. The mode is one series set per controller, and the
 in-flight count is per group.
 
-Gauges are replaced each cycle and deleted when the optimizer stops; the
-counters and histograms are not deleted, and keep their values.
+Gauges are replaced each cycle and deleted when the optimizer stops or a cycle
+has no active model; the counters and histograms are not deleted, and keep their
+values. `release-taken` and `release-shape-mismatch` are reported for one release
+timeout after the fill that set them, and `donor-not-steerable` and
+`release-timeout` for the back-off, so they are alerted on by rate, not with a
+long `for:`. `wva_model_scaling_blocked` carries no `role`; a P/D owner reads
+the role from `_headroom` and `_actionable`.
 
 Transfers are also recorded as Kubernetes Events on the donor's and the
 receiver's scale targets (`internal/engines/steadystate/utilization_share_events.go`),
 for the model owner who reads `kubectl describe`, not the controller's log:
 `UtilizationShareGiving` and `UtilizationShareReceiving` at start,
-`UtilizationShareReceived` when a transfer lands, and the warnings
-`UtilizationShareReleaseAborted`, `UtilizationShareWrongPod` and
-`UtilizationShareFillTimedOut`. An Event names the other party only within its
-own namespace; across namespaces it says "a model in another namespace of its
-quota group".
+`UtilizationShareReceived` when a transfer lands, `UtilizationShareCancelled`
+(both sides) on a reversal, `UtilizationShareRedirected` on the receiver when a
+wake claims its GPUs, and the warnings `UtilizationShareReleaseAborted` (with
+the end of the back-off), `UtilizationShareWrongPod` (the donor stays one
+replica lower), `UtilizationShareFillTimedOut` and
+`UtilizationShareDonorNotSteerable` (the cause and the end of the back-off).
+`UtilizationShareGiving` names the pods that go and why: the receiver is below
+its need, or headroom by weight; a set contributor names the receiver its set
+funds, and a refill names the scale-from-zero reserve. An Event names the other
+party only within its own namespace; across namespaces it says "a model in
+another namespace of its quota group". An aggregated model is named without a
+role.
 
 Every log line the optimizer writes starts `Utilization share:`. The
 `would rebalance (shadow)` and `rebalancing` Info lines are written when a
@@ -2010,22 +2022,43 @@ optimizer every cycle (§6.6).
        one release timeout, with a WARN;
      - `wva_utilization_share_transfers_total`, and, for an active group,
        `_promised_gpus`, `_effective_seconds`, `_swinging`, `_in_flight` and
-       the `_release_seconds` histogram; `wva_utilization_share_mode`, always.
+       the `_release_seconds` histogram; `wva_utilization_share_mode`, set by
+       the leader at the start of every cycle (`observeUtilizationShareMode`),
+       which also removes the marks on any cycle it is not `active`, cycles
+       with no active model included. A cycle with no active model clears the
+       share gauges.
      - the transfer Events on the donor's and receiver's scale targets
-       (section 9), naming the other party only within its own namespace.
+       (section 9), naming the other party only within its own namespace,
+       including Cancelled, Redirected and DonorNotSteerable.
      - `clusterNamespaces` (section 8.1), the cluster-quota canary.
      - a role that holds a replica never gives its last one: its floor is at
        least one replica, so parking stays scale-to-zero's decision (section
-       7.2).
+       7.2). That replica is not reported as a floor: `floor-pinned`,
+       `floors-exceed-quota`, `_floor_excess_gpus` and the floor-heavy log
+       count only `minReplicaCount` (`ShareRole.MinFloor`).
      - donor pod choice on a Deployment: the lowest existing deletion cost,
-       then the name. A donor with a pod not Ready (Deployment) or not yet
-       scheduled is refused and backs off (`donor-not-steerable`). Unmarking
-       restores the previous cost only if the pod still carries ours.
-     - marks record the controller's `CONTROLLER_INSTANCE`, and the sweep that
-       runs when the optimizer stops acting removes only its own.
-     - node-aware placement skips cordoned and not-Ready nodes, and nodes
-       with a `node.kubernetes.io/...` `NoSchedule`/`NoExecute` taint; a
-       pool's own taints are not read (its pods tolerate them).
+       then the name. The marked pod's cost is below every sibling's: -1000,
+       or one below the lowest cost a user set on a sibling, recorded in the
+       mark's `cost`; unmarking restores the previous cost only if the pod
+       still carries that exact value. A Deployment with a pod not Ready or
+       not yet scheduled, or mid-rollout (live pods of more than one
+       ReplicaSet), is refused and backs off (`donor-not-steerable`). On an
+       LWS the group that goes is the highest index over its own
+       (StatefulSet-owned) pods, terminating ones included; a highest group
+       that is terminating or unscheduled refuses the donor, and a pod that
+       only carries the LWS's labels is ignored.
+     - marks record the controller's `CONTROLLER_INSTANCE` (omitted when
+       unset), and the sweep that runs when the optimizer stops acting removes
+       only its own; renaming the instance orphans the old marks. A mark names
+       its receiver only when the receiver is in the donor's namespace: a
+       cross-namespace transfer's mark carries no receiver, and a restart
+       restores it as a release with no receiver, the receiver being planned
+       again after the quiet period. Transfer IDs end in a random part.
+     - node-aware placement skips cordoned and not-Ready nodes, nodes
+       with a `node.kubernetes.io/...` `NoSchedule`/`NoExecute` taint, and
+       nodes an autoscaler is removing (`ToBeDeletedByClusterAutoscaler`,
+       `karpenter.sh/disrupted`, `karpenter.sh/disruption`); a pool's own
+       taints are not read (its pods tolerate them).
      - the restart quiet period still pins every planned variant for one
        fill timeout. Leaving the unrestored ones to today's optimizer was
        tried and reverted: today's optimizer lowered one model and raised
@@ -2068,9 +2101,9 @@ optimizer every cycle (§6.6).
          hole in one domain, trying each domain in turn; a node without the
          label is in none. It never falls back to the node-blind search, with
          node information or without.
-       - a Deployment donor offers each Ready pod as a replica, and nothing
-         while any of its pods is not Ready. An LWS donor offers its
-         highest-index group.
+       - a Deployment donor offers each Ready pod as a replica, lowest
+         deletion cost first, then by name, and nothing while any of its pods
+         is not Ready. An LWS donor offers its highest-index group.
        - the planned pods, and only they, are marked; a mark carries
          `planned`, so a restart keeps the next check.
        - checking which pod went: a planned transfer whose donor shrank while

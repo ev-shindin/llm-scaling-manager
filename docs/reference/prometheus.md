@@ -750,10 +750,11 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
 ### Utilization-Share Optimizer Metrics
 
 Published when the [utilization-share optimizer](scaling-policy.md#optimizer-cluster-default-only-live)
-is selected, except `wva_utilization_share_mode`, which is always published. The
+is selected, except `wva_utilization_share_mode`, which the leader publishes
+every cycle, from its first, including cycles with no active model. The
 **gauges** are replaced each cycle, so a model or group that leaves takes its
-gauge series with it, and switching the optimizer off (or a cycle with no quota
-read) deletes them all. The **counters and histograms** (`_transfers_total`,
+gauge series with it, and switching the optimizer off, a cycle with no quota
+read, or a cycle with no active model deletes them all. The **counters and histograms** (`_transfers_total`,
 `_withheld_total`, `_claims_total`, `_donors_per_transfer`, `_release_seconds`)
 are never deleted: they keep their last values after the optimizer is switched
 off, as counters do. Use `rate()` or `increase()` on them, not their raw value, to
@@ -763,7 +764,7 @@ The mode gauge:
 
 | metric | type | labels | meaning |
 | --- | --- | --- | --- |
-| `wva_utilization_share_mode` | gauge | `mode`, optional `controller_instance` | `1` for the mode in force, `0` for the other three. `mode`: `off` (no `optimizer:` block selects it), `invalid` (the block did not validate; today's optimizer runs and the limiters are unaffected), `shadow` (computes and reports, moves nothing), `active` (moves GPUs). All four series always exist, so an alert can match the one it fears without `absent()`. |
+| `wva_utilization_share_mode` | gauge | `mode`, optional `controller_instance` | `1` for the mode in force, `0` for the other three. `mode`: `off` (no `optimizer:` block, or an empty `type`), `invalid` (the block did not validate, or there is no `limiters:` list to give it a budget; today's optimizer runs and the limiters are unaffected), `shadow` (computes and reports, moves nothing), `active` (moves GPUs). Set by the leader at the start of every optimization cycle, so all four series exist from its first cycle and an alert can match the one it fears without `absent()`. A non-leader replica does not publish it. |
 
 Two label sets for every other series, plus the optional `controller_instance` on both:
 
@@ -783,7 +784,7 @@ Published in shadow mode as well as when acting:
 | `wva_utilization_share_target_gpus` | gauge | role | The GPU target the tolerance band is judged against (continuous, not whole replicas). |
 | `wva_utilization_share_actionable` | gauge | role | `1` when the role is out of band and off its whole-replica target, so a move could fix it; else `0`. |
 | `wva_utilization_share_actual` | gauge | role | The role's utilization at the GPUs it holds, on the scale of its `scaleUpThreshold`. Absent with no demand or no GPUs. |
-| `wva_utilization_share_floor_excess_gpus` | gauge | role | GPUs the role's `minReplicaCount` holds above its need. |
+| `wva_utilization_share_floor_excess_gpus` | gauge | role | GPUs the role's `minReplicaCount` holds above its need. Only the floor the owner configured counts: the last replica the optimizer never takes from a running role is not a floor here. |
 | `wva_utilization_share_spare_gpus` | gauge | group | The group's budget minus every role's claim (need, raised to its floor). Negative when the quota is short. |
 | `wva_utilization_share_replicas_to_move` | gauge | group | Replicas the whole-replica target would move. In shadow mode, what would be planned. |
 
@@ -811,10 +812,12 @@ Transfer `outcome` values:
 | `aborted` | The donor did not release within the release timeout. Its replica count is restored, and it backs off before it is asked to give again. |
 | `cancelled` | Demand reversed while the release was still in progress, and the transfer was called off. |
 | `redirected` | A scale-from-zero wake claimed the GPUs being released; the original receiver is planned again. |
-| `wrong-pod` | The donor shrank by a pod other than the one marked, so the GPUs did not come free where the receiver was planned; the receiver is not raised. |
+| `wrong-pod` | The donor shrank by a pod other than the one marked, so the GPUs did not come free where the receiver was planned; the receiver is not raised, and the donor stays one replica lower. |
 
-A sustained rise in `aborted` or `fill-timeout` means transfers are not landing;
-the blocked reasons below say which models are affected.
+A sustained rise in `aborted`, `fill-timeout` or `wrong-pod` means transfers are
+not landing; alert on `increase()` of those outcomes (see
+[monitoring](monitoring.md#the-metrics-that-answer-specific-questions)), and read
+the blocked reasons below for which models are affected.
 
 At most two transfers with a donor run per group at once
 (`wva_utilization_share_in_flight` counts them with idle fills included). Idle
@@ -829,22 +832,29 @@ see [Events](monitoring.md#events-on-the-models-scale-targets).
 - **Type**: Gauge, `1` for each reason that holds; a series exists only while its reason holds.
 - **Labels**: `namespace` (scraped as `exported_namespace`), `model_name`, `reason`, optional `controller_instance`.
 - Set only while the optimizer acts. In shadow mode nothing is blocked by it, so none of these appear.
+- There is no `role` label: a reason on a P/D model may come from either role. Cross-check
+  `wva_utilization_share_headroom` and `wva_utilization_share_actionable`, which carry `role`,
+  to see which one is short.
+- Most reasons hold until something changes. `release-taken` and `release-shape-mismatch` expire
+  one release timeout after the fill that set them timed out, and `donor-not-steerable` and
+  `release-timeout` last only their back-off, so they come and go; alert on how often they appear
+  rather than with a long `for:` (see [monitoring](monitoring.md#the-metrics-that-answer-specific-questions)).
 
 | reason | what it means | what you can do |
 | --- | --- | --- |
 | `awaiting-release` | The model receives a transfer whose donor has not released its GPUs yet. | Normally clears within one release. If it persists, check the donor's ScaledObject scale-down window and its pods' termination grace; transfers that time out show as `aborted`. |
 | `quota-short` | The role holds less than its need and the whole group is short: no rebalance can cover it. | Raise the quota for that accelerator type, or lower demand. Weights decide who is cut. |
-| `floor-pinned` | The model's `minReplicaCount` holds at least one replica more than it needs; GPUs the share would otherwise give to others. | Lower `minReplicaCount` if the floor is not deliberate. |
-| `floors-exceed-quota` | The floors of the group's models add up to more than its budget. | Lower floors or raise the quota; until then every model of the group shows this. |
+| `floor-pinned` | The model's `minReplicaCount` holds at least one replica more than it needs; GPUs the share would otherwise give to others. Only the configured `minReplicaCount` counts, not the last replica the optimizer keeps on any running role. | Lower `minReplicaCount` if the floor is not deliberate. |
+| `floors-exceed-quota` | The configured floors (`minReplicaCount`) of the group's models add up to more than its budget. The last replica the optimizer keeps on a running role is not counted. | Lower floors or raise the quota; until then every model of the group shows this. |
 | `donors-at-floor` | The role is short, and no other role holds more than its floor to give. | Lower another model's `minReplicaCount`, or raise the quota. |
 | `no-compatible-donor` | The role is short and out of band, but no donor's pods can host one of its replicas: each of its pods needs a donor pod at least as large (for example, it runs 8-GPU pods and every donor runs 2-GPU pods). | Nothing to tune in the optimizer: give the model GPUs another way (a larger quota, or scale a compatible model down). See [troubleshooting](troubleshooting.md#a-model-shows-no-compatible-donor). |
 | `release-timeout` | The role's last release as a donor was aborted (it did not scale down within the release timeout), and it is backing off before it is asked to give again. Set only for an aborted release; a donor that could not be marked shows `donor-not-steerable` instead. | Check why it did not scale down in time: a long scale-down window, pods slow to terminate, or a ScaledObject not acting. |
-| `donor-not-steerable` | The role was asked to give, but its pods could not be marked: a Deployment pod was not Ready, a pod was not yet scheduled, or the pod patch failed. It is backing off before it is asked again. | Look at the donor's pods (`kubectl get pods`): a pod stuck not Ready or Pending keeps the model from ever giving. The controller log line `could not mark a donor pod` carries the error. |
+| `donor-not-steerable` | The role was asked to give, but the pod that would go could not be chosen: a Deployment pod was not Ready or not yet scheduled, the Deployment was mid-rollout (live pods of more than one ReplicaSet), a LeaderWorkerSet's highest-index group was terminating or not yet scheduled, or the pod patch failed. Present only while it backs off (the back-off doubles with each failure in a row, up to 16 release timeouts), then it is asked again. | Look at the donor's pods (`kubectl get pods`): a pod stuck not Ready or Pending, or a rollout that does not finish, keeps the model from ever giving. The `UtilizationShareDonorNotSteerable` Event on the donor and the controller log line `could not mark a donor pod` carry the cause. |
 | `reversal-hold` | The role is short and a move could fix it, but it gave GPUs within the reversal hold, so it may not receive yet. Applies to urgent receivers (below their need) too. | Usually clears by itself; the hold lasts `wva_utilization_share_effective_seconds{param="reversal-hold"}` from the start of the transfer it gave in, about twice a release. Persisting means load on this model swings faster than transfers land. |
 | `swinging` | The role reversed direction twice within the swing window and is planned on its mean need over that window, not its current one. | Nothing to tune: its load moves faster than the optimizer can follow. Give it headroom by weight or floor if it must not lag. |
 | `transfer-limit` | The role is short and a move could fix it, but its group already has the most transfers with a donor in flight (two). | Clears as transfers land. Persisting means transfers are slow to release; check `wva_utilization_share_in_flight{state="releasing"}` and the donors' scale-down windows. |
-| `release-taken` | The role's last transfer timed out filling, and the GPUs its donors released were taken by a pod the scaling manager did not place. Needs node information. | Look for other workloads scheduling onto the same accelerator type. |
-| `release-shape-mismatch` | The role's last transfer timed out filling: enough GPUs were free in total, but no node had enough for its largest pod. Needs node information. | GPUs are fragmented across nodes; the model needs a node with enough GPUs free at once. |
+| `release-taken` | The role's last transfer timed out filling, and the GPUs its donors released were taken by a pod the scaling manager did not place. Needs node information. Reported for one release timeout after the fill timed out, then cleared; it returns if the next fill fails the same way. | Look for other workloads scheduling onto the same accelerator type. |
+| `release-shape-mismatch` | The role's last transfer timed out filling: enough GPUs were free in total, but no node had enough for its largest pod. Needs node information. Reported for one release timeout after the fill timed out, then cleared. | GPUs are fragmented across nodes; the model needs a node with enough GPUs free at once. |
 
 ### Replica Management Metrics
 

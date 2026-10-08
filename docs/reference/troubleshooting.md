@@ -155,7 +155,10 @@ Work down the list in order.
    (a misspelled key, a value out of range, an empty `clusterNamespaces` entry,
    or `needs a limiters: list`, no budget to share). A block in a
    namespace-local scaling-policy map is ignored:
-   `ignoring optimizer blocks in namespace-local scaling-policy maps`.
+   `ignoring optimizer blocks in namespace-local scaling-policy maps`. On a
+   namespace-scoped install that reads its cluster policy from a separate policy
+   namespace, an edit there is read only when the controller starts: restart it
+   after changing the block.
 2. **Is it in shadow mode?** `wva_utilization_share_mode{mode="shadow"} == 1`;
    the log says `Utilization share: would rebalance (shadow)` rather than
    `Utilization share: rebalancing`, and `wva_utilization_share_promised_gpus` is
@@ -204,11 +207,22 @@ Work down the list in order.
    leader change. The log line `Utilization share: ledger started` carries
    `planningFrom`.
 9. **Could it not mark the donor?** `Utilization share: could not mark a donor pod;
-   transfer not started` means the donor had a pod that was not Ready (on a
-   Deployment) or not yet scheduled (the ReplicaSet removes such a pod before it
-   reads the deletion cost, so the choice of pod cannot be steered), had no pod
-   left to give, or the patch failed. The donor backs off, shows the blocked
-   reason `donor-not-steerable`, and is retried after the back-off.
+   transfer not started` means the donor's pod could not be chosen: a Deployment
+   had a pod that was not Ready or not yet scheduled (the ReplicaSet removes such
+   a pod before it reads the deletion cost), or was mid-rollout with pods of more
+   than one ReplicaSet; a LeaderWorkerSet's highest-index group was terminating or
+   not yet scheduled; the donor had no pod left to give; or the patch failed. The
+   donor backs off, shows the blocked reason `donor-not-steerable`, gets a
+   `UtilizationShareDonorNotSteerable` Event naming the cause and the end of the
+   back-off, and is retried after it.
+
+If a P/D model shows a blocked reason, `wva_model_scaling_blocked` does not say
+which role it came from (it has no `role` label); read
+`wva_utilization_share_headroom` and `wva_utilization_share_actionable` by `role`.
+
+If a lowered quota does not shrink the fleet: the optimizer does not evict to
+meet a quota. A group whose quota is now below what it holds plans over what it
+holds, and moves back under the quota only as models scale down.
 
 If transfers do start but the model still does not grow, read its
 `wva_model_scaling_blocked` reasons.
@@ -233,13 +247,19 @@ which role is short with `wva_utilization_share_headroom < 0`.
 ### Transfer marks left on pods after a downgrade
 
 **Symptom**: after moving to a version without the utilization-share optimizer,
-some pods still carry `llm-d.ai/utilization-share-transfer` and
-`controller.kubernetes.io/pod-deletion-cost: "-1000"`, so the ReplicaSet removes
-them first on every scale-down.
+some pods still carry `llm-d.ai/utilization-share-transfer` and a low
+`controller.kubernetes.io/pod-deletion-cost` (`-1000`, or lower when a sibling's
+cost was lower), so the ReplicaSet removes them first on every scale-down. The
+same happens after renaming a controller's `CONTROLLER_INSTANCE`: the controller
+removes only marks carrying its current instance, so those written under the old
+name stay.
 
-**Prevention**: before downgrading, set `shadow: true` (or remove the `optimizer:`
-block) and wait one optimization cycle. The controller removes the marks it wrote
-and restores each pod's previous deletion cost. Check that none are left:
+**Prevention**: before downgrading (or renaming `CONTROLLER_INSTANCE`), set
+`shadow: true` (or remove the `optimizer:` block) and wait one optimization
+cycle. The controller removes the marks it wrote and restores each pod's previous
+deletion cost. On a namespace-scoped install that reads its cluster policy from a
+separate policy namespace, that edit takes effect only after a controller
+restart: edit, restart, then wait a cycle. Check that none are left:
 
 ```bash
 kubectl get pods -A -o json | jq -r '.items[]
@@ -274,4 +294,13 @@ kubectl get pods -A -o json \
 A mark that is not valid JSON is treated as having no previous cost. If several
 controllers with different `CONTROLLER_INSTANCE` values share the cluster, each
 mark names its writer in its `instance` field; run the cleanup only for the
-instances that were downgraded, by adding that field to the `select`.
+instances that were downgraded (or renamed), by adding that field to the
+`select`. A controller with `CONTROLLER_INSTANCE` unset writes no `instance`
+field at all, so match it with `== null`, not `== ""`:
+
+```jq
+# marks of the instance named old-name
+select((.metadata.annotations["llm-d.ai/utilization-share-transfer"] | fromjson? | .instance) == "old-name")
+# marks of a controller with CONTROLLER_INSTANCE unset
+select((.metadata.annotations["llm-d.ai/utilization-share-transfer"] | fromjson? | .instance) == null)
+```

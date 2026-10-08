@@ -257,33 +257,61 @@ is set. Full list, with labels:
 
 | metric | meaning |
 | --- | --- |
-| `wva_utilization_share_mode{mode=...} == 1` | which state it is in: `off`, `invalid` (the block did not validate), `shadow` or `active`. Always published |
+| `wva_utilization_share_mode{mode=...} == 1` | which state it is in: `off`, `invalid` (the block did not validate), `shadow` or `active`. Published by the leader every cycle, from its first, including cycles with no active model |
 | `wva_utilization_share_actionable == 1` | roles a move would fix now. Published in shadow mode too: this is what shadow mode is for |
 | `wva_utilization_share_replicas_to_move` | replicas the target would move, per group |
 | `wva_utilization_share_spare_gpus` | below `0` = the quota cannot cover every role's need; rebalancing cannot fix that |
 | `wva_utilization_share_in_flight{state=...}` | transfers per group still `releasing` or `filling`; while it acts |
-| `wva_utilization_share_transfers_total` | by `outcome`: `done` is healthy; rising `aborted` or `fill-timeout` means transfers are not landing |
-| `wva_model_scaling_blocked{reason=...}` | which model the optimizer is holding back, and why ([reasons](prometheus.md#wva_model_scaling_blocked-reasons-set-by-the-utilization-share-optimizer)); set only while it acts |
+| `wva_utilization_share_transfers_total` | by `outcome`: `done` is healthy; rising `aborted`, `fill-timeout` or `wrong-pod` means transfers are not landing |
+| `wva_model_scaling_blocked{reason=...}` | which model the optimizer is holding back, and why ([reasons](prometheus.md#wva_model_scaling_blocked-reasons-set-by-the-utilization-share-optimizer)); set only while it acts. No `role` label: on a P/D model, read `wva_utilization_share_headroom` / `_actionable` by `role` to see which role it is |
 
 Alerts worth having once it is configured (adjust the `for:` to a few of your
 release times; `wva_utilization_share_effective_seconds{param="release-timeout"}`
 is one):
 
 ```promql
-# The optimizer block is broken: today's optimizer is running instead.
+# The optimizer block is broken: today's optimizer is running instead. This
+# includes a block whose limiters: list was removed (no budget to share).
 wva_utilization_share_mode{mode="invalid"} == 1
 
-# You configured it, but the controller reports it off (for example, the
-# limiters: list was removed, or the block was edited out by mistake).
+# You configured it, but the controller reports it off: no optimizer: block
+# (it was edited out by mistake) or an empty type.
 wva_utilization_share_mode{mode="off"} == 1
 
-# A group has had releasing transfers for longer than a release should take
-# (alert with for: 30m or so). Check the donors' scale-down windows and pods.
-wva_utilization_share_in_flight{state="releasing"} > 0
+# Transfers are not landing: donors that do not release, receivers that do not
+# fill, or donors losing a pod other than the marked one. The threshold (3)
+# is an example; check the donors' scale-down windows and pods, and the blocked reasons.
+sum by (accelerator_type, scope) (
+  increase(wva_utilization_share_transfers_total{outcome=~"aborted|fill-timeout|wrong-pod"}[1h])
+) > 3
 
-# A model held back by the optimizer for a reason it will not clear by itself.
-wva_model_scaling_blocked{reason=~"donor-not-steerable|no-compatible-donor|floors-exceed-quota|release-taken|release-shape-mismatch"} == 1
+# Releases are running close to their bound: the p90 release time over the last
+# hour exceeds 80% of the release timeout in force.
+histogram_quantile(0.9, sum by (le, accelerator_type, scope) (
+  rate(wva_utilization_share_release_seconds_bucket[1h])))
+> on (accelerator_type, scope)
+0.8 * max by (accelerator_type, scope) (
+  wva_utilization_share_effective_seconds{param="release-timeout"})
+
+# A model held back by a condition that holds until someone changes something
+# (alert with for: of a few release timeouts).
+wva_model_scaling_blocked{reason=~"no-compatible-donor|floors-exceed-quota"} == 1
+
+# Reasons that expire by themselves and come back: release-taken and
+# release-shape-mismatch last one release timeout after a fill timed out, and
+# donor-not-steerable lasts only its back-off. A long for: may never fire on
+# them; alert on how much of a window they were present instead. Here: more
+# than 60 samples in 6h, an hour in total at a 1m scrape interval (scale the
+# threshold to yours).
+sum by (exported_namespace, model_name, reason) (
+  count_over_time(wva_model_scaling_blocked{reason=~"release-taken|release-shape-mismatch|donor-not-steerable"}[6h])
+) > 60
 ```
+
+Do not alert on `wva_utilization_share_in_flight{state="releasing"} > 0` with a
+long `for:`: one release cannot outlive its release timeout (it is aborted
+then), and a busy group keeps the series above zero with transfers that each
+land on time.
 
 #### Events on the models' scale targets
 
@@ -298,16 +326,20 @@ kubectl get events -n <namespace> --field-selector reason=UtilizationShareGiving
 
 | reason | type | on | when |
 | --- | --- | --- | --- |
-| `UtilizationShareGiving` | Normal | donor | a transfer started: it gives one replica; names the pod-deletion cost the marked pod carries |
+| `UtilizationShareGiving` | Normal | donor | a transfer started: it gives one replica. Names the pod (or pods) that go, whom it gives to, and why: the receiver is below its need, or to even out headroom by weight. A donor in a set names the receiver its set funds and how many other donor replicas fund it; a refill names the quota group's scale-from-zero reserve (`reserveGPUs`) |
 | `UtilizationShareReceiving` | Normal | receiver | a transfer started for it; it is raised once the donor's replica is released |
 | `UtilizationShareReceived` | Normal | receiver | the transfer landed: it holds the GPUs |
-| `UtilizationShareReleaseAborted` | Warning | donor | its replica was not released within the release timeout; its count is restored and it is not asked again for a while |
-| `UtilizationShareWrongPod` | Warning | donor | a pod other than the marked one went; the receiver is not raised |
+| `UtilizationShareCancelled` | Normal | donor and receiver | the transfer was called off because demand reversed; the donor's replica count is restored |
+| `UtilizationShareRedirected` | Normal | receiver | the GPUs it was to receive went to a model waking from zero; it is planned again |
+| `UtilizationShareReleaseAborted` | Warning | donor | its replica was not released within the release timeout; its count is restored, and the Event gives the time before which it is not asked to give again (the wait doubles with each abort in a row, up to 16 release timeouts) |
+| `UtilizationShareWrongPod` | Warning | donor | a pod other than the marked one was removed (a rollout, an eviction, another scale-down); the donor stays one replica lower and the receiver is not raised |
 | `UtilizationShareFillTimedOut` | Warning | receiver | its new replica did not take the released GPUs within the fill timeout; it keeps its target |
+| `UtilizationShareDonorNotSteerable` | Warning | donor | it was asked to give, but the pod that would go could not be chosen; the Event carries the cause (a pod not Ready or not yet scheduled, a rollout, the patch failing) and the time before which it is not asked again |
 
 An Event names the other model only when it is in the same namespace; otherwise
 it says "a model in another namespace of its quota group", so one tenant's Events
-never name another tenant's models.
+never name another tenant's models. A P/D model is named with its role, for
+example `model llama (decode)`; an aggregated model by its name alone.
 
 ### The logs
 
@@ -322,7 +354,7 @@ Useful when a metric tells you *which* model is wrong and you want to know *why*
 | `Utilization share: would rebalance (shadow)` | shadow mode found moves it would make; carries `actionable` and `frozen`. Logged when the set of actionable roles changes, not every cycle | Info |
 | `Utilization share: rebalancing` | the optimizer is acting on a group with actionable roles; same fields, same once-per-change rule | Info |
 | `Utilization share: transfer` | a transfer started, ended (with its `outcome`), was cancelled, or was redirected to a wake | Info |
-| `Utilization share: could not mark a donor pod` | a transfer was not started; the donor backs off (`donor-not-steerable`) | Error |
+| `Utilization share: could not mark a donor pod` | a transfer was not started; the donor backs off (`donor-not-steerable`, and a `UtilizationShareDonorNotSteerable` Event on it) | Error |
 | `Utilization share: invalid optimizer block` | the block did not validate; today's optimizer runs | Error |
 | `Utilization share: evaluation` | the per-group table, every cycle | **`-v=4`** |
 | `Collected replica metrics` | metrics are arriving | **`-v=4`** |
