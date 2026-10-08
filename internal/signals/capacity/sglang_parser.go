@@ -65,69 +65,69 @@ func ParseSGLangArgs(scaleTarget scaletarget.ScaleTargetAccessor) EngineParams {
 // default standing in for an unreadable value is distinguishable from the
 // engine's real setting. The default is still preserved either way, matching
 // the vLLM parser.
-func applySGLangParam(key, value string, params *EngineParams) bool {
+func applySGLangParam(key, value string, params *EngineParams) applyResult {
 	switch key {
 	case "mem_fraction_static":
 		v, err := strconv.ParseFloat(value, 64)
 		if err != nil || !usableFraction(v) {
-			return false
+			return applyUnusable
 		}
 		params.GpuMemoryUtilization = v
 	case "page_size":
 		v, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
-			return false
+			return applyUnusable
 		}
 		params.BlockSize = v
 	case keyDtype:
 		if !usableWord(value) {
-			return false
+			return applyUnusable
 		}
 		params.WeightDtype = value
 	case "quantization":
 		if !usableWord(value) {
-			return false
+			return applyUnusable
 		}
 		params.Quantization = value
 	case "kv_cache_dtype":
 		if !usableWord(value) {
-			return false
+			return applyUnusable
 		}
 		params.KvCacheDtype = value
 	case "tp_size", "tensor_parallel_size", "tp":
 		v, err := strconv.Atoi(value)
 		if err != nil {
-			return false
+			return applyUnusable
 		}
 		params.TensorParallelSize = v
 	case "max_running_requests":
 		v, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
-			return false
+			return applyUnusable
 		}
 		params.MaxNumSeqs = v
 	case "max_total_tokens":
 		v, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
-			return false
+			return applyUnusable
 		}
 		params.TotalKvTokensOverride = v
 	case "context_length":
 		v, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
-			return false
+			return applyUnusable
 		}
 		params.MaxModelLen = v
 	case "max_prefill_tokens":
 		v, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
-			return false
+			return applyUnusable
 		}
 		params.MaxNumBatchedTokens = v
 	case "chunked_prefill_size":
 		v, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
-			return false
+			return applyUnusable
 		}
 		if v > 0 {
 			params.MaxNumBatchedTokens = v
@@ -138,6 +138,10 @@ func applySGLangParam(key, value string, params *EngineParams) bool {
 		}
 	case "disable_cuda_graph":
 		params.EnforceEager = true
+	default:
+		// Not a flag this parser maps. parseArgsWith decides whether
+		// that is harmless or the wrong-parser signal.
+		return applyUnknown
 	}
-	return true
+	return applyOK
 }
