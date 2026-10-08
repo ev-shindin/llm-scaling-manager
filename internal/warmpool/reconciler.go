@@ -149,6 +149,14 @@ type Reconciler struct {
 	// is what a pool with no optimizer running should do.
 	Contended func(namespace, accelerator string) bool
 
+	// Shape reads a pool Deployment's shape: the GPUs its template asks per
+	// Pod, the accelerator its template pins, and how many of its Pods are
+	// scheduled. Optional. It is what lets the utilization-share carve-out
+	// (CarveFor) size a pool none of whose Pods is a member yet -- the first
+	// Pod of a pool in a full quota -- and count a Pod that is scheduled but
+	// still starting as held.
+	Shape func(ctx context.Context, namespace, deployment string) (PoolShape, bool)
+
 	// WantAwake reports which model the optimizer says should hold a pool's
 	// GPUs, and whether it has said anything at all.
 	//
@@ -205,6 +213,9 @@ type Reconciler struct {
 	// keyed by pool and holding the version waited for, so a new wait after a
 	// new charge is announced again while one wait is stated once.
 	lastAwaiting map[string]uint64
+	// carveStall is, per pool, when its carve-out last made progress -- the
+	// pool's held GPUs grew or its target changed -- for CarveStall.
+	carveStall map[string]carveProgress
 	// lastSummary is the previous pass's one-line state PER POOL, so a steady
 	// pool logs once rather than every Interval. Guarded by passMu, which
 	// already serialises the whole pass.
@@ -435,9 +446,15 @@ func (r *Reconciler) Once(ctx context.Context) (policy.Plan, error) {
 		lent := lentPods(mine)
 		r.report(ctx, spec, mine, theirs, free, lent)
 		r.apply(ctx, spec, plan)
-		if acc, target, ok := r.publishSize(ctx, spec, mine, lent); ok {
-			if held := warmPoolGPUsByAccelerator(mine)[acc]; target > held {
-				unheld[acc] += target - held
+		var shape *PoolShape
+		if r.Shape != nil && spec.Deployment != "" {
+			if sh, ok := r.Shape(ctx, r.Namespace, spec.Deployment); ok {
+				shape = &sh
+			}
+		}
+		if acc, target, ok := r.publishSize(ctx, spec, mine, lent, shape); ok {
+			if short := r.carveFor(ctx, spec, mine, shape, acc, target); short > 0 {
+				unheld[acc] += short
 			}
 		}
 		merged = mergePlans(merged, plan)
@@ -609,7 +626,8 @@ func acceleratorsIn(memberships []pool.Membership) string {
 // the contention hold and before the headroom cap, which is what the
 // utilization-share optimizer's carve-out exists to relieve -- and false when
 // the pool is not sized here or names no single accelerator or device count.
-func (r *Reconciler) publishSize(ctx context.Context, spec PoolSpec, memberships []pool.Membership, lent int) (string, int, bool) {
+func (r *Reconciler) publishSize(ctx context.Context, spec PoolSpec, memberships []pool.Membership, lent int,
+	shape *PoolShape) (string, int, bool) {
 	if r.PublishSize == nil || spec.Deployment == "" {
 		return "", 0, false
 	}
@@ -674,6 +692,16 @@ func (r *Reconciler) publishSize(ctx context.Context, spec PoolSpec, memberships
 	// recurs later at the same version -- a snapshot that aged out -- is a new
 	// wait and is said again.
 	accelerator, perPod := soleAccelerator(memberships), gpusPerUnit(memberships)
+	if shape != nil {
+		// No member to read yet -- typically the first Pod of a pool in a full
+		// quota, which is exactly the Pod the carve-out exists for.
+		if accelerator == "" {
+			accelerator = shape.Accelerator
+		}
+		if perPod == 0 {
+			perPod = shape.PodGPUs
+		}
+	}
 	target := want * perPod
 	awaiting := false
 	defer func() {
@@ -1507,4 +1535,66 @@ func lentPodsByVariant(memberships []pool.Membership, variants []policy.VariantD
 		}
 	}
 	return out
+}
+
+// PoolShape is what a pool Deployment states about its Pods.
+type PoolShape struct {
+	// Accelerator is the product its template pins by nodeSelector, or "".
+	Accelerator string
+	// PodGPUs is the GPUs its template asks per Pod.
+	PodGPUs int
+	// ScheduledGPUs is what its Pods scheduled to a node request, members or
+	// not yet: a Pod still starting holds its GPUs already.
+	ScheduledGPUs int
+}
+
+// CarveStall is how long a pool's carve-out is kept without the pool making
+// progress into it. A pool that cannot grow for a reason the carve-out does
+// not relieve -- its Pods fit no node's free GPUs, or another limiter binds
+// -- would otherwise hold GPUs free from every model for as long as it wants
+// them.
+const CarveStall = 10 * time.Minute
+
+type carveProgress struct {
+	since        time.Time
+	held, target int
+	reported     bool
+}
+
+// carveFor is the part of a pool's target, in GPUs, the utilization-share
+// optimizer should keep free for it (proposal section 7.2): the target less
+// what the pool holds -- its members, or its scheduled Pods when the shape
+// says more -- and nothing once the pool has made no progress into it for
+// CarveStall.
+func (r *Reconciler) carveFor(ctx context.Context, spec PoolSpec, memberships []pool.Membership, shape *PoolShape,
+	accelerator string, target int) int {
+	held := warmPoolGPUsByAccelerator(memberships)[accelerator]
+	if shape != nil {
+		held = max(held, shape.ScheduledGPUs)
+	}
+	name := r.metricName(spec)
+	if target <= held {
+		delete(r.carveStall, name)
+		return 0
+	}
+	if r.carveStall == nil {
+		r.carveStall = map[string]carveProgress{}
+	}
+	now := r.now()
+	p, seen := r.carveStall[name]
+	if !seen || held > p.held || target != p.target {
+		r.carveStall[name] = carveProgress{since: now, held: held, target: target}
+		return target - held
+	}
+	if now.Sub(p.since) < CarveStall {
+		return target - held
+	}
+	if !p.reported {
+		p.reported = true
+		r.carveStall[name] = p
+		log.FromContext(ctx).Info("WARNING: warm pool made no progress into the GPUs kept free for it; "+
+			"no longer keeping them free", "pool", name, "accelerator", accelerator,
+			"target", target, "held", held, "for", CarveStall.String())
+	}
+	return 0
 }

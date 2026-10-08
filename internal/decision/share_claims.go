@@ -32,9 +32,8 @@ type ShareClaim struct {
 	Scope, Accelerator, ID string
 	// Wake names the woken variant (namespace/variant), for the log.
 	Wake string
-	// Model is the woken model (namespace/model). The claims one wake made
-	// together -- a decode and its prefill -- share it, and are applied all
-	// or none.
+	// Model is the woken model (namespace/model), for the log. The claims
+	// one wake made together -- a decode and its prefill -- share it.
 	Model string
 }
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,26 +14,6 @@ import (
 
 // fillerImage holds GPUs and does nothing. Never docker.io.
 const fillerImage = "registry.k8s.io/pause:3.9"
-
-// WithGPUs requests count GPUs of the named vendor resource on every container,
-// as a request and a limit. Unlike WithGPURequest it names the vendor, so it
-// matches the nodeSelector the accelerator pin sets.
-func WithGPUs(resourceName string, count int64) ModelServiceOption {
-	return func(d *appsv1.Deployment) {
-		qty := *resource.NewQuantity(count, resource.DecimalSI)
-		for i := range d.Spec.Template.Spec.Containers {
-			c := &d.Spec.Template.Spec.Containers[i]
-			if c.Resources.Requests == nil {
-				c.Resources.Requests = corev1.ResourceList{}
-			}
-			if c.Resources.Limits == nil {
-				c.Resources.Limits = corev1.ResourceList{}
-			}
-			c.Resources.Requests[corev1.ResourceName(resourceName)] = qty
-			c.Resources.Limits[corev1.ResourceName(resourceName)] = qty
-		}
-	}
-}
 
 // FreeGPUsOnNode is a node's allocatable GPUs of resourceName less what the
 // pods scheduled to it request, as the scheduler accounts them.

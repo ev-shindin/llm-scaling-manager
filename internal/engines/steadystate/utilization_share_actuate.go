@@ -150,31 +150,23 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	held := g.Committed
 	// Wake claims first, before Observe: a claim made against a Releasing
 	// transfer must be applied before a release turns it into Filling.
-	claims := decision.DefaultShareClaims.Take(g.Scope, g.AcceleratorType)
-	// The claims one wake made together -- a decode and its prefill -- are
-	// applied all or none: half a P/D pair funded holds GPUs for a model that
-	// cannot serve. If any has moved on, none is redirected, and the original
-	// receivers keep what they were promised.
-	lost := map[string]bool{}
-	for _, c := range claims {
-		if !l.Redirectable(c.ID) {
-			lost[c.Model] = true
-		}
-	}
-	for _, c := range claims {
-		if lost[c.Model] {
-			logger.Info("Utilization share: a wake claimed a transfer that is no longer releasing; "+
-				"none of its claims is applied", "id", c.ID, "wake", c.Wake, "model", c.Model)
-			continue
-		}
+	// Each claim is applied on its own. A wake's claims were made all or none
+	// (ShareClaimStore.ClaimSet), and the wake has happened by now: its pods
+	// exist, and the scheduler gives a hole to whichever Pending pod comes
+	// first, not to whoever was promised it. Refusing the redirect of a claim
+	// whose partner moved on would not keep the woken pod out of its hole; it
+	// would only raise the original receiver into a pod that stays Pending.
+	for _, c := range decision.DefaultShareClaims.Take(g.Scope, g.AcceleratorType) {
 		prev, ok := l.Redirect(c.ID, now, tm.FillTimeout)
 		if !ok {
-			continue // unreachable: checked Redirectable above, in this goroutine
+			logger.Info("Utilization share: a wake claimed a transfer that is no longer releasing; ignored",
+				"id", c.ID, "wake", c.Wake, "model", c.Model)
+			continue
 		}
 		metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, string(allocation.ShareOutcomeRedirected), prev.Urgent)
 		e.remarkDonorPods(ctx, logger, l, c.ID)
 		logger.Info("Utilization share: transfer redirected to a woken model; its receiver is planned again",
-			"id", c.ID, "wake", c.Wake, "receiver", prev.Receiver, "donor", prev.Donor)
+			"id", c.ID, "wake", c.Wake, "model", c.Model, "receiver", prev.Receiver, "donor", prev.Donor)
 	}
 	l.PlannedRunning(e.plannedRunning(ctx, logger, l))
 	for _, end := range l.Observe(held, now, tm) {
@@ -308,7 +300,10 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 //
 // With node information (nodes: the free GPUs this cycle's node-aware sets
 // left), a replica is filled only when its pods fit the nodes -- in its
-// domain, for a receiver with one -- and its placement is spent. This is
+// domain, for a receiver with one -- and its placement is spent. The nodes'
+// free GPUs already exclude what is promised or held for a wake; a promised
+// pod that is bound but not yet held is then subtracted twice, which only
+// delays a fill until it is held. This is
 // what re-plans a receiver after a donor lost the wrong pod: the GPUs that did
 // come free are idle, and they fund it only where its pods fit.
 func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g allocation.ShareGroup,
@@ -344,14 +339,13 @@ func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g 
 	slices.SortFunc(receivers, func(a, b string) int { return cmp.Or(cmp.Compare(z(a), z(b)), cmp.Compare(a, b)) })
 	for _, rc := range receivers {
 		grow := g.Grow[rc]
-		pods := grow.PodGPUs
-		if len(pods) == 0 {
-			pods = []int{max(grow.GPUs, 1)}
-		}
 		for n := 0; n < allocation.ShareMaxReplicasPerCycle && idle >= grow.GPUs && committed[rc] < integer[rc]; n++ {
-			if nodes != nil && !allocation.ShareFitPods(nodes, pods, domains[rc]) {
+			// A receiver whose pod shape is unknown is filled by count, as
+			// without node information: guessing one large pod would refuse
+			// a multi-pod replica that fits.
+			if nodes != nil && len(grow.PodGPUs) > 0 && !allocation.ShareFitPods(nodes, grow.PodGPUs, domains[rc]) {
 				logger.V(logging.DEBUG).Info("Utilization share: idle GPUs do not fit the receiver's pods on any node",
-					"receiver", rc, "pods", pods)
+					"receiver", rc, "pods", grow.PodGPUs)
 				break
 			}
 			t := l.StartFill(rc, grow.Name, grow.GPUs, held, now, tm)

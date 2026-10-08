@@ -1138,6 +1138,9 @@ func runWarmPool(
 		Client:    mgr.GetClient(),
 		Namespace: warmPoolNS,
 	}).Find
+	// Read, never written: a pool's shape lets the utilization-share
+	// optimizer keep GPUs free for a pool none of whose Pods runs yet.
+	reconciler.Shape = (&warmpool.PoolShapes{Client: mgr.GetClient()}).Read
 	setupLog.Info("warm pool enabled",
 		"namespace", warmPoolNS,
 		"sleepMinSize", *warmPoolSleepMinSize,

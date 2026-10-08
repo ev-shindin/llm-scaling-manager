@@ -553,28 +553,11 @@ func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string,
 	if l.ReceivingHeld(rc, now, tm) || moved[rc] >= ShareMaxReplicasPerCycle {
 		return nil, nil
 	}
-	nodes := slices.Sorted(maps.Keys(in.Nodes))
-	// A receiver with an exclusive topology is confined to one domain, and a
-	// node without the label is in none. Each domain is tried in turn: fixing
-	// it at the first placement would refuse receivers another domain fits.
+	// Each domain is tried in turn: fixing it at the first placement would
+	// refuse receivers another domain fits.
 	key := in.DomainKey[rc]
-	domains := []string{""}
-	if key != "" {
-		domains = nil
-		for _, n := range nodes {
-			if v := in.Nodes[n].Labels[key]; v != "" && !slices.Contains(domains, v) {
-				domains = append(domains, v)
-			}
-		}
-		slices.Sort(domains)
-	}
-	for _, domain := range domains {
-		var in1 []string
-		for _, n := range nodes {
-			if key == "" || in.Nodes[n].Labels[key] == domain {
-				in1 = append(in1, n)
-			}
-		}
+	for _, domain := range shareDomains(in.Nodes, key) {
+		in1 := shareNodesInDomain(in.Nodes, key, domain)
 		search := shareNodeSearch{l: l, in: in, rc: rc, donors: donors, work: work, moved: moved, byKey: byKey,
 			now: now, tm: tm, taken: map[string]int{}, used: map[shareUnitRef]bool{}}
 		hole, ok := search.place(grow.PodGPUs, in1)
@@ -600,19 +583,12 @@ func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string,
 // needing the fewest donor replicas, then leaving the smallest hole. It
 // returns the holes left on every node, and whether every pod was placed.
 func (s *shareNodeSearch) place(podGPUs []int, nodes []string) (map[string]int, bool) {
-	need := slices.Sorted(slices.Values(podGPUs))
-	slices.Reverse(need)
 	hole := map[string]int{}
 	for n, info := range s.in.Nodes {
 		hole[n] = info.Free
 	}
-	for _, p := range need {
-		best := ""
-		for _, n := range nodes {
-			if hole[n] >= p && (best == "" || hole[n] < hole[best]) {
-				best = n
-			}
-		}
+	for _, p := range largestFirst(podGPUs) {
+		best := shareBestFit(hole, nodes, p)
 		if best == "" {
 			var units []shareUnitRef
 			left := 0
@@ -743,36 +719,18 @@ func withdrawNodeSet(nodes map[string]ShareNode, units map[string][]ShareUnit, s
 // with the smallest free count that holds it, and spends what it placed. A
 // receiver with an exclusive topology (domainKey) is placed in one domain,
 // each tried in turn; a node without the label is in none. It reports
-// whether every pod fitted, and spends nothing when not.
+// whether every pod fitted, and spends nothing when not. It places exactly as
+// the node-aware set search does where no donor is needed.
 func ShareFitPods(nodes map[string]ShareNode, podGPUs []int, domainKey string) bool {
-	names := slices.Sorted(maps.Keys(nodes))
-	domains := []string{""}
-	if domainKey != "" {
-		domains = nil
-		for _, n := range names {
-			if v := nodes[n].Labels[domainKey]; v != "" && !slices.Contains(domains, v) {
-				domains = append(domains, v)
-			}
-		}
-		slices.Sort(domains)
-	}
-	need := slices.Sorted(slices.Values(podGPUs))
-	slices.Reverse(need)
-	for _, domain := range domains {
+	for _, domain := range shareDomains(nodes, domainKey) {
+		names := shareNodesInDomain(nodes, domainKey, domain)
 		free := map[string]int{}
 		for _, n := range names {
-			if domainKey == "" || nodes[n].Labels[domainKey] == domain {
-				free[n] = nodes[n].Free
-			}
+			free[n] = nodes[n].Free
 		}
 		fits := true
-		for _, p := range need {
-			best := ""
-			for _, n := range names {
-				if f, ok := free[n]; ok && f >= p && (best == "" || f < free[best]) {
-					best = n
-				}
-			}
+		for _, p := range largestFirst(podGPUs) {
+			best := shareBestFit(free, names, p)
 			if best == "" {
 				fits = false
 				break
@@ -789,4 +747,51 @@ func ShareFitPods(nodes map[string]ShareNode, podGPUs []int, domainKey string) b
 		}
 	}
 	return false
+}
+
+// shareDomains is the domains a receiver may be placed in, in order: every
+// value of key on the nodes, or the one domain "" -- all nodes -- when key is
+// "". A node without the label is in no domain.
+func shareDomains(nodes map[string]ShareNode, key string) []string {
+	if key == "" {
+		return []string{""}
+	}
+	var out []string
+	for _, n := range nodes {
+		if v := n.Labels[key]; v != "" && !slices.Contains(out, v) {
+			out = append(out, v)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// shareNodesInDomain is the nodes of one domain, by name.
+func shareNodesInDomain(nodes map[string]ShareNode, key, domain string) []string {
+	var out []string
+	for _, n := range slices.Sorted(maps.Keys(nodes)) {
+		if key == "" || nodes[n].Labels[key] == domain {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// shareBestFit is the node of names with the smallest hole that holds p
+// GPUs, the first by name on a tie, or "".
+func shareBestFit(hole map[string]int, names []string, p int) string {
+	best := ""
+	for _, n := range names {
+		if h, ok := hole[n]; ok && h >= p && (best == "" || h < hole[best]) {
+			best = n
+		}
+	}
+	return best
+}
+
+// largestFirst is a replica's pod sizes, largest first.
+func largestFirst(podGPUs []int) []int {
+	out := slices.Sorted(slices.Values(podGPUs))
+	slices.Reverse(out)
+	return out
 }

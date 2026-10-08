@@ -187,21 +187,7 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(b.Status.ReadyReplicas).To(BeNumerically(">=", 2))
 			logs := controllerLogsSince(start)
-			var raised, lastRelease time.Time
-			for _, line := range strings.Split(logs, "\n") {
-				at, ok := logLineTime(line)
-				switch {
-				case !ok:
-				case strings.Contains(line, "released, raising the receiver") && strings.Contains(line, `"id": "`+setID+`"`):
-					raised = at
-				case strings.Contains(line, "transfer ended") && strings.Contains(line, `"outcome": "done"`) &&
-					strings.Contains(line, `"receiver": ""`) && strings.Contains(line, `"scope": "`+ns+`"`):
-					lastRelease = at
-				}
-			}
-			g.Expect(raised.IsZero()).To(BeFalse(), "the set's primary never raised B")
-			g.Expect(lastRelease).NotTo(BeTemporally(">", raised), "a member released after B was raised")
-			g.Expect(logs).To(MatchRegexp(`transfer ended.*"id": "` + setID + `".*"outcome": "done"`))
+			expectSetCompleted(g, logs, setID)
 			g.Expect(logs).NotTo(MatchRegexp(`"scope": "`+ns+`".*"outcome": "wrong-pod"`), "a donor lost a pod it was not asked for")
 		}, 8*time.Minute, 10*time.Second).Should(Succeed())
 	})

@@ -32,6 +32,8 @@ type nodeFleet struct {
 	// quotaFree is what the quota limiter reports free: 0 in the fixture,
 	// which holds its 16 GPUs fully used.
 	quotaFree int
+	// unknownShape drops B's pod shape from the requests.
+	unknownShape bool
 }
 
 func newNodeFleet(t *testing.T) *nodeFleet {
@@ -76,6 +78,9 @@ func (nf *nodeFleet) cycle(withNodes bool) map[string]utilizationShareOverride {
 		st := &out[i].VariantStates[0]
 		if out[i].ModelID == "B" {
 			st.GPUsPerReplica, st.PodGPUs = 2, []int{2}
+			if nf.unknownShape {
+				st.PodGPUs = nil
+			}
 		} else {
 			st.PodGPUs = []int{1}
 		}
@@ -318,12 +323,14 @@ func TestUtilizationShareAttributesAFillTimeout(t *testing.T) {
 // pod; once a node shows room for it, B is filled.
 func TestUtilizationShareReplansFromTheHolesThatOpened(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		room  int // free GPUs on n-A-v-0 after the wrong pods went
-		wantB int
+		name    string
+		room    int // free GPUs on n-A-v-0 after the wrong pods went
+		unknown bool
+		wantB   int
 	}{
-		{"the open holes are too small", 1, 5},
-		{"a node has room for B's pod", 2, 6},
+		{"the open holes are too small", 1, false, 5},
+		{"a node has room for B's pod", 2, false, 6},
+		{"B's pod shape is unknown: filled by count", 1, true, 6},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			nf := newNodeFleet(t)
@@ -333,6 +340,7 @@ func TestUtilizationShareReplansFromTheHolesThatOpened(t *testing.T) {
 			nf.deletePods(t, "A-v-0", "A-v-1")
 			nf.f.current["A"] -= 2
 			nf.quotaFree = 2 // the quota sees the two GPUs A gave up
+			nf.unknownShape = tc.unknown
 			// What the refresher would see: those two nodes freed their GPU.
 			nf.nodes["n-A-v-0"] = decision.NodeGPU{Accelerator: "A100", Capacity: tc.room, Used: 0}
 			nf.nodes["n-A-v-1"] = decision.NodeGPU{Accelerator: "A100", Capacity: 1, Used: 0}

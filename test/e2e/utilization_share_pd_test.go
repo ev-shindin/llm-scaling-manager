@@ -193,30 +193,11 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 			var l lwsv1.LeaderWorkerSet
 			g.Expect(crClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: lwsDecode}, &l)).To(Succeed())
 			g.Expect(l.Status.ReadyReplicas).To(BeNumerically(">=", 2))
-			logs := controllerLogsSince(start)
 			// The set, from the controller's own account: two members started,
 			// the primary (whose ID is the set's) raised the receiver and ended
-			// done, and no member of the set released after that raise -- the
-			// receiver is raised only when all its holes are open.
-			members := 0
-			var raised, lastRelease time.Time
-			for _, line := range strings.Split(logs, "\n") {
-				at, ok := logLineTime(line)
-				switch {
-				case !ok:
-				case strings.Contains(line, "transfer started") && strings.Contains(line, `"set": "`+setID+`"`):
-					members++
-				case strings.Contains(line, "released, raising the receiver") && strings.Contains(line, `"id": "`+setID+`"`):
-					raised = at
-				case strings.Contains(line, "transfer ended") && strings.Contains(line, `"outcome": "done"`) &&
-					strings.Contains(line, `"receiver": ""`) && strings.Contains(line, `"scope": "`+ns+`"`):
-					lastRelease = at // a contributor completes at its release
-				}
-			}
-			g.Expect(members).To(Equal(2), "want exactly the two members of set %s started", setID)
-			g.Expect(raised.IsZero()).To(BeFalse(), "the set's primary never raised the receiver")
-			g.Expect(lastRelease).NotTo(BeTemporally(">", raised), "a member released after the receiver was raised")
-			g.Expect(logs).To(MatchRegexp(`transfer ended.*"id": "` + setID + `".*"outcome": "done"`))
+			// done, and its contributor released -- ended done -- no later than
+			// that raise: the receiver is raised only when all its holes are open.
+			expectSetCompleted(g, controllerLogsSince(start), setID)
 		}, 8*time.Minute, 10*time.Second).Should(Succeed())
 	})
 })
@@ -229,4 +210,43 @@ func logLineTime(line string) (time.Time, bool) {
 	}
 	t, err := time.Parse(time.RFC3339Nano, ts)
 	return t, err == nil
+}
+
+// expectSetCompleted checks a donor set of two from the controller's log:
+// both members started, the primary (whose ID is the set's) raised its
+// receiver, the contributor ended done no later than that raise -- a
+// contributor completes at its release -- and the primary ended done.
+func expectSetCompleted(g Gomega, logs, setID string) {
+	idOf := regexp.MustCompile(`"id": "([^"]+)"`)
+	var members []string
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, "transfer started") && strings.Contains(line, `"set": "`+setID+`"`) {
+			if m := idOf.FindStringSubmatch(line); m != nil {
+				members = append(members, m[1])
+			}
+		}
+	}
+	g.Expect(members).To(HaveLen(2), "want exactly the two members of set %s started", setID)
+	var raised, contributorDone time.Time
+	for _, line := range strings.Split(logs, "\n") {
+		at, ok := logLineTime(line)
+		if !ok {
+			continue
+		}
+		for _, id := range members {
+			if !strings.Contains(line, `"id": "`+id+`"`) {
+				continue
+			}
+			switch {
+			case id == setID && strings.Contains(line, "released, raising the receiver"):
+				raised = at
+			case id != setID && strings.Contains(line, "transfer ended") && strings.Contains(line, `"outcome": "done"`):
+				contributorDone = at
+			}
+		}
+	}
+	g.Expect(raised.IsZero()).To(BeFalse(), "the set's primary never raised the receiver")
+	g.Expect(contributorDone.IsZero()).To(BeFalse(), "the set's contributor never ended done")
+	g.Expect(contributorDone).NotTo(BeTemporally(">", raised), "the contributor released after the receiver was raised")
+	g.Expect(logs).To(MatchRegexp(`transfer ended.*"id": "` + setID + `".*"outcome": "done"`))
 }

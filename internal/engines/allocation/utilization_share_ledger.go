@@ -538,12 +538,8 @@ func (l *ShareLedger) Redirect(id string, now time.Time, hold time.Duration) (Sh
 	return ShareTransfer{}, false
 }
 
-// Redirectable reports whether Redirect would take transfer id: it is still
-// releasing, for a receiver, and not part of a donor set.
-func (l *ShareLedger) Redirectable(id string) bool {
-	return slices.ContainsFunc(l.transfers, func(t *ShareTransfer) bool { return t.ID == id && redirectable(t) })
-}
-
+// redirectable is a transfer still releasing, for a receiver, and not part of
+// a donor set.
 func redirectable(t *ShareTransfer) bool {
 	return t.State == ShareReleasing && t.Receiver != "" && t.SetID == ""
 }

@@ -1409,9 +1409,10 @@ A full quota has a consequence that must be designed for, not discovered:
   The two features compete by design. The pool grows only into free GPUs, and
   this optimizer drives free GPUs to about zero, so with nothing else said the
   pool could never grow once the optimizer is on. Instead, the pool's
-  **configured target** is a carve-out like the reserve: `B_net` is the quota
-  minus the larger of the pool's holdings and its configured target, and the
-  unheld part of that carve-out is published to the pool as available (§6.3). The pool can
+  **target size** (reserve + lent + 1, which the pool publishes to KEDA) is a
+  carve-out like the reserve: `B_net` is the quota minus the larger of the
+  pool's holdings and its target, and the unheld part of that carve-out stays
+  free for the pool to grow into (§6.3). The pool can
   reach its target from GPUs set aside for it. Growth beyond its target still
   needs genuinely free GPUs, which this mode rarely leaves. Operators who run
   both should size the pool's target deliberately; the optimizer will not
@@ -2007,9 +2008,10 @@ optimizer every cycle (§6.6).
        one accelerator (`ShareClaimStore.ClaimSet`: replicas matched largest
        first, each preferring the best-off receiver's transfer, backtracking
        when a later replica would be left without one). A role already serving
-       is not claimed for. The steady-state engine applies one wake's claims
-       all or none too: if any of them has moved on by the time it takes them,
-       none is redirected and their receivers keep their promises.
+       is not claimed for. The steady-state engine then applies each claim on
+       its own: the wake has happened, and its pods take whatever hole opens
+       first, so refusing the redirect of a claim whose partner moved on would
+       only raise the original receiver into a pod that stays Pending.
      - the kind e2e, single role and P/D: shadow evaluates and touches nothing.
        Active, an idle model's marked pod is the one its ReplicaSet removes,
        and the loaded model grows only after the release. A P/D decode LWS
@@ -2020,14 +2022,23 @@ optimizer every cycle (§6.6).
        cluster run found that the engine keyed scale targets by Deployment
        name, not variant name, so no donor could be marked.
      - the warm pool's carve-out (section 7.2). Each reconcile pass, a pool
-       publishes the part of its target it does not hold: its size after the
-       contention hold, before the headroom cap, times its Pods' GPUs, less
-       what it holds (`decision.WarmPoolUnheldStore`, believed five minutes).
-       It is taken out of the budget of the group its namespace plans in --
-       the namespace's own quota group, else the cluster group -- so the
-       optimizer leaves those GPUs free and the pool's headroom sees them. A
-       pool yielding to a denied model publishes nothing, and an empty pass
-       clears the figure.
+       publishes the part of its target it does not hold
+       (`decision.WarmPoolUnheldStore`, believed five minutes):
+       - the target is its size -- reserve + lent + 1 (`SizeFor`) after the
+         contention hold, before the headroom cap -- times its Pods' GPUs;
+       - held is its members' GPUs, or its scheduled Pods' when the pool
+         Deployment says more (`PoolShapes`), so a Pod still starting is not
+         counted twice;
+       - a pool none of whose Pods is a member yet -- the first Pod in a full
+         quota -- takes its GPUs per Pod and accelerator from its Deployment's
+         template;
+       - a pool that makes no progress into its carve-out for ten minutes
+         (`CarveStall`) stops being carved for, with a WARNING: something the
+         carve-out does not relieve is stopping it.
+       The figure is taken out of every group whose bound the pool spends: its
+       namespace's own quota group, and the cluster group, which every pool
+       counts against. A pool yielding to a denied model publishes nothing,
+       and an empty pass clears the figure.
      - re-planning after a wrong pod: the GPUs that did come free are idle,
        and the idle fill raises the receiver only where its pods fit the free
        node picture (`ShareFitPods`, in its domain when it has one), spending

@@ -76,3 +76,33 @@ func TestAPoolAtItsTargetClearsItsCarveOut(t *testing.T) {
 		t.Fatalf("a pool holding its target still carves %v", got)
 	}
 }
+
+// Two pools in one namespace: each pool's unheld part is summed per
+// accelerator, so one pool over its target cannot hide another's shortfall.
+func TestPoolsCarveOutsAddUp(t *testing.T) {
+	saved := decision.DefaultWarmPoolUnheld
+	decision.DefaultWarmPoolUnheld = &decision.WarmPoolUnheldStore{}
+	t.Cleanup(func() { decision.DefaultWarmPoolUnheld = saved })
+
+	other := types.NamespacedName{Namespace: podA().Namespace, Name: "pod-b"}
+	p := &fakePool{memberships: []pool.Membership{
+		{Pod: podA(), State: pool.Absent, Pool: "one", Capacity: pool.PodCapacity{GPUs: 2, Accelerator: "A100"}},
+		{Pod: other, State: pool.Absent, Pool: "two", Capacity: pool.PodCapacity{GPUs: 1, Accelerator: "A100"}},
+	}}
+	cfg := testConfig()
+	cfg.SleepMinSize = 1
+	r := New(p, &staticDemand{}, cfg)
+	r.Namespace = poolNamespace
+	r.Pools = fakePools{
+		{Name: "one", Config: cfg, Replicas: 1, Deployment: "pool-one"},
+		{Name: "two", Config: cfg, Replicas: 1, Deployment: "pool-two"},
+	}
+	r.PublishSize = func(string, string, int32) {}
+	if _, err := r.Once(context.Background()); err != nil {
+		t.Fatalf("Once: %v", err)
+	}
+	// Each pool wants two Pods and holds one: 2 GPUs short on "one", 1 on "two".
+	if got := decision.DefaultWarmPoolUnheld.Latest(time.Hour, time.Now())[poolNamespace]["A100"]; got != 3 {
+		t.Fatalf("unheld A100 = %d, want 3", got)
+	}
+}

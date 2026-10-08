@@ -123,10 +123,11 @@ type ShareGroupOptions struct {
 	// which the planner pays back first (SharePlan.Refills).
 	ReserveGPUs int
 	// PoolUnheld is, per namespace and accelerator, what the warm pools want
-	// and do not hold. It is carved out of the budget of the group the
-	// namespace plans in -- its own quota group where it has one, else the
-	// cluster group -- so the pools can grow into GPUs the optimizer would
-	// otherwise fill (proposal section 7.2).
+	// and do not hold. It is carved out of the budget of every group whose
+	// bound a pool's growth spends -- its namespace's own quota group, and the
+	// cluster group, which every namespace's GPUs count against -- so the pools
+	// can grow into GPUs the optimizer would otherwise fill (proposal section
+	// 7.2).
 	PoolUnheld map[string]map[string]int
 }
 
@@ -239,10 +240,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		if g.listed > MaxShareBudgetGPUs-free {
 			continue
 		}
-		g.PoolCarve = poolCarve(opts.PoolUnheld, k.acc, k.scope, func(ns string) bool {
-			_, own := groups[key{k.acc, ns}]
-			return own
-		})
+		g.PoolCarve = poolCarve(opts.PoolUnheld, k.acc, k.scope)
 		g.Budget = max(0, free+g.listed-opts.ReserveGPUs-g.PoolCarve)
 		g.PhysicalFree = math.MaxInt
 		if pf, ok := available[k.acc]; ok && pf >= 0 && pf < math.MaxInt {
@@ -383,17 +381,15 @@ func shareGrowVariant(vs []variantRecord, stateMap map[string]domain.VariantRepl
 }
 
 // poolCarve is a group's share of the warm pools' unheld target: a namespace
-// group's own, or for the cluster group every namespace's that has no group of
-// its own on the accelerator.
-func poolCarve(unheld map[string]map[string]int, acc, scope string, ownGroup func(ns string) bool) int {
+// group's own namespace's, the cluster group every namespace's -- a pool in a
+// namespace with its own quota spends the cluster's quota too.
+func poolCarve(unheld map[string]map[string]int, acc, scope string) int {
 	if scope != "" {
 		return max(0, unheld[scope][acc])
 	}
 	sum := 0
-	for ns, byType := range unheld {
-		if !ownGroup(ns) {
-			sum += max(0, byType[acc])
-		}
+	for _, byType := range unheld {
+		sum += max(0, byType[acc])
 	}
 	return sum
 }

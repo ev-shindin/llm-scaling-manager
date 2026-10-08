@@ -320,6 +320,15 @@ var _ = Describe("Node-aware donor sets: guards and shapes (§6.5)", func() {
 		Expect(planned(p)).To(ConsistOf("ns/a-1", "ns/c-0"), "r2 holds both pods; n4 has no rack")
 	})
 
+	It("returns the node state its sets left, for the idle fill", func() {
+		// B's two 4-GPU pods: one into n1's 4 free GPUs, one into the hole
+		// a-0 opens on n2. n1's free GPUs are now B's.
+		p := plan([]int{4, 4}, map[string]ShareNode{"n1": {Free: 4}, "n2": {}},
+			[]ShareUnit{pod8("ns/a-0", "n2")}, nil, nil)
+		Expect(planned(p)).To(ConsistOf("ns/a-0"))
+		Expect(p.Nodes["n1"].Free).To(BeZero(), "the fill must not count n1's free GPUs again")
+	})
+
 	It("spends a started set's node state for the rest of the cycle", func() {
 		nodes := map[string]ShareNode{"n1": {Free: 4}, "n2": {Free: 8}}
 		units := map[string][]ShareUnit{"A": {pod8("ns/a-0", "n1"), pod8("ns/a-1", "n2")}}

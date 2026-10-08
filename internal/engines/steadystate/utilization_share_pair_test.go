@@ -8,19 +8,19 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 )
 
-// A P/D wake's two claims are applied all or none. With both transfers still
-// releasing, both are redirected. Once one of them has released -- its
-// receiver already raised -- neither is: half a pair funded would hold GPUs for
-// a model that cannot serve, while taking them from the receiver that keeps the
-// other promise.
-func TestUtilizationShareAppliesAPairsClaimsAllOrNone(t *testing.T) {
+// A P/D wake's two claims are applied each on its own. With both transfers
+// still releasing, both are redirected. Once one has released -- its receiver
+// already raised -- that one cannot be, but the other still is: the wake has
+// happened, its pod will take the hole that opens, and the books must say so
+// rather than raise the original receiver into a pod that stays Pending.
+func TestUtilizationShareAppliesEachClaimItCan(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		releaseOne bool
 		want       float64
 	}{
 		{"both still releasing (control)", false, 2},
-		{"one already released", true, 0},
+		{"one already released", true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reg := freshMetrics(t)
@@ -66,5 +66,30 @@ func TestUtilizationShareAppliesAPairsClaimsAllOrNone(t *testing.T) {
 				t.Fatalf("redirected %v transfers, want %v", redirected, tc.want)
 			}
 		})
+	}
+}
+
+// The warm pools' published carve reaches the group's budget: the spare the
+// group reports falls by it.
+func TestUtilizationShareCarvesTheWarmPoolsTarget(t *testing.T) {
+	spare := func(carve int) float64 {
+		reg := freshMetrics(t)
+		saved := decision.DefaultWarmPoolUnheld
+		decision.DefaultWarmPoolUnheld = &decision.WarmPoolUnheldStore{}
+		t.Cleanup(func() { decision.DefaultWarmPoolUnheld = saved })
+		f := newShareFleet()
+		se := newShareEngine(t, f, sharePods(t, f), time.Unix(0, 0))
+		if carve > 0 {
+			decision.DefaultWarmPoolUnheld.Publish("pools", map[string]int{"A100": carve}, se.clock.Add(30*time.Second))
+		}
+		se.cycle()
+		for _, m := range family(t, reg, constants.WVAUtilizationShareSpareGPUs) {
+			return m.GetGauge().GetValue()
+		}
+		t.Fatal("no spare series published")
+		return 0
+	}
+	if without, with := spare(0), spare(3); without-with != 3 {
+		t.Fatalf("spare %v without the carve, %v with a 3-GPU carve: want 3 less", without, with)
 	}
 }
