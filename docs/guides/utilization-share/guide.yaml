@@ -1,0 +1,114 @@
+name: utilization-share
+
+prerequisites:
+  limiter:
+    note: |
+      The optimizer shares the budget a QUOTA limiter gives, so the cluster
+      default entry must already declare one. Without a limiters: list the
+      optimizer stays off and reports mode "invalid".
+      Read it from the namespace that holds the cluster policy: wva-policy when
+      an admin published one there, otherwise the controller's own namespace.
+      The last line says whether the controller ACCEPTED the entry: a malformed
+      one is rejected on read and leaves NO limiter while the ConfigMap still
+      looks healthy.
+    run: |
+      kubectl get configmap wva-scaling-policy-config -n <policy-namespace> \
+        -o jsonpath='{.data.default}' | grep -A12 limiters
+      kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
+        | grep -E 'GPU limiter constructed|Invalid saturation scaling'
+  accelerators:
+    note: |
+      Every variant's accelerator must resolve, and the quota's type must be the
+      name the controller resolves. A variant whose accelerator does not resolve
+      gets no budget, and a quota key nobody resolves to is a quota of zero.
+      The event hangs on the ScaledObject, in the MODEL's namespace -- hence -A.
+    run: |
+      kubectl get events -A --field-selector reason=AcceleratorNotResolved
+
+deploy:
+  shadow:
+    note: |
+      Add the optimizer block to the SAME default entry as limiters:, in
+      shadow. shadow defaults to false, so a block without it ACTS from the
+      next cycle -- write shadow: true explicitly.
+      Read live on the next cycle. On a namespace-scoped install whose cluster
+      policy lives in a separate policy namespace, the controller reads that
+      policy only when it starts: restart it after the edit.
+    run: |
+      kubectl edit configmap wva-scaling-policy-config -n <policy-namespace>
+      # under data.default, beside limiters:
+      #   optimizer:
+      #     type: utilizationShare
+      #     utilizationShare:
+      #       shadow: true
+      #       # clusterNamespaces: [team-canary]   # cluster quota only: plan these namespaces alone
+  active:
+    note: |
+      Only after reading what shadow would do. From the first active cycle, each
+      planned group holds what it runs for one fill timeout (about three
+      minutes with default timings) and nothing in it scales. Expect the same
+      after every controller restart.
+    run: |
+      kubectl edit configmap wva-scaling-policy-config -n <policy-namespace>
+      #       shadow: false
+
+verify:
+  shadow:
+    note: |
+      The mode first: exactly one series is 1. "invalid" means the block did not
+      validate or there is no limiters: list -- the log line below says which.
+      Then what it WOULD do: actionable roles, replicas_to_move per group, and
+      headroom per role (negative = short). spare_gpus below 0 means the quota
+      cannot cover every need, and no rebalance fixes that.
+      The leader publishes the mode; with more than one controller replica,
+      port-forward to the leader pod, or query Prometheus.
+    run: |
+      kubectl port-forward -n <wva-namespace> svc/wva-controller-manager-metrics-service 8443:8443 &
+      curl -sk https://localhost:8443/metrics | grep -E '^wva_utilization_share_(mode|actionable|replicas_to_move|headroom|spare_gpus)'
+      kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
+        | grep -E 'Utilization share: (would rebalance|invalid optimizer block)'
+      # The same in PromQL:
+      #   wva_utilization_share_mode == 1
+      #   wva_utilization_share_actionable == 1
+      #   wva_utilization_share_replicas_to_move
+      #   wva_utilization_share_headroom
+  active:
+    note: |
+      Transfers that ended, by outcome: done is healthy; rising aborted,
+      fill-timeout or wrong-pod means transfers are not landing. A model held
+      back shows a reason on wva_model_scaling_blocked.
+      Every transfer is also an Event on the Deployment or LeaderWorkerSet it
+      moved, in the model's namespace. Warnings are the ones to read.
+    run: |
+      curl -sk https://localhost:8443/metrics | grep -E '^wva_utilization_share_(mode|transfers_total|in_flight)'
+      curl -sk https://localhost:8443/metrics | grep '^wva_model_scaling_blocked'
+      kubectl get events -n <llmd-namespace> --field-selector reason=UtilizationShareGiving
+      kubectl get events -n <llmd-namespace> --field-selector reason=UtilizationShareReceived
+      kubectl get events -n <llmd-namespace> --field-selector type=Warning | grep UtilizationShare
+      # The same in PromQL:
+      #   sum by (outcome) (increase(wva_utilization_share_transfers_total[1h]))
+
+cleanup:
+  rollback:
+    note: |
+      Back to shadow FIRST, and wait one optimization cycle. The controller then
+      removes every transfer mark it wrote and restores each pod's previous
+      deletion cost. Do this before a downgrade to a version without the
+      optimizer too: that version leaves the marks behind.
+      On a namespace-scoped install whose cluster policy lives in a separate
+      policy namespace: edit, restart the controller, then wait a cycle.
+      The last command must print nothing.
+    run: |
+      kubectl edit configmap wva-scaling-policy-config -n <policy-namespace>
+      #       shadow: true
+      # namespace-scoped install, separate policy namespace only:
+      #   kubectl rollout restart -n <wva-namespace> deploy/wva-controller-manager
+      kubectl get pods -A -o json | jq -r '.items[]
+        | select(.metadata.annotations["llm-d.ai/utilization-share-transfer"] != null)
+        | .metadata.namespace + "/" + .metadata.name'
+  remove:
+    note: |
+      Then delete the optimizer: block. The mode reads "off" and today's
+      optimizer runs; the limiters are untouched. The transfer counters keep
+      their last values, as counters do.
+    run: kubectl edit configmap wva-scaling-policy-config -n <policy-namespace>

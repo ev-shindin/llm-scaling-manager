@@ -197,6 +197,10 @@ trusting any latency number; if the two disagree, see
 - [Two models, anti-phase bursts, warm pool on and off](two-model-warm-pool.md) —
   the shared-pool comparison: one pool, two models whose bursts do not coincide,
   measured with the pool and without it
+- [Two models, anti-phase bursts, under one quota](two-model-utilization-share.md) —
+  the same load under one quota smaller than both models' peak, with today's
+  optimizer, the utilization-share optimizer in shadow, and the same acting.
+  **Not yet run**
 - [FMA post-mortem](../../proposals/fma-post-mortem.md) — if the namespace runs FMA
 - [After the install](../../reference/operations.md) — what the metrics mean
 - [Configuration](../../reference/configuration.md) — every installer variable

@@ -33,6 +33,7 @@ source docs/guides/env.sh
 | [Test against a full llm-d stack](testing-with-llm-d/) | llm-d + the scaling manager on kind, emulated GPUs, no hardware |
 | [Benchmark the scaling manager](benchmarking/) | drive load through a real stack and compare runs |
 | [Bridge a scale-up with a warm pool](warm-pool/) | hold models loaded and asleep so a scale-up serves while its replica starts |
+| [Turn on the utilization-share optimizer, safely](utilization-share/) | share one quota between models by weight: shadow first, then active, and how to back out (experimental) |
 
 ## Reference
 
