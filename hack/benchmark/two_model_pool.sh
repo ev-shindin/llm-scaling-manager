@@ -130,6 +130,11 @@ HIGH_RPS="${HIGH_RPS:-9}"
 HIGH_RPS_B="${HIGH_RPS_B:-8}"
 INPUT_TOKENS="${INPUT_TOKENS:-1000}"
 OUTPUT_TOKENS="${OUTPUT_TOKENS:-500}"
+# Loader b's shape. Defaults to a's; a single-stack P/D run gives the two
+# loaders different shapes (prompt-heavy, then decode-heavy) so the model's
+# prefill and decode take turns at needing the GPUs.
+INPUT_TOKENS_B="${INPUT_TOKENS_B:-$INPUT_TOKENS}"
+OUTPUT_TOKENS_B="${OUTPUT_TOKENS_B:-$OUTPUT_TOKENS}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-300}"
 SEED="${SEED:-1729}"
 # The prompts. `synthetic` slices every prompt from a random offset into
@@ -187,6 +192,13 @@ RESULT_GRACE="${RESULT_GRACE:-1200}"
 
 MAX_REPLICAS="${MAX_REPLICAS:-3}"
 MIN_REPLICAS="${MIN_REPLICAS:-1}"
+# Per-role bounds for a P/D model; both default to the shared ones, so an
+# aggregated run is unchanged. A prefill role rarely needs the replicas its
+# decode does, and one ceiling for both would let it hold GPUs it never uses.
+MIN_PREFILL="${MIN_PREFILL:-$MIN_REPLICAS}"
+MIN_DECODE="${MIN_DECODE:-$MIN_REPLICAS}"
+MAX_PREFILL="${MAX_PREFILL:-$MAX_REPLICAS}"
+MAX_DECODE="${MAX_DECODE:-$MAX_REPLICAS}"
 # The THIRD arm. `floor` is what a pool competes against in practice: no pool,
 # but every model kept at FLOOR_REPLICAS at all times -- over-provisioning as
 # insurance. It pays for the extra replicas for the whole run, in the way the
@@ -481,6 +493,9 @@ verb_preflight() {
 # would have been one model's stack answering for both.
 # ---------------------------------------------------------------------------
 verb_standup() {
+    [ "$PD_SINGLE_STACK" != 1 ] || die "PD_SINGLE_STACK=1: stand the P/D model up with
+    make benchmark-standup BENCHMARK_SPEC=guides/pd-disaggregation MODEL_ID=<model>
+  then set PD_ENDPOINT to its router Service and run verify."
     need_ns
     [ -f "$ROOT/hack/benchmark/scenarios/$BENCH_SPEC.yaml" ] || \
         die "no scenario at hack/benchmark/scenarios/$BENCH_SPEC.yaml"
@@ -608,6 +623,61 @@ decode_deploy_for() {
     prefix="${backend%-router}"
     k get deploy "${prefix}-decode" -o name >/dev/null 2>&1 && printf '%s' "${prefix}-decode"
 }
+
+# ---------------------------------------------------------------------------
+# Single-stack P/D: one model, its prefill and decode under one quota
+# ---------------------------------------------------------------------------
+# PD_SINGLE_STACK=1 drives ONE P/D model, stood up by
+#   make benchmark-standup BENCHMARK_SPEC=guides/pd-disaggregation MODEL_ID=<model>
+# and not by `standup`: that scenario is single-stack, its router reached through
+# its own Service, with no shared Gateway or HTTPRoute to find a stack by. Both
+# loaders drive the one model through PD_ENDPOINT -- the router Service's base
+# URL, http://<service>:<port> -- with different shapes (INPUT/OUTPUT_TOKENS and
+# their _B), so prefill and decode take turns at needing the GPUs. MODEL_A and
+# MODEL_B both name that model.
+PD_SINGLE_STACK="${PD_SINGLE_STACK:-0}"
+PD_ENDPOINT="${PD_ENDPOINT:-}"
+
+# Every model Deployment and its role, one "<deployment> <role>" per line.
+role_deploys() {
+    if [ "$PD_SINGLE_STACK" = 1 ]; then
+        k get deploy -l 'llm-d.ai/role in (prefill,decode)' -o json 2>/dev/null | jq -r '
+            .items[] | .metadata.name + " " + .metadata.labels["llm-d.ai/role"]'
+        return
+    fi
+    local s d
+    for s in "$STACK_A" "$STACK_B"; do
+        d="$(decode_deploy_for "$s")"
+        [ -n "$d" ] || continue
+        echo "$d decode"
+        k get deploy "${d%-decode}-prefill" -o name >/dev/null 2>&1 && echo "${d%-decode}-prefill prefill"
+    done
+}
+
+role_min() { if [ "$1" = prefill ]; then echo "$MIN_PREFILL"; else echo "$MIN_DECODE"; fi; }
+role_max() { if [ "$1" = prefill ]; then echo "$MAX_PREFILL"; else echo "$MAX_DECODE"; fi; }
+
+# The role of the Deployment a ScaledObject scales: decode unless it is labelled
+# prefill, which is every aggregated stack.
+so_role() {
+    local target
+    target="$(k get scaledobject "$1" -o jsonpath='{.spec.scaleTargetRef.name}' 2>/dev/null)"
+    if [ -n "$target" ] && [ "$(k get deploy "$target" -o jsonpath='{.metadata.labels.llm-d\.ai/role}' 2>/dev/null)" = prefill ]; then
+        echo prefill
+    else
+        echo decode
+    fi
+}
+
+if [ "$PD_SINGLE_STACK" = 1 ]; then
+    gateway_host() {
+        [ -n "$PD_ENDPOINT" ] || return 1
+        local h="${PD_ENDPOINT#*://}"
+        printf '%s' "${h%%/*}"
+    }
+    base_url_for_stack() { printf '%s' "${PD_ENDPOINT%/}"; }
+    decode_deploy_for() { role_deploys | awk '$2 == "decode" { print $1; exit }'; }
+fi
 
 gateway_ip() {
     # The gateway Service's ClusterIP. Resolved ONCE, here, so the load never
@@ -937,9 +1007,19 @@ verb_verify() {
     # both pools would still run, and the run would be measuring something else.
     local epps
     epps="$(k get deploy -o name 2>/dev/null | grep -c -- '-epp' || true)"
-    [ "${epps:-0}" -ge 2 ] || \
-        die "expected an EPP per model and found ${epps:-0}. The standup rendered one stack, not two."
-    ok "$epps EPP deployments, one per model"
+    local want_epps=2
+    [ "$PD_SINGLE_STACK" != 1 ] || want_epps=1
+    [ "${epps:-0}" -ge "$want_epps" ] || \
+        die "expected an EPP per model and found ${epps:-0}. The standup rendered fewer stacks than this run drives."
+    ok "$epps EPP deployment(s), one per model"
+    # Every role serving, prefill included: a P/D model with no ready prefill
+    # serves through decode alone, and the run would measure an aggregated model.
+    local rd role
+    while read -r rd role; do
+        [ -n "$rd" ] || continue
+        ready="$(k get deploy "$rd" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"
+        [ "${ready:-0}" -ge 1 ] || die "$role Deployment $rd has no ready replica"
+    done < <(role_deploys)
 
     # A real request per model, through its own path, before half an hour of
     # load. A 404 here is a name; a 404 at minute 12 is a wasted run.
@@ -1271,10 +1351,15 @@ verb_reset() {
     sos="$(k get scaledobject -o json 2>/dev/null | jq -r '
         [.items[] | select([.spec.triggers[]?.metadata.warmPoolName] | all(. == null)) | .metadata.name] | .[]')"
     [ -n "$sos" ] || die "no model ScaledObjects in $NS; there is nothing to reset."
-    # A floor arm raised minReplicaCount; every arm starts from MIN_REPLICAS.
-    set_fleet_floor "$MIN_REPLICAS"
+    # A floor arm raised minReplicaCount; every arm starts from each role's
+    # floor (MIN_REPLICAS, unless MIN_PREFILL/MIN_DECODE say otherwise).
+    local role_of
     for so in $sos; do
-        pause_at "$so" "$MIN_REPLICAS" || warn "could not pin $so"
+        role_of="$(so_role "$so")"
+        k patch scaledobject "$so" --type=merge \
+            -p "{\"spec\":{\"minReplicaCount\":$(role_min "$role_of")}}" >/dev/null || \
+            warn "could not set minReplicaCount on $so"
+        pause_at "$so" "$(role_min "$role_of")" || warn "could not pin $so"
     done
     # PAUSE THEN SCALE. Pausing alone does not bring the fleet down: measured
     # here, KEDA reported `Paused=True` and deleted the HPA while leaving the
@@ -1285,25 +1370,25 @@ verb_reset() {
     #
     # The pause still matters, and has to come first: without it the HPA puts
     # the replicas straight back within a cycle.
-    for s in "$STACK_A" "$STACK_B"; do
-        d="$(decode_deploy_for "$s")"
-        [ -n "$d" ] || { warn "no decode Deployment for stack $s"; continue; }
-        k scale deploy "$d" --replicas="$MIN_REPLICAS" >/dev/null || warn "could not scale $d"
-    done
-    info "pinned every model ScaledObject at $MIN_REPLICAS and scaled the fleet down; waiting for it to settle"
+    local deploys
+    deploys="$(role_deploys)"
+    [ -n "$deploys" ] || die "no model Deployment found to reset"
+    while read -r d role_of; do
+        k scale deploy "$d" --replicas="$(role_min "$role_of")" >/dev/null || warn "could not scale $d"
+    done <<<"$deploys"
+    info "pinned every model ScaledObject at its role's floor and scaled the fleet down; waiting for it to settle"
     waited=0
     while [ "$waited" -lt "$RESET_TIMEOUT" ]; do
-        local settled=1
-        for s in "$STACK_A" "$STACK_B"; do
-            d="$(decode_deploy_for "$s")"
-            [ -n "$d" ] || { settled=0; continue; }
+        local settled=1 want ready
+        while read -r d role_of; do
+            want="$(role_min "$role_of")"
             n="$(k get deploy "$d" -o jsonpath='{.status.replicas}' 2>/dev/null)"
-            local ready; ready="$(k get deploy "$d" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"
-            [ "${n:-0}" = "$MIN_REPLICAS" ] && [ "${ready:-0}" = "$MIN_REPLICAS" ] || settled=0
-        done
+            ready="$(k get deploy "$d" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"
+            [ "${n:-0}" = "$want" ] && [ "${ready:-0}" = "$want" ] || settled=0
+        done <<<"$deploys"
         if [ "$settled" = 1 ]; then
             for so in $sos; do unpause "$so"; done
-            ok "both models are at $MIN_REPLICAS and ready; autoscaling released"
+            ok "every role is at its floor and ready; autoscaling released"
             return 0
         fi
         sleep 10
@@ -1353,9 +1438,16 @@ set_arm_ceiling() {
     ceiling="$(arm_max_replicas "$arm")"
     sos="$(k get scaledobject -o json 2>/dev/null | jq -r '
         [.items[] | select([.spec.triggers[]?.metadata.warmPoolName] | all(. == null)) | .metadata.name] | .[]')"
+    # Per role: a prefill ScaledObject gets MAX_PREFILL, every other MAX_DECODE.
+    # Both default to the arm's ceiling, so an aggregated run is unchanged.
+    local role_ceiling
     for so in $sos; do
+        role_ceiling="$ceiling"
+        if [ "$MAX_PREFILL" != "$MAX_REPLICAS" ] || [ "$MAX_DECODE" != "$MAX_REPLICAS" ]; then
+            role_ceiling="$(role_max "$(so_role "$so")")"
+        fi
         k patch scaledobject "$so" --type=merge \
-            -p "{\"spec\":{\"maxReplicaCount\":$ceiling}}" >/dev/null || \
+            -p "{\"spec\":{\"maxReplicaCount\":$role_ceiling}}" >/dev/null || \
             warn "could not set maxReplicaCount on $so"
     done
     # The pool's Pods only exist in the pool arm, and saying otherwise here
@@ -1388,7 +1480,7 @@ sample_gpus() {
         # Available for the whole 36 minutes, because the rest could not be
         # placed. Its numbers described a one-replica fleet and nothing said so.
         want="$(k get deploy -o json 2>/dev/null | jq -c '
-            [.items[] | select(.metadata.name | test("decode"))
+            [.items[] | select(.metadata.name | test("decode|prefill"))
              | {(.metadata.name): (.spec.replicas // 0)}] | add // {}')"
         # Explicit, not ${want:-{}}: the brace inside that expansion terminates
         # it early in bash, jq then gets nothing, and every sample comes out
@@ -1436,13 +1528,14 @@ capture_pod_work() {
     : > "$out"
     for pod in $(k get pods -o json 2>/dev/null | jq -r '
         .items[] | select(.status.phase=="Running")
-        | select((.metadata.name|test("decode")) or (.metadata.labels["llm-d.ai/warm-pool"] != null))
+        | select((.metadata.name|test("decode|prefill")) or (.metadata.labels["llm-d.ai/warm-pool"] != null))
         | .metadata.name'); do
         # A decode engine serves on the port the chart gave it; a pool Pod's warm
         # engine listens on the supervisor-assigned port. 8200 covers the former,
-        # 9001 the first of the latter -- both are read, and whichever answers is
-        # the engine.
-        for port in 8200 9001; do
+        # 9001 the first of the latter, and 8000 a P/D prefill engine, which has
+        # no routing sidecar in front of it -- all are read, and whichever
+        # answers first is the engine.
+        for port in 8200 8000 9001; do
             k exec "$pod" -- python3 -c "
 import re,sys,urllib.request
 try:
@@ -1565,8 +1658,9 @@ verb_run() {
 
     local out_dir="$OUT_ROOT/$arm"
     mkdir -p "$out_dir"
-    printf '{"arm":"%s","max_replicas_per_model":%s,"min_replicas_per_model":%s,"pool_replicas":%s,"gpus_per_replica":%s}\n' \
+    printf '{"arm":"%s","max_replicas_per_model":%s,"min_replicas_per_model":%s,"pool_replicas":%s,"gpus_per_replica":%s,"max_prefill":%s,"max_decode":%s,"min_prefill":%s,"min_decode":%s}\n' \
         "$arm" "$ceiling" "$floor" "$([ "$arm" = pool ] && echo "$POOL_REPLICAS" || echo 0)" "$GPUS_PER_REPLICA" \
+        "$MAX_PREFILL" "$MAX_DECODE" "$MIN_PREFILL" "$MIN_DECODE" \
         > "$out_dir/budget.json"
     # The policy this arm ran under, kept with its results: the report refuses
     # two share arms whose limiters differ.
@@ -1586,6 +1680,7 @@ verb_run() {
             --phase-seconds "$PHASE_SECONDS" --cycles "$CYCLES" --lead-in "$LEAD_IN" \
             --low-rps "$LOW_RPS" --high-rps "$HIGH_RPS" --high-rps-b "$HIGH_RPS_B" \
             --input-tokens "$INPUT_TOKENS" --output-tokens "$OUTPUT_TOKENS" \
+            --input-tokens-b "$INPUT_TOKENS_B" --output-tokens-b "$OUTPUT_TOKENS_B" \
             --data "$LOAD_DATA" --prefix-groups "$PREFIX_GROUPS" \
             --request-timeout "$REQUEST_TIMEOUT" \
             --rise-window "$RISE_WINDOW" --overlap "$OVERLAP_SECONDS" \
@@ -1793,6 +1888,7 @@ verb_run() {
         --t0 "$start_at" --overlap "$OVERLAP_SECONDS" \
         --arm "$arm" --model-a "$MODEL_A" --model-b "$MODEL_B" \
         --input-tokens "$INPUT_TOKENS" --output-tokens "$OUTPUT_TOKENS" \
+        --input-tokens-b "$INPUT_TOKENS_B" --output-tokens-b "$OUTPUT_TOKENS_B" \
         --seed "$SEED" --data "$LOAD_DATA" --prefix-groups "$PREFIX_GROUPS" \
         || die "could not convert the harness results for arm $arm. See $out_dir/loader.log"
     mv "$out_dir/requests.jsonl.meta.json" "$out_dir/meta.json"

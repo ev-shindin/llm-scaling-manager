@@ -257,6 +257,8 @@ def schedule_signature(meta):
         "schedule": meta.get("schedule"),
         "input_tokens": meta.get("input_tokens"),
         "output_tokens": meta.get("output_tokens"),
+        "input_tokens_b": meta.get("input_tokens_b", meta.get("input_tokens")),
+        "output_tokens_b": meta.get("output_tokens_b", meta.get("output_tokens")),
         "model_a": meta.get("model_a"),
         "model_b": meta.get("model_b"),
         "seed": meta.get("seed"),
@@ -301,6 +303,13 @@ def budget_problem(a, b):
         return ("the floor arm's floor (%s per model) is no higher than the %s "
                 "arm's (%s); it was not the floor arm"
                 % (bb.get("min_replicas_per_model"), BASELINE, ba.get("min_replicas_per_model", 1)))
+    # Per-role bounds, recorded by a P/D run. Absent on older budgets, which had
+    # one ceiling for every role.
+    for key in ("max_prefill", "max_decode", "min_prefill", "min_decode"):
+        if key in ba and key in bb and ba[key] != bb[key]:
+            return ("the %s arm ran with %s=%s against the %s arm's %s: its roles were "
+                    "bounded differently, so its TTFT differs for a reason that is not "
+                    "the thing under test." % (b["name"], key, bb[key], BASELINE, ba[key]))
     if (bb["max_replicas_per_model"] != ba["max_replicas_per_model"]
             or bb["gpus_per_replica"] != ba["gpus_per_replica"]):
         return ("the %s arm capped each model at %d replicas of %d accelerator(s) against "
@@ -679,7 +688,8 @@ def admissible(arms, max_queue_delay, max_short=300.0, max_overlap=0.0,
     for b in arms[1:]:
         if schedule_signature(a["meta"]) != schedule_signature(b["meta"]):
             diffs = []
-            for k in ("input_tokens", "output_tokens", "model_a", "model_b", "seed", "data"):
+            for k in ("input_tokens", "output_tokens", "input_tokens_b", "output_tokens_b",
+                      "model_a", "model_b", "seed", "data"):
                 if a["meta"].get(k) != b["meta"].get(k):
                     diffs.append("%s: %s=%s %s=%s" % (k, a["name"], a["meta"].get(k), b["name"], b["meta"].get(k)))
             if a["meta"].get("schedule") != b["meta"].get("schedule"):

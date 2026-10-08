@@ -282,6 +282,11 @@ def convert(args):
         "model_b": args.model_b,
         "input_tokens": args.input_tokens,
         "output_tokens": args.output_tokens,
+        # Role b's shape, when it differs: a P/D run gives the two loaders
+        # different shapes, and two arms run with different ones are not the
+        # same experiment.
+        "input_tokens_b": getattr(args, "input_tokens_b", 0) or args.input_tokens,
+        "output_tokens_b": getattr(args, "output_tokens_b", 0) or args.output_tokens,
         "seed": args.seed,
         "data": args.data,
         "prefix_groups": args.prefix_groups,
@@ -322,6 +327,8 @@ def main(argv):
     p.add_argument("--model-b", default="B")
     p.add_argument("--input-tokens", type=int, default=0)
     p.add_argument("--output-tokens", type=int, default=0)
+    p.add_argument("--input-tokens-b", type=int, default=0)
+    p.add_argument("--output-tokens-b", type=int, default=0)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--data", default="synthetic",
                    help="the inference-perf dataset type the arm ran; recorded so "

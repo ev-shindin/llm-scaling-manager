@@ -1423,6 +1423,22 @@ if rc != 2:
 else:
     ok("the baseline's name is reserved whatever it is called")
 
+case("a P/D run gives each loader its own shape, and the default is unchanged")
+_base = ["--emit", "profile", "--role", "b", "--input-tokens", "1000", "--output-tokens", "500"]
+_same = profile.build_parser().parse_args(_base)
+_pd = profile.build_parser().parse_args(_base + ["--input-tokens-b", "20000", "--output-tokens-b", "250"])
+if profile.shape_for(_same, "b") != (1000, 500):
+    fail("role b without its own shape did not take role a's: %r" % (profile.shape_for(_same, "b"),))
+elif profile.shape_for(_pd, "b") != (20000, 250) or profile.shape_for(_pd, "a") != (1000, 500):
+    fail("per-loader shapes were not kept apart: a=%r b=%r"
+         % (profile.shape_for(_pd, "a"), profile.shape_for(_pd, "b")))
+else:
+    _lines = "\n".join(profile.render_data(_pd, [], "b", 1729))
+    if "min: 20000" not in _lines or "min: 250" not in _lines:
+        fail("role b's rendered data does not carry its shape:\n%s" % _lines)
+    else:
+        ok("role b defaults to role a's shape, and keeps its own when given one")
+
 print("")
 if FAIL:
     print("two-model self-test FAILED (%d of %d cases)" % (FAIL, CASES))

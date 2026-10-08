@@ -55,6 +55,22 @@ cat > "$STUB/kubectl" <<'STUBEOF'
 printf 'CALL[%s]\n' "$*" >> "${KCALLS:-/dev/null}"
 args="$*"
 case "$args" in
+  *"get scaledobject -o json"*)
+      if [ "${PD_STUB:-0}" = "1" ]; then
+        echo '{"items":[{"metadata":{"name":"pd-decode-wva"},"spec":{"scaleTargetRef":{"name":"pd-decode"},"triggers":[{"metadata":{}}]}},
+                        {"metadata":{"name":"pd-prefill-wva"},"spec":{"scaleTargetRef":{"name":"pd-prefill"},"triggers":[{"metadata":{}}]}}]}'
+      else
+        echo '{"items":[]}'
+      fi
+      exit 0 ;;
+  *"get scaledobject pd-prefill-wva"*"scaleTargetRef"*) echo "pd-prefill"; exit 0 ;;
+  *"get scaledobject pd-decode-wva"*"scaleTargetRef"*) echo "pd-decode"; exit 0 ;;
+  *"get deploy -l llm-d.ai/role in (prefill,decode) -o json"*)
+      echo '{"items":[{"metadata":{"name":"pd-decode","labels":{"llm-d.ai/role":"decode"}}},
+                      {"metadata":{"name":"pd-prefill","labels":{"llm-d.ai/role":"prefill"}}}]}'
+      exit 0 ;;
+  *"get deploy pd-prefill -o jsonpath={.metadata.labels"*) echo "prefill"; exit 0 ;;
+  *"get deploy pd-decode -o jsonpath={.metadata.labels"*) echo "decode"; exit 0 ;;
   *"get deploy wva-warm-pool-"*)
       [ "${POOL_EXISTS:-0}" = "1" ] && exit 0
       echo 'Error from server (NotFound): deployments.apps "wva-warm-pool-x" not found' >&2
@@ -174,8 +190,11 @@ run_verb() {
         RESIDENT_JSON="${RESIDENT_JSON:-[]}" \
         POLICY_TEXT="${POLICY_TEXT:-}" PQUERY_OUT="${PQUERY_OUT:-}" \
         WVA_POLICY_NS="${WVA_POLICY_NS:-0}" NS_POLICY_LABEL="${NS_POLICY_LABEL:-}" \
+        PD_STUB="${PD_STUB:-0}" PD_SINGLE_STACK="${PD_SINGLE_STACK:-0}" PD_ENDPOINT="${PD_ENDPOINT:-}" \
+        MIN_PREFILL="${MIN_PREFILL:-}" MIN_DECODE="${MIN_DECODE:-}" \
+        MAX_PREFILL="${MAX_PREFILL:-}" MAX_DECODE="${MAX_DECODE:-}" RESET_TIMEOUT="${RESET_TIMEOUT:-}" \
         SHARE_MODE_TIMEOUT=1 SHARE_MODE_POLL=1 \
-        WARM_GATE_TIMEOUT=1 \
+        WARM_GATE_TIMEOUT=1 OUT_ROOT="$WORK/out" \
         ${VERB_TIMEOUT:+timeout "$VERB_TIMEOUT"} bash "$SCRIPT" "$@" 2>&1)"
     RC=$?
 }
@@ -272,6 +291,46 @@ elif grep -q 'patch configmap' "$CALLS" 2>/dev/null; then
     fail "'run today' rewrote a policy before refusing: $(cat "$CALLS")"
 else
     ok "'run today' refuses when its namespace is labelled to read another namespace's policy"
+fi
+
+# A single-stack P/D model: one prefill and one decode Deployment. Every arm
+# starts from each ROLE's floor; a reset that scaled only decode left prefill
+# frozen at whatever the previous arm grew it to.
+case_begin
+PD_STUB=1 PD_SINGLE_STACK=1 MIN_PREFILL=2 MIN_DECODE=1 RESET_TIMEOUT=1 run_verb reset
+if ! grep -q 'scale deploy pd-prefill --replicas=2' "$CALLS"; then
+    fail "P/D reset did not scale prefill to MIN_PREFILL: $(grep scale "$CALLS")"
+elif ! grep -q 'scale deploy pd-decode --replicas=1' "$CALLS"; then
+    fail "P/D reset did not scale decode to MIN_DECODE: $(grep scale "$CALLS")"
+elif ! grep 'patch scaledobject pd-prefill-wva' "$CALLS" | grep -q 'minReplicaCount.:2'; then
+    fail "P/D reset did not set prefill's floor on its ScaledObject: $(grep 'patch scaledobject' "$CALLS")"
+else
+    ok "P/D reset puts each role at its own floor, prefill included"
+fi
+
+# The ceiling is per role: one number for both let prefill hold GPUs it never
+# uses, or capped decode below its need.
+case_begin
+PD_STUB=1 PD_SINGLE_STACK=1 PD_ENDPOINT=http://pd-router.ns-under-test.svc:80 \
+    MAX_PREFILL=4 MAX_DECODE=3 POLICY_TEXT="$QUOTA_POLICY" \
+    PQUERY_OUT='RESULT {"max by (mode) (wva_utilization_share_mode{namespace=\"ns-under-test\"})": [{"metric": {"mode": "off"}, "value": [0, "1"]}]}' \
+    VERB_TIMEOUT=60 run_verb run today
+if ! grep 'patch scaledobject pd-prefill-wva' "$CALLS" | grep -q 'maxReplicaCount.:4'; then
+    fail "P/D run did not cap prefill at MAX_PREFILL: $(grep 'maxReplicaCount' "$CALLS")"
+elif ! grep 'patch scaledobject pd-decode-wva' "$CALLS" | grep -q 'maxReplicaCount.:3'; then
+    fail "P/D run did not cap decode at MAX_DECODE: $(grep 'maxReplicaCount' "$CALLS")"
+else
+    ok "P/D run caps each role at its own ceiling"
+fi
+
+case_begin
+PD_SINGLE_STACK=1 VERB_TIMEOUT=60 run_verb standup
+if [ "$RC" -eq 0 ]; then
+    fail "standup ran with PD_SINGLE_STACK=1; the two-stack standup would render the wrong scenario"
+elif ! printf '%s' "$OUT" | grep -q 'BENCHMARK_SPEC=guides/pd-disaggregation'; then
+    fail "standup refused P/D without naming the standup to use: $OUT"
+else
+    ok "standup refuses a single-stack P/D run and names the standup to use"
 fi
 
 # A COLD pool is the worst result this scenario can produce: the arm runs to
@@ -627,7 +686,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=36
+CASES_EXPECTED=39
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

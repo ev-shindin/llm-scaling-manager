@@ -194,9 +194,20 @@ def planned_requests(stages, role):
     return sum(rate * duration for rate, duration in stages_for(stages, role))
 
 
+def shape_for(args, role):
+    """(input tokens, output tokens) for this role's requests. Role b defaults
+    to role a's shape; a P/D run gives the two loaders different shapes, so one
+    model's prefill and decode take turns at being the role under load."""
+    if role == "b":
+        return (args.input_tokens if args.input_tokens_b is None else args.input_tokens_b,
+                args.output_tokens if args.output_tokens_b is None else args.output_tokens_b)
+    return args.input_tokens, args.output_tokens
+
+
 def render_data(args, stages, role, seed):
     """The `data:` block. Synthetic by default; see the module docstring."""
     lines = []
+    input_tokens, output_tokens = shape_for(args, role)
     if args.data == "synthetic":
         # total_count is MANDATORY and indexed without a modulo: inference-perf
         # draws its per-request lengths from arrays of exactly this many
@@ -206,8 +217,8 @@ def render_data(args, stages, role, seed):
         # issuing while the last stage drains are both covered.
         total = int(2 * planned_requests(stages, role)) + 1000
         lines.append("  type: synthetic")
-        for name, n in (("input_distribution", args.input_tokens),
-                        ("output_distribution", args.output_tokens)):
+        for name, n in (("input_distribution", input_tokens),
+                        ("output_distribution", output_tokens)):
             # Fixed lengths. The scenario prices both arms at INPUT_TOKENS in
             # and OUTPUT_TOKENS out; a distribution would make "1000 tokens"
             # mean something different in every stage.
@@ -218,14 +229,14 @@ def render_data(args, stages, role, seed):
             lines.append("    std_dev: 0")
             lines.append("    total_count: %d" % total)
         return lines
-    system_len, question_len = split_input(args.input_tokens)
+    system_len, question_len = split_input(input_tokens)
     lines.append("  type: shared_prefix")
     lines.append("  shared_prefix:")
     lines.append("    num_groups: %d" % args.prefix_groups)
     lines.append("    num_prompts_per_group: %d" % args.prompts_per_group)
     lines.append("    system_prompt_len: %d" % system_len)
     lines.append("    question_len: %d" % question_len)
-    lines.append("    output_len: %d" % args.output_tokens)
+    lines.append("    output_len: %d" % output_tokens)
     lines.append("    enable_multi_turn_chat: false")
     lines.append("    seed: %d" % seed)
     return lines
@@ -350,6 +361,10 @@ def build_parser():
                         "models rarely have the same per-replica capacity")
     p.add_argument("--input-tokens", type=int, default=1000)
     p.add_argument("--output-tokens", type=int, default=500)
+    p.add_argument("--input-tokens-b", type=int, default=None,
+                   help="role b's input tokens; defaults to --input-tokens")
+    p.add_argument("--output-tokens-b", type=int, default=None,
+                   help="role b's output tokens; defaults to --output-tokens")
     p.add_argument("--overlap", type=int, default=90,
                    help="seconds of BOTH models at the low rate between phases, "
                         "so their bursts cannot run into each other when the two "
