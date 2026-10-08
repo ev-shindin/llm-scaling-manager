@@ -15,6 +15,7 @@ func defaultSGLangEngineParams() EngineParams {
 		GpuMemoryUtilization: 0.9, // --mem-fraction-static default
 		BlockSize:            1,   // --page-size default
 		KvCacheDtype:         "auto",
+		WeightDtype:          "auto",
 		TensorParallelSize:   1,
 		// SGLang auto-derives --max-running-requests from available memory when
 		// unset; 256 is a conservative placeholder that underestimates capacity
@@ -44,64 +45,104 @@ func ParseSGLangArgs(scaleTarget scaletarget.ScaleTargetAccessor) EngineParams {
 		return params
 	}
 
-	for _, container := range podTemplateSpec.Spec.Containers {
-		// collectArgs and the --key/--key=value parsing loop are shared with the
-		// vLLM parser; only the per-flag mapping (applySGLangParam) differs.
+	// The engine's containers only, for the reason given at the vLLM call site.
+	for _, container := range inferenceengine.ConfigContainers(podTemplateSpec, inferenceengine.EngineSGLang) {
+		// collectArgs, variable resolution and the --key/--key=value parsing
+		// loop are shared with the vLLM parser; only the per-flag mapping
+		// (applySGLangParam) differs. The env is this container's own, for the
+		// reason given at the vLLM call site.
 		allArgs := collectArgs(container.Command, container.Args)
-		parseArgsWith(allArgs, &params, applySGLangParam)
+		parseArgsWith(allArgs, &params, envValues(&container), applySGLangParam)
 	}
 
 	resolveEffectiveMaxBatchedTokens(&params)
 	return params
 }
 
-// applySGLangParam sets the corresponding EngineParams field from a
-// normalized SGLang flag key and its string value. Parse errors are silently
-// ignored and the default value is preserved (graceful degradation), matching
-// the vLLM parser's behavior.
-func applySGLangParam(key, value string, params *EngineParams) {
+// applySGLangParam sets the corresponding EngineParams field from a normalized
+// SGLang flag key and its string value, returning applyUnusable when it
+// recognised the key and could not use the value, applyUnknown when it does
+// not map the key, and applyOK otherwise -- the caller records the key in the
+// first two cases, so a default standing in for an unreadable value is
+// distinguishable from the engine's real setting. The default is still
+// preserved either way, matching the vLLM parser.
+func applySGLangParam(key, value string, params *EngineParams) applyResult {
 	switch key {
 	case "mem_fraction_static":
-		if v, err := strconv.ParseFloat(value, 64); err == nil {
-			params.GpuMemoryUtilization = v
+		v, err := strconv.ParseFloat(value, 64)
+		if err != nil || !usableFraction(v) {
+			return applyUnusable
 		}
+		params.GpuMemoryUtilization = v
 	case "page_size":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			params.BlockSize = v
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return applyUnusable
 		}
+		params.BlockSize = v
+	case keyDtype:
+		if !usableWord(value) {
+			return applyUnusable
+		}
+		params.WeightDtype = value
+	case "quantization":
+		if !usableWord(value) {
+			return applyUnusable
+		}
+		params.Quantization = value
 	case "kv_cache_dtype":
+		if !usableWord(value) {
+			return applyUnusable
+		}
 		params.KvCacheDtype = value
 	case "tp_size", "tensor_parallel_size", "tp":
-		if v, err := strconv.Atoi(value); err == nil {
-			params.TensorParallelSize = v
+		v, err := strconv.Atoi(value)
+		if err != nil {
+			return applyUnusable
 		}
+		params.TensorParallelSize = v
 	case "max_running_requests":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			params.MaxNumSeqs = v
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return applyUnusable
 		}
+		params.MaxNumSeqs = v
 	case "max_total_tokens":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			params.TotalKvTokensOverride = v
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return applyUnusable
 		}
+		params.TotalKvTokensOverride = v
 	case "context_length":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			params.MaxModelLen = v
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return applyUnusable
 		}
+		params.MaxModelLen = v
 	case "max_prefill_tokens":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			params.MaxNumBatchedTokens = v
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return applyUnusable
 		}
+		params.MaxNumBatchedTokens = v
 	case "chunked_prefill_size":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
-			if v > 0 {
-				params.MaxNumBatchedTokens = v
-				params.ChunkedPrefillEnabled = true
-			} else {
-				// SGLang uses --chunked-prefill-size=-1 to disable chunked prefill.
-				params.ChunkedPrefillEnabled = false
-			}
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return applyUnusable
+		}
+		if v > 0 {
+			params.MaxNumBatchedTokens = v
+			params.ChunkedPrefillEnabled = true
+		} else {
+			// SGLang uses --chunked-prefill-size=-1 to disable chunked prefill.
+			params.ChunkedPrefillEnabled = false
 		}
 	case "disable_cuda_graph":
 		params.EnforceEager = true
+	default:
+		// Not a flag this parser maps. parseArgsWith decides whether
+		// that is harmless or the wrong-parser signal.
+		return applyUnknown
 	}
+	return applyOK
 }

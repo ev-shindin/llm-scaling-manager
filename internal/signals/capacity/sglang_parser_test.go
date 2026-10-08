@@ -21,12 +21,57 @@ var _ = Describe("ParseSGLangArgs", func() {
 			Expect(params.GpuMemoryUtilization).To(Equal(0.9))
 			Expect(params.BlockSize).To(Equal(int64(1))) // page-size default
 			Expect(params.KvCacheDtype).To(Equal("auto"))
+			Expect(params.WeightDtype).To(Equal("auto"))
+			Expect(params.Quantization).To(BeEmpty())
 			Expect(params.TensorParallelSize).To(Equal(1))
 			Expect(params.MaxNumSeqs).To(Equal(int64(256)))
 			Expect(params.TotalKvTokensOverride).To(Equal(int64(0)))
 			Expect(params.EnforceEager).To(BeFalse())
 			Expect(params.IsV1Engine).To(BeTrue())
 			Expect(params.ChunkedPrefillEnabled).To(BeTrue())
+		})
+	})
+
+	Describe("Weight dtype and quantization", func() {
+		It("should parse --dtype and --quantization", func() {
+			deploy := makeTestDeployment("--dtype=bfloat16", "--quantization=fp8")
+			params := ParseSGLangArgs(scaletarget.NewDeploymentAccessor(deploy))
+			Expect(params.WeightDtype).To(Equal("bfloat16"))
+			Expect(params.Quantization).To(Equal("fp8"))
+		})
+	})
+
+	Describe("an unusable memory fraction", func() {
+		// The guard mirrors the vLLM path's, and only the vLLM path was
+		// tested -- reverting this one left the whole package green.
+		// ParseFloat accepts "NaN" and "Inf", and NaN then defeats every
+		// comparison downstream: IsCapacityCompatible would report a variant
+		// as incompatible with itself.
+		It("leaves the default in place for NaN, Inf and out-of-range values", func() {
+			for _, bad := range []string{"NaN", "Inf", "-Inf", "0", "-0.5", "1.5"} {
+				deploy := makeTestDeployment("--mem-fraction-static=" + bad)
+				params := ParseSGLangArgs(scaletarget.NewDeploymentAccessor(deploy))
+				Expect(params.GpuMemoryUtilization).To(Equal(0.9),
+					"--mem-fraction-static="+bad+" must leave the SGLang default")
+			}
+		})
+
+		It("still accepts a usable fraction, including exactly 1", func() {
+			// The EXACT value, not `> 0`. The SGLang default is 0.9, which is
+			// also `> 0`, so the looser assertion could not tell "my 1.0
+			// landed" from "the guard rejected it and the default stayed" --
+			// and the boundary is where that matters: narrowing `v <= 1` to
+			// `v < 1` silently excludes both of the two values this spec is
+			// named for, and left it green. Verified by that mutation.
+			for _, tc := range []struct {
+				arg  string
+				want float64
+			}{{"0.85", 0.85}, {"1", 1}, {"1.0", 1}} {
+				deploy := makeTestDeployment("--mem-fraction-static=" + tc.arg)
+				params := ParseSGLangArgs(scaletarget.NewDeploymentAccessor(deploy))
+				Expect(params.GpuMemoryUtilization).To(Equal(tc.want),
+					"--mem-fraction-static="+tc.arg+" is usable and must land as itself")
+			}
 		})
 	})
 
