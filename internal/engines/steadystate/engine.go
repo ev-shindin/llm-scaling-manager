@@ -1139,6 +1139,7 @@ func (e *Engine) optimizeV2(
 	e.pruneAnalyzerSeries(activeKeys)
 	e.pruneBlockedModels(activeKeys)
 	e.pruneLastDecided(e.stickyAge(), time.Now())
+	e.evictStaleLearnedState(ctx)
 	e.scaleTargetUIDs = make(map[string]types.UID)
 
 	// Stage 1: Collect ModelScalingRequests for all models

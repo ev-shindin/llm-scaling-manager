@@ -18,9 +18,11 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
@@ -251,6 +253,76 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 	// Evict after emitting, never before, so a series that survives the cycle is
 	// never briefly absent from a concurrent scrape.
 	e.evictStaleAnalyzerSeries(namespace, modelID, current)
+}
+
+// staleHistoryEvictor is the part of the saturation analyzer this file needs.
+// saturationV2Analyzer is typed domain.Analyzer so tests can inject, so the
+// eviction entry point is reached through an assertion rather than a direct
+// call.
+type staleHistoryEvictor interface {
+	EvictStaleHistory(variantTimeout, bucketRetention time.Duration) saturation.Evicted
+}
+
+// evictStaleLearnedState sweeps the two stores of learned per-variant state
+// whose eviction functions existed with no caller at all.
+//
+// The saturation analyzer's EvictStaleHistory takes the k2 history and, beside
+// it, the accelerator memo, the saturated-throughput windows, the ITL windows
+// (with the learned baseline and start estimate keyed to them) and the
+// decode-saturation memory. The capacity store's EvictStale takes its records.
+// Both are keyed by variant, so until now a renamed, deleted or recreated
+// variant left its entry behind for the lifetime of the process -- exactly the
+// leak the analyzer's own comment describes: "one window per variant that has
+// EVER been seen, including deleted and renamed ones".
+//
+// Here rather than on a timer because this is the one place that runs once per
+// cycle for the whole fleet, which is where this engine's other prunes already
+// live. The timeouts are long -- 24h for history, 7 days for records -- so the
+// scan is cheap and on almost every cycle evicts nothing, which is why it logs
+// only when it does something.
+func (e *Engine) evictStaleLearnedState(ctx context.Context) {
+	logger := ctrl.LoggerFrom(ctx)
+	var history saturation.Evicted
+	if evictor, ok := e.saturationV2Analyzer.(staleHistoryEvictor); ok {
+		// Two horizons, named at the call site because they differ on purpose:
+		// per-variant state goes when the variant stops being reported, while a
+		// bucket-keyed window is KEPT past the point it is trusted so that
+		// "measured, and no longer believed" stays distinguishable from "never
+		// measured" -- see HistoryRetention.
+		history = evictor.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+	} else {
+		// Production always satisfies it (engine.go constructs the concrete
+		// analyzer), so this is a test shape -- but a memory sweep that
+		// silently did nothing is worth one line either way.
+		logger.V(logging.DEBUG).Info("analyzer cannot evict learned state; skipping its half of the sweep")
+	}
+	records := 0
+	if e.capacityStore != nil {
+		records = e.capacityStore.EvictStale(capacity.EvictionTimeout)
+	}
+	if history.Any() || records > 0 {
+		// Broken out per map, not summed. Which map lost entries is the whole
+		// diagnostic: muWindows going non-zero means the demand floor just
+		// lost the rate it prices from, k2History that a variant's capacity
+		// moved off its measurement, and the rest are routine. One line per
+		// fleet per 24h, so the cardinality cost of naming all of them is nil.
+		logger.Info("evicted stale learned state",
+			"k2History", history.K2History,
+			"muWindows", history.MuWindows,
+			"itlWindows", history.ITLWindows,
+			"itlBaselines", history.ITLBaselines,
+			"startEstimates", history.StartEstimates,
+			"startOutliers", history.StartOutliers,
+			"startSeenPods", history.Pods,
+			"accelerators", history.Accelerators,
+			"decodeSaturation", history.DecodeSaturation,
+			"fleetShapes", history.FleetShapes,
+			"variantStamps", history.VariantStamps,
+			"capacityRecords", records,
+			"variantTimeout", capacity.HistoryEvictionTimeout,
+			"bucketRetention", capacity.HistoryRetention,
+			"recordTimeout", capacity.EvictionTimeout)
+	}
 }
 
 // zeroObservedReplicas sets wva_analyzer_observed_replicas to 0 for every
