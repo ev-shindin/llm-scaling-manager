@@ -177,6 +177,9 @@ type ShareLedger struct {
 	// kept its pods, and retrying at once would loop start/abort forever.
 	aborts    map[string]int
 	giveAfter map[string]time.Time
+	// unsteerable are the donors backing off because their pods could not be
+	// marked (MarkFailed), not because a release aborted.
+	unsteerable map[string]bool
 	// fillBlocked is, per receiver, why its last fill timed out
 	// (release-taken or release-shape-mismatch) and until when it is reported.
 	fillBlocked map[string]shareFillBlock
@@ -240,6 +243,7 @@ func NewShareLedger() *ShareLedger {
 		needs:       map[string][]shareNeedSample{},
 		confirm:     map[string]int{},
 		seen:        map[string]time.Time{},
+		unsteerable: map[string]bool{},
 	}
 }
 
@@ -534,6 +538,7 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 				l.aborts[t.Donor]++
 				backoff := tm.ReleaseTimeout << min(l.aborts[t.Donor]-1, 4)
 				l.giveAfter[t.Donor] = now.Add(backoff)
+				delete(l.unsteerable, t.Donor)
 			}
 			continue
 		case t.State == ShareFilling && (receiverSeen || t.Receiver == ""):
@@ -867,6 +872,13 @@ func (l *ShareLedger) MarkFailed(donor string, now time.Time, tm ShareTimings) {
 	}
 	l.aborts[donor]++
 	l.giveAfter[donor] = now.Add(tm.ReleaseTimeout << min(l.aborts[donor]-1, 4))
+	l.unsteerable[donor] = true
+}
+
+// Unsteerable reports whether role is backing off because its pods could not
+// be marked, rather than because a release aborted.
+func (l *ShareLedger) Unsteerable(role string, now time.Time) bool {
+	return l.BackingOff(role, now) && l.unsteerable[role]
 }
 
 // Retain forgets the per-role history of roles that have been out of the group
@@ -902,6 +914,7 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		}
 		delete(l.seen, r)
 		delete(l.aborts, r)
+		delete(l.unsteerable, r)
 		delete(l.giveAfter, r)
 		delete(l.fillBlocked, r)
 		delete(l.lastGave, r)

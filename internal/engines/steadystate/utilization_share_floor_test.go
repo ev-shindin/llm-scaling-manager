@@ -100,7 +100,7 @@ func TestUtilizationShareGivesTheLeastProtectedPod(t *testing.T) {
 	se.untilStarted()
 	m := markedPods(t, c)
 	if len(m) != 1 || m[0].Name != "A-v-6" {
-		names := []string{}
+		names := make([]string, 0, len(m))
 		for _, p := range m {
 			names = append(names, p.Name)
 		}

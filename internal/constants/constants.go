@@ -175,8 +175,16 @@ const (
 	K8SEventOptimizationFailed                = "OptimizationFailed"
 	K8SEventUnattributedReadyPods             = "UnattributedReadyPods"
 	K8SEventThroughputAnalyzerRestartRequired = "ThroughputAnalyzerRestartRequired"
-	EnforcerPolicyTypeScaleToZero             = "scale_to_zero"
-	EnforcerPolicyTypeMinimumReplicas         = "minimum_replicas"
+	// Utilization-share transfer Events, on the donor's and the receiver's
+	// scale targets.
+	K8SEventUtilizationShareGiving         = "UtilizationShareGiving"
+	K8SEventUtilizationShareReceiving      = "UtilizationShareReceiving"
+	K8SEventUtilizationShareReceived       = "UtilizationShareReceived"
+	K8SEventUtilizationShareReleaseAborted = "UtilizationShareReleaseAborted"
+	K8SEventUtilizationShareWrongPod       = "UtilizationShareWrongPod"
+	K8SEventUtilizationShareFillTimedOut   = "UtilizationShareFillTimedOut"
+	EnforcerPolicyTypeScaleToZero          = "scale_to_zero"
+	EnforcerPolicyTypeMinimumReplicas      = "minimum_replicas"
 
 	// DefaultAcceleratorName is used internally by the GPU limiter when the
 	// accelerator type cannot be resolved from the scale target or VA label.

@@ -51,6 +51,21 @@ type shareActuation struct {
 	timings   allocation.ShareTimings
 	sources   allocation.ShareTimingSource
 	swinging  []string
+	// releasing and filling count the group's transfers in flight.
+	releasing, filling int
+}
+
+// countInFlight counts a ledger's transfers in flight by state.
+func countInFlight(l *allocation.ShareLedger) (releasing, filling int) {
+	for _, t := range l.Transfers() {
+		switch t.State {
+		case allocation.ShareReleasing:
+			releasing++
+		case allocation.ShareFilling:
+			filling++
+		}
+	}
+	return releasing, filling
 }
 
 // utilizationShareOverride is a planned variant's target as the optimizer owns
@@ -147,6 +162,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	for _, end := range l.Observe(held, now, tm) {
 		t := end.Transfer
 		metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, string(end.Outcome), t.Urgent)
+		e.shareEndedEvent(g, end, tm, accessor)
 		// A fill timeout leaves the receiver's target: the scheduler places it
 		// when it can, and the transfer simply stops counting as committed
 		// (§6.3). An aborted release restores the donor.
@@ -200,8 +216,9 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		out.overrides = e.quietOverrides(l, g, variantKey)
 		out.promised = l.Promised() + l.WakeHeld(now)
 		out.reserveDebt = shareDebtNow(l, held, g.Budget)
-		out.blocked = shareBlockedReasons(l, g, ev, nil, now)
+		out.blocked = shareBlockedReasons(l, g, ev, nil, now, tm)
 		out.claimable = shareClaimable(l, g, held)
+		out.releasing, out.filling = countInFlight(l)
 		return out
 	}
 
@@ -273,6 +290,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		for _, t := range set {
 			l.ConfirmStarted(t.ID, marked[t.ID])
 			st.desired[variantKey(t.Donor, t.DonorVariant)]--
+			e.shareStartedEvents(g, t, accessor)
 			logger.Info("Utilization share: transfer started", "id", t.ID, "set", t.SetID, "donor", t.Donor,
 				"receiver", t.Receiver, "donorVariant", t.DonorVariant, "receiverVariant", t.ReceiverVariant,
 				"urgent", t.Urgent, "pods", marked[t.ID], "planned", len(t.PlannedPods) > 0)
@@ -284,9 +302,10 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	out.promised = l.Promised() + l.WakeHeld(now)
 	out.swinging = plan.Swinging
 	out.reserveDebt = shareDebtNow(l, held, g.Budget)
-	out.blocked = shareBlockedReasons(l, g, ev, plan.Unfunded, now)
+	out.blocked = shareBlockedReasons(l, g, ev, plan.Unfunded, now, tm)
 	out.withheld = plan.Withheld
 	out.claimable = shareClaimable(l, g, held)
+	out.releasing, out.filling = countInFlight(l)
 	return out
 }
 
@@ -568,7 +587,7 @@ func shareDebtNow(l *allocation.ShareLedger, held map[string]int, budget int) in
 // entry, empty when nothing holds it back, so a reason that stops holding is
 // cleared.
 func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev allocation.ShareEvaluation,
-	unfunded map[string]string, now time.Time) map[string][]string {
+	unfunded map[string]string, now time.Time, tm allocation.ShareTimings) map[string][]string {
 	out := map[string][]string{}
 	model := func(role string) string {
 		o := g.Origins[role]
@@ -598,6 +617,12 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 	for _, v := range ev.Roles {
 		verdict[v.Key] = v
 	}
+	receiving := map[string]bool{}
+	for _, t := range l.Transfers() {
+		if t.Receiver != "" {
+			receiving[t.Receiver] = true
+		}
+	}
 	for _, r := range g.Roles {
 		if floors > g.Budget {
 			add(r.Key, constants.ScalingBlockedFloorsExceedQuota)
@@ -615,8 +640,23 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 		if v.Headroom < 0 && donorsAtFloor(r.Key) {
 			add(r.Key, constants.ScalingBlockedDonorsAtFloor)
 		}
-		if l.BackingOff(r.Key, now) {
+		switch {
+		case l.Unsteerable(r.Key, now):
+			add(r.Key, constants.ScalingBlockedDonorNotSteerable)
+		case l.BackingOff(r.Key, now):
 			add(r.Key, constants.ScalingBlockedReleaseTimeout)
+		}
+		if l.Swinging(r.Key, now) {
+			add(r.Key, constants.ScalingBlockedSwinging)
+		}
+		// What keeps a short role from receiving, when something does.
+		if v.Headroom < 0 && v.Actionable && !receiving[r.Key] {
+			switch {
+			case l.ReceivingHeld(r.Key, now, tm):
+				add(r.Key, constants.ScalingBlockedReversalHold)
+			case l.InFlight() >= allocation.ShareMaxConcurrentTransfers:
+				add(r.Key, constants.ScalingBlockedTransferLimit)
+			}
 		}
 		if reason := l.FillBlockedReason(r.Key, now); reason != "" {
 			add(r.Key, reason)

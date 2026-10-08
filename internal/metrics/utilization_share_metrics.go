@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -31,6 +32,8 @@ var (
 	utilizationShareEffective      *prometheus.GaugeVec
 	utilizationShareSwinging       *prometheus.GaugeVec
 	utilizationShareRelease        *prometheus.HistogramVec
+	utilizationShareMode           *prometheus.GaugeVec
+	utilizationShareInFlight       *prometheus.GaugeVec
 )
 
 // registerUtilizationShareMetrics creates and registers the utilization-share
@@ -125,11 +128,23 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 	if err := registry.Register(utilizationShareTransfers); err != nil {
 		return fmt.Errorf("failed to register utilization-share metric: %w", err)
 	}
+	modeLabels := []string{constants.LabelMode}
+	if controllerInstance != "" {
+		modeLabels = append(modeLabels, constants.LabelControllerInstance)
+	}
+	utilizationShareMode = gauge(constants.WVAUtilizationShareMode,
+		"Utilization-share optimizer: 1 for the mode it is in (off, invalid, shadow, active), 0 for the others.",
+		modeLabels)
+	utilizationShareInFlight = gauge(constants.WVAUtilizationShareInFlight,
+		"Utilization-share optimizer: a group's transfers in flight, by state (releasing, filling). "+
+			"Published only while the optimizer acts.",
+		append(slices.Clone(groupLabels), constants.LabelState))
 	for _, g := range []*prometheus.GaugeVec{
 		utilizationShareHeadroom, utilizationShareTargetGPUs, utilizationShareActionable,
 		utilizationShareSpareGPUs, utilizationShareReplicasToMove,
 		utilizationSharePromisedGPUs, utilizationShareEffective, utilizationShareSwinging,
 		utilizationShareReserveDebt, utilizationShareActual, utilizationShareFloorExcess,
+		utilizationShareMode, utilizationShareInFlight,
 	} {
 		if err := registry.Register(g); err != nil {
 			return fmt.Errorf("failed to register utilization-share metric: %w", err)
@@ -172,12 +187,37 @@ type UtilizationShareGroup struct {
 	PromisedGPUs    float64
 	ReserveDebtGPUs float64
 	Timings         []UtilizationShareTiming
+	// Releasing and Filling count the group's transfers in flight.
+	Releasing, Filling int
+}
+
+// SetUtilizationShareMode publishes the optimizer's mode: 1 for mode, 0 for
+// every other, so an alert can match the one it fears without absent().
+func SetUtilizationShareMode(mode string) {
+	if utilizationShareMode == nil {
+		return
+	}
+	for _, m := range constants.UtilizationShareModes {
+		l := prometheus.Labels{constants.LabelMode: m}
+		if controllerInstance != "" {
+			l[constants.LabelControllerInstance] = controllerInstance
+		}
+		v := 0.0
+		if m == mode {
+			v = 1
+		}
+		utilizationShareMode.With(l).Set(v)
+	}
 }
 
 // utilizationSharePublished is the series the last PublishUtilizationShare set,
-// per gauge, so the next call can delete only those that are gone. It is
-// written by the single optimize loop only.
-var utilizationSharePublished = map[*prometheus.GaugeVec]map[string]prometheus.Labels{}
+// per gauge, so the next call can delete only those that are gone. The
+// optimize loop is its only writer; publishMu keeps a second caller -- a test,
+// a second engine -- from racing it.
+var (
+	utilizationSharePublished = map[*prometheus.GaugeVec]map[string]prometheus.Labels{}
+	publishMu                 sync.Mutex
+)
 
 func seriesKey(l prometheus.Labels) string {
 	parts := make([]string, 0, len(l))
@@ -198,6 +238,8 @@ func PublishUtilizationShare(groups []UtilizationShareGroup) {
 	if utilizationShareHeadroom == nil {
 		return
 	}
+	publishMu.Lock()
+	defer publishMu.Unlock()
 	current := map[*prometheus.GaugeVec]map[string]prometheus.Labels{}
 	set := func(g *prometheus.GaugeVec, l prometheus.Labels, v float64) {
 		g.With(l).Set(v)
@@ -226,6 +268,12 @@ func PublishUtilizationShare(groups []UtilizationShareGroup) {
 		if grp.Active {
 			set(utilizationSharePromisedGPUs, gl, grp.PromisedGPUs)
 			set(utilizationShareReserveDebt, gl, grp.ReserveDebtGPUs)
+			for state, n := range map[string]int{constants.UtilizationShareStateReleasing: grp.Releasing,
+				constants.UtilizationShareStateFilling: grp.Filling} {
+				sl := maps.Clone(gl)
+				sl[constants.LabelState] = state
+				set(utilizationShareInFlight, sl, float64(n))
+			}
 			for _, tm := range grp.Timings {
 				tl := maps.Clone(gl)
 				tl[constants.LabelParam] = tm.Param

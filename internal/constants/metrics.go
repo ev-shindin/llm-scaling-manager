@@ -632,41 +632,60 @@ var (
 		ScalingBlockedReleaseTimeout,
 		ScalingBlockedReleaseTaken,
 		ScalingBlockedReleaseShapeMismatch,
+		ScalingBlockedReversalHold,
+		ScalingBlockedSwinging,
+		ScalingBlockedTransferLimit,
+		ScalingBlockedDonorNotSteerable,
 	}
 )
 
 // Utilization-share reasons (values for the `reason` label of
 // WVAModelScalingBlocked). Each is set on the model of the role it describes.
 const (
-	// ScalingBlockedAwaitingRelease: the role receives a transfer whose donor
-	// has not released its GPUs yet.
+	// ScalingBlockedAwaitingRelease indicates the role receives a transfer
+	// whose donor has not released its GPUs yet.
 	ScalingBlockedAwaitingRelease = "awaiting-release"
-	// ScalingBlockedQuotaShort: the role holds less than its need and the
-	// group as a whole is short: no rebalance can cover it.
+	// ScalingBlockedQuotaShort indicates the role holds less than its need and
+	// the group as a whole is short, so no rebalance can cover it.
 	ScalingBlockedQuotaShort = "quota-short"
-	// ScalingBlockedFloorPinned: the role's floor holds at least a replica
-	// more than its need, GPUs the share would otherwise give to others.
+	// ScalingBlockedFloorPinned indicates the role's floor holds at least a
+	// replica more than its need: GPUs the share would otherwise give others.
 	ScalingBlockedFloorPinned = "floor-pinned"
-	// ScalingBlockedFloorsExceedQuota: the floors of the group's roles add up
-	// to more than its budget.
+	// ScalingBlockedFloorsExceedQuota indicates the floors of the group's
+	// roles add up to more than its budget.
 	ScalingBlockedFloorsExceedQuota = "floors-exceed-quota"
-	// ScalingBlockedDonorsAtFloor: the role is short and out of band, and no
-	// other role is above its whole-replica target and floor to give.
+	// ScalingBlockedDonorsAtFloor indicates the role is short and out of band,
+	// and no other role is above its whole-replica target and floor to give.
 	ScalingBlockedDonorsAtFloor = "donors-at-floor"
-	// ScalingBlockedNoCompatibleDonor: the role is short and out of band, and
-	// no donor replica's pods can host one of its replicas (section 6.5).
+	// ScalingBlockedNoCompatibleDonor indicates the role is short and out of
+	// band, and no donor replica's pods can host one of its replicas
+	// (section 6.5).
 	ScalingBlockedNoCompatibleDonor = "no-compatible-donor"
-	// ScalingBlockedReleaseTimeout: the role's last release was aborted, and
-	// it is backing off before it is asked to give again.
+	// ScalingBlockedReleaseTimeout indicates the role's last release was
+	// aborted, and it is backing off before it is asked to give again.
 	ScalingBlockedReleaseTimeout = "release-timeout"
-	// ScalingBlockedReleaseTaken: the role's last transfer timed out filling,
-	// and the GPUs its donors released are no longer free -- a pod WVA did not
-	// place took them. Needs node information.
+	// ScalingBlockedReleaseTaken indicates the role's last transfer timed out
+	// filling, and the GPUs its donors released are no longer free: a pod WVA
+	// did not place took them. It needs node information.
 	ScalingBlockedReleaseTaken = "release-taken"
-	// ScalingBlockedReleaseShapeMismatch: the role's last transfer timed out
-	// filling with enough GPUs free in total, but on no node enough for the
-	// role's largest pod. Needs node information.
+	// ScalingBlockedReleaseShapeMismatch indicates the role's last transfer
+	// timed out filling with enough GPUs free in total, but on no node enough
+	// for the role's largest pod. It needs node information.
 	ScalingBlockedReleaseShapeMismatch = "release-shape-mismatch"
+	// ScalingBlockedReversalHold indicates the role is short but gave GPUs
+	// within the reversal hold, so it may not receive yet (section 6.7 rule 4).
+	ScalingBlockedReversalHold = "reversal-hold"
+	// ScalingBlockedSwinging indicates the role reversed direction twice
+	// within the swing window and is planned on its mean need, not its
+	// current one (section 6.7 rule 5).
+	ScalingBlockedSwinging = "swinging"
+	// ScalingBlockedTransferLimit indicates the role is short while its group
+	// already has the most transfers in flight it may run at once.
+	ScalingBlockedTransferLimit = "transfer-limit"
+	// ScalingBlockedDonorNotSteerable indicates the role's pods could not be
+	// marked when it was asked to give (one was not Ready or not scheduled, or
+	// the patch failed), and it is backing off before it is asked again.
+	ScalingBlockedDonorNotSteerable = "donor-not-steerable"
 )
 
 // Pod-mapping miss reasons (values for the `reason` label of WVAPodMappingMissTotal).

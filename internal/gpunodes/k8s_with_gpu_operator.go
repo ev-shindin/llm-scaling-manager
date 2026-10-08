@@ -124,7 +124,7 @@ func (d *K8sWithGpuOperator) listGPUNodes(ctx context.Context) (map[string]NodeI
 					Name:          node.Name,
 					Labels:        copyStringMap(node.Labels),
 					Accelerators:  make(map[string]AcceleratorModelInfo),
-					Unschedulable: node.Spec.Unschedulable,
+					Unschedulable: refusesNewPods(&node),
 				}
 			}
 			// i915 and xe resources use the same gpu.intel.com/product label, so
@@ -355,3 +355,23 @@ func nodeGPUTypesOf(nodes map[string]NodeInfo) map[string]string {
 
 // Ensure K8sWithGpuOperator implements FullDiscovery
 var _ FullDiscovery = (*K8sWithGpuOperator)(nil)
+
+// refusesNewPods reports whether no new pod can land on node: it is cordoned,
+// not Ready, or carries a NoSchedule or NoExecute taint. A placement that
+// counted on its free GPUs would open a hole nobody can use.
+func refusesNewPods(node *corev1.Node) bool {
+	if node.Spec.Unschedulable {
+		return true
+	}
+	for _, t := range node.Spec.Taints {
+		if t.Effect == corev1.TaintEffectNoSchedule || t.Effect == corev1.TaintEffectNoExecute {
+			return true
+		}
+	}
+	for _, c := range node.Status.Conditions {
+		if c.Type == corev1.NodeReady {
+			return c.Status != corev1.ConditionTrue
+		}
+	}
+	return false
+}

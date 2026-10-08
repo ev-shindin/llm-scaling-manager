@@ -236,7 +236,6 @@ func TestUtilizationShareIgnoresAnInvalidPrevCost(t *testing.T) {
 	}
 }
 
-
 // A rollback in the cycle of the mark cannot read the pod back: the cache may
 // not show the mark yet, and an unmark built from that read patches nothing.
 // It unmarks the pod as the mark's patch returned it.

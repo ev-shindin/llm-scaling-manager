@@ -510,7 +510,7 @@ var _ = Describe("Donor-set integrity and wake holds (§6.3, §6.5)", func() {
 		Expect(ok).To(BeTrue())
 		// The release takes far longer than the hold: the GPUs stay held.
 		l.Observe(held, t0.Add(10*time.Minute), long)
-		Expect(l.WakeHeld(t0.Add(10 * time.Minute))).To(Equal(8), "the hold lapsed before the hole opened")
+		Expect(l.WakeHeld(t0.Add(10*time.Minute))).To(Equal(8), "the hold lapsed before the hole opened")
 		// The donor's pod goes at minute 11: the wake has two minutes from then.
 		held["A"] = 0
 		l.Observe(held, t0.Add(11*time.Minute), long)

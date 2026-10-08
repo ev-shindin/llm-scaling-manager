@@ -73,10 +73,24 @@ const (
 	// that fund one receiver replica (section 6.5).
 	WVAUtilizationShareDonorsPerTransfer = "wva_utilization_share_donors_per_transfer"
 
+	// WVAUtilizationShareMode is a gauge: 1 for the mode the optimizer is in
+	// -- off, invalid (the optimizer block did not validate), shadow or active
+	// -- and 0 for the others.
+	WVAUtilizationShareMode = "wva_utilization_share_mode"
+
+	// WVAUtilizationShareInFlight is a gauge: a group's transfers in flight, by
+	// state (releasing, filling). Published only while the optimizer acts.
+	WVAUtilizationShareInFlight = "wva_utilization_share_in_flight"
+
 	// LabelParam names a derived timing; LabelSource is where its inputs came
 	// from.
 	LabelParam  = "param"
 	LabelSource = "source"
+
+	// LabelMode is the optimizer mode of WVAUtilizationShareMode; LabelState
+	// is a transfer state of WVAUtilizationShareInFlight.
+	LabelMode  = "mode"
+	LabelState = "state"
 
 	// LabelUrgent is "true" on a transfer whose receiver was below its need.
 	LabelUrgent = "urgent"
@@ -86,4 +100,49 @@ const (
 
 	// UtilizationShareClusterScope is the scope label of the cluster group.
 	UtilizationShareClusterScope = "cluster"
+)
+
+// Values of LabelMode on WVAUtilizationShareMode.
+const (
+	// UtilizationShareModeOff is a scaling policy that selects no optimizer.
+	UtilizationShareModeOff = "off"
+	// UtilizationShareModeInvalid is an optimizer block that did not validate:
+	// today's optimizer runs instead.
+	UtilizationShareModeInvalid = "invalid"
+	// UtilizationShareModeShadow is the optimizer computing and reporting,
+	// actuating nothing.
+	UtilizationShareModeShadow = "shadow"
+	// UtilizationShareModeActive is the optimizer moving GPUs.
+	UtilizationShareModeActive = "active"
+)
+
+// UtilizationShareModes are every LabelMode value, in the order published.
+var UtilizationShareModes = []string{UtilizationShareModeOff, UtilizationShareModeInvalid,
+	UtilizationShareModeShadow, UtilizationShareModeActive}
+
+// Values of LabelState on WVAUtilizationShareInFlight.
+const (
+	// UtilizationShareStateReleasing is a transfer whose donor has not
+	// released its GPUs yet.
+	UtilizationShareStateReleasing = "releasing"
+	// UtilizationShareStateFilling is a transfer whose receiver has not taken
+	// the released GPUs yet.
+	UtilizationShareStateFilling = "filling"
+)
+
+// Values of LabelParam on WVAUtilizationShareEffectiveSeconds: the derived
+// timings in force.
+const (
+	// UtilizationShareParamWindow is the donors' scale-down window.
+	UtilizationShareParamWindow = "window"
+	// UtilizationShareParamReleaseTimeout bounds a release.
+	UtilizationShareParamReleaseTimeout = "release-timeout"
+	// UtilizationShareParamFillTimeout bounds a fill.
+	UtilizationShareParamFillTimeout = "fill-timeout"
+	// UtilizationShareParamReversalHold is how long a role that gave may not
+	// receive, and one that received may not give.
+	UtilizationShareParamReversalHold = "reversal-hold"
+	// UtilizationShareParamSwingWindow is the window two reversals must fall
+	// in for a role to be planned on its mean need.
+	UtilizationShareParamSwingWindow = "swing-window"
 )

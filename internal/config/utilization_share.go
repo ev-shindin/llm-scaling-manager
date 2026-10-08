@@ -75,7 +75,7 @@ func (o *OptimizerConfig) UnmarshalYAML(node *yaml.Node) error {
 }
 
 // UtilizationShareConfig is the operator-facing configuration of the
-// utilization-share optimizer: six optional keys, each a decision only an
+// utilization-share optimizer: seven optional keys, each a decision only an
 // operator can make. Every other value the optimizer uses is derived from the
 // cluster or is a constant (§8.4 of the proposal).
 type UtilizationShareConfig struct {
@@ -103,6 +103,11 @@ type UtilizationShareConfig struct {
 
 	// Namespaces disables the optimizer for individual namespace-quota groups.
 	Namespaces map[string]UtilizationShareNamespace `yaml:"namespaces,omitempty"`
+
+	// ClusterNamespaces, when set, limits the cluster-scope groups to the
+	// models of these namespaces: a canary for a cluster quota. Every other
+	// model is left to today's optimizer. Empty plans every namespace.
+	ClusterNamespaces []string `yaml:"clusterNamespaces,omitempty"`
 }
 
 // UtilizationShareNamespace is the per-namespace-quota-group setting.
@@ -127,6 +132,9 @@ type UtilizationShare struct {
 	MinWeight, MaxWeight float64
 
 	disabled map[string]bool
+	// clusterOnly, when non-nil, are the namespaces the cluster-scope groups
+	// plan (ClusterNamespaces).
+	clusterOnly map[string]bool
 }
 
 // ResolveUtilizationShare validates cfg and returns the settings in force.
@@ -188,7 +196,22 @@ func ResolveUtilizationShare(cfg *UtilizationShareConfig) (UtilizationShare, err
 			us.disabled[ns] = true
 		}
 	}
+	for _, ns := range cfg.ClusterNamespaces {
+		if ns == "" {
+			return UtilizationShare{}, errors.New("utilizationShare.clusterNamespaces has an empty entry")
+		}
+		if us.clusterOnly == nil {
+			us.clusterOnly = make(map[string]bool, len(cfg.ClusterNamespaces))
+		}
+		us.clusterOnly[ns] = true
+	}
 	return us, nil
+}
+
+// InClusterGroup reports whether the cluster-scope groups plan namespace's
+// models: every namespace, unless ClusterNamespaces names some.
+func (u UtilizationShare) InClusterGroup(namespace string) bool {
+	return u.clusterOnly == nil || u.clusterOnly[namespace]
 }
 
 // EnabledForNamespace reports whether a namespace-quota group in namespace takes

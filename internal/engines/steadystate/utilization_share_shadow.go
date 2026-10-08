@@ -122,6 +122,16 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	if err != nil {
 		errText = err.Error()
 	}
+	switch {
+	case err != nil:
+		metrics.SetUtilizationShareMode(constants.UtilizationShareModeInvalid)
+	case !selected:
+		metrics.SetUtilizationShareMode(constants.UtilizationShareModeOff)
+	case us.Shadow:
+		metrics.SetUtilizationShareMode(constants.UtilizationShareModeShadow)
+	default:
+		metrics.SetUtilizationShareMode(constants.UtilizationShareModeActive)
+	}
 	if errText != st.lastConfigErr {
 		if err != nil {
 			logger.Error(err, "Invalid optimizer block; keeping today's optimizer. The limiters are unaffected")
@@ -191,6 +201,9 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		Exclude: func(req allocation.ModelScalingRequest, clusterScope bool) string {
 			if clusterScope && e.Config.NamespaceHasLocalPolicy(req.Namespace) {
 				return "namespace has its own scaling-policy map; not planned in the cluster-wide group"
+			}
+			if clusterScope && !us.InClusterGroup(req.Namespace) {
+				return "namespace not in utilizationShare.clusterNamespaces"
 			}
 			return ""
 		},
@@ -269,6 +282,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			}
 			pg.PromisedGPUs = float64(act.promised)
 			pg.ReserveDebtGPUs = float64(act.reserveDebt)
+			pg.Releasing, pg.Filling = act.releasing, act.filling
 			if act.promised > 0 {
 				if promised[g.Scope] == nil {
 					promised[g.Scope] = map[string]int{}
@@ -402,11 +416,14 @@ func shareTimingSeries(tm allocation.ShareTimings, src allocation.ShareTimingSou
 		return "default"
 	}
 	return []metrics.UtilizationShareTiming{
-		{Param: "window", Source: derived("window"), Seconds: tm.Window.Seconds()},
-		{Param: "release_timeout", Source: derived("window", "polling", "grace"), Seconds: tm.ReleaseTimeout.Seconds()},
-		{Param: "fill_timeout", Source: derived("polling"), Seconds: tm.FillTimeout.Seconds()},
-		{Param: "reversal_hold", Source: derived("release", "window", "polling", "grace"), Seconds: tm.ReversalHold.Seconds()},
-		{Param: "swing_window", Source: derived("release", "window", "polling", "grace"), Seconds: tm.SwingWindow.Seconds()},
+		{Param: constants.UtilizationShareParamWindow, Source: derived("window"), Seconds: tm.Window.Seconds()},
+		{Param: constants.UtilizationShareParamReleaseTimeout, Source: derived("window", "polling", "grace"),
+			Seconds: tm.ReleaseTimeout.Seconds()},
+		{Param: constants.UtilizationShareParamFillTimeout, Source: derived("polling"), Seconds: tm.FillTimeout.Seconds()},
+		{Param: constants.UtilizationShareParamReversalHold, Source: derived("release", "window", "polling", "grace"),
+			Seconds: tm.ReversalHold.Seconds()},
+		{Param: constants.UtilizationShareParamSwingWindow, Source: derived("release", "window", "polling", "grace"),
+			Seconds: tm.SwingWindow.Seconds()},
 	}
 }
 
