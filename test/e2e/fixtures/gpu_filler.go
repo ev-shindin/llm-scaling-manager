@@ -83,3 +83,27 @@ func FillGPUNodes(ctx context.Context, k8sClient *kubernetes.Clientset, namespac
 	}
 	return names, total, nil
 }
+
+// TerminatingPodsOnNodes counts the pods still terminating on the nodes
+// labelled key=product. The scheduler counts their GPUs as used until they
+// are gone, so a fill taken while any remains leaves GPUs that come free
+// later.
+func TerminatingPodsOnNodes(ctx context.Context, k8sClient *kubernetes.Clientset, key, product string) (int, error) {
+	nodes, err := k8sClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: key + "=" + product})
+	if err != nil {
+		return 0, fmt.Errorf("list %s nodes: %w", product, err)
+	}
+	n := 0
+	for i := range nodes.Items {
+		pods, err := k8sClient.CoreV1().Pods("").List(ctx, metav1.ListOptions{FieldSelector: "spec.nodeName=" + nodes.Items[i].Name})
+		if err != nil {
+			return 0, fmt.Errorf("list pods on %s: %w", nodes.Items[i].Name, err)
+		}
+		for j := range pods.Items {
+			if pods.Items[j].DeletionTimestamp != nil {
+				n++
+			}
+		}
+	}
+	return n, nil
+}

@@ -1970,7 +1970,11 @@ optimizer every cycle (§6.6).
          donor pods on it (`shareNodeSet`). Receiver pods are placed largest
          first, into the smallest hole that fits, else on the node needing the
          fewest further donor replicas. Free GPUs complete a hole but never
-         stand in for a donor's quota. The search runs before the node-blind
+         stand in for a donor's quota: where the placement needs fewer donor
+         replicas than the receiver's quota -- none, when its pods fit free
+         GPUs on a cluster whose quota is smaller than its nodes -- donor
+         replicas from any node make it up. (The kind e2e found this: with
+         free GPUs on the node and the quota spent, nothing was funded.) The search runs before the node-blind
          one, which remains the fallback. The whole set passes the same
          admission as a node-blind set, the concurrency limit counted across
          all its donors.

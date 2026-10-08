@@ -320,6 +320,24 @@ var _ = Describe("Node-aware donor sets: guards and shapes (§6.5)", func() {
 		Expect(planned(p)).To(ConsistOf("ns/a-1", "ns/c-0"), "r2 holds both pods; n4 has no rack")
 	})
 
+	It("funds a receiver whose pod fits free GPUs from donors on any node, when the quota is spent", func() {
+		// B's 8-GPU pod fits n1's free GPUs, but the quota has nothing idle:
+		// two of A's 4-GPU replicas, on n2, must give their quota. No A pod
+		// holds B's pod alone, so the node-blind search funds nothing.
+		four := func(name string) ShareUnit {
+			return ShareUnit{Pods: []SharePod{{Name: name, Node: "n2", GPUs: 4}}}
+		}
+		p := plan([]int{8}, map[string]ShareNode{"n1": {Free: 8}, "n2": {}},
+			[]ShareUnit{four("ns/a-0"), four("ns/a-1")}, nil, func(in *SharePlanInput) {
+				in.Give["A"] = ShareVariant{Name: "a", GPUs: 4, PodGPUs: []int{4}}
+				in.Roles[0].ReplicaGPUs = 4
+				delete(in.Give, "C")
+			})
+		Expect(p.Started).To(HaveLen(2), "a set of two A replicas paying for B's replica")
+		Expect(p.Started[0].Receiver).To(Equal("B"))
+		Expect(planned(p)).To(ConsistOf("ns/a-0", "ns/a-1"))
+	})
+
 	It("returns the node state its sets left, for the idle fill", func() {
 		// B's two 4-GPU pods: one into n1's 4 free GPUs, one into the hole
 		// a-0 opens on n2. n1's free GPUs are now B's.

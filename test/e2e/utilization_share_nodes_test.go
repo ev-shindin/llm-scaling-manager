@@ -106,9 +106,18 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 			g.Expect(b.Status.ReadyReplicas).To(Equal(int32(1)))
 		}, time.Duration(cfg.PodReadyTimeout)*time.Second, time.Duration(cfg.PollIntervalSec)*time.Second).Should(Succeed())
 
+		By("Waiting for earlier specs' pods to finish terminating on the product's nodes")
+		// The scheduler counts a terminating pod's GPUs as used, so a fill
+		// taken while one remains leaves GPUs that come free later -- and
+		// B's pod would then fit free GPUs, which is not this spec's case.
+		Eventually(func(g Gomega) {
+			n, err := fixtures.TerminatingPodsOnNodes(ctx, k8sClient, key, product)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(n).To(BeZero(), "%d pods still terminating", n)
+		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
 		By("Taking every other free GPU on the product's nodes with pause pods outside WVA")
-		// Pods of earlier specs may still be terminating and free GPUs as they
-		// go; fill until a pass finds nothing left to take.
+		// Fill until a pass finds nothing left to take.
 		var fillers []string
 		Eventually(func(g Gomega) {
 			names, took, err := fixtures.FillGPUNodes(ctx, k8sClient, fillerNS, key, product, gpuResName)

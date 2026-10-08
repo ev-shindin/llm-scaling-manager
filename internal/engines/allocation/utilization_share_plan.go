@@ -541,8 +541,11 @@ func startShareSet(l *ShareLedger, in SharePlanInput, rc string, set []shareDono
 // receiver with an exclusive topology keeps every hole in one domain.
 //
 // The donors must give at least the receiver's replica: free GPUs complete a
-// hole, they never stand in for a donor -- the quota still has to fit. The set
-// passes the same admission as shareDonorSet.
+// hole, they never stand in for a donor -- the quota still has to fit. Where
+// the placement needs fewer donor replicas than that -- none at all when the
+// receiver's pods fit free GPUs, as on a cluster whose quota is smaller than
+// its nodes -- donor replicas from any node make up the quota. The set passes
+// the same admission as shareDonorSet.
 func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string, work, moved map[string]int,
 	byKey map[string]ShareRole, cont map[string]float64, z func(string, int) float64,
 	isConfirmed func(string) bool, now time.Time, tm ShareTimings) ([]shareDonor, map[string]int) {
@@ -561,15 +564,14 @@ func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string,
 		search := shareNodeSearch{l: l, in: in, rc: rc, donors: donors, work: work, moved: moved, byKey: byKey,
 			now: now, tm: tm, taken: map[string]int{}, used: map[shareUnitRef]bool{}}
 		hole, ok := search.place(grow.PodGPUs, in1)
-		if !ok || len(search.set) == 0 {
-			// Free GPUs alone are the idle fill's to place, within the quota.
+		if !ok {
 			continue
 		}
-		gives := 0
-		for _, d := range search.set {
-			gives += d.gpus
-		}
-		if gives < max(grow.GPUs, 1) ||
+		// The placement may need fewer donor replicas than the receiver's
+		// quota -- or none, where its pods fit free GPUs. Free GPUs place a
+		// pod; they never pay for it: donor replicas from any node make up
+		// the quota, their pods' GPUs coming free wherever they run.
+		if !search.topUp(max(grow.GPUs, 1), hole) ||
 			!admitShareSet(l, in, rc, search.set, search.taken, work, byKey, cont, z, isConfirmed) {
 			continue
 		}
@@ -677,6 +679,31 @@ func (s *shareNodeSearch) open(n string, free, p int) ([]shareUnitRef, int, bool
 		}
 	}
 	return units, h, h >= p
+}
+
+// topUp adds donor replicas, from any node, until the set gives at least g
+// GPUs of quota, and reports whether it does.
+func (s *shareNodeSearch) topUp(g int, hole map[string]int) bool {
+	gives := func() int {
+		n := 0
+		for _, d := range s.set {
+			n += d.gpus
+		}
+		return n
+	}
+	for _, dn := range s.donors {
+		for ui := range s.in.DonorUnits[dn] {
+			if gives() >= g {
+				return true
+			}
+			r := shareUnitRef{dn, ui}
+			if s.used[r] || !s.canGive(dn, 1, 1) {
+				continue
+			}
+			s.take(r, hole)
+		}
+	}
+	return gives() >= g
 }
 
 // take adds a donor replica to the set: every node its pods run on gains
