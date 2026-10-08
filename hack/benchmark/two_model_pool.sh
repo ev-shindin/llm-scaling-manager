@@ -673,15 +673,6 @@ so_role() {
     fi
 }
 
-if [ "$PD_SINGLE_STACK" = 1 ]; then
-    gateway_host() {
-        [ -n "$PD_ENDPOINT" ] || return 1
-        local h="${PD_ENDPOINT#*://}"
-        printf '%s' "${h%%/*}"
-    }
-    base_url_for_stack() { printf '%s' "${PD_ENDPOINT%/}"; }
-    decode_deploy_for() { role_deploys | awk '$2 == "decode" { print $1; exit }'; }
-fi
 
 gateway_ip() {
     # The gateway Service's ClusterIP. Resolved ONCE, here, so the load never
@@ -721,6 +712,20 @@ endpoint_for_stack() {
     # The full completions URL, for the driver's own probes.
     printf '%s/v1/completions' "$(base_url_for_stack "$@")"
 }
+
+# Single-stack P/D replaces the stack lookups. Defined AFTER the originals: a
+# bash function is whichever definition ran last, and an override placed above
+# base_url_for_stack was silently replaced by it -- the loaders would have
+# driven the gateway, not the P/D router.
+if [ "$PD_SINGLE_STACK" = 1 ]; then
+    gateway_host() {
+        [ -n "$PD_ENDPOINT" ] || return 1
+        local h="${PD_ENDPOINT#*://}"
+        printf '%s' "${h%%/*}"
+    }
+    base_url_for_stack() { printf '%s' "${PD_ENDPOINT%/}"; }
+    decode_deploy_for() { role_deploys | awk '$2 == "decode" { print $1; exit }'; }
+fi
 
 # The EPP Deployment behind each stack: the route's backendRef names the pool
 # (`<shortName>-router`), and the chart names its EPP `<shortName>-router-epp`.

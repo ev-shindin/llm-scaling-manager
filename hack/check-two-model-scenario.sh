@@ -327,8 +327,11 @@ if ! grep 'patch scaledobject pd-prefill-wva' "$CALLS" | grep -q 'maxReplicaCoun
     fail "P/D run did not cap prefill at MAX_PREFILL: $(grep 'maxReplicaCount' "$CALLS")"
 elif ! grep 'patch scaledobject pd-decode-wva' "$CALLS" | grep -q 'maxReplicaCount.:3'; then
     fail "P/D run did not cap decode at MAX_DECODE: $(grep 'maxReplicaCount' "$CALLS")"
+elif ! grep -q "base_url: 'http://pd-router.ns-under-test.svc:80'" "$WORK/out/today/profile-a.yaml" 2>/dev/null || \
+     ! grep -q "base_url: 'http://pd-router.ns-under-test.svc:80'" "$WORK/out/today/profile-b.yaml" 2>/dev/null; then
+    fail "P/D run did not send both loaders to PD_ENDPOINT: $(grep -h -i 'url\|endpoint\|base' "$WORK"/out/today/profile-*.yaml 2>/dev/null | head -4)"
 else
-    ok "P/D run caps each role at its own ceiling"
+    ok "P/D run caps each role at its own ceiling and drives PD_ENDPOINT"
 fi
 
 case_begin
