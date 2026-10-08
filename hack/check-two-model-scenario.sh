@@ -121,6 +121,19 @@ case "$args" in
   # The scaling policy the share arms rewrite, and the query Pod that reads
   # the controller's mode back. PQUERY_OUT is what that Pod printed.
   *"get configmap wva-scaling-policy-config"*) printf '%s' "${POLICY_TEXT:-}"; exit 0 ;;
+  # Which policy a self-managed controller reads: a label on its namespace,
+  # then a wva-policy namespace, then its own.
+  *"get namespace wva-policy"*)
+      if [ "${WVA_POLICY_NS:-0}" = "1" ]; then echo "namespace/wva-policy"; exit 0; fi
+      echo 'Error from server (NotFound): namespaces "wva-policy" not found' >&2
+      exit 1 ;;
+  *"get namespace "*"-o json"*)
+      if [ -n "${NS_POLICY_LABEL:-}" ]; then
+        echo '{"metadata":{"name":"ns-under-test","labels":{"wva.llmd.ai/policy-namespace":"'"$NS_POLICY_LABEL"'"}}}'
+      else
+        echo '{"metadata":{"name":"ns-under-test"}}'
+      fi
+      exit 0 ;;
   *"get pod pquery-"*"jsonpath={.status.phase}"*) echo "Succeeded"; exit 0 ;;
   *"logs pquery-"*) echo "${PQUERY_OUT:-}"; exit 0 ;;
   *"get pvc"*) [ "${HAS_PVC:-1}" = "1" ] && exit 0; exit 1 ;;
@@ -160,6 +173,7 @@ run_verb() {
         NODE_GPUS="${NODE_GPUS:-8}" MIXED_ACCEL="${MIXED_ACCEL:-0}" \
         RESIDENT_JSON="${RESIDENT_JSON:-[]}" \
         POLICY_TEXT="${POLICY_TEXT:-}" PQUERY_OUT="${PQUERY_OUT:-}" \
+        WVA_POLICY_NS="${WVA_POLICY_NS:-0}" NS_POLICY_LABEL="${NS_POLICY_LABEL:-}" \
         SHARE_MODE_TIMEOUT=1 SHARE_MODE_POLL=1 \
         WARM_GATE_TIMEOUT=1 \
         ${VERB_TIMEOUT:+timeout "$VERB_TIMEOUT"} bash "$SCRIPT" "$@" 2>&1)"
@@ -230,6 +244,34 @@ elif grep -q 'CALL\[apply' "$CALLS" 2>/dev/null; then
     fail "'run share' started the load before the mode was confirmed: $(cat "$CALLS")"
 else
     ok "'run share' writes the acting block, keeps the quota, and waits for the controller to report it"
+fi
+
+# The share arms rewrite the benchmark namespace's policy. A controller that
+# reads another one -- a wva-policy namespace, or the namespace its own is
+# labelled to read -- would run every arm under a quota nobody wrote down, and
+# that policy is shared, so it is not the benchmark's to rewrite.
+case_begin
+WVA_POLICY_NS=1 POLICY_TEXT="$QUOTA_POLICY" VERB_TIMEOUT=60 run_verb run today
+if [ "$RC" -eq 0 ]; then
+    fail "'run today' was accepted while a wva-policy namespace exists; the controller reads that policy, not the one the arm rewrites"
+elif ! printf '%s' "$OUT" | grep -q 'shared'; then
+    fail "'run today' refused without saying the wva-policy policy is shared: $OUT"
+elif grep -q 'patch configmap' "$CALLS" 2>/dev/null; then
+    fail "'run today' rewrote a policy before refusing: $(cat "$CALLS")"
+else
+    ok "'run today' refuses when a wva-policy namespace holds the policy in force"
+fi
+
+case_begin
+NS_POLICY_LABEL=team-policy POLICY_TEXT="$QUOTA_POLICY" VERB_TIMEOUT=60 run_verb run today
+if [ "$RC" -eq 0 ]; then
+    fail "'run today' was accepted while its namespace is labelled to read team-policy's policy"
+elif ! printf '%s' "$OUT" | grep -q 'team-policy'; then
+    fail "'run today' refused without naming the labelled policy namespace: $OUT"
+elif grep -q 'patch configmap' "$CALLS" 2>/dev/null; then
+    fail "'run today' rewrote a policy before refusing: $(cat "$CALLS")"
+else
+    ok "'run today' refuses when its namespace is labelled to read another namespace's policy"
 fi
 
 # A COLD pool is the worst result this scenario can produce: the arm runs to
@@ -585,7 +627,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=34
+CASES_EXPECTED=36
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

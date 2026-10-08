@@ -28,9 +28,10 @@
 # The two arms must differ in ONE thing. Four ways they silently did not, each
 # of which produces a complete and plausible table:
 #
-#   * The pool arm was allowed MORE accelerators. Insurance must LOWER the
-#     ceiling, so the pool arm runs at MAX_REPLICAS - POOL_REPLICAS per model
-#     and the nopool arm at MAX_REPLICAS. `run` sets this; it does not hope.
+#   * The arms were allowed different ceilings. Every arm gets MAX_REPLICAS
+#     per model and the pool sits on top of that; what the pool costs is
+#     measured in accelerator-seconds, not imposed through the cap. `run` sets
+#     the ceiling; it does not hope.
 #   * The fleet was not reset. With scale-down stabilization at 300s and nopool
 #     always first, the second arm starts on an already-scaled fleet and pays no
 #     cold load at all. `reset` pins both models back to MIN_REPLICAS, waits for
@@ -65,9 +66,14 @@
 #                                   arms: nopool (the baseline), pool, and
 #                                   floor -- no pool, every model held at
 #                                   FLOOR_REPLICAS, the over-provisioning a
-#                                   pool competes against
+#                                   pool competes against. Or the
+#                                   utilization-share arms, under one quota:
+#                                   today (no optimizer block), shadow (the
+#                                   optimizer computing) and share (acting)
 #   two_model_pool.sh report        compare every arm that ran against nopool;
 #                                   writes report.md, report.json and SVG plots
+#   two_model_pool.sh report-share  compare shadow and share against today, and
+#                                   what the optimizer recorded in each
 #   two_model_pool.sh status        what exists, and what holds accelerators
 #   two_model_pool.sh teardown      remove everything this created
 #
@@ -814,10 +820,46 @@ print("RESULT " + json.dumps(out))
     printf '%s\n' "$out" | sed -n 's/^RESULT //p' | grep . || { warn "the query Pod returned nothing: $out"; return 1; }
 }
 
+# The policy this arm rewrites must be the one the controller reads. A
+# namespace-scoped controller that manages its own namespace reads, in order:
+# the namespace named by the wva.llmd.ai/policy-namespace label on that
+# namespace, the wva-policy namespace if it exists, its own namespace. Only the
+# last is the benchmark's to edit. The others are shared with other tenants, so
+# this refuses rather than rewriting them -- and an arm run against the
+# benchmark's own copy while the controller reads another would measure a quota
+# nobody wrote down.
+check_policy_namespace() {
+    [ "${SKIP_POLICY_NAMESPACE_CHECK:-0}" = "1" ] && {
+        warn "SKIP_POLICY_NAMESPACE_CHECK=1: not checking that the controller reads the policy in $WVA_NS"
+        return 0
+    }
+    local out label
+    # Forbidden is not absent: a namespace this identity cannot read may still
+    # be the one the controller reads.
+    out="$(kc get namespace "$NS" -o json 2>&1)" || \
+        die "could not read namespace $NS to find which policy the controller reads: $out
+  Set SKIP_POLICY_NAMESPACE_CHECK=1 if you know the policy in $WVA_NS is the one in force."
+    label="$(jq -r '.metadata.labels["wva.llmd.ai/policy-namespace"] // ""' <<<"$out")"
+    if [ -n "$label" ] && [ "$label" != "$WVA_NS" ]; then
+        die "namespace $NS is labelled to read its policy from $label, not $WVA_NS. That policy is shared; the share arms do not rewrite it. Run in a namespace without the label."
+    fi
+    [ -n "$label" ] && return 0
+    out="$(kc get namespace wva-policy -o name 2>&1)"
+    case "$out" in
+        namespace/wva-policy)
+            [ "$WVA_NS" = "wva-policy" ] || \
+                die "a wva-policy namespace exists, so a controller managing its own namespace reads its policy from there, not from $WVA_NS. That policy is shared; the share arms do not rewrite it." ;;
+        *NotFound*|*"not found"*) : ;;
+        *) die "could not tell whether a wva-policy namespace exists: $out
+  Set SKIP_POLICY_NAMESPACE_CHECK=1 if you know the policy in $WVA_NS is the one in force." ;;
+    esac
+}
+
 # Write the arm's `optimizer:` block into the policy every controller reads,
 # replacing whatever block is there and touching nothing else.
 set_share_policy() {
     local arm="$1" current updated
+    check_policy_namespace
     current="$(kc -n "$WVA_NS" get configmap wva-scaling-policy-config -o jsonpath='{.data.default}' 2>&1)" || \
         die "could not read the scaling policy in $WVA_NS: $current"
     # The comparison is under a quota, and the optimizer has no budget without
