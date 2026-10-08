@@ -123,16 +123,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	if err != nil {
 		errText = err.Error()
 	}
-	switch {
-	case err != nil:
-		metrics.SetUtilizationShareMode(constants.UtilizationShareModeInvalid)
-	case !selected:
-		metrics.SetUtilizationShareMode(constants.UtilizationShareModeOff)
-	case us.Shadow:
-		metrics.SetUtilizationShareMode(constants.UtilizationShareModeShadow)
-	default:
-		metrics.SetUtilizationShareMode(constants.UtilizationShareModeActive)
-	}
+	metrics.SetUtilizationShareMode(shareMode(us, selected, err))
 	if errText != st.lastConfigErr {
 		if err != nil {
 			logger.Error(err, "Utilization share: invalid optimizer block; keeping today's optimizer. The limiters are unaffected")
@@ -245,7 +236,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 				actual = r.Need * g.Thresholds[v.Key] / float64(v.Committed)
 			}
 			o := g.Origins[v.Key]
-			excess := math.Max(0, float64(r.Floor)-r.Need)
+			excess := math.Max(0, float64(r.MinFloor)-r.Need)
 			pg.Roles = append(pg.Roles, metrics.UtilizationShareRole{
 				Namespace:   o.Namespace,
 				ModelName:   o.ModelID,
@@ -513,4 +504,35 @@ func (st *utilizationShareState) clock() time.Time {
 		return st.now()
 	}
 	return time.Now()
+}
+
+// shareMode is the mode the optimizer's configuration puts it in.
+func shareMode(us config.UtilizationShare, selected bool, err error) string {
+	switch {
+	case err != nil:
+		return constants.UtilizationShareModeInvalid
+	case !selected:
+		return constants.UtilizationShareModeOff
+	case us.Shadow:
+		return constants.UtilizationShareModeShadow
+	}
+	return constants.UtilizationShareModeActive
+}
+
+// observeUtilizationShareMode publishes the optimizer's mode and, when it is
+// not acting, removes its marks -- on every cycle, including the ones that
+// plan no model (no active variant, or every model failed collection) and so
+// never reach evaluateUtilizationShare. Without it the mode would go stale,
+// and "switch to shadow, wait a cycle" before a downgrade would clean nothing
+// while the fleet is parked.
+func (e *Engine) observeUtilizationShareMode(ctx context.Context) {
+	if e.Config == nil {
+		return
+	}
+	us, selected, err := e.Config.UtilizationShare()
+	mode := shareMode(us, selected, err)
+	metrics.SetUtilizationShareMode(mode)
+	if mode != constants.UtilizationShareModeActive {
+		e.dropShareActuation(ctx, ctrl.LoggerFrom(ctx).WithName("utilization-share"))
+	}
 }

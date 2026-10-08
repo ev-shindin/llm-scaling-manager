@@ -148,7 +148,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	// whose partner moved on would not keep the woken pod out of its hole; it
 	// would only raise the original receiver into a pod that stays Pending.
 	for _, c := range decision.DefaultShareClaims.Take(g.Scope, g.AcceleratorType) {
-		prev, ok := l.Redirect(c.ID, now, tm.FillTimeout)
+		prev, ok := l.Redirect(c.ID, tm.FillTimeout)
 		if !ok {
 			logger.Info("Utilization share: a wake claimed a transfer that is no longer releasing; ignored",
 				"id", c.ID, "wake", c.Wake, "model", c.Model)
@@ -156,6 +156,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		}
 		metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, string(allocation.ShareOutcomeRedirected), prev.Urgent)
 		e.remarkDonorPods(ctx, logger, l, c.ID)
+		e.shareRedirectedEvent(prev, accessor)
 		logger.Info("Utilization share: transfer redirected to a woken model; its receiver is planned again",
 			"id", c.ID, "wake", c.Wake, "model", c.Model, "receiver", prev.Receiver, "donor", prev.Donor)
 	}
@@ -164,7 +165,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	for _, end := range l.Observe(held, now, tm) {
 		t := end.Transfer
 		metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, string(end.Outcome), t.Urgent)
-		e.shareEndedEvent(g, end, tm, accessor)
+		e.shareEndedEvent(g, end, tm, l.GiveAfter(t.Donor), accessor)
 		// A fill timeout leaves the receiver's target: the scheduler places it
 		// when it can, and the transfer simply stops counting as committed
 		// (§6.3). An aborted release restores the donor.
@@ -246,6 +247,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			st.desired[variantKey(t.Donor, t.DonorVariant)]++
 		}
 		e.unmarkDonorPods(ctx, logger, t)
+		e.shareCancelledEvents(t, accessor)
 		metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, string(allocation.ShareOutcomeCancelled), t.Urgent)
 		logger.Info("Utilization share: transfer cancelled", "id", id, "donor", t.Donor, "receiver", t.Receiver)
 	}
@@ -289,6 +291,12 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			// marked -- not Ready, all already given -- is the same next
 			// cycle, and its receiver would never try another donor.
 			l.MarkFailed(failedDonor, now, tm)
+			for _, t := range set {
+				if t.Donor == failedDonor {
+					e.shareUnsteerableEvent(accessor(t.Donor, t.DonorVariant), failed, l.GiveAfter(t.Donor))
+					break
+				}
+			}
 			logger.Error(failed, "Utilization share: could not mark a donor pod; transfer not started",
 				"id", set[0].ID, "donors", len(set), "donor", failedDonor)
 			continue
@@ -297,7 +305,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		for _, t := range set {
 			l.ConfirmStarted(t.ID, marked[t.ID])
 			st.desired[variantKey(t.Donor, t.DonorVariant)]--
-			e.shareStartedEvents(g, t, accessor)
+			e.shareStartedEvents(g, t, set, marked[t.ID], accessor)
 			logger.Info("Utilization share: transfer started", "id", t.ID, "set", t.SetID, "donor", t.Donor,
 				"receiver", t.Receiver, "donorVariant", t.DonorVariant, "receiverVariant", t.ReceiverVariant,
 				"urgent", t.Urgent, "pods", marked[t.ID], "planned", len(t.PlannedPods) > 0)
@@ -580,7 +588,7 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 	floors := 0
 	for _, r := range g.Roles {
 		out[model(r.Key)] = out[model(r.Key)][:0:0]
-		floors += r.Floor
+		floors += r.MinFloor
 	}
 	// donorsAtFloor: every role other than skip holds no more than its floor.
 	donorsAtFloor := func(skip string) bool {
@@ -605,7 +613,7 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 		if floors > g.Budget {
 			add(r.Key, constants.ScalingBlockedFloorsExceedQuota)
 		}
-		if float64(r.Floor)-r.Need >= float64(max(r.ReplicaGPUs, 1)) {
+		if float64(r.MinFloor)-r.Need >= float64(max(r.ReplicaGPUs, 1)) {
 			add(r.Key, constants.ScalingBlockedFloorPinned)
 		}
 		v := verdict[r.Key]

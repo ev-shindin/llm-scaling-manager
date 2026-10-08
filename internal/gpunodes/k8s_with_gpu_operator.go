@@ -357,9 +357,18 @@ func nodeGPUTypesOf(nodes map[string]NodeInfo) map[string]string {
 // Ensure K8sWithGpuOperator implements FullDiscovery
 var _ FullDiscovery = (*K8sWithGpuOperator)(nil)
 
+// nodeRemovalTaints mark a node an autoscaler is draining for removal. No
+// workload tolerates them.
+var nodeRemovalTaints = map[string]bool{
+	"ToBeDeletedByClusterAutoscaler": true,
+	"karpenter.sh/disrupted":         true,
+	"karpenter.sh/disruption":        true,
+}
+
 // refusesNewPods reports whether no new pod can land on node: it is cordoned,
 // not Ready, or carries a NoSchedule or NoExecute node-condition taint
-// (node.kubernetes.io/...: not-ready, unreachable, a pressure). A placement
+// (node.kubernetes.io/...: not-ready, unreachable, a pressure) or an
+// autoscaler's removal taint. A placement
 // that counted on its free GPUs would open a hole nobody can use. Other taints
 // are not read: a GPU pool's own taint is tolerated by the pods it exists for,
 // and matching a receiver's tolerations is not built.
@@ -368,8 +377,10 @@ func refusesNewPods(node *corev1.Node) bool {
 		return true
 	}
 	for _, t := range node.Spec.Taints {
-		if strings.HasPrefix(t.Key, "node.kubernetes.io/") &&
-			(t.Effect == corev1.TaintEffectNoSchedule || t.Effect == corev1.TaintEffectNoExecute) {
+		if t.Effect != corev1.TaintEffectNoSchedule && t.Effect != corev1.TaintEffectNoExecute {
+			continue
+		}
+		if strings.HasPrefix(t.Key, "node.kubernetes.io/") || nodeRemovalTaints[t.Key] {
 			return true
 		}
 	}

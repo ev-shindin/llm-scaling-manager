@@ -494,9 +494,9 @@ var _ = Describe("Donor-set integrity and wake holds (§6.3, §6.5)", func() {
 	It("never redirects a set member to a wake", func() {
 		l := NewShareLedger()
 		p, c := startSet(l)
-		_, ok := l.Redirect(p.ID, t0, time.Minute)
+		_, ok := l.Redirect(p.ID, time.Minute)
 		Expect(ok).To(BeFalse())
-		_, ok = l.Redirect(c.ID, t0, time.Minute)
+		_, ok = l.Redirect(c.ID, time.Minute)
 		Expect(ok).To(BeFalse())
 	})
 
@@ -506,7 +506,7 @@ var _ = Describe("Donor-set integrity and wake holds (§6.3, §6.5)", func() {
 			ReversalHold: time.Minute, SwingWindow: time.Minute}
 		held := map[string]int{"A": 8, "B": 0}
 		t := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 8, DonorGPUs: 8}, held, t0, long)
-		_, ok := l.Redirect(t.ID, t0, 2*time.Minute)
+		_, ok := l.Redirect(t.ID, 2*time.Minute)
 		Expect(ok).To(BeTrue())
 		// The release takes far longer than the hold: the GPUs stay held.
 		l.Observe(held, t0.Add(10*time.Minute), long)
@@ -522,7 +522,7 @@ var _ = Describe("Donor-set integrity and wake holds (§6.3, §6.5)", func() {
 		l := NewShareLedger()
 		held := map[string]int{"A": 8, "B": 0}
 		t := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 8, DonorGPUs: 8}, held, t0, tm)
-		_, ok := l.Redirect(t.ID, t0, time.Hour)
+		_, ok := l.Redirect(t.ID, time.Hour)
 		Expect(ok).To(BeTrue())
 		at := t0.Add(tm.ReleaseTimeout)
 		Expect(l.Observe(held, at, tm)).To(ConsistOf(HaveField("Outcome", ShareOutcomeAborted)))

@@ -9,6 +9,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 )
 
@@ -30,8 +31,8 @@ func TestUtilizationShareNeverGivesTheLastReplica(t *testing.T) {
 			}
 		}
 		o := se.e.evaluateUtilizationShare(se.ctx, reqs, fullQuota(), f.scaleTargets())
-		if got, ok := o["ns/C-v"]; ok && got.Target < 1 {
-			t.Fatalf("C's last replica given away: target %d", got.Target)
+		if got := targetOf(t, o, "ns/C-v"); got != 1 {
+			t.Fatalf("C's last replica given away: target %d", got)
 		}
 	}
 }
@@ -54,14 +55,16 @@ func TestUtilizationShareQuietPeriodHoldsEveryPlannedVariant(t *testing.T) {
 	}
 }
 
-// targetOf is the target a cycle leaves a fixture variant at: its override,
-// or, with none, the count the share fleet runs -- the variant is left to
-// today's optimizer, which these fixtures do not run.
-func targetOf(o map[string]utilizationShareOverride, key string) int {
-	if v, ok := o[key]; ok {
-		return v.Target
+// targetOf is a fixture variant's target in a cycle's overrides. A planned
+// variant always has one -- even in the quiet period, which pins it -- so a
+// missing one fails the test rather than reading as "unchanged".
+func targetOf(t *testing.T, o map[string]utilizationShareOverride, key string) int {
+	t.Helper()
+	v, ok := o[key]
+	if !ok {
+		t.Fatalf("no override for planned variant %s in %v", key, o)
 	}
-	return map[string]int{"ns/A-v": 9, "ns/B-v": 5, "ns/C-v": 2}[key]
+	return v.Target
 }
 
 // A donor with a pod not yet scheduled cannot be steered -- the ReplicaSet
@@ -82,7 +85,7 @@ func TestUtilizationShareRefusesADonorWithAnUnscheduledPod(t *testing.T) {
 	}
 	se := newShareEngine(t, f, c, time.Unix(0, 0))
 	for range 20 {
-		if a := targetOf(se.cycle(), "ns/A-v"); a != 9 {
+		if a := targetOf(t, se.cycle(), "ns/A-v"); a != 9 {
 			t.Fatalf("A lowered to %d although one of its pods is not scheduled", a)
 		}
 	}
@@ -132,5 +135,30 @@ func TestUtilizationShareUnmarkKeepsACostSetSinceTheMark(t *testing.T) {
 	}
 	if _, ok := p.Annotations[utilizationShareTransferAnnotation]; ok {
 		t.Fatal("the mark itself was kept")
+	}
+}
+
+// The last-replica floor is the optimizer's, not the owner's: an idle model
+// allowed to scale to zero keeps its one replica, and is not told to lower a
+// minReplicaCount it never set.
+func TestUtilizationShareDoesNotBlameTheOwnerForTheLastReplica(t *testing.T) {
+	g := allocation.ShareGroup{
+		Budget: 4,
+		Roles: []allocation.ShareRole{
+			// Idle at one replica, minReplicaCount 0: the floor is the last replica.
+			{Key: "ns/A/both", Weight: 1, Need: 0, Floor: 2, MinFloor: 0, Ceiling: 64, ReplicaGPUs: 2},
+			{Key: "ns/B/both", Weight: 1, Need: 1, Floor: 1, MinFloor: 1, Ceiling: 64, ReplicaGPUs: 1},
+		},
+		Committed:  map[string]int{"ns/A/both": 2, "ns/B/both": 2},
+		Thresholds: map[string]float64{"ns/A/both": 0.8, "ns/B/both": 0.8},
+		Origins: map[string]allocation.ShareRoleOrigin{
+			"ns/A/both": {Namespace: "ns", ModelID: "A"}, "ns/B/both": {Namespace: "ns", ModelID: "B"}},
+	}
+	ev := allocation.EvaluateShare(g.Roles, g.Committed, g.Thresholds, g.Budget, 0.15)
+	got := shareBlockedReasons(allocation.NewShareLedger(), g, ev, nil, time.Unix(0, 0), allocation.ShareTimings{})
+	for _, r := range got["ns/A"] {
+		if r == constants.ScalingBlockedFloorPinned || r == constants.ScalingBlockedFloorsExceedQuota {
+			t.Fatalf("A's last replica reported as %s: its owner set no floor", r)
+		}
 	}
 }

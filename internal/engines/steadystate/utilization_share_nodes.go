@@ -165,7 +165,11 @@ func shareDonorUnits(lws bool, pods []corev1.Pod, marked func(*corev1.Pod) bool)
 	if len(pods) == 0 {
 		return nil
 	}
-	slices.SortFunc(pods, func(a, b corev1.Pod) int { return cmp.Compare(a.Name, b.Name) })
+	// The least protected first: a node-aware plan takes units in this order,
+	// so a pod a user protected with a high deletion cost goes last.
+	slices.SortFunc(pods, func(a, b corev1.Pod) int {
+		return cmp.Or(cmp.Compare(podDeletionCost(&a), podDeletionCost(&b)), cmp.Compare(a.Name, b.Name))
+	})
 	toPod := func(p corev1.Pod) allocation.SharePod {
 		return allocation.SharePod{Name: utils.GetNamespacedKey(p.Namespace, p.Name), Node: p.Spec.NodeName,
 			GPUs: resources.PodGPURequests(&p)}

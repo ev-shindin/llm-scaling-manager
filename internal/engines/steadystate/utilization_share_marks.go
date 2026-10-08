@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
@@ -50,23 +52,42 @@ type transferMark struct {
 	// Instance is the CONTROLLER_INSTANCE that wrote the mark: a controller
 	// sweeps only its own marks (sweepShareMarks).
 	Instance string `json:"instance,omitempty"`
+	// Cost is the deletion cost the mark wrote; empty is donorDeletionCost.
+	Cost string `json:"cost,omitempty"`
 }
 
-// donorPods lists the pods a donor variant would release: on a Deployment, its
-// active pods; on a LeaderWorkerSet, the pods of its highest-index group, which
-// LWS removes first and does not steer by cost. Pods that finished
-// (Succeeded, Failed) or are being deleted are not active, as the ReplicaSet
-// counts them. A donor with an active pod not yet scheduled cannot be steered
-// -- the ReplicaSet removes an unscheduled pod before it consults the cost, and
-// LWS's highest group may be that pod's -- and is refused.
+// ownCost is the deletion cost this mark wrote on its pod.
+func (m transferMark) ownCost() string {
+	if m.Cost == "" {
+		return donorDeletionCost
+	}
+	return m.Cost
+}
+
+// donorPods lists the pods a donor variant would release, and refuses a donor
+// whose release cannot be steered.
+//
+// On a Deployment: its active pods -- not finished (Succeeded, Failed), not
+// being deleted. A pod not yet scheduled refuses the donor: the ReplicaSet
+// removes it before it reads any cost. So does a rollout, pods of more than one
+// ReplicaSet: the Deployment controller splits a scale-down across them, and a
+// cost ranks pods only within one.
+//
+// On a LeaderWorkerSet: the pods of its highest-index group, which LWS removes
+// first and does not steer by cost -- the highest over every pod its
+// StatefulSets own, terminating or not. A highest group that is terminating
+// or not yet scheduled refuses the donor: LWS removes that group, not the next.
+// A pod that only carries the LWS's labels is not its own, and is ignored.
 func (e *Engine) donorPods(ctx context.Context, acc scaletarget.ScaleTargetAccessor, namespace string) ([]corev1.Pod, error) {
-	lws := scaletarget.IsLeaderWorkerSet(acc)
 	list, err := variantmeta.ListVariantPods(ctx, e.client, namespace, acc)
 	if err != nil {
 		return nil, err
 	}
+	if scaletarget.IsLeaderWorkerSet(acc) {
+		return lwsDonorPods(acc.GetName(), list)
+	}
 	var pods []corev1.Pod
-	maxGroup := -1
+	replicaSets := map[string]bool{}
 	for _, p := range list {
 		if p.DeletionTimestamp != nil || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 			continue
@@ -74,20 +95,47 @@ func (e *Engine) donorPods(ctx context.Context, acc scaletarget.ScaleTargetAcces
 		if p.Spec.NodeName == "" {
 			return nil, fmt.Errorf("%s has a pod not yet scheduled (%s); its victim cannot be steered", acc.GetName(), p.Name)
 		}
-		if lws {
-			if i, err := strconv.Atoi(p.Labels[lwsv1.GroupIndexLabelKey]); err == nil && i > maxGroup {
-				maxGroup = i
-			}
+		if owner := metav1.GetControllerOf(&p); owner != nil {
+			replicaSets[owner.Name] = true
 		}
 		pods = append(pods, p)
 	}
-	if lws {
-		if maxGroup < 0 {
-			return nil, fmt.Errorf("no pod of %s carries a group index", acc.GetName())
+	if len(replicaSets) > 1 {
+		return nil, fmt.Errorf("%s is mid-rollout (pods of %d ReplicaSets); its victim cannot be steered",
+			acc.GetName(), len(replicaSets))
+	}
+	return pods, nil
+}
+
+// lwsDonorPods is the highest-index group of an LWS's own pods (donorPods).
+func lwsDonorPods(name string, list []corev1.Pod) ([]corev1.Pod, error) {
+	var pods []corev1.Pod
+	maxGroup := -1
+	for _, p := range list {
+		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			continue
 		}
-		pods = slices.DeleteFunc(pods, func(p corev1.Pod) bool {
-			return p.Labels[lwsv1.GroupIndexLabelKey] != strconv.Itoa(maxGroup)
-		})
+		// An LWS's pods are its StatefulSets': a bare pod that only carries its
+		// label -- one a tenant made to stay Pending -- is not the workload's.
+		if owner := metav1.GetControllerOf(&p); owner == nil || owner.Kind != "StatefulSet" {
+			continue
+		}
+		if i, err := strconv.Atoi(p.Labels[lwsv1.GroupIndexLabelKey]); err == nil && i > maxGroup {
+			maxGroup = i
+		}
+		pods = append(pods, p)
+	}
+	if maxGroup < 0 {
+		return nil, fmt.Errorf("no pod of %s carries a group index", name)
+	}
+	pods = slices.DeleteFunc(pods, func(p corev1.Pod) bool {
+		return p.Labels[lwsv1.GroupIndexLabelKey] != strconv.Itoa(maxGroup)
+	})
+	for _, p := range pods {
+		if p.DeletionTimestamp != nil || p.Spec.NodeName == "" {
+			return nil, fmt.Errorf("%s's highest group %d is terminating or not scheduled (%s); its release cannot be steered",
+				name, maxGroup, p.Name)
+		}
 	}
 	return pods, nil
 }
@@ -131,6 +179,7 @@ func (e *Engine) markDonorPods(ctx context.Context, t allocation.ShareTransfer,
 			}
 		}
 	}
+	cost := markCost(pods)
 	// A pod another transfer has marked is that transfer's: a second
 	// concurrent transfer from the same donor gives a different pod, or none.
 	// A mark no live transfer owns -- forged in a pod template, or left by a
@@ -163,11 +212,21 @@ func (e *Engine) markDonorPods(ctx context.Context, t allocation.ShareTransfer,
 		mark := transferMark{ID: t.ID, Donor: t.Donor, Receiver: t.Receiver, DonorVariant: t.DonorVariant,
 			ReceiverVariant: t.ReceiverVariant, GPUs: t.GPUs, DonorGPUs: t.DonorGPUs, Started: t.Started, SetID: t.SetID,
 			Planned: len(t.PlannedPods) > 0, Instance: metrics.GetControllerInstance()}
+		if !sameNamespace(t.Donor, t.Receiver) {
+			// The mark sits on the donor tenant's pod: it must not name
+			// another tenant's model. Restored, it is a release with no
+			// receiver, and the receiver is planned again.
+			mark.Receiver, mark.ReceiverVariant, mark.GPUs, mark.SetID = "", "", 0, ""
+			mark.DonorGPUs = t.DonorGPUs
+		}
+		mark.Cost = cost
 		// The pod's own deletion cost, restored with the mark's removal. One a
-		// stale mark of ours wrote is not the user's.
+		// stale mark of ours wrote is not the user's -- unless the user has
+		// set another since.
 		if prev, ok := p.Annotations[podDeletionCostAnnotation]; ok {
 			var old transferMark
-			if json.Unmarshal([]byte(p.Annotations[utilizationShareTransferAnnotation]), &old) == nil && old.ID != "" {
+			if json.Unmarshal([]byte(p.Annotations[utilizationShareTransferAnnotation]), &old) == nil &&
+				old.ID != "" && prev == old.ownCost() {
 				mark.PrevCost = old.PrevCost
 			} else {
 				mark.PrevCost = &prev
@@ -181,7 +240,7 @@ func (e *Engine) markDonorPods(ctx context.Context, t allocation.ShareTransfer,
 		if p.Annotations == nil {
 			p.Annotations = map[string]string{}
 		}
-		p.Annotations[podDeletionCostAnnotation] = donorDeletionCost
+		p.Annotations[podDeletionCostAnnotation] = cost
 		p.Annotations[utilizationShareTransferAnnotation] = string(raw)
 		if err := e.client.Patch(ctx, p, patch); err != nil {
 			return done, err
@@ -239,7 +298,7 @@ func (e *Engine) unmarkPod(ctx context.Context, p *corev1.Pod) error {
 	var m transferMark
 	_ = json.Unmarshal([]byte(p.Annotations[utilizationShareTransferAnnotation]), &m)
 	switch {
-	case p.Annotations[podDeletionCostAnnotation] != donorDeletionCost:
+	case p.Annotations[podDeletionCostAnnotation] != m.ownCost():
 		// Set since the mark -- by the user, or another controller: theirs.
 	case m.PrevCost != nil && validDeletionCost(*m.PrevCost):
 		p.Annotations[podDeletionCostAnnotation] = *m.PrevCost // the user's, back
@@ -587,4 +646,26 @@ func (e *Engine) sweepShareMarks(ctx context.Context, logger logr.Logger) {
 func validDeletionCost(v string) bool {
 	_, err := strconv.ParseInt(v, 10, 32)
 	return err == nil
+}
+
+// sameNamespace reports whether two share role keys (namespace/model/role)
+// belong to one namespace. A transfer with no receiver is its donor's own.
+func sameNamespace(a, b string) bool {
+	if b == "" {
+		return true
+	}
+	na, _, _ := strings.Cut(a, "/")
+	nb, _, _ := strings.Cut(b, "/")
+	return na == nb
+}
+
+// markCost is the deletion cost a donor's marked pods get: below every
+// sibling's, so the ReplicaSet removes them first -- donorDeletionCost, or
+// lower when a user set a sibling lower still.
+func markCost(pods []corev1.Pod) string {
+	lowest := int64(0)
+	for i := range pods {
+		lowest = min(lowest, podDeletionCost(&pods[i]))
+	}
+	return strconv.FormatInt(max(min(lowest-1, -1000), math.MinInt32), 10)
 }

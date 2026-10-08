@@ -613,9 +613,10 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	}()
 
 	logger := ctrl.LoggerFrom(ctx)
-	e.refreshLimiter(ctx)             // rebuild the GPU limiter if the ConfigMap changed its type/entries
-	e.reconcileExternalAnalyzers(ctx) // sync the runtime external-analyzer registry with the catalog
-	e.recordDefaultConfigMetrics()    // record as soon as possible to reflect any changes in configuration
+	e.refreshLimiter(ctx)              // rebuild the GPU limiter if the ConfigMap changed its type/entries
+	e.reconcileExternalAnalyzers(ctx)  // sync the runtime external-analyzer registry with the catalog
+	e.recordDefaultConfigMetrics()     // record as soon as possible to reflect any changes in configuration
+	e.observeUtilizationShareMode(ctx) // every cycle, even one with no model to plan
 
 	if e.Config.ScaleToZeroEnabled() {
 		logger.Info("Scaling to zero is enabled")
@@ -631,6 +632,7 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 
 	if len(activeVAs) == 0 {
 		logger.Info("No active VariantAutoscalings found, skipping optimization")
+		metrics.PublishUtilizationShare(nil) // no group to report: the share gauges go too
 		// This cycle analyzes nothing, so no analyzer series gets refreshed and
 		// the per-model prune below is never reached. Absence is meaningful for
 		// those series: left alone they would hold their last busy-cycle values

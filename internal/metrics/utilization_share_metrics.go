@@ -124,16 +124,28 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		"Utilization-share optimizer: a group's transfers in flight, by state (releasing, filling). "+
 			"Published only while the optimizer acts.",
 		append(slices.Clone(groupLabels), constants.LabelState))
-	for _, c := range []prometheus.Collector{
-		utilizationShareHeadroom, utilizationShareTargetGPUs, utilizationShareActionable,
-		utilizationShareSpareGPUs, utilizationShareReplicasToMove,
-		utilizationSharePromisedGPUs, utilizationShareEffective, utilizationShareSwinging,
-		utilizationShareReserveDebt, utilizationShareActual, utilizationShareFloorExcess,
-		utilizationShareMode, utilizationShareInFlight,
-		utilizationShareWithheld, utilizationShareClaims, utilizationShareDonorsPer, utilizationShareRelease, utilizationShareTransfers,
+	for name, c := range map[string]prometheus.Collector{
+		constants.WVAUtilizationShareHeadroom:          utilizationShareHeadroom,
+		constants.WVAUtilizationShareTargetGPUs:        utilizationShareTargetGPUs,
+		constants.WVAUtilizationShareActionable:        utilizationShareActionable,
+		constants.WVAUtilizationShareSpareGPUs:         utilizationShareSpareGPUs,
+		constants.WVAUtilizationShareReplicasToMove:    utilizationShareReplicasToMove,
+		constants.WVAUtilizationSharePromisedGPUs:      utilizationSharePromisedGPUs,
+		constants.WVAUtilizationShareEffectiveSeconds:  utilizationShareEffective,
+		constants.WVAUtilizationShareSwinging:          utilizationShareSwinging,
+		constants.WVAUtilizationShareReserveDebtGPUs:   utilizationShareReserveDebt,
+		constants.WVAUtilizationShareActual:            utilizationShareActual,
+		constants.WVAUtilizationShareFloorExcessGPUs:   utilizationShareFloorExcess,
+		constants.WVAUtilizationShareMode:              utilizationShareMode,
+		constants.WVAUtilizationShareInFlight:          utilizationShareInFlight,
+		constants.WVAUtilizationShareWithheldTotal:     utilizationShareWithheld,
+		constants.WVAUtilizationShareClaimsTotal:       utilizationShareClaims,
+		constants.WVAUtilizationShareDonorsPerTransfer: utilizationShareDonorsPer,
+		constants.WVAUtilizationShareReleaseSeconds:    utilizationShareRelease,
+		constants.WVAUtilizationShareTransfersTotal:    utilizationShareTransfers,
 	} {
 		if err := registry.Register(c); err != nil {
-			return fmt.Errorf("failed to register utilization-share metric %T: %w", c, err)
+			return fmt.Errorf("failed to register utilization-share metric %s: %w", name, err)
 		}
 	}
 	return nil

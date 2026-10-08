@@ -303,7 +303,8 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 		if !measured && len(vs) > 0 {
 			g = gpusPerReplicaFromState(stateMap, vs[0].VariantName)
 		}
-		floor := roleFloorGPUs(records, stateMap, acc, role)
+		minFloor := roleFloorGPUs(records, stateMap, acc, role)
+		floor := minFloor
 		// A role that holds a replica never gives its last one: parking a
 		// model is scale-to-zero's decision -- with its retention and its
 		// cheapest-variant rule -- not a transfer's (proposal section 7.2).
@@ -320,6 +321,7 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				Weight:      w,
 				Need:        need,
 				Floor:       floor,
+				MinFloor:    minFloor,
 				Ceiling:     ceiling,
 				ReplicaGPUs: max(g, 1),
 			},

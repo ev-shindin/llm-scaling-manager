@@ -76,7 +76,7 @@ func TestUtilizationShareBacksOffWhenTheMarkPatchFails(t *testing.T) {
 	fresh := sharePods(t, f)
 	se := newShareEngine(t, f, failing(fresh, nil, func() bool { return true }), time.Unix(0, 0))
 	for range 20 {
-		if a := targetOf(se.cycle(), "ns/A-v"); a != 9 {
+		if a := targetOf(t, se.cycle(), "ns/A-v"); a != 9 {
 			t.Fatalf("A lowered to %d although its pod could not be marked", a)
 		}
 		for _, l := range se.e.utilizationShare.ledgers {

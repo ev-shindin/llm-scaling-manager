@@ -20,8 +20,13 @@ type ShareRole struct {
 	Weight float64
 	// Need is N_r: the GPUs that put the role exactly at its scale-up threshold.
 	Need float64
-	// Floor is F_r, the GPUs its minReplicaCount holds.
+	// Floor is F_r, the GPUs the role cannot give: its minReplicaCount, and
+	// at least one replica while it runs one (the last is scale-to-zero's).
 	Floor int
+	// MinFloor is the part of Floor the owner configured: the GPUs its
+	// minReplicaCount holds. Reports that tell the owner to lower a floor
+	// count only this.
+	MinFloor int
 	// Ceiling is C_r, the GPUs its maxReplicaCount allows. Zero is unbounded.
 	Ceiling int
 	// ReplicaGPUs is g_r, one replica of the role.

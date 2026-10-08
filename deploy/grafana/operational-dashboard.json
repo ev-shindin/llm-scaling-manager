@@ -1354,7 +1354,7 @@
       "id": 61,
       "type": "stat",
       "title": "Models blocked from scaling",
-      "description": "Models the optimizer decided not to scale, in the selected namespace. Its reasons are in the 'Models that will not scale, by reason' chart below; the two disagreed while this one counted the whole cluster and that one the namespace.",
+      "description": "Models the optimizer decided not to scale, in the selected namespace, each counted once. The utilization-share optimizer's passing states (awaiting-release, reversal-hold, swinging, transfer-limit) and floor-pinned are not counted: they are expected while it works. Every reason is in the 'Models that will not scale, by reason' chart below.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource_uid}"
@@ -1371,7 +1371,7 @@
             "type": "prometheus",
             "uid": "${datasource_uid}"
           },
-          "expr": "count(wva_model_scaling_blocked{$namespace_label=~\"$namespace\"} == 1) or vector(0)",
+          "expr": "count(count by (model_name, $namespace_label) (wva_model_scaling_blocked{$namespace_label=~\"$namespace\", reason!~\"awaiting-release|reversal-hold|swinging|transfer-limit|floor-pinned\"} == 1)) or vector(0)",
           "refId": "A",
           "instant": true
         }

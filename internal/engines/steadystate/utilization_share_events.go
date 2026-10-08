@@ -2,12 +2,15 @@ package steadystate
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
@@ -20,15 +23,15 @@ import (
 // shareEventObject references a scale target for an Event.
 func shareEventObject(acc scaletarget.ScaleTargetAccessor) *corev1.ObjectReference {
 	ref := &corev1.ObjectReference{Namespace: acc.GetNamespace(), Name: acc.GetName(), UID: acc.GetUID(),
-		Kind: "Deployment", APIVersion: appsv1.SchemeGroupVersion.String()}
+		Kind: constants.DeploymentKind, APIVersion: appsv1.SchemeGroupVersion.String()}
 	if scaletarget.IsLeaderWorkerSet(acc) {
-		ref.Kind, ref.APIVersion = "LeaderWorkerSet", lwsv1.GroupVersion.String()
+		ref.Kind, ref.APIVersion = constants.LeaderWorkerSetKind, lwsv1.GroupVersion.String()
 	}
 	return ref
 }
 
-// shareEvent records an Event on the scale target of role's variant, when there
-// is a recorder and the target is known.
+// shareEvent records an Event on acc's scale target, when there is a recorder
+// and a target.
 func (e *Engine) shareEvent(acc scaletarget.ScaleTargetAccessor, eventType, reason, message string) {
 	if e.Recorder == nil || acc == nil {
 		return
@@ -40,21 +43,46 @@ func (e *Engine) shareEvent(acc scaletarget.ScaleTargetAccessor, eventType, reas
 // the same namespace, otherwise only as a model of the same quota group.
 func sharePeer(g allocation.ShareGroup, self, other string) string {
 	so, oo := g.Origins[self], g.Origins[other]
-	if other == "" {
-		return "the quota's reserve"
+	if so.Namespace == "" || so.Namespace != oo.Namespace {
+		return "a model in another namespace of its quota group"
 	}
-	if so.Namespace != "" && so.Namespace == oo.Namespace {
-		return fmt.Sprintf("model %s (%s)", oo.ModelID, oo.Role)
+	if oo.Role == "" || oo.Role == domain.RoleBoth {
+		return "model " + oo.ModelID
 	}
-	return "a model in another namespace of its quota group"
+	return fmt.Sprintf("model %s (%s)", oo.ModelID, oo.Role)
 }
 
 // shareStartedEvents records a started transfer on its donor and receiver.
-func (e *Engine) shareStartedEvents(g allocation.ShareGroup, t allocation.ShareTransfer,
-	accessor func(string, string) scaletarget.ScaleTargetAccessor) {
+// set is the transfer's donor set, or the transfer alone; pods are the donor's
+// pods it marked.
+func (e *Engine) shareStartedEvents(g allocation.ShareGroup, t allocation.ShareTransfer, set []allocation.ShareTransfer,
+	pods []string, accessor func(string, string) scaletarget.ScaleTargetAccessor) {
+	receiver, urgent := t.Receiver, t.Urgent
+	for _, m := range set {
+		if t.SetID != "" && m.ID == t.SetID {
+			receiver, urgent = m.Receiver, m.Urgent // a contributor funds its primary's receiver
+		}
+	}
+	to := "the quota group's scale-from-zero reserve (reserveGPUs)"
+	why := "the reserve was spent"
+	if receiver != "" {
+		to = sharePeer(g, t.Donor, receiver)
+		why = "to even out headroom by weight"
+		if urgent {
+			why = "because it is below its need"
+		}
+		if len(set) > 1 {
+			to += fmt.Sprintf(", with %d other donor replicas", len(set)-1)
+		}
+	}
+	names := make([]string, 0, len(pods))
+	for _, p := range pods {
+		_, name, _ := strings.Cut(p, "/")
+		names = append(names, name)
+	}
 	e.shareEvent(accessor(t.Donor, t.DonorVariant), corev1.EventTypeNormal, constants.K8SEventUtilizationShareGiving,
-		fmt.Sprintf("Utilization share: giving one replica (%d GPUs) to %s; the pod marked with deletion cost %s goes first",
-			t.DonorGPUs, sharePeer(g, t.Donor, t.Receiver), donorDeletionCost))
+		fmt.Sprintf("Utilization share: giving one replica (%d GPUs) to %s %s; %s goes",
+			t.DonorGPUs, to, why, strings.Join(names, ", ")))
 	if t.Receiver != "" && t.ReceiverVariant != "" {
 		e.shareEvent(accessor(t.Receiver, t.ReceiverVariant), corev1.EventTypeNormal, constants.K8SEventUtilizationShareReceiving,
 			fmt.Sprintf("Utilization share: receiving %d GPUs from %s; raised once its replica is released",
@@ -64,22 +92,25 @@ func (e *Engine) shareStartedEvents(g allocation.ShareGroup, t allocation.ShareT
 
 // shareEndedEvent records how a transfer ended, on the side the outcome is
 // about: a donor that did not release or lost another pod, a receiver that
-// got or did not get its GPUs.
+// got or did not get its GPUs. backoff is when an aborted donor may give again.
 func (e *Engine) shareEndedEvent(g allocation.ShareGroup, end allocation.ShareTransferEnd, tm allocation.ShareTimings,
-	accessor func(string, string) scaletarget.ScaleTargetAccessor) {
+	backoff time.Time, accessor func(string, string) scaletarget.ScaleTargetAccessor) {
 	t := end.Transfer
 	switch end.Outcome {
 	case allocation.ShareOutcomeAborted:
 		if t.DonorVariant != "" {
 			e.shareEvent(accessor(t.Donor, t.DonorVariant), corev1.EventTypeWarning,
 				constants.K8SEventUtilizationShareReleaseAborted,
-				fmt.Sprintf("Utilization share: the replica was not released within %s; its count is restored, "+
-					"and it is not asked to give again for a while", tm.ReleaseTimeout))
+				fmt.Sprintf("Utilization share: the replica was not released within %s; its count is restored, and it is "+
+					"not asked to give again before %s (the wait doubles with each abort in a row, up to 16 release "+
+					"timeouts). Check the ScaledObject's scale-down window and the pods' termination grace",
+					tm.ReleaseTimeout, backoff.UTC().Format(time.RFC3339)))
 		}
 	case allocation.ShareOutcomeWrongPod:
 		e.shareEvent(accessor(t.Donor, t.DonorVariant), corev1.EventTypeWarning,
 			constants.K8SEventUtilizationShareWrongPod,
-			"Utilization share: a pod other than the marked one went; the receiver is not raised")
+			"Utilization share: a pod other than the marked one was removed (a rollout, an eviction, another "+
+				"scale-down?); this model stays one replica lower, and the receiver is not raised")
 	case allocation.ShareOutcomeFillTimeout:
 		if t.ReceiverVariant != "" {
 			e.shareEvent(accessor(t.Receiver, t.ReceiverVariant), corev1.EventTypeWarning,
@@ -94,4 +125,33 @@ func (e *Engine) shareEndedEvent(g allocation.ShareGroup, end allocation.ShareTr
 				fmt.Sprintf("Utilization share: received %d GPUs from %s", t.GPUs, sharePeer(g, t.Receiver, t.Donor)))
 		}
 	}
+}
+
+// shareCancelledEvents records a transfer called off on a clear reversal, on
+// both sides.
+func (e *Engine) shareCancelledEvents(t allocation.ShareTransfer, accessor func(string, string) scaletarget.ScaleTargetAccessor) {
+	e.shareEvent(accessor(t.Donor, t.DonorVariant), corev1.EventTypeNormal, constants.K8SEventUtilizationShareCancelled,
+		"Utilization share: the transfer was called off because demand reversed; its replica count is restored")
+	if t.ReceiverVariant != "" {
+		e.shareEvent(accessor(t.Receiver, t.ReceiverVariant), corev1.EventTypeNormal, constants.K8SEventUtilizationShareCancelled,
+			"Utilization share: the transfer to this model was called off because demand reversed")
+	}
+}
+
+// shareRedirectedEvent records, on the receiver, that a model waking from zero
+// took the GPUs it was to receive.
+func (e *Engine) shareRedirectedEvent(t allocation.ShareTransfer, accessor func(string, string) scaletarget.ScaleTargetAccessor) {
+	if t.ReceiverVariant == "" {
+		return
+	}
+	e.shareEvent(accessor(t.Receiver, t.ReceiverVariant), corev1.EventTypeNormal, constants.K8SEventUtilizationShareRedirected,
+		"Utilization share: the GPUs this model was to receive went to a model waking from zero; it is planned again")
+}
+
+// shareUnsteerableEvent records, on a donor whose pods could not be marked,
+// why it was not asked to give.
+func (e *Engine) shareUnsteerableEvent(acc scaletarget.ScaleTargetAccessor, cause error, until time.Time) {
+	e.shareEvent(acc, corev1.EventTypeWarning, constants.K8SEventUtilizationShareDonorNotSteerable,
+		fmt.Sprintf("Utilization share: could not choose which pod gives (%v); not asked to give again before %s",
+			cause, until.UTC().Format(time.RFC3339)))
 }

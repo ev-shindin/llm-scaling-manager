@@ -92,7 +92,7 @@ func TestUtilizationShareMarksDistinctPodsThroughAStaleCache(t *testing.T) {
 	se := newShareEngine(t, f, c, time.Unix(0, 0))
 	for range 20 {
 		snapshot = nil // each cycle starts with a fresh cache, then goes stale
-		if given := 9 - targetOf(se.cycle(), "ns/A-v"); given > 0 {
+		if given := 9 - targetOf(t, se.cycle(), "ns/A-v"); given > 0 {
 			if marked := len(markedPods(t, fresh)); marked != given {
 				t.Fatalf("A gave %d replicas but %d distinct pods are marked", given, marked)
 			}
@@ -168,7 +168,7 @@ func TestUtilizationShareUnmarksAVanishedGroup(t *testing.T) {
 		t.Fatalf("a group missing for one cycle lost its state: %d marked (was %d), %d ledgers",
 			n, marked, len(se.e.utilizationShare.ledgers))
 	}
-	if got := targetOf(o, "ns/A-v"); got != 9-given {
+	if got := targetOf(t, o, "ns/A-v"); got != 9-given {
 		t.Fatalf("A's target while its group is missing = %d, want %d held", got, 9-given)
 	}
 	se.clock = se.clock.Add(shareAbsenceGrace)
@@ -254,7 +254,7 @@ func TestUtilizationShareRestoreRejectsAnIDUnderTwoDonors(t *testing.T) {
 	annotate(t, c, "C-v-0", map[string]string{utilizationShareTransferAnnotation: string(raw)})
 
 	restarted := newShareEngine(t, f, c, se.clock.Add(30*time.Second))
-	if got := targetOf(restarted.cycle(), "ns/A-v"); got != 9 {
+	if got := targetOf(t, restarted.cycle(), "ns/A-v"); got != 9 {
 		t.Fatalf("A target after restart = %d, want 9: the copied id restored a transfer", got)
 	}
 	if n := len(markedPods(t, c)); n != 0 {

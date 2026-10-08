@@ -225,7 +225,6 @@ type shareUndo struct {
 	receiverSwing   time.Time
 }
 
-// shareWakeHold is GPUs held for a woken model until a time.
 // shareWakeHold is a redirected transfer's GPUs, held for the woken model:
 // for as long as the release takes (id names the transfer, until is zero), then
 // for hold more, while the wake's pod lands.
@@ -283,7 +282,7 @@ func (l *ShareLedger) InFlight() int {
 func (l *ShareLedger) StartFill(receiver, variant string, gpus int, held map[string]int, now time.Time, tm ShareTimings) ShareTransfer {
 	l.nextID++
 	t := &ShareTransfer{
-		ID: fmt.Sprintf("%s-f%d", l.incarnation, l.nextID), Receiver: receiver, ReceiverVariant: variant,
+		ID: fmt.Sprintf("%s-f%d-%s", l.incarnation, l.nextID, randomHex(4)), Receiver: receiver, ReceiverVariant: variant,
 		GPUs: gpus, Entitled: true, State: ShareFilling, Started: now,
 		Deadline: now.Add(tm.FillTimeout), receiverBase: held[receiver], fillingSince: now,
 	}
@@ -352,7 +351,7 @@ func (l *ShareLedger) Promised() int {
 // Start records a newly admitted transfer, in Releasing.
 func (l *ShareLedger) Start(t ShareTransfer, held map[string]int, now time.Time, tm ShareTimings) ShareTransfer {
 	l.nextID++
-	t.ID = fmt.Sprintf("%s-t%d", l.incarnation, l.nextID)
+	t.ID = fmt.Sprintf("%s-t%d-%s", l.incarnation, l.nextID, randomHex(4))
 	if t.SetID == "" && t.DonorGPUs < t.GPUs {
 		t.DonorGPUs = t.GPUs // a set member gives one donor replica of several
 	}
@@ -649,7 +648,7 @@ func (l *ShareLedger) ReceivingHeld(role string, now time.Time, tm ShareTimings)
 // lands -- not after the redirect: a release takes a whole scale-down window --
 // so an idle fill does not raise another receiver into the hole the wake's pod
 // waits for. A release that aborts opens no hole, and its hold goes.
-func (l *ShareLedger) Redirect(id string, now time.Time, hold time.Duration) (ShareTransfer, bool) {
+func (l *ShareLedger) Redirect(id string, hold time.Duration) (ShareTransfer, bool) {
 	for _, t := range l.transfers {
 		if t.ID == id && redirectable(t) {
 			prev := *t
@@ -933,14 +932,27 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 	}
 }
 
-// newIncarnation is a random prefix for a ledger's transfer IDs. Random, not a
-// clock: an ID a tenant can predict from one it saw on its own pod could be
-// forged onto its pods to collide with another tenant's transfer, which a
-// restart then drops as a duplicate.
+// newIncarnation is a random prefix for a ledger's transfer IDs, so an ID
+// never repeats across restarts.
 func newIncarnation() string {
-	b := make([]byte, 8)
+	if s := randomHex(8); s != "" {
+		return s
+	}
+	return strconv.FormatInt(time.Now().UnixNano(), 36)
+}
+
+// randomHex is n random bytes in hex, or "" if the system has none. Every
+// transfer ID ends in one: an ID a tenant could predict from the one on its own
+// pod could be forged onto its pods to collide with another tenant's transfer,
+// which a restart then drops as a duplicate.
+func randomHex(n int) string {
+	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
-		return strconv.FormatInt(time.Now().UnixNano(), 36)
+		return ""
 	}
 	return hex.EncodeToString(b)
 }
+
+// GiveAfter is when role may be asked to give again after a back-off; the zero
+// time when it is not backing off.
+func (l *ShareLedger) GiveAfter(role string) time.Time { return l.giveAfter[role] }
