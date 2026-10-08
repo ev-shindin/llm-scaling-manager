@@ -510,7 +510,14 @@ func (a *SaturationAnalyzer) computeK2(
 		} else {
 			a.mu.Lock()
 			ra, ok := a.computeCapacityHistory[historyKey]
-			if !ok || ra.Stale(capacity.HistoryEvictionTimeout) {
+			// WriteGapExceeds, not Stale: this asks whether the last
+			// OBSERVATION is old enough that today's belongs to a new
+			// episode. Stale tracks use, and Priority 2 below reads this
+			// window every cycle, so asking it could never report a gap for
+			// a bucket the fleet is still serving -- two episodes weeks
+			// apart would blend, and a stale high reading would hold
+			// capacity up against today's lower, truer one.
+			if !ok || ra.WriteGapExceeds(capacity.HistoryEvictionTimeout) {
 				ra = capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
 				a.computeCapacityHistory[historyKey] = ra
 			}
@@ -529,12 +536,35 @@ func (a *SaturationAnalyzer) computeK2(
 
 	// Priority 2: Historical — lock must cover Average() since Add() mutates
 	// the same slice from Priority 1 under the same lock.
+	//
+	// Stale() is checked here for the same reason the write path above checks
+	// it, and it was missing. Without it this read returns a window the sweep
+	// is about to delete, which makes wiring up EvictStaleHistory a BEHAVIOUR
+	// change rather than the memory fix it looks like: a k2 older than
+	// HistoryEvictionTimeout used to come back as K2SrcHistorical, and once
+	// the sweep deletes it the source falls through to the DERIVED figure
+	// instead. A derived k2 above the measured one raises effectiveCapacity
+	// and orders FEWER replicas, which is the direction this project has
+	// recorded as breaking TTFT irrecoverably.
+	//
+	// Touch() is why the guard is safe to add. The ONLY writer of this window
+	// is Priority 1 above, which needs a saturated queue, so without the
+	// touch the window ages on "last saturated" -- and a comfortably
+	// provisioned fleet does not saturate. Measured: a live variant serving
+	// happily for 24h went from a measured k2 of 50,000 to a derived 332,800,
+	// a 6.7x capacity rise and ~6.7x fewer replicas, for no reason but the
+	// clock. Touching on the read ages it on "last USED" instead, which is
+	// the same correction variantSeenAt makes for the ITL maps and the same
+	// reason Touch exists at all: a reading still being read is still the
+	// window being observed. A window nothing reads still ages out, so the
+	// leak closes; a window a decision depends on every cycle does not.
 	a.mu.Lock()
 	var histAvg float64
 	var histLen int
 	if ra, ok := a.computeCapacityHistory[historyKey]; ok {
 		histAvg = ra.Average()
 		histLen = ra.Len()
+		ra.Touch()
 	}
 	a.mu.Unlock()
 	if histAvg > 0 {
@@ -571,6 +601,16 @@ func (a *SaturationAnalyzer) computeK2(
 	// magnitude in the other direction, but at least it bounds something real
 	// (the KV cache this replica actually has) rather than a per-step figure
 	// compared against an accumulated one.
+	//
+	// Reached only when Priority 2 found NO window, which is what makes the
+	// ordering safe: a bucket this fleet has measured keeps answering from its
+	// measurement for as long as the window is retained, however old the
+	// figure is. That is deliberate and it follows from effectiveCapacity =
+	// min(k1, k2) -- a measured k2 can only ever LOWER capacity below k1, so
+	// it is never more dangerous than the k1 it would otherwise fall back to,
+	// and preferring it can only order more replicas. An earlier revision
+	// refused a measurement past a "trust horizon" and fell to k1 for it; that
+	// could only raise capacity, so it was removed.
 	isPrefill := canonicalRole(role) == domain.RolePrefill
 	if !isPrefill {
 		if k2Derived := estimateCapacityFromParams(engineParams, avgInput, avgOutput); k2Derived > 0 {

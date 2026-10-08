@@ -105,7 +105,24 @@ func (s *Store) Get(namespace, modelID, variantName string) *Record {
 
 // IsStale returns true if the record for the given variant is older than
 // StalenessTimeout, or if no record exists. No caller on the reconcile path
-// today.
+// today, and that is not an oversight: the read paths deliberately have no
+// trust horizon.
+//
+// StalenessTimeout is 30 minutes and EvictionTimeout is seven days, so the
+// store keeps a record 336x longer than this function would call fresh. The
+// gap is the design. A record is engine configuration and a learned capacity,
+// and for the fleets this serves both change only on a redeploy -- which
+// rewrites the record rather than ageing it. Meanwhile the figure a stale
+// record yields is the conservative one: capacity is min(k1, k2), so an old
+// measurement can only hold capacity DOWN, and refusing it falls through to a
+// derived estimate that is typically higher and orders fewer replicas. Ageing
+// records out of the read path is therefore a way to under-provision on a
+// timer; see the same argument at the k2 history read in the saturation
+// analyzer, where it was measured.
+//
+// Kept rather than deleted because an explicit staleness predicate is the
+// right thing to have the day a caller wants one -- a diagnostic, or a
+// condition on the CR -- and because what it means is now written down.
 func (s *Store) IsStale(namespace, modelID, variantName string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -169,7 +186,7 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 // given timeout. This prevents unbounded memory growth from deleted or
 // long-unused variants. Use a long timeout (EvictionTimeout, seven days)
 // since historical capacity data is valuable for zero-replica estimation.
-// No caller on the reconcile path today.
+// Called once per cycle from steadystate.evictStaleLearnedState.
 func (s *Store) EvictStale(timeout time.Duration) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

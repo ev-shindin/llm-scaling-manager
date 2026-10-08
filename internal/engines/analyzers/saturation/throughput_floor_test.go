@@ -179,7 +179,7 @@ var _ = Describe("the saturated-throughput window", func() {
 		// a zero timeout asks whether any time at all has passed, which on a
 		// coarse clock it may not have.
 		a.saturatedThroughput["k"].TouchAt(time.Now().Add(-2 * time.Hour))
-		a.EvictStaleHistory(time.Hour)
+		a.EvictStaleHistory(time.Hour, time.Hour)
 		Expect(a.saturatedThroughput).To(BeEmpty())
 	})
 

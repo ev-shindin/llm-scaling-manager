@@ -96,7 +96,7 @@ the saturation V2 analyzer sets one of these values:
 |---|---|
 | `P0-store` | capacity came from the **capacity store** (no live replicas) |
 | `P1-obs` | k2 came from **observed** tokens-in-use (queue was saturated), blended into the same rolling average `P2-hist` reads -- a single noisy cycle gets 1/N weight rather than taking over outright |
-| `P2-hist` | k2 came from the **historical** rolling average |
+| `P2-hist` | k2 came from the **historical** rolling average. The window is kept for 7 days from when it was last *read* — not written — so a bucket whose capacity is priced from it every cycle keeps its measurement however long the fleet goes without saturating. However old the figure is, while it is retained it answers: it is the most conservative number available for the bucket, since `min(k1, k2)` means every alternative is higher. Past 7 days with nothing reading it the bucket is forgotten and the next decision falls to `P3-k2` or `P4-k1` |
 | `P3-k2` | k2 was **derived** from deployment parameters (vLLM model args). Never fires for a **prefill** variant: the formula assumes a real per-request output length, which prefill's own avgOutput (~0-1, it hands off before generating anything) collapses to just the batch-token budget echoed back -- not a derived signal |
 | `P4-k1` | k2 was unavailable; **fell back** to k1 (memory-bound capacity). For prefill this is the common case, not a degraded one -- see `P3-k2` above |
 

@@ -82,7 +82,7 @@ type SaturationAnalyzer struct {
 	// shape_change.go for what the event is for.
 	fleetShape map[string]*shapeMemo
 
-	// itlWindows is one rolling window of (k, ITL) readings per variant, from
+	// itlWindows is one rolling window of (k, ITL) readings PER VARIANT, from
 	// which ITL(k) = A*k + B is fitted so mu can be derived for the shape the
 	// fleet is serving NOW rather than waiting for it to saturate under it
 	// (mu_from_itl.go). Keyed like the throughput windows and swept with them.
@@ -108,8 +108,87 @@ type SaturationAnalyzer struct {
 	// implausible for a variant, so a genuine change of hardware is eventually
 	// admitted rather than rejected forever against a stale estimate.
 	startOutliers map[string]int
+	// variantSeenAt is when each variant key was last REPORTED, which is what
+	// the learned per-variant state is swept on.
+	//
+	// It exists because an empty ITL window is not evidence that a variant is
+	// gone. Window.Add admits only k in [DefaultMinObservableK,
+	// DefaultMaxObservableK], so a healthy, under-utilised fleet below k=0.15
+	// offers readings every cycle and holds NONE -- its window is permanently
+	// empty while the variant is perfectly live. Keying the sweep on
+	// Len() == 0 therefore deleted the learned start estimate and the ITL
+	// baseline of exactly the fleets that were doing fine, every cycle; and
+	// because startSeenPods is re-stamped for a Pod still being reported,
+	// noteReplicaStart could never put the start estimate back. The figure was
+	// gone until the Pod was replaced.
+	//
+	// Stamped by noteITL and by noteReplicaStart, so it covers every role
+	// rather than decode alone -- which also bounds the start estimate of a
+	// prefill or RoleBoth variant, whose keys the window cascade could never
+	// visit and so never swept at all. Both producers stamp their own key,
+	// rather than one relying on the other having run first.
+	//
+	// "REPORTED" means a replica of it was attributable this cycle, which is
+	// not the same as existing. A model with no attributable replicas skips
+	// analysis entirely (steadystate, the len(replicaMetrics) == 0 branch), so
+	// a fleet parked at zero is unstamped for as long as it is parked: past
+	// HistoryEvictionTimeout it re-learns its ITL baseline and start estimate
+	// on wake, which is the one case this timeout is felt rather than just
+	// bounding memory. The capacity STORE is what carries a parked variant --
+	// deliberately, on a seven-day timeout whose own comment names the
+	// weekend -- so engine params and the capacity record survive the gap and
+	// only the two fitted figures are re-measured. The asymmetry between the
+	// two timeouts is therefore intended, but it is an asymmetry: 24h of
+	// quiet costs the fit, seven days costs the record.
+	variantSeenAt map[string]time.Time
 	// now is the clock the memory reads; tests set it.
 	now func() time.Time
+}
+
+// Evicted is what one sweep of the analyzer's learned state removed, counted
+// per map rather than summed.
+//
+// Summed, the number could not be acted on: the per-variant state is swept in
+// separate loops, so one departed variant counted three times, while the two
+// figures an operator would actually want to see -- MuWindows, because losing
+// it makes the demand floor abstain or borrow, and K2History, because losing
+// it moves k2 to a derived figure -- were indistinguishable from the start
+// estimates and baselines that come and go harmlessly.
+//
+// Zero value means nothing was evicted, which is the common case; Any reports
+// it so the caller can stay silent on the cycles that found nothing.
+type Evicted struct {
+	// K2History is compute-capacity (k2) windows, and MuWindows the
+	// saturated-throughput windows the demand floor prices from.
+	K2History int
+	MuWindows int
+	// ITLWindows and ITLBaselines are the fitted ITL(k) state; StartEstimates
+	// and StartOutliers the learned replica start time and its reject
+	// counter; Pods the per-Pod records that say a start is already counted.
+	ITLWindows     int
+	ITLBaselines   int
+	StartEstimates int
+	StartOutliers  int
+	Pods           int
+	// Accelerators is the resolved-accelerator memo, DecodeSaturation the
+	// per-model decode-saturation memory, FleetShapes the per-model shape memo
+	// and VariantStamps the liveness stamps themselves. None is read as a
+	// figure; they are counted because an unbounded map is the thing being
+	// fixed, and because a deletion nothing counts makes Any() false on a
+	// cycle that evicted something -- which silences the one log line this
+	// sweep emits. A reviewer found both of the last two uncounted.
+	Accelerators     int
+	DecodeSaturation int
+	FleetShapes      int
+	VariantStamps    int
+}
+
+// Any reports whether the sweep evicted anything at all.
+func (e Evicted) Any() bool {
+	return e.K2History > 0 || e.MuWindows > 0 || e.ITLWindows > 0 ||
+		e.ITLBaselines > 0 || e.StartEstimates > 0 || e.StartOutliers > 0 ||
+		e.Pods > 0 || e.Accelerators > 0 || e.DecodeSaturation > 0 ||
+		e.FleetShapes > 0 || e.VariantStamps > 0
 }
 
 // acceleratorMemo is the last accelerator that resolved for a variant, with the
@@ -137,6 +216,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		startSeconds:           make(map[string]float64),
 		startSeenPods:          make(map[string]time.Time),
 		startOutliers:          make(map[string]int),
+		variantSeenAt:          make(map[string]time.Time),
 		now:                    time.Now,
 	}
 }
@@ -148,9 +228,44 @@ func (a *SaturationAnalyzer) Name() string {
 	return "saturation-token-based"
 }
 
-// EvictStaleHistory removes k2 history entries that have not been updated
-// within the given timeout. This prevents unbounded memory growth from
-// deleted models or workload buckets that are no longer active.
+// noteVariantSeen records that a variant key was reported this cycle. The
+// learned state keyed on it is swept on this timestamp and nothing else.
+//
+// Callers hold a.mu.
+func (a *SaturationAnalyzer) noteVariantSeen(key string, now time.Time) {
+	a.variantSeenAt[key] = now
+}
+
+// variantIsStale reports whether nothing has reported a variant key within the
+// timeout. A key with no stamp at all counts as stale: every producer of
+// learned state stamps one, so an unstamped key is left over from before a key
+// changed shape and is exactly what the sweep is for.
+//
+// Callers hold a.mu.
+func (a *SaturationAnalyzer) variantIsStale(key string, now time.Time, timeout time.Duration) bool {
+	seen, ok := a.variantSeenAt[key]
+	return !ok || now.Sub(seen) > timeout
+}
+
+// EvictStaleHistory removes learned state that is past its horizon, which
+// prevents unbounded memory growth from deleted models, renamed variants and
+// workload buckets that are no longer active.
+//
+// Two horizons, because the maps are keyed differently and "no longer needed"
+// means different things:
+//
+//   - variantTimeout governs the PER-VARIANT state -- ITL window and baseline,
+//     start estimate and its outlier counter -- measured from when the variant
+//     was last REPORTED (variantSeenAt), plus the per-model memos beside them.
+//   - bucketRetention governs the BUCKET-KEYED windows, the k2 history and the
+//     mu windows, measured from when they were last READ. It is deliberately
+//     the longer of the two: a window is kept well past the point its figure
+//     is trusted, so that a bucket the read refuses on age still EXISTS to be
+//     refused. That is what lets k2 fall through to k1 rather than to the
+//     derived figure, which is higher and would order fewer replicas. The
+//     sweep runs at the top of the cycle, before any capacity is computed, so
+//     a window evicted on the trust horizon would be gone before the read that
+//     needed to see it. See capacity.HistoryRetention.
 //
 // It prunes the accelerator memo on the same timeout, and here rather than in a
 // second sweep so the two cannot drift: both are per-variant state that exists
@@ -158,56 +273,122 @@ func (a *SaturationAnalyzer) Name() string {
 // timeout has no use for either. The saturated-throughput windows and the
 // decode-saturation memory go the same way -- the latter is per
 // namespace|model rather than per variant, but a model quiet for the timeout
-// has no use for it either. The returned count remains the number of
-// HISTORY entries evicted, which is what its callers report.
-func (a *SaturationAnalyzer) EvictStaleHistory(timeout time.Duration) int {
+// has no use for it either.
+//
+// The return is a per-map breakdown rather than one total, because a single
+// number could not be read: the per-variant state is swept in separate loops
+// (window-emptiness stopped being the liveness test), so one departed variant
+// incremented a shared counter three times, and the one figure a total could
+// have meant -- "the demand floor just lost its mu" -- was not counted at all.
+// Each field names the map it came from, and the caller in steadystate logs
+// them under those names.
+func (a *SaturationAnalyzer) EvictStaleHistory(variantTimeout, bucketRetention time.Duration) Evicted {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	evicted := 0
+	var evicted Evicted
 	for key, ra := range a.computeCapacityHistory {
-		if ra.Stale(timeout) {
+		if ra.Stale(bucketRetention) {
 			delete(a.computeCapacityHistory, key)
-			evicted++
+			evicted.K2History++
 		}
 	}
+	// bucketRetention, NOT variantTimeout, although this memo is per
+	// variant. It is the value that RESOLVES into the k2 history key, so
+	// expiring it ahead of the window it keys silently moves the key: the
+	// accelerator reads unresolved, the lookup misses a window that is
+	// still retained, and k2 falls through to the derived figure -- which
+	// is exactly what retaining the window past its last read is meant to
+	// prevent. A reviewer found this; on the 24h horizon there was a
+	// six-day band where the measurement existed and could not be reached.
 	for key, memo := range a.lastAccelerator {
-		if time.Since(memo.lastUsed) > timeout {
+		if time.Since(memo.lastUsed) > bucketRetention {
 			delete(a.lastAccelerator, key)
+			evicted.Accelerators++
 		}
 	}
-	// An ITL window ages by its own observations rather than by a timestamp
-	// of its own: Prune drops readings past DefaultObservationMaxAge, so a
-	// window left empty by that belongs to a variant nothing has reported for
-	// at least that long. Without this the map keeps one window per variant
-	// that has EVER been seen, including deleted and renamed ones.
+	// The per-VARIANT maps below age on variantSeenAt: the time the variant
+	// was last REPORTED. Two other clocks are in play in this function and
+	// neither is a leftover. The k2 history and the mu windows age on their
+	// own last-use stamp, because they are keyed by workload BUCKET
+	// (model|accel|gpus|role|bucket|qN -- no namespace, no variant name), so
+	// they cannot be joined to a variant key at all; their reads call Touch
+	// so that "last use" is what it says. The accelerator memo, the
+	// decode-saturation memory and the fleet shape are per model, not per
+	// variant, and age on wall-clock time.Since.
+	//
+	// The window is still pruned every sweep,
+	// because stale observations must not reach a fit, but an empty window is
+	// no longer taken as evidence that the variant is gone -- see
+	// variantSeenAt's own comment for why it is not, and for what that cost.
+	//
+	// The intent is unchanged and is the one the first version of this loop
+	// stated: without a sweep the maps keep one entry per variant that has
+	// EVER been seen, including deleted and renamed ones, and a baseline or a
+	// start time measured before a redeploy onto different hardware would size
+	// every later fit and projection for that key. Only the liveness test
+	// changed, from "its window is empty" to "nothing has reported it".
 	now := a.now()
-	for key, w := range a.itlWindows {
+	for _, w := range a.itlWindows {
 		w.Prune(now)
-		if w.Len() == 0 {
+	}
+	for key := range a.itlWindows {
+		if a.variantIsStale(key, now, variantTimeout) {
 			delete(a.itlWindows, key)
-			// The learned baseline dies with the window that produced it.
-			// Kept, it would grow one float per variant/accelerator ever seen
-			// and, worse, pin a hardware floor measured before a redeploy onto
-			// different hardware into every later fit for that key.
+			evicted.ITLWindows++
+		}
+	}
+	// Separate loops, not one pass over itlWindows: noteReplicaStart runs for
+	// every role while noteITL runs for decode only, so a prefill or RoleBoth
+	// variant has a start estimate and no window at all. Sweeping these
+	// through the window map left those keys unbounded -- the very leak the
+	// sweep was wired up to close.
+	for key := range a.itlBaseline {
+		if a.variantIsStale(key, now, variantTimeout) {
 			delete(a.itlBaseline, key)
-			// And the start estimate, for the same reason: a figure measured
-			// before a redeploy onto different hardware would otherwise size
-			// every later projection for that key.
+			evicted.ITLBaselines++
+		}
+	}
+	for key := range a.startSeconds {
+		if a.variantIsStale(key, now, variantTimeout) {
 			delete(a.startSeconds, key)
 			delete(a.startOutliers, key)
+			evicted.StartEstimates++
 		}
 	}
-	a.evictStartSeenPods(now, timeout)
+	// Belt and braces, and deliberately kept as such. Today
+	// keys(startOutliers) is a strict SUBSET of keys(startSeconds) -- the
+	// counter is only ever incremented under `measured` (so the estimate
+	// exists) or written to 0 beside an estimate write -- and the loop above
+	// deletes both on the same key, so this loop cannot currently fire. It
+	// stays because it is what makes startOutliers bounded no matter who
+	// writes it next: the subset property is an invariant of two call sites in
+	// start_est.go, not of this map's type, and an unbounded per-variant map
+	// is the defect this whole function exists to prevent. An earlier version
+	// of this comment claimed the loop was reachable, which was wrong.
+	for key := range a.startOutliers {
+		if a.variantIsStale(key, now, variantTimeout) {
+			delete(a.startOutliers, key)
+			evicted.StartOutliers++
+		}
+	}
+	for key, seen := range a.variantSeenAt {
+		if now.Sub(seen) > variantTimeout {
+			delete(a.variantSeenAt, key)
+			evicted.VariantStamps++
+		}
+	}
 	for key, ra := range a.saturatedThroughput {
-		if ra.Stale(timeout) {
+		if ra.Stale(bucketRetention) {
 			delete(a.saturatedThroughput, key)
 			delete(a.throughputSampledAt, key)
 			delete(a.throughputLastRead, key)
+			evicted.MuWindows++
 		}
 	}
 	for key, at := range a.decodeSaturatedAt {
-		if time.Since(at) > timeout {
+		if time.Since(at) > variantTimeout {
 			delete(a.decodeSaturatedAt, key)
+			evicted.DecodeSaturation++
 		}
 	}
 	// The fleet-shape memo is per namespace|model and exists only to key and
@@ -216,11 +397,19 @@ func (a *SaturationAnalyzer) EvictStaleHistory(timeout time.Duration) int {
 	// namespaces come and go.
 	//
 	// maps.DeleteFunc rather than the hand-rolled loops above: those predate
-	// it and two of them cannot use it anyway, one because it counts what it
-	// evicts and one because it deletes from three maps on the same key.
+	// it and two of them cannot use it anyway, one because it needs the key
+	// to consult another map and one because it deletes from three maps on
+	// the same key. Counting is not the obstacle -- the length difference
+	// gives it, which is how FleetShapes is filled. An earlier version of
+	// this comment said counting was the obstacle and left these evictions
+	// unreported, so Any() could be false on a cycle that evicted something
+	// and the one log line this sweep emits stayed silent.
+	before := len(a.fleetShape)
 	maps.DeleteFunc(a.fleetShape, func(_ string, memo *shapeMemo) bool {
-		return time.Since(memo.lastSeen) > timeout
+		return time.Since(memo.lastSeen) > variantTimeout
 	})
+	evicted.FleetShapes = before - len(a.fleetShape)
+	evicted.Pods = a.evictStartSeenPods(now, variantTimeout)
 	return evicted
 }
 
@@ -249,10 +438,12 @@ func engineParamsFor(a *SaturationAnalyzer, namespace, modelID, variantName stri
 	return nil
 }
 
-// itlWindowKey names one ITL(k) window. ITL is a property of the
-// accelerator and the engine, so the key carries both the accelerator
-// (through stableAccelerator, which absorbs the flapping a heterogeneous
-// fleet reports) and the GPU count, and no shape dimension at all.
+// itlWindowKey names one VARIANT's per-key state: the learned ITL baseline,
+// the replica start estimate and its outlier count. It carries the
+// accelerator (through stableAccelerator, which absorbs the flapping a
+// heterogeneous fleet reports) and the GPU count, and no shape dimension at
+// all. It is also the key the per-cycle sweep ages all four of those maps on,
+// through variantSeenAt.
 func (a *SaturationAnalyzer) itlWindowKey(namespace, modelID, variantName, accelerator string, gpuCount int) string {
 	return fmt.Sprintf("%s|%s|%s|%s|%d", namespace, modelID, variantName,
 		a.stableAccelerator(namespace, variantName, accelerator), gpuCount)

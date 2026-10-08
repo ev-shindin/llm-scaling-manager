@@ -107,7 +107,11 @@ func (a *SaturationAnalyzer) recordSaturatedThroughput(key string, rate float64)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	ra, ok := a.saturatedThroughput[key]
-	if !ok || ra.Stale(capacity.HistoryEvictionTimeout) {
+	// WriteGapExceeds, not Stale, for the reason given at the k2 history
+	// write in replica_capacity.go: the floor reads this window every
+	// cycle, so a use-based check never sees the write gap it is asking
+	// about.
+	if !ok || ra.WriteGapExceeds(capacity.HistoryEvictionTimeout) {
 		ra = capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
 		a.saturatedThroughput[key] = ra
 		delete(a.throughputSampledAt, key)
@@ -121,7 +125,7 @@ func (a *SaturationAnalyzer) recordSaturatedThroughput(key string, rate float64)
 			return
 		}
 		if read && rate == lastRead {
-			ra.Touch() // the same pair across the boundary, or a repeat
+			ra.Observe() // the same pair across the boundary, or a repeat
 			return
 		}
 	}
@@ -151,10 +155,20 @@ type throughputReading struct {
 
 // saturatedThroughputReading is saturatedThroughputFor with the window's
 // size and provenance, which decide whether the floor may order on it.
+//
+// Touch() on the way out, for the reason spelled out at the k2 history read in
+// replica_capacity.go: recordSaturatedThroughput is the only writer and it
+// needs a saturated queue, so a window swept on "last written" is swept on
+// "last SATURATED" -- which deletes the floor's input from exactly the fleets
+// that are coping. The floor then either abstains (priceable(0) is false, so
+// mayOrder goes false for the role) or borrows a neighbour bucket at a rate
+// measured 2.97x too high. Aged on "last read" instead, a bucket the floor
+// prices from every cycle stays, and one nothing reads still goes.
 func (a *SaturationAnalyzer) saturatedThroughputReading(key string) throughputReading {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if ra, ok := a.saturatedThroughput[key]; ok {
+		ra.Touch()
 		return throughputReading{rate: ra.Median(), bucket: bucketOf(key), samples: ra.Len()}
 	}
 	rate, bucket, samples := a.nearestSaturatedThroughput(key)
@@ -200,6 +214,9 @@ func (a *SaturationAnalyzer) nearestSaturatedThroughput(key string) (float64, st
 				continue
 			}
 			if ra, found := a.saturatedThroughput[prefix+outputBuckets[i]+suffix]; found {
+				// A borrowed bucket is still a bucket a decision reads, so it
+				// ages on this read like the key's own window does.
+				ra.Touch()
 				return ra.Median(), outputBuckets[i], ra.Len()
 			}
 		}
