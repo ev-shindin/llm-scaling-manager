@@ -160,6 +160,38 @@ today's optimizer emits no blocked reason when the quota is simply spent.
   latency difference smaller than that is not a result. The replica timelines
   are.
 
+## Different burst shapes: a cancel that stalled the rising model
+
+A second scenario gave the two models different bursts: A (Llama) bursts on
+20 000-token prompts with 250 tokens out at 4 rps, B (Qwen) on 1000-token
+prompts with 6000 tokens out at 1 rps, with 0.25 rps between bursts. Each
+model may reach 8 replicas, and one namespace quota of `H200: 10` covers both.
+One run of each arm, on 2026-10-09, with the image of `4a5de336`. The two
+ladders drifted up to about four minutes apart, so the bursts overlapped by
+about two minutes and the report refused to compare the arms; the numbers
+below are the load generator's own per-stage summaries, read directly.
+
+| A's time to first token, p50 / p95 | `today` | `shadow` | `share` |
+| --- | ---: | ---: | ---: |
+| first 240 s of A's burst (960 requests) | 112 s / 134 s | 221 s / 254 s | 189 s / 401 s |
+| rest of A's burst (3840 requests) | 1 s / 1 s | 1 s / 3 s | **575 s / 651 s** |
+
+B stayed under a second in every arm, and every request was served.
+
+- `today` and `shadow` decide the same way, and their first 240 s differ by
+  2x: that is the spread of one run, not a result.
+- In `share`, A gave B two replicas during B's burst. As A's own burst began,
+  another A → B transfer started, and was cancelled within a minute because
+  A's demand had reversed. The cancel put both models in the reversal hold
+  in the reverse direction: A could not receive and B could not give. So A ran
+  its whole burst on 3 replicas while B, idle by then, held 7. The first
+  transfer back started 16 minutes into A's burst, and landed after B's
+  scale-down window.
+- Fixed afterwards: a cancelled transfer now records no move, and holds only
+  its own direction, so the move the cancelling demand calls for stays open
+  ([proposal §6.7](../../proposals/utilization-share-optimizer.md#67-why-it-does-not-oscillate-and-what-it-cannot-follow)). This run
+  predates that fix; it has not been rerun.
+
 ## P/D: not measured
 
 The same three arms were attempted on one P/D-disaggregated model

@@ -698,8 +698,10 @@ When the group acts:
 - **Every transfer involves a confirmed actionable role** (§6.1 step 5), and
   respects the reversal hold (§6.7). A role that gave cannot receive, and a role
   that received cannot give, within the reversal hold (two release times, §8.4)
-  of that transfer's start, or
-  of its cancellation. The hold blocks **transfers only**: a role on hold that
+  of that transfer's start. A cancelled transfer moved nothing and records no
+  move: it holds only its own direction -- its donor from giving and its
+  receiver from receiving again -- so a start and a cancel cannot loop, and
+  the reverse move its cancelling demand calls for stays open. The hold blocks **transfers only**: a role on hold that
   falls below its need still draws on idle GPUs and the reserve. Urgent
   receivers are not exempt from it. Simulated, an exemption changed no
   scenario (a role that just gave rarely bursts within the hold), and it would
@@ -949,7 +951,13 @@ during Releasing the donor's demand rises so that its reduced size would land
 transfer is cancelled and the donor's target restored. The thresholds are deliberately wider than the
 admission test's: a cancel rule that mirrors admission flips with demand noise
 — plan, cancel, plan — and in simulation it kept a needed transfer from ever
-landing (§6.7). A cancelled pair enters the reversal hold. While the
+landing (§6.7). A cancelled pair is held in the cancelled direction only:
+the cancel happens because the donor's demand rose (or the receiver's fell), so
+the donor is the role about to need GPUs and the receiver the one able to give
+them. Holding the pair in the reverse direction -- the earlier rule -- blocked
+exactly that move: on a cluster run a prompt-heavy model whose burst began as
+it was about to give waited 16 minutes for GPUs that sat idle on the other
+model, serving at a 575 s median time to first token. While the
 HPA is still holding the window's maximum, none of the donor's pods have been
 touched, and the cancel costs nothing. That stops being true once the window
 expires: the scale-down policies then remove pods step by step, and a cancel
@@ -1598,7 +1606,7 @@ it takes: one rule changed reproduces each oscillation.
 | release time | **measured**: the p90 of this group's completed releases (`wva_utilization_share_release_seconds`). Until enough have completed, the configured bound below |
 | configured release bound | the stabilization window of the donors' ScaledObjects (`spec.advanced.horizontalPodAutoscalerConfig.behavior.scaleDown.stabilizationWindowSeconds`, 300 s if unset), plus the HPA's 15 s sync, plus the KEDA `pollingInterval` (30 s if unset), plus the donor pods' `terminationGracePeriodSeconds` from the scale target's pod template (leader and worker templates for an LWS; 30 s if unset). Each input is the **largest among the group's donors**: the timings are per group, set by its slowest donor, not per transfer. The scale-down `policies` are **not** included: a Pods/Percent policy that paces a release past the window (why a ten-replica release measured 420 s, not 300) is covered only by the 1.5× margin of the timeout below, and, once three releases have completed, by the measured release time |
 | release timeout | 1.5 × the configured release bound + 2 cycles — from configured values, an upper bound, so a release that is merely slow is not aborted |
-| reversal hold | 2 × release time, from a transfer's start or cancellation — the *measured* time, so a long drain grace that is rarely used does not stretch it |
+| reversal hold | 2 × release time, from a transfer's start (the opposite direction), or from its cancellation (the cancelled direction only) — the *measured* time, so a long drain grace that is rarely used does not stretch it |
 | decide-to-serve latency | release time + a fixed 5-minute estimate of pod start and model load + 3 cycles. Measuring it (decision to the receiver's pods Ready) from the transfers the ledger has completed is not built (§13) |
 | swing window | 8 × decide-to-serve latency |
 | fill timeout | the KEDA `pollingInterval` + the HPA's 15 s sync + 2 cycles + 1 minute of scheduling — Filling ends at *scheduled*, so this covers the scale-up's way through KEDA and the HPA and the scheduler, not model load. For an LWS receiver, + 1 minute for gang scheduling |
