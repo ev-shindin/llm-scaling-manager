@@ -206,22 +206,27 @@ Work down the list in order.
    must not lose their GPUs meanwhile. Expect this freeze on every upgrade or
    leader change. Every planned model of the group shows the blocked reason
    `quiet-period` while it lasts, and the log line
-   `Utilization share: ledger started` carries `planningFrom`. The same reason
-   holds, for as long as it lasts, while the controller cannot read the transfer
-   marks on the donors' pods -- the Error line
+   `Utilization share: ledger started` carries `planningFrom`. A freeze that
+   does not end shows `marks-unreadable` instead: the controller cannot read
+   the transfer marks on the donors' pods, and the Error line
    `Utilization share: could not read transfer marks; retrying next cycle` says
-   why, typically a missing RBAC grant to list pods.
+   why, typically a missing RBAC grant to list pods in one model's namespace.
 9. **Could it not mark the donor?** `Utilization share: could not mark a donor pod;
-   transfer not started` means the donor's pod could not be chosen: a Deployment
-   had a pod that was not Ready or not yet scheduled (the ReplicaSet removes such
-   a pod before it reads the deletion cost), was mid-rollout, had fewer pods than
-   `spec.replicas`, or had a sibling whose deletion cost leaves no room for
-   the mark (see [which pod leaves](scaling-policy.md#for-model-owners-what-the-optimizer-may-take-and-how-to-protect-a-model));
-   a LeaderWorkerSet was in a rolling update, was missing a group below
-   `spec.replicas`, or its next group to go was terminating or not yet
-   scheduled; or the patch failed. The donor backs off, shows the blocked reason
+   transfer not started` means the donor's pod could not be steered by a fault:
+   a sibling's deletion cost leaves no room for the mark (see
+   [which pod leaves](scaling-policy.md#for-model-owners-what-the-optimizer-may-take-and-how-to-protect-a-model)),
+   or the patch failed. The donor backs off, shows the blocked reason
    `donor-not-steerable`, gets a `UtilizationShareDonorNotSteerable` Event naming
    the cause and the end of the back-off, and is retried after it.
+
+   A donor whose workload is changing is held, not failed: mid-rollout (by its
+   status, pods of two ReplicaSets, or LWS groups of two revisions at or above
+   its partition), a pod not yet created, scheduled or Ready, or an LWS group
+   missing or being replaced. Its receiver tries another donor; it counts no
+   abort, does not back off and gets no Event or blocked reason; at `--v=4` the
+   log says `Utilization share: donor's workload is changing; transfer not
+   started`. A paused Deployment or a held LWS canary rollout stays "changing",
+   and does not give, until it is resumed or finished.
 
    A donor whose every pod (or LWS group) is already given to transfers still in
    flight is not broken, only exhausted: it is held until one of those releases
@@ -229,6 +234,12 @@ Work down the list in order.
    it counts no abort, does not back off, shows no blocked reason, gets no Event
    and is not counted as `reversal-hold`; at `--v=4` the log says
    `Utilization share: donor has nothing left to give; transfer not started`.
+
+If a model shows `whole-replica-short`, it serves below its need while the
+quota covers the needs in fractions but not in whole replicas: with 8-GPU
+replicas, a quota a few GPUs short of every model's need rounded up to whole
+nodes. Moves go to the model that is worse off by weight, and this one gave.
+Raise the quota by a replica, lower a floor, or accept the trade.
 
 If a P/D model shows a blocked reason, `wva_model_scaling_blocked` does not say
 which role it came from (it has no `role` label); read

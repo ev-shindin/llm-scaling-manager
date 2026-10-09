@@ -285,8 +285,9 @@ wva_utilization_share_mode{mode="off"} == 1
 # Each outcome's series exists at 0 from the group's first acting cycle, so the
 # first transfer of an outcome is counted by increase(). After a restart the new
 # controller creates them at 0 and counts its first cycle's outcomes on the
-# next -- a release that timed out while no controller ran is counted then, as
-# aborted.
+# next. A release that timed out while no controller ran is not counted: its
+# mark is removed, and the log line "removed a transfer mark older than the
+# release timeout" names the pod.
 sum by (accelerator_type, scope) (
   increase(wva_utilization_share_transfers_total{outcome=~"aborted|fill-timeout|wrong-pod"}[1h])
 ) > 3
@@ -300,18 +301,20 @@ histogram_quantile(0.9, sum by (le, accelerator_type, scope) (
   wva_utilization_share_effective_seconds{param="release-timeout"})
 
 # A model held back by a condition that holds until someone changes something
-# (alert with for: of a few release timeouts).
-wva_model_scaling_blocked{reason=~"no-compatible-donor|floors-exceed-quota"} == 1
+# (alert with for: of a few release timeouts). marks-unreadable freezes every
+# model of the group until the controller can read its transfer marks again.
+wva_model_scaling_blocked{reason=~"no-compatible-donor|floors-exceed-quota|marks-unreadable"} == 1
 
 # Reasons that expire by themselves and come back: release-taken and
 # release-shape-mismatch last one release timeout after a fill timed out, and
 # donor-not-steerable lasts only its back-off (quiet-period lasts one fill
-# timeout after a restart and is expected; do not alert on it). A long for: may never fire on
-# them; alert on how much of a window they were present instead. Here: more
-# than 60 samples in 6h, an hour in total at a 1m scrape interval (scale the
-# threshold to yours).
+# timeout after a restart and is expected; do not alert on it). A long for: may
+# never fire on them; alert on how long in a window they were present instead.
+# The series exists only while its reason does, so count it at a fixed 1m
+# step (a subquery), which does not depend on the scrape interval: more than
+# 60 minutes in 6h.
 sum by (exported_namespace, model_name, reason) (
-  count_over_time(wva_model_scaling_blocked{reason=~"release-taken|release-shape-mismatch|donor-not-steerable"}[6h])
+  count_over_time(wva_model_scaling_blocked{reason=~"release-taken|release-shape-mismatch|donor-not-steerable"}[6h:1m])
 ) > 60
 ```
 
@@ -366,7 +369,9 @@ Useful when a metric tells you *which* model is wrong and you want to know *why*
 | `Utilization share: rebalancing` | the optimizer is acting on a group with actionable roles; same fields, same once-per-change rule | Info |
 | `Utilization share: transfer` | a transfer started, ended (with its `outcome`), was cancelled, or was redirected to a wake | Info |
 | `Utilization share: could not mark a donor pod` | a transfer was not started; the donor backs off (`donor-not-steerable`, and a `UtilizationShareDonorNotSteerable` Event on it) | Error |
-| `Utilization share: donor has nothing left to give` | a transfer was not started because every pod the donor could give is already given to a transfer in flight; it is held one release timeout, with no back-off, blocked reason or Event | **`-v=4`** |
+| `Utilization share: donor has nothing left to give` | a transfer was not started because every pod the donor could give is already given to a transfer in flight; it is held until one of them lands, or for one release timeout, with no back-off, blocked reason or Event | **`-v=4`** |
+| `Utilization share: donor's workload is changing` | a transfer was not started because the donor is mid-rollout, has a pod not yet created, scheduled or Ready, or an LWS group being replaced; it is held one release timeout, with no back-off, blocked reason or Event | **`-v=4`** |
+| `Utilization share: removed a transfer mark older than the release timeout` | a restarted controller found a mark whose transfer it can no longer judge; the mark is removed and not counted | Info |
 | `Utilization share: invalid optimizer block` | the block did not validate; today's optimizer runs | Error |
 | `Utilization share: evaluation` | the per-group table, every cycle | **`-v=4`** |
 | `Collected replica metrics` | metrics are arriving | **`-v=4`** |

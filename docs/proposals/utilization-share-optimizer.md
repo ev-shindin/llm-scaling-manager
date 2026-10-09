@@ -1648,6 +1648,8 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_utilization_share_promised_gpus` | `accelerator_type`, `scope` | `P`: GPUs released for a receiver and not yet held by it — withheld from the warm pool, from wakes and from plans (§6.3) |
 | `wva_utilization_share_release_seconds` | `accelerator_type`, `scope` | histogram, Releasing → Released |
 | `wva_model_scaling_blocked` | `reason="quiet-period"` | every planned model of a group, for the one fill timeout after a restart, a leader change or the optimizer starting to act (§13, stage 2), during which nothing in the group scales |
+| `wva_model_scaling_blocked` | `reason="marks-unreadable"` | every planned model of a group whose transfer marks cannot be read, so its ledger cannot start; nothing in the group scales until they can. Does not clear by itself |
+| `wva_model_scaling_blocked` | `reason="whole-replica-short"` | below need while the needs fit the quota but whole replicas do not, so the worse off by weight gained |
 | `wva_model_scaling_blocked` | `reason="awaiting-release"` | receiver waiting on a donor |
 | `wva_model_scaling_blocked` | `reason="quota-short"` | below need, and the group as a whole is short. Naming the cause in the log (`causedBy`: load, whose floor, or which woken model) is not built (§13) |
 | `wva_model_scaling_blocked` | `reason="floor-pinned"` | floor above the share (§5.5); only the configured `minReplicaCount` counts, not the last replica a running role keeps (§7.2) |
@@ -2018,29 +2020,76 @@ optimizer every cycle (§6.6).
        the ReplicaSet removes pods in the order the ledger releases them; no
        room for such a cost, or a sibling at the int32 minimum, refuses the
        donor (`donor-not-steerable`). A donor whose every pod or group is
-       already marked by live transfers (`errDonorExhausted`) is held one
-       release timeout (`ShareLedger.HoldGiving`): no abort, no back-off, no
-       blocked reason, no Event.
+       already marked by live transfers (`errDonorExhausted`) is held until
+       one of them lands, or one release timeout (`ShareLedger.HoldGiving`):
+       no abort, no back-off, no blocked reason, no Event.
      - while whole replicas cover every role's claim
-       (`WholeReplicaCoverage`), no donor is taken below its own need
-       rounded up to whole GPUs (`shareKeep`). The integer targets already
-       hold that there; the keep is defence in depth. Covered only in
-       fractions, keeping a large-replica donor at its need can hold a
-       receiver far below its own (9 of 16 kept against 1 of 6), so only the
-       floor holds, as when short (§6.2). Reserve refills keep only the
-       floor: the debt is GPUs the budget does not have.
-     - a Deployment donor mid-rollout by its status (`scaletarget.RollingOut`:
-       updated replicas below replicas) or with fewer active pods than
-       `spec.replicas`, and an LWS donor in a rolling update
-       (`UpdateInProgress`, or groups of two template revisions) or missing
-       a group below `spec.replicas`, are refused as unsteerable.
+       (`WholeReplicaCoverage`), no donor is taken below its own claim
+       rounded up to whole GPUs (`shareKeep`; the claim is capped at the
+       ceiling, so a role needing more than its ceiling is held to the
+       ceiling). The integer targets already hold that there; the keep is
+       defence in depth. Covered only in fractions, keeping a large-replica
+       donor at its need can hold a receiver far below its own (9 of 16 kept
+       against 1 of 6), so only the floor holds, as when short (§6.2), and
+       the role below its need shows `whole-replica-short`. Reserve refills
+       keep only the floor: the debt is GPUs the budget does not have.
+     - a donor is in band at or above its own whole-replica target
+       (`donorInBand`), whatever its continuous band says: a band wider
+       than a replica's step put that target outside it, and a short
+       receiver starved for good (152 of 20 000 random fleets, 59 of them
+       all 8-GPU replicas). And a role below its need is never in band
+       while its continuous target covers that need (`EvaluateShare`): the
+       band is never narrower than half a replica, so for whole-node
+       replicas it hid shortfalls of up to four GPUs (8 held of 8.5
+       needed).
+     - a donor whose workload is changing (`errDonorChanging`) is held one
+       release timeout (`ShareLedger.HoldChanging`) with no abort,
+       back-off, Warning or reason: a Deployment mid-rollout by its status
+       (`scaletarget.RollingOut`: updated replicas below replicas, or a
+       spec not yet observed) or by pods of two ReplicaSets, with fewer
+       active pods than `spec.replicas`, or with a pod not yet scheduled or
+       Ready; an LWS in a rolling update (`UpdateInProgress`, or groups of
+       two template revisions at or above its partition,
+       `scaletarget.LWSPartition`), missing a group below `spec.replicas`,
+       or whose next group is terminating or unscheduled. Only a sibling
+       cost with no room and a failed patch are faults
+       (`donor-not-steerable`).
      - the mark's cost is judged against the siblings that stay, not the
        pod being marked.
-     - an exhausted donor's hold ends when one of its releases lands
+     - an exhausted donor's hold ends when it has no live transfer left
        (`ShareLedger.GivingBusy`), and is not counted as a reversal hold.
      - a ledger's first cycle creates the outcome counters at 0 and counts
-       its outcomes on the next; a mark that expired while no controller
-       ran, still on a live pod, is counted as aborted.
+       its outcomes on the next (`countOutcome`, `flushUncounted`). A mark
+       that expired while no controller ran is removed, logged with its
+       pod, and not counted: its outcome cannot be told from it, and a
+       tenant can write such marks.
+     - transfer marks that cannot be read set `marks-unreadable`, not
+       `quiet-period`: the freeze does not end by itself.
+     - whole-node receivers (reviewed with 8-GPU pods):
+       - a fill that times out with the receiver's pods Pending undoes the
+         raise and holds the receiver from funding for one release timeout
+         (`ShareLedger.HoldFill`, `FillHeld`): a Pending pod holds no GPU,
+         so kept raised it read as idle budget and the receiver ratcheted up
+         a whole node per fill timeout (3 to 22 replicas in 20 minutes in a
+         probe).
+       - an LWS receiver's fill is judged by its FILLED replicas -- groups
+         with every pod scheduled (`VariantMetadata.FilledReplicas`,
+         `ShareGroup.Filled`, `ShareLedger.ReceiverFilled`) -- not held
+         ones: a group whose leader alone was bound ended the fill and
+         freed its other holes.
+       - a donor set counts once against the concurrency limit
+         (`InFlight`), and one donor may give a set as many replicas as the
+         receiver has pods (`shareSetPace`): an LWS receiver of three or more
+         8-GPU pods was never funded from 8-GPU donors.
+       - marks written earlier in a cycle are read at the cost they were
+         written with (`markDonorPods`'s `written`), so three marks on one
+         donor in a cycle order strictly.
+       - today's optimizer decides with promised GPUs withheld
+         (`decideV2`), so it does not scale a model into a whole node freed
+         for a share receiver; promised GPUs are taken from the freest node
+         in one piece (`shareFreeNodes`), so they do not hide a whole free
+         node; and an LWS receiver gets the gang-scheduling allowance in the
+         fill timeout.
      - a transfer released by count -- another of the donor's pods went --
        unmarks its surviving marked pods, so a restart inside the release
        timeout cannot restore it and move it twice.
@@ -2074,15 +2123,15 @@ optimizer every cycle (§6.6).
        `floors-exceed-quota`, `_floor_excess_gpus` and the floor-heavy log
        count only `minReplicaCount` (`ShareRole.MinFloor`).
      - donor pod choice on a Deployment: the lowest existing deletion cost,
-       then, as the ReplicaSet breaks ties, the most recently Ready, then the
-       name. The marked pod's cost is below every unmarked sibling's: -1000,
+       then the most recently Ready (the coldest cache; only a preference,
+       since the mark's cost decides), then the name. The marked pod's cost is below every unmarked sibling's: -1000,
        or one below the lowest cost a user set on a sibling, recorded in the
        mark's `cost`; unmarking restores the previous cost only if the pod
        still carries that exact value. A Deployment with a pod not Ready or
-       not yet scheduled, or mid-rollout (live pods of more than one
-       ReplicaSet, listed by the Deployment's `spec.selector` so a rollout
-       that changed a template label is still seen), is refused and backs off
-       (`donor-not-steerable`). On an LWS the group that goes is the highest
+       not yet scheduled, or mid-rollout (by its status, or live pods of more
+       than one ReplicaSet, listed by the Deployment's `spec.selector` so a
+       rollout that changed a template label is still seen), is held as
+       changing (see above), not refused. On an LWS the group that goes is the highest
        index below `spec.replicas` (those at or above are already going) that
        no live transfer has marked, over its own (StatefulSet-owned) pods,
        terminating ones included; that group terminating or unscheduled
@@ -2293,6 +2342,23 @@ Decided, not built here:
   window (~5.5 min) later than under today's optimizer, because the falling
   model's headroom moves only through a transfer. A short scale-down window
   for urgent transfers is the designed answer and the next step.
+- **Raise the receiver when its donor pod starts terminating.** Today the
+  receiver is raised when the donor's pod is gone, so for 30 to 75 seconds a
+  freed whole node has no receiver pod queued for it, and any Pending GPU pod
+  in the cluster can take it (the transfer ends `release-taken`). Raising at
+  the donor pod's `deletionTimestamp` queues the receiver's pod through the
+  drain; it needs the ResourceQuota admission of a pod created while its
+  donor still terminates checked first, since a refused create would only move
+  the race. Until then, receivers should run at a higher `PriorityClass`.
+- **Resource-aware holes.** The node picture (`decision.NodeGPU`) and
+  `ShareCovers` read GPUs only. A receiver needing more CPU, memory, hugepages
+  or RDMA devices than its donor freed is planned into a hole it cannot use,
+  and the fill timeout reports no cause. Comparing the donor's and receiver's
+  pod requests for every resource, or reporting a cause, is the fix.
+- **A wake reserve below a replica.** `reserveGPUs` is a quota count, not a
+  reserved free node: below a replica's size (8 for whole-node models) it
+  never serves a wake. Rounding it to whole replicas of the models it wakes,
+  or saying so where it is set, is the fix.
 - **A prefill capacity measure.** Prefill demand is read in tokens -- KV in use
   plus queued requests at their average input length -- so it does grow with
   input tokens. Once prefill has queued on its own, with decode healthy, k2 and
@@ -2303,9 +2369,12 @@ Decided, not built here:
   its KV to decode, so the tokens resident at any instant are few, and the need
   reads small even for long prompts at a high rate. A reading taken while
   decode is saturated too is withheld (`downstreamSaturated`), so a prefill
-  that only ever queues with decode stays at k1. The fix is a prefill-specific
-  capacity: sustained input tokens per second against a measured per-replica
-  prefill ceiling. Until then, a P/D model with long prompts should size
-  prefill's `minReplicaCount` from its peak prompt-token rate (the recipe is in
-  the reference, "For model owners"); with short prompts, prefill is rightly a
-  donor.
+  that only ever queues with decode stays at k1. And what is learned is held
+  in memory only (`computeCapacityHistory`, `saturatedThroughput`), keyed by
+  input-length band (`throughputKey`), so a restart, a leader change or a
+  shift in prompt length loses it. The fix is a prefill-specific capacity:
+  sustained input tokens per second against a measured per-replica prefill
+  ceiling, persisted. Until then, a P/D model with long prompts should keep a
+  prefill `minReplicaCount` sized from its peak prompt-token rate (the recipe
+  is in the reference, "For model owners"); with short prompts, prefill is
+  rightly a donor.
