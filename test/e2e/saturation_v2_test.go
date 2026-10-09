@@ -6,7 +6,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	promoperator "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
-	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -196,23 +195,22 @@ var _ = Describe("Saturation V2 engine", Label("smoke", "full"), Ordered, func()
 		By("Asserting controller logs show V2 path selected for our model")
 		expectAnalyzerPathLog(modelID)
 
-		// WVA's observable output is the wva_desired_replicas metric being consumed by KEDA.
-		// Verify the KEDA-managed HPA has CurrentMetrics populated (only set after a
-		// successful Prometheus query).
+		// WVA's observable output is the wva_desired_replicas metric being
+		// consumed by KEDA. Asserted through the shared helpers, which check
+		// the EXTERNAL metric specifically.
+		//
+		// This used to assert `Status.CurrentMetrics` was non-empty, and that
+		// is satisfied by a one-element slice of all-nil fields -- which is
+		// exactly what a CPU-defaulted HPA reports on a cluster with no
+		// metrics-server. So the spec passed on an HPA that was wired to the
+		// wrong metric and could not read even that, and the next spec was
+		// left to discover it 120 s later. Seen in CI: one all-empty entry in
+		// CurrentMetrics, with ScalingActive=False FailedGetResourceMetric.
 		By("Verifying KEDA read wva_desired_replicas for the V2 smoke variant")
 		Eventually(func(g Gomega) {
-			hpaList, err := k8sClient.AutoscalingV2().HorizontalPodAutoscalers(cfg.LLMDNamespace).List(ctx, metav1.ListOptions{})
-			g.Expect(err).NotTo(HaveOccurred())
-			var kedaHPA *autoscalingv2.HorizontalPodAutoscaler
-			for i := range hpaList.Items {
-				if hpaList.Items[i].Spec.ScaleTargetRef.Name == modelDecodeDeployment {
-					kedaHPA = &hpaList.Items[i]
-					break
-				}
-			}
-			g.Expect(kedaHPA).NotTo(BeNil(), "KEDA should have created an HPA for the V2 smoke deployment")
-			g.Expect(kedaHPA.Status.CurrentMetrics).NotTo(BeEmpty(),
-				"KEDA HPA should have CurrentMetrics populated from wva_desired_replicas")
+			reportIfHPAOnCPUDefault(cfg.LLMDNamespace, modelDecodeDeployment)
+			expectKEDAExternalMetricWired(g, cfg.LLMDNamespace, modelDecodeDeployment)
+			expectWVADesiredReplicasConsumed(g, cfg.LLMDNamespace, modelDecodeDeployment)
 		}, time.Duration(cfg.EventuallyLongSec)*time.Second, time.Duration(cfg.PollIntervalSec)*time.Second).
 			Should(Succeed())
 	})
@@ -229,7 +227,13 @@ var _ = Describe("Saturation V2 engine", Label("smoke", "full"), Ordered, func()
 		// second reads as the first for the whole timeout. Measured at 20-35s on
 		// kind, so 120s is generous; failing here is a different diagnosis, not a
 		// slower one.
+		//
+		// The report covers the one state polling cannot fix: an HPA with no
+		// external metric at all. A CI run burned the whole 120 s against exactly
+		// that, with the ScaledObject reporting Ready=True throughout, so the
+		// failure said nothing about its own cause.
 		Eventually(func(g Gomega) {
+			reportIfHPAOnCPUDefault(cfg.LLMDNamespace, modelDecodeDeployment)
 			expectKEDAExternalMetricWired(g, cfg.LLMDNamespace, modelDecodeDeployment)
 		}, 120*time.Second, time.Duration(cfg.PollIntervalSec)*time.Second).
 			Should(Succeed())
