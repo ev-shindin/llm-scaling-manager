@@ -924,14 +924,23 @@ check_policy_namespace() {
     # still manages every namespace. Namespace-scoped means --watch-namespace
     # set to $NS, directly or through WVA_WATCH_NAMESPACE.
     if [ "${SHARE_ALLOW_SHARED_POLICY:-0}" != "1" ]; then
-        local ctl scope
-        ctl="$(kc get deploy wva-controller-manager -n "$WVA_NS" -o json 2>&1)" || \
-            die "could not read the controller Deployment in $WVA_NS to check its scope: $ctl
+        local ctl scope errf
+        # Stderr apart: kubectl's throttling and API warnings would otherwise
+        # land in the JSON, fail the parse, and read as "watches every
+        # namespace" -- sending someone to reinstall a controller that is fine.
+        errf="$(mktemp)"
+        ctl="$(kc get deploy wva-controller-manager -n "$WVA_NS" -o json 2>"$errf")" || {
+            local e; e="$(cat "$errf")"; rm -f "$errf"
+            die "could not read the controller Deployment in $WVA_NS to check its scope: $e
   Set SHARE_ALLOW_SHARED_POLICY=1 if you know it manages $NS alone."
-        scope="$(watch_scope <<<"$ctl")"
+        }
+        rm -f "$errf"
+        scope="$(watch_scope <<<"$ctl")" || die "could not parse the controller Deployment in $WVA_NS to check its scope. Set SHARE_ALLOW_SHARED_POLICY=1 if you know it manages $NS alone."
         case "$scope" in
-            "$NS"|own) : ;;
+            "$NS"|"<own>") : ;;
             "") die "the controller in $WVA_NS watches every namespace (no --watch-namespace): its policy is shared, and the share arms would rewrite it for all of them. Install a namespace-scoped controller in $NS, or set SHARE_ALLOW_SHARED_POLICY=1." ;;
+            "<multiple>") die "the controller in $WVA_NS sets --watch-namespace more than once; it watches the last, which this check will not guess at. Set SHARE_ALLOW_SHARED_POLICY=1 if it manages $NS alone." ;;
+            "<unknown>") die "the controller in $WVA_NS takes its watch namespace from something this check cannot resolve (not a literal, not the pod namespace). Set SHARE_ALLOW_SHARED_POLICY=1 if it manages $NS alone." ;;
             *) die "the controller in $WVA_NS watches $scope, not $NS: the share arms would rewrite a policy that is not the benchmark's. Set SHARE_ALLOW_SHARED_POLICY=1 if it is yours alone." ;;
         esac
     fi
@@ -962,28 +971,38 @@ check_policy_namespace() {
 }
 
 # watch_scope reads a controller Deployment (JSON on stdin) and prints the
-# namespace it watches: the --watch-namespace value with every $(VAR) in it
-# resolved through the container env, as the kubelet does -- "own" when it ends
-# at the pod namespace fieldRef, "unknown" when it ends anywhere else -- and
-# nothing when it watches every namespace. The installs chain it:
-# --watch-namespace=$(WVA_WATCH_NAMESPACE), whose value is $(POD_NAMESPACE),
-# which is the fieldRef; older ones name $(POD_NAMESPACE) directly.
+# namespace it watches, from its manager container (or the first): the
+# --watch-namespace value (=VALUE or a separate VALUE, one dash or two) with
+# every $(VAR) in it resolved through the container env as the kubelet does,
+# the last definition of a name winning. It prints <own> when that ends at the
+# pod namespace fieldRef, <unknown> when it ends anywhere else, <multiple> when
+# the flag is given more than once (the controller would take the last; a
+# guard that read the first could be fooled), and nothing when it watches
+# every namespace. The installs chain it: --watch-namespace=$(WVA_WATCH_NAMESPACE),
+# whose value is $(POD_NAMESPACE), which is the fieldRef.
 watch_scope() {
     jq -r '
-      .spec.template.spec.containers[0] as $c
+      .spec.template.spec.containers as $cs
+      | (($cs | map(select(.name == "manager")) | first) // $cs[0]) as $c
       | ($c.env // []) as $env
       | def resolve($v; $n):
-          if $n > 5 then "unknown"
+          if $n > 5 then "<unknown>"
           elif ($v | test("^\\$\\([A-Za-z_][A-Za-z0-9_]*\\)$")) then
             ($v | ltrimstr("$(") | rtrimstr(")")) as $name
-            | ($env | map(select(.name == $name)) | first // {}) as $e
+            | ($env | map(select(.name == $name)) | last // {}) as $e
             | if ($e.value // "") != "" then resolve($e.value; $n + 1)
-              elif $e.valueFrom.fieldRef.fieldPath == "metadata.namespace" then "own"
-              else "unknown" end
+              elif $e.valueFrom.fieldRef.fieldPath == "metadata.namespace" then "<own>"
+              else "<unknown>" end
           else $v end;
-      ([($c.args // [])[], ($c.command // [])[]] | map(select(startswith("--watch-namespace="))) | first // "")
-      | ltrimstr("--watch-namespace=") as $flag
-      | if $flag == "" then "" else resolve($flag; 0) end'
+      ([($c.command // [])[], ($c.args // [])[]]) as $argv
+      | [range(0; $argv | length) as $i
+         | if ($argv[$i] | test("^--?watch-namespace=")) then ($argv[$i] | sub("^--?watch-namespace="; ""))
+           elif (($argv[$i] == "--watch-namespace") or ($argv[$i] == "-watch-namespace")) and ($i + 1 < ($argv | length))
+             then $argv[$i + 1]
+           else empty end] as $flags
+      | if ($flags | length) == 0 then ""
+        elif ($flags | length) > 1 then "<multiple>"
+        else resolve($flags[0]; 0) end'
 }
 
 # Write the arm's `optimizer:` block into the policy every controller reads,
@@ -1449,7 +1468,7 @@ verb_reset() {
         done <<<"$deploys"
         # status.replicas leaves out terminating pods, which still hold their
         # GPUs through their grace period: the next arm would start short.
-        [ "$(terminating_model_pods "$deploys")" = 0 ] || settled=0
+        [ -z "$(terminating_model_pods "$deploys")" ] || settled=0
         if [ "$settled" = 1 ]; then
             for so in $sos; do unpause "$so"; done
             ok "every role is at its floor and ready; autoscaling released"
@@ -1459,19 +1478,26 @@ verb_reset() {
         waited=$(( waited + 10 ))
     done
     for so in $sos; do unpause "$so"; done
+    local stuck
+    stuck="$(terminating_model_pods "$deploys" | tr '\n' ' ')"
+    [ -z "$stuck" ] || warn "still terminating (a pod on an unreachable node never finishes until force-deleted): $stuck"
     die "the fleet did not settle at $MIN_REPLICAS within ${RESET_TIMEOUT}s. Starting an arm from a fleet the previous arm left scaled makes the two incomparable."
 }
 
-# terminating_model_pods counts the pods of the given model Deployments (one
-# "deployment role" per line) that are being deleted.
+# terminating_model_pods names the pods of the given model Deployments (one
+# "deployment role" per line) that are being deleted, one per line. A pod is a
+# Deployment's when its ReplicaSet is named <deployment>-<pod-template-hash>,
+# as the Deployment controller names it -- not by prefix, which would count a
+# sibling Deployment whose name extends this one's.
 terminating_model_pods() {
     local names
     names="$(awk '{print $1}' <<<"$1" | jq -R . | jq -s .)"
-    k get pods -o json 2>/dev/null | jq --argjson names "$names" '
-      [.items[] | select(.metadata.deletionTimestamp != null)
-        | select(any(.metadata.ownerReferences[]?; .kind == "ReplicaSet"
-            and (.name as $rs | any($names[]; . as $d | $rs | startswith($d + "-")))))]
-      | length'
+    k get pods -o json 2>/dev/null | jq -r --argjson names "$names" '
+      .items[] | select(.metadata.deletionTimestamp != null)
+      | (.metadata.labels["pod-template-hash"] // "") as $h
+      | select($h != "" and any(.metadata.ownerReferences[]?; .kind == "ReplicaSet"
+          and (.name as $rs | any($names[]; $rs == . + "-" + $h))))
+      | .metadata.name'
 }
 
 model_scaledobjects() {

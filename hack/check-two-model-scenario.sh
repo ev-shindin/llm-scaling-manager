@@ -74,6 +74,18 @@ case "$args" in
         pod) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace=$(POD_NAMESPACE)"],
                "env":[{"name":"POD_NAMESPACE","valueFrom":{"fieldRef":{"fieldPath":"metadata.namespace"}}}]}]}}}}' ;;
         cluster) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--leader-elect"]}]}}}}' ;;
+        # The flag twice: the controller takes the last, here every namespace.
+        multiple) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace=ns-under-test","--watch-namespace="]}]}}}}' ;;
+        # A namespace from a ConfigMap key: nothing this check can resolve.
+        configmap) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace=$(NS_FROM_CM)"],
+               "env":[{"name":"NS_FROM_CM","valueFrom":{"configMapKeyRef":{"name":"x","key":"ns"}}}]}]}}}}' ;;
+        # The flag and its value as two arguments, and a sidecar listed first.
+        twoarg) echo '{"spec":{"template":{"spec":{"containers":[{"name":"proxy","args":["--upstream=x"]},
+               {"name":"manager","args":["--watch-namespace","ns-under-test"]}]}}}}' ;;
+        # kubectl writes throttling notices to stderr; they are not the JSON.
+        noisy) echo 'I1009 throttling request took 1.2s' >&2
+               echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace=ns-under-test"]}]}}}}' ;;
+        fail) echo 'Error from server (Forbidden): deployments.apps is forbidden' >&2; exit 1 ;;
         *) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace='"$CTL_SCOPE"'"]}]}}}}' ;;
       esac
       exit 0 ;;
@@ -182,7 +194,13 @@ case "$args" in
   *"get pods -o json"*)
       if [ "${TERMINATING:-0}" = "1" ]; then
         echo '{"items":[{"metadata":{"name":"pd-decode-abc-1","deletionTimestamp":"2026-01-01T00:00:00Z",
+               "labels":{"pod-template-hash":"abc"},
                "ownerReferences":[{"kind":"ReplicaSet","name":"pd-decode-abc"}]}}]}'
+      elif [ "${TERMINATING:-0}" = "sibling" ]; then
+        # A sibling Deployment whose name extends pd-decode: not the fleet.
+        echo '{"items":[{"metadata":{"name":"pd-decode-b-xyz-1","deletionTimestamp":"2026-01-01T00:00:00Z",
+               "labels":{"pod-template-hash":"xyz"},
+               "ownerReferences":[{"kind":"ReplicaSet","name":"pd-decode-b-xyz"}]}}]}'
       else
         echo '{"items":[]}'
       fi
@@ -221,6 +239,7 @@ run_verb() {
         POLICY_TEXT="${POLICY_TEXT:-}" PQUERY_OUT="${PQUERY_OUT:-}" WVA_NS="${WVA_NS:-ns-under-test}" \
         WVA_POLICY_NS="${WVA_POLICY_NS:-0}" NS_POLICY_LABEL="${NS_POLICY_LABEL:-}" \
         CTL_SCOPE="${CTL_SCOPE:-own}" TERMINATING="${TERMINATING:-0}" \
+        SHARE_ALLOW_SHARED_POLICY="${SHARE_ALLOW_SHARED_POLICY:-0}" \
         PD_STUB="${PD_STUB:-0}" PD_SINGLE_STACK="${PD_SINGLE_STACK:-0}" PD_ENDPOINT="${PD_ENDPOINT:-}" \
         MIN_PREFILL="${MIN_PREFILL:-}" MIN_DECODE="${MIN_DECODE:-}" \
         MAX_PREFILL="${MAX_PREFILL:-}" MAX_DECODE="${MAX_DECODE:-}" RESET_TIMEOUT="${RESET_TIMEOUT:-}" \
@@ -369,8 +388,45 @@ case_begin
 CTL_SCOPE=pod POLICY_TEXT="$QUOTA_POLICY" VERB_TIMEOUT=60 run_verb run today
 if printf '%s' "$OUT" | grep -q 'watches'; then
     fail "'run today' refused a controller watching \$(POD_NAMESPACE), its own namespace: $OUT"
+elif ! grep -q 'get namespace ns-under-test' "$CALLS"; then
+    fail "'run today' never reached the check after the scope check: $OUT"
 else
     ok "'run today' accepts a controller watching its own namespace through POD_NAMESPACE"
+fi
+
+# The scope check must not be fooled, and must not refuse a correct install.
+# guard_case <scope> <want: refuse|accept> <phrase> <description>
+guard_case() {
+    case_begin
+    CTL_SCOPE="$1" POLICY_TEXT="$QUOTA_POLICY" VERB_TIMEOUT=60 run_verb run today
+    if [ "$2" = refuse ]; then
+        if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q "$3"; then
+            fail "$4: rc $RC, want a refusal saying '$3': $OUT"
+        elif grep -q 'patch configmap' "$CALLS" 2>/dev/null; then
+            fail "$4: a policy was rewritten before the refusal"
+        else
+            ok "$4"
+        fi
+    elif printf '%s' "$OUT" | grep -qE 'watches|more than once|cannot resolve|could not'; then
+        fail "$4: refused: $OUT"
+    elif ! grep -q 'get namespace ns-under-test' "$CALLS"; then
+        fail "$4: never reached the check after the scope check: $OUT"
+    else
+        ok "$4"
+    fi
+}
+guard_case multiple refuse 'more than once' "'run today' refuses a controller giving --watch-namespace twice (it takes the last)"
+guard_case configmap refuse 'cannot resolve' "'run today' refuses a watch namespace it cannot resolve"
+guard_case fail refuse 'could not read the controller' "'run today' refuses when it cannot read the controller"
+guard_case twoarg accept '' "'run today' reads --watch-namespace as two arguments, in the manager container"
+guard_case noisy accept '' "'run today' keeps kubectl stderr out of the JSON it parses"
+
+case_begin
+SHARE_ALLOW_SHARED_POLICY=1 CTL_SCOPE=cluster POLICY_TEXT="$QUOTA_POLICY" VERB_TIMEOUT=60 run_verb run today
+if printf '%s' "$OUT" | grep -q 'watches every namespace'; then
+    fail "SHARE_ALLOW_SHARED_POLICY=1 did not let a cluster-scoped controller through: $OUT"
+else
+    ok "SHARE_ALLOW_SHARED_POLICY=1 lets an operator who owns the policy through"
 fi
 
 # Reset settles only when no pod of the fleet is still terminating: one in its
@@ -379,12 +435,16 @@ case_begin
 TERMINATING=1 PD_STUB=1 PD_SINGLE_STACK=1 MIN_PREFILL=1 MIN_DECODE=1 RESET_TIMEOUT=1 run_verb reset
 RC_TERM="$RC"
 TERMINATING=0 PD_STUB=1 PD_SINGLE_STACK=1 MIN_PREFILL=1 MIN_DECODE=1 RESET_TIMEOUT=1 run_verb reset
+TERMINATING=sibling PD_STUB=1 PD_SINGLE_STACK=1 MIN_PREFILL=1 MIN_DECODE=1 RESET_TIMEOUT=1 run_verb reset
+RC_SIB="$RC"
 if [ "$RC_TERM" -eq 0 ]; then
     fail "reset settled while a decode pod was still terminating"
 elif [ "$RC" -ne 0 ]; then
     fail "control: reset did not settle with no pod terminating: $OUT"
+elif [ "$RC_SIB" -ne 0 ]; then
+    fail "reset waited on a terminating pod of pd-decode-b, a sibling Deployment, not the fleet's pd-decode"
 else
-    ok "reset waits for terminating pods, and settles without them"
+    ok "reset waits for the fleet's terminating pods, and only the fleet's"
 fi
 
 # A single-stack P/D model: one prefill and one decode Deployment. Every arm
@@ -808,7 +868,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=45
+CASES_EXPECTED=51
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else
