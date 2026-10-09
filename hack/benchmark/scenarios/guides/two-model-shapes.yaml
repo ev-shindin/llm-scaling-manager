@@ -33,7 +33,7 @@
 #
 #   model.shortName: set on both stacks, and IGNORED -- the harness generates
 #       `{first8}-{sha256(namespace/model)[:8]}-{last8}` regardless. Measured on
-#       CoreWeave: unsloth/Meta-Llama-3.1-8B-Instruct in evgensh-twomodel became
+#       a Kubernetes cluster: unsloth/Meta-Llama-3.1-8B-Instruct in a benchmark namespace became
 #       `unsloth--244120d9-instruct`, which shares no substring with the stack
 #       name. It is kept here only as documentation of the intent; nothing may
 #       depend on it. The driver resolves each stack through the shared
@@ -576,7 +576,7 @@ scenario:
         replicas: 1
         # 8 CPU, not 16. FREE ACCELERATORS ARE NOT PLACEABLE ACCELERATORS, and
         # 16 made most of this cluster's spare accelerators unusable: measured
-        # on CoreWeave, of 16 free accelerators only FOUR sat on a node with 16
+        # on a Kubernetes cluster, of 16 free accelerators only FOUR sat on a node with 16
         # spare cores -- the rest had 7 and 15. A 90-minute A/B was voided by
         # it. The nopool arm's Deployments scaled to 3 within four minutes of
         # the first burst and never had more than ONE replica Available,

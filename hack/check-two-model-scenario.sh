@@ -196,7 +196,7 @@ run_verb() {
         GATEWAYS="${GATEWAYS:-1}" HAS_PVC="${HAS_PVC:-1}" \
         NODE_GPUS="${NODE_GPUS:-8}" MIXED_ACCEL="${MIXED_ACCEL:-0}" \
         RESIDENT_JSON="${RESIDENT_JSON:-[]}" \
-        POLICY_TEXT="${POLICY_TEXT:-}" PQUERY_OUT="${PQUERY_OUT:-}" \
+        POLICY_TEXT="${POLICY_TEXT:-}" PQUERY_OUT="${PQUERY_OUT:-}" WVA_NS="${WVA_NS:-ns-under-test}" \
         WVA_POLICY_NS="${WVA_POLICY_NS:-0}" NS_POLICY_LABEL="${NS_POLICY_LABEL:-}" \
         PD_STUB="${PD_STUB:-0}" PD_SINGLE_STACK="${PD_SINGLE_STACK:-0}" PD_ENDPOINT="${PD_ENDPOINT:-}" \
         MIN_PREFILL="${MIN_PREFILL:-}" MIN_DECODE="${MIN_DECODE:-}" \
@@ -230,6 +230,20 @@ elif ! printf '%s' "$OUT" | grep -q 'pool-delete'; then
     fail "'run nopool' refused without naming the fix: $OUT"
 else
     ok "'run nopool' with a pool present is refused"
+fi
+
+# A controller outside the benchmark namespace serves others: its policy is
+# theirs too, and the share arms must not rewrite it.
+case_begin
+WVA_NS=shared-controller POLICY_TEXT='limiters: []' VERB_TIMEOUT=60 run_verb run share
+if [ "$RC" -eq 0 ]; then
+    fail "'run share' was accepted against a controller in another namespace"
+elif ! printf '%s' "$OUT" | grep -q 'shared with every namespace'; then
+    fail "'run share' refused a shared controller without saying why: $OUT"
+elif grep -q 'patch configmap' "$CALLS" 2>/dev/null; then
+    fail "'run share' rewrote a shared policy before refusing: $(cat "$CALLS")"
+else
+    ok "'run share' refuses to rewrite a policy a controller in another namespace serves"
 fi
 
 # The utilization-share arms compare two optimizers under ONE quota. Without a
@@ -470,6 +484,31 @@ else
     ok "the scenario and its specification both exist, and the specification names it"
 fi
 
+# two-model-shapes is two-model-warm-pool with room for 20k-token prompts and
+# nothing else. A copy drifts: every non-comment line but those three must
+# match, and its specification must name it, not the scenario it was copied
+# from.
+case_begin
+if [ ! -f "$SPEC_DIR/two-model-shapes.yaml" ] || [ ! -f "$SPEC_DIR/two-model-shapes.yaml.j2" ]; then
+    fail "two-model-shapes.yaml or its specification is missing"
+elif ! grep -q 'scenarios/guides/two-model-shapes.yaml' "$SPEC_DIR/two-model-shapes.yaml.j2"; then
+    fail "the shapes specification points at a scenario other than its own: $(grep -A1 scenario_file "$SPEC_DIR/two-model-shapes.yaml.j2")"
+else
+    drift="$(diff <(grep -vE '^[[:space:]]*#' "$SPEC_DIR/two-model-warm-pool.yaml" | tr -d '\r') \
+                  <(grep -vE '^[[:space:]]*#' "$SPEC_DIR/two-model-shapes.yaml" | tr -d '\r') | grep -E '^[<>]')"
+    expected="< workDir: \"~/data/two-model-warm-pool\"
+<       maxModelLen: 8192
+<       maxModelLen: 8192
+>   workDir: \"~/data/two-model-shapes\"
+>       maxModelLen: 32768
+>       maxModelLen: 32768"
+    if [ "$(printf '%s\n' "$drift" | sed 's/^\([<>]\) */\1 /' | sort)" != "$(printf '%s\n' "$expected" | sed 's/^\([<>]\) */\1 /' | sort)" ]; then
+        fail "two-model-shapes.yaml differs from two-model-warm-pool.yaml in more than workDir and maxModelLen: $drift"
+    else
+        ok "two-model-shapes differs from two-model-warm-pool only in workDir and maxModelLen, and its specification names it"
+    fi
+fi
+
 case_begin
 # The stack names are the HTTPRoute path prefixes AND the driver's defaults --
 # one fact in two files. Drift makes every request 404 for a whole run.
@@ -697,7 +736,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=39
+CASES_EXPECTED=41
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

@@ -873,6 +873,9 @@ prom_queries() {
         --env="PROM_URL=$url" --env="QUERIES=$queries" --env="EVAL_TIME=$eval_time" \
         --command -- python3 -c '
 import json, os, ssl, urllib.parse, urllib.request
+# The in-cluster Prometheus usually serves a self-signed certificate, and the
+# controller reads it the same way. No credential is sent; the worst a spoofed
+# answer can do is mislabel this benchmark.
 ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
 out = {}
 for q in json.loads(os.environ["QUERIES"]):
@@ -908,6 +911,12 @@ print("RESULT " + json.dumps(out))
 # benchmark's own copy while the controller reads another would measure a quota
 # nobody wrote down.
 check_policy_namespace() {
+    # A controller outside the benchmark namespace is cluster-scoped or serves
+    # other namespaces: its policy is what every tenant it manages gets, and an
+    # arm would switch the optimizer on, or sweep every live transfer, for all
+    # of them. The arms rewrite only a policy that is the benchmark's own.
+    [ "$WVA_NS" = "$NS" ] || [ "${SHARE_ALLOW_SHARED_POLICY:-0}" = "1" ] || \
+        die "the controller runs in $WVA_NS, not in $NS: its policy is shared with every namespace it manages, and the share arms would rewrite it for all of them. Install a namespace-scoped controller in $NS (the standup does), or set SHARE_ALLOW_SHARED_POLICY=1 if that policy really is yours alone."
     [ "${SKIP_POLICY_NAMESPACE_CHECK:-0}" = "1" ] && {
         warn "SKIP_POLICY_NAMESPACE_CHECK=1: not checking that the controller reads the policy in $WVA_NS"
         return 0
