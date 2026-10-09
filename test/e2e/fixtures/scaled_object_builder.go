@@ -359,7 +359,11 @@ func RecreateScaledObject(ctx context.Context, crClient client.Client, namespace
 	if err := crClient.Get(ctx, client.ObjectKeyFromObject(old), old); err != nil {
 		return fmt.Errorf("get ScaledObject %s: %w", old.Name, err)
 	}
-	if err := crClient.Delete(ctx, old); err != nil && !errors.IsNotFound(err) {
+	// Foreground: the object is gone only once its HPA is. In the background the
+	// old keda-hpa can outlive it, be adopted by the new ScaledObject and then
+	// collected, and read as wired for a moment in between.
+	if err := crClient.Delete(ctx, old, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil &&
+		!errors.IsNotFound(err) {
 		return fmt.Errorf("delete ScaledObject %s: %w", old.Name, err)
 	}
 	gone := wait.PollUntilContextTimeout(ctx, time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {

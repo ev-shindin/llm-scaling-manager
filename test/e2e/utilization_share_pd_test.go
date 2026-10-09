@@ -179,7 +179,7 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 		GinkgoWriter.Printf("donor set: %s\n", setID)
 
 		// Marks, where the pods are still there to read: only A's, only this set.
-		for _, p := range markedSharePods(ns) {
+		for _, p := range markedSharePods(Default, ns) {
 			Expect(p.Labels["app"]).To(Equal(depA), "only A has replicas to give")
 			var m struct {
 				SetID string `json:"setID"`

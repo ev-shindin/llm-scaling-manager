@@ -146,7 +146,7 @@ var _ = Describe("Utilization share optimizer", Label("full", "utilization-share
 
 		By("Holding for two minutes: no pod is marked and A keeps its replicas")
 		Consistently(func(g Gomega) {
-			g.Expect(markedSharePods(ns)).To(BeEmpty())
+			g.Expect(markedSharePods(g, ns)).To(BeEmpty())
 			a, err := k8sClient.AppsV1().Deployments(ns).Get(ctx, depA, metav1.GetOptions{})
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(*a.Spec.Replicas).To(Equal(int32(3)))
@@ -171,7 +171,7 @@ var _ = Describe("Utilization share optimizer", Label("full", "utilization-share
 		By("Waiting for an A pod to be marked as a donor")
 		var marked []corev1.Pod
 		Eventually(func(g Gomega) {
-			marked = markedSharePods(ns)
+			marked = markedSharePods(g, ns)
 			g.Expect(marked).NotTo(BeEmpty())
 		}, 10*time.Minute, 5*time.Second).Should(Succeed())
 		for _, p := range marked {
@@ -205,17 +205,18 @@ var _ = Describe("Utilization share optimizer", Label("full", "utilization-share
 		Eventually(func(g Gomega) {
 			now := time.Now()
 			if released.IsZero() {
-				for _, p := range markedSharePods(ns) {
+				for _, p := range markedSharePods(g, ns) {
 					markedNames[p.Name] = true
 				}
 				live := livePods(g, depA)
+				var gone []string
 				for name := range before {
 					if !live[name] {
-						leaving = append(leaving, name)
+						gone = append(gone, name)
 					}
 				}
-				if len(leaving) > 0 {
-					released = now
+				if len(gone) > 0 {
+					leaving, released = gone, now
 				}
 			}
 			b, err := k8sClient.AppsV1().Deployments(ns).Get(ctx, depB, metav1.GetOptions{})
@@ -235,6 +236,11 @@ var _ = Describe("Utilization share optimizer", Label("full", "utilization-share
 			Expect(markedNames).To(HaveKey(name), "the ReplicaSet removed %s, which no transfer marked", name)
 		}
 		Eventually(func(g Gomega) {
+			// A later transfer may mark, and the ReplicaSet remove, another A
+			// pod while this waits: it is a marked pod too.
+			for _, p := range markedSharePods(g, ns) {
+				markedNames[p.Name] = true
+			}
 			live := livePods(g, depA)
 			for name := range before {
 				if !live[name] {
@@ -256,9 +262,12 @@ var _ = Describe("Utilization share optimizer", Label("full", "utilization-share
 
 // markedSharePods lists the pods in ns that carry a utilization-share transfer
 // mark.
-func markedSharePods(ns string) []corev1.Pod {
+//
+// It asserts through g, so inside a poll a transient API error retries the poll
+// instead of failing the spec.
+func markedSharePods(g Gomega, ns string) []corev1.Pod {
 	pods, err := k8sClient.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
-	Expect(err).NotTo(HaveOccurred())
+	g.Expect(err).NotTo(HaveOccurred())
 	var out []corev1.Pod
 	for _, p := range pods.Items {
 		if _, ok := p.Annotations["llm-d.ai/utilization-share-transfer"]; ok {
