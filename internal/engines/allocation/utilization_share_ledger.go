@@ -218,10 +218,15 @@ type ShareLedger struct {
 	fillShort map[string]bool
 
 	lastGave, lastGot map[string]time.Time
-	moves             map[string][]shareMove
-	swingUntil        map[string]time.Time
-	needs             map[string][]shareNeedSample
-	confirm           map[string]int
+	// noGive and noRecv hold, until then, the direction of a transfer that
+	// was cancelled: its donor from giving and its receiver from receiving
+	// again, so a start and a cancel cannot loop. The reverse direction --
+	// the one the demand that cancelled it calls for -- is left open.
+	noGive, noRecv map[string]time.Time
+	moves          map[string][]shareMove
+	swingUntil     map[string]time.Time
+	needs          map[string][]shareNeedSample
+	confirm        map[string]int
 	// releases are the durations of recent completed releases, newest last,
 	// for the measured release time (§8.4).
 	releases []time.Duration
@@ -267,6 +272,8 @@ func NewShareLedger() *ShareLedger {
 		fillBlocked: map[string]shareFillBlock{},
 		lastGave:    map[string]time.Time{},
 		lastGot:     map[string]time.Time{},
+		noGive:      map[string]time.Time{},
+		noRecv:      map[string]time.Time{},
 		moves:       map[string][]shareMove{},
 		swingUntil:  map[string]time.Time{},
 		needs:       map[string][]shareNeedSample{},
@@ -449,10 +456,20 @@ func (l *ShareLedger) Cancel(id string, now time.Time, tm ShareTimings) bool {
 	if t.State != ShareReleasing || now.Sub(t.Started) >= tm.Window {
 		return false
 	}
-	l.transfers = slices.Delete(l.transfers, i, i+1)
+	// Nothing moved: the move history Start recorded is put back, as for a
+	// transfer that never took effect. Recorded, it held the donor from
+	// receiving and the receiver from giving -- exactly the reverse move the
+	// demand that cancelled it calls for -- and counted toward a swing, which
+	// plans a role on its mean need and under-reads a rising one. Measured: a
+	// model whose burst began as it was about to give waited 16 minutes.
+	// Only the cancelled direction is held, so start and cancel cannot loop.
+	l.Forget(t.ID)
 	if !t.Entitled {
-		l.lastGave[t.Donor] = now
-		l.lastGot[t.Receiver] = now
+		until := now.Add(tm.ReversalHold)
+		l.noGive[t.Donor] = until
+		if t.Receiver != "" {
+			l.noRecv[t.Receiver] = until
+		}
 	}
 	return true
 }
@@ -676,6 +693,9 @@ func (l *ShareLedger) rebaseDonor(t *ShareTransfer, now time.Time) {
 // ReceivingHeld reports whether role may not receive now: it gave within the
 // reversal hold.
 func (l *ShareLedger) ReceivingHeld(role string, now time.Time, tm ShareTimings) bool {
+	if now.Before(l.noRecv[role]) {
+		return true
+	}
 	t, ok := l.lastGave[role]
 	return ok && now.Sub(t) < tm.ReversalHold
 }
@@ -736,7 +756,7 @@ func (l *ShareLedger) BackingOff(role string, now time.Time) bool {
 // reversal hold, its last release was aborted and it is backing off, or it
 // has given all it can (GivingBusy).
 func (l *ShareLedger) GivingHeld(role string, now time.Time, tm ShareTimings) bool {
-	if now.Before(l.giveAfter[role]) || l.GivingBusy(role, now) {
+	if now.Before(l.giveAfter[role]) || now.Before(l.noGive[role]) || l.GivingBusy(role, now) {
 		return true
 	}
 	t, ok := l.lastGot[role]
@@ -1040,6 +1060,8 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		delete(l.fillBlocked, r)
 		delete(l.lastGave, r)
 		delete(l.lastGot, r)
+		delete(l.noGive, r)
+		delete(l.noRecv, r)
 		delete(l.moves, r)
 		delete(l.swingUntil, r)
 		delete(l.needs, r)

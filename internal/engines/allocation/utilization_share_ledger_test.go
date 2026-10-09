@@ -86,16 +86,23 @@ var _ = Describe("ShareLedger", func() {
 		Expect(ended[0].Outcome).To(Equal(ShareOutcomeFillTimeout))
 	})
 
-	It("cancels only a Releasing transfer inside the window, and holds the pair", func() {
+	It("cancels only a Releasing transfer inside the window, and holds only the cancelled direction", func() {
 		l := NewShareLedger()
 		held := map[string]int{"A": 9, "B": 5}
 		t := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 1}, held, at(0), tm)
 		Expect(l.Cancel(t.ID, at(400), tm)).To(BeFalse(), "past the window a pod may have moved")
 		Expect(l.Cancel(t.ID, at(100), tm)).To(BeTrue())
 		Expect(l.InFlight()).To(BeZero())
-		Expect(l.ReceivingHeld("A", at(100+719), tm)).To(BeTrue())
-		Expect(l.ReceivingHeld("A", at(100+720), tm)).To(BeFalse())
-		Expect(l.GivingHeld("B", at(500), tm)).To(BeTrue())
+		// Nothing moved, and the demand that cancelled it calls for the
+		// reverse: A may receive and B may give at once.
+		Expect(l.ReceivingHeld("A", at(101), tm)).To(BeFalse(), "the donor whose demand rose is free to receive")
+		Expect(l.GivingHeld("B", at(101), tm)).To(BeFalse(), "the receiver whose demand fell is free to give")
+		Expect(l.Swinging("A", at(101))).To(BeFalse(), "a cancel is no move toward a swing")
+		// The cancelled direction is held one reversal hold, so start and
+		// cancel cannot loop.
+		Expect(l.GivingHeld("A", at(100+719), tm)).To(BeTrue())
+		Expect(l.GivingHeld("A", at(100+720), tm)).To(BeFalse())
+		Expect(l.ReceivingHeld("B", at(500), tm)).To(BeTrue())
 	})
 
 	It("holds only the opposite direction", func() {

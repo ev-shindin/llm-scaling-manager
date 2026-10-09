@@ -58,8 +58,9 @@ func TestUtilizationShareBlockedReasonsForAHeldBackReceiver(t *testing.T) {
 	t.Run("reversal-hold", func(t *testing.T) {
 		l := allocation.NewShareLedger()
 		held := map[string]int{"ns/B/both": 4, "ns/C/both": 6}
-		gave := l.Start(allocation.ShareTransfer{Donor: "ns/B/both", Receiver: "ns/C/both", GPUs: 1, DonorGPUs: 1}, held, t0, tm)
-		l.Cancel(gave.ID, t0, tm)
+		// B gave: the move is recorded when the transfer starts. (A cancelled
+		// one records none -- nothing moved.)
+		l.Start(allocation.ShareTransfer{Donor: "ns/B/both", Receiver: "ns/C/both", GPUs: 1, DonorGPUs: 1}, held, t0, tm)
 		if got := reasons(l, t0.Add(time.Minute)); !slices.Contains(got, constants.ScalingBlockedReversalHold) {
 			t.Fatalf("B gave a minute ago: want reversal-hold, got %v", got)
 		}
@@ -84,9 +85,8 @@ func TestUtilizationShareBlockedReasonsForAHeldBackReceiver(t *testing.T) {
 		held := map[string]int{"ns/B/both": 4, "ns/C/both": 6}
 		// B gives, receives, gives: two reversals within the swing window.
 		for i, pair := range [][2]string{{"ns/B/both", "ns/C/both"}, {"ns/C/both", "ns/B/both"}, {"ns/B/both", "ns/C/both"}} {
-			tr := l.Start(allocation.ShareTransfer{Donor: pair[0], Receiver: pair[1], GPUs: 1, DonorGPUs: 1},
+			l.Start(allocation.ShareTransfer{Donor: pair[0], Receiver: pair[1], GPUs: 1, DonorGPUs: 1},
 				held, t0.Add(time.Duration(i)*time.Second), tm)
-			l.Cancel(tr.ID, t0.Add(time.Duration(i)*time.Second), tm)
 		}
 		if got := reasons(l, t0.Add(time.Minute)); !slices.Contains(got, constants.ScalingBlockedSwinging) {
 			t.Fatalf("B reversed twice: want swinging, got %v", got)
