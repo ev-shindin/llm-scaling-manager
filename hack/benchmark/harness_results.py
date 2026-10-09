@@ -211,7 +211,12 @@ def stage_windows(root, n_expected):
 
 
 def planned_arrivals(schedule, key):
-    return sum(ph[key] * (ph["end"] - ph["start"]) for ph in schedule)
+    # Per phase, the whole requests the generator issues: it rounds each
+    # stage's rate x duration down, so a 90 s phase at 0.25 rps is 22, not
+    # 22.5. Summing the fractions planned arrivals no stage could issue, and
+    # every arm read one short -- "the driver was the limit" -- in a run
+    # whose generator kept up.
+    return sum(int(ph[key] * (ph["end"] - ph["start"]) + 1e-9) for ph in schedule)
 
 
 def convert(args):
@@ -255,8 +260,7 @@ def convert(args):
     # as a cluster that answered nothing.
     issued = sum(w["n"] + w["failed"]
                  for role in ("a", "b") for w in sides[role]["stages"])
-    planned = int(round(planned_arrivals(schedule, "rate_a")
-                        + planned_arrivals(schedule, "rate_b")))
+    planned = planned_arrivals(schedule, "rate_a") + planned_arrivals(schedule, "rate_b")
 
     # The WORST of everything the generator reported about its own lateness --
     # whole run and every stage. A driver that kept up on average while falling

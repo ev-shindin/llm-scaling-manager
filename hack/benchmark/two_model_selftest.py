@@ -1439,6 +1439,17 @@ else:
     else:
         ok("role b defaults to role a's shape, and keeps its own when given one")
 
+case("planned arrivals count whole requests per phase, as the generator issues them")
+# Two 90 s phases at 0.25 rps: 22 each, as inference-perf issued them on a
+# cluster run. Fractions summed to 45 there, and every arm read one short.
+_sched = [{"start": 0, "end": 90, "rate_a": 0.25, "rate_b": 4.0},
+          {"start": 90, "end": 180, "rate_a": 0.25, "rate_b": 4.0}]
+_pa, _pb = harness.planned_arrivals(_sched, "rate_a"), harness.planned_arrivals(_sched, "rate_b")
+if (_pa, _pb) != (44, 720):
+    fail("planned arrivals %r / %r, want 44 / 720" % (_pa, _pb))
+else:
+    ok("planned arrivals are 44 and 720, whole requests per phase")
+
 print("")
 if FAIL:
     print("two-model self-test FAILED (%d of %d cases)" % (FAIL, CASES))
