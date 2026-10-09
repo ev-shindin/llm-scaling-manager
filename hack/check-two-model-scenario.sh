@@ -68,7 +68,11 @@ case "$args" in
   *"get deploy wva-controller-manager"*"-o json"*)
       case "${CTL_SCOPE:-own}" in
         own) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace=$(WVA_WATCH_NAMESPACE)"],
-               "env":[{"name":"WVA_WATCH_NAMESPACE","valueFrom":{"fieldRef":{"fieldPath":"metadata.namespace"}}}]}]}}}}' ;;
+               "env":[{"name":"POD_NAMESPACE","valueFrom":{"fieldRef":{"fieldPath":"metadata.namespace"}}},
+                      {"name":"WVA_WATCH_NAMESPACE","value":"$(POD_NAMESPACE)"}]}]}}}}' ;;
+        # An older install: the flag names the pod namespace variable directly.
+        pod) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace=$(POD_NAMESPACE)"],
+               "env":[{"name":"POD_NAMESPACE","valueFrom":{"fieldRef":{"fieldPath":"metadata.namespace"}}}]}]}}}}' ;;
         cluster) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--leader-elect"]}]}}}}' ;;
         *) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace='"$CTL_SCOPE"'"]}]}}}}' ;;
       esac
@@ -355,6 +359,18 @@ if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'watches team-a'; then
     fail "'run today' with a controller watching another namespace: rc $RC, $OUT"
 else
     ok "'run today' refuses a controller that watches another namespace"
+fi
+
+# Both shapes the installs render resolve to the pod's own namespace: the
+# chain through WVA_WATCH_NAMESPACE (every case above), and an older install
+# naming POD_NAMESPACE in the flag -- which a first version of the guard read
+# as a namespace called "$(POD_NAMESPACE)" and refused on a real cluster.
+case_begin
+CTL_SCOPE=pod POLICY_TEXT="$QUOTA_POLICY" VERB_TIMEOUT=60 run_verb run today
+if printf '%s' "$OUT" | grep -q 'watches'; then
+    fail "'run today' refused a controller watching \$(POD_NAMESPACE), its own namespace: $OUT"
+else
+    ok "'run today' accepts a controller watching its own namespace through POD_NAMESPACE"
 fi
 
 # Reset settles only when no pod of the fleet is still terminating: one in its
@@ -792,7 +808,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=44
+CASES_EXPECTED=45
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

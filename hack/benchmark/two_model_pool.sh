@@ -962,21 +962,28 @@ check_policy_namespace() {
 }
 
 # watch_scope reads a controller Deployment (JSON on stdin) and prints the
-# namespace it watches: the --watch-namespace value, the literal value of
-# WVA_WATCH_NAMESPACE when the flag names it, "own" when that variable comes
-# from the pod (its own namespace), and nothing when it watches every namespace.
+# namespace it watches: the --watch-namespace value with every $(VAR) in it
+# resolved through the container env, as the kubelet does -- "own" when it ends
+# at the pod namespace fieldRef, "unknown" when it ends anywhere else -- and
+# nothing when it watches every namespace. The installs chain it:
+# --watch-namespace=$(WVA_WATCH_NAMESPACE), whose value is $(POD_NAMESPACE),
+# which is the fieldRef; older ones name $(POD_NAMESPACE) directly.
 watch_scope() {
     jq -r '
       .spec.template.spec.containers[0] as $c
-      | ([($c.args // [])[], ($c.command // [])[]] | map(select(startswith("--watch-namespace="))) | first // "")
+      | ($c.env // []) as $env
+      | def resolve($v; $n):
+          if $n > 5 then "unknown"
+          elif ($v | test("^\\$\\([A-Za-z_][A-Za-z0-9_]*\\)$")) then
+            ($v | ltrimstr("$(") | rtrimstr(")")) as $name
+            | ($env | map(select(.name == $name)) | first // {}) as $e
+            | if ($e.value // "") != "" then resolve($e.value; $n + 1)
+              elif $e.valueFrom.fieldRef.fieldPath == "metadata.namespace" then "own"
+              else "unknown" end
+          else $v end;
+      ([($c.args // [])[], ($c.command // [])[]] | map(select(startswith("--watch-namespace="))) | first // "")
       | ltrimstr("--watch-namespace=") as $flag
-      | if $flag == "" then ""
-        elif ($flag | test("WVA_WATCH_NAMESPACE")) then
-          (($c.env // []) | map(select(.name == "WVA_WATCH_NAMESPACE")) | first // {}) as $e
-          | if ($e.value // "") != "" then $e.value
-            elif $e.valueFrom.fieldRef.fieldPath == "metadata.namespace" then "own"
-            else "unknown" end
-        else $flag end'
+      | if $flag == "" then "" else resolve($flag; 0) end'
 }
 
 # Write the arm's `optimizer:` block into the policy every controller reads,
