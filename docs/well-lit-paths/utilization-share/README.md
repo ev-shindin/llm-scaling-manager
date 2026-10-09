@@ -4,10 +4,13 @@
 > donor sets, P/D roles and node-aware placement. Unit tests cover it, and three
 > end-to-end specs run it on kind with emulated GPUs and the inference
 > simulator. **One benchmark run, on two aggregated models,** measured it on
-> H200s ([measured](measured.md)): the transfers worked, and its effect on
-> latency cut both ways. That is the short leg. There is one run and no
-> repetition, and P/D could not be measured: prefill never scaled, so prefill and
-> decode never competed for GPUs. The defaults may also change: the `tolerance` of 0.15, the weight classes and a `reserveGPUs` of 0
+> H200s ([measured](measured.md)): the transfers worked, and the replica
+> timelines show idle headroom serving the first rise and a delay of about 5.5
+> minutes at the swap. Its effect on latency is inconclusive: two arms that
+> scaled identically differed by up to 9 s p95. That is the short leg. There is
+> one run and no repetition, and P/D could not be measured: prefill never
+> scaled, so prefill and decode never competed for GPUs. The defaults may also
+> change: the `tolerance` of 0.15, the weight classes and a `reserveGPUs` of 0
 > are starting points, and the
 > [proposal](../../proposals/utilization-share-optimizer.md#14-open-questions)
 > says they should be tuned from shadow-mode data. The short scale-down window
@@ -57,9 +60,15 @@ is pure loss and headroom costs nothing extra.
 - **The donors cannot be steered.** A transfer depends on choosing the pod that
   goes, and some workloads do not allow it. A Deployment that is often
   mid-rollout, a Deployment with pods stuck Pending or not Ready, or a
-  LeaderWorkerSet whose highest-index group is terminating is refused as a donor
+  LeaderWorkerSet whose next group to go is terminating is refused as a donor
   (`donor-not-steerable`) and backs off. A fleet that is like this most of the
   time gets no transfers.
+- **The model that rises at a swap cannot wait.** At a swap, the headroom it
+  needs is held by the falling model, and a transfer releases it only through
+  that donor's scale-down window. The rising model waits at least one window
+  before it grows. In the benchmark it started growing about 5.5 minutes later
+  than under today's optimizer, which had already scaled the falling model
+  down.
 - **The real limit is not the scaling manager's quota.** A quota counts only
   what the scaling manager's own variants hold. If a Kubernetes `ResourceQuota`
   or unmanaged workloads on the same accelerators are what actually stops
@@ -74,7 +83,10 @@ is pure loss and headroom costs nothing extra.
   100 minutes
   ([§6.7](../../proposals/utilization-share-optimizer.md#67-why-it-does-not-oscillate-and-what-it-cannot-follow)).
   The swing rule limits that loss but does not turn it into a gain. These are
-  design figures, not measurements.
+  design figures. The one benchmark measured about 8 minutes from a rise to a
+  serving replica on an 8B model, with releases of about 6 minutes
+  ([measured](measured.md#what-this-says-and-how-far-it-goes)); a larger model
+  takes longer.
 
 Also, a model whose variants run on more than one accelerator type is never
 planned: it stays on today's optimizer.
@@ -97,6 +109,8 @@ planned: it stays on today's optimizer.
   nodes, so it plans by GPU count alone. It does not check that the GPUs a donor
   frees are on a node where the receiver's pod fits, and the two blocked reasons
   that need nodes (`release-taken`, `release-shape-mismatch`) never appear.
+  Nor does the `wrong-pod` outcome: without a node-aware plan a release is
+  judged by count, so a different pod leaving counts as the release.
 
 ## Declaring it
 
@@ -150,7 +164,8 @@ you have read what it would do.
 acting, when a controller restarts or the leader changes, and when a group first
 appears, every planned model of the group holds what it runs for one fill
 timeout. That is about three minutes with default timings, and nothing in the
-group scales during it. Expect the same freeze on every upgrade.
+group scales during it. Each of those models shows the blocked reason
+`quiet-period` meanwhile. Expect the same freeze on every upgrade.
 
 **A model that just gave GPUs cannot receive them back for a while, even when it
 is short.** That is the anti-oscillation rule. It applies to urgent receivers
@@ -219,7 +234,9 @@ When it evaluates but never moves anything, work down
 - **The receiver waits for the release.** The receiver is raised only after the
   donor's GPUs are free: after the donor's scale-down window, its drain, and
   then the receiver's own pod start and model load. For that whole time the
-  receiver runs short.
+  receiver runs short. A spike beyond a model's headroom waits at least one
+  donor scale-down window; at the benchmark's swap that was about 5.5 minutes
+  later than under today's optimizer.
 - **The freeze and the hold above.** About one fill timeout of no scaling in a
   group after every restart, and a reversal hold that can keep a short model
   waiting.
@@ -279,8 +296,9 @@ differ only in the policy's `optimizer:` block: none (`today`), shadow
 (`shadow`) and acting (`share`). One run, with 20-minute bursts under a 4-GPU
 quota, showed:
 
-- **The first model to rise did better.** Idle headroom had already given it
-  a second replica, and its p95 TTFT on the rise was 126 ms against 7.7 s.
+- **The first model to rise had its second replica already serving.** Idle
+  headroom had raised it from 1 to 2 before its burst; under today's optimizer
+  it asked for a second replica 43 s into the burst and had it 127 s in.
 - **The model rising at the swap started growing about 5.5 minutes later.**
   Today's optimizer had already scaled the falling model down to its need, so
   a GPU was free. This optimizer kept that GPU as headroom, so it had to be
@@ -288,8 +306,9 @@ quota, showed:
   delay is what the designed, unbuilt short window for urgent transfers is for.
 - **It cost 24% more GPU-seconds**, because it holds the whole quota.
 - The `shadow` arm, which makes today's decisions, differed from `today` by up
-  to 9 s p95 on the same replicas. Latency differences smaller than that are
-  noise in a single run.
+  to 9 s p95 on the same replicas. Every latency difference between the arms
+  was smaller than that, so the run says nothing about latency on its own; the
+  bullets above rest on the replica timelines.
 
 A P/D version was attempted and not measured. Prefill never left one replica
 under prompt-heavy load, so there was no prefill-versus-decode competition to

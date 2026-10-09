@@ -42,15 +42,33 @@ deploy:
       #     utilizationShare:
       #       shadow: true
       #       # clusterNamespaces: [team-canary]   # cluster quota only: plan these namespaces alone
-  active:
+  canary:
     note: |
-      Only after reading what shadow would do. From the first active cycle, each
-      planned group holds what it runs for one fill timeout (about three
-      minutes with default timings) and nothing in it scales. Expect the same
-      after every controller restart.
+      Cluster quota only, and optional: act on a few namespaces first.
+      clusterNamespaces limits the cluster group to the models of the
+      namespaces listed; every other model stays on today's optimizer, and the
+      GPUs it holds stay outside the group. Pick namespaces whose owners
+      agreed, act on them alone, and read the active checks below before
+      widening the list or removing it (empty plans every namespace).
+      On namespace quotas there is no canary: keep a namespace out with
+      namespaces: {<ns>: {enabled: false}} instead.
     run: |
       kubectl edit configmap wva-scaling-policy-config -n <policy-namespace>
       #       shadow: false
+      #       clusterNamespaces: [team-canary]
+  active:
+    note: |
+      Only after reading what shadow would do (and, on a cluster quota, what
+      the canary did). From the first active cycle, each planned group holds
+      what it runs for one fill timeout (about three minutes with default
+      timings), nothing in it scales, and its models show the blocked reason
+      quiet-period. Expect the same after every controller restart.
+      After a canary, shadow is already false: widen or remove
+      clusterNamespaces instead.
+    run: |
+      kubectl edit configmap wva-scaling-policy-config -n <policy-namespace>
+      #       shadow: false
+      #       # after a canary: clusterNamespaces: [team-canary, team-b], or remove the key
 
 verify:
   shadow:
@@ -75,8 +93,10 @@ verify:
   active:
     note: |
       Transfers that ended, by outcome: done is healthy; rising aborted,
-      fill-timeout or wrong-pod means transfers are not landing. A model held
-      back shows a reason on wva_model_scaling_blocked.
+      fill-timeout or wrong-pod means transfers are not landing. Every outcome
+      is published at 0 while a group acts, so increase() counts the first.
+      wrong-pod needs node information: a namespace-scoped install never
+      reports it. A model held back shows a reason on wva_model_scaling_blocked.
       Every transfer is also an Event on the Deployment or LeaderWorkerSet it
       moved, in the model's namespace. Warnings are the ones to read.
     run: |

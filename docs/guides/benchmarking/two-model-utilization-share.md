@@ -72,6 +72,14 @@ except the pool. In addition:
   and both models fall in one namespace quota group. `<accelerator>` must be
   the name the controller resolves for the variants: a quota on a name nobody
   resolves to is a quota of zero, and both models freeze at their floor.
+- **A controller in the benchmark namespace.** The share arms refuse a
+  controller that runs anywhere else (`WVA_NS` other than
+  `BENCHMARK_NAMESPACE`): a cluster-scoped controller, or one that serves other
+  namespaces, applies its policy to every tenant it manages, and an arm would
+  switch the optimizer on, or sweep every live transfer mark, for all of them.
+  The standup installs a namespace-scoped controller beside the models, which
+  passes. `SHARE_ALLOW_SHARED_POLICY=1` is the deliberate way past, for a policy
+  that really is yours alone.
 - **The policy in force is the benchmark namespace's own.** A namespace-scoped
   controller that manages its own namespace reads the namespace named by a
   `wva.llmd.ai/policy-namespace` label on it first, then `wva-policy` when that
@@ -144,7 +152,11 @@ default), so the freeze should end before the first request. Do not shorten
 `PRELOAD_GRACE` below it.
 
 Each arm takes about 45 minutes at the defaults, as in the warm-pool run. Each
-keeps the policy it ran under (`policy.yaml`) beside its results. After the arm
+keeps the policy it ran under (`policy.yaml`) beside its results. An arm whose
+loader never wrote its results is still refused, but it keeps the evidence
+before the loader Pod is deleted: what the Pod's `/results` held, in
+`harness-partial/`, the Pod itself as `loader-pod.json`, and loader b's process
+list as `loader-b-ps.txt`. After the arm
 ends, it also writes what the controller recorded over the arm's window
 (`share.json`):
 
@@ -190,6 +202,29 @@ the work); see
 | Arms whose policies differ apart from the `optimizer:` block, or an arm that kept no `policy.yaml` | The comparison is two optimizers under **one** quota. A different quota is a different experiment. |
 | An arm whose controller did not hold the arm's mode for the whole window, or has no `share.json` | A mode that lapsed mid-arm means part of the arm measured something else. |
 | A `today` or `shadow` arm that recorded a transfer | Neither may move a GPU. One that did was not the arm it is labelled. |
+
+## Two different burst shapes
+
+By default both models burst with the same request shape. To give them
+different ones, for example one model's bursts prompt-heavy and the other's
+output-heavy, stand up with the `two-model-shapes` scenario and give each loader
+its own shape:
+
+```bash
+BENCH_SPEC=guides/two-model-shapes make benchmark-two-model-preflight
+BENCH_SPEC=guides/two-model-shapes \
+  WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=4' make benchmark-two-model-standup
+# then every arm with the same shapes, for example:
+INPUT_TOKENS=20000 OUTPUT_TOKENS=500 INPUT_TOKENS_B=1000 OUTPUT_TOKENS_B=6000 \
+  make benchmark-two-model-run ARM=today
+```
+
+The scenario (`hack/benchmark/scenarios/guides/two-model-shapes.yaml`) is
+`two-model-warm-pool.yaml` with one change: `maxModelLen` 32768 on both stacks,
+in place of 8192, so a 20 000-token prompt fits. `make lint-deploy-scripts`
+checks that it stays a copy in every other line. Set `BENCH_SPEC` for the
+preflight and the standup, which read the scenario; the shapes are read by each
+`run`, and every arm of one comparison must use the same ones.
 
 ## The load shape, and the case it does not reach
 
@@ -259,4 +294,6 @@ Two tooling problems are also open:
   logging the 2 CPU / 8 GiB override for Qwen3-0.6B. Check the Deployments, and
   set the requests by hand if needed.
 - A decode-heavy loader with 4000-token outputs wrote no results within
-  `RESULT_GRACE` (1200 s) after its load ended.
+  `RESULT_GRACE` (1200 s) after its load ended. The arm now keeps what the
+  loader left (`harness-partial/`, `loader-pod.json`, `loader-b-ps.txt`) for
+  the next occurrence; the cause is not known.

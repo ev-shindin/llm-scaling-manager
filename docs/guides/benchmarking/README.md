@@ -200,7 +200,7 @@ trusting any latency number; if the two disagree, see
 - [Two models, anti-phase bursts, under one quota](two-model-utilization-share.md) —
   the same load under one quota smaller than both models' peak, with today's
   optimizer, the utilization-share optimizer in shadow, and the same acting.
-  **Not yet run**
+  Run once on aggregated models: [what it measured](../../well-lit-paths/utilization-share/measured.md)
 - [FMA post-mortem](../../proposals/fma-post-mortem.md) — if the namespace runs FMA
 - [After the install](../../reference/operations.md) — what the metrics mean
 - [Configuration](../../reference/configuration.md) — every installer variable

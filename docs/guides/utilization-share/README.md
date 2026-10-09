@@ -10,14 +10,17 @@ once the GPUs are free. Whether it suits your fleet, and what it costs, is on
 the well-lit path:
 [Share one GPU quota between models whose peaks do not coincide](../../well-lit-paths/utilization-share/).
 
-This guide turns it on in three steps: in **shadow**, where it computes and
-reports but moves nothing; then **active**; then, if needed, back out. It is
+This guide turns it on in steps: in **shadow**, where it computes and reports
+but moves nothing; on a cluster quota, a **canary** that acts on a few
+namespaces only; then **active**; then, if needed, back out. It is
 one block in one ConfigMap, read live. The care is in the order: the
 `shadow` key **defaults to `false`**, so a block written without it moves
 replicas from the next cycle.
 
-**Experimental.** It has been tested on kind with emulated GPUs, and no
-benchmark has been run on it yet.
+**Experimental.** It has been tested on kind with emulated GPUs, and
+benchmarked once, on two aggregated models
+([what it measured](../../well-lit-paths/utilization-share/measured.md)); P/D
+has not been measured.
 
 ## Prerequisites
 
@@ -91,22 +94,44 @@ kubectl edit configmap wva-scaling-policy-config -n <policy-namespace>
 ```
 <!-- guide:deploy.shadow end -->
 
-On a **cluster** quota, a canary is possible. `clusterNamespaces` limits the
-cluster group to the models of the namespaces you list, and leaves every other
-model on today's optimizer. On **namespace** quotas, keep a namespace out with
-`namespaces: {<ns>: {enabled: false}}` instead. Each key is described in
+**Step two, on a cluster quota: a canary.** After reading what shadow would do
+(below), act on a few namespaces before the whole cluster. `clusterNamespaces`
+limits the cluster group to the models of the namespaces you list, and leaves
+every other model on today's optimizer. On **namespace** quotas there is no
+canary; keep a namespace out with `namespaces: {<ns>: {enabled: false}}`
+instead, and skip to step three. Each key is described in
 [the reference](../../reference/scaling-policy.md#optimizer-cluster-default-only-live).
 
-**Step two, after reading what shadow would do (below): active.**
+<!-- guide:deploy.canary start -->
+```bash
+# Cluster quota only, and optional: act on a few namespaces first.
+# clusterNamespaces limits the cluster group to the models of the
+# namespaces listed; every other model stays on today's optimizer, and the
+# GPUs it holds stay outside the group. Pick namespaces whose owners
+# agreed, act on them alone, and read the active checks below before
+# widening the list or removing it (empty plans every namespace).
+# On namespace quotas there is no canary: keep a namespace out with
+# namespaces: {<ns>: {enabled: false}} instead.
+kubectl edit configmap wva-scaling-policy-config -n <policy-namespace>
+#       shadow: false
+#       clusterNamespaces: [team-canary]
+```
+<!-- guide:deploy.canary end -->
+
+**Step three, after reading what shadow (and the canary) did: active.**
 
 <!-- guide:deploy.active start -->
 ```bash
-# Only after reading what shadow would do. From the first active cycle, each
-# planned group holds what it runs for one fill timeout (about three
-# minutes with default timings) and nothing in it scales. Expect the same
-# after every controller restart.
+# Only after reading what shadow would do (and, on a cluster quota, what
+# the canary did). From the first active cycle, each planned group holds
+# what it runs for one fill timeout (about three minutes with default
+# timings), nothing in it scales, and its models show the blocked reason
+# quiet-period. Expect the same after every controller restart.
+# After a canary, shadow is already false: widen or remove
+# clusterNamespaces instead.
 kubectl edit configmap wva-scaling-policy-config -n <policy-namespace>
 #       shadow: false
+#       # after a canary: clusterNamespaces: [team-canary, team-b], or remove the key
 ```
 <!-- guide:deploy.active end -->
 
@@ -154,8 +179,10 @@ planned at all.
 <!-- guide:verify.active start -->
 ```bash
 # Transfers that ended, by outcome: done is healthy; rising aborted,
-# fill-timeout or wrong-pod means transfers are not landing. A model held
-# back shows a reason on wva_model_scaling_blocked.
+# fill-timeout or wrong-pod means transfers are not landing. Every outcome
+# is published at 0 while a group acts, so increase() counts the first.
+# wrong-pod needs node information: a namespace-scoped install never
+# reports it. A model held back shows a reason on wva_model_scaling_blocked.
 # Every transfer is also an Event on the Deployment or LeaderWorkerSet it
 # moved, in the model's namespace. Warnings are the ones to read.
 curl -sk https://localhost:8443/metrics | grep -E '^wva_utilization_share_(mode|transfers_total|in_flight)'
@@ -171,11 +198,14 @@ kubectl get events -n <llmd-namespace> --field-selector type=Warning | grep Util
 | Event reason | type | means |
 | --- | --- | --- |
 | `UtilizationShareGiving` | Normal | a donor gives one replica; names the pod that goes and the receiver |
-| `UtilizationShareReceived` | Normal | the transfer landed: the receiver holds the GPUs |
-| `UtilizationShareReleaseAborted` | Warning | the donor did not release within the release timeout; its count is restored |
+| `UtilizationShareReceived` | Normal | the transfer landed: the receiver holds the GPUs. An idle fill says the GPUs came from the quota group's spare, as headroom by weight |
+| `UtilizationShareReleaseAborted` | Warning | the donor did not release within the release timeout; its count is restored. Or its donor set could not complete; the Event then says so, and the donor is not held back |
 | `UtilizationShareFillTimedOut` | Warning | the receiver's new replica did not take the released GPUs in time |
 | `UtilizationShareWrongPod` | Warning | a pod other than the marked one was removed |
 | `UtilizationShareDonorNotSteerable` | Warning | the pod that would go could not be chosen: a pod not Ready, or a rollout in progress |
+
+Events expire, after an hour by default: read them soon after a transfer, and
+use the counters for anything older.
 
 The full list, with `Receiving`, `Cancelled` and `Redirected`, is in
 [monitoring](../../reference/monitoring.md#events-on-the-models-scale-targets).
@@ -183,7 +213,8 @@ What each blocked reason means and what to do about it is in
 [the metrics reference](../../reference/prometheus.md#wva_model_scaling_blocked-reasons-set-by-the-utilization-share-optimizer).
 
 Expect nothing to scale in a group for about three minutes after the switch.
-That is the freeze of one fill timeout described above, not a fault. If it
+That is the freeze of one fill timeout described above, not a fault; its models
+show the blocked reason `quiet-period` meanwhile. If it
 still moves nothing after that, work down
 [the troubleshooting list](../../reference/troubleshooting.md#the-optimizer-evaluates-but-never-moves-anything).
 

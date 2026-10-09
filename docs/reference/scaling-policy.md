@@ -384,18 +384,21 @@ ReplicaSet removes that pod and not a sibling: `-1000`, or one below the lowest
 cost a user set on a sibling when that is lower still. The mark records the cost
 it wrote in its `cost` field (absent means `-1000`). A restarted controller
 rebuilds its in-flight transfers from these marks. The controller removes both,
-restoring the pod's previous deletion cost, when the transfer ends, when the
-optimizer is switched to shadow or off (including across a controller restart),
-and when no quota has been read for two minutes. When it removes a mark it
+restoring the pod's previous deletion cost, when the transfer ends (including a
+release judged by count, where another of the donor's pods went and the marked
+one survives), when the optimizer is switched to shadow or off (including across
+a controller restart), and when no quota has been read for two minutes. When it removes a mark it
 restores the previous cost only if the pod still carries exactly the cost the
 mark wrote: a deletion cost someone else set after the mark is left as they set
 it.
 
-A mark sits on the donor tenant's pod, so it names the receiver only when the
-receiver is in the donor's namespace. A transfer to a model in another namespace
-writes a mark with no receiver; after a controller restart it is restored as a
-release with no receiver: the donor still releases, and the receiver is planned
-again once the restart's quiet period (one fill timeout) ends. Transfer IDs end
+A mark sits on the donor tenant's pod, so it names another model only when
+every party is in one namespace. A transfer whose donor and receiver are in
+different namespaces, or a donor set whose donors and receiver are not all in
+one namespace, writes on every member's pod a mark with no receiver, no receiver
+GPUs and no set link; after a controller restart each is restored as a release
+with no receiver: the donor still releases, and the receiver is planned again
+once the restart's quiet period (one fill timeout) ends. Transfer IDs end
 in a random part, so an ID seen on one pod does not predict another.
 
 Each mark records the `CONTROLLER_INSTANCE` that wrote it in its `instance` field
@@ -411,7 +414,10 @@ see [marks left after a downgrade](troubleshooting.md#transfer-marks-left-on-pod
 **Namespace-scoped installs** cannot list nodes, so the optimizer plans by GPU
 count alone: it does not check that the GPUs a donor frees are on a node where
 the receiver's pod fits, and the two blocked reasons that need node information
-(`release-taken`, `release-shape-mismatch`) never appear.
+(`release-taken`, `release-shape-mismatch`) never appear. Neither does the
+transfer outcome `wrong-pod`: only a node-aware plan names the pods that must go,
+so a count-planned release is done when the donor shrinks by a replica, whichever
+pod left.
 
 With node information, placement counts only nodes a new pod can land on: cordoned
 nodes, nodes that are not Ready, nodes with a Kubernetes node-condition taint
@@ -430,8 +436,13 @@ raised target until the scheduler places it.
 **What can be taken.** Only replicas above the model's floor (its
 `minReplicaCount`, per variant) and above its whole-replica target. While the
 quota covers every model's need, targets sit at or above need, so only headroom
-moves. When the quota is short (`quota-short`), targets fall below need and a
-model can lose a replica it needs if another, weighted, is worse off. A role that
+moves, with one exception: when a replica is larger than the spare GPUs
+(whole replicas cannot match the continuous targets), a donor of multi-GPU
+replicas can end up one replica below its need even though the quota covers
+every need. A negative `wva_utilization_share_headroom` on a role while
+`wva_utilization_share_spare_gpus` is not negative is that case. When the quota
+is short (`quota-short`), targets fall below need and a model can lose a replica
+it needs if another, weighted, is worse off. A role that
 holds a replica never gives its last one: taking a model to zero is
 scale-to-zero's decision, with its own retention, never a transfer's. That last
 replica is kept, but it is not reported as a floor: `floor-pinned`,
@@ -439,13 +450,32 @@ replica is kept, but it is not reported as a floor: `floor-pinned`,
 `floors hold more than half the group's budget` log line count only the
 `minReplicaCount` you configured.
 
+**How much spike a model absorbs.** Its spike capacity is the headroom it holds
+(`wva_utilization_share_headroom`). A spike larger than that waits for a
+transfer, and a transfer releases the donor first: expect at least one donor
+scale-down window before the new replica serves. An idle model is not
+shrunk to its floor: it stays at its headroom target, its weighted share of the
+spare GPUs, which is what lets it take the next spike at once.
+
 **How to protect a model.** Raise its `minReplicaCount` (a floor is never taken,
 but it is paid for by every other model in the group: see `floor-pinned`), or
 give it a higher `weightClass`. The optimizer does not read `priority`; only
-`weight`/`weightClass` decide shares. On a cluster-scoped install a model is
-planned in a cluster group only when its namespace has no scaling-policy map of
-its own, so its weight is the one the admin's policy resolves (the `default`
-entry, a tier, or an override there).
+`weight`/`weightClass` decide shares. On a cluster quota the admin's policy sets
+the weights: a model is planned in a cluster group only when its namespace has no
+scaling-policy map of its own, so its weight is the one the admin's policy
+resolves (the `default` entry, a tier, or an override there). A model whose
+namespace has its own map is excluded from the cluster group and stays on
+today's optimizer; the controller log lists it in the `frozen` field with
+`namespace has its own scaling-policy map; not planned in the cluster-wide group`.
+
+**P/D models: set prefill's floor.** Prefill's demand is under-read: the
+scaling manager reads prefill's queueing as decode pressure, and in the one P/D
+benchmark attempt prefill never left one replica under prompt-heavy load
+([why](../well-lit-paths/utilization-share/measured.md#pd-not-measured)). So
+prefill gets little headroom and is the first donor above its floor. Set the
+prefill variant's `minReplicaCount` to what it really needs. That floor is never
+taken, and the rest of the group pays for it (`floor-pinned` when the floor is
+a replica or more above the need the optimizer reads).
 
 **How a replica leaves.** A transfer lowers the donor's target, and the pod goes
 through an ordinary scale-down (the ReplicaSet, or LeaderWorkerSet for an LWS).
@@ -455,12 +485,21 @@ drain. The grace also lengthens every transfer in the group (it is part of the
 release bound).
 
 **Which pod leaves.** On a Deployment the optimizer marks the pod with the lowest
-existing `controller.kubernetes.io/pod-deletion-cost` (ties broken by name), so a
-cost you set to protect a pod is respected. With node information, when it plans
-which node's GPUs to free, it likewise takes a donor's pods lowest cost first,
-then by name, so a pod you protected goes last. The marked pod's cost is set
-below every sibling's: `-1000`, or one below the lowest cost you set on a sibling
-when that is lower.
+existing `controller.kubernetes.io/pod-deletion-cost`, so a cost you set to
+protect a pod is respected. Ties between equal costs go as the ReplicaSet breaks
+them: the most recently Ready pod, then the name. With node information, the
+plan first picks the node whose GPUs it frees (where the receiver's pod fits),
+and on that node takes a donor's pods lowest cost first, then by name: a pod you
+protected goes last among the donor's pods on that node, not across nodes. The
+marked pod's cost is set below every unmarked sibling's: `-1000`, or one below
+the lowest cost you set on a sibling when that is lower.
+
+When two transfers in flight take from one donor, each later mark sits above
+the earlier live marks and below every unmarked sibling, so the ReplicaSet
+removes the earlier transfer's pod first, in the order the transfers release.
+When no cost fits strictly between them, or a sibling's cost is the int32
+minimum (`-2147483648`) so nothing fits below it, the donor is refused
+(`donor-not-steerable`).
 
 A Deployment is not asked to give, and backs off with the blocked reason
 `donor-not-steerable` and a `UtilizationShareDonorNotSteerable` Event, when the
@@ -470,19 +509,40 @@ choice of pod could not be steered:
   before it reads the cost;
 - it is mid-rollout, with live pods of more than one ReplicaSet: the Deployment
   controller splits a scale-down across them, and a cost ranks pods only within
-  one.
+  one. Pods are found by the Deployment's `spec.selector`, so a rollout that
+  changed a pod-template label still shows its old ReplicaSet's pods;
+- a sibling's cost leaves no room for the mark (above).
 
-On a LeaderWorkerSet the highest-index group goes, as LWS removes it; its
-deletion cost is not consulted. The highest index is taken over the LWS's own
-pods (the ones its StatefulSets own), terminating ones included; a pod that only
-carries the LWS's labels is ignored. If that highest group is terminating or not
-yet scheduled, the donor is refused the same way, since LWS would remove that
-group and not the next.
+A donor whose every pod is already given to transfers still in flight backs off
+the same way and shows `donor-not-steerable`, but gets no Event: nothing is
+wrong with it, it has given all it can until those releases land.
+
+On a LeaderWorkerSet the group that goes is the one LWS removes next; its
+deletion cost is not consulted. LWS removes the highest indices first, so that
+is the highest group index still below `spec.replicas` that no transfer in
+flight has marked: groups at or above `spec.replicas` are already going, and a
+marked group is an earlier transfer's and goes first. Groups are taken over the
+LWS's own pods (the ones its StatefulSets own), terminating ones included; a pod
+that only carries the LWS's labels is ignored. If that group is terminating or
+not yet scheduled, the donor is refused the same way: below `spec.replicas` that
+is a rollout, not a release. When every group below `spec.replicas` is marked,
+the donor is exhausted, as above.
 
 **Reading the blocked reasons of a P/D model.** `wva_model_scaling_blocked` has
 no `role` label, so a reason on a P/D model may come from its decode or its
 prefill role. Check `wva_utilization_share_headroom` and
 `wva_utilization_share_actionable` by `role` to see which one is short.
+
+**Events are not history.** The `UtilizationShare*` Events on a scale target
+explain recent transfers, but the API server deletes Events after its
+`--event-ttl`, one hour by default. Use the counters and the controller log for
+anything older.
+
+**After a restart or a leader change** only the releases in flight are rebuilt,
+from the marks on donor pods. Everything else the optimizer remembers starts
+again from zero: reversal holds, swing state and abort back-offs. For one fill
+timeout every planned model of the group holds what it runs (blocked reason
+`quiet-period`); that quiet period is the only protection across the restart.
 
 **Caveats for operators.**
 

@@ -1641,11 +1641,12 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_utilization_share_actual` | `model_name`, `role`, `exported_namespace` | `u_r` |
 | `wva_utilization_share_spare_gpus` | `accelerator_type`, `scope` | `S`; negative when the quota is short |
 | `wva_utilization_share_floor_excess_gpus` | `model_name`, `role`, `exported_namespace` | GPUs a floor holds above need (§5.5) |
-| `wva_utilization_share_transfers_total` | `accelerator_type`, `scope`, `outcome`, `urgent` | `done` / `fill-timeout` / `cancelled` / `aborted` / `redirected` / `wrong-pod` |
+| `wva_utilization_share_transfers_total` | `accelerator_type`, `scope`, `outcome`, `urgent` | `done` / `fill-timeout` / `cancelled` / `aborted` / `redirected` / `wrong-pod`; every outcome × urgent series is published at 0 for an acting group, so `increase()` sees the first event (`constants.UtilizationShareOutcomes`) |
 | `wva_utilization_share_reserve_debt_gpus` | `accelerator_type`, `scope` | `reserveDebt`: reserve GPUs spent and not yet refilled (§6.2) |
 | `wva_utilization_share_effective_seconds` | `accelerator_type`, `scope`, `param`, `source` | the derived timings in force and where each came from (§8.4) |
 | `wva_utilization_share_promised_gpus` | `accelerator_type`, `scope` | `P`: GPUs released for a receiver and not yet held by it — withheld from the warm pool, from wakes and from plans (§6.3) |
 | `wva_utilization_share_release_seconds` | `accelerator_type`, `scope` | histogram, Releasing → Released |
+| `wva_model_scaling_blocked` | `reason="quiet-period"` | every planned model of a group, for the one fill timeout after a restart, a leader change or the optimizer starting to act (§13, stage 2), during which nothing in the group scales |
 | `wva_model_scaling_blocked` | `reason="awaiting-release"` | receiver waiting on a donor |
 | `wva_model_scaling_blocked` | `reason="quota-short"` | below need, and the group as a whole is short. Naming the cause in the log (`causedBy`: load, whose floor, or which woken model) is not built (§13) |
 | `wva_model_scaling_blocked` | `reason="floor-pinned"` | floor above the share (§5.5); only the configured `minReplicaCount` counts, not the last replica a running role keeps (§7.2) |
@@ -1657,7 +1658,7 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_model_scaling_blocked` | `reason="release-shape-mismatch"` | GPUs released but the receiver's replica does not fit them (§6.5) |
 | `wva_model_scaling_blocked` | `reason="release-taken"` | GPUs released, then occupied by a pod WVA did not place (§6.3) |
 | `wva_model_scaling_blocked` | `reason="release-timeout"` | the role's last release was aborted; it backs off before giving again. Only an aborted release |
-| `wva_model_scaling_blocked` | `reason="donor-not-steerable"` | the role's pods could not be marked when it was asked to give (a Deployment pod not Ready or not scheduled, a Deployment mid-rollout, an LWS whose highest group is terminating or unscheduled, or the patch failed); it backs off as after an abort, and the reason lasts only the back-off |
+| `wva_model_scaling_blocked` | `reason="donor-not-steerable"` | the role's pods could not be marked when it was asked to give (a Deployment pod not Ready or not scheduled, a Deployment mid-rollout, no deletion cost left between earlier live marks and the lowest unmarked sibling, an LWS whose next group to go is terminating or unscheduled, or the patch failed), or every pod it could give is already given to live transfers (exhausted: no Event); it backs off as after an abort, and the reason lasts only the back-off |
 | `wva_model_scaling_blocked` | `reason="reversal-hold"` | short and actionable, but it gave within the reversal hold (§6.7 rule 4). Urgent receivers (below need) are held too, by decision; this reason makes that wait visible |
 | `wva_model_scaling_blocked` | `reason="swinging"` | planned on its mean need (§6.7 rule 5) |
 | `wva_model_scaling_blocked` | `reason="transfer-limit"` | short and actionable, while the group already has the most donor transfers in flight (2) |
@@ -1680,10 +1681,12 @@ Transfers are also recorded as Kubernetes Events on the donor's and the
 receiver's scale targets (`internal/engines/steadystate/utilization_share_events.go`),
 for the model owner who reads `kubectl describe`, not the controller's log:
 `UtilizationShareGiving` and `UtilizationShareReceiving` at start,
-`UtilizationShareReceived` when a transfer lands, `UtilizationShareCancelled`
+`UtilizationShareReceived` when a transfer lands (an idle fill's says it came
+from the quota group's spare GPUs, as headroom by weight), `UtilizationShareCancelled`
 (both sides) on a reversal, `UtilizationShareRedirected` on the receiver when a
 wake claims its GPUs, and the warnings `UtilizationShareReleaseAborted` (with
-the end of the back-off), `UtilizationShareWrongPod` (the donor stays one
+the end of the back-off, or, when its donor set could not complete, saying so
+and setting none), `UtilizationShareWrongPod` (the donor stays one
 replica lower), `UtilizationShareFillTimedOut` and
 `UtilizationShareDonorNotSteerable` (the cause and the end of the back-off).
 `UtilizationShareGiving` names the pods that go and why: the receiver is below
@@ -1934,7 +1937,8 @@ optimizer every cycle (§6.6).
      - receivers raised only at release;
      - idle fills bounded by the cluster's physical free GPUs;
      - the restart rebuild from the marks, with one fill timeout of quiet
-       after it;
+       after it, reported as the blocked reason `quiet-period` on every
+       planned model of the group;
      - the overlay on the cycle's decisions under the `utilization-share`
        reason, which the sticky scale-down hold stands down for;
      - section 9's `_withheld_total`, `_actual` and `_floor_excess_gpus`, and
@@ -2008,7 +2012,18 @@ optimizer every cycle (§6.6).
        donor variant, a receiver variant of the same group, both replica sizes,
        and a start in the past. Anything else is removed with a WARN.
      - concurrent transfers from one donor mark distinct pods, and each
-       transfer unmarks only its own.
+       transfer unmarks only its own. Each later mark's cost sits above the
+       earlier live marks and below every unmarked sibling (`markCost`), so
+       the ReplicaSet removes pods in the order the ledger releases them; no
+       room for such a cost, or a sibling at the int32 minimum, refuses the
+       donor (`donor-not-steerable`). A donor whose every pod or group is
+       already marked by live transfers (`errDonorExhausted`) backs off
+       without a `UtilizationShareDonorNotSteerable` Event.
+     - a transfer released by count -- another of the donor's pods went --
+       unmarks its surviving marked pods, so a restart inside the release
+       timeout cannot restore it and move it twice.
+     - every outcome of `_transfers_total` published at 0 for an acting
+       group, so the first event of an outcome is an `increase()`.
      - a donor lowered on a restart only if its marked pod was not yet
        terminating, and raised back on cancel or abort only if it was lowered.
      - promised GPUs withheld from the other two consumers of "what is
@@ -2037,23 +2052,29 @@ optimizer every cycle (§6.6).
        `floors-exceed-quota`, `_floor_excess_gpus` and the floor-heavy log
        count only `minReplicaCount` (`ShareRole.MinFloor`).
      - donor pod choice on a Deployment: the lowest existing deletion cost,
-       then the name. The marked pod's cost is below every sibling's: -1000,
+       then, as the ReplicaSet breaks ties, the most recently Ready, then the
+       name. The marked pod's cost is below every unmarked sibling's: -1000,
        or one below the lowest cost a user set on a sibling, recorded in the
        mark's `cost`; unmarking restores the previous cost only if the pod
        still carries that exact value. A Deployment with a pod not Ready or
        not yet scheduled, or mid-rollout (live pods of more than one
-       ReplicaSet), is refused and backs off (`donor-not-steerable`). On an
-       LWS the group that goes is the highest index over its own
-       (StatefulSet-owned) pods, terminating ones included; a highest group
-       that is terminating or unscheduled refuses the donor, and a pod that
-       only carries the LWS's labels is ignored.
+       ReplicaSet, listed by the Deployment's `spec.selector` so a rollout
+       that changed a template label is still seen), is refused and backs off
+       (`donor-not-steerable`). On an LWS the group that goes is the highest
+       index below `spec.replicas` (those at or above are already going) that
+       no live transfer has marked, over its own (StatefulSet-owned) pods,
+       terminating ones included; that group terminating or unscheduled
+       refuses the donor (below `spec.replicas` it is a rollout), and a pod
+       that only carries the LWS's labels is ignored.
      - marks record the controller's `CONTROLLER_INSTANCE` (omitted when
        unset), and the sweep that runs when the optimizer stops acting removes
        only its own; renaming the instance orphans the old marks. A mark names
-       its receiver only when the receiver is in the donor's namespace: a
-       cross-namespace transfer's mark carries no receiver, and a restart
-       restores it as a release with no receiver, the receiver being planned
-       again after the quiet period. Transfer IDs end in a random part.
+       its receiver only when the transfer -- or the donor set it belongs to,
+       judged whole (`sharePrivate`) -- has its donors and receiver in one
+       namespace: otherwise every member's mark carries no receiver, receiver
+       GPUs or set link, and a restart restores each as a release with no
+       receiver, the receiver being planned again after the quiet period.
+       Transfer IDs end in a random part.
      - node-aware placement skips cordoned and not-Ready nodes, nodes
        with a `node.kubernetes.io/...` `NoSchedule`/`NoExecute` taint, and
        nodes an autoscaler is removing (`ToBeDeletedByClusterAutoscaler`,
@@ -2107,7 +2128,10 @@ optimizer every cycle (§6.6).
        - the planned pods, and only they, are marked; a mark carries
          `planned`, so a restart keeps the next check.
        - checking which pod went: a planned transfer whose donor shrank while
-         a planned pod still runs ends `outcome="wrong-pod"`. The receiver is
+         a planned pod still runs ends `outcome="wrong-pod"`. Only planned
+         transfers (`PlannedPods`) are checked: without node information, or
+         for a replica that only pays quota, a release is judged by count and
+         a different pod leaving counts as done. The receiver is
          not raised, the donor stays lowered and its GPUs return to the
          budget. Not the donor's fault, so it does not back off. A set
          contributor that ends so keeps its primary from releasing; the set is

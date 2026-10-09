@@ -262,7 +262,7 @@ is set. Full list, with labels:
 | `wva_utilization_share_replicas_to_move` | replicas the target would move, per group |
 | `wva_utilization_share_spare_gpus` | below `0` = the quota cannot cover every role's need; rebalancing cannot fix that |
 | `wva_utilization_share_in_flight{state=...}` | transfers per group still `releasing` or `filling`; while it acts |
-| `wva_utilization_share_transfers_total` | by `outcome`: `done` is healthy; rising `aborted`, `fill-timeout` or `wrong-pod` means transfers are not landing |
+| `wva_utilization_share_transfers_total` | by `outcome`: `done` is healthy; rising `aborted`, `fill-timeout` or `wrong-pod` means transfers are not landing. Every outcome is published at `0` while a group acts, so `increase()` counts the first one too |
 | `wva_model_scaling_blocked{reason=...}` | which model the optimizer is holding back, and why ([reasons](prometheus.md#wva_model_scaling_blocked-reasons-set-by-the-utilization-share-optimizer)); set only while it acts. No `role` label: on a P/D model, read `wva_utilization_share_headroom` / `_actionable` by `role` to see which role it is |
 
 Alerts worth having once it is configured (adjust the `for:` to a few of your
@@ -279,8 +279,11 @@ wva_utilization_share_mode{mode="invalid"} == 1
 wva_utilization_share_mode{mode="off"} == 1
 
 # Transfers are not landing: donors that do not release, receivers that do not
-# fill, or donors losing a pod other than the marked one. The threshold (3)
-# is an example; check the donors' scale-down windows and pods, and the blocked reasons.
+# fill, or donors losing a pod other than the marked one (wrong-pod is detected
+# only for transfers planned with node information). The threshold (3) is an
+# example; check the donors' scale-down windows and pods, and the blocked reasons.
+# Each outcome's series exists at 0 from the group's first acting cycle, so the
+# first transfer of an outcome is counted by increase().
 sum by (accelerator_type, scope) (
   increase(wva_utilization_share_transfers_total{outcome=~"aborted|fill-timeout|wrong-pod"}[1h])
 ) > 3
@@ -299,7 +302,8 @@ wva_model_scaling_blocked{reason=~"no-compatible-donor|floors-exceed-quota"} == 
 
 # Reasons that expire by themselves and come back: release-taken and
 # release-shape-mismatch last one release timeout after a fill timed out, and
-# donor-not-steerable lasts only its back-off. A long for: may never fire on
+# donor-not-steerable lasts only its back-off (quiet-period lasts one fill
+# timeout after a restart and is expected; do not alert on it). A long for: may never fire on
 # them; alert on how much of a window they were present instead. Here: more
 # than 60 samples in 6h, an hour in total at a 1m scrape interval (scale the
 # threshold to yours).
@@ -328,13 +332,17 @@ kubectl get events -n <namespace> --field-selector reason=UtilizationShareGiving
 | --- | --- | --- | --- |
 | `UtilizationShareGiving` | Normal | donor | a transfer started: it gives one replica. Names the pod (or pods) that go, whom it gives to, and why: the receiver is below its need, or to even out headroom by weight. A donor in a set names the receiver its set funds and how many other donor replicas fund it; a refill names the quota group's scale-from-zero reserve (`reserveGPUs`) |
 | `UtilizationShareReceiving` | Normal | receiver | a transfer started for it; it is raised once the donor's replica is released |
-| `UtilizationShareReceived` | Normal | receiver | the transfer landed: it holds the GPUs |
+| `UtilizationShareReceived` | Normal | receiver | the transfer landed: it holds the GPUs. An idle fill that lands says it received them "from the quota group's spare GPUs, as headroom by weight", and that they are given to another model when it needs them: the reason a model grew with no load to grow it |
 | `UtilizationShareCancelled` | Normal | donor and receiver | the transfer was called off because demand reversed; the donor's replica count is restored |
 | `UtilizationShareRedirected` | Normal | receiver | the GPUs it was to receive went to a model waking from zero; it is planned again |
-| `UtilizationShareReleaseAborted` | Warning | donor | its replica was not released within the release timeout; its count is restored, and the Event gives the time before which it is not asked to give again (the wait doubles with each abort in a row, up to 16 release timeouts) |
+| `UtilizationShareReleaseAborted` | Warning | donor | its replica was not released within the release timeout; its count is restored, and the Event gives the time before which it is not asked to give again (the wait doubles with each abort in a row, up to 16 release timeouts). When the transfer was called off because its donor set could not complete (another member broke, or this donor released while a contributor did not), the Event says so instead, and sets no back-off: it was not this donor's failure |
 | `UtilizationShareWrongPod` | Warning | donor | a pod other than the marked one was removed (a rollout, an eviction, another scale-down); the donor stays one replica lower and the receiver is not raised |
 | `UtilizationShareFillTimedOut` | Warning | receiver | its new replica did not take the released GPUs within the fill timeout; it keeps its target |
-| `UtilizationShareDonorNotSteerable` | Warning | donor | it was asked to give, but the pod that would go could not be chosen; the Event carries the cause (a pod not Ready or not yet scheduled, a rollout, the patch failing) and the time before which it is not asked again |
+| `UtilizationShareDonorNotSteerable` | Warning | donor | it was asked to give, but the pod that would go could not be chosen; the Event carries the cause (a pod not Ready or not yet scheduled, a rollout, a sibling's deletion cost leaving no room, the patch failing) and the time before which it is not asked again. Not recorded for a donor that has simply given every pod it has to transfers still in flight |
+
+Events expire: the API server keeps them for an hour by default (its
+`--event-ttl`), so they explain what happened recently, not a model's history.
+For history, use the counters above and the controller log.
 
 An Event names the other model only when it is in the same namespace; otherwise
 it says "a model in another namespace of its quota group", so one tenant's Events
@@ -355,6 +363,7 @@ Useful when a metric tells you *which* model is wrong and you want to know *why*
 | `Utilization share: rebalancing` | the optimizer is acting on a group with actionable roles; same fields, same once-per-change rule | Info |
 | `Utilization share: transfer` | a transfer started, ended (with its `outcome`), was cancelled, or was redirected to a wake | Info |
 | `Utilization share: could not mark a donor pod` | a transfer was not started; the donor backs off (`donor-not-steerable`, and a `UtilizationShareDonorNotSteerable` Event on it) | Error |
+| `Utilization share: donor has nothing left to give` | a transfer was not started because every pod the donor could give is already given to a transfer in flight; it backs off, with no Event | **`-v=4`** |
 | `Utilization share: invalid optimizer block` | the block did not validate; today's optimizer runs | Error |
 | `Utilization share: evaluation` | the per-group table, every cycle | **`-v=4`** |
 | `Collected replica metrics` | metrics are arriving | **`-v=4`** |

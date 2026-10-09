@@ -204,17 +204,25 @@ Work down the list in order.
    about three minutes with default timings, and nothing in it scales:
    a fill in flight before the restart has no mark, and its receiver's pods
    must not lose their GPUs meanwhile. Expect this freeze on every upgrade or
-   leader change. The log line `Utilization share: ledger started` carries
-   `planningFrom`.
+   leader change. Every planned model of the group shows the blocked reason
+   `quiet-period` while it lasts, and the log line
+   `Utilization share: ledger started` carries `planningFrom`.
 9. **Could it not mark the donor?** `Utilization share: could not mark a donor pod;
    transfer not started` means the donor's pod could not be chosen: a Deployment
    had a pod that was not Ready or not yet scheduled (the ReplicaSet removes such
-   a pod before it reads the deletion cost), or was mid-rollout with pods of more
-   than one ReplicaSet; a LeaderWorkerSet's highest-index group was terminating or
-   not yet scheduled; the donor had no pod left to give; or the patch failed. The
-   donor backs off, shows the blocked reason `donor-not-steerable`, gets a
-   `UtilizationShareDonorNotSteerable` Event naming the cause and the end of the
-   back-off, and is retried after it.
+   a pod before it reads the deletion cost), was mid-rollout with pods of more
+   than one ReplicaSet, or had a sibling whose deletion cost leaves no room for
+   the mark (see [which pod leaves](scaling-policy.md#for-model-owners-what-the-optimizer-may-take-and-how-to-protect-a-model));
+   a LeaderWorkerSet's next group to go was terminating or not yet scheduled; or
+   the patch failed. The donor backs off, shows the blocked reason
+   `donor-not-steerable`, gets a `UtilizationShareDonorNotSteerable` Event naming
+   the cause and the end of the back-off, and is retried after it.
+
+   A donor whose every pod (or LWS group) is already given to transfers still in
+   flight is not broken, only exhausted: it backs off the same way, so its
+   receiver tries another donor, and shows `donor-not-steerable` for the back-off,
+   but gets no Event and no Error line; at `--v=4` the log says
+   `Utilization share: donor has nothing left to give; transfer not started`.
 
 If a P/D model shows a blocked reason, `wva_model_scaling_blocked` does not say
 which role it came from (it has no `role` label); read

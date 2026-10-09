@@ -74,16 +74,17 @@ window are not independent samples of it:
 
 **Read `shadow` before `share`.** A shadow arm moves nothing, so it makes the
 same decisions as `today`. On Llama's rise it held exactly the replicas `today`
-held, at the same times, yet its p95 is 8.9 s higher. That spread comes from
-serving, not from scaling, and it is larger than the difference between
-`share` and either other arm. **This run does not say whether `share` helped or
-hurt Llama's latency.** The table above, which shows when the replicas came,
-is the evidence for that rise.
+held, at the same times, yet its p95 is 8.9 s higher; on Qwen's rise the two
+differ by 2.9 s. That spread comes from serving, not from scaling, and up to
+9 s p95 of it separates two arms that scaled identically. Every difference
+between `share` and the other arms in this table is smaller than that, so
+**this run does not say whether `share` helped or hurt latency** on either
+rise. The numbers are kept as recorded; the replica table above, which shows
+when the replicas came, is the evidence.
 
-Qwen's rise is different. `share` came in 4.7 s below `shadow` and 7.6 s below
-`today`, both wider than the 2.9 s between `today` and `shadow`. The mechanism
-is also visible: there was a second replica already serving when the burst
-began.
+On Qwen's rise `share` had the lowest p95 (126 ms against 4.8 s and 7.7 s). That
+is consistent with what the replica table shows, a second replica already
+serving when the burst began, but in one run it is not a result on its own.
 
 ## Accelerators
 
@@ -104,7 +105,11 @@ whole quota, idle or not.
 ## What the optimizer did
 
 From the controller log of the `share` arm. Every transfer ended `done`: no
-abort, fill timeout or wrong pod.
+abort and no fill timeout. Whether the right pod went was not checked: the
+benchmark install is namespace-scoped, so its transfers were planned by count,
+and `wrong-pod` is detected only for transfers planned with node information. A
+count-planned transfer is done when the donor shrinks by a replica, whichever
+pod left.
 
 | what | detail |
 | --- | --- |
@@ -115,32 +120,45 @@ abort, fill timeout or wrong pod.
 
 Events on both Deployments named the pod that went and the reason, for
 example *"giving one replica (1 GPUs) to model Qwen/Qwen3-8B (decode) to even
-out headroom by weight; … goes"*. The two concurrent transfers from one donor
-are the case a fix in this branch covers (the second mark must not rank below
-the first). It ran correctly here on real hardware.
+out headroom by weight; … goes"*. Two transfers from one donor were in flight at
+once here, and both released, at about the same time. In the image this run
+used, the two marks carried the same deletion cost, so the ReplicaSet's own
+tie-break chose which pod went first. The controller now gives each later mark
+a cost above the earlier live marks and below every unmarked sibling, so the
+pods go in the order the transfers release.
 
 The report's own transfer count, from `increase()` on
 `wva_utilization_share_transfers_total`, read 2 where the log shows 3 transfers
-plus the idle fills: `increase()` does not count a counter's first increment.
-Count transfers from the log or the Events. The `model-s held back` column is
-also `share`-only by construction: today's optimizer emits no blocked reason
-when the quota is simply spent.
+plus the idle fills: in the image this run used, a counter series appeared at 1,
+and `increase()` does not count a series' first sample. The controller now
+publishes every outcome at 0 for an acting group, so later runs count the first
+transfer of each outcome; for this run, count transfers from the log or the
+Events. The `model-s held back` column is also `share`-only by construction:
+today's optimizer emits no blocked reason when the quota is simply spent.
 
 ## What this says, and how far it goes
 
 - **The mechanics work on real hardware.** Release came before the fill every
-  time. The marked pods were the ones removed, and the Events said what
-  happened.
+  time, and the Events said what happened. Which pod went was not checked (the
+  install planned by count; see above).
 - **Headroom by weight is insurance for the first rise, and a delay at the
   swap.** Here the delay was one donor scale-down window, 300 s, because
   headroom held by the falling model is only released through a transfer.
   Today's optimizer does not hold that headroom, so at the swap it was faster.
   A short scale-down window for urgent receivers is designed but not built (the
   proposal's stage 3), and it would address exactly this delay.
+- **A move took about 8 minutes from the rise to a serving replica, not the
+  design's twelve.** The proposal's decide-to-serve figure (§6.7) budgets two
+  cycles to confirm, a 360 s release and a 180 s fill. Here the releases took
+  about 5 min 45 s to 6 min, matching that budget, but the rest was shorter:
+  Llama's Deployment asked for its second replica 390 s after the rise and had
+  it ready at 478 s, an 8B model loading in about 90 s. A larger model, or a
+  longer scale-down window, moves this toward the design figure or past it.
 - **It costs GPU-seconds**: here 24%.
 - One run, two rises per arm, no repetition. The `today` and `shadow` arms
-  disagree by up to 9 s p95 on identical decisions. A latency difference smaller
-  than that is not a result. The replica timelines are.
+  disagree by up to 9 s p95 on identical decisions (2.9 s on Qwen's rise). A
+  latency difference smaller than that is not a result. The replica timelines
+  are.
 
 ## P/D: not measured
 
