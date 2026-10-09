@@ -836,7 +836,8 @@ see [Events](monitoring.md#events-on-the-models-scale-targets).
   `wva_utilization_share_headroom` and `wva_utilization_share_actionable`, which carry `role`,
   to see which one is short.
 - `quiet-period` is set on every planned model of a group for one fill timeout after a controller
-  restart, a leader change, or the optimizer starting to act; nothing in the group scales meanwhile.
+  restart, a leader change, or the optimizer starting to act, and for as long as the transfer
+  marks cannot be read; nothing in the group scales meanwhile.
 - Most reasons hold until something changes. `release-taken` and `release-shape-mismatch` expire
   one release timeout after the fill that set them timed out, and `donor-not-steerable` and
   `release-timeout` last only their back-off, so they come and go; alert on how often they appear
@@ -844,7 +845,7 @@ see [Events](monitoring.md#events-on-the-models-scale-targets).
 
 | reason | what it means | what you can do |
 | --- | --- | --- |
-| `quiet-period` | The group is in the quiet period that follows a controller restart, a leader change, or the optimizer starting to act: for one fill timeout (`wva_utilization_share_effective_seconds{param="fill-timeout"}`, about three minutes with default timings) every planned model holds what it runs, or its restored target, and none scales up or down. A fill in flight before the restart has no mark, and its receiver's pods must not lose their GPUs meanwhile. | Nothing: it clears by itself. Expect it on every upgrade and leader change. |
+| `quiet-period` | The group is in the quiet period that follows a controller restart, a leader change, or the optimizer starting to act: for one fill timeout (`wva_utilization_share_effective_seconds{param="fill-timeout"}`, about three minutes with default timings) every planned model holds what it runs, or its restored target, and none scales up or down. A fill in flight before the restart has no mark, and its receiver's pods must not lose their GPUs meanwhile. Also set, for as long as it lasts, while the controller cannot read the transfer marks on the donors' pods. | Nothing after a restart: it clears by itself; expect it on every upgrade and leader change. If it does not clear, look for the Error line `could not read transfer marks` and fix what it names. |
 | `awaiting-release` | The model receives a transfer whose donor has not released its GPUs yet. | Normally clears within one release. If it persists, check the donor's ScaledObject scale-down window and its pods' termination grace; transfers that time out show as `aborted`. |
 | `quota-short` | The role holds less than its need and the whole group is short: no rebalance can cover it. | Raise the quota for that accelerator type, or lower demand. Weights decide who is cut. |
 | `floor-pinned` | The model's `minReplicaCount` holds at least one replica more than it needs; GPUs the share would otherwise give to others. Only the configured `minReplicaCount` counts, not the last replica the optimizer keeps on any running role. | Lower `minReplicaCount` if the floor is not deliberate. |

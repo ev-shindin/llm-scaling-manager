@@ -1151,9 +1151,10 @@ A set that must push a donor out of band to complete is refused.
 **Donors are released per pod as well.** A Deployment donor frees one pod's
 GPUs per replica removed. An LWS donor frees a whole group, meaning all its
 pods at once, possibly on several nodes. LWS removes groups from the highest
-index down and does not read a deletion cost, so only an LWS donor's
-highest-index group is a candidate, and it contributes a hole on each node its
-pods occupy. That makes an LWS donor the natural funder of an LWS receiver of the
+index down and does not read a deletion cost, so only the group an LWS donor
+removes next -- the highest below `spec.replicas` that no live transfer has
+marked -- is a candidate, and it contributes a hole on each node its pods
+occupy. That makes an LWS donor the natural funder of an LWS receiver of the
 same shape: one group out, one group's worth of holes in the same places.
 
 **Steering which pod goes.** Lowering a Deployment's replica count lets the
@@ -1841,7 +1842,7 @@ optimizer every cycle (§6.6).
   any donor out of band is refused. The chosen pods carry the lowest deletion
   cost, and the ReplicaSet removes them and not their siblings (kind e2e:
   envtest runs no ReplicaSet controller, so it cannot show this). An
-  LWS donor offers only its highest-index group, with a hole on each of its
+  LWS donor offers only the group it removes next, with a hole on each of its
   nodes. Without node information each receiver pod is funded by exactly one
   donor pod at least its size. Two 4-GPU donor pods are **never** combined for
   an 8-GPU receiver pod (negative control: summing GPUs funds it, and the pod
@@ -2020,10 +2021,26 @@ optimizer every cycle (§6.6).
        already marked by live transfers (`errDonorExhausted`) is held one
        release timeout (`ShareLedger.HoldGiving`): no abort, no back-off, no
        blocked reason, no Event.
-     - while the budget covers every role's need, no donor is taken below its
-       own need rounded up to whole GPUs (`shareKeep`), even when its
-       replicas are larger than the spare; the receiver waits below its
-       headroom target instead. Short, only the floor holds (§6.2).
+     - while whole replicas cover every role's claim
+       (`WholeReplicaCoverage`), no donor is taken below its own need
+       rounded up to whole GPUs (`shareKeep`). The integer targets already
+       hold that there; the keep is defence in depth. Covered only in
+       fractions, keeping a large-replica donor at its need can hold a
+       receiver far below its own (9 of 16 kept against 1 of 6), so only the
+       floor holds, as when short (§6.2). Reserve refills keep only the
+       floor: the debt is GPUs the budget does not have.
+     - a Deployment donor mid-rollout by its status (`scaletarget.RollingOut`:
+       updated replicas below replicas) or with fewer active pods than
+       `spec.replicas`, and an LWS donor in a rolling update
+       (`UpdateInProgress`, or groups of two template revisions) or missing
+       a group below `spec.replicas`, are refused as unsteerable.
+     - the mark's cost is judged against the siblings that stay, not the
+       pod being marked.
+     - an exhausted donor's hold ends when one of its releases lands
+       (`ShareLedger.GivingBusy`), and is not counted as a reversal hold.
+     - a ledger's first cycle creates the outcome counters at 0 and counts
+       its outcomes on the next; a mark that expired while no controller
+       ran, still on a live pod, is counted as aborted.
      - a transfer released by count -- another of the donor's pods went --
        unmarks its surviving marked pods, so a restart inside the release
        timeout cannot restore it and move it twice.
@@ -2128,8 +2145,10 @@ optimizer every cycle (§6.6).
          label is in none. It never falls back to the node-blind search, with
          node information or without.
        - a Deployment donor offers each Ready pod as a replica, lowest
-         deletion cost first, then by name, and nothing while any of its pods
-         is not Ready. An LWS donor offers its highest-index group.
+         deletion cost first, then the most recently Ready, then by name,
+         and nothing while any of its pods is not Ready. An LWS donor offers
+         the group LWS removes next: the highest below `spec.replicas` that
+         no live transfer has marked.
        - the planned pods, and only they, are marked; a mark carries
          `planned`, so a restart keeps the next check.
        - checking which pod went: a planned transfer whose donor shrank while
@@ -2276,15 +2295,17 @@ Decided, not built here:
   for urgent transfers is the designed answer and the next step.
 - **A prefill capacity measure.** Prefill demand is read in tokens -- KV in use
   plus queued requests at their average input length -- so it does grow with
-  input tokens. What it is divided by is the problem: with no learned
-  throughput (k2), a prefill replica is priced at its KV memory (k1), and KV
-  memory is not what limits prefill; compute throughput is. A prefill finishes
-  in well under a second and hands its KV to decode, so the tokens resident at
-  any instant are few, and the need computed against a large KV capacity reads
-  small even for long prompts at a high rate. k2 cannot be learned for prefill
-  either, because prefill queues on decode's back-pressure and the analyzer
-  rightly refuses to learn from that. The fix is a prefill-specific capacity:
-  sustained input tokens per second against a measured per-replica prefill
-  ceiling. Until then, a P/D model with long prompts should set prefill's
-  `minReplicaCount` to its real requirement; with short prompts, prefill is
-  rightly a donor.
+  input tokens. Once prefill has queued on its own, with decode healthy, k2 and
+  mu are recorded (`computeK2`) and the throughput floor sizes it from its
+  arrival rate. The gap is before that first saturation: a prefill replica is
+  priced at its KV memory (k1), and KV memory is not what limits prefill;
+  compute throughput is. A prefill finishes in well under a second and hands
+  its KV to decode, so the tokens resident at any instant are few, and the need
+  reads small even for long prompts at a high rate. A reading taken while
+  decode is saturated too is withheld (`downstreamSaturated`), so a prefill
+  that only ever queues with decode stays at k1. The fix is a prefill-specific
+  capacity: sustained input tokens per second against a measured per-replica
+  prefill ceiling. Until then, a P/D model with long prompts should size
+  prefill's `minReplicaCount` from its peak prompt-token rate (the recipe is in
+  the reference, "For model owners"); with short prompts, prefill is rightly a
+  donor.

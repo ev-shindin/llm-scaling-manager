@@ -283,7 +283,10 @@ wva_utilization_share_mode{mode="off"} == 1
 # only for transfers planned with node information). The threshold (3) is an
 # example; check the donors' scale-down windows and pods, and the blocked reasons.
 # Each outcome's series exists at 0 from the group's first acting cycle, so the
-# first transfer of an outcome is counted by increase().
+# first transfer of an outcome is counted by increase(). After a restart the new
+# controller creates them at 0 and counts its first cycle's outcomes on the
+# next -- a release that timed out while no controller ran is counted then, as
+# aborted.
 sum by (accelerator_type, scope) (
   increase(wva_utilization_share_transfers_total{outcome=~"aborted|fill-timeout|wrong-pod"}[1h])
 ) > 3

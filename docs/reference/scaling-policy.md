@@ -434,13 +434,16 @@ raised target until the scheduler places it.
 #### For model owners: what the optimizer may take, and how to protect a model
 
 **What can be taken.** Only replicas above the model's floor (its
-`minReplicaCount`, per variant) and above its whole-replica target. While the
-quota covers every model's need, targets sit at or above need, and only
-headroom moves: a donor is never taken below its own need, rounded up to whole
-GPUs. That holds even when its replicas are larger than the spare -- a donor of
-8-GPU replicas with a need of 9 keeps 16, and the receiver waits below its
-headroom target rather than leaving the donor short. When the quota
-is short (`quota-short`), targets fall below need and a model can lose a replica
+`minReplicaCount`, per variant) and above its whole-replica target. While
+whole replicas can give every model its need -- each need rounded up to the
+model's replica size, summed, fits the quota -- only headroom moves, and no
+donor is taken below its own need. Large replicas can make that impossible even
+when the needs add up to less than the quota: a donor of 8-GPU replicas that
+needs 9 GPUs holds 16, and another model needs 6 of a 17-GPU quota. Keeping
+the donor at 16 would hold the other at a sixth of its need, so the donor gives
+a replica and serves one GPU short while the other is brought to its need.
+Moves then go to whichever model is worse off, as they do when the quota is
+short (`quota-short`): targets fall below need, and a model can lose a replica
 it needs if another, weighted, is worse off. A role that
 holds a replica never gives its last one: taking a model to zero is
 scale-to-zero's decision, with its own retention, never a transfer's. That last
@@ -467,20 +470,32 @@ namespace has its own map is excluded from the cluster group and stays on
 today's optimizer; the controller log lists it in the `frozen` field with
 `namespace has its own scaling-policy map; not planned in the cluster-wide group`.
 
-**P/D models: with long prompts, set prefill's floor.** Prefill's demand is
-read in tokens and grows with input length, but it is priced against the
-replica's KV memory, and memory is not what limits prefill: compute throughput
-is. A prefill finishes fast and hands its KV to decode, so few tokens are
-resident at any instant, and the need reads small even for long prompts at a
-high rate. Prefill's own queue cannot correct it, because prefill queues on
-decode's back-pressure and that is deliberately not learned from. In the one
-P/D benchmark attempt prefill never left one replica under 15 000-token prompts
-([why](../well-lit-paths/utilization-share/measured.md#pd-not-measured)). With
-short prompts that is right, and prefill is a fair donor. With long prompts,
-set the prefill variant's `minReplicaCount` to what it really needs: that floor
-is never taken, and the rest of the group pays for it (`floor-pinned` when the
-floor is a replica or more above the need the optimizer reads). A
-prefill-specific capacity measure is planned
+**P/D models: prefill before it has saturated once.** Prefill's demand is
+read in tokens and grows with input length. Once a prefill replica has queued
+on its own, with decode healthy, its capacity is measured, its need follows its
+arrival rate, and it is sized like any role. Until then it is priced against
+its KV memory, and memory is not what limits prefill: compute throughput is. A
+prefill finishes fast and hands its KV to decode, so few tokens are resident at
+any instant, and the need reads small even for long prompts. A queue that
+builds while decode is saturated too is not learned from, because prefill then
+waits on decode. In the one P/D benchmark attempt prefill never queued on its
+own and never left one replica under 15 000-token prompts
+([why](../well-lit-paths/utilization-share/measured.md#pd-not-measured)).
+
+With short prompts that is right, and prefill is a fair donor. With long
+prompts, until prefill has saturated once, size its floor from what it must
+sustain: the peak rate of prompt tokens across the model's prefill pods,
+
+```promql
+sum(rate(vllm:prompt_tokens_total{namespace="<namespace>", pod=~"<prefill pods>"}[5m]))
+```
+
+divided by what one prefill replica sustains (the same rate on one pod while
+it queues), rounded up. Set that as the prefill variant's `minReplicaCount`: a
+floor is never taken, and the rest of the group pays for it. When the floor is
+a replica or more above the need the optimizer reads, the model shows
+`floor-pinned` -- on the model, not the role. A prefill-specific capacity
+measure is planned
 ([proposal §15](../proposals/utilization-share-optimizer.md#15-deferred-to-later-prs)).
 
 **How a replica leaves.** A transfer lowers the donor's target, and the pod goes
@@ -492,13 +507,16 @@ release bound).
 
 **Which pod leaves.** On a Deployment the optimizer marks the pod with the lowest
 existing `controller.kubernetes.io/pod-deletion-cost`, so a cost you set to
-protect a pod is respected. Ties between equal costs go as the ReplicaSet breaks
-them: the most recently Ready pod, then the name. With node information, the
-plan first picks the node whose GPUs it frees (where the receiver's pod fits),
-and on that node takes a donor's pods lowest cost first, then by name: a pod you
-protected goes last among the donor's pods on that node, not across nodes. The
-marked pod's cost is set below every unmarked sibling's: `-1000`, or one below
-the lowest cost you set on a sibling when that is lower.
+protect a pod is respected. Ties between equal costs go to the most recently
+Ready pod -- the coldest cache, and the ReplicaSet's own preference when no cost
+is set -- then the name. That is only a preference: the mark's cost decides
+which pod the ReplicaSet removes. With node information, the plan first picks
+the node whose GPUs it frees (where the receiver's pod fits), and on that node
+takes a donor's pods lowest cost first, then the most recently Ready, then by
+name: a pod you protected goes last among the donor's pods on that node, not
+across nodes. The marked pod's cost is set below every sibling that stays:
+`-1000`, or one below the lowest cost you set on such a sibling when that is
+lower.
 
 When two transfers in flight take from one donor, each later mark sits above
 the earlier live marks and below every unmarked sibling, so the ReplicaSet
@@ -513,13 +531,21 @@ choice of pod could not be steered:
 
 - a pod is not Ready or not yet scheduled: the ReplicaSet removes such pods
   before it reads the cost;
-- it is mid-rollout, with live pods of more than one ReplicaSet: the Deployment
-  controller splits a scale-down across them, and a cost ranks pods only within
-  one. Pods are found by the Deployment's `spec.selector`, so a rollout that
-  changed a pod-template label still shows its old ReplicaSet's pods;
+- it is mid-rollout -- its status counts pods not of its current template, a
+  new ReplicaSet whose pods do not exist yet included, or it has live pods of
+  more than one ReplicaSet: the Deployment controller splits a scale-down
+  across them, and a cost ranks pods only within one. Pods are found by the
+  Deployment's `spec.selector`, so a rollout that changed a pod-template label
+  still shows its old ReplicaSet's pods;
+- it has fewer pods than `spec.replicas` -- one a quota or an eviction left
+  uncreated: lowering the count would remove none;
 - a sibling's cost leaves no room for the mark (above).
 
-A donor whose every pod is already given to transfers still in flight is held for one release timeout, so its receiver tries another donor. Nothing is wrong with it -- it has given all it can until those releases land -- so it counts no abort, does not back off, shows no blocked reason and gets no Event.
+A donor whose every pod is already given to transfers still in flight is held
+until one of those releases lands, or for one release timeout, so its receiver
+tries another donor. Nothing is wrong with it -- it has given all it can for
+now -- so it counts no abort, does not back off, shows no blocked reason, gets
+no Event and is not counted in `wva_utilization_share_withheld_total`.
 
 On a LeaderWorkerSet the group that goes is the one LWS removes next; its
 deletion cost is not consulted. LWS removes the highest indices first, so that
@@ -529,8 +555,13 @@ marked group is an earlier transfer's and goes first. Groups are taken over the
 LWS's own pods (the ones its StatefulSets own), terminating ones included; a pod
 that only carries the LWS's labels is ignored. If that group is terminating or
 not yet scheduled, the donor is refused the same way: below `spec.replicas` that
-is a rollout, not a release. When every group below `spec.replicas` is marked,
-the donor is exhausted, as above.
+is a rollout, not a release. So is an LWS in a rolling update (its
+`UpdateInProgress` condition, or groups of two template revisions): its surge
+groups sit above `spec.replicas` and stay until the update ends, so lowering
+the count would remove one of them. So is an LWS with no pod of some group
+below `spec.replicas`: the StatefulSet removes the highest ordinal, existing or
+not. When every group below `spec.replicas` is marked, the donor is exhausted,
+as above.
 
 **Reading the blocked reasons of a P/D model.** `wva_model_scaling_blocked` has
 no `role` label, so a reason on a P/D model may come from its decode or its
