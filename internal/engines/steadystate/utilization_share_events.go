@@ -100,6 +100,13 @@ func (e *Engine) shareEndedEvent(g allocation.ShareGroup, end allocation.ShareTr
 	case allocation.ShareOutcomeAborted:
 		switch {
 		case t.DonorVariant == "":
+		case !backoff.After(t.Started) && end.DonorReleased:
+			// Its pod is already gone: the restored count is a cold start.
+			e.shareEvent(accessor(t.Donor, t.DonorVariant), corev1.EventTypeWarning,
+				constants.K8SEventUtilizationShareReleaseAborted,
+				fmt.Sprintf("Utilization share: the transfer was called off because its donor set could not complete; "+
+					"this model had already released %s, so its count is restored and a replacement pod is starting. "+
+					"It is not held back for it", shareDonorPodNames(t)))
 		case !backoff.After(t.Started):
 			// Not this donor's failure: its donor set could not complete (a
 			// member broke, or released while a contributor did not), and the
@@ -173,4 +180,19 @@ func (e *Engine) shareUnsteerableEvent(acc scaletarget.ScaleTargetAccessor, caus
 	e.shareEvent(acc, corev1.EventTypeWarning, constants.K8SEventUtilizationShareDonorNotSteerable,
 		fmt.Sprintf("Utilization share: could not choose which pod gives (%v); not asked to give again before %s",
 			cause, until.UTC().Format(time.RFC3339)))
+}
+
+// shareDonorPodNames names the donor pods a transfer marked, without their
+// namespace (the donor's own, where the Event is read), or "its replica" when
+// it recorded none.
+func shareDonorPodNames(t allocation.ShareTransfer) string {
+	names := make([]string, 0, len(t.DonorPods))
+	for _, k := range t.DonorPods {
+		_, name, _ := strings.Cut(k, "/")
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return "its replica"
+	}
+	return strings.Join(names, ", ")
 }

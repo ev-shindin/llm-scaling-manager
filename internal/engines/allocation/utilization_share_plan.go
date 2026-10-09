@@ -44,7 +44,7 @@ type SharePlanInput struct {
 	Nodes map[string]ShareNode
 	// DonorUnits are, per donor role, the replicas it could give and where
 	// their pods run: one Ready, unmarked pod per Deployment replica, the
-	// highest-index group of a LeaderWorkerSet. A role absent gives nothing to
+	// group a LeaderWorkerSet removes next. A role absent gives nothing to
 	// a node-aware set.
 	DonorUnits map[string][]ShareUnit
 	// DomainKey is, per receiver role, the node label all its pods' holes must
@@ -226,18 +226,16 @@ type sharePlanRun struct {
 }
 
 // shareKeep is the least each role may hold after giving: its floor, and --
-// while the budget covers every role's need -- its need, rounded up to whole
-// GPUs. Covered, only headroom may move: a role whose replicas are larger
-// than the spare could otherwise be taken below its own need to raise
-// another's headroom, and it would serve short with nothing in the quota
-// short to explain it. Short, every role is below its need and moves go to
-// the worst off (§6.2), so only the floor holds.
+// while whole replicas cover every role's claim (WholeReplicaCoverage) -- its
+// need, rounded up to whole GPUs. Covered, only headroom need move: a role
+// short of its need can always be funded from free GPUs or from a donor
+// holding a whole replica above its own rounded claim, so no donor need be
+// taken below its need for it. Covered only in fractions -- 9 + 6 of 17, with
+// the 9 in 8-GPU replicas -- the need cannot be kept without leaving the
+// other role far below its own, and moves go to the worst off (§6.2), as they
+// do when the budget is short; only the floor holds.
 func shareKeep(roles []ShareRole, budget int) map[string]int {
-	need := 0.0
-	for _, r := range roles {
-		need += r.Need
-	}
-	covered := need <= float64(budget)
+	covered := WholeReplicaCoverage(roles, budget)
 	keep := make(map[string]int, len(roles))
 	for _, r := range roles {
 		keep[r.Key] = r.Floor
@@ -326,7 +324,7 @@ func (p *sharePlanRun) refillReserve() {
 	}
 	var cands []string
 	for _, r := range p.roles {
-		if c := p.committed[r.Key]; c > p.integ[r.Key] && c > p.keep[r.Key] {
+		if c := p.committed[r.Key]; c > p.integ[r.Key] && c > r.Floor {
 			cands = append(cands, r.Key)
 		}
 	}
@@ -350,9 +348,11 @@ func (p *sharePlanRun) refillReserve() {
 		}
 		// The same pace as a rebalance: up to ShareMaxReplicasPerCycle
 		// replicas per role, never below its whole-replica target or floor.
+		// Not held to its need (shareKeep): the debt is GPUs the budget does
+		// not have, and repaying it is entitled (§6.2).
 		left := p.committed[dn]
 		for p.moved[dn] < ShareMaxReplicasPerCycle && debt > 0 && l.InFlight() < ShareMaxConcurrentTransfers {
-			if left-gd < p.keep[dn] || left-gd < p.integ[dn] {
+			if left-gd < p.byKey[dn].Floor || left-gd < p.integ[dn] {
 				break
 			}
 			t := l.Start(ShareTransfer{Donor: dn, DonorGPUs: gd, DonorVariant: give.Name, Entitled: true}, in.Held, now, tm)
@@ -413,6 +413,9 @@ func (p *sharePlanRun) fund(rc string, donors []string) bool {
 		if !ShareCovers(give, grow) {
 			misfits++
 			continue // the donor's pods cannot host the receiver's (§6.5)
+		}
+		if l.GivingBusy(dn, now) {
+			continue // it has given all it can until its releases land
 		}
 		// Rule 4: a role that gave cannot receive, and one that received
 		// cannot give, within the hold.

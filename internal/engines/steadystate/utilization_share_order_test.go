@@ -272,7 +272,7 @@ func TestUtilizationShareReleaseUnmarksASurvivingPod(t *testing.T) {
 	c := sharePods(t, f)
 	se := newShareEngine(t, f, c, time.Unix(0, 0))
 	if started := se.untilStarted(); started != 1 {
-		t.Skipf("fixture started %d transfers; this test needs exactly one", started)
+		t.Fatalf("setup: the fixture started %d transfers; this test needs exactly one", started)
 	}
 	m := markedPods(t, c)[0]
 	var original transferMark
@@ -358,9 +358,9 @@ func TestUtilizationShareRolloutSeenThroughTheSelector(t *testing.T) {
 	}
 }
 
-// Equal deletion costs: the ReplicaSet removes the most recently Ready pod, so
-// the mark goes there -- marking an older one would steer the ReplicaSet away
-// from its own choice and cost the warm cache it keeps.
+// Equal deletion costs: the mark goes to the most recently Ready pod, the
+// coldest cache. The newest is not the highest-named, so a sort by name alone
+// fails here.
 func TestUtilizationShareMarksTheMostRecentlyReadyPod(t *testing.T) {
 	f := newShareFleet()
 	c := sharePods(t, f)
@@ -369,8 +369,12 @@ func TestUtilizationShareMarksTheMostRecentlyReadyPod(t *testing.T) {
 		if err := c.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "A-v-" + string(rune('0'+i))}, &p); err != nil {
 			t.Fatal(err)
 		}
+		since := int64(100 * (i + 1))
+		if i == 2 {
+			since = 10000
+		}
 		p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue,
-			LastTransitionTime: metav1.Time{Time: time.Unix(int64(100*(i+1)), 0)}}}
+			LastTransitionTime: metav1.Time{Time: time.Unix(since, 0)}}}
 		if err := c.Status().Update(context.Background(), &p); err != nil {
 			t.Fatal(err)
 		}
@@ -379,14 +383,14 @@ func TestUtilizationShareMarksTheMostRecentlyReadyPod(t *testing.T) {
 	tr := allocation.ShareTransfer{ID: "x-t1-ab", Donor: roleA, DonorVariant: "A-v", Receiver: roleB,
 		ReceiverVariant: "B-v", GPUs: 1, DonorGPUs: 1, Started: time.Unix(0, 0)}
 	pods, err := se.e.markDonorPods(se.ctx, tr, f.scaleTargets()["ns/A-v"], "ns", func(*corev1.Pod) bool { return false }, false)
-	newest := "A-v-" + string(rune('0'+f.current["A"]-1))
+	newest := "A-v-2"
 	if err != nil || len(pods) != 1 || pods[0].Name != newest {
 		t.Fatalf("marked %v (%v), want the most recently Ready %s", podKeys(pods), err, newest)
 	}
 }
 
 // A Deployment donor whose every pod a live transfer holds is exhausted, not
-// unsteerable: it backs off without a Warning.
+// unsteerable (the actuator holds it: TestUtilizationShareExhaustedDonorIsHeldNotFailed).
 func TestUtilizationShareDeploymentDonorExhausted(t *testing.T) {
 	f := newShareFleet()
 	se := newShareEngine(t, f, sharePods(t, f), time.Unix(0, 0))

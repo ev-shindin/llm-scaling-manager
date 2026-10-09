@@ -53,11 +53,16 @@ func TestUtilizationShareRefusesADonorMidRollout(t *testing.T) {
 }
 
 // Finished pods are not the Deployment's: an evicted pod waiting to be
-// collected does not stop its model from giving.
+// collected, beside the replacement the ReplicaSet made, does not stop its
+// model from giving.
 func TestUtilizationShareIgnoresFinishedPods(t *testing.T) {
 	f := newShareFleet()
 	c := sharePods(t, f)
 	p := podOf(t, c, "A-v-0")
+	p.Name, p.ResourceVersion = "A-v-evicted", ""
+	if err := c.Create(context.Background(), &p); err != nil {
+		t.Fatal(err)
+	}
 	p.Status.Phase = corev1.PodFailed
 	p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
 	if err := c.Status().Update(context.Background(), &p); err != nil {
@@ -69,14 +74,15 @@ func TestUtilizationShareIgnoresFinishedPods(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, q := range pods {
-		if q.Name == "A-v-0" {
+		if q.Name == "A-v-evicted" {
 			t.Fatal("a failed pod was offered as a donor pod")
 		}
 	}
 }
 
-// The mark's cost is below every sibling's: a sibling a user set to -3000
-// would otherwise be the one the ReplicaSet removes.
+// The pod a user set lowest is the one given, and its mark stays below every
+// sibling that stays. Its own cost does not count against it: a sibling's
+// would, and a sibling at -3000 would otherwise be the one removed.
 func TestUtilizationShareMarksBelowAUsersLowCost(t *testing.T) {
 	f := newShareFleet()
 	c := sharePods(t, f)
@@ -87,8 +93,11 @@ func TestUtilizationShareMarksBelowAUsersLowCost(t *testing.T) {
 	if len(m) != 1 {
 		t.Fatalf("setup: %d marked", len(m))
 	}
-	if got := m[0].Annotations[podDeletionCostAnnotation]; got != "-3001" {
-		t.Fatalf("marked %s at cost %s, want -3001, below the user's -3000", m[0].Name, got)
+	if m[0].Name != "A-v-3" {
+		t.Fatalf("marked %s, want A-v-3, the pod the user set lowest", m[0].Name)
+	}
+	if got := m[0].Annotations[podDeletionCostAnnotation]; got != "-1000" {
+		t.Fatalf("marked %s at cost %s, want -1000: below its siblings' 0, and not below its own -3000", m[0].Name, got)
 	}
 	// Its own cost is the one the unmark checks.
 	se.e.unmarkDonorPods(se.ctx, ctrl.LoggerFrom(se.ctx), allocation.ShareTransfer{DonorPods: []string{"ns/" + m[0].Name}})

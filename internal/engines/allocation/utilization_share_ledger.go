@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strconv"
 	"time"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 )
 
 // ShareTransferState is a transfer's place in the state machine of
@@ -34,30 +36,32 @@ func (s ShareTransferState) String() string {
 	return fmt.Sprintf("state(%d)", int(s))
 }
 
-// ShareTransferOutcome is how a transfer left the ledger.
+// ShareTransferOutcome is how a transfer left the ledger: one of
+// constants.UtilizationShareOutcomes, the values its counter is published with.
 type ShareTransferOutcome string
 
 const (
 	// ShareOutcomeDone counts a transfer whose receiver holds the GPUs, and
 	// an idle fill that landed.
-	ShareOutcomeDone ShareTransferOutcome = "done"
+	ShareOutcomeDone ShareTransferOutcome = constants.UtilizationShareOutcomeDone
 	// ShareOutcomeFillTimeout counts a transfer whose receiver did not take
 	// the released GPUs within the fill timeout; it keeps its target.
-	ShareOutcomeFillTimeout ShareTransferOutcome = "fill-timeout"
+	ShareOutcomeFillTimeout ShareTransferOutcome = constants.UtilizationShareOutcomeFillTimeout
 	// ShareOutcomeCancelled counts a release called off on a clear reversal,
 	// while it was still free (section 6.7 rule 3).
-	ShareOutcomeCancelled ShareTransferOutcome = "cancelled"
+	ShareOutcomeCancelled ShareTransferOutcome = constants.UtilizationShareOutcomeCancelled
 	// ShareOutcomeAborted counts a release that did not land within the
-	// release timeout; its donor is restored and backs off.
-	ShareOutcomeAborted ShareTransferOutcome = "aborted"
+	// release timeout -- its donor is restored and backs off -- or a member of
+	// a donor set that could not complete, which sets no back-off.
+	ShareOutcomeAborted ShareTransferOutcome = constants.UtilizationShareOutcomeAborted
 	// ShareOutcomeRedirected counts a transfer a wake claimed (section 6.3);
 	// it stays in the ledger as a release with no receiver.
-	ShareOutcomeRedirected ShareTransferOutcome = "redirected"
+	ShareOutcomeRedirected ShareTransferOutcome = constants.UtilizationShareOutcomeRedirected
 	// ShareOutcomeWrongPod counts a node-planned transfer whose donor shrank
 	// by a different pod than the one marked: the GPUs came free, but not
 	// where the plan put the receiver's pod, so the receiver is not raised
 	// (section 6.5, "check which pod actually went").
-	ShareOutcomeWrongPod ShareTransferOutcome = "wrong-pod"
+	ShareOutcomeWrongPod ShareTransferOutcome = constants.UtilizationShareOutcomeWrongPod
 )
 
 // ShareTransfer moves one receiver replica: Donor gives GPUs, Receiver gets
@@ -135,6 +139,10 @@ func (t ShareTransfer) IsSetPrimary() bool { return t.SetID != "" && t.SetID == 
 type ShareTransferEnd struct {
 	Transfer ShareTransfer
 	Outcome  ShareTransferOutcome
+	// DonorReleased is set on an abort that is not the donor's failure when
+	// its donor had already released: the pod is gone, and restoring the
+	// count starts a replacement.
+	DonorReleased bool
 }
 
 // ShareTimings are the derived timings the ledger runs with (§8.4).
@@ -189,8 +197,9 @@ type ShareLedger struct {
 	// marked (MarkFailed), not because a release aborted.
 	unsteerable map[string]bool
 	// busyUntil holds a donor that has given all it can until its earlier
-	// releases land (HoldGiving). Not a back-off: no abort is counted and no
-	// blocked reason reads it.
+	// releases land, or one release timeout (HoldGiving). Not a back-off: no
+	// abort is counted, no blocked reason reads it, and the withheld count
+	// does not take it for a reversal hold.
 	busyUntil map[string]time.Time
 	// fillBlocked is, per receiver, why its last fill timed out
 	// (release-taken or release-shape-mismatch) and until when it is reported.
@@ -516,6 +525,7 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 		l.rebaseDonor(t, now)
 		delete(l.aborts, t.Donor)
 		delete(l.giveAfter, t.Donor)
+		delete(l.busyUntil, t.Donor)
 	}
 	// A transfer released this cycle measures its receiver from now; one that
 	// was already filling keeps its base. Filling -> Done, per receiver in start
@@ -529,7 +539,7 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 		switch {
 		case t.State == ShareReleasing && broken(t):
 			// Not the donor's failure: no back-off.
-			ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeAborted})
+			ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeAborted, DonorReleased: releasable[t]})
 			continue
 		case t.State == ShareReleasing && wrongPod(t) && !t.plannedUnknown:
 			// The donor did give; its GPUs return to the budget for the next
@@ -540,7 +550,7 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 		case t.State == ShareReleasing && !now.Before(t.Deadline) && t.IsSetPrimary() && releasable[t]:
 			// Its own donor released; a contributor did not. Not this
 			// donor's failure: no back-off.
-			ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeAborted})
+			ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeAborted, DonorReleased: true})
 			continue
 		case t.State == ShareReleasing && !now.Before(t.Deadline):
 			ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeAborted})
@@ -694,7 +704,8 @@ func (l *ShareLedger) BackingOff(role string, now time.Time) bool {
 }
 
 // GivingHeld reports whether role may not give now: it received within the
-// reversal hold, or its last release was aborted and it is backing off.
+// reversal hold, its last release was aborted and it is backing off, or it
+// has given all it can (GivingBusy).
 func (l *ShareLedger) GivingHeld(role string, now time.Time, tm ShareTimings) bool {
 	if now.Before(l.giveAfter[role]) || now.Before(l.busyUntil[role]) {
 		return true
@@ -887,10 +898,16 @@ func (l *ShareLedger) MarkFailed(donor string, now time.Time, tm ShareTimings) {
 	l.unsteerable[donor] = true
 }
 
-// HoldGiving keeps donor from being asked again for one release timeout: every
-// pod it could give is already given to a live transfer. Its receiver tries
-// another donor meanwhile. Nothing failed, so unlike MarkFailed it counts no
-// abort, sets no back-off and is not unsteerable.
+// GivingBusy reports whether role is held by HoldGiving.
+func (l *ShareLedger) GivingBusy(role string, now time.Time) bool {
+	return now.Before(l.busyUntil[role])
+}
+
+// HoldGiving keeps donor from being asked again until one of its releases
+// lands, or for one release timeout: every pod it could give is already given
+// to a live transfer. Its receiver tries another donor meanwhile. Nothing
+// failed, so unlike MarkFailed it counts no abort, sets no back-off and is not
+// unsteerable.
 func (l *ShareLedger) HoldGiving(donor string, now time.Time, tm ShareTimings) {
 	if donor == "" {
 		return

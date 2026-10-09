@@ -56,6 +56,10 @@ type utilizationShareState struct {
 	// divergedSince is when a planned variant's running count first differed
 	// from its target with no transfer in flight; see reanchorShareTargets.
 	divergedSince map[string]time.Time
+	// uncounted are, per group, the transfer outcomes of its ledger's first
+	// cycle, counted on the next: their series are created at 0 in that first
+	// cycle, and one that appeared at 1 would be invisible to increase().
+	uncounted map[string][]shareOutcomeCount
 	// blockedModels are the models the last active cycle published blocked
 	// reasons for (namespace/model), so a model that stops being planned has
 	// its reasons cleared.

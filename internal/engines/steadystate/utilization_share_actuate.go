@@ -121,23 +121,64 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	}
 
 	l, ok := st.ledgers[key]
+	fresh := !ok
 	if !ok {
 		l = allocation.NewShareLedger()
-		restored, err := e.restoreShareTransfers(ctx, logger, l, g, accessor, variantKey, now, tm)
+		restored, expired, err := e.restoreShareTransfers(ctx, logger, l, g, accessor, variantKey, now, tm)
 		if err != nil {
 			// Without the marks the ledger would start blind to releases in
 			// flight; it is not created, so the read is retried next cycle,
 			// and nothing is planned meanwhile.
 			logger.Error(err, "Utilization share: could not read transfer marks; retrying next cycle")
+			// Said, not only logged: every planned model is held at what it
+			// runs until the marks can be read, which may be indefinitely.
+			blocked := map[string][]string{}
+			for _, r := range g.Roles {
+				o := g.Origins[r.Key]
+				k := utils.GetNamespacedKey(o.Namespace, o.ModelID)
+				blocked[k] = []string{constants.ScalingBlockedQuietPeriod}
+			}
 			return shareActuation{overrides: e.shareOverrides(g, variantKey, "reading transfer marks"),
-				timings: tm, sources: src}
+				timings: tm, sources: src, blocked: blocked}
 		}
 		st.ledgers[key] = l
+		// Releases that timed out while no controller watched: aborted, and
+		// counted with this cycle's outcomes on the next (uncounted).
+		for range expired {
+			if st.uncounted == nil {
+				st.uncounted = map[string][]shareOutcomeCount{}
+			}
+			st.uncounted[key] = append(st.uncounted[key], shareOutcomeCount{outcome: string(allocation.ShareOutcomeAborted)})
+		}
 		// After a restart a transfer in Filling has no mark left, and its
 		// receiver may have no pods yet: plan nothing for one fill timeout.
 		st.quietUntil[key] = now.Add(tm.FillTimeout)
-		logger.Info("Utilization share: ledger started", "restoredTransfers", restored,
+		logger.Info("Utilization share: ledger started", "restoredTransfers", restored, "expiredTransfers", expired,
 			"planningFrom", st.quietUntil[key], "timings", src)
+	}
+
+	// Every outcome's series exists at 0 from the ledger's first cycle, and
+	// that cycle's outcomes -- a restored transfer that timed out while the
+	// controller was down -- are counted on the next: a series that appeared
+	// at 1 would be invisible to increase(), and the first abort would never
+	// alert.
+	if fresh {
+		metrics.InitUtilizationShareTransfers(g.AcceleratorType, scope)
+	} else {
+		for _, c := range st.uncounted[key] {
+			metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, c.outcome, c.urgent)
+		}
+		delete(st.uncounted, key)
+	}
+	count := func(outcome allocation.ShareTransferOutcome, urgent bool) {
+		if fresh {
+			if st.uncounted == nil {
+				st.uncounted = map[string][]shareOutcomeCount{}
+			}
+			st.uncounted[key] = append(st.uncounted[key], shareOutcomeCount{outcome: string(outcome), urgent: urgent})
+			return
+		}
+		metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, string(outcome), urgent)
 	}
 
 	held := g.Committed
@@ -156,7 +197,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 				"id", c.ID, "wake", c.Wake, "model", c.Model)
 			continue
 		}
-		metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, string(allocation.ShareOutcomeRedirected), prev.Urgent)
+		count(allocation.ShareOutcomeRedirected, prev.Urgent)
 		e.remarkDonorPods(ctx, logger, l, c.ID)
 		e.shareRedirectedEvent(prev, accessor)
 		logger.Info("Utilization share: transfer redirected to a woken model; its receiver is planned again",
@@ -166,7 +207,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	l.Retain(slices.Collect(maps.Keys(held)), now, tm)
 	for _, end := range l.Observe(held, now, tm) {
 		t := end.Transfer
-		metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, string(end.Outcome), t.Urgent)
+		count(end.Outcome, t.Urgent)
 		e.shareEndedEvent(g, end, tm, l.GiveAfter(t.Donor), accessor)
 		// A fill timeout leaves the receiver's target: the scheduler places it
 		// when it can, and the transfer simply stops counting as committed
@@ -263,7 +304,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		}
 		e.unmarkDonorPods(ctx, logger, t)
 		e.shareCancelledEvents(t, accessor)
-		metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, string(allocation.ShareOutcomeCancelled), t.Urgent)
+		count(allocation.ShareOutcomeCancelled, t.Urgent)
 		logger.Info("Utilization share: transfer cancelled", "id", id, "donor", t.Donor, "receiver", t.Receiver)
 	}
 	// A donor set (section 6.5) starts whole or not at all: a primary whose
@@ -303,9 +344,9 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 					}
 				}
 			}
-			// The donor backs off as after an abort: a pod that cannot be
-			// marked -- not Ready, all already given -- is the same next
-			// cycle, and its receiver would never try another donor.
+			// A donor whose pod cannot be marked is the same next cycle, and
+			// its receiver would never try another donor: an exhausted one is
+			// held, any other backs off as after an abort.
 			if errors.Is(failed, errDonorExhausted) {
 				// Nothing is wrong with the donor: it has given all it can
 				// until its earlier releases land. It is held so its receiver
@@ -723,9 +764,12 @@ func shareClaimable(l *allocation.ShareLedger, g allocation.ShareGroup, held map
 	return out
 }
 
-// shareStartedSets groups this cycle's started transfers into what must start
-// together: each donor set's members, primary first, and each single transfer
-// alone.
+// shareOutcomeCount is one transfer outcome not yet counted (uncounted).
+type shareOutcomeCount struct {
+	outcome string
+	urgent  bool
+}
+
 // sharePrivate reports whether a started transfer, or the donor set it is,
 // crosses a namespace: its donors and its receiver are not all in one. Its
 // marks then name no receiver and no set (markDonorPods). A set is judged
@@ -749,6 +793,9 @@ func sharePrivate(set []allocation.ShareTransfer) bool {
 	return false
 }
 
+// shareStartedSets groups this cycle's started transfers into what must start
+// together: each donor set's members, primary first, and each single transfer
+// alone.
 func shareStartedSets(started []allocation.ShareTransfer) [][]allocation.ShareTransfer {
 	var out [][]allocation.ShareTransfer
 	index := map[string]int{}

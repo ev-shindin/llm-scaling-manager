@@ -131,12 +131,35 @@ const (
 	UtilizationShareStateFilling = "filling"
 )
 
-// UtilizationShareOutcomes are the values of LabelOutcome on
-// WVAUtilizationShareTransfersTotal: how a transfer left the ledger. They are
-// the allocation package's ShareOutcome values, which a test keeps equal.
-// Every one is published at 0 for an acting group, so the first transfer of
-// an outcome is an increase() and not a series appearing at 1.
-var UtilizationShareOutcomes = []string{"done", "fill-timeout", "cancelled", "aborted", "redirected", "wrong-pod"}
+// Values of LabelOutcome on WVAUtilizationShareTransfersTotal: how a transfer
+// left the ledger. The allocation package's ShareOutcome values are these.
+const (
+	// UtilizationShareOutcomeDone is a transfer whose receiver holds the GPUs,
+	// or an idle fill that landed.
+	UtilizationShareOutcomeDone = "done"
+	// UtilizationShareOutcomeFillTimeout is a transfer whose receiver did not
+	// take the released GPUs within the fill timeout.
+	UtilizationShareOutcomeFillTimeout = "fill-timeout"
+	// UtilizationShareOutcomeCancelled is a release called off while it was
+	// still free.
+	UtilizationShareOutcomeCancelled = "cancelled"
+	// UtilizationShareOutcomeAborted is a release that did not land within the
+	// release timeout, or a donor set that could not complete.
+	UtilizationShareOutcomeAborted = "aborted"
+	// UtilizationShareOutcomeRedirected is a transfer a wake claimed.
+	UtilizationShareOutcomeRedirected = "redirected"
+	// UtilizationShareOutcomeWrongPod is a node-planned transfer whose donor
+	// shrank by a different pod than the one marked.
+	UtilizationShareOutcomeWrongPod = "wrong-pod"
+)
+
+// UtilizationShareOutcomes are every LabelOutcome value. Each is published at
+// 0 for an acting group, so the first transfer of an outcome is an increase()
+// and not a series appearing at 1.
+var UtilizationShareOutcomes = []string{
+	UtilizationShareOutcomeDone, UtilizationShareOutcomeFillTimeout, UtilizationShareOutcomeCancelled,
+	UtilizationShareOutcomeAborted, UtilizationShareOutcomeRedirected, UtilizationShareOutcomeWrongPod,
+}
 
 // Values of LabelParam on WVAUtilizationShareEffectiveSeconds: the derived
 // timings in force.

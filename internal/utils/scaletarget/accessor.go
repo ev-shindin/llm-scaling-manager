@@ -2,8 +2,10 @@ package scaletarget
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/resources"
 )
@@ -88,4 +90,18 @@ func PodGPUs(acc ScaleTargetAccessor) []int {
 func IsLeaderWorkerSet(acc ScaleTargetAccessor) bool {
 	_, ok := acc.(*lwsAccessor)
 	return ok
+}
+
+// RollingOut reports whether acc's workload says it is mid-rollout: a
+// Deployment some of whose pods are not of its current template -- including a
+// new ReplicaSet whose pods do not exist yet -- or a LeaderWorkerSet whose
+// UpdateInProgress condition is True, which also holds its surge groups.
+func RollingOut(acc ScaleTargetAccessor) bool {
+	switch a := acc.(type) {
+	case *deploymentAccessor:
+		return a.deployment.Status.UpdatedReplicas < a.deployment.Status.Replicas
+	case *lwsAccessor:
+		return meta.IsStatusConditionTrue(a.lws.Status.Conditions, string(lwsv1.LeaderWorkerSetUpdateInProgress))
+	}
+	return false
 }

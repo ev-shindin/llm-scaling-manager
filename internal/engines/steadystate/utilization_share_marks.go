@@ -71,9 +71,11 @@ func (m transferMark) ownCost() string {
 //
 // On a Deployment: its active pods -- not finished (Succeeded, Failed), not
 // being deleted. A pod not yet scheduled refuses the donor: the ReplicaSet
-// removes it before it reads any cost. So does a rollout, pods of more than one
-// ReplicaSet: the Deployment controller splits a scale-down across them, and a
-// cost ranks pods only within one.
+// removes it before it reads any cost. So does a rollout -- by the
+// Deployment's status, or pods of more than one ReplicaSet: the Deployment
+// controller splits a scale-down across them, and a cost ranks pods only
+// within one. So do fewer active pods than spec.replicas: lowering it by one
+// removes nothing, since the ReplicaSet removes only pods above the count.
 //
 // On a LeaderWorkerSet: the pods of the group LWS removes next. LWS removes
 // the highest indices first and does not steer by cost, so that is the
@@ -81,10 +83,20 @@ func (m transferMark) ownCost() string {
 // no live transfer has marked (marked groups are earlier transfers', and go
 // first). Every pod its StatefulSets own counts, terminating or not. That
 // group terminating or not yet scheduled refuses the donor: below
-// spec.replicas it is a rollout, not a release. A pod that only carries the
-// LWS's labels is not its own, and is ignored. marked may be nil.
+// spec.replicas it is a rollout, not a release. So does a rolling update,
+// whose surge groups sit above spec.replicas and stay until it ends, and a
+// group below spec.replicas with no pods: the StatefulSet removes the highest
+// ordinal, existing or not. A pod that only carries the LWS's labels is not
+// its own, and is ignored. marked may be nil.
 func (e *Engine) donorPods(ctx context.Context, acc scaletarget.ScaleTargetAccessor, namespace string,
 	marked func(*corev1.Pod) bool) ([]corev1.Pod, error) {
+	if scaletarget.RollingOut(acc) {
+		return nil, fmt.Errorf("%s is mid-rollout; its victim cannot be steered", acc.GetName())
+	}
+	replicas := -1
+	if r := acc.GetReplicas(); r != nil {
+		replicas = int(*r)
+	}
 	if !scaletarget.IsLeaderWorkerSet(acc) {
 		// By the Deployment's selector, every ReplicaSet generation: a
 		// rollout that changed a template label would otherwise hide the old
@@ -99,22 +111,19 @@ func (e *Engine) donorPods(ctx context.Context, acc scaletarget.ScaleTargetAcces
 		if err != nil {
 			return nil, err
 		}
-		return deploymentDonorPods(acc.GetName(), list)
+		return deploymentDonorPods(acc.GetName(), replicas, list)
 	}
 	list, err := variantmeta.ListVariantPods(ctx, e.client, namespace, acc)
 	if err != nil {
 		return nil, err
 	}
-	replicas := -1
-	if r := acc.GetReplicas(); r != nil {
-		replicas = int(*r)
-	}
 	return lwsDonorPods(acc.GetName(), replicas, list, marked)
 }
 
 // deploymentDonorPods is the active pods of a Deployment's every ReplicaSet,
-// refusing an unscheduled pod or a rollout (donorPods).
-func deploymentDonorPods(name string, list []corev1.Pod) ([]corev1.Pod, error) {
+// refusing an unscheduled pod, a rollout or a missing pod (donorPods).
+// replicas is the Deployment's spec.replicas, or -1 when unknown.
+func deploymentDonorPods(name string, replicas int, list []corev1.Pod) ([]corev1.Pod, error) {
 	var pods []corev1.Pod
 	replicaSets := map[string]bool{}
 	for _, p := range list {
@@ -132,6 +141,13 @@ func deploymentDonorPods(name string, list []corev1.Pod) ([]corev1.Pod, error) {
 	if len(replicaSets) > 1 {
 		return nil, fmt.Errorf("%s is mid-rollout (pods of %d ReplicaSets); its victim cannot be steered",
 			name, len(replicaSets))
+	}
+	// More active pods than spec.replicas is a scale-down already under way;
+	// fewer is a pod the ReplicaSet cannot create (a quota, an eviction), and
+	// lowering the count would remove none.
+	if replicas >= 0 && len(pods) < replicas {
+		return nil, fmt.Errorf("%s has %d of its %d pods; lowering its count would remove none",
+			name, len(pods), replicas)
 	}
 	return pods, nil
 }
@@ -156,6 +172,20 @@ func lwsDonorPods(name string, replicas int, list []corev1.Pod, marked func(*cor
 	if len(groups) == 0 {
 		return nil, fmt.Errorf("no pod of %s carries a group index", name)
 	}
+	for i := range max(replicas, 0) {
+		if len(groups[i]) == 0 {
+			return nil, fmt.Errorf("%s has no pod of group %d; lowering its count would remove none", name, i)
+		}
+	}
+	revisions := map[string]bool{}
+	for _, pods := range groups {
+		for _, p := range pods {
+			revisions[p.Labels[lwsv1.RevisionKey]] = true
+		}
+	}
+	if len(revisions) > 1 {
+		return nil, fmt.Errorf("%s is mid-rollout (groups of %d revisions); its release cannot be steered", name, len(revisions))
+	}
 	indices := slices.Sorted(maps.Keys(groups))
 	slices.Reverse(indices)
 	for _, i := range indices {
@@ -179,8 +209,9 @@ func lwsDonorPods(name string, replicas int, list []corev1.Pod, marked func(*cor
 
 // errDonorExhausted is a donor whose every pod or group a live transfer has
 // already marked: nothing is wrong with it, it has simply given all it can
-// right now. The donor still backs off -- its receiver should try another --
-// but it is not reported as unsteerable.
+// right now. It is held from giving for one release timeout
+// (ShareLedger.HoldGiving), so its receiver tries another donor, and it does
+// not back off and is not reported as unsteerable.
 var errDonorExhausted = errors.New("every pod the donor could give is already given to a live transfer")
 
 // podDeletionCost is a pod's deletion cost, 0 when it has none or an invalid
@@ -236,15 +267,7 @@ func (e *Engine) markDonorPods(ctx context.Context, t allocation.ShareTransfer,
 	if len(pods) == 0 {
 		return nil, fmt.Errorf("donor variant %q: %w", t.DonorVariant, errDonorExhausted)
 	}
-	// Below every unmarked sibling, and above every live mark of this donor:
-	// the ledger releases transfers in start order, so the ReplicaSet must
-	// remove the earlier transfer's pod first. A tie leaves the order to the
-	// ReplicaSet's own tie-break, and a planned transfer whose pod lost it
-	// would end wrong-pod.
-	cost, ok := markCost(pods, live)
-	if !ok && !scaletarget.IsLeaderWorkerSet(acc) {
-		return nil, fmt.Errorf("donor variant %q: a sibling's deletion cost leaves no room below it; its victim cannot be steered", t.DonorVariant)
-	}
+	unmarked := slices.Clone(pods)
 	if len(t.PlannedPods) > 0 {
 		// A node-aware plan placed its holes where these pods run: exactly
 		// they go, or the transfer does not start.
@@ -256,14 +279,27 @@ func (e *Engine) markDonorPods(ctx context.Context, t allocation.ShareTransfer,
 				t.DonorVariant, len(t.PlannedPods)-len(pods), len(t.PlannedPods))
 		}
 	} else if !scaletarget.IsLeaderWorkerSet(acc) {
-		// The pod the ReplicaSet would remove anyway, or the least protected:
-		// the lowest deletion cost a user set, then -- as the ReplicaSet
-		// breaks ties -- the most recently Ready, then the name.
+		// The least protected pod: the lowest deletion cost a user set, then
+		// the most recently Ready -- the coldest cache, and the ReplicaSet's
+		// own preference absent a cost -- then the name. Only a preference:
+		// the cost below makes it the one removed.
 		slices.SortFunc(pods, func(a, b corev1.Pod) int {
 			return cmp.Or(cmp.Compare(podDeletionCost(&a), podDeletionCost(&b)),
 				podReadySince(&b).Compare(podReadySince(&a)), cmp.Compare(a.Name, b.Name))
 		})
 		pods = pods[:1]
+	}
+	// Below every unmarked sibling that stays, and above every live mark of
+	// this donor: the ledger releases transfers in start order, so the
+	// ReplicaSet must remove the earlier transfer's pod first. A tie leaves
+	// the order to the ReplicaSet's own tie-break, and a planned transfer
+	// whose pod lost it would end wrong-pod.
+	siblings := slices.DeleteFunc(unmarked, func(p corev1.Pod) bool {
+		return slices.ContainsFunc(pods, func(q corev1.Pod) bool { return q.Name == p.Name })
+	})
+	cost, ok := markCost(siblings, live)
+	if !ok && !scaletarget.IsLeaderWorkerSet(acc) {
+		return nil, fmt.Errorf("donor variant %q: a sibling's deletion cost leaves no room below it; its victim cannot be steered", t.DonorVariant)
 	}
 	var done []corev1.Pod
 	for i := range pods {
@@ -384,7 +420,9 @@ func markedFor(p *corev1.Pod, id string) bool {
 // that group now: the donor role and variant it is found under, a receiver
 // role and variant of the same group, the replica sizes of both, and a start
 // in the past. Anything else is removed with a WARN. A mark older than the
-// release timeout is stale and removed quietly.
+// release timeout is stale and removed quietly; one still on a pod that is not
+// terminating is a release that never landed while no controller watched, and
+// expired counts it, once per transfer, so it is counted as aborted.
 //
 // The pods of one transfer -- every pod of an LWS group -- are restored as one
 // transfer. If any of them is not yet terminating, the donor is still counted
@@ -395,9 +433,9 @@ func markedFor(p *corev1.Pod, id string) bool {
 // An error listing a donor's pods is returned before anything is applied.
 func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, l *allocation.ShareLedger,
 	g allocation.ShareGroup, accessor func(string, string) scaletarget.ScaleTargetAccessor,
-	variantKey func(string, string) string, now time.Time, tm allocation.ShareTimings) (int, error) {
+	variantKey func(string, string) string, now time.Time, tm allocation.ShareTimings) (restored, expired int, err error) {
 	if e.client == nil {
-		return 0, nil
+		return 0, 0, nil
 	}
 	type found struct {
 		mark transferMark
@@ -407,6 +445,7 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 	byID := map[string]*found{}
 	var order []string
 	var invalid []string
+	aborted := map[string]bool{}
 	for _, role := range slices.Sorted(maps.Keys(g.Give)) {
 		give := g.Give[role]
 		acc := accessor(role, give.Name)
@@ -415,7 +454,7 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 		}
 		pods, err := variantmeta.ListVariantPods(ctx, e.client, g.Origins[role].Namespace, acc)
 		if err != nil {
-			return 0, fmt.Errorf("list the pods of donor variant %s: %w", give.Name, err)
+			return 0, 0, fmt.Errorf("list the pods of donor variant %s: %w", give.Name, err)
 		}
 		for _, p := range pods {
 			raw, ok := p.Annotations[utilizationShareTransferAnnotation]
@@ -431,6 +470,9 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 			}
 			if now.Sub(m.Started) >= tm.ReleaseTimeout {
 				invalid = append(invalid, key)
+				if p.DeletionTimestamp == nil {
+					aborted[role+"|"+m.ID] = true
+				}
 				continue
 			}
 			id := role + "|" + m.ID
@@ -509,7 +551,7 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 	for set, members := range contributors {
 		l.LinkSet(set, members...)
 	}
-	return len(order), nil
+	return len(order), len(aborted), nil
 }
 
 // validTransferMark parses a mark into m and reports why it is not one this
@@ -709,11 +751,17 @@ func validDeletionCost(v string) bool {
 }
 
 // markCost is the deletion cost a donor's newly marked pods get, and whether
-// it orders them as it must. Below every unmarked sibling, so the ReplicaSet
-// removes them first: donorDeletionCost, or lower when a user set a sibling
-// lower still. And above every live mark of this donor, so an earlier
+// it orders them as it must. Below every unmarked sibling that stays, so the
+// ReplicaSet removes them first: donorDeletionCost, or lower when a user set a
+// sibling lower still. And above every live mark of this donor, so an earlier
 // transfer's pod goes before this one's. ok is false when no cost fits both,
 // or none fits below a sibling a user pinned at the int32 minimum.
+//
+// A live mark the cache does not show yet was written this cycle at its own
+// base cost or above. That base is at most this one's -- its siblings were a
+// superset of these -- and it was raised above base only over an older live
+// mark, which would make three marks on one donor: more than
+// allocation.ShareMaxConcurrentTransfers admits.
 func markCost(unmarked, live []corev1.Pod) (string, bool) {
 	lowest := int64(0)
 	for i := range unmarked {

@@ -32,7 +32,7 @@ import (
 // A Deployment donor offers each Ready, unmarked pod as a replica, and offers
 // nothing when any of its pods is not Ready: the ReplicaSet removes a not-Ready
 // pod first, wherever it runs, so the planned hole would not open. A
-// LeaderWorkerSet donor offers its highest-index group, the one LWS removes.
+// LeaderWorkerSet donor offers the group LWS removes next (donorPods).
 func (e *Engine) shareNodeInputs(ctx context.Context, logger logr.Logger, g allocation.ShareGroup,
 	accessor func(role, variant string) scaletarget.ScaleTargetAccessor, reserved int,
 	marked func(*corev1.Pod) bool, now time.Time) (
@@ -151,8 +151,8 @@ func (e *Engine) pendingPodGPUs(ctx context.Context, acc scaletarget.ScaleTarget
 }
 
 // shareDonorUnits is what a donor could give a node-aware set, from its pods
-// (donorPods: running, scheduled, and for a LeaderWorkerSet its highest-index
-// group only). Pods already marked by a transfer are another transfer's. A
+// (donorPods: running, scheduled, and for a LeaderWorkerSet the group it
+// removes next only). Pods already marked by a transfer are another transfer's. A
 // LeaderWorkerSet gives that group, all its pods at once, as one unit. A
 // Deployment gives each pod as a unit, and nothing while any pod is not
 // Ready: the ReplicaSet removes a not-Ready pod first, wherever it runs, so
