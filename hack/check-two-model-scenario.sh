@@ -59,6 +59,11 @@ case "$args" in
       if [ "${PD_STUB:-0}" = "1" ]; then
         echo '{"items":[{"metadata":{"name":"pd-decode-wva"},"spec":{"scaleTargetRef":{"name":"pd-decode"},"triggers":[{"metadata":{}}]}},
                         {"metadata":{"name":"pd-prefill-wva"},"spec":{"scaleTargetRef":{"name":"pd-prefill"},"triggers":[{"metadata":{}}]}}]}'
+      elif [ "${TWO_PD_STUB:-0}" = "1" ]; then
+        # Two P/D stacks (two-model-shapes-pd): a ScaledObject per ROLE per
+        # model, on the Deployments the route resolves to.
+        so() { printf '{"metadata":{"name":"%s-wva"},"spec":{"scaleTargetRef":{"name":"%s"},"triggers":[{"metadata":{}}]}}' "$1" "$1"; }
+        echo "{\"items\":[$(so unsloth--244120d9-instruct-decode),$(so unsloth--244120d9-instruct-prefill),$(so qwen-qwe-6e036fd5-qwen3-8b-decode),$(so qwen-qwe-6e036fd5-qwen3-8b-prefill)]}"
       else
         echo '{"items":[]}'
       fi
@@ -91,6 +96,9 @@ case "$args" in
       exit 0 ;;
   *"get scaledobject pd-prefill-wva"*"scaleTargetRef"*) echo "pd-prefill"; exit 0 ;;
   *"get scaledobject pd-decode-wva"*"scaleTargetRef"*) echo "pd-decode"; exit 0 ;;
+  # TWO_PD_STUB's ScaledObjects are named <target>-wva.
+  *"get scaledobject "*"-wva -o jsonpath={.spec.scaleTargetRef.name}"*)
+      n="${args#*get scaledobject }"; echo "${n%%-wva *}"; exit 0 ;;
   # As the modelservice chart renders them: the role is on the pod template,
   # and the Deployment's own labels carry none -- plus an EPP with no role.
   *"get deploy -o json"*)
@@ -105,6 +113,8 @@ case "$args" in
       fi ;;&
   *"get deploy pd-prefill -o jsonpath={.spec.template.metadata.labels"*) echo "prefill"; exit 0 ;;
   *"get deploy pd-decode -o jsonpath={.spec.template.metadata.labels"*) echo "decode"; exit 0 ;;
+  *"get deploy "*"-prefill -o jsonpath={.spec.template.metadata.labels"*) echo "prefill"; exit 0 ;;
+  *"get deploy "*"-decode -o jsonpath={.spec.template.metadata.labels"*) echo "decode"; exit 0 ;;
   *"get deploy wva-warm-pool-"*)
       [ "${POOL_EXISTS:-0}" = "1" ] && exit 0
       echo 'Error from server (NotFound): deployments.apps "wva-warm-pool-x" not found' >&2
@@ -136,6 +146,8 @@ case "$args" in
   # Without this branch the readiness check reads empty and verify refuses for
   # the wrong reason -- which is how the EPP case first passed while proving
   # nothing about EPPs.
+  # PREFILL_READY: a prefill Deployment's count, apart from decode's.
+  *"get deploy "*"-prefill -o jsonpath={.status."*) echo "${PREFILL_READY:-${READY:-1}}"; exit 0 ;;
   *"get deploy "*"-o jsonpath={.status.readyReplicas}"*) echo "${READY:-1}"; exit 0 ;;
   *"get deploy "*"-o jsonpath={.status.replicas}"*) echo "${READY:-1}"; exit 0 ;;
   # The routing table, which is how a stack name resolves to its backend. Names
@@ -490,6 +502,84 @@ else
     ok "standup refuses a single-stack P/D run and names the standup to use"
 fi
 
+# ---------------------------------------------------------------------------
+# TWO P/D stacks (two-model-shapes-pd), driven through the shared route, not
+# PD_SINGLE_STACK: each model's decode and its prefill are separate scaled roles.
+# ---------------------------------------------------------------------------
+# The peak counts both roles of both models. Counted as one role per model it
+# was HALF the fleet, and preflight passed on a cluster with room for half.
+case_begin
+BENCH_SPEC=guides/two-model-shapes-pd NODE_GPUS=16 run_verb preflight
+PD_PEAK_OUT="$OUT"
+BENCH_SPEC=guides/two-model-shapes NODE_GPUS=16 run_verb preflight
+if ! printf '%s' "$PD_PEAK_OUT" | grep -q 'peaks at 12'; then
+    fail "preflight for two P/D models (2 x (prefill 3 + decode 3)) did not report a peak of 12: $(printf '%s' "$PD_PEAK_OUT" | grep peaks)"
+elif ! printf '%s' "$PD_PEAK_OUT" | grep -q 'P/D: every model is two roles'; then
+    fail "preflight for two P/D models did not state the per-role ranges: $PD_PEAK_OUT"
+elif ! printf '%s' "$OUT" | grep -q 'peaks at 6'; then
+    fail "control: the aggregated two-model-shapes no longer peaks at 6: $(printf '%s' "$OUT" | grep peaks)"
+else
+    ok "preflight counts prefill and decode of both P/D models, and an aggregated scenario as before"
+fi
+
+case_begin
+TWO_PD_STUB=1 MIN_PREFILL=2 MIN_DECODE=1 RESET_TIMEOUT=1 run_verb reset
+miss=""
+for d in unsloth--244120d9-instruct-prefill qwen-qwe-6e036fd5-qwen3-8b-prefill; do
+    grep -q "scale deploy $d --replicas=2" "$CALLS" || miss="$miss $d"
+    grep "patch scaledobject $d-wva" "$CALLS" | grep -q 'minReplicaCount.:2' || miss="$miss $d-wva"
+done
+for d in unsloth--244120d9-instruct-decode qwen-qwe-6e036fd5-qwen3-8b-decode; do
+    grep -q "scale deploy $d --replicas=1" "$CALLS" || miss="$miss $d"
+done
+if [ -n "$miss" ]; then
+    fail "two-stack P/D reset did not put every role of both models at its floor; missing:$miss
+$(grep -E 'scale deploy|minReplicaCount' "$CALLS")"
+else
+    ok "two-stack P/D reset puts both models' prefill and decode at their own floors"
+fi
+
+case_begin
+TWO_PD_STUB=1 MAX_PREFILL=4 MAX_DECODE=3 POLICY_TEXT="$QUOTA_POLICY" \
+    PQUERY_OUT='RESULT {"max by (mode) (wva_utilization_share_mode{namespace=\"ns-under-test\"})": [{"metric": {"mode": "off"}, "value": [0, "1"]}]}' \
+    VERB_TIMEOUT=60 run_verb run today
+miss=""
+for so in unsloth--244120d9-instruct-prefill qwen-qwe-6e036fd5-qwen3-8b-prefill; do
+    grep "patch scaledobject $so-wva" "$CALLS" | grep -q 'maxReplicaCount.:4' || miss="$miss $so"
+done
+for so in unsloth--244120d9-instruct-decode qwen-qwe-6e036fd5-qwen3-8b-decode; do
+    grep "patch scaledobject $so-wva" "$CALLS" | grep -q 'maxReplicaCount.:3' || miss="$miss $so"
+done
+if [ -n "$miss" ]; then
+    fail "two-stack P/D run did not cap every role at its own ceiling; wrong or missing:$miss
+$(grep maxReplicaCount "$CALLS")"
+else
+    ok "two-stack P/D run caps both models' prefill at MAX_PREFILL and decode at MAX_DECODE"
+fi
+
+# A P/D model with no ready prefill serves through decode alone; the run would
+# measure an aggregated model under a P/D name.
+case_begin
+TWO_PD_STUB=1 DEPLOY_EXISTS=1 ROUTES=1 PREFILL_READY=0 run_verb verify
+if [ "$RC" -eq 0 ]; then
+    fail "verify passed two P/D stacks whose prefill Deployments have no ready replica"
+elif ! printf '%s' "$OUT" | grep -q 'prefill Deployment .*-prefill has no ready replica'; then
+    fail "verify refused without naming the unready prefill Deployment: $OUT"
+else
+    ok "verify refuses a P/D stack whose prefill is not serving"
+fi
+
+# The floor arm raises EVERY model ScaledObject, so it must wait for every role.
+# Waiting on decode alone started the arm while prefill was still short.
+case_begin
+TWO_PD_STUB=1 FLOOR_REPLICAS=2 READY=2 PREFILL_READY=1 RESET_TIMEOUT=1 VERB_TIMEOUT=60 run_verb run floor
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'did not reach the floor'; then
+    fail "the floor arm started while both prefill Deployments were below the floor (decode at 2, prefill at 1): rc $RC
+$(printf '%s' "$OUT" | tail -5)"
+else
+    ok "the floor arm waits for prefill as well as decode"
+fi
+
 # A COLD pool is the worst result this scenario can produce: the arm runs to
 # completion and reports the cost of a pool nobody would operate that way.
 case_begin
@@ -639,6 +729,64 @@ else
     else
         ok "two-model-shapes differs from two-model-warm-pool only in workDir and maxModelLen, and its specification names it"
     fi
+fi
+
+# two-model-shapes-pd is two-model-shapes with both models disaggregated. Its
+# STACKS must differ from two-model-shapes' only by the prefill block each one
+# adds -- the models, the decode sizing and the WVA bounds are the comparison's
+# fixed points, and a copy drifts.
+case_begin
+if [ ! -f "$SPEC_DIR/two-model-shapes-pd.yaml" ] || [ ! -f "$SPEC_DIR/two-model-shapes-pd.yaml.j2" ]; then
+    fail "two-model-shapes-pd.yaml or its specification is missing"
+elif ! grep -q 'scenarios/guides/two-model-shapes-pd.yaml' "$SPEC_DIR/two-model-shapes-pd.yaml.j2"; then
+    fail "the P/D shapes specification points at a scenario other than its own: $(grep -A1 scenario_file "$SPEC_DIR/two-model-shapes-pd.yaml.j2")"
+else
+    # The scenario: list, comments and blank lines out; for the P/D file, each
+    # stack's `      prefill:` block (up to the next key at its indent) too.
+    stacks_of() {
+        tr -d '\r' < "$1" | sed -n '/^scenario:/,$p' | grep -vE '^[[:space:]]*(#|$)' | awk '
+            /^      prefill:$/ { skip = 1; next }
+            skip && /^ {0,6}[^ ]/ { skip = 0 }
+            !skip { print }'
+    }
+    drift="$(diff <(stacks_of "$SPEC_DIR/two-model-shapes.yaml") <(stacks_of "$SPEC_DIR/two-model-shapes-pd.yaml"))"
+    n_prefill="$(tr -d '\r' < "$SPEC_DIR/two-model-shapes-pd.yaml" | sed -n '/^scenario:/,$p' | grep -c '^      prefill:$')"
+    if [ "$n_prefill" -ne 2 ]; then
+        fail "two-model-shapes-pd has $n_prefill per-stack prefill blocks, not 2 -- one per model"
+    elif [ -n "$drift" ]; then
+        fail "two-model-shapes-pd's stacks differ from two-model-shapes' in more than their prefill blocks: $drift"
+    else
+        ok "two-model-shapes-pd's stacks are two-model-shapes' plus one prefill block each, and its specification names it"
+    fi
+fi
+
+# What makes it P/D, in the shared block every stack inherits. Any one missing
+# does not crash: requests fall back to decode doing its own prefill, or route
+# to one role, and the run measures an aggregated model under a P/D name.
+case_begin
+pd_body="$(tr -d '\r' < "$SPEC_DIR/two-model-shapes-pd.yaml" | grep -vE '^[[:space:]]*#')"
+shared_body="$(printf '%s\n' "$pd_body" | sed -n '/^shared:/,/^scenario:/p')"
+missing=""
+printf '%s\n' "$shared_body" | grep -qE '^    prefill:$' || missing="$missing shared.modelservice.prefill"
+printf '%s\n' "$shared_body" | sed -n '/^    prefill:$/,/^    [a-z]/p' | grep -qE '^      enabled: true$' || missing="$missing prefill.enabled=true"
+printf '%s\n' "$shared_body" | grep -qE '^      connector: nixlv2$' || missing="$missing routing.connector=nixlv2"
+printf '%s\n' "$shared_body" | grep -qE 'pluginsConfigFile: "pd-config.yaml"' || missing="$missing pluginsConfigFile=pd-config.yaml"
+for plugin in always-disagg-pd-decider disagg-profile-handler prefill-filter decode-filter metrics-data-source; do
+    printf '%s\n' "$shared_body" | grep -qE -- "- type: $plugin\$" || missing="$missing plugin:$plugin"
+done
+printf '%s\n' "$shared_body" | grep -qE -- '- flowControl$' || missing="$missing featureGates:flowControl"
+printf '%s\n' "$shared_body" | grep -A1 -E '^    routerEndpointPicker:$' | grep -qE 'tag: v0\.11\.0$' || missing="$missing images.routerEndpointPicker=v0.11.0"
+[ "$(printf '%s\n' "$pd_body" | grep -c 'kv_connector":"NixlConnector"')" -eq 2 ] || missing="$missing NixlConnector-on-both-roles"
+if printf '%s\n' "$pd_body" | grep -q 'matchLabels'; then
+    missing="$missing no-matchLabels(each-InferencePool-would-select-both-models)"
+fi
+if [ -n "$missing" ]; then
+    fail "two-model-shapes-pd is not P/D on every stack; missing or wrong:$missing"
+elif ! grep -qE '^  - name: "llama-31-8b"' "$SPEC_DIR/two-model-shapes-pd.yaml" || \
+     ! grep -qE '^  - name: "qwen3-8b"' "$SPEC_DIR/two-model-shapes-pd.yaml"; then
+    fail "two-model-shapes-pd's stack names are not the driver's STACK_A/STACK_B defaults"
+else
+    ok "two-model-shapes-pd enables prefill with the nixlv2 connector and the P/D EPP config for every stack"
 fi
 
 case_begin
@@ -868,7 +1016,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=51
+CASES_EXPECTED=58
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

@@ -268,7 +268,35 @@ need_ns() { [ -n "$NS" ] || die "BENCHMARK_NAMESPACE is required."; }
 # run. The cost of an insurance is not imposed through the cap; it is
 # MEASURED, in accelerator-seconds, and that is what every arm is priced on.
 # Set MAX_REPLICAS to as many replicas as the models could ask for.
-peak_gpus() { echo $(( 2 * MAX_REPLICAS * GPUS_PER_REPLICA )); }
+#
+# A P/D model is TWO scaled roles, each with its own ceiling, so it peaks at
+# MAX_PREFILL + MAX_DECODE replicas, not MAX_REPLICAS. Counting it as one role
+# halved the peak of a two-P/D-stack run, and preflight then passed on a
+# cluster with room for half the fleet.
+peak_gpus() {
+    local models=2 per_model="$MAX_REPLICAS"
+    [ "$PD_SINGLE_STACK" != 1 ] || models=1
+    if scenario_is_pd; then
+        per_model=$(( MAX_PREFILL + MAX_DECODE ))
+    fi
+    echo $(( models * per_model * GPUS_PER_REPLICA ))
+}
+
+# Whether the models are P/D: PD_SINGLE_STACK, or a scenario whose prefill is
+# enabled (two-model-shapes-pd). Read from the scenario, because preflight runs
+# before anything is deployed.
+scenario_is_pd() {
+    [ "$PD_SINGLE_STACK" != 1 ] || return 0
+    local file="$ROOT/hack/benchmark/scenarios/$BENCH_SPEC.yaml"
+    [ -f "$file" ] || return 1
+    python3 - "$file" <<'PY' 2>/dev/null
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+# Comments out first: a header that mentions "prefill: enabled" is not a block.
+text = re.sub(r"(?m)^\s*#.*$", "", text)
+sys.exit(0 if re.search(r"\n\s*prefill:\s*\n(\s*\n)*\s*enabled:\s*true\b", text) else 1)
+PY
+}
 
 pool_gpus() { echo $(( POOL_REPLICAS * GPUS_PER_REPLICA )); }
 
@@ -382,6 +410,9 @@ verb_preflight() {
     info "  nopool arm: 2 models x 1..${MAX_REPLICAS} replicas"
     info "  floor arm:  2 models x ${FLOOR_REPLICAS}..${MAX_REPLICAS} replicas"
     info "  pool arm:   2 models x 1..${MAX_REPLICAS} replicas + a ${POOL_REPLICAS}-Pod pool on top -- the same ceiling in every arm; the insurance is priced in GPU-seconds"
+    if scenario_is_pd; then
+        info "  P/D: every model is two roles -- prefill ${MIN_PREFILL}..${MAX_PREFILL} and decode ${MIN_DECODE}..${MAX_DECODE} replicas -- and the peak counts both"
+    fi
 
     # FREE ACCELERATORS ARE NOT PLACEABLE ACCELERATORS, and the difference cost
     # a whole 90-minute A/B.
@@ -1517,18 +1548,24 @@ set_fleet_floor() {
     info "minReplicaCount=$n on every model ScaledObject"
 }
 
+# EVERY role, prefill included: set_fleet_floor raises every model
+# ScaledObject, and waiting on decode alone started a P/D floor arm while its
+# prefill was still coming up.
 wait_fleet_at() {
-    local n="$1" waited=0 s d cur ready
+    local n="$1" waited=0 s d cur ready deploys
     while [ "$waited" -lt "$RESET_TIMEOUT" ]; do
         local settled=1
         for s in "$STACK_A" "$STACK_B"; do
-            d="$(decode_deploy_for "$s")"
-            [ -n "$d" ] || { settled=0; continue; }
+            [ -n "$(decode_deploy_for "$s")" ] || settled=0
+        done
+        deploys="$(role_deploys)"
+        while read -r d _; do
+            [ -n "$d" ] || continue
             cur="$(k get deploy "$d" -o jsonpath='{.status.replicas}' 2>/dev/null)"
             ready="$(k get deploy "$d" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"
             [ "${cur:-0}" = "$n" ] && [ "${ready:-0}" = "$n" ] || settled=0
-        done
-        [ "$settled" = 1 ] && { ok "both models are at $n and ready"; return 0; }
+        done <<<"$deploys"
+        [ "$settled" = 1 ] && { ok "every role of both models is at $n and ready"; return 0; }
         sleep 10
         waited=$(( waited + 10 ))
     done
@@ -1556,7 +1593,11 @@ set_arm_ceiling() {
     # misreports the one number that makes the arms comparable.
     local held=0
     [ "$arm" = "pool" ] && held="$POOL_REPLICAS"
-    info "arm '$arm': each model may reach ${ceiling} replicas; the pool holds ${held} Pod(s) -- ceiling $(( 2 * ceiling * GPUS_PER_REPLICA + held * GPUS_PER_REPLICA )) accelerators"
+    if scenario_is_pd; then
+        info "arm '$arm': each model's prefill may reach ${MAX_PREFILL} replicas and its decode ${MAX_DECODE}; the pool holds ${held} Pod(s) -- ceiling $(( $(peak_gpus) + held * GPUS_PER_REPLICA )) accelerators"
+    else
+        info "arm '$arm': each model may reach ${ceiling} replicas; the pool holds ${held} Pod(s) -- ceiling $(( $(peak_gpus) + held * GPUS_PER_REPLICA )) accelerators"
+    fi
     echo "$ceiling"
 }
 

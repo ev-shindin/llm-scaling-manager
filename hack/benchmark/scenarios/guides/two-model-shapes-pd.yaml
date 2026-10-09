@@ -1,0 +1,1076 @@
+# TWO P/D MODELS, DIFFERENT BURST SHAPES -- the standup half.
+#
+# two-model-shapes.yaml with BOTH models disaggregated: each stack runs its own
+# prefill Deployment and its own decode Deployment behind its own EPP, so the
+# utilization-share optimizer has four roles competing for one quota instead
+# of two. Everything else -- the two models, maxModelLen 32768, maxNumSeq 32,
+# one accelerator per Pod, the shared HTTPRoute keyed on the stack names, the
+# WVA/KEDA bounds, the 10s scrape -- is two-model-shapes', and its header
+# (kept below) still applies.
+#
+# Driven by hack/benchmark/two_model_pool.sh with
+# BENCH_SPEC=guides/two-model-shapes-pd, NOT with PD_SINGLE_STACK: that mode is
+# ONE P/D model behind its own router Service, and this is two P/D models behind
+# one Gateway. The driver pairs each stack's `<x>-decode` with its
+# `<x>-prefill` and bounds each role with MIN/MAX_PREFILL and MIN/MAX_DECODE.
+#
+# WHAT DIFFERS FROM two-model-shapes.yaml, AND WHY -- all of it, nothing else:
+#
+#   modelservice.prefill: enabled, 1 replica per stack, 1 accelerator per Pod.
+#       The point of the scenario. The command is the P/D guide's
+#       (pd-disaggregation.yaml): vLLM on $VLLM_INFERENCE_PORT (8000) with no
+#       routing sidecar in front of it -- the decode Pod's sidecar calls it --
+#       a NixlConnector kv-transfer-config, and --max-num-batched-tokens 65536,
+#       because the harness default of 256 caps a prefill-only engine's whole
+#       per-step progress at 256 tokens. 20 000-token prompts are this
+#       scenario's prompt-heavy shape, so 256 would make prefill the bottleneck
+#       for a reason that is not capacity.
+#
+#   modelservice.decode.vllm.customCommand: the P/D guide's decode command --
+#       the same NixlConnector config, --max-num-batched-tokens 8192 for the
+#       same reason, and `. /shared-config/llmdbench_env.sh` first, which is
+#       where the preprocess init container writes the NIXL side-channel
+#       settings. Both roles keep two-model-shapes' --no-enable-log-requests,
+#       the one flag here the P/D guide does not have. Without the connector on BOTH roles the KV handoff has no
+#       transport, and requests fall back to decode doing its own prefill:
+#       nothing crashes, the run just measures an aggregated model.
+#
+#   prefill AND decode initContainers: the P/D guide's preprocess, which
+#       strips the two apt-get installs the generated env script starts with
+#       (71 s of a 186 s order-to-Ready, measured, on a node that needs
+#       neither). two-model-shapes never sources that script, so it never paid
+#       them; this one sources it on every start and would.
+#
+#   prefill AND decode extraContainerConfig: NET_ADMIN and NET_RAW added to the
+#       capabilities, because on a multi-NIC RDMA node the env script the engine
+#       sources runs `ip route` / `ip rule`. Prefill's named metrics port is
+#       8000, not 8200: a prefill engine has one port, and the PodMonitor
+#       scrapes by NAME -- without it Prometheus carries no vllm:* series for
+#       prefill and WVA can never price that role.
+#
+#   modelservice.routing.connector: nixlv2, pinned. It is also the harness
+#       default; it is spelled out because the sidecar's flag set and the
+#       chart have to agree (see images below).
+#
+#   images.routingSidecar v0.9.0 and images.routerEndpointPicker v0.11.0,
+#       PINNED, as in the P/D guide. The P/D EPP config below is written for
+#       v0.11.0 (`deciders.prefill`, a declared metrics-data-source): on the
+#       harness default v0.9.0 it does not start, and on a v0.11.0 without the
+#       declared data source every endpoint reads stale and is scored fully
+#       saturated. two-model-shapes runs the harness default EPP, so the EPP
+#       VERSION is a second difference between the two scenarios, not only its
+#       config.
+#
+#   router.epp.pluginsConfigFile: pd-config.yaml, per stack (it lives in
+#       `shared:`, so each stack's EPP gets the same file): the P/D guide's
+#       always-disagg-pd-decider + disagg-profile-handler, with a prefill
+#       profile (prefill-filter) and a decode profile (decode-filter, queue
+#       outranking prefix affinity), and its flowControl block. The
+#       flowControl feature gate is kept -- WVA's demand signal is the EPP
+#       queue. What is NOT taken from the guide: `modelServers.matchLabels`
+#       (`llm-d.ai/guide`, identical on every stack, so each InferencePool
+#       would select the other model's Pods) and `extraServicePorts` (the
+#       epponly sidecar port; this scenario has a real Gateway).
+#
+#   vllmCommon.ucxTls / networkResource / networkNr: the P/D guide's. `rc`
+#       first so a cross-node prefill->decode pair uses RDMA when there is
+#       some; `networkResource: auto` resolves to the node's RDMA device
+#       plugin resource, or to nothing at all where there is none, so it is
+#       safe on a cluster without RDMA (UCX then uses cuda_ipc on one node and
+#       tcp across nodes -- measured at seconds per KV transfer, so expect a
+#       TTFT tail on a cross-node pair there). The guide's Multus
+#       `k8s.v1.cni.cncf.io/networks` annotation is NOT carried: it names a
+#       NetworkAttachmentDefinition that exists on one cluster. Add it per
+#       cluster with `annotations.prefill.pod` / `annotations.decode.pod` if
+#       RDMA needs a secondary network there.
+#
+#   workDir: its own.
+#
+# NOT taken from the P/D guide, deliberately: its engine-cache volume (the
+# harness workload PVC as a compile cache), its startup-probe timing
+# (patch_harness.sh fix 10 sets the same default), its NCCL_* and NIXL debug
+# env (one accelerator per Pod, so no NCCL; the HCA list was one cluster's),
+# and its decode resources (32 CPU / 128Gi for a 32B model). Both roles here
+# take two-model-shapes' decode Pod shape -- 8 CPU, 64Gi, one accelerator --
+# so preflight's placeability arithmetic, which is computed from the decode
+# Pod, is also right for the prefill Pods.
+#
+# THE PEAK DOUBLES. A model is now two roles, each 1..MAX, so the fleet peaks
+# at 2 x (MAX_PREFILL + MAX_DECODE) accelerators; the driver's preflight counts
+# it that way for this scenario. The share arms bound it with the quota anyway.
+#
+# ---------------------------------------------------------------------------
+# What follows is two-model-shapes.yaml's own header, kept with the lines it
+# explains. Where it says "decode-only" or "PREFILL - disabled", read the
+# section above instead.
+#
+# TWO MODELS, DIFFERENT BURST SHAPES -- the standup half.
+#
+# two-model-warm-pool.yaml with two changes: maxModelLen 32768 on both stacks
+# (from 8192), so one model's bursts can be prompt-heavy (20 000 tokens in)
+# while the other's are output-heavy (6000 tokens out), and its own workDir.
+# Both models take 32k natively. hack/check-two-model-scenario.sh holds every
+# other line equal to that scenario's.
+#
+# Driven by hack/benchmark/two_model_pool.sh with BENCH_SPEC=guides/two-model-shapes
+# and a shape per loader (INPUT/OUTPUT_TOKENS, INPUT/OUTPUT_TOKENS_B); the
+# runbook is docs/guides/benchmarking/two-model-utilization-share.md.
+#
+# ---------------------------------------------------------------------------
+# What follows is two-model-warm-pool.yaml's own header, kept with the lines it
+# explains; its runbook pointer and "this file only stands the stacks up" are
+# that scenario's.
+#
+# TWO MODELS, ANTI-PHASE BURSTS, WARM POOL ON AND OFF -- the standup half.
+#
+# Driven by hack/benchmark/two_model_pool.sh; the runbook is
+# docs/guides/benchmarking/two-model-warm-pool.md. This file only stands the two
+# stacks up; the load, the pool and the comparison live there.
+#
+# Why it lives here: llm-d-benchmark/ is gitignored and benchmark-install
+# re-checks it out to a pinned tag, so a spec edited in the clone is invisible
+# to review and gone on the next install. benchmark-scenarios copies this file
+# into the clone before every run. Edit THIS file, never the one in the clone.
+#
+# Base: upstream config/scenarios/examples/multi-model-optimized-baseline.yaml.
+# Deliberate deviations, all of them:
+#
+#   scenario[]: the two 8B models this run compares, in place of the example's
+#       0.6B + 8B pair. They must be COMPARABLE in size, because a pool Pod
+#       holds both and the warm-set budget is one memory limit for the Pod.
+#       Different families on purpose: two sizes of one model share a tokenizer
+#       and a weight layout, and a pool holding "both" would be closer to
+#       holding one.
+#
+#   model.shortName: set on both stacks, and IGNORED -- the harness generates
+#       `{first8}-{sha256(namespace/model)[:8]}-{last8}` regardless. Measured on
+#       a Kubernetes cluster: unsloth/Meta-Llama-3.1-8B-Instruct in a benchmark namespace became
+#       `unsloth--244120d9-instruct`, which shares no substring with the stack
+#       name. It is kept here only as documentation of the intent; nothing may
+#       depend on it. The driver resolves each stack through the shared
+#       HTTPRoute's backendRef instead -- the same table the load's own requests
+#       follow, so what it measures and what it resolves cannot drift.
+#
+#   wva: per stack, with IDENTICAL variantCost. variantCost is what WVA's
+#       solver uses to choose which model to scale when they compete for the
+#       same accelerators; different values would make one model win every
+#       contention, and the report would read that as the pool helping one
+#       model and not the other.
+#
+#   wva.prometheus: REMOVED. This repo's installer resolves the Prometheus URL
+#       from the cluster, so a value here is a second source of truth that
+#       drifts -- and it is the field that matters most to get right: pointed at
+#       a Prometheus that does not scrape this namespace, the controller reads
+#       no metrics, every variant looks idle, and NEITHER arm ever scales. Two
+#       flat runs that agree perfectly and mean nothing.
+#
+#   hpa.maxReplicas: 3, and the driver LOWERS it for the pool arm. Insurance
+#       lowers your maximum fleet, so an arm holding a pool and the same ceiling
+#       is a bigger cluster, not a pool.
+#
+#   router.epp featureGates: [flowControl] -- ADDED, and the example has none.
+#       WVA's arrival-rate and throughput analysis is driven by EPP queue depth,
+#       and that gate is what emits it. Without it `make benchmark-deploy-wva`
+#       refuses to install ("Router queue not enabled"), which is the right
+#       refusal: the controller would otherwise scale on a degraded demand
+#       signal in BOTH arms, measuring something other than what this claims to.
+#
+#   model.maxNumSeq: 32, against a default of 256, and it is what makes this run
+#       scale at all. Measured on an H200: one replica of an 8B model absorbed
+#       40 rps of 1000-token requests without queueing, so neither arm ever
+#       added a replica and there was nothing to compare. See the note at the
+#       key for why it does not bias the comparison.
+#
+#   storage.modelPvc.accessModes: ReadWriteMany -- see the note at the block.
+#
+# The upstream header follows, and everything it says about the topology still
+# applies.
+#
+# MULTI-MODEL OPTIMIZED BASELINE for LLM-D Deployment
+#
+# The optimized-baseline well-lit path
+# ([config/scenarios/guides/optimized-baseline.yaml]), deployed N times
+# behind a single gateway. Each model gets its own EPP + InferencePool +
+# decode Deployment; all of them are reachable through ONE HTTPRoute with
+# N backendRefs. Deploy method is modelservice (the same path the
+# single-model guide uses when `kustomize.enabled: false`).
+#
+# Topology (with N=2; in THIS scenario each stack also has a prefill
+# Deployment beside its decode, selected by the same InferencePool and picked
+# by the EPP's prefill profile):
+#                        +---- Gateway (infra-llmdbench, shared) ------+
+#                        |     HTTPRoute multi-model-route (shared)    |
+#                        |     +-- /qwen3-06b/v1   -> InferencePool A  |
+#                        |     +-- /llama-31-8b/v1 -> InferencePool B  |
+#                        +--------------------------------------------+
+#                              |                          |
+#                      +-------+--------+         +-------+--------+
+#                      | EPP qwen3-06b  |         | EPP llama-31-8b|
+#                      | + InferencePool|         | + InferencePool|
+#                      +-------+--------+         +-------+--------+
+#                              |                          |
+#                      +-------+--------+         +-------+--------+
+#                      | vLLM decode    |         | vLLM decode    |
+#                      +----------------+         +----------------+
+#
+# Architecture:
+#
+#   - `shared:` block holds scenario-wide config (gateway, shared
+#     HTTPRoute, EPP plugin config, Envoy sidecar + InferencePool tuning,
+#     the decode command). It is merged into every stack's values in
+#     render_plans._process_stack BEFORE the per-stack overrides -
+#     per-stack always wins.
+#
+#   - `scenario:` is a list of N stacks. Each gets its own
+#     `{model_id_label}-ms` and `{model_id_label}-router` Helm releases and
+#     its own auto-named download Job. Per-stack blocks carry only
+#     model-specific knobs (model.*, modelservice.decode replicas +
+#     resources).
+#
+#   - Every modelservice-only section (gateway, httpRoute, router, prefill,
+#     decode) is nested under `modelservice:` in BOTH `shared:` and the
+#     stacks, the same way the single-model guides are laid out. The
+#     renderer hoists those sections back to the top level
+#     (`_hoist_modelservice_sections`) after `shared:` and per-stack are
+#     merged, so the nesting is purely an authoring convenience - it
+#     documents that these keys only take effect on the modelservice
+#     deploy path. Sections that are NOT method-specific (accelerator,
+#     model, vllmCommon, storage, harness, workDir) stay at the root.
+#
+# What changed relative to the single-model guide, and why:
+#
+#   - `modelservice.gateway.className: istio`, not `epponly`. `epponly` is
+#     the single-stack "standalone router" topology: it deploys no Gateway,
+#     so a shared HTTPRoute would have no parentRef to attach to. The
+#     renderer rejects `epponly` outright once a scenario has more than one
+#     stack (see `_validate_epponly_constraints` in render_plans.py).
+#
+#   - `modelservice.router.extraServicePorts` is dropped. In the guide it
+#     exists only to expose the `epponly` Envoy sidecar (port 80 -> 8081)
+#     directly to clients; with a real Gateway in front, clients go through
+#     the HTTPRoute instead.
+#
+#   - `modelservice.router.modelServers.matchLabels` is dropped. The guide
+#     pins it to `llm-d.ai/guide: optimized-baseline`, a label that is
+#     identical on every stack's decode pods - both InferencePools would
+#     select each other's pods. Leaving it unset lets
+#     `_normalize_router_block` derive a per-stack selector
+#     (`llm-d.ai/model: {model_id_label}`) instead.
+#
+#   - `kustomize` is left at its default (disabled) and is not configured
+#     here. The kustomize deploy path applies the upstream guide manifests
+#     keyed on `guideName` with no per-stack uniquification, so N stacks
+#     would collide. This scenario is modelservice-only.
+#
+#   - `storage.modelPvc.size` is 100Gi rather than the guide's 1Ti: sized
+#     for the sum of the two example models below, not for Qwen3-32B.
+#
+# Everything else - the EPP scheduling profile, the Envoy sidecar args and
+# resources, the InferencePool connection-pool limits, the HTTPRoute
+# timeouts, the decode `customCommand`, the preprocess init container - is
+# carried over from the guide verbatim.
+#
+# Stack naming convention:
+#
+#   Stack `name` values double as path prefixes in the shared HTTPRoute
+#   (`/{stack.name}/v1/...`). Pick short descriptive names that identify
+#   the model family + size (e.g. `qwen3-06b`, `llama-31-8b`) rather than
+#   opaque labels (`pool-a`). Keep them lowercase and URL-safe; no hard
+#   k8s limit on the name itself, but conventionally <=30 chars.
+#   `--list-endpoints` prints the rendered URLs so users rarely have to
+#   type these manually.
+#
+# Based on:
+#   https://github.com/llm-d/llm-d/tree/main/guides/optimized-baseline
+#
+# Running:
+#
+#   llmdbenchmark --spec examples/multi-model-optimized-baseline standup -p <namespace>
+#
+# To add a third model: copy one of the stack blocks, give it a unique
+# short descriptive `name` and a unique `model.*`. The parser auto-derives
+# unique `downloadJob.name` and `router.monitoring.secretName` values from
+# the model ID label, so nothing else needs per-stack customization. Grow
+# `shared.storage.modelPvc.size` to cover the extra weights.
+#
+# Before editing, two things worth knowing:
+#
+#   - Pick ONE spelling per section across `shared:` and the stacks. This
+#     file uses the nested `modelservice.<section>` form everywhere; the
+#     hoist runs AFTER `shared:` and per-stack are merged, so mixing forms
+#     inverts precedence - a stack's flat `decode:` would be silently
+#     beaten by `shared.modelservice.decode`.
+#
+#   - DoE treatments and `--set` overrides still target the TOP-LEVEL
+#     dotted paths (`decode.replicas`, `router.epp.*`), not the nested
+#     `modelservice.*` spelling: the hoist runs before setup overrides are
+#     merged, so a treatment always lands on top of the scenario value.
+#     Those treatments (from experiments/optimized-baseline.yaml) are
+#     unscoped, so they apply to EVERY stack: a sweep that sets
+#     `decode.replicas` or `parallelism.tensor` multiplies across pools.
+#     Scope them with a `stack:` prefix, or budget accelerators for the
+#     sum of all stacks.
+
+# ============================================================================
+# SHARED - applied to every stack before per-stack overrides
+# ============================================================================
+shared:
+  # --------------------------------------------------------------------------
+  # ACCELERATOR - detect the device-plugin resource and select the matching
+  # machine profile. Explicit accelerator settings supplied by the user
+  # still win.
+  # --------------------------------------------------------------------------
+  accelerator:
+    profile: auto
+    resource: auto
+
+  # --------------------------------------------------------------------------
+  # IMAGES - the P/D pair, pinned together. The routing sidecar and the
+  # modelservice chart have to agree on the sidecar's CLI flags, and they are
+  # pinned SEPARATELY: hack/benchmark/patch_harness.sh pins the chart to the
+  # version that renders --vllm-port/--connector, and v0.9.0 is the sidecar
+  # that takes those flags. Move both pins together or neither.
+  #
+  # The EPP is v0.11.0 because pd-config.yaml below is written for it:
+  # `deciders.prefill` (v0.9.0 had `deciderPluginName`) and a DECLARED
+  # metrics-data-source (v0.11.0's auto-created one does not reach the
+  # engines; every endpoint then reads stale and is scored fully saturated).
+  # See docs/reference/router-configuration.md and pd-disaggregation.yaml.
+  # --------------------------------------------------------------------------
+  images:
+    routingSidecar:
+      tag: v0.9.0
+    routerEndpointPicker:
+      tag: v0.11.0
+
+  # --------------------------------------------------------------------------
+  # SCRAPE - 10s, for the vllm-<model> PodMonitors the harness renders for
+  # both stacks (template 18_podmonitor reads THIS key; this scenario leaves
+  # decode.monitoring.podmonitor to the chart's default). The scale-up signal
+  # is a queue at the engine and moves only when Prometheus holds a sample
+  # that shows it, so 30s is 0-30s of jitter on every scaling decision.
+  # Measured on the anti-phase run: decision lags 25/56/56/87s at 30s,
+  # 15/60/60/76s at 10s -- the jitter goes; the queue's own formation time
+  # does not. The pool PodMonitor is 10s too (deploy/warmpool.sh), so pool and
+  # models are read alike. Every number on the measured page was taken at 10s.
+  # --------------------------------------------------------------------------
+  monitoring:
+    scrapeInterval: "10s"
+
+  # -------------------------------------------------------------------------
+  # Affinity / Node Selection
+  # By default, affinity is disabled and pods schedule on any available node.
+  # Options:
+  #   1. Leave commented out -- no node selection constraint
+  #   2. Set nodeSelector to "auto" -- auto-detects GPU labels from the cluster
+  #   3. Set explicit labels -- pods only schedule on matching nodes
+  # -------------------------------------------------------------------------
+  # affinity:
+  #   enabled: true
+  #   nodeSelector:
+  #     nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3      # OpenShift
+  #     # gpu.nvidia.com/model: H200                        # Kubernetes
+  #     # cloud.google.com/gke-accelerator: nvidia-h100-80gb  # GKE
+
+  # --------------------------------------------------------------------------
+  # VLLM COMMON - same across pools. Individual settings can be overridden
+  # per-stack below if a specific model needs different tuning.
+  # --------------------------------------------------------------------------
+  vllmCommon:
+    #      priorityClassName: nightly-gpu-critical
+    # The KV handoff's transport. `rc` (RDMA) first, so a prefill and a decode
+    # Pod on DIFFERENT nodes hand KV over RDMA where the cluster has it; without
+    # it UCX falls back to tcp across nodes, measured at seconds per transfer.
+    # `networkResource: auto` resolves to the node's RDMA device-plugin
+    # resource, or is cleared when there is none -- so this is safe on a
+    # cluster without RDMA. A cluster that also needs a Multus secondary
+    # network for RDMA wants `annotations.{prefill,decode}.pod` set for it;
+    # that names a cluster's own NetworkAttachmentDefinition, so it is not
+    # set here.
+    ucxTls: "rc,sm,cuda_ipc,cuda_copy,tcp"
+    networkResource: "auto"
+    networkNr: "1"
+
+    volumes:
+      - name: shared-config
+        type: emptyDir
+        emptyDir: {}
+      - name: dshm
+        type: emptyDir
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+
+    volumeMounts:
+      - name: dshm
+        mountPath: /dev/shm
+      - name: shared-config
+        mountPath: /shared-config
+
+  # --------------------------------------------------------------------------
+  # STORAGE - ONE shared model PVC for the whole scenario.
+  # Every stack's weights live in a distinct subdirectory
+  # (`{modelPvc.mountPath}/{model.path}`) on the same volume, which is the
+  # right shape for NVMe / local-directory-backed storage classes and for
+  # reusing cached weights across runs. Size it for the sum of all models
+  # this scenario will ever load.
+  # --------------------------------------------------------------------------
+  storage:
+    modelPvc:
+      size: 100Gi
+      # ReadWriteMany, explicitly. Without it the claim takes whatever the
+      # cluster default StorageClass gives, and a default of RWO block storage
+      # binds the cache to ONE NODE -- so the second replica of either model
+      # cannot mount it and never schedules. That does not fail the standup; it
+      # fails the scale-up, which is the thing this run exists to measure.
+      # Twice as true here: every model now has two Deployments reading it.
+      accessModes:
+        - ReadWriteMany
+
+  # --------------------------------------------------------------------------
+  # HARNESS + WORKDIR - harness is single-instance per scenario, so it
+  # lives in `shared` (the workload PVC it writes to is scenario-wide).
+  # --------------------------------------------------------------------------
+  workDir: "~/data/two-model-shapes-pd"
+  harness:
+    name: inference-perf
+    experimentProfile: shared_prefix_synthetic.yaml
+
+  # --------------------------------------------------------------------------
+  # DEPLOYMENT METHOD - this scenario is modelservice-only.
+  # --------------------------------------------------------------------------
+  standalone:
+    enabled: false
+
+  # ==========================================================================
+  # MODELSERVICE -- Only applies when modelservice.enabled: true
+  # The following sections configure the llm-d modelservice Helm chart
+  # deployment including decode pods, prefill pods, router, and gateway.
+  # ==========================================================================
+  modelservice:
+    enabled: true
+
+    # Pinned explicitly: this scenario is multi-stack, and `epponly` (what
+    # the single-model guide uses) is single-stack only -- it has no shared
+    # Gateway / HTTPRoute to multiplex several models behind one address.
+    gateway:
+      className: istio
+
+    # ------------------------------------------------------------------------
+    # ROUTING - the P/D KV connector the decode Pod's routing sidecar speaks
+    # to its prefill peer. nixlv2 is also the harness default; it is pinned
+    # here because the sidecar image above and this flag move together.
+    # ------------------------------------------------------------------------
+    routing:
+      connector: nixlv2
+
+    # ------------------------------------------------------------------------
+    # HTTPROUTE - one shared route with N URLRewrite rules, one per stack.
+    # Emitted only in the first stack's render (stackIndex == 1). Other stacks
+    # render an empty 08_httproute.yaml (step_09 skips empty files).
+    #
+    # pathPrefix is the whole client-side path segment; the gateway rewrites
+    # it to rewriteTo before the upstream pod sees the request. We route on
+    # `/{stack.name}` (e.g. `/qwen3-06b`) rather than `/{stack.name}/v1` so
+    # the smoketest can probe both `/{stack.name}/health` and
+    # `/{stack.name}/v1/models` - the vLLM `/health` endpoint lives at the
+    # root, not under `/v1`, and a narrower prefix would not match it.
+    #
+    # requestTimeout: end-to-end Gateway-API HTTPRoute timeout the istio
+    # gateway enforces per request. Long agentic turns that exceed it are
+    # aborted by the gateway with a 502 (surfaces as "connection reset by
+    # peer" on the decode routing-proxy loopback hop). Set "0s" to disable.
+    # ------------------------------------------------------------------------
+    httpRoute:
+      mode: shared
+      name: multi-model-route
+      pathPrefix: /{stack.name}
+      rewriteTo: /
+      requestTimeout: "300s"
+      backendRequestTimeout: "0s"
+
+    # ------------------------------------------------------------------------
+    # ROUTING / GAIE - the P/D guide's EPP config and the shared transport
+    # tuning, applied identically to every pool: each stack renders its OWN
+    # EPP from this, with its own pd-config.yaml ConfigMap.
+    # `modelServers.matchLabels` is deliberately NOT set here so each stack
+    # gets its own pod selector -- and that selector, `llm-d.ai/model`, is on
+    # the prefill Pods as well as the decode Pods, which is how one
+    # InferencePool holds both roles of ONE model and the prefill-filter /
+    # decode-filter split them by `llm-d.ai/role`.
+    # ------------------------------------------------------------------------
+    router:
+      epp:
+        replicas: 1
+        flags:
+          v: 2
+        pluginsConfigFile: "pd-config.yaml"
+        pluginsCustomConfig:
+          pd-config.yaml: |
+            apiVersion: llm-d.ai/v1alpha1
+            kind: EndpointPickerConfig
+            # WVA's arrival-rate and throughput analysis is driven by EPP
+            # QUEUE DEPTH, and the flowControl gate is what emits it. Without
+            # it `make benchmark-deploy-wva` REFUSES to install ("Router queue
+            # not enabled").
+            featureGates:
+            - flowControl
+            # The P/D guide's config for EPP v0.11.0 (pd-disaggregation.yaml
+            # has the migration notes): every request is disaggregated, the
+            # prefill profile picks a prefill Pod and the decode profile a
+            # decode Pod. A broken split does not crash -- it routes
+            # everything to one role and the run still looks plausible -- so
+            # check both roles' request counters move after a standup.
+            plugins:
+            - type: always-disagg-pd-decider
+            - type: disagg-profile-handler
+              parameters:
+                deciders:
+                  prefill: always-disagg-pd-decider
+            - type: prefill-filter
+            - type: decode-filter
+            - type: prefix-cache-scorer
+            - type: queue-scorer
+            - type: kv-cache-utilization-scorer
+            - type: active-request-scorer
+            - type: metrics-data-source
+              parameters:
+                scheme: "http"
+                path: "/metrics"
+                insecureSkipVerify: true
+            - type: core-metrics-extractor
+            flowControl:
+              # Saturated regime: endpoints exist and are busy.
+              defaultRequestTTL: 30s
+              # Empty-pool regime (scale-from-zero). This scenario never goes
+              # to zero; kept as the P/D guide sets it.
+              noEndpointRequestTTL: 180s
+              priorityBands:
+                - priority: 0
+                  maxRequests: 2000
+                  maxBytes: 1Gi
+            schedulingProfiles:
+            - name: prefill
+              plugins:
+              - pluginRef: prefill-filter
+              - pluginRef: prefix-cache-scorer
+                weight: 3
+              - pluginRef: queue-scorer
+                weight: 2
+              - pluginRef: kv-cache-utilization-scorer
+                weight: 2
+            - name: decode
+              plugins:
+              - pluginRef: decode-filter
+              # LOAD DECIDES, prefix affinity only breaks ties -- see the
+              # P/D guide: with prefix 3 against active-request 2, one decode
+              # replica held 99.3% of the running requests while 80% sat at
+              # zero. Queue outranks active-requests because preemption moves
+              # a request out of running, so a thrashing Pod reads idlest.
+              - pluginRef: queue-scorer
+                weight: 4
+              - pluginRef: active-request-scorer
+                weight: 2
+              - pluginRef: kv-cache-utilization-scorer
+                weight: 2
+              - pluginRef: prefix-cache-scorer
+                weight: 1
+        resources:
+          requests:
+            cpu: "4"
+            memory: 8Gi
+          limits:
+            memory: 16Gi
+      proxy:
+        # CLI args for the Envoy sidecar. Override the chart's defaults of
+        # `--log-level trace` (very expensive under load) and no `--concurrency`
+        # (Envoy spawns ~hardware_concurrency() worker threads, oversubscribing
+        # the cgroup's CPU slice). `--concurrency 8` matches the resources.limits
+        # equivalent below; trace-level logging would burn a meaningful share of
+        # the sidecar's CPU at high QPS.
+        args:
+          - "--service-node"
+          - "envoy-sidecar"
+          - "--log-level"
+          - "warn"
+          - "--concurrency"
+          - "8"
+          - "--drain-strategy"
+          - "immediate"
+          - "--drain-time-s"
+          - "60"
+          - "-c"
+          - "/etc/envoy/envoy.yaml"
+        # Resource requests and limits for the Envoy sidecar.
+        resources:
+          requests:
+            cpu: "4"
+            memory: 8Gi
+          limits:
+            memory: 16Gi
+      modelServers:
+        # NOTE: `matchLabels` is deliberately absent - see the header. Setting it
+        # here would stop `_normalize_router_block` from deriving the per-stack
+        # `llm-d.ai/model` selector, and every InferencePool would then select
+        # every stack's prefill and decode pods.
+        protocol: http
+      inferencePool:
+        failureMode: "FailOpen"
+        providerConfig:
+          destinationRule:
+            trafficPolicy:
+              connectionPool:
+                http:
+                  http1MaxPendingRequests: 256000
+                  maxRequestsPerConnection: 256000
+                  http2MaxRequests: 256000
+                  idleTimeout: "900s"
+                tcp:
+                  maxConnections: 256000
+                  maxConnectionDuration: "1800s"
+                  connectTimeout: "900s"
+      tracing:
+        otelExporterEndpoint: "http://localhost:4317"
+        sampling:
+          sampler: "parentbased_traceidratio"
+          samplerArg: "0.1"
+
+    # ------------------------------------------------------------------------
+    # PREFILL defaults shared across pools. `replicas` and `resources` are
+    # per-model sizing and live in each stack below, as decode's do.
+    # ------------------------------------------------------------------------
+    prefill:
+      enabled: true
+      vllm:
+        # The P/D guide's prefill command. vLLM on $VLLM_INFERENCE_PORT (8000):
+        # the chart puts no routing sidecar on a prefill Pod, and the decode
+        # Pod's sidecar calls this port. --max-num-batched-tokens is hardcoded
+        # because $VLLM_MAX_NUM_BATCHED_TOKENS defaults to 256, which caps a
+        # prefill-only engine's per-step progress at 256 tokens -- a 20 000-token
+        # prompt would take 79 steps for no reason but the cap.
+        customCommand: |
+          ${accelerator.runtimePreamble}
+          . /shared-config/llmdbench_env.sh
+          vllm serve /model-cache/$MODEL_PATH \
+          --host 0.0.0.0 \
+          --served-model-name $MODEL_NAME \
+          --port $VLLM_INFERENCE_PORT \
+          ${accelerator.blockSizeArgs} \
+          --max-model-len $VLLM_MAX_MODEL_LEN \
+          --max-num-seq $VLLM_MAX_NUM_SEQ \
+          --max-num-batched-tokens 65536 \
+          --tensor-parallel-size $TP_SIZE \
+          ${accelerator.memoryUtilizationArgs} \
+          --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both"${accelerator.kvBufferDeviceJson}}' \
+          --no-enable-log-requests \
+          --disable-uvicorn-access-log \
+          --disable-access-log-for-endpoints=/health,/metrics,/v1/models \
+          --no-enable-prefix-caching \
+          ${accelerator.dtypeArgs} \
+          ${accelerator.executionArgs} \
+          --no-disable-hybrid-kv-cache-manager
+
+      initContainers:
+        - name: preprocess
+          imageKey: benchmark
+          imagePullPolicy: Always
+          # The P/D guide's preprocess. The generated env script starts with two
+          # apt-get installs: iproute2 for the `ip route/rule` lines it emits on
+          # a multi-NIC RDMA node, infiniband-diags for nothing the engine runs.
+          # The engine SOURCES that script (see customCommand), so on a node
+          # that needs neither they are 71 s of every start, measured. iproute2
+          # stays whenever the script uses it. The cache-dir guard is inert here
+          # (no engine-cache variables are set) and kept so this block stays
+          # the guide's.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set_llmdbench_environment.py -e /shared-config/llmdbench_env.sh -i || exit $?
+              f=/shared-config/llmdbench_env.sh
+              sed -i '/^which ibstat$/,/^fi$/d' "$f"
+              if ! grep -qE '^ip (route|rule) ' "$f"; then
+                sed -i '/^which ip$/,/^fi$/d' "$f"
+              fi
+              grep -c apt-get "$f" | sed 's/^/preprocess: apt-get lines left in llmdbench_env.sh: /'
+              echo >> "$f"  # the generator leaves no trailing newline
+              cat >> "$f" <<'EOF'
+              for v in VLLM_CACHE_ROOT FLASHINFER_WORKSPACE_DIR TRITON_CACHE_DIR; do
+                # neither a doubled dollar nor a dollar-paren in here: Kubernetes rewrites both in a container command
+                eval "d=\${$v}"
+                [ -n "$d" ] || continue
+                if ! mkdir -p "$d" 2>/dev/null || ! touch "$d/.writable" 2>/dev/null; then
+                  echo "engine cache $v=$d is not writable; using the engine default instead"
+                  unset $v
+                fi
+              done
+              EOF
+          volumeMounts:
+            - name: shared-config
+              mountPath: /shared-config
+
+      parallelism:
+        tensor: 1
+        data: 1
+        dataLocal: 1
+        workers: 1
+
+      extraEnvVars: []
+
+      extraContainerConfig:
+        # The PodMonitor scrapes by port NAME. A prefill engine has ONE port,
+        # 8000, so that is where `metrics` points -- not decode's 8200. Without
+        # the name Prometheus carries no vllm:* series for prefill, silently,
+        # and WVA can never price that role.
+        ports:
+          - containerPort: 5557  # NIXL side channel port
+            protocol: TCP
+          - containerPort: 8000  # Metrics port (prefill has no separate one)
+            name: metrics
+            protocol: TCP
+        securityContext:
+          capabilities:
+            add:
+              - "IPC_LOCK"
+              - "SYS_RAWIO"
+              - "NET_ADMIN"
+              - "NET_RAW"
+          runAsGroup: 0
+          runAsUser: 0
+        # IfNotPresent, not Always: the engine tag is pinned, and Always contacts the
+        # registry at every pod start for a digest that cannot have changed.
+        imagePullPolicy: IfNotPresent
+
+      additionalVolumeMounts: []
+      additionalVolumes: []
+
+    # ------------------------------------------------------------------------
+    # DECODE defaults shared across pools. `replicas` and `resources` are
+    # per-model sizing and live in each stack below.
+    # ------------------------------------------------------------------------
+    decode:
+      extraContainerConfig:
+        ports:
+          - containerPort: 5557  # NIXL side channel port
+            protocol: TCP
+          - containerPort: 8200  # Metrics port
+            name: metrics
+            protocol: TCP
+        securityContext:
+          capabilities:
+            add:
+              - "IPC_LOCK"
+              - "SYS_RAWIO"
+              - "NET_ADMIN"
+              - "NET_RAW"
+          runAsGroup: 0
+          runAsUser: 0
+        # IfNotPresent, not Always: the engine tag is pinned, and Always contacts the
+        # registry at every pod start -- a second when it answers, a failed start
+        # when it does not -- for a digest that cannot have changed. Pre-pull the
+        # image on the accelerator nodes with `make prepull` and the start never
+        # waits on the registry at all.
+        imagePullPolicy: IfNotPresent
+
+      vllm:
+        # The P/D guide's decode command: vLLM on $VLLM_METRICS_PORT (8200)
+        # behind the routing sidecar on 8000, the same NixlConnector config as
+        # prefill, and --max-num-batched-tokens 8192 rather than the harness's
+        # 256. `${accelerator.*}` fragments and `$MODEL_PATH` / `$MODEL_NAME` /
+        # `$VLLM_*` are resolved per stack, so this one command string is
+        # correct for every model.
+        customCommand: |
+          ${accelerator.runtimePreamble}
+          . /shared-config/llmdbench_env.sh
+          vllm serve /model-cache/$MODEL_PATH \
+          --host 0.0.0.0 \
+          --served-model-name $MODEL_NAME \
+          --port $VLLM_METRICS_PORT \
+          ${accelerator.blockSizeArgs} \
+          --max-model-len $VLLM_MAX_MODEL_LEN \
+          --max-num-seq $VLLM_MAX_NUM_SEQ \
+          --max-num-batched-tokens 8192 \
+          --tensor-parallel-size $TP_SIZE \
+          ${accelerator.memoryUtilizationArgs} \
+          --kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_both"${accelerator.kvBufferDeviceJson}}' \
+          --no-enable-log-requests \
+          --disable-uvicorn-access-log \
+          --disable-access-log-for-endpoints=/health,/metrics,/v1/models \
+          --no-enable-prefix-caching \
+          ${accelerator.dtypeArgs} \
+          ${accelerator.executionArgs} \
+          --no-disable-hybrid-kv-cache-manager
+
+      initContainers:
+        - name: preprocess
+          imageKey: benchmark
+          imagePullPolicy: Always
+          # Same as prefill's, same reason.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set_llmdbench_environment.py -e /shared-config/llmdbench_env.sh -i || exit $?
+              f=/shared-config/llmdbench_env.sh
+              sed -i '/^which ibstat$/,/^fi$/d' "$f"
+              if ! grep -qE '^ip (route|rule) ' "$f"; then
+                sed -i '/^which ip$/,/^fi$/d' "$f"
+              fi
+              grep -c apt-get "$f" | sed 's/^/preprocess: apt-get lines left in llmdbench_env.sh: /'
+              echo >> "$f"  # the generator leaves no trailing newline
+              cat >> "$f" <<'EOF'
+              for v in VLLM_CACHE_ROOT FLASHINFER_WORKSPACE_DIR TRITON_CACHE_DIR; do
+                # neither a doubled dollar nor a dollar-paren in here: Kubernetes rewrites both in a container command
+                eval "d=\${$v}"
+                [ -n "$d" ] || continue
+                if ! mkdir -p "$d" 2>/dev/null || ! touch "$d/.writable" 2>/dev/null; then
+                  echo "engine cache $v=$d is not writable; using the engine default instead"
+                  unset $v
+                fi
+              done
+              EOF
+          volumeMounts:
+            - name: shared-config
+              mountPath: /shared-config
+
+      parallelism:
+        tensor: 1
+        data: 1
+        dataLocal: 1
+        workers: 1
+
+      # ----------------------------------------------------------------------
+      # Extra Environment Variables
+      # No custom env vars for this scenario -- uses default ENVVARS_TO_YAML
+      # mechanism. Auto-populated vars (UCX_TLS, VLLM_NIXL_*, etc.) are set
+      # by the preprocess script at pod runtime.
+      # ----------------------------------------------------------------------
+      extraEnvVars: []
+
+      # ----------------------------------------------------------------------
+      # Additional Volume Mounts
+      # ----------------------------------------------------------------------
+      additionalVolumeMounts: []
+
+      # ----------------------------------------------------------------------
+      # Additional Volumes
+      # ----------------------------------------------------------------------
+      additionalVolumes: []
+
+
+# ============================================================================
+scenario:
+  # --------------------------------------------------------------------------
+  # LLAMA-31-8B -- unsloth/Meta-Llama-3.1-8B-Instruct
+  #
+  # The stack `name` is the PATH PREFIX the shared HTTPRoute routes on
+  # (`/llama-31-8b/v1/...`), and hack/benchmark/two_model_pool.sh builds the
+  # loader's endpoint from it -- so STACK_A there and this name are one fact
+  # written twice, and `verify` fails loudly rather than quietly if they drift.
+  #
+  # `model.shortName` is PINNED rather than derived. Left out, the harness
+  # generates `{first8}-{sha256(namespace/model)[:8]}-{last8}`, which is
+  # namespace-dependent and unguessable -- and every object in the stack is
+  # named after it, so nothing outside the harness could find the decode
+  # Deployment without reproducing that hash.
+  # --------------------------------------------------------------------------
+  - name: "llama-31-8b"
+
+    model:
+      name: unsloth/Meta-Llama-3.1-8B-Instruct
+      shortName: llama-31-8b
+      path: models/unsloth/Meta-Llama-3.1-8B-Instruct
+      huggingfaceId: unsloth/Meta-Llama-3.1-8B-Instruct
+      size: 32Gi
+      maxModelLen: 32768
+      blockSize: 64
+      gpuMemoryUtilization: 0.90
+      # THE CONCURRENCY CEILING PER REPLICA, and the reason this run scales
+      # at all. The default is 256: measured on an H200, one replica of an 8B
+      # model absorbed 40 rps of 1000-token requests without queueing, so
+      # NEITHER arm ever added a replica and the comparison had nothing to
+      # compare. A fleet that never scales cannot show a bridge.
+      #
+      # 32 is a normal production value -- operators cap concurrency to
+      # protect TTFT -- and it does not bias pool against nopool: what a pool
+      # bridges is a MODEL LOAD, whose cost is fixed by the weights and the
+      # storage, not by how many sequences a replica will batch. This changes
+      # when a scale-up is triggered, not how long the new replica takes to
+      # arrive, and it changes it identically in both arms.
+      #
+      # It applies to BOTH roles: prefill and decode read the same
+      # $VLLM_MAX_NUM_SEQ.
+      maxNumSeq: 32
+
+    modelservice:
+      # One prefill Pod to start, the same shape as decode's (see the header:
+      # preflight's placeability is computed from the decode Pod).
+      prefill:
+        replicas: 1
+        resources:
+          limits:
+            memory: 64Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+          requests:
+            memory: 64Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+      decode:
+        replicas: 1
+        # 8 CPU, not 16. FREE ACCELERATORS ARE NOT PLACEABLE ACCELERATORS, and
+        # 16 made most of this cluster's spare accelerators unusable: measured
+        # on a Kubernetes cluster, of 16 free accelerators only FOUR sat on a node with 16
+        # spare cores -- the rest had 7 and 15. A 90-minute A/B was voided by
+        # it. The nopool arm's Deployments scaled to 3 within four minutes of
+        # the first burst and never had more than ONE replica Available,
+        # because the other two could not be placed; the pool arm ran an hour
+        # later, got everything, and the comparison was between two different
+        # fleets.
+        #
+        # At 8 the same cluster takes 6 Pods, which is this run's peak, and at
+        # 16 it took 4. Nothing about the measurement changes: 8 cores is ample
+        # for an 8B model at 9 rps with maxNumSeq 32 -- the CPU goes on
+        # tokenization, detokenization and the API server, not the forward pass
+        # -- and whatever it costs, it costs both arms identically.
+        resources:
+          limits:
+            memory: 64Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+          requests:
+            memory: 64Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+
+    # The two stacks MUST price the same. variantCost is what WVA's solver uses
+    # to decide which model to scale when they compete for the same GPUs, and a
+    # difference here would make one model win every contention -- which the
+    # report would read as the pool helping one model and not the other.
+    wva:
+      enabled: true
+      wellLitPath: optimized-baseline
+      namespace: ""
+      image:
+        repository: ghcr.io/ev-shindin/llm-scaling-manager
+        tag: main
+      replicaCount: 1
+      controller:
+        enabled: true
+      namespaceScoped: true
+      metrics:
+        enabled: true
+        port: 8443
+        secure: true
+      # NO prometheus block, deliberately. This repo's installer RESOLVES the
+      # Prometheus URL from the cluster (deploy/lib/infra_monitoring.sh: the
+      # `prometheus-operated` Service of whichever Prometheus CR it finds,
+      # with the scheme taken from the CR rather than the port number), and a
+      # value here would be a second source of truth that drifts. It is also
+      # the field that matters most to get right: pointed at a Prometheus that
+      # does not scrape this namespace, the controller reads no metrics, every
+      # variant looks idle, and NEITHER arm ever scales -- two flat runs that
+      # agree perfectly and mean nothing. `verify` checks the controller is
+      # actually reading, rather than trusting either source.
+      variantAutoscaling:
+        variantCost: "10.0"
+      hpa:
+        enabled: true
+        minReplicas: 1
+        maxReplicas: 3
+        targetAvgValue: 1
+        behavior:
+          scaleUp:
+            stabilizationWindowSeconds: 0
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 5
+          scaleDown:
+            stabilizationWindowSeconds: 300
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 120
+
+  # --------------------------------------------------------------------------
+  # QWEN3-8B -- Qwen/Qwen3-8B
+  #
+  # A different family on purpose. Two sizes of the same model would share a
+  # tokenizer and a weight layout, and a pool that held "both" would be closer
+  # to holding one -- which is not the claim being tested.
+  # --------------------------------------------------------------------------
+  - name: "qwen3-8b"
+
+    model:
+      name: Qwen/Qwen3-8B
+      shortName: qwen3-8b
+      path: models/Qwen/Qwen3-8B
+      huggingfaceId: Qwen/Qwen3-8B
+      size: 32Gi
+      maxModelLen: 32768
+      blockSize: 64
+      gpuMemoryUtilization: 0.90
+      # THE CONCURRENCY CEILING PER REPLICA -- see the note on the first stack.
+      maxNumSeq: 32
+
+    modelservice:
+      prefill:
+        replicas: 1
+        resources:
+          limits:
+            memory: 64Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+          requests:
+            memory: 64Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+      decode:
+        replicas: 1
+        resources:
+          limits:
+            memory: 64Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+          requests:
+            memory: 64Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+
+    wva:
+      enabled: true
+      wellLitPath: optimized-baseline
+      namespace: ""
+      image:
+        repository: ghcr.io/ev-shindin/llm-scaling-manager
+        tag: main
+      replicaCount: 1
+      controller:
+        enabled: true
+      namespaceScoped: true
+      metrics:
+        enabled: true
+        port: 8443
+        secure: true
+      # NO prometheus block, deliberately -- see the first stack.
+      variantAutoscaling:
+        variantCost: "10.0"
+      hpa:
+        enabled: true
+        minReplicas: 1
+        maxReplicas: 3
+        targetAvgValue: 1
+        behavior:
+          scaleUp:
+            stabilizationWindowSeconds: 0
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 5
+          scaleDown:
+            stabilizationWindowSeconds: 300
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 120
