@@ -302,7 +302,14 @@ func EvaluateShare(roles []ShareRole, committed map[string]int, thresholds map[s
 		if r.Need > 0 {
 			v.Headroom = float64(c)/r.Need - 1
 		}
-		v.InBand = ShareInBand(float64(c), v.Continuous, r, tolerance, thresholds[r.Key])
+		// Below its need, a role is never in band while its target covers
+		// that need: it runs past its scale-up threshold, which today's
+		// optimizer would answer with a replica. The band is never narrower
+		// than half a replica, so for whole-node replicas it would otherwise
+		// hide a shortfall of up to four GPUs -- 8 held against 8.5 needed,
+		// target 11.7 -- and the role would never be actionable.
+		belowNeed := float64(c) < r.Need && v.Continuous >= r.Need
+		v.InBand = !belowNeed && ShareInBand(float64(c), v.Continuous, r, tolerance, thresholds[r.Key])
 		v.Actionable = !v.InBand && c != v.Integer
 		if short := v.Integer - c; short > 0 {
 			ev.ReplicasToMove += short / max(r.ReplicaGPUs, 1)

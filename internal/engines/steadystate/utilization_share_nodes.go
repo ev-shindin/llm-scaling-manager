@@ -202,6 +202,11 @@ func shareFreeNodes(snap map[string]decision.NodeGPU, accelerator string, reserv
 			nodes[name] = allocation.ShareNode{Free: n.Free(), Labels: n.Labels}
 		}
 	}
+	// The reserved GPUs are taken in one piece from the freest node, then the
+	// next: they are the holes promised transfers opened, whole nodes for
+	// whole-node pods. Taken a GPU at a time across nodes, eight promised over
+	// two free 8-GPU nodes would leave four on each, and a genuinely free node
+	// would stop being placeable until the promise landed.
 	for reserved > 0 {
 		most := ""
 		for name, n := range nodes {
@@ -213,9 +218,10 @@ func shareFreeNodes(snap map[string]decision.NodeGPU, accelerator string, reserv
 			break
 		}
 		n := nodes[most]
-		n.Free--
+		take := min(n.Free, reserved)
+		n.Free -= take
 		nodes[most] = n
-		reserved--
+		reserved -= take
 	}
 	return nodes
 }

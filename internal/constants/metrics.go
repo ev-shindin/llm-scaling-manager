@@ -637,6 +637,8 @@ var (
 		ScalingBlockedTransferLimit,
 		ScalingBlockedDonorNotSteerable,
 		ScalingBlockedQuietPeriod,
+		ScalingBlockedMarksUnreadable,
+		ScalingBlockedWholeReplicaShort,
 	}
 )
 
@@ -648,6 +650,17 @@ const (
 	// starting to act: every planned model holds what it runs for one fill
 	// timeout, so none scales, up or down.
 	ScalingBlockedQuietPeriod = "quiet-period"
+	// ScalingBlockedMarksUnreadable indicates the controller cannot read the
+	// transfer marks on the group's donor pods, so it cannot start the group's
+	// ledger: every planned model holds what it runs until it can. Unlike the
+	// quiet period it does not clear by itself -- the Error log line
+	// "could not read transfer marks" names the cause.
+	ScalingBlockedMarksUnreadable = "marks-unreadable"
+	// ScalingBlockedWholeReplicaShort indicates the role holds less than its
+	// need although the needs add up to less than the quota: whole replicas
+	// cannot give every role its need (each need rounded up to its replica
+	// size does not fit), so moves go to whichever role is worse off.
+	ScalingBlockedWholeReplicaShort = "whole-replica-short"
 	// ScalingBlockedAwaitingRelease indicates the role receives a transfer
 	// whose donor has not released its GPUs yet.
 	ScalingBlockedAwaitingRelease = "awaiting-release"

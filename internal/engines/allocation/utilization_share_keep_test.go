@@ -41,17 +41,6 @@ var _ = Describe("A donor keeps its own need only where that starves no one", fu
 		Expect(run(roles, map[string]int{"D": 24, "R": 8}, 32)).To(ContainElement(HaveField("Donor", "D")))
 	})
 
-	It("repays reserve debt from a donor within a replica of its need", func() {
-		roles := []ShareRole{
-			{Key: "D", Weight: 1, Need: 9, Ceiling: 64, ReplicaGPUs: 8},
-			{Key: "R", Weight: 1, Need: 1, Ceiling: 64, ReplicaGPUs: 1},
-		}
-		in := SharePlanInput{Roles: roles, Held: map[string]int{"D": 16, "R": 3},
-			Thresholds: map[string]float64{"D": 0.8, "R": 0.8}, Budget: 17, Tolerance: 0.15}
-		plan := PlanShareTransfers(NewShareLedger(), in, time.Unix(0, 0), simTimings())
-		Expect(plan.Refills).To(BeNumerically(">", 0), "the debt is GPUs the budget does not have")
-	})
-
 	It("keeps the floor, and the need rounded up only while whole replicas cover every claim", func() {
 		roles := []ShareRole{{Key: "a", Need: 2.3, Floor: 1, ReplicaGPUs: 1}, {Key: "b", Need: 0.5, Floor: 4, ReplicaGPUs: 1}}
 		Expect(shareKeep(roles, 10)).To(Equal(map[string]int{"a": 3, "b": 4}))

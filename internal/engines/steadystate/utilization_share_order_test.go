@@ -50,31 +50,31 @@ func bare(p *corev1.Pod)        { p.OwnerReferences = nil }
 func TestUtilizationShareLWSGivesTheGroupItRemovesNext(t *testing.T) {
 	three := []corev1.Pod{lwsPod("d-0", "0"), lwsPod("d-1", "1"), lwsPod("d-2", "2")}
 	first := func(p *corev1.Pod) bool { return p.Name == "d-2" }
-	got, err := lwsDonorPods("d", 3, three, first)
+	got, err := lwsDonorPods("d", 3, 0, three, first)
 	if err != nil || len(got) != 1 || got[0].Name != nextGroup {
 		t.Fatalf("highest group marked: got %v %v, want the next group d-1", got, err)
 	}
 	// Above spec.replicas and terminating: a scale-down already under way.
 	going := []corev1.Pod{lwsPod("d-0", "0"), lwsPod("d-1", "1"), lwsPod("d-2", "2", deleting)}
-	if got, err := lwsDonorPods("d", 2, going, nil); err != nil || len(got) != 1 || got[0].Name != nextGroup {
+	if got, err := lwsDonorPods("d", 2, 0, going, nil); err != nil || len(got) != 1 || got[0].Name != nextGroup {
 		t.Fatalf("group above spec.replicas: got %v %v, want d-1", got, err)
 	}
 	// Below spec.replicas and terminating: a rollout, refused -- and not as exhausted.
-	if _, err := lwsDonorPods("d", 2, []corev1.Pod{lwsPod("d-0", "0"), lwsPod("d-1", "1", deleting)}, nil); err == nil ||
+	if _, err := lwsDonorPods("d", 2, 0, []corev1.Pod{lwsPod("d-0", "0"), lwsPod("d-1", "1", deleting)}, nil); err == nil ||
 		errors.Is(err, errDonorExhausted) {
 		t.Fatalf("a terminating group below spec.replicas: err %v, want unsteerable", err)
 	}
 	// Unscheduled: the next group LWS removes is Pending, refused.
-	if _, err := lwsDonorPods("d", 2, []corev1.Pod{lwsPod("d-0", "0"), lwsPod("d-1", "1", unscheduled)}, nil); err == nil {
+	if _, err := lwsDonorPods("d", 2, 0, []corev1.Pod{lwsPod("d-0", "0"), lwsPod("d-1", "1", unscheduled)}, nil); err == nil {
 		t.Fatal("an unscheduled group was offered")
 	}
 	// A bare pod at a higher index is not the LWS's.
-	if got, err := lwsDonorPods("d", -1, []corev1.Pod{lwsPod("d-0", "0"), lwsPod("d-1", "1"), lwsPod("evil", "9", bare)}, nil); err != nil ||
+	if got, err := lwsDonorPods("d", -1, 0, []corev1.Pod{lwsPod("d-0", "0"), lwsPod("d-1", "1"), lwsPod("evil", "9", bare)}, nil); err != nil ||
 		len(got) != 1 || got[0].Name != nextGroup {
 		t.Fatalf("bare pod: got %v %v, want d-1", got, err)
 	}
 	// Every group already given: exhausted, which is not a failure to steer.
-	if _, err := lwsDonorPods("d", 3, three, func(*corev1.Pod) bool { return true }); !errors.Is(err, errDonorExhausted) {
+	if _, err := lwsDonorPods("d", 3, 0, three, func(*corev1.Pod) bool { return true }); !errors.Is(err, errDonorExhausted) {
 		t.Fatalf("all groups marked: err %v, want errDonorExhausted", err)
 	}
 }
@@ -109,7 +109,7 @@ func TestShareMarkCost(t *testing.T) {
 		{"live mark not visible yet", []corev1.Pod{costPod("", false)}, []corev1.Pod{costPod("", false)}, "-999", true},
 		{"a sibling at the int32 minimum", []corev1.Pod{costPod(minInt32, false)}, nil, minInt32, false},
 	} {
-		got, ok := markCost(tc.unmarked, tc.live)
+		got, ok := markCost(tc.unmarked, tc.live, nil)
 		if got != tc.want || ok != tc.ok {
 			t.Errorf("%s: markCost = %s, %t; want %s, %t", tc.name, got, ok, tc.want, tc.ok)
 		}
@@ -382,7 +382,7 @@ func TestUtilizationShareMarksTheMostRecentlyReadyPod(t *testing.T) {
 	se := newShareEngine(t, f, c, time.Unix(0, 0))
 	tr := allocation.ShareTransfer{ID: "x-t1-ab", Donor: roleA, DonorVariant: "A-v", Receiver: roleB,
 		ReceiverVariant: "B-v", GPUs: 1, DonorGPUs: 1, Started: time.Unix(0, 0)}
-	pods, err := se.e.markDonorPods(se.ctx, tr, f.scaleTargets()["ns/A-v"], "ns", func(*corev1.Pod) bool { return false }, false)
+	pods, err := se.e.markDonorPods(se.ctx, tr, f.scaleTargets()["ns/A-v"], "ns", func(*corev1.Pod) bool { return false }, false, nil)
 	newest := "A-v-2"
 	if err != nil || len(pods) != 1 || pods[0].Name != newest {
 		t.Fatalf("marked %v (%v), want the most recently Ready %s", podKeys(pods), err, newest)
@@ -396,7 +396,7 @@ func TestUtilizationShareDeploymentDonorExhausted(t *testing.T) {
 	se := newShareEngine(t, f, sharePods(t, f), time.Unix(0, 0))
 	tr := allocation.ShareTransfer{ID: "x-t1-ab", Donor: roleA, DonorVariant: "A-v", Receiver: roleB,
 		ReceiverVariant: "B-v", GPUs: 1, DonorGPUs: 1, Started: time.Unix(0, 0)}
-	_, err := se.e.markDonorPods(se.ctx, tr, f.scaleTargets()["ns/A-v"], "ns", func(*corev1.Pod) bool { return true }, false)
+	_, err := se.e.markDonorPods(se.ctx, tr, f.scaleTargets()["ns/A-v"], "ns", func(*corev1.Pod) bool { return true }, false, nil)
 	if !errors.Is(err, errDonorExhausted) {
 		t.Fatalf("every pod given: err %v, want errDonorExhausted", err)
 	}

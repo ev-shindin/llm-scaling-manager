@@ -94,14 +94,30 @@ func IsLeaderWorkerSet(acc ScaleTargetAccessor) bool {
 
 // RollingOut reports whether acc's workload says it is mid-rollout: a
 // Deployment some of whose pods are not of its current template -- including a
-// new ReplicaSet whose pods do not exist yet -- or a LeaderWorkerSet whose
-// UpdateInProgress condition is True, which also holds its surge groups.
+// new ReplicaSet whose pods do not exist yet -- or whose controller has not yet
+// observed its latest spec (a template change not acted on yet; a scale too,
+// briefly), or a LeaderWorkerSet whose UpdateInProgress condition is True.
 func RollingOut(acc ScaleTargetAccessor) bool {
 	switch a := acc.(type) {
 	case *deploymentAccessor:
-		return a.deployment.Status.UpdatedReplicas < a.deployment.Status.Replicas
+		d := a.deployment
+		return d.Status.ObservedGeneration < d.Generation || d.Status.UpdatedReplicas < d.Status.Replicas
 	case *lwsAccessor:
 		return meta.IsStatusConditionTrue(a.lws.Status.Conditions, string(lwsv1.LeaderWorkerSetUpdateInProgress))
 	}
 	return false
+}
+
+// LWSPartition is a LeaderWorkerSet's rolling-update partition: groups below it
+// stay on their revision while those at or above it update. 0 when unset, and
+// for any other target.
+func LWSPartition(acc ScaleTargetAccessor) int {
+	a, ok := acc.(*lwsAccessor)
+	if !ok {
+		return 0
+	}
+	if c := a.lws.Spec.RolloutStrategy.RollingUpdateConfiguration; c != nil && c.Partition != nil {
+		return int(*c.Partition)
+	}
+	return 0
 }

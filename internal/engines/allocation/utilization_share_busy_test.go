@@ -28,6 +28,8 @@ func TestShareBusyDonorIsNotAReversalHold(t *testing.T) {
 		return reversal, started
 	}
 	l := NewShareLedger()
+	// A third role takes D's live transfer: D is exhausted, R stays short.
+	l.Start(ShareTransfer{Donor: "D", Receiver: "X", GPUs: 1, DonorGPUs: 1}, map[string]int{"D": 8, "X": 0}, now, tm)
 	l.HoldGiving("D", now, tm)
 	if reversal, started := withheld(l); started != 0 || reversal != 0 {
 		t.Fatalf("a busy donor: %d started, %d reversal holds counted; want none of either", started, reversal)

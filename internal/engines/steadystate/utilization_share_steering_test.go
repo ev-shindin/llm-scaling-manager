@@ -121,7 +121,7 @@ func TestUtilizationShareSecondMarkGoesAfterTheFirst(t *testing.T) {
 			ReceiverVariant: "B-v", GPUs: 1, DonorGPUs: 1, Started: time.Unix(0, 0)}
 		pods, err := se.e.markDonorPods(se.ctx, tr, acc, "ns", func(p *corev1.Pod) bool {
 			return len(first) > 0 && p.Name == first[0].Name
-		}, false)
+		}, false, nil)
 		if err != nil || len(pods) != 1 {
 			t.Fatalf("transfer %d: %v, %d pods", i+1, err, len(pods))
 		}
@@ -152,7 +152,7 @@ func TestUtilizationShareMarkHidesAReceiverInAnotherNamespace(t *testing.T) {
 		tr := allocation.ShareTransfer{ID: "x-t1-ab", Donor: roleA, DonorVariant: "A-v", Receiver: tc.receiver,
 			ReceiverVariant: "rv", GPUs: 1, DonorGPUs: 1, Started: time.Unix(0, 0)}
 		pods, err := se.e.markDonorPods(se.ctx, tr, f.scaleTargets()["ns/A-v"], "ns", func(*corev1.Pod) bool { return false },
-			sharePrivate([]allocation.ShareTransfer{tr}))
+			sharePrivate([]allocation.ShareTransfer{tr}), nil)
 		if err != nil || len(pods) != 1 {
 			t.Fatalf("setup: %v %d", err, len(pods))
 		}
@@ -256,10 +256,10 @@ func TestUtilizationShareRefusesAnLWSWhoseHighestGroupIsTerminating(t *testing.T
 		}
 		return p
 	}
-	if _, err := lwsDonorPods("d", 2, []corev1.Pod{pod("d-0", "0", false), pod("d-1", "1", true)}, nil); err == nil {
+	if _, err := lwsDonorPods("d", 2, 0, []corev1.Pod{pod("d-0", "0", false), pod("d-1", "1", true)}, nil); err == nil {
 		t.Fatal("the highest group is terminating, yet the donor was offered group 0")
 	}
-	got, err := lwsDonorPods("d", 2, []corev1.Pod{pod("d-0", "0", false), pod("d-1", "1", false)}, nil)
+	got, err := lwsDonorPods("d", 2, 0, []corev1.Pod{pod("d-0", "0", false), pod("d-1", "1", false)}, nil)
 	if err != nil || len(got) != 1 || got[0].Name != "d-1" {
 		t.Fatalf("control: %v %v, want the highest group d-1", got, err)
 	}
@@ -278,7 +278,7 @@ func TestUtilizationShareRemarkRecordsACostSetSinceTheOldMark(t *testing.T) {
 	se := newShareEngine(t, f, c, time.Unix(0, 0))
 	tr := allocation.ShareTransfer{ID: "new-t1-bb", Donor: roleA, DonorVariant: "A-v", Receiver: roleB,
 		ReceiverVariant: "B-v", GPUs: 1, DonorGPUs: 1, Started: time.Unix(0, 0)}
-	pods, err := se.e.markDonorPods(se.ctx, tr, f.scaleTargets()["ns/A-v"], "ns", func(*corev1.Pod) bool { return false }, false)
+	pods, err := se.e.markDonorPods(se.ctx, tr, f.scaleTargets()["ns/A-v"], "ns", func(*corev1.Pod) bool { return false }, false, nil)
 	if err != nil || len(pods) != 1 {
 		t.Fatalf("setup: %v %d", err, len(pods))
 	}

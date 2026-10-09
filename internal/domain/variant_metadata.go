@@ -56,6 +56,12 @@ type VariantMetadata struct {
 	// CurrentReplicas.
 	HeldReplicas int
 	HeldKnown    bool
+	// FilledReplicas counts the replicas every pod of which holds GPUs: the
+	// same as HeldReplicas for a Deployment; for a LeaderWorkerSet, the groups
+	// whose every pod is scheduled. A receiver's fill is judged by it -- a
+	// group whose leader alone is bound serves nothing -- where a donor's
+	// release is judged by HeldReplicas, the opposite safe direction.
+	FilledReplicas int
 	// PodGPUs is the GPUs each pod of one replica requests, leader first: one
 	// entry for a Deployment, the group size for a LeaderWorkerSet. Nil when
 	// no pod requests a GPU explicitly, where GPUsPerReplica's default of 1
@@ -84,6 +90,7 @@ func (m VariantMetadata) ToReplicaState() VariantReplicaState {
 		StuckReplicas:   m.StuckReplicas,
 		HeldReplicas:    m.HeldReplicas,
 		HeldKnown:       m.HeldKnown,
+		FilledReplicas:  m.FilledReplicas,
 		PodGPUs:         m.PodGPUs,
 		GPUsPerReplica:  m.GPUsPerReplica,
 		Role:            m.Role,

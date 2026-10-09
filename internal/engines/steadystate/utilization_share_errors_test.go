@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 )
 
@@ -122,10 +123,10 @@ func TestUtilizationShareRemarkKeepsTheUsersCost(t *testing.T) {
 }
 
 // counterSum adds up a counter family's series whose labels include want.
-func counterSum(t *testing.T, r *prometheus.Registry, name string, want map[string]string) float64 {
+func counterSum(t *testing.T, r *prometheus.Registry, want map[string]string) float64 {
 	t.Helper()
 	sum := 0.0
-	for _, m := range family(t, r, name) {
+	for _, m := range family(t, r, constants.WVAUtilizationShareTransfersTotal) {
 		ok := true
 		for k, v := range want {
 			if label(m, k) != v {
@@ -264,7 +265,7 @@ func TestUtilizationShareRollbackUnmarksThePatchedPod(t *testing.T) {
 	})
 	se := newShareEngine(t, f, stale, time.Unix(0, 0))
 	tr := allocation.ShareTransfer{ID: "x-t1", Donor: roleA, DonorVariant: "A-v", DonorGPUs: 1}
-	marked, err := se.e.markDonorPods(se.ctx, tr, f.scaleTargets()["ns/A-v"], "ns", func(*corev1.Pod) bool { return false }, false)
+	marked, err := se.e.markDonorPods(se.ctx, tr, f.scaleTargets()["ns/A-v"], "ns", func(*corev1.Pod) bool { return false }, false, nil)
 	if err != nil || len(marked) != 1 {
 		t.Fatalf("setup: marked %d, %v", len(marked), err)
 	}

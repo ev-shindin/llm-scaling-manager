@@ -258,13 +258,20 @@ var _ = Describe("Node-aware donor sets: guards and shapes (§6.5)", func() {
 		return out
 	}
 
-	It("never starts more transfers than the concurrency limit, whatever the donors", func() {
+	It("counts a donor set once against the concurrency limit, however many members it has", func() {
 		// A 24-GPU pod needs three 8-GPU donor pods on one node: two from A
-		// and one from C each pass their own donor's limits.
+		// and one from C. The set funds one receiver replica, so it is one
+		// transfer against the limit -- counted per member, three whole-node
+		// donors could never fund it.
 		p := plan([]int{24}, full("n1"),
 			[]ShareUnit{pod8("ns/a-0", "n1"), pod8("ns/a-1", "n1")}, []ShareUnit{pod8("ns/c-0", "n1")}, nil)
-		Expect(len(p.Started)).To(BeNumerically("<=", ShareMaxConcurrentTransfers))
-		Expect(p.Started).To(BeEmpty(), "three units are needed, and only two may be in flight")
+		Expect(p.Started).To(HaveLen(3), "one set of three members")
+		sets := map[string]bool{}
+		for _, t := range p.Started {
+			sets[t.SetID] = true
+		}
+		Expect(sets).To(HaveLen(1), "the three members are one set")
+		Expect(sets).NotTo(HaveKey(""))
 	})
 
 	It("never takes a donor below its floor", func() {

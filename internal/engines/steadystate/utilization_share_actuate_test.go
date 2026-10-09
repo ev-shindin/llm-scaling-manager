@@ -562,8 +562,7 @@ func TestUtilizationShareAbortRestoresTheDonorAndBacksOff(t *testing.T) {
 	if targetOf(t, o, "ns/A-v") != 9 {
 		t.Fatalf("A target after the abort = %d, want 9 restored", targetOf(t, o, "ns/A-v"))
 	}
-	if got := counterSum(t, r, constants.WVAUtilizationShareTransfersTotal,
-		map[string]string{constants.LabelOutcome: string(allocation.ShareOutcomeAborted)}); got != float64(len(ids)) {
+	if got := counterSum(t, r, map[string]string{constants.LabelOutcome: string(allocation.ShareOutcomeAborted)}); got != float64(len(ids)) {
 		t.Fatalf("aborted transfers counted %v, want each of the %d that started once", got, len(ids))
 	}
 	// The back-off is at least one release timeout, which is how long the
@@ -733,7 +732,8 @@ func TestUtilizationShareConcurrentTransfersMarkDistinctPods(t *testing.T) {
 	}
 }
 
-// An LWS donor gives its highest-index group, every pod of it.
+// An LWS donor gives the group LWS removes next (here the highest index, below
+// spec.replicas and unmarked), every pod of it.
 func TestUtilizationShareLWSDonorGivesItsHighestGroup(t *testing.T) {
 	s := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(s); err != nil {

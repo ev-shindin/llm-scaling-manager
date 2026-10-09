@@ -225,9 +225,29 @@ type sharePlanRun struct {
 	keep map[string]int
 }
 
+// shareLimits are what bounds a donor, per role: keep, the least it may hold
+// after giving (shareKeep), and integ, its whole-replica target. A donor that
+// stays at or above its whole-replica target is in band whatever its
+// continuous band says: the target is where the plan means it to be, and a
+// continuous band wider than a replica's step can put that target outside it
+// -- 24 held as 8-GPU replicas, target 16, continuous 20.2, band 4 -- which
+// would starve a short receiver for good.
+type shareLimits struct {
+	keep, integ map[string]int
+}
+
+// donorInBand reports whether donor dn holding left GPUs after giving is in its
+// band (§6.2): at or above its whole-replica target or its continuous target,
+// or within the tolerance band around the latter.
+func donorInBand(in SharePlanInput, lim shareLimits, cont map[string]float64, byKey map[string]ShareRole,
+	dn string, left int) bool {
+	l := float64(left)
+	return left >= lim.integ[dn] || l >= cont[dn] || ShareInBand(l, cont[dn], byKey[dn], in.Tolerance, in.Thresholds[dn])
+}
+
 // shareKeep is the least each role may hold after giving: its floor, and --
 // while whole replicas cover every role's claim (WholeReplicaCoverage) -- its
-// need, rounded up to whole GPUs. Covered, only headroom need move: a role
+// claim (need, floor and ceiling applied), rounded up to whole GPUs. Covered, only headroom need move: a role
 // short of its need can always be funded from free GPUs or from a donor
 // holding a whole replica above its own rounded claim, so no donor need be
 // taken below its need for it. Covered only in fractions -- 9 + 6 of 17, with
@@ -240,10 +260,19 @@ func shareKeep(roles []ShareRole, budget int) map[string]int {
 	for _, r := range roles {
 		keep[r.Key] = r.Floor
 		if covered {
-			keep[r.Key] = max(r.Floor, int(math.Ceil(r.Need-1e-9)))
+			// The claim, not the need: it is capped at the ceiling, which
+			// the need is not -- a role needing 20 under a ceiling of 8
+			// would otherwise be held at 20 it can never hold, and could
+			// neither give down to its ceiling nor repay a debt.
+			keep[r.Key] = max(r.Floor, int(math.Ceil(r.Claim()-1e-9)))
 		}
 	}
 	return keep
+}
+
+// limits are the run's donor bounds (shareLimits).
+func (p *sharePlanRun) limits() shareLimits {
+	return shareLimits{keep: p.keep, integ: p.integ}
 }
 
 // z is a role's score at g GPUs.
@@ -373,6 +402,9 @@ func (p *sharePlanRun) fund(rc string, donors []string) bool {
 	l, in, now, tm := p.l, p.in, p.now, p.tm
 	work, moved, byKey := p.work, p.moved, p.byKey
 	candidates, misfits, funded := 0, 0, false
+	if l.FillHeld(rc, now) {
+		return true // its last fill timed out with its pods Pending (HoldFill)
+	}
 	for _, dn := range donors {
 		if l.InFlight() >= ShareMaxConcurrentTransfers {
 			return false
@@ -430,8 +462,7 @@ func (p *sharePlanRun) fund(rc string, donors []string) bool {
 		// donor is not pushed out of band.
 		before := math.Min(p.z(dn, work[dn]), p.z(rc, work[rc]))
 		after := math.Min(p.z(dn, work[dn]-gd), p.z(rc, work[rc]+g))
-		donorAfter := float64(work[dn] - gd)
-		donorOK := donorAfter >= p.cont[dn] || ShareInBand(donorAfter, p.cont[dn], dr, in.Tolerance, in.Thresholds[dn])
+		donorOK := donorInBand(in, p.limits(), p.cont, byKey, dn, work[dn]-gd)
 		if !(after > before) || !donorOK || work[dn]-gd < p.keep[dn] {
 			continue
 		}
@@ -472,7 +503,7 @@ func (p *sharePlanRun) fundBySet(rc string, donors []string) (funded, deferred b
 	var set []shareDonor
 	if in.Nodes != nil {
 		var left map[string]int
-		set, left, deferred = shareNodeSet(l, in, rc, donors, p.work, p.moved, p.byKey, p.keep, p.cont, p.z, p.isConfirmed, now, tm)
+		set, left, deferred = shareNodeSet(l, in, rc, donors, p.work, p.moved, p.byKey, p.limits(), p.cont, p.z, p.isConfirmed, now, tm)
 		if len(set) > 0 {
 			withdrawNodeSet(in.Nodes, in.DonorUnits, set, left)
 		}
@@ -481,7 +512,7 @@ func (p *sharePlanRun) fundBySet(rc string, donors []string) (funded, deferred b
 		return false, true
 	}
 	if len(set) == 0 && in.DomainKey[rc] == "" {
-		set = shareDonorSet(l, in, rc, donors, p.work, p.moved, p.byKey, p.keep, p.cont, p.z, p.isConfirmed, now, tm)
+		set = shareDonorSet(l, in, rc, donors, p.work, p.moved, p.byKey, p.limits(), p.cont, p.z, p.isConfirmed, now, tm)
 	}
 	if len(set) == 0 {
 		return false, false
@@ -523,7 +554,7 @@ type shareDonor struct {
 // donor rises, no donor leaves its band or goes below its floor, and the holds,
 // the pace and the concurrency limit hold for every member.
 func shareDonorSet(l *ShareLedger, in SharePlanInput, rc string, donors []string, work, moved map[string]int,
-	byKey map[string]ShareRole, keep map[string]int, cont map[string]float64, z func(string, int) float64,
+	byKey map[string]ShareRole, lim shareLimits, cont map[string]float64, z func(string, int) float64,
 	isConfirmed func(string) bool, now time.Time, tm ShareTimings) []shareDonor {
 	grow, ok := in.Grow[rc]
 	if !ok || len(grow.PodGPUs) == 0 || in.Give == nil {
@@ -561,7 +592,7 @@ func shareDonorSet(l *ShareLedger, in SharePlanInput, rc string, donors []string
 			}
 			gd := max(give.GPUs, 1)
 			k := taken[dn] + 1
-			if moved[dn]+k > ShareMaxReplicasPerCycle || work[dn]-k*gd < keep[dn] || l.GivingHeld(dn, now, tm) {
+			if moved[dn]+k > shareSetPace(grow) || work[dn]-k*gd < lim.keep[dn] || l.GivingHeld(dn, now, tm) {
 				continue
 			}
 			pods := slices.Sorted(slices.Values(give.PodGPUs))
@@ -579,7 +610,7 @@ func shareDonorSet(l *ShareLedger, in SharePlanInput, rc string, donors []string
 			return nil
 		}
 	}
-	if len(set) < 2 || !admitShareSet(l, in, rc, set, taken, work, byKey, cont, z, isConfirmed) {
+	if len(set) < 2 || !admitShareSet(l, in, rc, taken, work, byKey, lim, cont, z, isConfirmed) {
 		return nil
 	}
 	return set
@@ -589,10 +620,10 @@ func shareDonorSet(l *ShareLedger, in SharePlanInput, rc string, donors []string
 // the concurrency limit, the lowest score among the receiver and every donor
 // rises, no donor leaves its band, and a confirmed role takes part. taken is
 // the replicas each donor gives.
-func admitShareSet(l *ShareLedger, in SharePlanInput, rc string, set []shareDonor, taken map[string]int,
-	work map[string]int, byKey map[string]ShareRole, cont map[string]float64, z func(string, int) float64,
+func admitShareSet(l *ShareLedger, in SharePlanInput, rc string, taken map[string]int,
+	work map[string]int, byKey map[string]ShareRole, lim shareLimits, cont map[string]float64, z func(string, int) float64,
 	isConfirmed func(string) bool) bool {
-	if l.InFlight()+len(set) > ShareMaxConcurrentTransfers {
+	if l.InFlight()+1 > ShareMaxConcurrentTransfers {
 		return false
 	}
 	g := max(in.Grow[rc].GPUs, 1)
@@ -602,8 +633,7 @@ func admitShareSet(l *ShareLedger, in SharePlanInput, rc string, set []shareDono
 		gd := max(in.Give[dn].GPUs, 1)
 		before = math.Min(before, z(dn, work[dn]))
 		after = math.Min(after, z(dn, work[dn]-k*gd))
-		left := float64(work[dn] - k*gd)
-		if !(left >= cont[dn] || ShareInBand(left, cont[dn], byKey[dn], in.Tolerance, in.Thresholds[dn])) {
+		if !donorInBand(in, lim, cont, byKey, dn, work[dn]-k*gd) {
 			return false
 		}
 		confirmed = confirmed || isConfirmed(dn)
@@ -663,7 +693,7 @@ func startShareSet(l *ShareLedger, in SharePlanInput, rc string, set []shareDono
 // its nodes -- donor replicas from any node make up the quota. The set passes
 // the same admission as shareDonorSet.
 func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string, work, moved map[string]int,
-	byKey map[string]ShareRole, keep map[string]int, cont map[string]float64, z func(string, int) float64,
+	byKey map[string]ShareRole, lim shareLimits, cont map[string]float64, z func(string, int) float64,
 	isConfirmed func(string) bool, now time.Time, tm ShareTimings) ([]shareDonor, map[string]int, bool) {
 	grow, ok := in.Grow[rc]
 	if !ok || len(grow.PodGPUs) == 0 || in.Give == nil || in.DonorUnits == nil {
@@ -677,7 +707,7 @@ func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string,
 	key := in.DomainKey[rc]
 	for _, domain := range shareDomains(in.Nodes, key) {
 		in1 := shareNodesInDomain(in.Nodes, key, domain)
-		search := shareNodeSearch{l: l, in: in, rc: rc, donors: donors, work: work, moved: moved, byKey: byKey, keep: keep,
+		search := shareNodeSearch{l: l, in: in, rc: rc, donors: donors, work: work, moved: moved, byKey: byKey, keep: lim.keep,
 			now: now, tm: tm, taken: map[string]int{}, used: map[shareUnitRef]bool{}}
 		hole, ok := search.place(grow.PodGPUs, in1)
 		if !ok {
@@ -696,7 +726,7 @@ func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string,
 		// pod; they never pay for it: donor replicas from any node make up
 		// the quota, their pods' GPUs coming free wherever they run.
 		if !search.topUp(max(grow.GPUs, 1), hole) ||
-			!admitShareSet(l, in, rc, search.set, search.taken, work, byKey, cont, z, isConfirmed) {
+			!admitShareSet(l, in, rc, search.taken, work, byKey, lim, cont, z, isConfirmed) {
 			continue
 		}
 		return search.set, hole, false
@@ -760,16 +790,24 @@ type shareNodeSearch struct {
 }
 
 // canGive reports whether donor dn may give extra replicas more than it
-// already does in the set, with pending more replicas about to join the set
-// from any donor: its floor, the pace, its holds and the concurrency limit.
-func (s *shareNodeSearch) canGive(dn string, extra, pending int) bool {
+// already does in the set: its keep, the set pace, its holds and the
+// concurrency limit, which the whole set counts against once.
+func (s *shareNodeSearch) canGive(dn string, extra int) bool {
 	give, ok := s.in.Give[dn]
 	if !ok || dn == s.rc {
 		return false
 	}
 	k := s.taken[dn] + extra
-	return s.moved[dn]+k <= ShareMaxReplicasPerCycle && s.work[dn]-k*max(give.GPUs, 1) >= s.keep[dn] &&
-		!s.l.GivingHeld(dn, s.now, s.tm) && s.l.InFlight()+len(s.set)+pending <= ShareMaxConcurrentTransfers
+	return s.moved[dn]+k <= shareSetPace(s.in.Grow[s.rc]) && s.work[dn]-k*max(give.GPUs, 1) >= s.keep[dn] &&
+		!s.l.GivingHeld(dn, s.now, s.tm) && s.l.InFlight()+1 <= ShareMaxConcurrentTransfers
+}
+
+// shareSetPace is how many replicas one donor may give a donor set in a cycle:
+// the pace, or as many as the receiver replica has pods -- one whole-node
+// donor pod per receiver pod is the only way to fund an LWS group of three or
+// more 8-GPU pods from 8-GPU donors, and the set moves one receiver replica.
+func shareSetPace(grow ShareVariant) int {
+	return max(ShareMaxReplicasPerCycle, len(grow.PodGPUs))
 }
 
 // open finds the donor replicas that, added to free, make a hole of at least
@@ -786,7 +824,7 @@ func (s *shareNodeSearch) open(n string, free, p int) ([]shareUnitRef, int, bool
 				return units, h, true
 			}
 			r := shareUnitRef{dn, ui}
-			if s.used[r] || !s.canGive(dn, extra[dn]+1, len(units)+1) {
+			if s.used[r] || !s.canGive(dn, extra[dn]+1) {
 				continue
 			}
 			on := 0
@@ -822,7 +860,7 @@ func (s *shareNodeSearch) topUp(g int, hole map[string]int) bool {
 				return true
 			}
 			r := shareUnitRef{dn, ui}
-			if s.used[r] || !s.canGive(dn, 1, 1) {
+			if s.used[r] || !s.canGive(dn, 1) {
 				continue
 			}
 			s.take(r, hole, false)

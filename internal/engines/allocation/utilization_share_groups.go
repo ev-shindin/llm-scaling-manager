@@ -75,6 +75,11 @@ type ShareGroup struct {
 	// ones included (HeldReplicas), falling back to the replica count when the
 	// pods could not be listed. The ledger adjusts it for transfers in flight.
 	Committed map[string]int
+	// Filled is, per role, the GPUs of its replicas every pod of which is
+	// scheduled (FilledReplicas): what a receiver's fill is judged by, so an
+	// LWS group whose leader alone is bound does not end a fill. Nil judges
+	// fills by Committed.
+	Filled map[string]int
 	// Give and Grow name the variant of each role that gives a replica (the
 	// most expensive with replicas above its floor) and the one that grows (the
 	// cheapest with room below its ceiling), as rescale reclaims and fills.
@@ -156,6 +161,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 				AcceleratorType: acc,
 				Scope:           scope,
 				Committed:       map[string]int{},
+				Filled:          map[string]int{},
 				Give:            map[string]ShareVariant{},
 				Grow:            map[string]ShareVariant{},
 				Variants:        map[string][]ShareVariant{},
@@ -205,6 +211,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 			o := ShareRoleOrigin{Namespace: req.Namespace, ModelID: req.ModelID, Role: r.role}
 			g.Roles = append(g.Roles, r.ShareRole)
 			g.Committed[r.Key] = roleHeldGPUs(records, stateMap, acc, r.role)
+			g.Filled[r.Key] = roleFilledGPUs(records, stateMap, acc, r.role)
 			g.listed += roleCurrentGPUs(records, stateMap, acc, r.role)
 			g.Thresholds[r.Key] = req.CompositeSignal.ScaleUpThreshold
 			g.Origins[r.Key] = o
@@ -355,6 +362,22 @@ func roleHeldGPUs(records []variantRecord, stateMap map[string]domain.VariantRep
 		n := st.CurrentReplicas
 		if st.HeldKnown {
 			n = st.HeldReplicas
+		}
+		total += n * gpusPerReplicaFromState(stateMap, vc.VariantName)
+	}
+	return total
+}
+
+// roleFilledGPUs sums the GPUs of a role's replicas on accType every pod of
+// which is scheduled: FilledReplicas where the pods were listed,
+// CurrentReplicas where they could not be.
+func roleFilledGPUs(records []variantRecord, stateMap map[string]domain.VariantReplicaState, accType, role string) int {
+	total := 0
+	for _, vc := range variantsForRole(variantsOnType(records, accType), role) {
+		st := stateMap[vc.VariantName]
+		n := st.CurrentReplicas
+		if st.HeldKnown {
+			n = st.FilledReplicas
 		}
 		total += n * gpusPerReplicaFromState(stateMap, vc.VariantName)
 	}

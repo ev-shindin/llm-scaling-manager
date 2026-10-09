@@ -38,9 +38,11 @@ func TestUtilizationShareIgnoresForeignMarks(t *testing.T) {
 	}
 }
 
-// A donor whose pod cannot be marked backs off, as after an abort, instead of
-// being planned -- and failing -- every cycle.
-func TestUtilizationShareBacksOffADonorItCannotMark(t *testing.T) {
+// A donor with a pod that is not Ready -- still starting, or a rollout -- is
+// held, not failed: it is not planned again every cycle, and it does not back
+// off as after an abort (TestUtilizationShareBacksOffWhenTheMarkPatchFails is
+// the fault).
+func TestUtilizationShareHoldsADonorWithAPodNotReady(t *testing.T) {
 	f := newShareFleet()
 	c := sharePods(t, f)
 	var p corev1.Pod
@@ -52,15 +54,19 @@ func TestUtilizationShareBacksOffADonorItCannotMark(t *testing.T) {
 		t.Fatal(err)
 	}
 	se := newShareEngine(t, f, c, time.Unix(0, 0))
+	held := false
 	for range 20 {
 		se.cycle()
 		for _, l := range se.e.utilizationShare.ledgers {
-			if l.BackingOff(roleA, se.clock) {
-				return
+			if l.BackingOff(roleA, se.clock) || l.Unsteerable(roleA, se.clock) {
+				t.Fatal("a donor with a pod still starting backs off or is unsteerable")
 			}
+			held = held || l.GivingBusy(roleA, se.clock)
 		}
 	}
-	t.Fatal("A was never backed off after its pod could not be marked")
+	if !held {
+		t.Fatal("A was never held after its pod could not be marked")
+	}
 }
 
 // The client reads pods through a cache that may not yet show a patch made

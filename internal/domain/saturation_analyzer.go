@@ -260,6 +260,9 @@ type VariantReplicaState struct {
 	// VariantMetadata.HeldReplicas. HeldKnown false means it could not be read.
 	HeldReplicas int
 	HeldKnown    bool
+	// FilledReplicas counts replicas every pod of which holds GPUs; see
+	// VariantMetadata.FilledReplicas. Read only when HeldKnown.
+	FilledReplicas int
 	// PodGPUs is each pod's GPUs in one replica; see VariantMetadata.PodGPUs.
 	PodGPUs []int
 	// GPUsPerReplica is the number of GPUs required per replica, extracted from

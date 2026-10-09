@@ -92,9 +92,17 @@ func TestShareFreeNodes(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("want nodes a and b only, got %v", got)
 	}
-	// Free 6 and 4; three reserved come off the larger first: 6->5->4, then a tie at 4 breaks by name.
+	// Free 6 and 4; the three reserved come off the freest in one piece.
 	if got["a"].Free != 3 || got["b"].Free != 4 {
 		t.Fatalf("free after the reserve: a=%d b=%d, want 3 and 4", got["a"].Free, got["b"].Free)
+	}
+	// Eight promised over two free 8-GPU nodes take one whole node, and leave
+	// the other placeable for an 8-GPU pod.
+	whole := shareFreeNodes(map[string]decision.NodeGPU{
+		"x": {Accelerator: "H200", Capacity: 8}, "y": {Accelerator: "H200", Capacity: 8},
+	}, "H200", 8)
+	if whole["x"].Free+whole["y"].Free != 8 || (whole["x"].Free != 8 && whole["y"].Free != 8) {
+		t.Fatalf("eight reserved over two free nodes: x=%d y=%d, want one node whole", whole["x"].Free, whole["y"].Free)
 	}
 	if all := shareFreeNodes(snap, "A100", 100); all["a"].Free != 0 || all["b"].Free != 0 {
 		t.Fatalf("a reserve larger than every free GPU empties them: %v", all)

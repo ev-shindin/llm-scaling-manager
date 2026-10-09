@@ -64,7 +64,7 @@ func TestHeldReplicasCountsTerminatingPods(t *testing.T) {
 		heldPod("finished", sel, "n2", corev1.PodSucceeded, false),
 		heldPod("other", map[string]string{"app": "x"}, "n1", corev1.PodRunning, false),
 	)
-	held, known := heldReplicaCount(context.Background(), c, "ns", scaletarget.NewDeploymentAccessor(d))
+	held, _, known := heldReplicaCount(context.Background(), c, "ns", scaletarget.NewDeploymentAccessor(d))
 	if !known || held != 3 {
 		t.Fatalf("held = %d (known %t), want 3: running, draining and scheduled-starting", held, known)
 	}
@@ -91,14 +91,19 @@ func TestHeldReplicasCountsLWSGroups(t *testing.T) {
 		heldPod("pd-1", group("1"), "n3", corev1.PodRunning, true),
 		heldPod("pd-2", group("2"), "", corev1.PodPending, false),
 	)
-	held, known := heldReplicaCount(context.Background(), c, "ns", scaletarget.NewLWSAccessor(lws))
+	held, filled, known := heldReplicaCount(context.Background(), c, "ns", scaletarget.NewLWSAccessor(lws))
 	if !known || held != 2 {
 		t.Fatalf("held = %d (known %t), want 2 groups", held, known)
+	}
+	// Filled is the groups whose every pod is scheduled: group 0 only. Group 1's
+	// leader alone holds GPUs; a receiver's fill must not end on it.
+	if filled != 1 {
+		t.Fatalf("filled = %d, want 1: only group 0 has all four pods", filled)
 	}
 }
 
 func TestHeldReplicasUnknownWithoutAClient(t *testing.T) {
-	if _, known := heldReplicaCount(context.Background(), nil, "ns", nil); known {
+	if _, _, known := heldReplicaCount(context.Background(), nil, "ns", nil); known {
 		t.Fatal("a missing client must report the count as unknown, not zero")
 	}
 }
@@ -132,7 +137,7 @@ func TestHeldReplicasCountsOnlyTheDeploymentsOwnPods(t *testing.T) {
 		ownedBy(heldPod("sibling-1", sel, "n1", corev1.PodRunning, false), "m-other"),
 		ownedBy(heldPod("sibling-2", sel, "n1", corev1.PodRunning, false), "m-other"),
 	)
-	held, known := heldReplicaCount(context.Background(), c, "ns", scaletarget.NewDeploymentAccessor(d))
+	held, _, known := heldReplicaCount(context.Background(), c, "ns", scaletarget.NewDeploymentAccessor(d))
 	if !known || held != 1 {
 		t.Fatalf("held = %d (known %t), want 1: the sibling variant's pods share labels but not the owner", held, known)
 	}

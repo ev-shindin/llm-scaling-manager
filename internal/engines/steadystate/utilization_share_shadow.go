@@ -76,6 +76,10 @@ type utilizationShareState struct {
 // removes those that are stale.
 func (st *utilizationShareState) resetActuation() {
 	st.ledgers, st.desired, st.quietUntil, st.divergedSince, st.goneSince = nil, nil, nil, nil, nil
+	// A first cycle's outcomes not yet counted go with their ledger: the group
+	// labels they would be counted under are gone, and a rebuilt ledger counts
+	// its own.
+	st.uncounted = nil
 }
 
 // evaluateUtilizationShare runs the utilization-share optimizer
@@ -349,6 +353,7 @@ func (e *Engine) dropVanishedGroups(ctx context.Context, logger logr.Logger, see
 		delete(st.ledgers, k)
 		delete(st.quietUntil, k)
 		delete(st.goneSince, k)
+		delete(st.uncounted, k)
 	}
 }
 

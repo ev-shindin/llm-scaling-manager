@@ -24,10 +24,11 @@ func reasonModels(t *testing.T, r *prometheus.Registry, reason string) []string 
 	return models
 }
 
-// A restored transfer that timed out while the controller was down ends in the
-// new ledger's first cycle. Its series must already be at 0 when it is
-// counted, or increase() never sees the abort: it is counted on the next cycle.
-func TestUtilizationShareRestartCountsTheFirstCycleOnTheNext(t *testing.T) {
+// A mark older than the release timeout found at a restart is removed and not
+// counted: its outcome cannot be told from the mark, and a tenant can write
+// such marks on its own pods. Every outcome's series still exists at 0 from
+// the new ledger's first cycle.
+func TestUtilizationShareRestartRemovesExpiredMarksUncounted(t *testing.T) {
 	f := newShareFleet()
 	c := sharePods(t, f)
 	se := newShareEngine(t, f, c, time.Unix(0, 0))
@@ -46,23 +47,54 @@ func TestUtilizationShareRestartCountsTheFirstCycleOnTheNext(t *testing.T) {
 	if series == 0 {
 		t.Fatal("the first cycle created no aborted series at 0")
 	}
-	if got := counterSum(t, r, constants.WVAUtilizationShareTransfersTotal, aborted); got != 0 {
-		t.Fatalf("the first cycle counted %v aborts; its series would appear at 1", got)
+	if n := len(markedPods(t, c)); n != 0 {
+		t.Fatalf("%d expired marks left on the donor's pods", n)
 	}
-	restarted.cycle()
-	if got := counterSum(t, r, constants.WVAUtilizationShareTransfersTotal, aborted); got != 1 {
-		t.Fatalf("the second cycle counted %v aborts, want the restored transfer's 1", got)
+	for i := range 3 {
+		if got := counterSum(t, r, aborted); got != 0 {
+			t.Fatalf("cycle %d: %v aborts counted for a mark that only expired", i+1, got)
+		}
+		restarted.cycle()
+	}
+}
+
+// A ledger's first-cycle outcomes are kept and counted on the next cycle, once:
+// their series are created at 0 in that first cycle, and one that appeared at
+// 1 would be invisible to increase().
+func TestUtilizationShareFirstCycleOutcomesCountOnTheNext(t *testing.T) {
+	r := freshMetrics(t)
+	var st utilizationShareState
+	aborted := map[string]string{constants.LabelOutcome: string(allocation.ShareOutcomeAborted)}
+	st.countOutcome("g", "H200", "cluster", true, allocation.ShareOutcomeAborted, false)
+	if got := counterSum(t, r, aborted); got != 0 {
+		t.Fatalf("a first-cycle outcome was counted at once (%v)", got)
+	}
+	st.flushUncounted("g", "H200", "cluster")
+	if got := counterSum(t, r, aborted); got != 1 {
+		t.Fatalf("flushed %v, want 1", got)
+	}
+	st.flushUncounted("g", "H200", "cluster")
+	if got := counterSum(t, r, aborted); got != 1 {
+		t.Fatalf("flushed twice: %v, want still 1", got)
+	}
+	st.countOutcome("g", "H200", "cluster", false, allocation.ShareOutcomeAborted, false)
+	if got := counterSum(t, r, aborted); got != 2 {
+		t.Fatalf("a later outcome counted %v, want 2 at once", got)
 	}
 }
 
 // While the marks cannot be read every planned model is held at what it runs,
-// possibly for good: a blocked reason says so.
+// possibly for good: a reason of its own says so -- not quiet-period, which
+// clears by itself and is documented as not worth an alert.
 func TestUtilizationShareUnreadMarksAreAReason(t *testing.T) {
 	r := freshMetrics(t)
 	f := newShareFleet()
 	se := newShareEngine(t, f, failing(sharePods(t, f), func() bool { return true }, nil), time.Unix(0, 0))
 	se.cycle()
-	if got := reasonModels(t, r, constants.ScalingBlockedQuietPeriod); !slices.Equal(got, []string{"A", "B", "C"}) {
-		t.Fatalf("quiet-period while the marks cannot be read: %v, want A, B, C", got)
+	if got := reasonModels(t, r, constants.ScalingBlockedMarksUnreadable); !slices.Equal(got, []string{"A", "B", "C"}) {
+		t.Fatalf("marks-unreadable while the marks cannot be read: %v, want A, B, C", got)
+	}
+	if got := reasonModels(t, r, constants.ScalingBlockedQuietPeriod); len(got) != 0 {
+		t.Fatalf("quiet-period set for unreadable marks on %v", got)
 	}
 }

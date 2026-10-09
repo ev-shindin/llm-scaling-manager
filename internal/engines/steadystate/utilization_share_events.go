@@ -104,9 +104,10 @@ func (e *Engine) shareEndedEvent(g allocation.ShareGroup, end allocation.ShareTr
 			// Its pod is already gone: the restored count is a cold start.
 			e.shareEvent(accessor(t.Donor, t.DonorVariant), corev1.EventTypeWarning,
 				constants.K8SEventUtilizationShareReleaseAborted,
-				fmt.Sprintf("Utilization share: the transfer was called off because its donor set could not complete; "+
-					"this model had already released %s, so its count is restored and a replacement pod is starting. "+
-					"It is not held back for it", shareDonorPodNames(t)))
+				fmt.Sprintf("Utilization share: the transfer was called off because its donor set could not complete. "+
+					"This model had already given up %s, so restoring its count starts a cold replacement, which waits "+
+					"for GPUs if others took the freed ones. This model is not held back from giving again.",
+					shareDonorPodNames(t)))
 		case !backoff.After(t.Started):
 			// Not this donor's failure: its donor set could not complete (a
 			// member broke, or released while a contributor did not), and the

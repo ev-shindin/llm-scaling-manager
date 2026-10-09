@@ -124,61 +124,44 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	fresh := !ok
 	if !ok {
 		l = allocation.NewShareLedger()
-		restored, expired, err := e.restoreShareTransfers(ctx, logger, l, g, accessor, variantKey, now, tm)
+		restored, err := e.restoreShareTransfers(ctx, logger, l, g, accessor, variantKey, now, tm)
 		if err != nil {
 			// Without the marks the ledger would start blind to releases in
 			// flight; it is not created, so the read is retried next cycle,
 			// and nothing is planned meanwhile.
 			logger.Error(err, "Utilization share: could not read transfer marks; retrying next cycle")
 			// Said, not only logged: every planned model is held at what it
-			// runs until the marks can be read, which may be indefinitely.
+			// runs until the marks can be read, which may be indefinitely --
+			// so a reason of its own, which an operator alerts on.
 			blocked := map[string][]string{}
 			for _, r := range g.Roles {
 				o := g.Origins[r.Key]
 				k := utils.GetNamespacedKey(o.Namespace, o.ModelID)
-				blocked[k] = []string{constants.ScalingBlockedQuietPeriod}
+				blocked[k] = []string{constants.ScalingBlockedMarksUnreadable}
 			}
 			return shareActuation{overrides: e.shareOverrides(g, variantKey, "reading transfer marks"),
 				timings: tm, sources: src, blocked: blocked}
 		}
 		st.ledgers[key] = l
-		// Releases that timed out while no controller watched: aborted, and
-		// counted with this cycle's outcomes on the next (uncounted).
-		for range expired {
-			if st.uncounted == nil {
-				st.uncounted = map[string][]shareOutcomeCount{}
-			}
-			st.uncounted[key] = append(st.uncounted[key], shareOutcomeCount{outcome: string(allocation.ShareOutcomeAborted)})
-		}
 		// After a restart a transfer in Filling has no mark left, and its
 		// receiver may have no pods yet: plan nothing for one fill timeout.
 		st.quietUntil[key] = now.Add(tm.FillTimeout)
-		logger.Info("Utilization share: ledger started", "restoredTransfers", restored, "expiredTransfers", expired,
+		logger.Info("Utilization share: ledger started", "restoredTransfers", restored,
 			"planningFrom", st.quietUntil[key], "timings", src)
 	}
 
 	// Every outcome's series exists at 0 from the ledger's first cycle, and
-	// that cycle's outcomes -- a restored transfer that timed out while the
-	// controller was down -- are counted on the next: a series that appeared
-	// at 1 would be invisible to increase(), and the first abort would never
-	// alert.
+	// that cycle's outcomes -- a restored set whose member is gone, a restored
+	// planned transfer whose donor lost another pod -- are counted on the
+	// next: a series that appeared at 1 would be invisible to increase(), and
+	// the first abort would never alert.
 	if fresh {
 		metrics.InitUtilizationShareTransfers(g.AcceleratorType, scope)
 	} else {
-		for _, c := range st.uncounted[key] {
-			metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, c.outcome, c.urgent)
-		}
-		delete(st.uncounted, key)
+		st.flushUncounted(key, g.AcceleratorType, scope)
 	}
 	count := func(outcome allocation.ShareTransferOutcome, urgent bool) {
-		if fresh {
-			if st.uncounted == nil {
-				st.uncounted = map[string][]shareOutcomeCount{}
-			}
-			st.uncounted[key] = append(st.uncounted[key], shareOutcomeCount{outcome: string(outcome), urgent: urgent})
-			return
-		}
-		metrics.CountUtilizationShareTransfer(g.AcceleratorType, scope, string(outcome), urgent)
+		st.countOutcome(key, g.AcceleratorType, scope, fresh, outcome, urgent)
 	}
 
 	held := g.Committed
@@ -205,6 +188,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	}
 	l.PlannedRunning(e.plannedRunning(ctx, logger, l))
 	l.Retain(slices.Collect(maps.Keys(held)), now, tm)
+	l.ReceiverFilled(g.Filled)
 	for _, end := range l.Observe(held, now, tm) {
 		t := end.Transfer
 		count(end.Outcome, t.Urgent)
@@ -228,6 +212,19 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			if reason != "" {
 				logger.Info("Utilization share: the receiver's pods stayed Pending after its GPUs were released",
 					"id", t.ID, "receiver", t.Receiver, "reason", reason)
+			}
+			// Its pods still Pending: the raise is undone, and the receiver is
+			// not funded again for one release timeout. A Pending pod holds no
+			// GPU, so it reads as idle budget: kept raised, the receiver would
+			// be raised -- and funded from donors -- again every fill timeout,
+			// a whole node each time for a pod that cannot be placed. The
+			// ReplicaSet or LWS removes the unscheduled pod first.
+			if len(pending) > 0 && t.ReceiverVariant != "" {
+				k := variantKey(t.Receiver, t.ReceiverVariant)
+				st.desired[k] = max(st.desired[k]-1, 0)
+				l.HoldFill(t.Receiver, now.Add(tm.ReleaseTimeout))
+				logger.Info("Utilization share: the receiver's replica could not be placed; its raise is undone",
+					"id", t.ID, "receiver", t.Receiver, "variant", t.ReceiverVariant, "retryAfter", now.Add(tm.ReleaseTimeout))
 			}
 		}
 		if end.Outcome == allocation.ShareOutcomeWrongPod {
@@ -311,6 +308,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	// contributor could not be marked would raise its receiver into a hole
 	// that never fully opens.
 	taken := map[string]bool{}
+	written := map[string]int64{} // the cost each pod got this cycle
 	ownedMark := shareMarkOwned(l, taken)
 	for _, set := range shareStartedSets(plan.Started) {
 		marked := map[string][]string{}
@@ -319,7 +317,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		failedDonor := ""
 		private := sharePrivate(set)
 		for _, t := range set {
-			pods, err := e.markDonorPods(ctx, t, accessor(t.Donor, t.DonorVariant), g.Origins[t.Donor].Namespace, ownedMark, private)
+			pods, err := e.markDonorPods(ctx, t, accessor(t.Donor, t.DonorVariant), g.Origins[t.Donor].Namespace, ownedMark, private, written)
 			markedPods[t.ID], marked[t.ID] = pods, podKeys(pods)
 			for _, p := range marked[t.ID] {
 				taken[p] = true
@@ -345,8 +343,17 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 				}
 			}
 			// A donor whose pod cannot be marked is the same next cycle, and
-			// its receiver would never try another donor: an exhausted one is
-			// held, any other backs off as after an abort.
+			// its receiver would never try another donor: a changing one is
+			// held for a release timeout, an exhausted one until a release
+			// lands, any other backs off as after an abort.
+			if errors.Is(failed, errDonorChanging) {
+				// Routine: a rollout, a pod still starting. Not a fault, so
+				// no abort, no back-off, no Warning and no blocked reason.
+				l.HoldChanging(failedDonor, now, tm)
+				logger.V(logging.DEBUG).Info("Utilization share: donor's workload is changing; transfer not started",
+					"id", set[0].ID, "donor", failedDonor, "reason", failed.Error())
+				continue
+			}
 			if errors.Is(failed, errDonorExhausted) {
 				// Nothing is wrong with the donor: it has given all it can
 				// until its earlier releases land. It is held so its receiver
@@ -424,7 +431,7 @@ func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g 
 	}
 	var receivers []string
 	for _, r := range g.Roles {
-		if _, ok := g.Grow[r.Key]; ok && committed[r.Key] < integer[r.Key] {
+		if _, ok := g.Grow[r.Key]; ok && committed[r.Key] < integer[r.Key] && !l.FillHeld(r.Key, now) {
 			receivers = append(receivers, r.Key)
 		}
 	}
@@ -489,6 +496,14 @@ func (e *Engine) shareTimingInputs(g allocation.ShareGroup,
 		if *cur == nil || d > **cur {
 			v := d
 			*cur = &v
+		}
+	}
+	// The gang allowance is the RECEIVER's: its group's pods schedule
+	// together, and an LWS receiver at its floor gives nothing, so reading
+	// donors alone would miss it.
+	for role, grow := range g.Grow {
+		if acc := accessor(role, grow.Name); acc != nil && acc.GetGroupSize() > 1 {
+			in.LWS = true
 		}
 	}
 	for role, give := range g.Give {
@@ -613,7 +628,12 @@ func (e *Engine) reanchorShareTargets(logger logr.Logger, l *allocation.ShareLed
 func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptimizer,
 	requests []allocation.ModelScalingRequest, constraints []*allocation.ResourceConstraints,
 	scaleTargets map[string]scaletarget.ScaleTargetAccessor) []domain.VariantDecision {
-	decisions := optimizer.Optimize(ctx, requests, constraints)
+	// Today's optimizer decides the models the share does not plan, and must
+	// not spend GPUs promised to a share receiver: a whole node freed for an
+	// 8-GPU pod is lost to the first other pod that lands on it, and the
+	// receiver's own pod is not even queued until its target is raised.
+	promised := decision.LatestSharePromised(e.utilizationShare.clock())
+	decisions := optimizer.Optimize(ctx, requests, allocation.WithholdPromised(constraints, promised))
 	if overrides := e.evaluateUtilizationShare(ctx, requests, constraints, scaleTargets); len(overrides) > 0 {
 		applied := applyUtilizationShareOverrides(decisions, overrides)
 		ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("Utilization share: set planned targets", "variants", applied)
@@ -685,6 +705,11 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 		v := verdict[r.Key]
 		if v.Headroom < 0 && ev.Spare < 0 {
 			add(r.Key, constants.ScalingBlockedQuotaShort)
+		}
+		// Short although the needs fit the quota: whole replicas do not, so
+		// the worse off gains and this role serves below its need.
+		if v.Headroom < 0 && ev.Spare >= 0 && !ev.WholeReplicaCoverage {
+			add(r.Key, constants.ScalingBlockedWholeReplicaShort)
 		}
 		// Not "out of band": the targets already absorb floors, so a role
 		// whose GPUs are all pinned elsewhere sits in band at its shortfall.
@@ -766,8 +791,30 @@ func shareClaimable(l *allocation.ShareLedger, g allocation.ShareGroup, held map
 
 // shareOutcomeCount is one transfer outcome not yet counted (uncounted).
 type shareOutcomeCount struct {
-	outcome string
+	outcome allocation.ShareTransferOutcome
 	urgent  bool
+}
+
+// countOutcome counts a transfer outcome of group key, or -- in its ledger's
+// first cycle, fresh -- keeps it for flushUncounted on the next.
+func (st *utilizationShareState) countOutcome(key, acceleratorType, scope string, fresh bool,
+	outcome allocation.ShareTransferOutcome, urgent bool) {
+	if fresh {
+		if st.uncounted == nil {
+			st.uncounted = map[string][]shareOutcomeCount{}
+		}
+		st.uncounted[key] = append(st.uncounted[key], shareOutcomeCount{outcome: outcome, urgent: urgent})
+		return
+	}
+	metrics.CountUtilizationShareTransfer(acceleratorType, scope, string(outcome), urgent)
+}
+
+// flushUncounted counts the outcomes countOutcome kept for group key.
+func (st *utilizationShareState) flushUncounted(key, acceleratorType, scope string) {
+	for _, c := range st.uncounted[key] {
+		metrics.CountUtilizationShareTransfer(acceleratorType, scope, string(c.outcome), c.urgent)
+	}
+	delete(st.uncounted, key)
 }
 
 // sharePrivate reports whether a started transfer, or the donor set it is,

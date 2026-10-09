@@ -31,19 +31,23 @@ import (
 //
 // known is false when the pods cannot be listed; the caller then falls back to
 // CurrentReplicas.
+//
+// filled counts the replicas every pod of which holds GPUs: held for a
+// Deployment, and for a LeaderWorkerSet the groups with all of their group
+// size scheduled. A receiver's fill is judged by it, the safe direction there.
 func heldReplicaCount(ctx context.Context, k8sClient client.Client, namespace string,
-	scaleTarget scaletarget.ScaleTargetAccessor) (held int, known bool) {
+	scaleTarget scaletarget.ScaleTargetAccessor) (held, filled int, known bool) {
 	if k8sClient == nil || scaleTarget == nil {
-		return 0, false
+		return 0, 0, false
 	}
 	group := scaletarget.IsLeaderWorkerSet(scaleTarget)
 	pods, err := ListVariantPods(ctx, k8sClient, namespace, scaleTarget)
 	if err != nil {
 		ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("Could not list a variant's pods to count the GPUs it holds",
 			"namespace", namespace, "error", err.Error())
-		return 0, false
+		return 0, 0, false
 	}
-	groups := map[string]struct{}{}
+	groups := map[string]int{}
 	for i := range pods {
 		p := &pods[i]
 		if !holdsGPUs(p) {
@@ -57,12 +61,18 @@ func heldReplicaCount(ctx context.Context, k8sClient client.Client, namespace st
 		if !ok {
 			continue
 		}
-		groups[idx] = struct{}{}
+		groups[idx]++
 	}
-	if group {
-		held = len(groups)
+	if !group {
+		return held, held, true
 	}
-	return held, true
+	size := max(int(scaleTarget.GetGroupSize()), 1)
+	for _, n := range groups {
+		if n >= size {
+			filled++
+		}
+	}
+	return len(groups), filled, true
 }
 
 // holdsGPUs reports whether a pod holds the GPUs it requested: it is bound to a

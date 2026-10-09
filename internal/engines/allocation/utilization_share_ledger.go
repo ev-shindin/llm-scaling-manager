@@ -201,6 +201,15 @@ type ShareLedger struct {
 	// abort is counted, no blocked reason reads it, and the withheld count
 	// does not take it for a reversal hold.
 	busyUntil map[string]time.Time
+	// steadyUntil holds a donor whose workload is changing -- a rollout, a
+	// pod not yet created or scheduled or Ready -- for one release timeout
+	// (HoldChanging). Like busyUntil, not a back-off and not a fault.
+	steadyUntil map[string]time.Time
+	// filled is the next Observe's per-role filled GPUs (ReceiverFilled).
+	filled map[string]int
+	// fillHeld holds a receiver whose last fill timed out from being funded
+	// again, until then (HoldFill).
+	fillHeld map[string]time.Time
 	// fillBlocked is, per receiver, why its last fill timed out
 	// (release-taken or release-shape-mismatch) and until when it is reported.
 	fillBlocked map[string]shareFillBlock
@@ -265,6 +274,8 @@ func NewShareLedger() *ShareLedger {
 		seen:        map[string]time.Time{},
 		unsteerable: map[string]bool{},
 		busyUntil:   map[string]time.Time{},
+		steadyUntil: map[string]time.Time{},
+		fillHeld:    map[string]time.Time{},
 	}
 }
 
@@ -278,15 +289,23 @@ func (l *ShareLedger) Transfers() []ShareTransfer {
 }
 
 // InFlight is how many transfers count against the concurrency limit: those
-// with a donor. A fill from idle GPUs moves nothing and does not count.
+// with a donor, a donor set counting once -- it funds one receiver replica,
+// and counting its members would make an LWS receiver of three or more
+// whole-node pods unfundable. A fill from idle GPUs moves nothing and does
+// not count.
 func (l *ShareLedger) InFlight() int {
-	n := 0
+	seen := map[string]bool{}
 	for _, t := range l.transfers {
-		if t.Donor != "" {
-			n++
+		if t.Donor == "" {
+			continue
 		}
+		k := t.ID
+		if t.SetID != "" {
+			k = t.SetID
+		}
+		seen[k] = true
 	}
-	return n
+	return len(seen)
 }
 
 // StartFill records a receiver raised into idle GPUs: no donor, so it starts in
@@ -446,6 +465,14 @@ func (l *ShareLedger) Cancel(id string, now time.Time, tm ShareTimings) bool {
 // are released and filled in start order against a common base, so the first
 // one completes when one replica's worth has moved, the second when two have.
 func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTimings) []ShareTransferEnd {
+	// A receiver is judged by its filled replicas when the caller gave them
+	// (ReceiverFilled): an LWS group whose leader alone is bound serves
+	// nothing, and ending its fill would free its other holes for anyone.
+	rheld := held
+	if l.filled != nil {
+		rheld = l.filled
+		l.filled = nil
+	}
 	var ended []ShareTransferEnd
 
 	// Releasing -> Filling, per donor in start order. A set's primary waits
@@ -517,8 +544,8 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 				h.until = now.Add(h.hold) // the hole is open: the wake's pod has hold to land
 			}
 		}
-		_, seen := held[t.Receiver]
-		t.receiverBase = held[t.Receiver]
+		_, seen := rheld[t.Receiver]
+		t.receiverBase = rheld[t.Receiver]
 		t.receiverBaseUnset = t.Receiver != "" && !seen
 		t.fillingSince = now
 		l.released = append(l.released, *t)
@@ -535,11 +562,13 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 	keep := l.transfers[:0]
 	var filled, wrong []*ShareTransfer
 	for _, t := range l.transfers {
-		_, receiverSeen := held[t.Receiver]
+		_, receiverSeen := rheld[t.Receiver]
 		switch {
 		case t.State == ShareReleasing && broken(t):
 			// Not the donor's failure: no back-off.
-			ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeAborted, DonorReleased: releasable[t]})
+			// Released by count, not by the planned pod: that pod still runs.
+			ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeAborted,
+				DonorReleased: releasable[t] && !t.plannedRunning})
 			continue
 		case t.State == ShareReleasing && wrongPod(t) && !t.plannedUnknown:
 			// The donor did give; its GPUs return to the budget for the next
@@ -572,14 +601,14 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 				// from now, and judged from the next cycle. A pod that landed
 				// while it was unseen ends it at its fill timeout instead,
 				// which leaves the receiver's target.
-				t.receiverBase, t.receiverBaseUnset, t.fillingSince = held[t.Receiver], false, now
+				t.receiverBase, t.receiverBaseUnset, t.fillingSince = rheld[t.Receiver], false, now
 				break
 			}
 			if _, ok := rbase[t.Receiver]; !ok {
 				rbase[t.Receiver] = t.receiverBase
 			}
 			got[t.Receiver] += t.GPUs
-			if held[t.Receiver] >= rbase[t.Receiver]+got[t.Receiver] {
+			if rheld[t.Receiver] >= rbase[t.Receiver]+got[t.Receiver] {
 				ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeDone})
 				filled = append(filled, t)
 				continue
@@ -707,7 +736,7 @@ func (l *ShareLedger) BackingOff(role string, now time.Time) bool {
 // reversal hold, its last release was aborted and it is backing off, or it
 // has given all it can (GivingBusy).
 func (l *ShareLedger) GivingHeld(role string, now time.Time, tm ShareTimings) bool {
-	if now.Before(l.giveAfter[role]) || now.Before(l.busyUntil[role]) {
+	if now.Before(l.giveAfter[role]) || l.GivingBusy(role, now) {
 		return true
 	}
 	t, ok := l.lastGot[role]
@@ -898,9 +927,56 @@ func (l *ShareLedger) MarkFailed(donor string, now time.Time, tm ShareTimings) {
 	l.unsteerable[donor] = true
 }
 
-// GivingBusy reports whether role is held by HoldGiving.
+// GivingBusy reports whether role is held by HoldGiving: within the hold,
+// and still giving to a live transfer. A transfer of its that ended -- a
+// release that landed, a cancel, an abort -- may have left it a pod to give,
+// so the hold ends with the last of them.
 func (l *ShareLedger) GivingBusy(role string, now time.Time) bool {
-	return now.Before(l.busyUntil[role])
+	if now.Before(l.steadyUntil[role]) {
+		return true
+	}
+	if !now.Before(l.busyUntil[role]) {
+		return false
+	}
+	for _, t := range l.transfers {
+		if t.Donor == role && t.State == ShareReleasing {
+			return true
+		}
+	}
+	return false
+}
+
+// ReceiverFilled gives the next Observe the GPUs of each role's replicas
+// every pod of which is scheduled, to judge receivers' fills by.
+func (l *ShareLedger) ReceiverFilled(filled map[string]int) { l.filled = filled }
+
+// HoldFill keeps receiver from being funded again -- by a transfer or by the
+// idle fill -- until until: its last fill timed out with its pods Pending, and
+// funding it again would take another whole replica of GPUs for a pod that
+// cannot be placed either.
+func (l *ShareLedger) HoldFill(receiver string, until time.Time) {
+	if until.After(l.fillHeld[receiver]) {
+		l.fillHeld[receiver] = until
+	}
+}
+
+// FillHeld reports whether receiver is held by HoldFill.
+func (l *ShareLedger) FillHeld(receiver string, now time.Time) bool {
+	return now.Before(l.fillHeld[receiver])
+}
+
+// HoldChanging keeps donor from being asked again for one release timeout:
+// its workload is changing -- a rollout, a pod not yet created, scheduled or
+// Ready -- and which pod a lower count removes cannot be steered until it
+// settles. Routine, not a fault: no abort, no back-off, not unsteerable, so a
+// rollout cannot ratchet the back-off the next real abort starts from.
+func (l *ShareLedger) HoldChanging(donor string, now time.Time, tm ShareTimings) {
+	if donor == "" {
+		return
+	}
+	if until := now.Add(tm.ReleaseTimeout); until.After(l.steadyUntil[donor]) {
+		l.steadyUntil[donor] = until
+	}
 }
 
 // HoldGiving keeps donor from being asked again until one of its releases
@@ -958,6 +1034,8 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		delete(l.aborts, r)
 		delete(l.unsteerable, r)
 		delete(l.busyUntil, r)
+		delete(l.steadyUntil, r)
+		delete(l.fillHeld, r)
 		delete(l.giveAfter, r)
 		delete(l.fillBlocked, r)
 		delete(l.lastGave, r)
