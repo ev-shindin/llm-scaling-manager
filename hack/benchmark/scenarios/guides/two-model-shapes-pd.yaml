@@ -35,6 +35,11 @@
 #       transport, and requests fall back to decode doing its own prefill:
 #       nothing crashes, the run just measures an aggregated model.
 #
+#   engine caches (both roles): VLLM_CACHE_ROOT, FLASHINFER_WORKSPACE_DIR and
+#       TRITON_CACHE_DIR on the workload PVC's engine-cache directory, as in
+#       workload-autoscaling. two-model-shapes leaves them in /tmp, so every
+#       scale-up recompiled (12 s torch.compile + about 8 s autotune of an
+#       80 s start, measured); here only the first pod of each role compiles.
 #   prefill AND decode initContainers: the P/D guide's preprocess, which
 #       strips the two apt-get installs the generated env script starts with
 #       (71 s of a 186 s order-to-Ready, measured, on a node that needs
@@ -715,7 +720,28 @@ shared:
         dataLocal: 1
         workers: 1
 
-      extraEnvVars: []
+      # vLLM writes its torch.compile artefacts, the FlashInfer autotune table
+      # and Triton's JIT cache under /tmp in the container, so every replica
+      # recompiles: measured on these 8B models, 12 s of torch.compile and
+      # about 8 s of FlashInfer autotune of an 80 s start, on every scale-up.
+      # /engine-cache is the workload PVC's engine-cache directory (RWX); the
+      # standup's first prefill and decode pods compile once per engine
+      # config, and every later replica of either model starts warm. vLLM
+      # keys the caches by a hash of the engine config: a change of model,
+      # flags or version is a miss, never a stale hit. The preprocess guard
+      # above falls back to /tmp when the directory is not writable.
+      # PYTORCH_ALLOC_CONF is listed here: the standup injects it only into an
+      # empty env list, which this one no longer is. (Never write that empty
+      # list literally in a comment: the standup's sed rewrites comments too.)
+      extraEnvVars:
+        - name: PYTORCH_ALLOC_CONF
+          value: "expandable_segments:True"
+        - name: VLLM_CACHE_ROOT
+          value: /engine-cache/vllm
+        - name: FLASHINFER_WORKSPACE_DIR
+          value: /engine-cache/flashinfer
+        - name: TRITON_CACHE_DIR
+          value: /engine-cache/triton
 
       extraContainerConfig:
         # The PodMonitor scrapes by port NAME. A prefill engine has ONE port,
@@ -741,8 +767,15 @@ shared:
         # registry at every pod start for a digest that cannot have changed.
         imagePullPolicy: IfNotPresent
 
-      additionalVolumeMounts: []
-      additionalVolumes: []
+      additionalVolumeMounts:
+        - name: engine-cache
+          mountPath: /engine-cache
+          subPath: engine-cache
+      additionalVolumes:
+        - name: engine-cache
+          type: persistentVolumeClaim
+          persistentVolumeClaim:
+            claimName: workload-pvc
 
     # ------------------------------------------------------------------------
     # DECODE defaults shared across pools. `replicas` and `resources` are
@@ -839,23 +872,39 @@ shared:
         dataLocal: 1
         workers: 1
 
-      # ----------------------------------------------------------------------
-      # Extra Environment Variables
-      # No custom env vars for this scenario -- uses default ENVVARS_TO_YAML
-      # mechanism. Auto-populated vars (UCX_TLS, VLLM_NIXL_*, etc.) are set
-      # by the preprocess script at pod runtime.
-      # ----------------------------------------------------------------------
-      extraEnvVars: []
-
-      # ----------------------------------------------------------------------
-      # Additional Volume Mounts
-      # ----------------------------------------------------------------------
-      additionalVolumeMounts: []
-
-      # ----------------------------------------------------------------------
-      # Additional Volumes
-      # ----------------------------------------------------------------------
-      additionalVolumes: []
+      # Auto-populated vars (UCX_TLS, VLLM_NIXL_*, etc.) are set by the
+      # preprocess script at pod runtime. The engine caches: as prefill's.
+      # vLLM writes its torch.compile artefacts, the FlashInfer autotune table
+      # and Triton's JIT cache under /tmp in the container, so every replica
+      # recompiles: measured on these 8B models, 12 s of torch.compile and
+      # about 8 s of FlashInfer autotune of an 80 s start, on every scale-up.
+      # /engine-cache is the workload PVC's engine-cache directory (RWX); the
+      # standup's first prefill and decode pods compile once per engine
+      # config, and every later replica of either model starts warm. vLLM
+      # keys the caches by a hash of the engine config: a change of model,
+      # flags or version is a miss, never a stale hit. The preprocess guard
+      # above falls back to /tmp when the directory is not writable.
+      # PYTORCH_ALLOC_CONF is listed here: the standup injects it only into an
+      # empty env list, which this one no longer is. (Never write that empty
+      # list literally in a comment: the standup's sed rewrites comments too.)
+      extraEnvVars:
+        - name: PYTORCH_ALLOC_CONF
+          value: "expandable_segments:True"
+        - name: VLLM_CACHE_ROOT
+          value: /engine-cache/vllm
+        - name: FLASHINFER_WORKSPACE_DIR
+          value: /engine-cache/flashinfer
+        - name: TRITON_CACHE_DIR
+          value: /engine-cache/triton
+      additionalVolumeMounts:
+        - name: engine-cache
+          mountPath: /engine-cache
+          subPath: engine-cache
+      additionalVolumes:
+        - name: engine-cache
+          type: persistentVolumeClaim
+          persistentVolumeClaim:
+            claimName: workload-pvc
 
 
 # ============================================================================
