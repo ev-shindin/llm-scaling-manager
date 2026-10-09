@@ -252,7 +252,32 @@ happens.
   answer visible.
 - **The dashboards.** Series are not panels. `make dashboards-check` exists and
   the panels are a separate piece of work.
+- **Historical comparison across a restart** — REVISED. This section called
+  the restart gap honest rather than fixable, and that was wrong: see
+  [learned state across a restart](learned-state-across-restarts.md), which
+  recovers the learned ITL line after a restart.
+
+  It does so by refitting from the **engines'** own series — an independent
+  measurement rather than WVA's own claim, and the same two PromQL expressions
+  the live path already fits. It carries no stored snapshot, and it does not
+  read these `wva_` series back, for a reason that belongs here too: the
+  ServiceMonitor drops `pod` by design, so a `wva_` series has **no writer
+  identity**, and `client_golang` cannot publish a historical timestamp, so a
+  republished value looks new. Publishing a signal is safe; thresholding or
+  reading back a signal WVA itself wrote is the line this document draws.
+
+  **That proposal also supersedes the three `wva_itl_line_*` families above.**
+  It keys the ITL line by engine configuration — model, accelerator, GPUs,
+  fingerprint — because that is what the line is now SHARED on in the built
+  code, and a per-variant key cannot express a line two variants hold. The
+  families become `wva_learned_itl_slope/_intercept/_samples` on that key; the
+  shape families here are unaffected and stand as written. The original text
+  follows.
+
 - **Historical comparison across a restart.** Every signal here is in-memory
   and starts empty; a restart shows a gap, and the ITL families stay absent for
-  the ~51 cycles a fit takes. That is honest rather than fixable, and
+  the ~28 cycles a fit takes (measured from load start; ~51 was anchored to
+  the controller's boot). That is honest rather than fixable *for this
+  document* — see learned-state-across-restarts.md, which refits the line from
+  the engines' own series rather than from these — and
   `wva_itl_line_samples` is what makes it legible.

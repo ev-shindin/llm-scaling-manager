@@ -117,6 +117,18 @@ last; it is the unit change that makes the other two land.
   observability yes, a metric for KEDA to threshold instead of WVA computing
   the target no.
 
+- **[Learned state across a restart](learned-state-across-restarts.md)** —
+  nothing the analyzer learns survives a restart, and a cold start measured on
+  run QT spends 28 cycles and ~7 minutes relearning the ITL line. Key the
+  learned figures on an ENGINE CONFIG fingerprint rather than a variant name
+  (the relation already exists as IsCapacityCompatible, used only as a
+  fallback), and then carry nothing: if the fingerprint matches it is the same
+  engine, so refit the line from the ENGINES' own series, which Prometheus
+  already holds. No store, no RBAC, no schema. Also measures a second finding
+  worth more than the restart case: 52% of all cycles cannot fit an OLS line
+  for want of k-spread. Revises signals-as-metrics.md, which called the restart
+  gap unfixable.
+
 ## Product and lifecycle
 
 - **[Capacity-planner positioning](capacity-planner-positioning.md)** — where a
