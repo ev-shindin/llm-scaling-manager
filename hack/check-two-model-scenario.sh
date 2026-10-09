@@ -63,6 +63,16 @@ case "$args" in
         echo '{"items":[]}'
       fi
       exit 0 ;;
+  # The controller, which decides whether the policy is the benchmark's own:
+  # namespace-scoped (the standup's install) unless CTL_SCOPE says otherwise.
+  *"get deploy wva-controller-manager"*"-o json"*)
+      case "${CTL_SCOPE:-own}" in
+        own) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace=$(WVA_WATCH_NAMESPACE)"],
+               "env":[{"name":"WVA_WATCH_NAMESPACE","valueFrom":{"fieldRef":{"fieldPath":"metadata.namespace"}}}]}]}}}}' ;;
+        cluster) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--leader-elect"]}]}}}}' ;;
+        *) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace='"$CTL_SCOPE"'"]}]}}}}' ;;
+      esac
+      exit 0 ;;
   *"get scaledobject pd-prefill-wva"*"scaleTargetRef"*) echo "pd-prefill"; exit 0 ;;
   *"get scaledobject pd-decode-wva"*"scaleTargetRef"*) echo "pd-decode"; exit 0 ;;
   # As the modelservice chart renders them: the role is on the pod template,
@@ -164,7 +174,15 @@ case "$args" in
   *"get pods -l llm-d.ai/warm-pool"*)
       [ "${POOL_EXISTS:-0}" = "1" ] && echo "wva-warm-pool-twomodel-abc"
       exit 0 ;;
-  *"get pods -o json"*) echo '{"items":[]}' ; exit 0 ;;
+  # TERMINATING: a decode pod still in its grace period, holding its GPUs.
+  *"get pods -o json"*)
+      if [ "${TERMINATING:-0}" = "1" ]; then
+        echo '{"items":[{"metadata":{"name":"pd-decode-abc-1","deletionTimestamp":"2026-01-01T00:00:00Z",
+               "ownerReferences":[{"kind":"ReplicaSet","name":"pd-decode-abc"}]}}]}'
+      else
+        echo '{"items":[]}'
+      fi
+      exit 0 ;;
   *exec*)
       # The supervisor answers, and holds NOTHING -- the cold pool.
       echo "${RESIDENT_JSON:-[]}"
@@ -198,6 +216,7 @@ run_verb() {
         RESIDENT_JSON="${RESIDENT_JSON:-[]}" \
         POLICY_TEXT="${POLICY_TEXT:-}" PQUERY_OUT="${PQUERY_OUT:-}" WVA_NS="${WVA_NS:-ns-under-test}" \
         WVA_POLICY_NS="${WVA_POLICY_NS:-0}" NS_POLICY_LABEL="${NS_POLICY_LABEL:-}" \
+        CTL_SCOPE="${CTL_SCOPE:-own}" TERMINATING="${TERMINATING:-0}" \
         PD_STUB="${PD_STUB:-0}" PD_SINGLE_STACK="${PD_SINGLE_STACK:-0}" PD_ENDPOINT="${PD_ENDPOINT:-}" \
         MIN_PREFILL="${MIN_PREFILL:-}" MIN_DECODE="${MIN_DECODE:-}" \
         MAX_PREFILL="${MAX_PREFILL:-}" MAX_DECODE="${MAX_DECODE:-}" RESET_TIMEOUT="${RESET_TIMEOUT:-}" \
@@ -313,6 +332,43 @@ elif grep -q 'patch configmap' "$CALLS" 2>/dev/null; then
     fail "'run today' rewrote a policy before refusing: $(cat "$CALLS")"
 else
     ok "'run today' refuses when its namespace is labelled to read another namespace's policy"
+fi
+
+# Sitting in the benchmark namespace is not being namespace-scoped: a
+# cluster-scoped controller installed there manages every namespace, and so does
+# its policy.
+case_begin
+CTL_SCOPE=cluster POLICY_TEXT="$QUOTA_POLICY" VERB_TIMEOUT=60 run_verb run today
+if [ "$RC" -eq 0 ]; then
+    fail "'run today' was accepted with a controller that watches every namespace"
+elif ! printf '%s' "$OUT" | grep -q 'watches every namespace'; then
+    fail "'run today' refused a cluster-scoped controller without saying why: $OUT"
+elif grep -q 'patch configmap' "$CALLS" 2>/dev/null; then
+    fail "'run today' rewrote a policy before refusing: $(cat "$CALLS")"
+else
+    ok "'run today' refuses a controller that watches every namespace, even in its own"
+fi
+
+case_begin
+CTL_SCOPE=team-a POLICY_TEXT="$QUOTA_POLICY" VERB_TIMEOUT=60 run_verb run today
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'watches team-a'; then
+    fail "'run today' with a controller watching another namespace: rc $RC, $OUT"
+else
+    ok "'run today' refuses a controller that watches another namespace"
+fi
+
+# Reset settles only when no pod of the fleet is still terminating: one in its
+# grace period still holds its GPUs, and the next arm would start short.
+case_begin
+TERMINATING=1 PD_STUB=1 PD_SINGLE_STACK=1 MIN_PREFILL=1 MIN_DECODE=1 RESET_TIMEOUT=1 run_verb reset
+RC_TERM="$RC"
+TERMINATING=0 PD_STUB=1 PD_SINGLE_STACK=1 MIN_PREFILL=1 MIN_DECODE=1 RESET_TIMEOUT=1 run_verb reset
+if [ "$RC_TERM" -eq 0 ]; then
+    fail "reset settled while a decode pod was still terminating"
+elif [ "$RC" -ne 0 ]; then
+    fail "control: reset did not settle with no pod terminating: $OUT"
+else
+    ok "reset waits for terminating pods, and settles without them"
 fi
 
 # A single-stack P/D model: one prefill and one decode Deployment. Every arm
@@ -736,7 +792,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=41
+CASES_EXPECTED=44
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

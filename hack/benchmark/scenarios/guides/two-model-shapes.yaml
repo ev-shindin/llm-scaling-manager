@@ -1,15 +1,20 @@
 # TWO MODELS, DIFFERENT BURST SHAPES -- the standup half.
 #
-# two-model-warm-pool.yaml with ONE change: maxModelLen 32768 on both stacks
+# two-model-warm-pool.yaml with two changes: maxModelLen 32768 on both stacks
 # (from 8192), so one model's bursts can be prompt-heavy (20 000 tokens in)
-# while the other's are output-heavy (6000 tokens out). Both models take 32k
-# natively. Every other line, and every note below, is that scenario's.
+# while the other's are output-heavy (6000 tokens out), and its own workDir.
+# Both models take 32k natively. hack/check-two-model-scenario.sh holds every
+# other line equal to that scenario's.
 #
 # Driven by hack/benchmark/two_model_pool.sh with BENCH_SPEC=guides/two-model-shapes
 # and a shape per loader (INPUT/OUTPUT_TOKENS, INPUT/OUTPUT_TOKENS_B); the
 # runbook is docs/guides/benchmarking/two-model-utilization-share.md.
 #
 # ---------------------------------------------------------------------------
+# What follows is two-model-warm-pool.yaml's own header, kept with the lines it
+# explains; its runbook pointer and "this file only stands the stacks up" are
+# that scenario's.
+#
 # TWO MODELS, ANTI-PHASE BURSTS, WARM POOL ON AND OFF -- the standup half.
 #
 # Driven by hack/benchmark/two_model_pool.sh; the runbook is

@@ -917,6 +917,24 @@ check_policy_namespace() {
     # of them. The arms rewrite only a policy that is the benchmark's own.
     [ "$WVA_NS" = "$NS" ] || [ "${SHARE_ALLOW_SHARED_POLICY:-0}" = "1" ] || \
         die "the controller runs in $WVA_NS, not in $NS: its policy is shared with every namespace it manages, and the share arms would rewrite it for all of them. Install a namespace-scoped controller in $NS (the standup does), or set SHARE_ALLOW_SHARED_POLICY=1 if that policy really is yours alone."
+    # The shared policy namespace itself is never the benchmark's own.
+    [ "$NS" != "wva-policy" ] || [ "${SHARE_ALLOW_SHARED_POLICY:-0}" = "1" ] || \
+        die "$NS is the shared policy namespace; the share arms do not rewrite it. Run in a namespace of your own, or set SHARE_ALLOW_SHARED_POLICY=1 if that policy really is yours alone."
+    # Sitting in $NS is not enough: a cluster-scoped controller installed there
+    # still manages every namespace. Namespace-scoped means --watch-namespace
+    # set to $NS, directly or through WVA_WATCH_NAMESPACE.
+    if [ "${SHARE_ALLOW_SHARED_POLICY:-0}" != "1" ]; then
+        local ctl scope
+        ctl="$(kc get deploy wva-controller-manager -n "$WVA_NS" -o json 2>&1)" || \
+            die "could not read the controller Deployment in $WVA_NS to check its scope: $ctl
+  Set SHARE_ALLOW_SHARED_POLICY=1 if you know it manages $NS alone."
+        scope="$(watch_scope <<<"$ctl")"
+        case "$scope" in
+            "$NS"|own) : ;;
+            "") die "the controller in $WVA_NS watches every namespace (no --watch-namespace): its policy is shared, and the share arms would rewrite it for all of them. Install a namespace-scoped controller in $NS, or set SHARE_ALLOW_SHARED_POLICY=1." ;;
+            *) die "the controller in $WVA_NS watches $scope, not $NS: the share arms would rewrite a policy that is not the benchmark's. Set SHARE_ALLOW_SHARED_POLICY=1 if it is yours alone." ;;
+        esac
+    fi
     [ "${SKIP_POLICY_NAMESPACE_CHECK:-0}" = "1" ] && {
         warn "SKIP_POLICY_NAMESPACE_CHECK=1: not checking that the controller reads the policy in $WVA_NS"
         return 0
@@ -941,6 +959,24 @@ check_policy_namespace() {
         *) die "could not tell whether a wva-policy namespace exists: $out
   Set SKIP_POLICY_NAMESPACE_CHECK=1 if you know the policy in $WVA_NS is the one in force." ;;
     esac
+}
+
+# watch_scope reads a controller Deployment (JSON on stdin) and prints the
+# namespace it watches: the --watch-namespace value, the literal value of
+# WVA_WATCH_NAMESPACE when the flag names it, "own" when that variable comes
+# from the pod (its own namespace), and nothing when it watches every namespace.
+watch_scope() {
+    jq -r '
+      .spec.template.spec.containers[0] as $c
+      | ([($c.args // [])[], ($c.command // [])[]] | map(select(startswith("--watch-namespace="))) | first // "")
+      | ltrimstr("--watch-namespace=") as $flag
+      | if $flag == "" then ""
+        elif ($flag | test("WVA_WATCH_NAMESPACE")) then
+          (($c.env // []) | map(select(.name == "WVA_WATCH_NAMESPACE")) | first // {}) as $e
+          | if ($e.value // "") != "" then $e.value
+            elif $e.valueFrom.fieldRef.fieldPath == "metadata.namespace" then "own"
+            else "unknown" end
+        else $flag end'
 }
 
 # Write the arm's `optimizer:` block into the policy every controller reads,
@@ -1404,6 +1440,9 @@ verb_reset() {
             ready="$(k get deploy "$d" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"
             [ "${n:-0}" = "$want" ] && [ "${ready:-0}" = "$want" ] || settled=0
         done <<<"$deploys"
+        # status.replicas leaves out terminating pods, which still hold their
+        # GPUs through their grace period: the next arm would start short.
+        [ "$(terminating_model_pods "$deploys")" = 0 ] || settled=0
         if [ "$settled" = 1 ]; then
             for so in $sos; do unpause "$so"; done
             ok "every role is at its floor and ready; autoscaling released"
@@ -1414,6 +1453,18 @@ verb_reset() {
     done
     for so in $sos; do unpause "$so"; done
     die "the fleet did not settle at $MIN_REPLICAS within ${RESET_TIMEOUT}s. Starting an arm from a fleet the previous arm left scaled makes the two incomparable."
+}
+
+# terminating_model_pods counts the pods of the given model Deployments (one
+# "deployment role" per line) that are being deleted.
+terminating_model_pods() {
+    local names
+    names="$(awk '{print $1}' <<<"$1" | jq -R . | jq -s .)"
+    k get pods -o json 2>/dev/null | jq --argjson names "$names" '
+      [.items[] | select(.metadata.deletionTimestamp != null)
+        | select(any(.metadata.ownerReferences[]?; .kind == "ReplicaSet"
+            and (.name as $rs | any($names[]; . as $d | $rs | startswith($d + "-")))))]
+      | length'
 }
 
 model_scaledobjects() {
