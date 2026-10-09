@@ -2,9 +2,11 @@
 
 [← Benchmarking guide](README.md)
 
-> **Not yet run.** The tooling for this scenario is in place, but it has **not
-> been run on a GPU cluster**. No result exists, and nothing on this page
-> predicts one. The first run is also a test of the runbook.
+> **Run once.** It ran on H200 nodes on 2026-10-08 with `PHASE_SECONDS=1200`,
+> `CYCLES=1` and a 4-GPU quota. What it measured, and how far that goes:
+> [measured](../../well-lit-paths/utilization-share/measured.md). One run is not
+> a result you can repeat yet: the `today` and `shadow` arms disagreed by up to
+> 9 s p95 on identical decisions.
 
 The [utilization-share optimizer](../../well-lit-paths/utilization-share/) is
 built for several models under one quota whose peaks do not coincide. This
@@ -229,3 +231,32 @@ and, in addition:
 - **Node-aware placement and P/D.** One accelerator per replica and aggregated
   models: no donor sets, no LeaderWorkerSets.
 - **A cluster quota or a canary.** One namespace quota group.
+
+## One P/D model (single-stack mode)
+
+The same three arms can drive **one** P/D-disaggregated model, whose prefill
+and decode share the quota. `PD_SINGLE_STACK=1` switches the driver to that
+mode:
+
+- Stand the model up with
+  `make benchmark-standup BENCHMARK_SPEC=guides/pd-disaggregation MODEL_ID=<model>`,
+  not with `standup`. That scenario has one stack and reaches its router
+  through a Service, so set `PD_ENDPOINT=http://<router Service clusterIP>:80`.
+- `MODEL_A` and `MODEL_B` both name the model. The two loaders take turns:
+  loader a uses `INPUT_TOKENS`/`OUTPUT_TOKENS`, loader b uses
+  `INPUT_TOKENS_B`/`OUTPUT_TOKENS_B`. Give one a prompt-heavy shape and the other
+  a decode-heavy one.
+- `MIN_PREFILL`/`MAX_PREFILL` and `MIN_DECODE`/`MAX_DECODE` bound each role. They
+  default to the shared bounds. Reset, the ceiling and `budget.json` all apply
+  them per role, and the report refuses arms whose bounds differ.
+
+**It has not produced a result.** On `Qwen/Qwen3-0.6B`, prefill stayed at one
+replica through 20 minutes of 15 000-token prompts at 12 rps, so there was
+nothing for the arms to compare ([why](../../well-lit-paths/utilization-share/measured.md#pd-not-measured)).
+Two tooling problems are also open:
+
+- The standup rendered the scenario's 32 CPU / 128 GiB engine requests despite
+  logging the 2 CPU / 8 GiB override for Qwen3-0.6B. Check the Deployments, and
+  set the requests by hand if needed.
+- A decode-heavy loader with 4000-token outputs wrote no results within
+  `RESULT_GRACE` (1200 s) after its load ended.

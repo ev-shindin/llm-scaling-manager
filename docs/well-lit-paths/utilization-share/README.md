@@ -3,10 +3,11 @@
 > **Experimental.** The optimizer is built, in shadow mode and acting, with
 > donor sets, P/D roles and node-aware placement. Unit tests cover it, and three
 > end-to-end specs run it on kind with emulated GPUs and the inference
-> simulator. **No benchmark has been run on it yet.** A benchmark scenario
-> exists (below), but no real model and no real accelerator has gone through a
-> transfer under measured load. That is the short leg. The defaults may also
-> change: the `tolerance` of 0.15, the weight classes and a `reserveGPUs` of 0
+> simulator. **One benchmark run, on two aggregated models,** measured it on
+> H200s ([measured](measured.md)): the transfers worked, and its effect on
+> latency cut both ways. That is the short leg. There is one run and no
+> repetition, and P/D could not be measured: prefill never scaled, so prefill and
+> decode never competed for GPUs. The defaults may also change: the `tolerance` of 0.15, the weight classes and a `reserveGPUs` of 0
 > are starting points, and the
 > [proposal](../../proposals/utilization-share-optimizer.md#14-open-questions)
 > says they should be tuned from shadow-mode data. The short scale-down window
@@ -259,7 +260,8 @@ When it evaluates but never moves anything, work down
 - **Not covered:**
   - A real model server or real accelerators: the e2e uses the inference
     simulator, so drain behaviour and model load time are not exercised.
-  - Any measured load: the benchmark below has not been run.
+  - Repeated measured load: the benchmark below ran once, on aggregated models
+    only.
   - A cluster quota group and the `clusterNamespaces` canary, which are
     unit-tested only. All three e2e specs use a namespace quota.
   - A controller restart that rebuilds transfers from pod marks, a
@@ -268,17 +270,30 @@ When it evaluates but never moves anything, work down
 
 ## How it is benchmarked
 
-**Not yet.** The scenario exists and has **not been run**, so this page has no
-numbers and makes no claim about what the optimizer buys under load.
+**Once, on two aggregated models: [what it measured](measured.md).**
 
-It is [Two models, anti-phase bursts, under one quota](../../guides/benchmarking/two-model-utilization-share.md):
-the two-model anti-phase load of the warm-pool benchmark, under one quota
-smaller than the two models' combined peak, run three times. The three arms
+[Two models, anti-phase bursts, under one quota](../../guides/benchmarking/two-model-utilization-share.md)
+is the two-model anti-phase load of the warm-pool benchmark. It runs under one
+quota smaller than the two models' combined peak, three times, and the arms
 differ only in the policy's `optimizer:` block: none (`today`), shadow
-(`shadow`) and acting (`share`). Read that page before you trust a number from
-it. With the default load shape, a full swing between the two models takes
-about 19 minutes, well below the roughly 100-minute break-even above. A run
-meant to show the case this path is built for needs longer phases.
+(`shadow`) and acting (`share`). One run, with 20-minute bursts under a 4-GPU
+quota, showed:
+
+- **The first model to rise did better.** Idle headroom had already given it
+  a second replica, and its p95 TTFT on the rise was 126 ms against 7.7 s.
+- **The model rising at the swap started growing about 5.5 minutes later.**
+  Today's optimizer had already scaled the falling model down to its need, so
+  a GPU was free. This optimizer kept that GPU as headroom, so it had to be
+  released through a transfer and the donor's scale-down window first. That
+  delay is what the designed, unbuilt short window for urgent transfers is for.
+- **It cost 24% more GPU-seconds**, because it holds the whole quota.
+- The `shadow` arm, which makes today's decisions, differed from `today` by up
+  to 9 s p95 on the same replicas. Latency differences smaller than that are
+  noise in a single run.
+
+A P/D version was attempted and not measured. Prefill never left one replica
+under prompt-heavy load, so there was no prefill-versus-decode competition to
+resolve: [why](measured.md#pd-not-measured).
 
 ## Tuning it
 

@@ -1,0 +1,44 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='390' height='360' viewBox='0 0 390 360' font-family='Helvetica, Arial, sans-serif' font-size='12'>
+<rect width='390' height='360' fill='white'/>
+<text x='70.0' y='22.0' font-size='14' text-anchor='start' fill='#222' font-weight='bold'>Time to first token in each rise window (first 240s after the rate goes up)</text>
+<text x='70.0' y='38.0' font-size='11' text-anchor='start' fill='#555'>bar = p95, tick = p50; one group per scale-up event, one run each</text>
+<line x1='70.0' y1='290.0' x2='370.0' y2='290.0' stroke='#ddd' stroke-width='1.0'/>
+<text x='64.0' y='294.0' font-size='11' text-anchor='end' fill='#222'>0</text>
+<line x1='70.0' y1='242.0' x2='370.0' y2='242.0' stroke='#ddd' stroke-width='1.0'/>
+<text x='64.0' y='246.0' font-size='11' text-anchor='end' fill='#222'>4000</text>
+<line x1='70.0' y1='194.0' x2='370.0' y2='194.0' stroke='#ddd' stroke-width='1.0'/>
+<text x='64.0' y='198.0' font-size='11' text-anchor='end' fill='#222'>8000</text>
+<line x1='70.0' y1='146.0' x2='370.0' y2='146.0' stroke='#ddd' stroke-width='1.0'/>
+<text x='64.0' y='150.0' font-size='11' text-anchor='end' fill='#222'>12000</text>
+<line x1='70.0' y1='98.0' x2='370.0' y2='98.0' stroke='#ddd' stroke-width='1.0'/>
+<text x='64.0' y='102.0' font-size='11' text-anchor='end' fill='#222'>16000</text>
+<line x1='70.0' y1='50.0' x2='370.0' y2='50.0' stroke='#ddd' stroke-width='1.0'/>
+<text x='64.0' y='54.0' font-size='11' text-anchor='end' fill='#222'>20000</text>
+<text x='16.0' y='170.0' font-size='11' text-anchor='middle' fill='#222' transform='rotate(-90 16.0 170.0)'>ms</text>
+<text x='145.0' y='308.0' font-size='11' text-anchor='middle' fill='#222'>Qwen3-8B @120s</text>
+<rect x='92.0' y='197.2' width='32.7' height='92.8' fill='#7f7f7f' fill-opacity='1.00' stroke='none'><title>today Qwen3-8B @120s: p95 7732 ms, p50 1417 ms, 1920 served, 0 failed</title></rect>
+<line x1='92.0' y1='273.0' x2='124.7' y2='273.0' stroke='#111' stroke-width='2.0'/>
+<text x='108.3' y='194.2' font-size='10' text-anchor='middle' fill='#222'>7732</text>
+<rect x='128.7' y='232.5' width='32.7' height='57.5' fill='#bcbd22' fill-opacity='1.00' stroke='none'><title>shadow Qwen3-8B @120s: p95 4796 ms, p50 135 ms, 1920 served, 0 failed</title></rect>
+<line x1='128.7' y1='288.4' x2='161.3' y2='288.4' stroke='#111' stroke-width='2.0'/>
+<text x='145.0' y='229.5' font-size='10' text-anchor='middle' fill='#222'>4796</text>
+<rect x='165.3' y='288.5' width='32.7' height='1.5' fill='#d62728' fill-opacity='1.00' stroke='none'><title>share Qwen3-8B @120s: p95 126 ms, p50 73 ms, 1920 served, 0 failed</title></rect>
+<line x1='165.3' y1='289.1' x2='198.0' y2='289.1' stroke='#111' stroke-width='2.0'/>
+<text x='181.7' y='285.5' font-size='10' text-anchor='middle' fill='#222'>126</text>
+<text x='295.0' y='308.0' font-size='11' text-anchor='middle' fill='#222'>Meta-Llama-3.1-8B-Instruct @1410s</text>
+<rect x='242.0' y='273.5' width='32.7' height='16.5' fill='#7f7f7f' fill-opacity='1.00' stroke='none'><title>today Meta-Llama-3.1-8B-Instruct @1410s: p95 1379 ms, p50 60 ms, 2160 served, 0 failed</title></rect>
+<line x1='242.0' y1='289.3' x2='274.7' y2='289.3' stroke='#111' stroke-width='2.0'/>
+<text x='258.3' y='270.5' font-size='10' text-anchor='middle' fill='#222'>1379</text>
+<rect x='278.7' y='167.2' width='32.7' height='122.8' fill='#bcbd22' fill-opacity='1.00' stroke='none'><title>shadow Meta-Llama-3.1-8B-Instruct @1410s: p95 10231 ms, p50 2526 ms, 2160 served, 0 failed</title></rect>
+<line x1='278.7' y1='259.7' x2='311.3' y2='259.7' stroke='#111' stroke-width='2.0'/>
+<text x='295.0' y='164.2' font-size='10' text-anchor='middle' fill='#222'>10231</text>
+<rect x='315.3' y='186.0' width='32.7' height='104.0' fill='#d62728' fill-opacity='1.00' stroke='none'><title>share Meta-Llama-3.1-8B-Instruct @1410s: p95 8665 ms, p50 3817 ms, 2160 served, 0 failed</title></rect>
+<line x1='315.3' y1='244.2' x2='348.0' y2='244.2' stroke='#111' stroke-width='2.0'/>
+<text x='331.7' y='183.0' font-size='10' text-anchor='middle' fill='#222'>8665</text>
+<rect x='70.0' y='338.0' width='12.0' height='12.0' fill='#7f7f7f' fill-opacity='1.00' stroke='none'></rect>
+<text x='86.0' y='348.0' font-size='11' text-anchor='start' fill='#222'>today</text>
+<rect x='150.0' y='338.0' width='12.0' height='12.0' fill='#bcbd22' fill-opacity='1.00' stroke='none'></rect>
+<text x='166.0' y='348.0' font-size='11' text-anchor='start' fill='#222'>shadow</text>
+<rect x='230.0' y='338.0' width='12.0' height='12.0' fill='#d62728' fill-opacity='1.00' stroke='none'></rect>
+<text x='246.0' y='348.0' font-size='11' text-anchor='start' fill='#222'>share</text>
+</svg>
