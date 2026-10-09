@@ -759,7 +759,7 @@ func TestUtilizationShareLWSDonorGivesItsHighestGroup(t *testing.T) {
 	e := &Engine{client: fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()}
 	lws := &lwsv1.LeaderWorkerSet{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "d"},
 		Spec: lwsv1.LeaderWorkerSetSpec{LeaderWorkerTemplate: lwsv1.LeaderWorkerTemplate{Size: ptr.To[int32](2)}}}
-	pods, err := e.donorPods(context.Background(), scaletarget.NewLWSAccessor(lws), "ns")
+	pods, err := e.donorPods(context.Background(), scaletarget.NewLWSAccessor(lws), "ns", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -126,4 +126,37 @@ var _ = Describe("PublishUtilizationShare", func() {
 			Expect(family(registry, name)).To(BeEmpty(), name)
 		}
 	})
+
+	// increase() cannot see a series that appears at 1, so the first abort or
+	// wrong-pod would never alert: every outcome starts at 0 for an acting group.
+	It("publishes every transfer outcome at 0 for an acting group, and counts from there", func() {
+		registry := prometheus.NewRegistry()
+		Expect(InitMetrics(registry)).To(Succeed())
+		active := group()
+		active.Active = true
+		PublishUtilizationShare([]UtilizationShareGroup{active})
+
+		series := family(registry, constants.WVAUtilizationShareTransfersTotal)
+		Expect(series).To(HaveLen(2 * len(constants.UtilizationShareOutcomes)))
+		for _, m := range series {
+			Expect(m.GetCounter().GetValue()).To(BeZero())
+		}
+
+		CountUtilizationShareTransfer("H200", constants.UtilizationShareClusterScope, "aborted", false)
+		PublishUtilizationShare([]UtilizationShareGroup{active}) // must not reset it
+		var aborted float64
+		for _, m := range family(registry, constants.WVAUtilizationShareTransfersTotal) {
+			if getLabelValue(m, constants.LabelOutcome) == "aborted" && getLabelValue(m, constants.LabelUrgent) == "false" {
+				aborted = m.GetCounter().GetValue()
+			}
+		}
+		Expect(aborted).To(Equal(1.0))
+	})
+
+	It("publishes no transfer outcome for a group in shadow", func() {
+		registry := prometheus.NewRegistry()
+		Expect(InitMetrics(registry)).To(Succeed())
+		PublishUtilizationShare([]UtilizationShareGroup{group()})
+		Expect(family(registry, constants.WVAUtilizationShareTransfersTotal)).To(BeEmpty())
+	})
 })

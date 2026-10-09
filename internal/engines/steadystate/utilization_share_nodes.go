@@ -61,7 +61,7 @@ func (e *Engine) shareNodeInputs(ctx context.Context, logger logr.Logger, g allo
 		if acc == nil {
 			continue
 		}
-		pods, err := e.donorPods(ctx, acc, g.Origins[role].Namespace)
+		pods, err := e.donorPods(ctx, acc, g.Origins[role].Namespace, marked)
 		if err != nil {
 			// The donor then gives nothing to a node-aware set this cycle.
 			logger.V(logging.DEBUG).Info("Utilization share: could not list a donor's pods for node-aware planning",
@@ -168,7 +168,8 @@ func shareDonorUnits(lws bool, pods []corev1.Pod, marked func(*corev1.Pod) bool)
 	// The least protected first: a node-aware plan takes units in this order,
 	// so a pod a user protected with a high deletion cost goes last.
 	slices.SortFunc(pods, func(a, b corev1.Pod) int {
-		return cmp.Or(cmp.Compare(podDeletionCost(&a), podDeletionCost(&b)), cmp.Compare(a.Name, b.Name))
+		return cmp.Or(cmp.Compare(podDeletionCost(&a), podDeletionCost(&b)),
+			podReadySince(&b).Compare(podReadySince(&a)), cmp.Compare(a.Name, b.Name))
 	})
 	toPod := func(p corev1.Pod) allocation.SharePod {
 		return allocation.SharePod{Name: utils.GetNamespacedKey(p.Namespace, p.Name), Node: p.Spec.NodeName,

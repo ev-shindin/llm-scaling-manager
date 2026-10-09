@@ -98,7 +98,17 @@ func (e *Engine) shareEndedEvent(g allocation.ShareGroup, end allocation.ShareTr
 	t := end.Transfer
 	switch end.Outcome {
 	case allocation.ShareOutcomeAborted:
-		if t.DonorVariant != "" {
+		switch {
+		case t.DonorVariant == "":
+		case !backoff.After(t.Started):
+			// Not this donor's failure: its donor set could not complete (a
+			// member broke, or released while a contributor did not), and the
+			// ledger set it no back-off for it.
+			e.shareEvent(accessor(t.Donor, t.DonorVariant), corev1.EventTypeWarning,
+				constants.K8SEventUtilizationShareReleaseAborted,
+				"Utilization share: the transfer was called off because its donor set could not complete; "+
+					"this model's count is restored, and it is not held back for it")
+		default:
 			e.shareEvent(accessor(t.Donor, t.DonorVariant), corev1.EventTypeWarning,
 				constants.K8SEventUtilizationShareReleaseAborted,
 				fmt.Sprintf("Utilization share: the replica was not released within %s; its count is restored, and it is "+
@@ -119,10 +129,19 @@ func (e *Engine) shareEndedEvent(g allocation.ShareGroup, end allocation.ShareTr
 					"it keeps its target and is scheduled when it can be", tm.FillTimeout))
 		}
 	case allocation.ShareOutcomeDone:
-		if t.ReceiverVariant != "" && t.Donor != "" {
+		switch {
+		case t.ReceiverVariant == "":
+		case t.Donor != "":
 			e.shareEvent(accessor(t.Receiver, t.ReceiverVariant), corev1.EventTypeNormal,
 				constants.K8SEventUtilizationShareReceived,
 				fmt.Sprintf("Utilization share: received %d GPUs from %s", t.GPUs, sharePeer(g, t.Receiver, t.Donor)))
+		default:
+			// An idle fill: no donor, so nothing else would tell the owner why
+			// the model grew with no load to grow it.
+			e.shareEvent(accessor(t.Receiver, t.ReceiverVariant), corev1.EventTypeNormal,
+				constants.K8SEventUtilizationShareReceived,
+				fmt.Sprintf("Utilization share: received %d GPUs from the quota group's spare GPUs, as headroom by weight; "+
+					"they are given to another model when it needs them", t.GPUs))
 		}
 	}
 }

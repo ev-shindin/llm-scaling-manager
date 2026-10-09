@@ -131,6 +131,13 @@ const (
 	UtilizationShareStateFilling = "filling"
 )
 
+// UtilizationShareOutcomes are the values of LabelOutcome on
+// WVAUtilizationShareTransfersTotal: how a transfer left the ledger. They are
+// the allocation package's ShareOutcome values, which a test keeps equal.
+// Every one is published at 0 for an acting group, so the first transfer of
+// an outcome is an increase() and not a series appearing at 1.
+var UtilizationShareOutcomes = []string{"done", "fill-timeout", "cancelled", "aborted", "redirected", "wrong-pod"}
+
 // Values of LabelParam on WVAUtilizationShareEffectiveSeconds: the derived
 // timings in force.
 const (

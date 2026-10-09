@@ -264,6 +264,19 @@ func PublishUtilizationShare(groups []UtilizationShareGroup) {
 		set(utilizationShareSpareGPUs, gl, grp.SpareGPUs)
 		set(utilizationShareReplicasToMove, gl, float64(grp.ReplicasToMove))
 		if grp.Active {
+			// Every outcome's counter exists from the group's first acting
+			// cycle, at 0: a series that appears at 1 is invisible to
+			// increase(), so the first abort or wrong-pod would never alert.
+			if utilizationShareTransfers != nil {
+				for _, outcome := range constants.UtilizationShareOutcomes {
+					for _, urgent := range []bool{false, true} {
+						cl := maps.Clone(gl)
+						cl[constants.LabelOutcome] = outcome
+						cl[constants.LabelUrgent] = strconv.FormatBool(urgent)
+						utilizationShareTransfers.With(cl).Add(0)
+					}
+				}
+			}
 			set(utilizationSharePromisedGPUs, gl, grp.PromisedGPUs)
 			set(utilizationShareReserveDebt, gl, grp.ReserveDebtGPUs)
 			for state, n := range map[string]int{constants.UtilizationShareStateReleasing: grp.Releasing,

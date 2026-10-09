@@ -188,6 +188,10 @@ type ShareLedger struct {
 	// unsteerable are the donors backing off because their pods could not be
 	// marked (MarkFailed), not because a release aborted.
 	unsteerable map[string]bool
+	// busyUntil holds a donor that has given all it can until its earlier
+	// releases land (HoldGiving). Not a back-off: no abort is counted and no
+	// blocked reason reads it.
+	busyUntil map[string]time.Time
 	// fillBlocked is, per receiver, why its last fill timed out
 	// (release-taken or release-shape-mismatch) and until when it is reported.
 	fillBlocked map[string]shareFillBlock
@@ -251,6 +255,7 @@ func NewShareLedger() *ShareLedger {
 		confirm:     map[string]int{},
 		seen:        map[string]time.Time{},
 		unsteerable: map[string]bool{},
+		busyUntil:   map[string]time.Time{},
 	}
 }
 
@@ -691,7 +696,7 @@ func (l *ShareLedger) BackingOff(role string, now time.Time) bool {
 // GivingHeld reports whether role may not give now: it received within the
 // reversal hold, or its last release was aborted and it is backing off.
 func (l *ShareLedger) GivingHeld(role string, now time.Time, tm ShareTimings) bool {
-	if now.Before(l.giveAfter[role]) {
+	if now.Before(l.giveAfter[role]) || now.Before(l.busyUntil[role]) {
 		return true
 	}
 	t, ok := l.lastGot[role]
@@ -882,6 +887,19 @@ func (l *ShareLedger) MarkFailed(donor string, now time.Time, tm ShareTimings) {
 	l.unsteerable[donor] = true
 }
 
+// HoldGiving keeps donor from being asked again for one release timeout: every
+// pod it could give is already given to a live transfer. Its receiver tries
+// another donor meanwhile. Nothing failed, so unlike MarkFailed it counts no
+// abort, sets no back-off and is not unsteerable.
+func (l *ShareLedger) HoldGiving(donor string, now time.Time, tm ShareTimings) {
+	if donor == "" {
+		return
+	}
+	if until := now.Add(tm.ReleaseTimeout); until.After(l.busyUntil[donor]) {
+		l.busyUntil[donor] = until
+	}
+}
+
 // Unsteerable reports whether role is backing off because its pods could not
 // be marked, rather than because a release aborted.
 func (l *ShareLedger) Unsteerable(role string, now time.Time) bool {
@@ -922,6 +940,7 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		delete(l.seen, r)
 		delete(l.aborts, r)
 		delete(l.unsteerable, r)
+		delete(l.busyUntil, r)
 		delete(l.giveAfter, r)
 		delete(l.fillBlocked, r)
 		delete(l.lastGave, r)

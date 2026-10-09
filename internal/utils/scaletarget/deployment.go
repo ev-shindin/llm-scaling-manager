@@ -23,6 +23,15 @@ func NewDeploymentAccessor(deploy *appsv1.Deployment) ScaleTargetAccessor {
 	return &accessor
 }
 
+// LabelSelector is a Deployment scale target's spec.selector, which selects
+// the pods of every ReplicaSet generation; nil for any other target.
+func LabelSelector(acc ScaleTargetAccessor) *v1.LabelSelector {
+	if d, ok := acc.(*deploymentAccessor); ok {
+		return d.deployment.Spec.Selector
+	}
+	return nil
+}
+
 func (r *deploymentAccessor) GetReplicas() *int32 {
 	// r.deployment is always not nil
 	return r.deployment.Spec.Replicas

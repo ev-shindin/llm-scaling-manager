@@ -264,7 +264,7 @@ func TestUtilizationShareRollbackUnmarksThePatchedPod(t *testing.T) {
 	})
 	se := newShareEngine(t, f, stale, time.Unix(0, 0))
 	tr := allocation.ShareTransfer{ID: "x-t1", Donor: roleA, DonorVariant: "A-v", DonorGPUs: 1}
-	marked, err := se.e.markDonorPods(se.ctx, tr, f.scaleTargets()["ns/A-v"], "ns", func(*corev1.Pod) bool { return false })
+	marked, err := se.e.markDonorPods(se.ctx, tr, f.scaleTargets()["ns/A-v"], "ns", func(*corev1.Pod) bool { return false }, false)
 	if err != nil || len(marked) != 1 {
 		t.Fatalf("setup: marked %d, %v", len(marked), err)
 	}

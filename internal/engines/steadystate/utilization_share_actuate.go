@@ -3,9 +3,11 @@ package steadystate
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -201,6 +203,10 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	for _, t := range l.TakeReleased() {
 		if t.Donor != "" {
 			metrics.ObserveUtilizationShareRelease(g.AcceleratorType, scope, now.Sub(t.Started))
+			// Released by count: when another of the donor's pods went, the
+			// marked one survives. Its mark would let a restart inside the
+			// release timeout restore the transfer and move it a second time.
+			e.unmarkDonorPods(ctx, logger, t)
 		}
 		if t.Donor != "" && t.Receiver == "" && t.SetID == "" {
 			logger.Info("Utilization share: reserve refilled", "id", t.ID, "donor", t.Donor, "gpus", t.DonorGPUs)
@@ -225,6 +231,15 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		out.promised = l.Promised() + l.WakeHeld(now)
 		out.reserveDebt = shareDebtNow(l, held, g.Budget)
 		out.blocked = shareBlockedReasons(l, g, ev, nil, now, tm)
+		// Said, not only logged: a model under load that stops scaling for
+		// three minutes after an upgrade otherwise has no reason anywhere.
+		for _, r := range g.Roles {
+			o := g.Origins[r.Key]
+			k := utils.GetNamespacedKey(o.Namespace, o.ModelID)
+			if !slices.Contains(out.blocked[k], constants.ScalingBlockedQuietPeriod) {
+				out.blocked[k] = append(out.blocked[k], constants.ScalingBlockedQuietPeriod)
+			}
+		}
 		out.claimable = shareClaimable(l, g, held)
 		out.releasing, out.filling = countInFlight(l)
 		return out
@@ -261,8 +276,9 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		markedPods := map[string][]corev1.Pod{}
 		var failed error
 		failedDonor := ""
+		private := sharePrivate(set)
 		for _, t := range set {
-			pods, err := e.markDonorPods(ctx, t, accessor(t.Donor, t.DonorVariant), g.Origins[t.Donor].Namespace, ownedMark)
+			pods, err := e.markDonorPods(ctx, t, accessor(t.Donor, t.DonorVariant), g.Origins[t.Donor].Namespace, ownedMark, private)
 			markedPods[t.ID], marked[t.ID] = pods, podKeys(pods)
 			for _, p := range marked[t.ID] {
 				taken[p] = true
@@ -290,6 +306,15 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			// The donor backs off as after an abort: a pod that cannot be
 			// marked -- not Ready, all already given -- is the same next
 			// cycle, and its receiver would never try another donor.
+			if errors.Is(failed, errDonorExhausted) {
+				// Nothing is wrong with the donor: it has given all it can
+				// until its earlier releases land. It is held so its receiver
+				// tries another, but it counts no abort and is not reported.
+				l.HoldGiving(failedDonor, now, tm)
+				logger.V(logging.DEBUG).Info("Utilization share: donor has nothing left to give; transfer not started",
+					"id", set[0].ID, "donor", failedDonor, "reason", failed.Error())
+				continue
+			}
 			l.MarkFailed(failedDonor, now, tm)
 			for _, t := range set {
 				if t.Donor == failedDonor {
@@ -701,6 +726,29 @@ func shareClaimable(l *allocation.ShareLedger, g allocation.ShareGroup, held map
 // shareStartedSets groups this cycle's started transfers into what must start
 // together: each donor set's members, primary first, and each single transfer
 // alone.
+// sharePrivate reports whether a started transfer, or the donor set it is,
+// crosses a namespace: its donors and its receiver are not all in one. Its
+// marks then name no receiver and no set (markDonorPods). A set is judged
+// whole -- a contributor's mark carries the set's ID, the primary transfer's,
+// so a set that crosses a namespace anywhere hides the link on every member.
+func sharePrivate(set []allocation.ShareTransfer) bool {
+	ns := ""
+	for _, t := range set {
+		for _, role := range []string{t.Donor, t.Receiver} {
+			if role == "" {
+				continue
+			}
+			n, _, _ := strings.Cut(role, "/")
+			if ns == "" {
+				ns = n
+			} else if n != ns {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func shareStartedSets(started []allocation.ShareTransfer) [][]allocation.ShareTransfer {
 	var out [][]allocation.ShareTransfer
 	index := map[string]int{}

@@ -636,12 +636,18 @@ var (
 		ScalingBlockedSwinging,
 		ScalingBlockedTransferLimit,
 		ScalingBlockedDonorNotSteerable,
+		ScalingBlockedQuietPeriod,
 	}
 )
 
 // Utilization-share reasons (values for the `reason` label of
 // WVAModelScalingBlocked). Each is set on the model of the role it describes.
 const (
+	// ScalingBlockedQuietPeriod indicates the group is in the quiet period
+	// that follows a controller restart, a leader change, or the optimizer
+	// starting to act: every planned model holds what it runs for one fill
+	// timeout, so none scales, up or down.
+	ScalingBlockedQuietPeriod = "quiet-period"
 	// ScalingBlockedAwaitingRelease indicates the role receives a transfer
 	// whose donor has not released its GPUs yet.
 	ScalingBlockedAwaitingRelease = "awaiting-release"

@@ -7,6 +7,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
@@ -103,6 +104,26 @@ func ListVariantPods(ctx context.Context, c client.Client, namespace string,
 	}
 	return slices.DeleteFunc(list.Items, func(p corev1.Pod) bool {
 		return !ownedByDeployment(&p, acc.GetName())
+	}), nil
+}
+
+// ListDeploymentPods lists every pod of a Deployment, of every ReplicaSet
+// generation: matched by its spec.selector, which is immutable, and by
+// ownership. ListVariantPods matches the CURRENT pod template's labels, so a
+// rollout that changed or added one leaves the old ReplicaSet's pods out --
+// the pods a mid-rollout check exists to see.
+func ListDeploymentPods(ctx context.Context, c client.Client, namespace, name string,
+	selector *metav1.LabelSelector) ([]corev1.Pod, error) {
+	sel, err := metav1.LabelSelectorAsSelector(selector)
+	if err != nil {
+		return nil, fmt.Errorf("deployment %s/%s selector: %w", namespace, name, err)
+	}
+	var list corev1.PodList
+	if err := c.List(ctx, &list, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: sel}); err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(list.Items, func(p corev1.Pod) bool {
+		return !ownedByDeployment(&p, name)
 	}), nil
 }
 
