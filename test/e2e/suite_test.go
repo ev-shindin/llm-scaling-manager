@@ -230,6 +230,11 @@ func dumpFailureDiagnostics(specText string) {
 	utils.DumpControllerLogs(context.Background(), k8sClient, cfg.WVANamespace, GinkgoWriter)
 	utils.DumpManagedScalers(context.Background(), k8sClient, dynamicClient, GinkgoWriter)
 	utils.DumpScaledObjects(context.Background(), dynamicClient, GinkgoWriter)
+	// KEDA's own log, because WVA's cannot explain a KEDA failure. An HPA on
+	// the Kubernetes CPU default is a dead end from this side -- WVA publishes
+	// the right number, the ScaledObject says Ready=True -- and the operator is
+	// the only component that says why it built the HPA that way.
+	utils.DumpKEDAOperatorLogs(context.Background(), k8sClient, cfg.KEDANamespace, GinkgoWriter)
 	utils.DumpDemandEvidence(context.Background(), k8sClient, cfg.LLMDNamespace, GinkgoWriter)
 }
 
