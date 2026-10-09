@@ -6,7 +6,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	promoperator "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
-	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -153,19 +152,19 @@ var _ = Describe("KEDA external scaler", Label("smoke", "full"), Ordered, func()
 	// CurrentMetrics populated once a scaler returns a value.
 	It("has KEDA consume WVA's decision through the external scaler", func() {
 		By("Verifying KEDA created an HPA with CurrentMetrics populated from the external scaler")
+		// This spec used to assert only that Status.CurrentMetrics was not
+		// empty, and a CPU-defaulted HPA reports exactly one entry whose every
+		// field is nil -- so the check passed on an HPA carrying no external
+		// metric at all. Observed in CI: this spec went green in 25 s against
+		// an HPA with CurrentMetrics [one all-nil entry] and
+		// ScalingActive=False FailedGetResourceMetric x41, and the next spec
+		// then waited the full 600 s for a Deployment that could never move.
+		// The spec whose whole subject is "KEDA consumes WVA's decision" has to
+		// assert the EXTERNAL metric, which is what these two helpers do.
 		Eventually(func(g Gomega) {
-			hpaList, err := k8sClient.AutoscalingV2().HorizontalPodAutoscalers(cfg.LLMDNamespace).List(ctx, metav1.ListOptions{})
-			g.Expect(err).NotTo(HaveOccurred())
-			var kedaHPA *autoscalingv2.HorizontalPodAutoscaler
-			for i := range hpaList.Items {
-				if hpaList.Items[i].Spec.ScaleTargetRef.Name == modelDecodeDeployment {
-					kedaHPA = &hpaList.Items[i]
-					break
-				}
-			}
-			g.Expect(kedaHPA).NotTo(BeNil(), "KEDA should have created an HPA for the external-scaler deployment")
-			g.Expect(kedaHPA.Status.CurrentMetrics).NotTo(BeEmpty(),
-				"KEDA HPA should have CurrentMetrics populated from the WVA external scaler")
+			reportIfHPAOnCPUDefault(cfg.LLMDNamespace, modelDecodeDeployment)
+			expectKEDAExternalMetricWired(g, cfg.LLMDNamespace, modelDecodeDeployment)
+			expectWVADesiredReplicasConsumed(g, cfg.LLMDNamespace, modelDecodeDeployment)
 		}, time.Duration(cfg.EventuallyLongSec)*time.Second, time.Duration(cfg.PollIntervalSec)*time.Second).
 			Should(Succeed())
 	})

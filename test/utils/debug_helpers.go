@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,6 +43,67 @@ func DumpControllerLogs(ctx context.Context, k8sClient *kubernetes.Clientset, co
 			continue
 		}
 		_, _ = fmt.Fprintf(w, "%s\n", string(logs))
+	}
+}
+
+// DumpKEDAOperatorLogs prints the KEDA operator's own log, filtered to the
+// lines that say why it could not build a scaler.
+//
+// It exists because the one line that explains a whole class of failure lives
+// only here. An HPA found carrying the Kubernetes CPU default instead of KEDA's
+// external metric is a dead end from WVA's side -- WVA publishes the right
+// number throughout, the ScaledObject reports Ready=True, and the HPA reports a
+// CPU metric it cannot read -- while the KEDA operator says plainly:
+//
+//	scale_handler  error getting metric spec for the scaler  "got empty metric spec"
+//	external_scaler  error  ... transport: Error while dialing ... i/o timeout
+//
+// Two CI failures were investigated end to end without that line, because
+// nothing collected it; it had to be reproduced on a local cluster to be seen
+// at all. Grepped rather than dumped whole: the operator is chatty and the
+// interesting lines are the errors.
+func DumpKEDAOperatorLogs(ctx context.Context, k8sClient *kubernetes.Clientset, kedaNamespace string, w io.Writer) {
+	_, _ = fmt.Fprintf(w, "\n=== KEDA operator log (errors) in %s ===\n", kedaNamespace)
+	if kedaNamespace == "" {
+		_, _ = fmt.Fprintf(w, "(KEDA namespace not configured; set KEDA_NAMESPACE)\n")
+		return
+	}
+	pods, err := k8sClient.CoreV1().Pods(kedaNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app=keda-operator",
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "Failed to list KEDA operator pods: %v\n", err)
+		return
+	}
+	if len(pods.Items) == 0 {
+		// Not a silent skip: "no operator pod" is itself a finding, and a
+		// different one from "the operator logged nothing".
+		_, _ = fmt.Fprintf(w, "No pod matching app=keda-operator in %s -- if KEDA is installed "+
+			"under different labels here, this dump is blind and the label needs updating\n", kedaNamespace)
+		return
+	}
+	for _, pod := range pods.Items {
+		_, _ = fmt.Fprintf(w, "\n--- %s ---\n", pod.Name)
+		logs, err := k8sClient.CoreV1().Pods(kedaNamespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+			TailLines: ptr.To(int64(500)),
+		}).DoRaw(ctx)
+		if err != nil {
+			_, _ = fmt.Fprintf(w, "Failed to get logs: %v\n", err)
+			continue
+		}
+		var kept int
+		for _, line := range strings.Split(string(logs), "\n") {
+			if strings.Contains(line, "ERROR") ||
+				strings.Contains(line, "empty metric spec") ||
+				strings.Contains(line, "external_scaler") {
+				_, _ = fmt.Fprintf(w, "%s\n", line)
+				kept++
+			}
+		}
+		if kept == 0 {
+			_, _ = fmt.Fprintf(w, "(no error lines in the last 500 -- the operator is healthy, "+
+				"so a missing external metric was not refused here)\n")
+		}
 	}
 }
 

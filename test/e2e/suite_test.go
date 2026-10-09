@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -229,6 +230,11 @@ func dumpFailureDiagnostics(specText string) {
 	utils.DumpControllerLogs(context.Background(), k8sClient, cfg.WVANamespace, GinkgoWriter)
 	utils.DumpManagedScalers(context.Background(), k8sClient, dynamicClient, GinkgoWriter)
 	utils.DumpScaledObjects(context.Background(), dynamicClient, GinkgoWriter)
+	// KEDA's own log, because WVA's cannot explain a KEDA failure. An HPA on
+	// the Kubernetes CPU default is a dead end from this side -- WVA publishes
+	// the right number, the ScaledObject says Ready=True -- and the operator is
+	// the only component that says why it built the HPA that way.
+	utils.DumpKEDAOperatorLogs(context.Background(), k8sClient, cfg.KEDANamespace, GinkgoWriter)
 	utils.DumpDemandEvidence(context.Background(), k8sClient, cfg.LLMDNamespace, GinkgoWriter)
 }
 
@@ -581,6 +587,72 @@ func expectKEDAExternalMetricWired(g Gomega, namespace, scaleTargetDeployment st
 			"While that is so the HPA scales on the Kubernetes-defaulted CPU metric, which needs a "+
 			"metrics-server this cluster may not have -- so the target cannot move whatever WVA recommends",
 		scaleTargetDeployment, carried)
+}
+
+// hpaOnCPUDefault reports whether the HPA for a deployment carries NO external
+// metric: KEDA built the HPA while WVA's external scaler was unreachable, got
+// no metric spec back ("got empty metric spec" in the KEDA operator log),
+// created the HPA with an empty metrics list, and Kubernetes defaulted that to
+// Resource/cpu.
+//
+// It also returns what the HPA does carry and why it is not scaling, so the
+// caller can say which of the two it saw. The ScaledObject's own conditions do
+// NOT distinguish them -- it reports Ready=True in both -- which is why a run
+// that hit this spent 120 s polling a condition that could not change, and why
+// the diagnosis has to come from the HPA.
+func hpaOnCPUDefault(namespace, scaleTargetDeployment string) (latched bool, carried []string, why string) {
+	hpaList, err := k8sClient.AutoscalingV2().HorizontalPodAutoscalers(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, nil, fmt.Sprintf("listing HPAs failed: %v", err)
+	}
+	var seen bool
+	for i := range hpaList.Items {
+		hpa := &hpaList.Items[i]
+		if hpa.Spec.ScaleTargetRef.Name != scaleTargetDeployment {
+			continue
+		}
+		seen = true
+		for _, m := range hpa.Spec.Metrics {
+			carried = append(carried, string(m.Type))
+			if m.Type == autoscalingv2.ExternalMetricSourceType {
+				return false, carried, ""
+			}
+		}
+		for _, c := range hpa.Status.Conditions {
+			if c.Type == autoscalingv2.ScalingActive && c.Status == corev1.ConditionFalse {
+				why = fmt.Sprintf("%s: %s", c.Reason, c.Message)
+			}
+		}
+	}
+	// No HPA yet is KEDA not having reconciled at all, which a wait DOES fix.
+	return seen, carried, why
+}
+
+// reportIfHPAOnCPUDefault prints the diagnosis when the HPA carries no external
+// metric, so a spec that is going to fail says WHY on its first poll instead of
+// at the end of the whole budget.
+//
+// It does NOT try to repair the state, and that is a deliberate retreat.
+// Annotating the ScaledObject was tried first, on the documented grounds that
+// KEDA re-derives an HPA when its ScaledObject changes: in a local run the
+// object was nudged 35 times over 210 s and the HPA never left [Resource]. An
+// annotation does not bump .spec, so it may not be a change KEDA acts on at
+// all. A recovery that does not recover would have turned a legible failure
+// into a retry loop that hides the defect, which is worse than failing.
+func reportIfHPAOnCPUDefault(namespace, scaleTargetDeployment string) {
+	latched, carried, why := hpaOnCPUDefault(namespace, scaleTargetDeployment)
+	if !latched {
+		return
+	}
+	GinkgoWriter.Printf(
+		"\nThe HPA for %s carries %v and NO external metric, so it is scaling on the "+
+			"Kubernetes CPU default and cannot move whatever WVA recommends (%s). KEDA built "+
+			"it that way because it got no metric spec from WVA's external scaler when it "+
+			"reconciled -- look for \"got empty metric spec\" in the KEDA operator log. The "+
+			"ScaledObject reports Ready=True throughout, which is why this has to be said "+
+			"here rather than read off its conditions. See internal/scaler/server.go's "+
+			"NeedLeaderElection for the mitigations in place and what they do not cover.\n",
+		scaleTargetDeployment, carried, why)
 }
 
 func expectWVADesiredReplicasConsumed(g Gomega, namespace, scaleTargetDeployment string) {
