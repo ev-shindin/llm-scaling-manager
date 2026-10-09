@@ -1658,7 +1658,7 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_model_scaling_blocked` | `reason="release-shape-mismatch"` | GPUs released but the receiver's replica does not fit them (§6.5) |
 | `wva_model_scaling_blocked` | `reason="release-taken"` | GPUs released, then occupied by a pod WVA did not place (§6.3) |
 | `wva_model_scaling_blocked` | `reason="release-timeout"` | the role's last release was aborted; it backs off before giving again. Only an aborted release |
-| `wva_model_scaling_blocked` | `reason="donor-not-steerable"` | the role's pods could not be marked when it was asked to give (a Deployment pod not Ready or not scheduled, a Deployment mid-rollout, no deletion cost left between earlier live marks and the lowest unmarked sibling, an LWS whose next group to go is terminating or unscheduled, or the patch failed), or every pod it could give is already given to live transfers (exhausted: no Event); it backs off as after an abort, and the reason lasts only the back-off |
+| `wva_model_scaling_blocked` | `reason="donor-not-steerable"` | the role's pods could not be marked when it was asked to give (a Deployment pod not Ready or not scheduled, a Deployment mid-rollout, no deletion cost left between earlier live marks and the lowest unmarked sibling, an LWS whose next group to go is terminating or unscheduled, or the patch failed); it backs off as after an abort, and the reason lasts only the back-off. A donor whose every pod is already given to live transfers is only held (`HoldGiving`), with no reason |
 | `wva_model_scaling_blocked` | `reason="reversal-hold"` | short and actionable, but it gave within the reversal hold (§6.7 rule 4). Urgent receivers (below need) are held too, by decision; this reason makes that wait visible |
 | `wva_model_scaling_blocked` | `reason="swinging"` | planned on its mean need (§6.7 rule 5) |
 | `wva_model_scaling_blocked` | `reason="transfer-limit"` | short and actionable, while the group already has the most donor transfers in flight (2) |
@@ -2017,8 +2017,13 @@ optimizer every cycle (§6.6).
        the ReplicaSet removes pods in the order the ledger releases them; no
        room for such a cost, or a sibling at the int32 minimum, refuses the
        donor (`donor-not-steerable`). A donor whose every pod or group is
-       already marked by live transfers (`errDonorExhausted`) backs off
-       without a `UtilizationShareDonorNotSteerable` Event.
+       already marked by live transfers (`errDonorExhausted`) is held one
+       release timeout (`ShareLedger.HoldGiving`): no abort, no back-off, no
+       blocked reason, no Event.
+     - while the budget covers every role's need, no donor is taken below its
+       own need rounded up to whole GPUs (`shareKeep`), even when its
+       replicas are larger than the spare; the receiver waits below its
+       headroom target instead. Short, only the floor holds (§6.2).
      - a transfer released by count -- another of the donor's pods went --
        unmarks its surviving marked pods, so a restart inside the release
        timeout cannot restore it and move it twice.
@@ -2248,3 +2253,38 @@ optimizer every cycle (§6.6).
 - **Default classes.** `0.5 / 1 / 2 / 4` is a starting point. Shadow mode should
   report, per group, the headroom each class actually received, so the defaults
   are chosen from data rather than taste.
+
+## 15. Deferred to later PRs
+
+Decided, not built here:
+
+- **Holds and back-offs across a restart.** Reversal holds, swing state and
+  abort back-offs live in the controller's memory; a restart or leader change
+  rebuilds only the transfers in flight (from pod marks) and restarts the rest
+  from zero, guarded by the quiet period alone. A donor backing off for hours
+  is asked again three minutes after an upgrade. Persisting the deadlines (an
+  annotation on the scale target is one place) is the fix.
+- **Per-model transfer history.** The transfer counters carry group labels
+  only, and Events expire after about an hour, so "when did my model give
+  GPUs yesterday" has no answer in the owner's namespace. A per-role counter of
+  GPUs given and received, by outcome, is the fix.
+- **The urgent short window (stage 3).** Measured on two models bursting in
+  turn (well-lit path, [measured](../well-lit-paths/utilization-share/measured.md)):
+  at the swap the rising model started growing about one donor scale-down
+  window (~5.5 min) later than under today's optimizer, because the falling
+  model's headroom moves only through a transfer. A short scale-down window
+  for urgent transfers is the designed answer and the next step.
+- **A prefill capacity measure.** Prefill demand is read in tokens -- KV in use
+  plus queued requests at their average input length -- so it does grow with
+  input tokens. What it is divided by is the problem: with no learned
+  throughput (k2), a prefill replica is priced at its KV memory (k1), and KV
+  memory is not what limits prefill; compute throughput is. A prefill finishes
+  in well under a second and hands its KV to decode, so the tokens resident at
+  any instant are few, and the need computed against a large KV capacity reads
+  small even for long prompts at a high rate. k2 cannot be learned for prefill
+  either, because prefill queues on decode's back-pressure and the analyzer
+  rightly refuses to learn from that. The fix is a prefill-specific capacity:
+  sustained input tokens per second against a measured per-replica prefill
+  ceiling. Until then, a P/D model with long prompts should set prefill's
+  `minReplicaCount` to its real requirement; with short prompts, prefill is
+  rightly a donor.

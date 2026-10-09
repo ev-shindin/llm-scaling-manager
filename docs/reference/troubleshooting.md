@@ -219,9 +219,9 @@ Work down the list in order.
    the cause and the end of the back-off, and is retried after it.
 
    A donor whose every pod (or LWS group) is already given to transfers still in
-   flight is not broken, only exhausted: it backs off the same way, so its
-   receiver tries another donor, and shows `donor-not-steerable` for the back-off,
-   but gets no Event and no Error line; at `--v=4` the log says
+   flight is not broken, only exhausted: it is held for one release timeout, so
+   its receiver tries another donor, but it counts no abort, does not back off,
+   shows no blocked reason and gets no Event; at `--v=4` the log says
    `Utilization share: donor has nothing left to give; transfer not started`.
 
 If a P/D model shows a blocked reason, `wva_model_scaling_blocked` does not say

@@ -435,12 +435,11 @@ raised target until the scheduler places it.
 
 **What can be taken.** Only replicas above the model's floor (its
 `minReplicaCount`, per variant) and above its whole-replica target. While the
-quota covers every model's need, targets sit at or above need, so only headroom
-moves, with one exception: when a replica is larger than the spare GPUs
-(whole replicas cannot match the continuous targets), a donor of multi-GPU
-replicas can end up one replica below its need even though the quota covers
-every need. A negative `wva_utilization_share_headroom` on a role while
-`wva_utilization_share_spare_gpus` is not negative is that case. When the quota
+quota covers every model's need, targets sit at or above need, and only
+headroom moves: a donor is never taken below its own need, rounded up to whole
+GPUs. That holds even when its replicas are larger than the spare -- a donor of
+8-GPU replicas with a need of 9 keeps 16, and the receiver waits below its
+headroom target rather than leaving the donor short. When the quota
 is short (`quota-short`), targets fall below need and a model can lose a replica
 it needs if another, weighted, is worse off. A role that
 holds a replica never gives its last one: taking a model to zero is
@@ -468,14 +467,21 @@ namespace has its own map is excluded from the cluster group and stays on
 today's optimizer; the controller log lists it in the `frozen` field with
 `namespace has its own scaling-policy map; not planned in the cluster-wide group`.
 
-**P/D models: set prefill's floor.** Prefill's demand is under-read: the
-scaling manager reads prefill's queueing as decode pressure, and in the one P/D
-benchmark attempt prefill never left one replica under prompt-heavy load
-([why](../well-lit-paths/utilization-share/measured.md#pd-not-measured)). So
-prefill gets little headroom and is the first donor above its floor. Set the
-prefill variant's `minReplicaCount` to what it really needs. That floor is never
-taken, and the rest of the group pays for it (`floor-pinned` when the floor is
-a replica or more above the need the optimizer reads).
+**P/D models: with long prompts, set prefill's floor.** Prefill's demand is
+read in tokens and grows with input length, but it is priced against the
+replica's KV memory, and memory is not what limits prefill: compute throughput
+is. A prefill finishes fast and hands its KV to decode, so few tokens are
+resident at any instant, and the need reads small even for long prompts at a
+high rate. Prefill's own queue cannot correct it, because prefill queues on
+decode's back-pressure and that is deliberately not learned from. In the one
+P/D benchmark attempt prefill never left one replica under 15 000-token prompts
+([why](../well-lit-paths/utilization-share/measured.md#pd-not-measured)). With
+short prompts that is right, and prefill is a fair donor. With long prompts,
+set the prefill variant's `minReplicaCount` to what it really needs: that floor
+is never taken, and the rest of the group pays for it (`floor-pinned` when the
+floor is a replica or more above the need the optimizer reads). A
+prefill-specific capacity measure is planned
+([proposal §15](../proposals/utilization-share-optimizer.md#15-deferred-to-later-prs)).
 
 **How a replica leaves.** A transfer lowers the donor's target, and the pod goes
 through an ordinary scale-down (the ReplicaSet, or LeaderWorkerSet for an LWS).
@@ -513,9 +519,7 @@ choice of pod could not be steered:
   changed a pod-template label still shows its old ReplicaSet's pods;
 - a sibling's cost leaves no room for the mark (above).
 
-A donor whose every pod is already given to transfers still in flight backs off
-the same way and shows `donor-not-steerable`, but gets no Event: nothing is
-wrong with it, it has given all it can until those releases land.
+A donor whose every pod is already given to transfers still in flight is held for one release timeout, so its receiver tries another donor. Nothing is wrong with it -- it has given all it can until those releases land -- so it counts no abort, does not back off, shows no blocked reason and gets no Event.
 
 On a LeaderWorkerSet the group that goes is the one LWS removes next; its
 deletion cost is not consulted. LWS removes the highest indices first, so that
