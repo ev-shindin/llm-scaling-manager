@@ -1874,6 +1874,17 @@ verb_run() {
         rm -rf "$out_dir/harness"
         k cp "$pod:/results" "$out_dir/harness" -c load-a >/dev/null 2>&1 || \
             warn "could not copy the harness results out of $pod"
+    elif [ -n "$pod" ]; then
+        # A loader that never wrote its results still leaves evidence, and the
+        # cleanup below deletes the Pod that holds it. Kept, not reported: the
+        # arm is still refused below. A decode-heavy loader once went silent
+        # after its load ended and the only copy went with the Pod.
+        warn "a loader never wrote its results; keeping what $pod holds in $out_dir/harness-partial"
+        rm -rf "$out_dir/harness-partial"
+        k cp "$pod:/results" "$out_dir/harness-partial" -c load-a >/dev/null 2>&1 || \
+            warn "could not copy the partial results out of $pod"
+        k get pod "$pod" -o json > "$out_dir/loader-pod.json" 2>/dev/null || true
+        k exec "$pod" -c load-b -- sh -c 'ps aux 2>/dev/null || ls /proc' > "$out_dir/loader-b-ps.txt" 2>&1 || true
     fi
     trap - INT TERM HUP
     run_cleanup
