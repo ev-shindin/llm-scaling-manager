@@ -254,6 +254,17 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	// rather than serialising every other model's cycle behind this one's
 	// scan, fit and two Info calls.
 	a.mu.Lock()
+	// Stamped here as well as in noteReplicaStart, because this function
+	// CREATES learned state (the window below, and the baseline it writes at
+	// the end) and the sweep's rule is that an unstamped key counts as stale.
+	// Stamping only in noteReplicaStart made that rule hold by the order two
+	// calls happen in a third file -- fitLines calls noteReplicaStart just
+	// before the decode guard that reaches this function -- so any early
+	// return added to noteReplicaStart, or a reordering of those two calls,
+	// would have deleted every learned ITL baseline on the first sweep 24h
+	// later, silently, falling back to itl.DefaultBaselineSec. A producer of
+	// learned state stamps its own key.
+	a.noteVariantSeen(key, now)
 	w, ok := a.itlWindows[key]
 	if !ok {
 		w = itl.NewWindow(

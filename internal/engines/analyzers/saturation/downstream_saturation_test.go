@@ -302,9 +302,11 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		// EvictStaleHistory reads the wall clock, as the history does; an
 		// entry written under the test clock (2026-09-18) is older than an
 		// hour of wall time and younger than a century of it.
-		analyzer.EvictStaleHistory(100 * 365 * 24 * time.Hour)
+		horizonsForTest(analyzer, 100*365*24*time.Hour)
+		analyzer.EvictStaleHistory()
 		Expect(analyzer.decodeSaturatedAt).To(HaveLen(1), "a fresh entry survives")
-		analyzer.EvictStaleHistory(time.Hour)
+		horizonsForTest(analyzer, time.Hour)
+		analyzer.EvictStaleHistory()
 		Expect(analyzer.decodeSaturatedAt).To(BeEmpty(), "a stale one is swept")
 	})
 

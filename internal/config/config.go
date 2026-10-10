@@ -71,6 +71,13 @@ type infrastructureConfig struct {
 	watchNamespace       string
 	loggerVerbosity      int
 	optimizationInterval time.Duration
+	// How long the saturation analyzer keeps what it has learned. Three
+	// plain durations rather than a capacity.Horizons so this package does
+	// not have to import signals/capacity; the engine assembles the struct.
+	// Zero means "not configured", which the analyzer reads as the default.
+	learnedEpisodeGap      time.Duration
+	learnedVariantTimeout  time.Duration
+	learnedBucketRetention time.Duration
 }
 
 // tlsConfig holds TLS certificate paths
@@ -288,6 +295,22 @@ func (c *Config) OptimizationInterval() time.Duration {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.infrastructure.optimizationInterval
+}
+
+// LearnedStateHorizons returns the three ages the saturation analyzer
+// keeps learned state on: the episode gap, the per-variant timeout and the
+// bucket retention, in that order. A zero means the operator set nothing
+// and the analyzer should use its own default.
+//
+// Returned as three values rather than a struct to keep signals/capacity
+// out of this package's imports; the engine builds capacity.Horizons.
+// Thread-safe.
+func (c *Config) LearnedStateHorizons() (episodeGap, variantTimeout, bucketRetention time.Duration) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.infrastructure.learnedEpisodeGap,
+		c.infrastructure.learnedVariantTimeout,
+		c.infrastructure.learnedBucketRetention
 }
 
 // ============================================================================
@@ -581,6 +604,19 @@ func SetOptimizationIntervalForTest(c *Config, interval time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.infrastructure.optimizationInterval = interval
+}
+
+// SetLearnedStateHorizonsForTest overrides the learned-state horizons on a test
+// Config, including to unusable values — the floor lives in
+// capacity.Horizons.Sanitized, so a caller's handling of a value an operator
+// could actually write ("24", meaning 24ns to viper) is only reachable this
+// way. Zero means "not configured". Not for production use.
+func SetLearnedStateHorizonsForTest(c *Config, episodeGap, variantTimeout, bucketRetention time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.infrastructure.learnedEpisodeGap = episodeGap
+	c.infrastructure.learnedVariantTimeout = variantTimeout
+	c.infrastructure.learnedBucketRetention = bucketRetention
 }
 
 // --- Bootstrap State Management ---

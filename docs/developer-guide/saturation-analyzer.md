@@ -437,6 +437,87 @@ token per request, so its output length is not a property of its work.
 | `ThroughputSampleSpacing` | 1m | `saturation` |
 | `DefaultExpectedOutputTokens` | 512 | `saturation` |
 | `BytesPerToken` | 4 | `saturation` |
+| `EpisodeGap` | 24h | `internal/signals/capacity` |
+| `HistoryEvictionTimeout` | 24h | `internal/signals/capacity` |
+| `HistoryRetention` | 7d | `internal/signals/capacity` |
+| `EvictionTimeout` | 7d | `internal/signals/capacity` |
+
+The first three are **defaults, not the values in force**. They are assembled into a
+`capacity.Horizons` and handed to the analyzer by `WithHorizons`, which the engine
+fills from `Config.LearnedStateHorizons()` — `LEARNED_STATE_EPISODE_GAP`,
+`LEARNED_STATE_TIMEOUT`, `LEARNED_STATE_RETENTION`. `Horizons.Sanitized` floors each
+field at `MinHorizon` (1m) independently and names the ones it replaced, so a single
+unusable value does not discard the other two. Read the pair in force off
+`a.horizons`; `EvictStaleHistory()` takes no arguments, because a horizon passed per
+sweep is a horizon no operator can reach.
+
+### How long learned state lives
+
+A sweep runs once per cycle from the engine, at the top, before any capacity is
+computed. Three horizons govern it, and the differences are load-bearing —
+getting any of them wrong silently changes replica counts.
+
+**Per-variant state** — the fitted ITL window and its baseline, the replica
+start estimate and its outlier counter — ages on `HistoryEvictionTimeout`
+measured from when the variant was last *reported*. It is a liveness stamp,
+because an empty ITL window is not evidence that a variant is gone: a healthy
+fleet below k=0.15 offers readings every cycle and holds none, so sweeping on
+emptiness deleted the state of exactly the fleets that were doing fine.
+
+**Bucket-keyed windows** — the k2 history and the mu windows the demand floor
+prices from — are keyed by workload bucket rather than by variant, so they
+cannot use that stamp at all. They are kept for `HistoryRetention` (7d) from
+when they were last **read**: `Touch()` on the read path is what makes "last
+read" the measure. Their only writer needs a saturated queue, so aged on last
+*write* they would expire on exactly the fleets that are coping, and the figure
+a decision depends on every cycle would vanish because the fleet was healthy.
+
+**There is deliberately no trust horizon on a retained measurement.** However
+old the figure is, while the window exists it answers. This follows from
+`effectiveCapacity = min(k1, k2)`: a measured k2 can only ever pull capacity
+*below* k1, so it is the most conservative figure available for its bucket, and
+everything it could fall through to — the derived figure, or k1 itself — is
+greater than or equal to it. Refusing a measurement can therefore only raise
+capacity and order fewer replicas. An intermediate revision of this code added
+a 24h trust horizon and fell through to k1; measured across k1 regimes, that
+cost between 1.8× and 48× the replicas. Priority 1 replaces the figure on the
+first saturated cycle regardless.
+
+**Two timestamps, not one.** `RollingAverage` tracks `lastUsed` and
+`lastWritten` separately, because three different questions were being asked of
+one field:
+
+| question | field | asked by |
+| --- | --- | --- |
+| keep this entry? | `lastUsed` | the sweep, via `Stale` |
+| is a new observation part of this window, or a new episode? | `lastWritten` | the write paths, via `WriteGapExceeds` |
+
+Collapsing them is a live defect: reads happen every cycle, so one field made
+every read look like a write, and the write path's "a long gap means a new
+episode, so reset rather than blend" check could never fire for any bucket
+still being served. Two saturation episodes weeks apart then blended into one
+rolling average — measured at 3.85× for k2 and 7.9× for mu, both in the
+fewer-replicas direction.
+
+**Two memos age on the *bucket* horizon despite being per variant**, because
+each one's value resolves into a bucket key: `lastAccelerator` (into the k2
+history key, the throughput key and the ITL window key) and `fleetShape` (into
+the throughput key). Expiring either ahead of the window it keys moves the key
+to `unresolved` or to a different bucket and makes a retained measurement
+unreachable — the measurement is still in the map, and nothing will ever ask for
+it again. Both are also stamped when they are **read**, not only when written,
+for the same reason the windows are: the read path is the one that runs every
+cycle. Those two are the whole set; a new memo whose value reaches a bucket key
+has to join them.
+
+**Capacity records** age on `EvictionTimeout` (7d), so a variant parked at zero
+over a weekend keeps its engine params and capacity record. The store has no
+trust horizon on reads either; `Store.IsStale` and `StalenessTimeout` (30 min)
+exist but have no caller on the reconcile path.
+
+Net: 24h of quiet costs the *fitted* per-variant figures; seven days costs the
+bucket's measurement and the capacity record. A fleet parked past 24h
+re-measures its ITL baseline and start estimate on wake.
 
 ## Reading a decision from the logs
 

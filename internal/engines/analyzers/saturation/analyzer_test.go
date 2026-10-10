@@ -231,8 +231,8 @@ var _ = Describe("SaturationAnalyzer", func() {
 
 		It("should not dilute a fresh observation against a stale window", func() {
 			// A variant that goes quiet keeps its window: samples are evicted by
-			// count, never by age, and EvictStaleHistory has no caller on the
-			// reconcile path. Blending a first observation back into that window
+			// count, never by age, and the per-cycle sweep keeps any variant that is
+			// still reported (see variantSeenAt). Blending a first observation back into that window
 			// would size current capacity from behaviour before the gap, at 9/10
 			// weight -- an exposure the raw return did not have.
 			steady := func(tokens int64) *domain.AnalyzerResult {
@@ -255,10 +255,15 @@ var _ = Describe("SaturationAnalyzer", func() {
 			}
 
 			// Age every window past the eviction timeout, as a quiet period would.
+			//
+			// ObservedAt, not TouchAt: this spec is about the WRITE gap, and the
+			// two clocks are separate now. TouchAt ages only use, which is what
+			// the sweep reads -- it would leave lastWritten at now and the reset
+			// correctly would not fire.
 			analyzer.mu.Lock()
 			Expect(analyzer.computeCapacityHistory).NotTo(BeEmpty())
 			for _, ra := range analyzer.computeCapacityHistory {
-				ra.TouchAt(time.Now().Add(-2 * capacity.HistoryEvictionTimeout))
+				ra.ObservedAt(time.Now().Add(-2 * capacity.HistoryEvictionTimeout))
 			}
 			analyzer.mu.Unlock()
 
@@ -434,12 +439,14 @@ var _ = Describe("SaturationAnalyzer", func() {
 			Expect(analyzer.lastAccelerator).To(HaveLen(1))
 
 			// A live variant keeps its memo.
-			analyzer.EvictStaleHistory(time.Hour)
+			horizonsForTest(analyzer, time.Hour)
+			analyzer.EvictStaleHistory()
 			Expect(analyzer.lastAccelerator).To(HaveLen(1),
 				"a memo younger than the timeout was evicted")
 
 			// One that has gone quiet loses it, on the same sweep as its history.
-			analyzer.EvictStaleHistory(0)
+			horizonsForTest(analyzer, 0)
+			analyzer.EvictStaleHistory()
 			Expect(analyzer.lastAccelerator).To(BeEmpty(),
 				"the memo outlived the history it keys, so nothing ever frees it")
 			Expect(analyzer.computeCapacityHistory).To(BeEmpty())
@@ -2469,10 +2476,12 @@ var _ = Describe("the fleet-shape memo's lifetime", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(analyzer.fleetShape).To(HaveLen(1), "one cycle records one model's shape")
 
-		analyzer.EvictStaleHistory(time.Hour)
+		horizonsForTest(analyzer, time.Hour)
+		analyzer.EvictStaleHistory()
 		Expect(analyzer.fleetShape).To(HaveLen(1), "a memo in use is kept")
 
-		analyzer.EvictStaleHistory(0)
+		horizonsForTest(analyzer, 0)
+		analyzer.EvictStaleHistory()
 		Expect(analyzer.fleetShape).To(BeEmpty(), "and a stale one goes")
 	})
 })

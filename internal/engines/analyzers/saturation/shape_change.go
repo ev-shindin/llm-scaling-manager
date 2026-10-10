@@ -545,6 +545,22 @@ func (a *SaturationAnalyzer) shapeChangedWithin(namespace, modelID string,
 
 // fleetShapeState reports the stable output length the keys are built from
 // and whether a change is outstanding, without observing anything.
+// It STAMPS the memo, which makes this a read that counts as use -- so it
+// WRITES, despite the name, and it takes a.mu to do it. Never call it with the
+// lock already held. There is one caller today (noteFleetShape's early return,
+// which runs before that function locks); a second one added inside a locked
+// section would deadlock rather than fail a test.
+//
+// lastSeen used to be written in exactly one place -- after noteFleetShape's
+// early return -- so it meant "the last cycle this model had completions or an
+// arriving prompt", not "the last cycle this model was analysed". An idle
+// fleet reads the memo through here every cycle and wrote nothing, so the memo
+// aged out from under a model that was being analysed the whole time. The
+// shape it carries resolves into the mu window's bucket key, so losing it
+// moves the key and the retained window becomes unreachable; see the
+// fleetShape loop in EvictStaleHistory for what that costs. Same correction as
+// variantSeenAt for the ITL maps and Touch for the windows: a thing still
+// being read is still in use.
 func (a *SaturationAnalyzer) fleetShapeState(namespace, modelID string) (out, in float64, outstanding bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -552,6 +568,7 @@ func (a *SaturationAnalyzer) fleetShapeState(namespace, modelID string) (out, in
 	if !ok {
 		return 0, 0, false
 	}
+	memo.lastSeen = a.now()
 	return memo.stable.AvgOutputTokens, memo.stable.AvgInputTokens, !memo.changedAt.IsZero()
 }
 
