@@ -18,9 +18,11 @@ one block in one ConfigMap, read live. The care is in the order: the
 replicas from the next cycle.
 
 **Experimental.** It has been tested on kind with emulated GPUs, and
-benchmarked once, on two aggregated models
-([what it measured](../../well-lit-paths/utilization-share/measured.md)); P/D
-has not been measured.
+benchmarked in three runs on two aggregated models with 1 GPU per replica
+([what they measured](../../well-lit-paths/utilization-share/measured.md)).
+Two of them found a model held short for its whole burst; the fixes are built
+and not yet measured. P/D, whole-node and multi-GPU pods have not been
+measured.
 
 ## Prerequisites
 

@@ -504,6 +504,22 @@ namespace has its own map is excluded from the cluster group and stays on
 today's optimizer; the controller log lists it in the `frozen` field with
 `namespace has its own scaling-policy map; not planned in the cluster-wide group`.
 
+**If your model bursts in turn with another.** A model that just gave a
+replica cannot receive one for the reversal hold, about twice a release time
+(on the order of 12 minutes with a 300 s scale-down window), so two models
+that take turns do not trade GPUs back and forth. The hold is lifted when the
+imbalance is hard: your model is at or near its scale-up threshold (its need
+at least 0.9 of what it holds) and another role would stay calm after giving
+(its need at most 0.6 of what it keeps). That transfer starts on the first
+cycle, with no hold and no second confirming cycle; it still waits for the
+donor's scale-down window. If no other role is that calm, your model waits
+out the hold and shows `reversal-hold`. The common case is a model whose
+burst of long outputs has just ended: its draining backlog still reads as
+need, so it is not calm, and transfers can even go *to* it just as your
+burst begins. That is not fixed. If your model must not start a burst short,
+set its `minReplicaCount` to the replicas the burst needs: a floor is never
+taken.
+
 **P/D models: with long prompts, keep a prefill floor.** Prefill's demand is
 read in tokens and grows with input length. When a prefill replica queues on
 its own, with decode healthy, its capacity is measured and its need follows its
@@ -520,7 +536,9 @@ under 15 000-token prompts
 ([why](../well-lit-paths/utilization-share/measured.md#pd-not-measured)).
 
 With short prompts that is right, and prefill is a fair donor. With long
-prompts, keep a prefill floor until a prefill capacity measure ships
+prompts, a prefill whose need reads small also counts as a calm donor, so its
+replicas can be taken at once for another model at its threshold. Keep a
+prefill floor until a prefill capacity measure ships
 ([proposal §15](../proposals/utilization-share-optimizer.md#15-deferred-to-later-prs)).
 Size it from what prefill must sustain at peak, over what one prefill replica
 sustains:

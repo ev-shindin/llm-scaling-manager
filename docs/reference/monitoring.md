@@ -305,6 +305,17 @@ histogram_quantile(0.9, sum by (le, accelerator_type, scope) (
 # model of the group until the controller can read its transfer marks again.
 wva_model_scaling_blocked{reason=~"no-compatible-donor|floors-exceed-quota|marks-unreadable"} == 1
 
+# A role stuck short while the optimizer acts: holding less than three quarters
+# of its need (headroom below -0.25). Alert with for: of about one reversal
+# hold, wva_utilization_share_effective_seconds{param="reversal-hold"} (about
+# 12 minutes with a 300 s scale-down window): a transfer should have reached it
+# by then. Read the model's wva_model_scaling_blocked reason: reversal-hold
+# for the whole hold means no other role was calm enough to give, often a
+# model whose burst just ended. On a short quota (spare_gpus below 0) it fires
+# by design: rebalancing cannot cover every need.
+wva_utilization_share_headroom < -0.25
+  and on() (wva_utilization_share_mode{mode="active"} == 1)
+
 # Reasons that expire by themselves and come back: release-taken and
 # release-shape-mismatch last one release timeout after a fill timed out, and
 # donor-not-steerable lasts only its back-off (quiet-period lasts one fill

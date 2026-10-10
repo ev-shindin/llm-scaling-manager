@@ -181,17 +181,25 @@ Work down the list in order.
    counts the latter.
 5. **Does it stay actionable?** A role must be actionable on **two consecutive
    cycles** before a transfer is planned for it, so a role that flickers in and
-   out of band never moves. At most two replicas move per role per cycle and two
+   out of band never moves. A hard imbalance (step 6) does not wait for the
+   second cycle. At most two replicas move per role per cycle and two
    transfers run per group at once.
 6. **Is it held?** `withheld_total{reason="reversal-hold"}` rising, or the
    model's blocked reason `reversal-hold`, means a role that just gave is being
    kept from receiving (or the reverse) until the hold in
    `wva_utilization_share_effective_seconds{param="reversal-hold"}` passes. That
-   is the anti-oscillation rule working, not a fault. Its worst case: a role that
-   gave cannot receive for the whole hold, about twice a release time from the
-   start of the transfer it gave in, **even when it is now below its need**
-   (urgent receivers are held too). With a 300 s scale-down window that is on the
-   order of 12 minutes.
+   is the anti-oscillation rule working, not a fault. The hold lasts about twice
+   a release time from the start of the transfer it gave in; with a 300 s
+   scale-down window that is on the order of 12 minutes. It is lifted for a
+   **hard imbalance**: a role at or near its scale-up threshold (need at least
+   0.9 of what it holds) receives at once from a role that stays calm after
+   giving (need at most 0.6 of what it keeps); the controller logs that
+   transfer with `rebalance=true`, and the role does not show `reversal-hold`
+   while such a donor exists. So a role held below its need for the whole hold
+   means no other role is that calm. A cancelled transfer holds only its own
+   donor -> receiver pair from starting again; each role can still move with
+   any other role. The counter also counts moves withheld by a donor's
+   back-off after an aborted release, or by a donor that has given all it can.
 7. **Is it swinging, or at the transfer limit?** Blocked reason `swinging`
    (`wva_utilization_share_swinging == 1`) means the role reversed direction
    twice within the swing window and is planned on its mean need, not its

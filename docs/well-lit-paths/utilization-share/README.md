@@ -3,13 +3,18 @@
 > **Experimental.** The optimizer is built, in shadow mode and acting, with
 > donor sets, P/D roles and node-aware placement. Unit tests cover it, and three
 > end-to-end specs run it on kind with emulated GPUs and the inference
-> simulator. **One benchmark run, on two aggregated models,** measured it on
-> H200s ([measured](measured.md)): the transfers worked, and the replica
-> timelines show idle headroom serving the first rise and a delay of about 5.5
-> minutes at the swap. Its effect on latency is inconclusive: two arms that
-> scaled identically differed by up to 9 s p95. That is the short leg. There is
-> one run and no repetition, and P/D could not be measured: prefill never
-> scaled, so prefill and decode never competed for GPUs. The defaults may also
+> simulator. **Three benchmark runs, on two aggregated models with 1 GPU per
+> replica,** measured it on H200s ([measured](measured.md)). The first, with
+> bursts of the same shape, showed idle headroom serving the first rise and a
+> delay of about 5.5 minutes at the swap; its effect on latency was
+> inconclusive (two arms that scaled identically differed by up to 9 s p95).
+> Two runs with different burst shapes found a failure: the second model to
+> burst ran its whole burst on 3 of its 8 replicas, at a 575 s and then a
+> 564 s median time to first token against 1 s without sharing, while the
+> other model, idle, held the GPUs. The fixes for it are built and **not yet
+> measured**. Each arm ran once; whole-node and multi-GPU pods were not
+> measured; and P/D could not be measured: prefill never scaled, so prefill
+> and decode never competed for GPUs. The defaults may also
 > change: the `tolerance` of 0.15, the weight classes and a `reserveGPUs` of 0
 > are starting points, and the
 > [proposal](../../proposals/utilization-share-optimizer.md#14-open-questions)
@@ -69,6 +74,15 @@ is pure loss and headroom costs nothing extra.
   before it grows. In the benchmark it started growing about 5.5 minutes later
   than under today's optimizer, which had already scaled the falling model
   down.
+- **Models burst in turn and a burst must not start short.** In two benchmark
+  runs with different burst shapes, the second model to burst waited 16 and
+  then 18 minutes -- its whole burst -- for GPUs the other, idle, model held.
+  The rule that lifts the hold for such a move is built but not yet measured,
+  and it does not cover every case: a model whose burst of long outputs has
+  just ended still reads its draining backlog as need, so GPUs can even move
+  *to* it as the other model's burst begins. If you take the mode anyway, give
+  each such model a floor sized for its burst
+  ([for model owners](../../reference/scaling-policy.md#for-model-owners-what-the-optimizer-may-take-and-how-to-protect-a-model)).
 - **The real limit is not the scaling manager's quota.** A quota counts only
   what the scaling manager's own variants hold. If a Kubernetes `ResourceQuota`
   or unmanaged workloads on the same accelerators are what actually stops
@@ -83,7 +97,7 @@ is pure loss and headroom costs nothing extra.
   100 minutes
   ([§6.7](../../proposals/utilization-share-optimizer.md#67-why-it-does-not-oscillate-and-what-it-cannot-follow)).
   The swing rule limits that loss but does not turn it into a gain. These are
-  design figures. The one benchmark measured about 8 minutes from a rise to a
+  design figures. The first benchmark run measured about 8 minutes from a rise to a
   serving replica on an 8B model, with releases of about 6 minutes
   ([measured](measured.md#what-this-says-and-how-far-it-goes)); a larger model
   takes longer.
@@ -168,10 +182,13 @@ group scales during it. Each of those models shows the blocked reason
 `quiet-period` meanwhile. Expect the same freeze on every upgrade.
 
 **A model that just gave GPUs cannot receive them back for a while, even when it
-is short.** That is the anti-oscillation rule. It applies to urgent receivers
-(below their need) as well, and it lasts about twice a release time from the
-start of the transfer it gave in. With a 300 s scale-down window, that is on
-the order of 12 minutes. It shows as the blocked reason `reversal-hold`.
+is short.** That is the anti-oscillation rule. It lasts about twice a release
+time from the start of the transfer it gave in; with a 300 s scale-down
+window, that is on the order of 12 minutes. It shows as the blocked reason
+`reversal-hold`. It is lifted only for a hard imbalance: the short model is at
+or near its scale-up threshold and another model would stay well below its
+own (at most 0.6 of what it keeps) after giving. A model whose burst just
+ended usually is not that calm, so the hold can still last a whole burst.
 
 **One slow donor slows the whole group.** The release and fill timeouts are
 derived per group, from the slowest donor configuration in it: the longest
@@ -277,8 +294,13 @@ When it evaluates but never moves anything, work down
 - **Not covered:**
   - A real model server or real accelerators: the e2e uses the inference
     simulator, so drain behaviour and model load time are not exercised.
-  - Repeated measured load: the benchmark below ran once, on aggregated models
-    only.
+  - Repeated measured load: each benchmark arm below ran once, on aggregated
+    models only.
+  - Whole-node or multi-GPU pods under real load: every benchmark run used
+    1 GPU per replica, and the P/D scenario does too. The e2e covers 2-GPU
+    receivers and LWS groups on emulated GPUs only.
+  - The cancel fix and the hard-imbalance rule, which no cluster run has
+    measured yet.
   - A cluster quota group and the `clusterNamespaces` canary, which are
     unit-tested only. All three e2e specs use a namespace quota.
   - A controller restart that rebuilds transfers from pod marks, a
@@ -287,7 +309,8 @@ When it evaluates but never moves anything, work down
 
 ## How it is benchmarked
 
-**Once, on two aggregated models: [what it measured](measured.md).**
+**Three runs, on two aggregated models with 1 GPU per replica: [what they
+measured](measured.md).**
 
 [Two models, anti-phase bursts, under one quota](../../guides/benchmarking/two-model-utilization-share.md)
 is the two-model anti-phase load of the warm-pool benchmark. It runs under one
@@ -309,6 +332,21 @@ quota, showed:
   to 9 s p95 on the same replicas. Every latency difference between the arms
   was smaller than that, so the run says nothing about latency on its own; the
   bullets above rest on the replica timelines.
+
+Two more runs gave the models different bursts -- one on long prompts, one on
+long outputs -- with up to 8 replicas each under a 10-GPU quota:
+
+- **The second model to burst ran its whole burst short.** It stayed on 3 of
+  its 8 replicas while the other model, idle by then, held 7: a 575 s, then a
+  564 s median time to first token for the rest of its burst, against 1 s
+  under today's optimizer. The first time a cancelled transfer held it; the
+  second time the reversal hold did. Both are fixed in the code since, and
+  neither fix has been measured yet.
+- **Idle headroom still helped the first model to burst**: on the second
+  run it began on 5 replicas instead of 1.
+- **It cost 66% more GPU-seconds** on the second run (28 111 against 16 976).
+  The cost depends on how much of the quota the load leaves idle: the mode
+  holds all of it.
 
 A P/D version was attempted and not measured. Prefill never left one replica
 under prompt-heavy load, so there was no prefill-versus-decode competition to

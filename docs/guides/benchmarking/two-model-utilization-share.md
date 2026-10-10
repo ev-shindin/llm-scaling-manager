@@ -246,7 +246,14 @@ shape follow from the documented rules:
   **reversal hold** when its own burst begins. The hold is about twice a
   release time from the start of the transfer it gave in, about 12 minutes
   with the scenario's 300 s scale-down window. If that happens, the report's
-  held-back table shows it as `reversal-hold`.
+  held-back table shows it as `reversal-hold`. This has been measured: in the
+  different-burst-shapes runs it kept the second model to burst on 3 of its 8
+  replicas for its whole burst
+  ([measured](../../well-lit-paths/utilization-share/measured.md#rerun-with-the-cancel-fix-the-reversal-hold-did-the-same)).
+  The hold is now lifted for a hard imbalance -- a receiver at or near its
+  scale-up threshold and a donor that stays calm after giving -- which no run
+  has measured yet. A model whose long-output burst just ended is usually not
+  calm, so the hold can still bite.
 - A role that reverses direction twice within the swing window is planned on
   its mean need, and shows `swinging`.
 
@@ -263,8 +270,13 @@ and, in addition:
 
 - **Weights.** Both models run at the default weight. How a weight class
   divides the headroom is not exercised.
-- **Node-aware placement and P/D.** One accelerator per replica and aggregated
-  models: no donor sets, no LeaderWorkerSets.
+- **Node-aware placement, whole-node pods and P/D.** One accelerator per
+  replica and aggregated models: no donor sets, no LeaderWorkerSets, no
+  8-GPU replicas. A P/D variant of the different-burst-shapes scenario,
+  `hack/benchmark/scenarios/guides/two-model-shapes-pd.yaml` (both models
+  disaggregated, four roles under one quota; how to drive it is in its
+  header), exists and has not been run. Its prefill and decode pods take one
+  accelerator each, so it says nothing about whole-node pods either.
 - **A cluster quota or a canary.** One namespace quota group.
 
 ## One P/D model (single-stack mode)

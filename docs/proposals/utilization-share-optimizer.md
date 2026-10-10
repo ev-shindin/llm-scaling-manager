@@ -698,26 +698,51 @@ When the group acts:
 - **Every transfer involves a confirmed actionable role** (§6.1 step 5), and
   respects the reversal hold (§6.7). A role that gave cannot receive, and a role
   that received cannot give, within the reversal hold (two release times, §8.4)
-  of that transfer's start. A cancelled transfer moved nothing and records no
-  move: it holds only its own direction -- its donor from giving and its
-  receiver from receiving again -- so a start and a cancel cannot loop, and
-  the reverse move its cancelling demand calls for stays open. The hold blocks **transfers only**: a role on hold that
-  falls below its need still draws on idle GPUs and the reserve. A **deeply**
-  short receiver -- holding less than three quarters of its need
-  (`ShareUrgentHeldFraction`) -- is exempt, from a donor that keeps its own
-  need after giving (`shareReversalExempt`). The earlier rule exempted no
-  urgent receiver, on the simulated premise that a role that just gave rarely
-  bursts within the hold. Alternating bursts break that premise: on a cluster
-  run, GPUs moved to a model whose burst had just ended (its draining backlog
-  still read as need) as the other's began, and the hold kept them there for
-  18 minutes -- the whole burst served on 3 of 8 replicas, at a 564 s median
-  time to first token against 1 s without sharing. Exempting every receiver
-  below its need reopens the reversal path in the §6.7 swing simulation
-  (transfers reversed, the 30-minute resonance at 2.95x the shortfall of
-  standing still); below three quarters of need it reversed none and ran at
-  1.73x (1.86x with no exemption). Back-offs, the cancelled-direction hold
-  and an exhausted donor still apply. A swinging role is planned on its
-  mean need (§6.7 rule 5).
+  of that transfer's start. A transfer cancelled before any pod moved removes
+  exactly its own recorded moves (§6.3): it holds neither role and counts
+  toward no swing. It holds only that donor -> receiver pair from starting
+  again, for one reversal hold (`PairHeld`), so a start and a cancel cannot
+  loop; the receiver can still take from other donors and the donor give to
+  others. The hold blocks **transfers only**: a role on hold that falls below
+  its need still draws on idle GPUs and the reserve.
+- **A hard imbalance waits for no hold** (`shareHardImbalance`). A move whose
+  receiver's need is at least `ShareUrgentPressure` (0.9) of what it holds --
+  at or near its scale-up threshold -- and whose donor's need is at most
+  `ShareCalmPressure` (0.6) of what it keeps after giving waits for neither
+  the reversal hold nor the confirmation cycles: it starts on the first cycle,
+  and the transfer is logged with `rebalance=true`. Everything else still
+  applies: the cancelled pair's hold, an aborted donor's back-off, an
+  exhausted donor (`GivingBusy`), the admission test above, and the donor's
+  band and keep. The two thresholds are the rule's hysteresis: after the move
+  the donor is at or below 0.6 and the receiver below 0.9, so the reverse move
+  cannot qualify until demand itself changes by their ratio, about 1.5x. Every
+  short role is above 0.9, so in practice the donor's calmness decides.
+
+  Why it exists: the first rule exempted no receiver from the hold, on the
+  simulated premise that a role that just gave rarely bursts within it.
+  Alternating bursts break that premise. On a cluster run, GPUs moved to a
+  model whose burst had just ended (its draining backlog still read as need)
+  as the other's began, and the hold kept them there for 18 minutes -- the
+  whole burst served on 3 of 8 replicas while the other model, idle, held 7,
+  at a 564 s median time to first token against 1 s without sharing. An
+  interim rule (a receiver below three quarters of its need, from a donor that
+  keeps its own need) was sized in a simulation whose cancel behaved
+  differently from production; its figures are superseded and the rule is
+  gone.
+
+  The thresholds come from the §6.7 simulator run in production's call order
+  (5-20 seeds; ratios are shortfall against a fleet that never moves). On
+  1-GPU sine and square swings with 15-60 minute periods and need lagging
+  demand by 1-5 minutes, 0.9/0.6 stays within -0.18x..+0.06x of no exemption,
+  and helps the 15-minute swing (1.43x -> 1.25x). A calm bound of 0.7 cost up
+  to +0.52x (15-minute swing, 3-minute lag: 1.72x against 1.20x), and
+  exempting every short receiver reached 3.1x where no exemption peaked at
+  1.86x. Whole-node square bursts (8-GPU replicas, 5-10 minute cold start)
+  stay within +/-0.06x of no exemption. The simulation never produces the
+  failure the rule is for -- one model held short for its whole burst while
+  the other, idle, holds the GPUs -- so it bounds the rule's cost, not its
+  benefit.
+- **A swinging role** is planned on its mean need (§6.7 rule 5).
 - **Entitled receivers** — an owed floor (§5.5 case 5), a fixed consumer below
   its today's-path target (§5.6), the reserve's refill (below) — are funded
   first. They have no `z`, so they bypass the `z` admission rule, the actionable
@@ -962,13 +987,30 @@ during Releasing the donor's demand rises so that its reduced size would land
 transfer is cancelled and the donor's target restored. The thresholds are deliberately wider than the
 admission test's: a cancel rule that mirrors admission flips with demand noise
 — plan, cancel, plan — and in simulation it kept a needed transfer from ever
-landing (§6.7). A cancelled pair is held in the cancelled direction only:
-the cancel happens because the donor's demand rose (or the receiver's fell), so
-the donor is the role about to need GPUs and the receiver the one able to give
-them. Holding the pair in the reverse direction -- the earlier rule -- blocked
-exactly that move: on a cluster run a prompt-heavy model whose burst began as
-it was about to give waited 16 minutes for GPUs that sat idle on the other
-model, serving at a 575 s median time to first token. While the
+landing (§6.7).
+
+A cancelled transfer removes exactly its own recorded moves: each move is
+tagged with its transfer's ID, and each role's last-gave and last-got times
+and its swing state are re-derived from the moves that remain. So a cancel
+holds neither role and counts toward no swing, whether or not the transfer
+had already been confirmed. (The first version restored a snapshot taken when
+the transfer started, which confirmation had already deleted, so in
+production it did nothing.) The cancel then holds only that donor -> receiver
+pair from starting again, for one reversal hold (`PairHeld`). Neither role is
+held toward any other: the receiver can still take from other donors and the
+donor give to others. Two earlier rules failed here:
+
+- holding the pair in the reverse direction blocked exactly the move the
+  cancel calls for. The cancel happens because the donor's demand rose (or
+  the receiver's fell), so the donor is the role about to need GPUs. On a
+  cluster run a prompt-heavy model whose burst began as it was about to give
+  waited 16 minutes for GPUs that sat idle on the other model, serving at a
+  575 s median time to first token;
+- holding the receiver as a role, from receiving from anyone, let one model,
+  by timing its own load to cancel transfers, keep another from receiving at
+  all.
+
+While the
 HPA is still holding the window's maximum, none of the donor's pods have been
 touched, and the cancel costs nothing. That stops being true once the window
 expires: the scale-down policies then remove pods step by step, and a cancel
@@ -1294,12 +1336,17 @@ replicas. Every figure is a mean of five seeds.
    receiver stayed exactly as short as if nothing had been done. With
    hysteresis, a transfer is cancelled only if its donor would now land more
    than twice its tolerance below target, or its receiver is more than its
-   tolerance above target without it.
-4. **Hold a pair from reversing** (§6.2). A role that gave cannot receive, and
-   one that received cannot give, for two release times measured from the transfer's start, or from its cancellation. That is
-   about one release time after it completes. The hold blocks only the opposite
-   direction. It holds an urgent receiver (one below its need) as well; that
-   role shows the blocked reason `reversal-hold` while it waits.
+   tolerance above target without it. A cancelled transfer removes exactly
+   its own recorded moves, so it neither holds its roles nor counts toward a
+   swing; it holds only that donor -> receiver pair from starting again, for
+   one reversal hold.
+4. **Hold a role from reversing** (§6.2). A role that gave cannot receive, and
+   one that received cannot give, for two release times measured from the
+   transfer's start. That is about one release time after it completes. The
+   hold blocks only the opposite direction. A move that rebalances a hard
+   imbalance -- a receiver at 0.9 or more of what it holds, from a donor that
+   stays at 0.6 or less of what it keeps -- is not held (§6.2); a short role
+   held otherwise shows the blocked reason `reversal-hold` while it waits.
 5. **Plan a swinging role on its mean need.** A role whose transfers change
    direction twice within eight decide-to-serve latencies (about 96 minutes) is
    following load it cannot catch. For the next such window it is planned on its
@@ -1617,7 +1664,7 @@ it takes: one rule changed reproduces each oscillation.
 | release time | **measured**: the p90 of this group's completed releases (`wva_utilization_share_release_seconds`). Until enough have completed, the configured bound below |
 | configured release bound | the stabilization window of the donors' ScaledObjects (`spec.advanced.horizontalPodAutoscalerConfig.behavior.scaleDown.stabilizationWindowSeconds`, 300 s if unset), plus the HPA's 15 s sync, plus the KEDA `pollingInterval` (30 s if unset), plus the donor pods' `terminationGracePeriodSeconds` from the scale target's pod template (leader and worker templates for an LWS; 30 s if unset). Each input is the **largest among the group's donors**: the timings are per group, set by its slowest donor, not per transfer. The scale-down `policies` are **not** included: a Pods/Percent policy that paces a release past the window (why a ten-replica release measured 420 s, not 300) is covered only by the 1.5× margin of the timeout below, and, once three releases have completed, by the measured release time |
 | release timeout | 1.5 × the configured release bound + 2 cycles — from configured values, an upper bound, so a release that is merely slow is not aborted |
-| reversal hold | 2 × release time, from a transfer's start (the opposite direction), or from its cancellation (the cancelled direction only) — the *measured* time, so a long drain grace that is rarely used does not stretch it |
+| reversal hold | 2 × release time, from a transfer's start (the opposite direction), or from a cancellation (that donor → receiver pair only) — the *measured* time, so a long drain grace that is rarely used does not stretch it |
 | decide-to-serve latency | release time + a fixed 5-minute estimate of pod start and model load + 3 cycles. Measuring it (decision to the receiver's pods Ready) from the transfers the ledger has completed is not built (§13) |
 | swing window | 8 × decide-to-serve latency |
 | fill timeout | the KEDA `pollingInterval` + the HPA's 15 s sync + 2 cycles + 1 minute of scheduling — Filling ends at *scheduled*, so this covers the scale-up's way through KEDA and the HPA and the scheduler, not model load. For an LWS receiver, + 1 minute for gang scheduling |
@@ -1656,7 +1703,7 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_utilization_share_target_gpus` | `model_name`, `role`, `exported_namespace` | `Ĝ_r`, the continuous target the band is judged against, in GPUs |
 | `wva_utilization_share_actionable` | `model_name`, `role`, `exported_namespace` | 1 when the role is out of band and off its integer target — a move could fix it (§6.1) |
 | `wva_utilization_share_replicas_to_move` | `accelerator_type`, `scope` | replicas the integer target would move; in shadow mode, what would be planned |
-| `wva_utilization_share_withheld_total` | `accelerator_type`, `scope`, `reason` | transfers not planned: `reversal-hold` (§6.7 rule 4) / `not-actionable` (§6.1 step 4). The swing rule withholds nothing; it changes the need a role is planned on, reported by `wva_utilization_share_swinging` |
+| `wva_utilization_share_withheld_total` | `accelerator_type`, `scope`, `reason` | transfers not planned: `reversal-hold` (every move a hold withheld: the reversal hold, §6.7 rule 4; a cancelled pair, §6.3; an aborted donor's back-off; an exhausted donor) / `not-actionable` (§6.1 step 4). The swing rule withholds nothing; it changes the need a role is planned on, reported by `wva_utilization_share_swinging` |
 | `wva_utilization_share_swinging` | `model_name`, `role`, `exported_namespace` | 1 while a role is planned on its mean need (§6.7 rule 5) |
 | `wva_utilization_share_actual` | `model_name`, `role`, `exported_namespace` | `u_r` |
 | `wva_utilization_share_spare_gpus` | `accelerator_type`, `scope` | `S`; negative when the quota is short |
@@ -1681,7 +1728,7 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_model_scaling_blocked` | `reason="release-taken"` | GPUs released, then occupied by a pod WVA did not place (§6.3) |
 | `wva_model_scaling_blocked` | `reason="release-timeout"` | the role's last release was aborted; it backs off before giving again. Only an aborted release |
 | `wva_model_scaling_blocked` | `reason="donor-not-steerable"` | the role's pods could not be marked when it was asked to give (a Deployment pod not Ready or not scheduled, a Deployment mid-rollout, no deletion cost left between earlier live marks and the lowest unmarked sibling, an LWS whose next group to go is terminating or unscheduled, or the patch failed); it backs off as after an abort, and the reason lasts only the back-off. A donor whose every pod is already given to live transfers is only held (`HoldGiving`), with no reason |
-| `wva_model_scaling_blocked` | `reason="reversal-hold"` | short and actionable, but it gave within the reversal hold (§6.7 rule 4). Urgent receivers (below need) are held too, by decision; this reason makes that wait visible |
+| `wva_model_scaling_blocked` | `reason="reversal-hold"` | short and actionable, but it gave within the reversal hold (§6.7 rule 4). Not reported when the role is at its threshold and another role would stay calm after giving it a replica: that move is a hard imbalance and the hold is lifted (§6.2). A cancelled pair sets it on neither role |
 | `wva_model_scaling_blocked` | `reason="swinging"` | planned on its mean need (§6.7 rule 5) |
 | `wva_model_scaling_blocked` | `reason="transfer-limit"` | short and actionable, while the group already has the most donor transfers in flight (2) |
 | `wva_utilization_share_mode` | `mode` | 1 for the mode in force — `off` / `invalid` / `shadow` / `active` — 0 for the others; published by the leader at the start of every cycle, from its first, including cycles with no active model, so an alert needs no `absent()` |
@@ -2275,6 +2322,25 @@ optimizer every cycle (§6.6).
        and the idle fill raises the receiver only where its pods fit the free
        node picture (`ShareFitPods`, in its domain when it has one), spending
        it. Without node information the fill counts GPUs, as before.
+     - holds after the different-burst-shapes cluster runs (well-lit path,
+       [measured](../well-lit-paths/utilization-share/measured.md)), where
+       one model ran its whole burst short twice, first through a cancel and
+       then through the reversal hold:
+       - a cancel removes exactly its own moves. Moves are tagged with their
+         transfer's ID, and the last-gave and last-got times and the swing
+         state are re-derived (`ShareLedger.rederive`), so a cancel after
+         confirmation works too; the first version restored a snapshot that
+         confirmation had already deleted, and in production did nothing.
+         The cancel holds only its donor -> receiver pair (`PairHeld`), not
+         either role (§6.3);
+       - a hard imbalance waits for no reversal hold and no confirmation
+         (`shareHardImbalance`, `ShareUrgentPressure` 0.9,
+         `ShareCalmPressure` 0.6; §6.2). It replaces the interim exemption
+         for a receiver below three quarters of its need
+         (`ShareUrgentHeldFraction`, `shareReversalExempt`), which is gone;
+       - `reversal-hold` is not reported for a role whose hold a hard
+         imbalance would lift, nor for a cancelled pair.
+       Neither change has been measured on a cluster yet.
 
    **Not yet built in stage 2** (the design above describes them; the code does
    not do them):
@@ -2298,11 +2364,13 @@ optimizer every cycle (§6.6).
      timings' sources are logged once, when a ledger starts.
 
    Decisions taken while building, not gaps: `shadow` stays default `false`
-   (§8.1), and the reversal hold applies to urgent receivers too (§6.7 rule 4,
-   reported as `reversal-hold`). The refill pace guard remains untestable
+   (§8.1). The reversal hold applying to urgent receivers too (§6.7 rule 4)
+   was a decision here; it is superseded by the hard-imbalance rule (§6.2),
+   after a cluster run held a bursting model short for its whole burst. The refill pace guard remains untestable
    while the concurrency limit (2) equals the pace (2).
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
-   managed-keda-behavior lands (§6.4).
+   managed-keda-behavior lands (§6.4), gated on a persistent hard imbalance,
+   not on the pressure band alone (§15).
 
 ## 14. Open questions
 
@@ -2360,7 +2428,20 @@ Decided, not built here:
   at the swap the rising model started growing about one donor scale-down
   window (~5.5 min) later than under today's optimizer, because the falling
   model's headroom moves only through a transfer. A short scale-down window
-  for urgent transfers is the designed answer and the next step.
+  for urgent transfers is the designed answer and the next step. Simulated
+  (§6.7 simulator), a 60 s release for hard-imbalance moves helped long
+  bursts (whole-node, 1-hour period: 1.37x -> 1.14x the shortfall of a fleet
+  that never moves; 1-GPU, 45 minutes: 1.19x -> 1.01x) but hurt 20-minute
+  swings (whole-node: 1.15x -> 1.31x): a faster release chases swings that
+  reverse before a replica starts. So stage 3 needs a persistence gate -- the
+  hard imbalance holding for some minutes -- not only the pressure band.
+- **A draining backlog reads as need.** After a model's burst of long outputs
+  ends, its backlog still reads as need while it drains, so transfers *to* it
+  can start just as the other model's burst begins. The hard-imbalance rule
+  (§6.2) shortens how long that lasts only when the draining model is calm
+  after giving. Not fixed; a demand signal that discounts a draining backlog
+  is the fix. Until then, an owner who cannot accept starting a burst short
+  keeps a floor (`minReplicaCount`) sized for the burst.
 - **Raise the receiver when its donor pod starts terminating.** Today the
   receiver is raised when the donor's pod is gone, so for 30 to 75 seconds a
   freed whole node has no receiver pod queued for it, and any Pending GPU pod
@@ -2393,7 +2474,10 @@ Decided, not built here:
   input-length band (`throughputKey`), so a restart, a leader change or a
   shift in prompt length loses it. The fix is a prefill-specific capacity:
   sustained input tokens per second against a measured per-replica prefill
-  ceiling, persisted. Until then, a P/D model with long prompts should keep a
+  ceiling, persisted. The hard-imbalance rule (§6.2) makes the gap matter
+  more: a prefill whose need reads small counts as a calm donor, so its
+  replicas can be taken with no hold and no confirmation. Until then, a P/D
+  model with long prompts should keep a
   prefill `minReplicaCount` sized from its peak prompt-token rate (the recipe
   is in the reference, "For model owners"); with short prompts, prefill is
   rightly a donor.

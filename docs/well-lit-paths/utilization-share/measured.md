@@ -16,7 +16,11 @@ from `259c52f8` and deployed by digest. The scenario and the guards that keep
 the arms comparable are in the
 [benchmarking runbook](../../guides/benchmarking/two-model-utilization-share.md).
 The tables below are that report's, unedited, except where a row says it came
-from the controller log.
+from the controller log. Two later runs, on a scenario with different burst
+shapes, follow in
+[their own section](#different-burst-shapes-a-cancel-that-stalled-the-rising-model);
+they found a failure the first scenario could not show. Every run used 1 GPU
+per replica.
 
 ## The setup
 
@@ -114,9 +118,9 @@ pod left.
 | what | detail |
 | --- | --- |
 | idle fills | at the start, one replica each to Qwen and Llama from spare quota |
-| Llama → Qwen | when Qwen rose; released after about 6 min, then Qwen raised |
-| Qwen → Llama | two concurrent transfers when Llama rose, both released after about 5 min 45 s |
-| Qwen ← Llama | one more started as Llama's burst ended, evening out headroom again |
+| Llama -> Qwen | when Qwen rose; released after about 6 min, then Qwen raised |
+| Qwen -> Llama | two concurrent transfers when Llama rose, both released after about 5 min 45 s |
+| Llama -> Qwen | one more started as Llama's burst ended, evening out headroom again |
 
 Events on both Deployments named the pod that went and the reason, for
 example *"giving one replica (1 GPUs) to model Qwen/Qwen3-8B (decode) to even
@@ -145,7 +149,7 @@ today's optimizer emits no blocked reason when the quota is simply spent.
   swap.** Here the delay was one donor scale-down window, 300 s, because
   headroom held by the falling model is only released through a transfer.
   Today's optimizer does not hold that headroom, so at the swap it was faster.
-  A short scale-down window for urgent receivers is designed but not built (the
+  A short scale-down window for urgent transfers is designed but not built (the
   proposal's stage 3), and it would address exactly this delay.
 - **A move took about 8 minutes from the rise to a serving replica, not the
   design's twelve.** The proposal's decide-to-serve figure (§6.7) budgets two
@@ -154,7 +158,9 @@ today's optimizer emits no blocked reason when the quota is simply spent.
   Llama's Deployment asked for its second replica 390 s after the rise and had
   it ready at 478 s, an 8B model loading in about 90 s. A larger model, or a
   longer scale-down window, moves this toward the design figure or past it.
-- **It costs GPU-seconds**: here 24%.
+- **It costs GPU-seconds**: here 24%, and 66% on the second run with
+  different burst shapes below. The cost depends on how much of the quota the
+  load leaves idle, because the mode holds all of it.
 - One run, two rises per arm, no repetition. The `today` and `shadow` arms
   disagree by up to 9 s p95 on identical decisions (2.9 s on Qwen's rise). A
   latency difference smaller than that is not a result. The replica timelines
@@ -181,22 +187,26 @@ B stayed under a second in every arm, and every request was served.
 - `today` and `shadow` decide the same way, and their first 240 s differ by
   2x: that is the spread of one run, not a result.
 - In `share`, A gave B two replicas during B's burst. As A's own burst began,
-  another A → B transfer started, and was cancelled within a minute because
+  another A -> B transfer started, and was cancelled within a minute because
   A's demand had reversed. The cancel put both models in the reversal hold
   in the reverse direction: A could not receive and B could not give. So A ran
   its whole burst on 3 replicas while B, idle by then, held 7. The first
   transfer back started 16 minutes into A's burst, and landed after B's
   scale-down window.
-- Fixed afterwards: a cancelled transfer now records no move, and holds only
-  its own direction, so the move the cancelling demand calls for stays open
-  ([proposal §6.7](../../proposals/utilization-share-optimizer.md#67-why-it-does-not-oscillate-and-what-it-cannot-follow)). This run
-  predates that fix; it has not been rerun.
+- Fixed now, not yet measured: a cancelled transfer removes exactly its own
+  recorded moves, so it holds neither model and counts toward no swing, and
+  it holds only that donor -> receiver pair from starting again
+  ([proposal §6.3](../../proposals/utilization-share-optimizer.md#63-execute-scale-down-first-scale-up-into-released-gpus)).
+  The first attempt at this fix, in the image of the rerun below, restored a
+  snapshot that confirming the transfer had already deleted, so on a cluster
+  it did nothing. No run has measured the working fix.
 
 ### Rerun with the cancel fix: the reversal hold did the same
 
-The same scenario on the image of `2eb607f9` (a cancel holds only its own
-direction), with a 300 s band between bursts so the report could compare the
-arms (no overlap in any arm). One run of each arm, on 2026-10-09.
+The same scenario on the image of `2eb607f9`, which carried the first,
+ineffective cancel fix (no cancel happened in this run, so it did not matter),
+with a 300 s band between bursts so the report could compare the arms (no
+overlap in any arm). One run of each arm, on 2026-10-09.
 
 | time to first token, p50 / p95 | `today` | `shadow` | `share` |
 | --- | ---: | ---: | ---: |
@@ -214,17 +224,25 @@ No pod was ever unscheduled in any arm, and every request was served.
   began. A had just given and B had just received, so the reversal hold
   (about 11 minutes each) blocked the move back. The first B -> A transfer
   started 18 minutes into A's burst and landed after it ended.
-- Fixed afterwards: a receiver holding less than three quarters of its need
-  is exempt from the reversal hold, when the donor keeps its own need
+- `share` spent 66% more GPU-seconds than `today` (28 111 against 16 976).
+- Fixed now, not yet measured: a move that rebalances a hard imbalance waits
+  for no reversal hold. That is a receiver at or near its scale-up threshold
+  (need at least 0.9 of what it holds) and a donor that stays calm after
+  giving (need at most 0.6 of what it keeps)
   ([proposal §6.2](../../proposals/utilization-share-optimizer.md#62-plan-transfers)).
-  This run predates that fix.
+  An interim rule, a receiver below three quarters of its need, is gone. This
+  run predates both; a rerun is next.
+- Not fixed: B's draining backlog read as need, which is what started the
+  transfers to it. The hard-imbalance rule lifts the hold only when the
+  draining model is calm after giving. A model that must not start a burst
+  short needs a floor sized for its burst.
 
 ## P/D: not measured
 
 The same three arms were attempted on one P/D-disaggregated model
 (`Qwen/Qwen3-0.6B`, prefill and decode each 1–4 replicas, a quota of 5). The
 idea was for prefill and decode to compete for the quota through alternating
-prompt-heavy and decode-heavy phases. In the `today` arm, decode scaled 1 → 4
+prompt-heavy and decode-heavy phases. In the `today` arm, decode scaled 1 -> 4
 on the decode-heavy phase. **Prefill never left one replica**, including through
 20 minutes of 15 000-token prompts at 12 rps. With no prefill demand there is
 no prefill-versus-decode competition for the optimizer to resolve, so the
@@ -240,3 +258,10 @@ The attempt also found two problems in the benchmark tooling, both open:
   by hand.
 - The decode-heavy loader (4000-token outputs) wrote no results after its
   load ended, within the 1200 s grace.
+
+A different P/D scenario now exists and has **not been run**:
+`hack/benchmark/scenarios/guides/two-model-shapes-pd.yaml`, the
+different-burst-shapes load with both 8B models disaggregated, so four roles
+compete for one quota. Its prefill and decode pods take 1 GPU each, and it
+shares an engine cache across replicas so only the first pod of each role
+compiles. It exercises nothing about 8-GPU or whole-node pods.
