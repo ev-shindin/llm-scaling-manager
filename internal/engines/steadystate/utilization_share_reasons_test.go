@@ -61,10 +61,21 @@ func TestUtilizationShareBlockedReasonsForAHeldBackReceiver(t *testing.T) {
 		// B gave: the move is recorded when the transfer starts. (A cancelled
 		// one records none -- nothing moved.)
 		l.Start(allocation.ShareTransfer{Donor: "ns/B/both", Receiver: "ns/C/both", GPUs: 1, DonorGPUs: 1}, held, t0, tm)
-		if got := reasons(l, t0.Add(time.Minute)); !slices.Contains(got, constants.ScalingBlockedReversalHold) {
+		// A is calm (2 of the 13 it would keep): a hard imbalance, exempt from
+		// the hold, so the hold is not B's reason.
+		if got := reasons(l, t0.Add(time.Minute)); slices.Contains(got, constants.ScalingBlockedReversalHold) {
+			t.Fatalf("B, with a calm donor, is exempt from the hold: got %v", got)
+		}
+		// No donor is calm: the hold applies.
+		mild, _ := shortGroup()
+		mild.Roles[0].Need = 12
+		mild.Roles[2].Need = 5
+		mev := allocation.EvaluateShare(mild.Roles, mild.Committed, mild.Thresholds, mild.Budget, 0.15)
+		mildReasons := func(now time.Time) []string { return shareBlockedReasons(l, mild, mev, nil, now, tm)["ns/B"] }
+		if got := mildReasons(t0.Add(time.Minute)); !slices.Contains(got, constants.ScalingBlockedReversalHold) {
 			t.Fatalf("B gave a minute ago: want reversal-hold, got %v", got)
 		}
-		if got := reasons(l, t0.Add(tm.ReversalHold+time.Minute)); slices.Contains(got, constants.ScalingBlockedReversalHold) {
+		if got := mildReasons(t0.Add(tm.ReversalHold + time.Minute)); slices.Contains(got, constants.ScalingBlockedReversalHold) {
 			t.Fatalf("past the hold: got %v", got)
 		}
 	})

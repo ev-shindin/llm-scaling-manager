@@ -86,10 +86,13 @@ var _ = Describe("ShareLedger", func() {
 		Expect(ended[0].Outcome).To(Equal(ShareOutcomeFillTimeout))
 	})
 
-	It("cancels only a Releasing transfer inside the window, and holds only the cancelled direction", func() {
+	It("cancels only a Releasing transfer inside the window, and holds only the cancelled pair", func() {
 		l := NewShareLedger()
 		held := map[string]int{"A": 9, "B": 5}
 		t := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 1}, held, at(0), tm)
+		// As in the engine: a started transfer is confirmed in its own cycle,
+		// before any cancel.
+		l.ConfirmStarted(t.ID, []string{"a-1"})
 		Expect(l.Cancel(t.ID, at(400), tm)).To(BeFalse(), "past the window a pod may have moved")
 		Expect(l.Cancel(t.ID, at(100), tm)).To(BeTrue())
 		Expect(l.InFlight()).To(BeZero())
@@ -98,11 +101,35 @@ var _ = Describe("ShareLedger", func() {
 		Expect(l.ReceivingHeld("A", at(101), tm)).To(BeFalse(), "the donor whose demand rose is free to receive")
 		Expect(l.GivingHeld("B", at(101), tm)).To(BeFalse(), "the receiver whose demand fell is free to give")
 		Expect(l.Swinging("A", at(101))).To(BeFalse(), "a cancel is no move toward a swing")
-		// The cancelled direction is held one reversal hold, so start and
-		// cancel cannot loop.
-		Expect(l.GivingHeld("A", at(100+719), tm)).To(BeTrue())
-		Expect(l.GivingHeld("A", at(100+720), tm)).To(BeFalse())
-		Expect(l.ReceivingHeld("B", at(500), tm)).To(BeTrue())
+		// The cancelled pair is held one reversal hold, so start and cancel
+		// cannot loop; neither role is held toward anyone else.
+		Expect(l.PairHeld("A", "B", at(100+719))).To(BeTrue())
+		Expect(l.PairHeld("A", "B", at(100+720))).To(BeFalse())
+		Expect(l.GivingHeld("A", at(101), tm)).To(BeFalse(), "A may give to another receiver")
+		Expect(l.ReceivingHeld("B", at(101), tm)).To(BeFalse(), "B may receive from another donor")
+	})
+
+	It("undoes only the cancelled transfer's moves, in any order", func() {
+		for _, order := range [][2]int{{0, 1}, {1, 0}} {
+			l := NewShareLedger()
+			held := map[string]int{"A": 9, "B": 5, "C": 1}
+			ts := []ShareTransfer{
+				l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 1}, held, at(0), tm),
+				l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 1}, held, at(0), tm),
+			}
+			other := l.Start(ShareTransfer{Donor: "A", Receiver: "C", GPUs: 1}, held, at(30), tm)
+			for _, x := range append(ts, other) {
+				l.ConfirmStarted(x.ID, nil)
+			}
+			Expect(l.Cancel(ts[order[0]].ID, at(60), tm)).To(BeTrue())
+			Expect(l.GivingHeld("B", at(61), tm)).To(BeTrue(), "order %v: the other A -> B transfer still holds B", order)
+			Expect(l.Cancel(ts[order[1]].ID, at(60), tm)).To(BeTrue())
+			Expect(l.GivingHeld("B", at(61), tm)).To(BeFalse(), "order %v: no A -> B move is left", order)
+			Expect(l.ReceivingHeld("A", at(61), tm)).To(BeTrue(), "order %v: A -> C still stands", order)
+			Expect(l.GivingHeld("C", at(61), tm)).To(BeTrue(), "order %v: C received", order)
+			Expect(l.Cancel(other.ID, at(61), tm)).To(BeTrue())
+			Expect(l.ReceivingHeld("A", at(62), tm)).To(BeFalse(), "order %v: nothing A gave is left", order)
+		}
 	})
 
 	It("holds only the opposite direction", func() {
@@ -157,7 +184,7 @@ var _ = Describe("ShareLedger.Forget", func() {
 		t := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 1}, map[string]int{"A": 4}, t0, tm)
 		Expect(l.ReceivingHeld("A", t0, tm)).To(BeTrue(), "control: Start holds the donor from receiving")
 		Expect(l.GivingHeld("B", t0, tm)).To(BeTrue(), "control: Start holds the receiver from giving")
-		l.Forget(t.ID)
+		l.Forget(t.ID, tm)
 		Expect(l.Transfers()).To(BeEmpty())
 		Expect(l.ReceivingHeld("A", t0, tm)).To(BeFalse())
 		Expect(l.GivingHeld("B", t0, tm)).To(BeFalse())

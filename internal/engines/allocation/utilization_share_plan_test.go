@@ -214,7 +214,8 @@ var _ = Describe("PlanShareTransfers against the §6.7 scenarios", func() {
 	})
 
 	// The resonance of §6.7: without the swing rule a 30-minute swing ran at 2.5x
-	// the shortfall of standing still. The rules must keep it well below that.
+	// the shortfall of standing still. The rules keep it at 1.45x; exempting
+	// every short receiver from the reversal hold ran it at 2.95x.
 	It("keeps the 30-minute resonance bounded", func() {
 		var with, still float64
 		for _, seed := range seeds {
@@ -224,7 +225,7 @@ var _ = Describe("PlanShareTransfers against the §6.7 scenarios", func() {
 			frozen.ReleaseTimeout = 0 // every transfer aborts at once: a fleet that never moves
 			still += runShareSim(roles, 12, seed, frozen).shortfall
 		}
-		Expect(with).To(BeNumerically("<", 2.5*still))
+		Expect(with).To(BeNumerically("<", 1.7*still))
 	})
 
 	// Negative control for the reversal hold (§6.7 rule 4): without it the
@@ -474,7 +475,7 @@ var _ = Describe("Donor-set integrity and wake holds (§6.3, §6.5)", func() {
 	It("aborts a primary whose contributor left without releasing, instead of releasing it alone", func() {
 		l := NewShareLedger()
 		p, c := startSet(l)
-		l.Forget(c.ID)
+		l.Forget(c.ID, tm)
 		ends := l.Observe(map[string]int{"A": 0, "C": 8}, t0.Add(time.Minute), tm)
 		Expect(ends).To(HaveLen(1))
 		Expect(ends[0].Transfer.ID).To(Equal(p.ID))

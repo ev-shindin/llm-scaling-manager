@@ -93,6 +93,10 @@ type ShareTransfer struct {
 	Entitled bool
 	// Urgent receivers are below their need (§6.4).
 	Urgent bool
+	// Rebalance marks a move that rebalances a hard imbalance
+	// (shareHardImbalance): it waited for neither the reversal hold nor the
+	// confirm cycles.
+	Rebalance bool
 	// PlannedPods are the donor pods a node-aware plan chose (namespace/name):
 	// the ones to mark, because the holes are planned where they run (§6.5).
 	// Empty when any of the donor's pods will do.
@@ -154,17 +158,24 @@ type ShareTimings struct {
 	ReleaseTimeout time.Duration
 	FillTimeout    time.Duration
 	// ReversalHold blocks a role from moving the opposite way, measured from a
-	// transfer's start or cancellation.
+	// transfer's start, and a cancelled transfer's donor from giving to the
+	// same receiver again, measured from the cancellation.
 	ReversalHold time.Duration
 	// SwingWindow: a role whose transfers change direction twice within it is
 	// planned on its mean need for the next SwingWindow.
 	SwingWindow time.Duration
 }
 
+// shareMove is one role's side of a transfer: id names the transfer, so a
+// transfer that is cancelled or never took effect removes exactly its own.
 type shareMove struct {
 	at       time.Time
 	received bool
+	id       string
 }
+
+// sharePair is a donor and the receiver it gives to.
+type sharePair struct{ donor, receiver string }
 
 type shareNeedSample struct {
 	at   time.Time
@@ -180,9 +191,6 @@ type ShareLedger struct {
 	// incarnation prefixes the IDs this ledger issues, so a transfer started
 	// after a restart never shares an ID with one restored from a mark.
 	incarnation string
-	// undo is what Start changed in the move history, per transfer, until
-	// ConfirmStarted; Forget puts it back.
-	undo map[string]shareUndo
 	// wakeHolds are the GPUs redirected to woken models (Redirect): free soon
 	// on the nodes, but taken by a wake's pod. Idle fills and other wakes must
 	// not count them until the hold expires.
@@ -217,16 +225,19 @@ type ShareLedger struct {
 	// the planner does not leave them to the fill again (SetFillShort).
 	fillShort map[string]bool
 
+	// lastGave and lastGot are derived from moves (rederive).
 	lastGave, lastGot map[string]time.Time
-	// noGive and noRecv hold, until then, the direction of a transfer that
-	// was cancelled: its donor from giving and its receiver from receiving
-	// again, so a start and a cancel cannot loop. The reverse direction --
-	// the one the demand that cancelled it calls for -- is left open.
-	noGive, noRecv map[string]time.Time
-	moves          map[string][]shareMove
-	swingUntil     map[string]time.Time
-	needs          map[string][]shareNeedSample
-	confirm        map[string]int
+	// noPair holds, until then, a donor from giving to the receiver of a
+	// transfer between them that was cancelled, so a start and a cancel
+	// cannot loop. Only that pair: the receiver may still take from other
+	// donors and the donor give to others -- a hold on either role alone
+	// would let one model, by timing its own load, keep another from
+	// receiving at all.
+	noPair     map[sharePair]time.Time
+	moves      map[string][]shareMove
+	swingUntil map[string]time.Time
+	needs      map[string][]shareNeedSample
+	confirm    map[string]int
 	// releases are the durations of recent completed releases, newest last,
 	// for the measured release time (§8.4).
 	releases []time.Duration
@@ -240,17 +251,6 @@ type ShareLedger struct {
 
 // shareReleaseSamples is how many completed releases the ledger remembers.
 const shareReleaseSamples = 20
-
-// shareUndo is the move history of a transfer's two roles before Start.
-type shareUndo struct {
-	donor, receiver string
-	gave, got       time.Time
-	hadGave, hadGot bool
-	donorMoves      []shareMove
-	receiverMoves   []shareMove
-	donorSwing      time.Time
-	receiverSwing   time.Time
-}
 
 // shareWakeHold is a redirected transfer's GPUs, held for the woken model:
 // for as long as the release takes (id names the transfer, until is zero), then
@@ -266,14 +266,12 @@ type shareWakeHold struct {
 func NewShareLedger() *ShareLedger {
 	return &ShareLedger{
 		incarnation: newIncarnation(),
-		undo:        map[string]shareUndo{},
 		aborts:      map[string]int{},
 		giveAfter:   map[string]time.Time{},
 		fillBlocked: map[string]shareFillBlock{},
 		lastGave:    map[string]time.Time{},
 		lastGot:     map[string]time.Time{},
-		noGive:      map[string]time.Time{},
-		noRecv:      map[string]time.Time{},
+		noPair:      map[sharePair]time.Time{},
 		moves:       map[string][]shareMove{},
 		swingUntil:  map[string]time.Time{},
 		needs:       map[string][]shareNeedSample{},
@@ -401,19 +399,9 @@ func (l *ShareLedger) Start(t ShareTransfer, held map[string]int, now time.Time,
 	t.donorBase = held[t.Donor]
 	l.transfers = append(l.transfers, &t)
 	if !t.Entitled {
-		u := shareUndo{
-			donor: t.Donor, receiver: t.Receiver,
-			donorMoves:    slices.Clone(l.moves[t.Donor]),
-			receiverMoves: slices.Clone(l.moves[t.Receiver]),
-			donorSwing:    l.swingUntil[t.Donor],
-			receiverSwing: l.swingUntil[t.Receiver],
-		}
-		u.gave, u.hadGave = l.lastGave[t.Donor]
-		u.got, u.hadGot = l.lastGot[t.Receiver]
-		l.undo[t.ID] = u
-		l.recordMove(t.Donor, false, now, tm)
+		l.recordMove(t.Donor, false, t.ID, now, tm)
 		if t.Receiver != "" {
-			l.recordMove(t.Receiver, true, now, tm)
+			l.recordMove(t.Receiver, true, t.ID, now, tm)
 		}
 	}
 	return t
@@ -445,8 +433,8 @@ func (l *ShareLedger) Transfer(id string) (ShareTransfer, bool) {
 }
 
 // Cancel removes a transfer that is still Releasing and inside the window, so
-// no donor pod has moved, and holds the pair (§6.3, §6.7 rule 3). It reports
-// whether the transfer was cancelled.
+// no donor pod has moved, and holds its donor from giving to its receiver
+// again (§6.3, §6.7 rule 3). It reports whether the transfer was cancelled.
 func (l *ShareLedger) Cancel(id string, now time.Time, tm ShareTimings) bool {
 	i := slices.IndexFunc(l.transfers, func(t *ShareTransfer) bool { return t.ID == id })
 	if i < 0 {
@@ -462,14 +450,14 @@ func (l *ShareLedger) Cancel(id string, now time.Time, tm ShareTimings) bool {
 	// demand that cancelled it calls for -- and counted toward a swing, which
 	// plans a role on its mean need and under-reads a rising one. Measured: a
 	// model whose burst began as it was about to give waited 16 minutes.
-	// Only the cancelled direction is held, so start and cancel cannot loop.
-	l.Forget(t.ID)
-	if !t.Entitled {
-		until := now.Add(tm.ReversalHold)
-		l.noGive[t.Donor] = until
-		if t.Receiver != "" {
-			l.noRecv[t.Receiver] = until
-		}
+	// Only the cancelled pair is held, so start and cancel cannot loop.
+	rc := t.Receiver
+	if rc == "" {
+		rc = l.setReceiver(t.SetID)
+	}
+	l.Forget(t.ID, tm)
+	if !t.Entitled && rc != "" {
+		l.noPair[sharePair{t.Donor, rc}] = now.Add(tm.ReversalHold)
 	}
 	return true
 }
@@ -691,21 +679,28 @@ func (l *ShareLedger) rebaseDonor(t *ShareTransfer, now time.Time) {
 }
 
 // ReceivingHeld reports whether role may not receive now: it gave within the
-// reversal hold, or it is held in the direction of a cancelled transfer
-// (ReceivingBlocked).
+// reversal hold.
 func (l *ShareLedger) ReceivingHeld(role string, now time.Time, tm ShareTimings) bool {
-	if l.ReceivingBlocked(role, now) {
-		return true
-	}
 	t, ok := l.lastGave[role]
 	return ok && now.Sub(t) < tm.ReversalHold
 }
 
-// ReceivingBlocked reports whether role may not receive now for a reason no
-// shortfall lifts: it was the receiver of a transfer cancelled within the
-// reversal hold, and receiving again would repeat it.
-func (l *ShareLedger) ReceivingBlocked(role string, now time.Time) bool {
-	return now.Before(l.noRecv[role])
+// PairHeld reports whether donor may not give to receiver now: a transfer
+// between them was cancelled within the reversal hold, and starting it again
+// would repeat it.
+func (l *ShareLedger) PairHeld(donor, receiver string, now time.Time) bool {
+	return now.Before(l.noPair[sharePair{donor, receiver}])
+}
+
+// setReceiver is the receiver of the set whose primary is id, while the
+// primary is in the ledger.
+func (l *ShareLedger) setReceiver(id string) string {
+	for _, t := range l.transfers {
+		if t.ID == id {
+			return t.Receiver
+		}
+	}
+	return ""
 }
 
 // Redirect hands a Releasing transfer's GPUs to a woken model (section 6.3):
@@ -761,8 +756,7 @@ func (l *ShareLedger) BackingOff(role string, now time.Time) bool {
 }
 
 // GivingHeld reports whether role may not give now: it received within the
-// reversal hold, its last release was aborted and it is backing off, or it
-// has given all it can (GivingBusy).
+// reversal hold, or GivingBlocked.
 func (l *ShareLedger) GivingHeld(role string, now time.Time, tm ShareTimings) bool {
 	if l.GivingBlocked(role, now) {
 		return true
@@ -772,32 +766,58 @@ func (l *ShareLedger) GivingHeld(role string, now time.Time, tm ShareTimings) bo
 }
 
 // GivingBlocked reports whether role may not give now for a reason no
-// shortfall lifts: it is backing off after an abort, it is held in the
-// direction of a cancelled transfer, or it has given all it can.
+// shortfall lifts: its last release was aborted and it is backing off, or it
+// has given all it can (GivingBusy).
 func (l *ShareLedger) GivingBlocked(role string, now time.Time) bool {
-	return now.Before(l.giveAfter[role]) || now.Before(l.noGive[role]) || l.GivingBusy(role, now)
+	return now.Before(l.giveAfter[role]) || l.GivingBusy(role, now)
 }
 
 // recordMove notes a role's transfer direction, holds it from reversing, and
 // marks it swinging when its moves changed direction twice within the swing
 // window (§6.7 rule 5).
-func (l *ShareLedger) recordMove(role string, received bool, now time.Time, tm ShareTimings) {
-	if received {
-		l.lastGot[role] = now
-	} else {
-		l.lastGave[role] = now
+func (l *ShareLedger) recordMove(role string, received bool, id string, now time.Time, tm ShareTimings) {
+	// Kept for as long as anything derived from them can still matter: the
+	// reversal hold, and a swing (SwingWindow) begun by moves up to a
+	// SwingWindow before it.
+	keep := max(tm.ReversalHold, 2*tm.SwingWindow)
+	l.moves[role] = append(slices.DeleteFunc(l.moves[role], func(m shareMove) bool { return now.Sub(m.at) > keep }),
+		shareMove{now, received, id})
+	l.rederive(role, tm)
+}
+
+// unrecord removes transfer id's moves from role's history, as if it never
+// started.
+func (l *ShareLedger) unrecord(role, id string, tm ShareTimings) {
+	if _, ok := l.moves[role]; !ok {
+		return
 	}
-	l.moves[role] = append(l.moves[role], shareMove{now, received})
-	ms := slices.DeleteFunc(l.moves[role], func(m shareMove) bool { return now.Sub(m.at) > tm.SwingWindow })
-	l.moves[role] = ms
-	flips := 0
-	for i := 1; i < len(ms); i++ {
-		if ms[i].received != ms[i-1].received {
-			flips++
+	l.moves[role] = slices.DeleteFunc(l.moves[role], func(m shareMove) bool { return m.id == id })
+	l.rederive(role, tm)
+}
+
+// rederive recomputes role's last move each way and its swing from its moves:
+// a swing begins where the moves within SwingWindow before one change
+// direction twice, and lasts SwingWindow.
+func (l *ShareLedger) rederive(role string, tm ShareTimings) {
+	delete(l.lastGave, role)
+	delete(l.lastGot, role)
+	delete(l.swingUntil, role)
+	ms := l.moves[role]
+	for j, m := range ms {
+		if m.received {
+			l.lastGot[role] = m.at
+		} else {
+			l.lastGave[role] = m.at
 		}
-	}
-	if flips >= 2 {
-		l.swingUntil[role] = now.Add(tm.SwingWindow)
+		flips := 0
+		for i := 1; i <= j; i++ {
+			if m.at.Sub(ms[i-1].at) <= tm.SwingWindow && ms[i].received != ms[i-1].received {
+				flips++
+			}
+		}
+		if flips >= 2 {
+			l.swingUntil[role] = m.at.Add(tm.SwingWindow)
+		}
 	}
 }
 
@@ -877,32 +897,24 @@ func (l *ShareLedger) ConfirmStarted(id string, pods []string) {
 			t.DonorLowered = true
 		}
 	}
-	delete(l.undo, id)
 }
 
 // Forget drops a transfer that never took effect -- its donor pod could not be
-// marked -- and puts back the move history Start recorded for it: nothing
-// moved, so it must neither hold its roles nor count toward a swing.
-func (l *ShareLedger) Forget(id string) {
-	l.transfers = slices.DeleteFunc(l.transfers, func(t *ShareTransfer) bool { return t.ID == id })
-	u, ok := l.undo[id]
-	if !ok {
+// marked, or it was cancelled before any pod moved -- and removes the moves
+// Start recorded for it: nothing moved, so it must neither hold its roles nor
+// count toward a swing. Only its own moves go, in any order and after
+// ConfirmStarted too, so other transfers between the same roles keep theirs.
+func (l *ShareLedger) Forget(id string, tm ShareTimings) {
+	i := slices.IndexFunc(l.transfers, func(t *ShareTransfer) bool { return t.ID == id })
+	if i < 0 {
 		return
 	}
-	delete(l.undo, id)
-	restore := func(m map[string]time.Time, k string, v time.Time, had bool) {
-		if had {
-			m[k] = v
-		} else {
-			delete(m, k)
-		}
+	t := l.transfers[i]
+	l.transfers = slices.Delete(l.transfers, i, i+1)
+	l.unrecord(t.Donor, id, tm)
+	if t.Receiver != "" {
+		l.unrecord(t.Receiver, id, tm)
 	}
-	restore(l.lastGave, u.donor, u.gave, u.hadGave)
-	restore(l.lastGot, u.receiver, u.got, u.hadGot)
-	l.moves[u.donor] = u.donorMoves
-	l.moves[u.receiver] = u.receiverMoves
-	restore(l.swingUntil, u.donor, u.donorSwing, !u.donorSwing.IsZero())
-	restore(l.swingUntil, u.receiver, u.receiverSwing, !u.receiverSwing.IsZero())
 }
 
 type shareFillBlock struct {
@@ -1061,6 +1073,7 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		}
 	}
 	horizon := max(tm.ReversalHold, 2*tm.SwingWindow, tm.ReleaseTimeout<<4)
+	maps.DeleteFunc(l.noPair, func(_ sharePair, until time.Time) bool { return !now.Before(until) })
 	for r, at := range l.seen {
 		if now.Sub(at) <= horizon {
 			continue
@@ -1075,8 +1088,6 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		delete(l.fillBlocked, r)
 		delete(l.lastGave, r)
 		delete(l.lastGot, r)
-		delete(l.noGive, r)
-		delete(l.noRecv, r)
 		delete(l.moves, r)
 		delete(l.swingUntil, r)
 		delete(l.needs, r)

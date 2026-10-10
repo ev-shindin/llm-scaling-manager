@@ -21,14 +21,17 @@ const (
 	ShareMaxReplicasPerCycle = 2
 	// ShareMaxConcurrentTransfers bounds the transfers in flight per group.
 	ShareMaxConcurrentTransfers = 2
-	// ShareUrgentHeldFraction is the fraction of its need below which a
-	// receiver may be funded through the reversal hold, from a donor that
-	// keeps its own need (shareReversalExempt). Deep shortfalls only: in the
-	// §6.7 simulation of anti-phase swings an exemption for every receiver
-	// below its need reversed transfers and ran the 30-minute resonance at
-	// 2.95x the shortfall of standing still, where below 0.75 it wasted none
-	// and ran at 1.73x (1.86x with no exemption).
-	ShareUrgentHeldFraction = 0.75
+	// ShareUrgentPressure and ShareCalmPressure bound a hard imbalance
+	// (shareHardImbalance): a receiver whose need is at least
+	// ShareUrgentPressure of what it holds -- at or near its scale-up
+	// threshold -- and a donor whose need stays at most ShareCalmPressure of
+	// what it keeps. Such a move skips the reversal hold and the confirm
+	// cycles. The gap between the two is the hysteresis that keeps it from
+	// oscillating: after the move the donor sits at or below ShareCalmPressure
+	// and the receiver below ShareUrgentPressure, so the reverse move cannot
+	// qualify until demand itself has changed by their ratio.
+	ShareUrgentPressure = 0.9
+	ShareCalmPressure   = 0.6
 )
 
 // SharePlanInput is one group's view for one planning cycle.
@@ -177,7 +180,7 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 	p.confirmed = l.Confirm(p.actionable)
 
 	p.refillReserve()
-	if !slices.ContainsFunc(slices.Collect(maps.Keys(p.confirmed)), p.isConfirmed) {
+	if !slices.ContainsFunc(slices.Collect(maps.Keys(p.confirmed)), p.isConfirmed) && !p.hardImbalance() {
 		return p.plan
 	}
 
@@ -244,38 +247,29 @@ type shareLimits struct {
 	keep, integ map[string]int
 }
 
-// shareReversalExempt reports whether a move to receiver rc, holding rcHeld,
-// from donor dn, left with dnLeft after giving, is exempt from the reversal
-// hold: rc holds less than ShareUrgentHeldFraction of its need and dn stays at
-// or above its own. The hold stops
-// GPUs ping-ponging for headroom; it must not keep a model short while another
-// holds more than it needs. Measured on alternating bursts: GPUs moved to a
-// model whose burst had just ended (its draining backlog still read as need)
-// as the other's began, and the hold kept them there for 18 minutes -- the
-// whole burst served on 3 of 8 replicas. A role that "just gave" is exactly
-// the one about to burst when bursts alternate. The cancelled-direction hold,
-// back-offs and an exhausted donor still apply (ReceivingBlocked,
-// GivingBlocked), and a swinging role is still planned on its mean need.
-func shareReversalExempt(rcHeld int, rc ShareRole, dnLeft int, dn ShareRole) bool {
-	return rc.Need > 0 && float64(rcHeld) < ShareUrgentHeldFraction*rc.Need && float64(dnLeft) >= dn.Need
+// shareHardImbalance reports whether a move to receiver rc, holding rcHeld,
+// from donor dn, left with dnLeft after giving, rebalances a hard imbalance:
+// rc is at or near its scale-up threshold (ShareUrgentPressure) while dn stays
+// well below its own (ShareCalmPressure). Such a move does not wait: the
+// reversal hold and the confirm cycles exist to stop GPUs ping-ponging for
+// headroom, and must not keep a model at its threshold while another idles.
+// Measured on alternating bursts, the hold kept a rising model at 3 of 8
+// replicas for its whole 18-minute burst while the other, idle, held 7. A
+// cancelled pair's hold, back-offs and an exhausted donor still apply
+// (PairHeld, GivingBlocked), as do §6.2 admission and the donor's band.
+func shareHardImbalance(rcHeld int, rc ShareRole, dnLeft int, dn ShareRole) bool {
+	return rc.Need > 0 && rc.Need >= ShareUrgentPressure*float64(rcHeld) && dn.Need <= ShareCalmPressure*float64(dnLeft)
 }
 
-// shareReceiveHeld is whether rc may not receive in a move the reversal
-// exemption covers (exempt) or not.
-func shareReceiveHeld(l *ShareLedger, rc string, exempt bool, now time.Time, tm ShareTimings) bool {
-	if exempt {
-		return l.ReceivingBlocked(rc, now)
+// shareMoveHeld reports whether donor dn may not give to receiver rc in a
+// move the reversal exemption covers (exempt) or not: the reversal hold of
+// either role unless exempt, and the pair's cancel hold, a back-off or an
+// exhausted donor always.
+func shareMoveHeld(l *ShareLedger, dn, rc string, exempt bool, now time.Time, tm ShareTimings) bool {
+	if l.PairHeld(dn, rc, now) || l.GivingBlocked(dn, now) {
+		return true
 	}
-	return l.ReceivingHeld(rc, now, tm)
-}
-
-// shareGiveHeld is whether dn may not give in a move the reversal exemption
-// covers (exempt) or not.
-func shareGiveHeld(l *ShareLedger, dn string, exempt bool, now time.Time, tm ShareTimings) bool {
-	if exempt {
-		return l.GivingBlocked(dn, now)
-	}
-	return l.GivingHeld(dn, now, tm)
+	return !exempt && (l.ReceivingHeld(rc, now, tm) || l.GivingHeld(dn, now, tm))
 }
 
 // donorInBand reports whether donor dn holding left GPUs after giving is in its
@@ -325,6 +319,24 @@ func (p *sharePlanRun) z(k string, g int) float64 {
 
 // isConfirmed reports whether a role has been actionable long enough to move.
 func (p *sharePlanRun) isConfirmed(k string) bool { return p.confirmed[k] >= ShareConfirmCycles }
+
+// hardImbalance reports whether an actionable role and another role could
+// make a hard imbalance (shareHardImbalance) with one replica moved: the
+// move fund then makes without waiting for the confirm cycles.
+func (p *sharePlanRun) hardImbalance() bool {
+	for _, rc := range p.roles {
+		if !p.actionable[rc.Key] {
+			continue
+		}
+		for _, dn := range p.roles {
+			left := p.committed[dn.Key] - max(dn.ReplicaGPUs, 1)
+			if dn.Key != rc.Key && left >= 0 && shareHardImbalance(p.committed[rc.Key], rc, left, dn) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // planningRoles records this cycle's needs and plans a swinging role on its
 // mean need (rule 5).
@@ -492,15 +504,16 @@ func (p *sharePlanRun) fund(rc string, donors []string) bool {
 			continue // it has given all it can until its releases land
 		}
 		// Rule 4: a role that gave cannot receive, and one that received
-		// cannot give, within the hold -- unless the receiver is short and the
-		// donor has more than it needs (shareReversalExempt).
-		exempt := shareReversalExempt(work[rc], rr, work[dn]-gd, dr)
-		if shareReceiveHeld(l, rc, exempt, now, tm) || shareGiveHeld(l, dn, exempt, now, tm) {
+		// cannot give, within the hold -- unless the move rebalances a hard
+		// imbalance (shareHardImbalance), which waits for neither the hold
+		// nor the confirm cycles.
+		exempt := shareHardImbalance(work[rc], rr, work[dn]-gd, dr)
+		if shareMoveHeld(l, dn, rc, exempt, now, tm) {
 			p.plan.Withheld[ShareWithheldReversalHold]++
 			continue
 		}
-		if !p.isConfirmed(rc) && !p.isConfirmed(dn) {
-			continue // every transfer must fix a confirmed actionable role
+		if !exempt && !p.isConfirmed(rc) && !p.isConfirmed(dn) {
+			continue // every other transfer must fix a confirmed actionable role
 		}
 		// §6.2 admission: the worst-off role of the pair improves, and the
 		// donor is not pushed out of band.
@@ -513,7 +526,7 @@ func (p *sharePlanRun) fund(rc string, donors []string) bool {
 		t := l.Start(ShareTransfer{
 			Donor: dn, Receiver: rc, GPUs: g, DonorGPUs: gd,
 			DonorVariant: in.Give[dn].Name, ReceiverVariant: in.Grow[rc].Name,
-			Urgent: float64(work[rc]) < rr.Need,
+			Urgent: float64(work[rc]) < rr.Need, Rebalance: exempt,
 		}, in.Held, now, tm)
 		p.plan.Started = append(p.plan.Started, t)
 		work[dn] -= gd
@@ -604,10 +617,10 @@ func shareDonorSet(l *ShareLedger, in SharePlanInput, rc string, donors []string
 	if !ok || len(grow.PodGPUs) == 0 || in.Give == nil {
 		return nil
 	}
-	// A short receiver may be funded through its reversal hold, by donors
-	// that keep their need; each donor is checked below.
+	// A receiver in its reversal hold may still be exempt from it, per donor
+	// (shareHardImbalance); only one that is not short is passed over here.
 	short := float64(work[rc]) < byKey[rc].Need
-	if shareReceiveHeld(l, rc, short, now, tm) || moved[rc] >= ShareMaxReplicasPerCycle {
+	if (!short && l.ReceivingHeld(rc, now, tm)) || moved[rc] >= ShareMaxReplicasPerCycle {
 		return nil
 	}
 	need := slices.Sorted(slices.Values(grow.PodGPUs))
@@ -639,9 +652,8 @@ func shareDonorSet(l *ShareLedger, in SharePlanInput, rc string, donors []string
 			}
 			gd := max(give.GPUs, 1)
 			k := taken[dn] + 1
-			exempt := shareReversalExempt(work[rc], byKey[rc], work[dn]-k*gd, byKey[dn])
-			if moved[dn]+k > shareSetPace(grow) || work[dn]-k*gd < lim.keep[dn] || shareGiveHeld(l, dn, exempt, now, tm) ||
-				(!exempt && l.ReceivingHeld(rc, now, tm)) {
+			exempt := shareHardImbalance(work[rc], byKey[rc], work[dn]-k*gd, byKey[dn])
+			if moved[dn]+k > shareSetPace(grow) || work[dn]-k*gd < lim.keep[dn] || shareMoveHeld(l, dn, rc, exempt, now, tm) {
 				continue
 			}
 			pods := slices.Sorted(slices.Values(give.PodGPUs))
@@ -748,8 +760,9 @@ func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string,
 	if !ok || len(grow.PodGPUs) == 0 || in.Give == nil || in.DonorUnits == nil {
 		return nil, nil, false
 	}
+	// As in shareDonorSet: the exemption is decided per donor (canGive).
 	short := float64(work[rc]) < byKey[rc].Need
-	if shareReceiveHeld(l, rc, short, now, tm) || moved[rc] >= ShareMaxReplicasPerCycle {
+	if (!short && l.ReceivingHeld(rc, now, tm)) || moved[rc] >= ShareMaxReplicasPerCycle {
 		return nil, nil, false
 	}
 	// Each domain is tried in turn: fixing it at the first placement would
@@ -849,9 +862,9 @@ func (s *shareNodeSearch) canGive(dn string, extra int) bool {
 	}
 	k := s.taken[dn] + extra
 	left := s.work[dn] - k*max(give.GPUs, 1)
-	exempt := shareReversalExempt(s.work[s.rc], s.byKey[s.rc], left, s.byKey[dn])
+	exempt := shareHardImbalance(s.work[s.rc], s.byKey[s.rc], left, s.byKey[dn])
 	return s.moved[dn]+k <= shareSetPace(s.in.Grow[s.rc]) && left >= s.keep[dn] &&
-		!shareGiveHeld(s.l, dn, exempt, s.now, s.tm) && (exempt || !s.l.ReceivingHeld(s.rc, s.now, s.tm)) &&
+		!shareMoveHeld(s.l, dn, s.rc, exempt, s.now, s.tm) &&
 		s.l.InFlight()+1 <= ShareMaxConcurrentTransfers
 }
 

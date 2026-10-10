@@ -45,7 +45,7 @@ func TestShareLedgerHoldGivingEndsWithItsTransfers(t *testing.T) {
 	if !l.GivingBusy("a", now.Add(time.Minute)) {
 		t.Fatal("setup: not busy")
 	}
-	l.Forget(tr.ID)
+	l.Forget(tr.ID, tm)
 	if l.GivingBusy("a", now.Add(time.Minute)) {
 		t.Fatal("still busy with no transfer of its live")
 	}

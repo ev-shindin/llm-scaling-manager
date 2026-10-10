@@ -328,11 +328,11 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			}
 		}
 		if failed != nil {
-			// In reverse start order: each member's Start snapshotted the move
-			// history its predecessors had already changed.
+			// In reverse start order, so each unmark runs before the marks of
+			// the members it followed are undone.
 			for i := len(set) - 1; i >= 0; i-- {
 				t := set[i]
-				l.Forget(t.ID)
+				l.Forget(t.ID, tm)
 				// The pods as the mark's patch returned them: the cache may
 				// not show the mark yet, and an unmark from it would patch
 				// nothing.
@@ -381,7 +381,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			e.shareStartedEvents(g, t, set, marked[t.ID], accessor)
 			logger.Info("Utilization share: transfer started", "id", t.ID, "set", t.SetID, "donor", t.Donor,
 				"receiver", t.Receiver, "donorVariant", t.DonorVariant, "receiverVariant", t.ReceiverVariant,
-				"urgent", t.Urgent, "pods", marked[t.ID], "planned", len(t.PlannedPods) > 0)
+				"urgent", t.Urgent, "rebalance", t.Rebalance, "pods", marked[t.ID], "planned", len(t.PlannedPods) > 0)
 		}
 	}
 
@@ -726,10 +726,19 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 		if l.Swinging(r.Key, now) {
 			add(r.Key, constants.ScalingBlockedSwinging)
 		}
-		// What keeps a short role from receiving, when something does.
+		// What keeps a short role from receiving, when something does. A role
+		// at its scale-up threshold is exempt from the reversal hold for any
+		// donor that stays calm after giving a replica (a hard imbalance,
+		// allocation.ShareUrgentPressure / ShareCalmPressure); naming the hold
+		// then would send an operator after the wrong cause.
+		urgent := r.Need >= allocation.ShareUrgentPressure*float64(g.Committed[r.Key])
+		calmDonor := slices.ContainsFunc(g.Roles, func(o allocation.ShareRole) bool {
+			left := g.Committed[o.Key] - max(o.ReplicaGPUs, 1)
+			return o.Key != r.Key && left >= 0 && o.Need <= allocation.ShareCalmPressure*float64(left)
+		})
 		if v.Headroom < 0 && v.Actionable && !receiving[r.Key] {
 			switch {
-			case l.ReceivingHeld(r.Key, now, tm):
+			case l.ReceivingHeld(r.Key, now, tm) && (!urgent || !calmDonor):
 				add(r.Key, constants.ScalingBlockedReversalHold)
 			case l.InFlight() >= allocation.ShareMaxConcurrentTransfers:
 				add(r.Key, constants.ScalingBlockedTransferLimit)

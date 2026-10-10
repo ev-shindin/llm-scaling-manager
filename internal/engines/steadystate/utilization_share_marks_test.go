@@ -75,6 +75,10 @@ func TestUtilizationShareHoldsADonorWithAPodNotReady(t *testing.T) {
 func TestUtilizationShareMarksDistinctPodsThroughAStaleCache(t *testing.T) {
 	f := newShareFleet()
 	f.demand["C"] = 6000 // B and C both short: A gives to each in one cycle
+	// A calm enough to give twice in one cycle (a hard imbalance both times);
+	// at 4000 it is calm for the first move only, and the second waits for
+	// the confirm cycles, a cycle later.
+	f.demand["A"] = 3000
 	fresh := sharePods(t, f)
 	var snapshot *corev1.PodList
 	c := interceptor.NewClient(fresh.(client.WithWatch), interceptor.Funcs{

@@ -9,9 +9,10 @@ import (
 // withheld count would send an operator after oscillation that is not there.
 func TestShareBusyDonorIsNotAReversalHold(t *testing.T) {
 	roles := []ShareRole{
-		{Key: "D", Weight: 1, Need: 2, Ceiling: 64, ReplicaGPUs: 1},
-		// Short (2 of 2.5) but not deeply: above ShareUrgentHeldFraction, so
-		// the reversal hold applies to it and the control below counts.
+		// Not calm after giving (5.5 of 7 is above ShareCalmPressure): no
+		// hard imbalance, so the reversal hold applies and the control below
+		// counts.
+		{Key: "D", Weight: 1, Need: 5.5, Ceiling: 64, ReplicaGPUs: 1},
 		{Key: "R", Weight: 1, Need: 2.5, Ceiling: 64, ReplicaGPUs: 1},
 	}
 	in := SharePlanInput{Roles: roles, Held: map[string]int{"D": 8, "R": 2},
@@ -39,7 +40,7 @@ func TestShareBusyDonorIsNotAReversalHold(t *testing.T) {
 
 	// The control: a donor that just received is a reversal hold, counted.
 	l = NewShareLedger()
-	l.recordMove("D", true, now, tm)
+	l.recordMove("D", true, "x", now, tm)
 	if reversal, _ := withheld(l); reversal == 0 {
 		t.Fatal("control: a donor inside its reversal hold was not counted")
 	}
