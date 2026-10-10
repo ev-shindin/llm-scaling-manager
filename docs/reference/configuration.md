@@ -423,12 +423,24 @@ which is also why there is no supported way to run two.
 | `SKIP_TLS_VERIFY` | Skip Prometheus TLS verification | `false`, forced to `true` on OpenShift and for in-cluster self-signed Prometheus |
 | `WVA_STICKY_SCALE_DOWN` | Hold a published scale-down against demand noise until utilization at the published count would reach the scale-up threshold, so the fleet actually descends. Off, a model idling near the scale-down boundary flips its target N ↔ N−1 cycle to cycle and KEDA's 300 s window keeps the N-th replica for as long as the noise lasts. Turn off only to compare | `true` |
 | `WVA_LOG_LEVEL` | the scaling manager logging level | `info` |
+| `LEARNED_STATE_EPISODE_GAP` | How long a gap in saturated observations before the next one starts a **new window** instead of blending into the old one. A variant that goes quiet over a weekend should not average Monday's capacity with Friday's | `24h` |
+| `LEARNED_STATE_TIMEOUT` | How long **per-variant** learned state — the fitted ITL window and its baseline, the replica start estimate — is kept after the variant stops being reported. Shorten it and a fleet that parks re-measures sooner on wake | `24h` |
+| `LEARNED_STATE_RETENTION` | How long a **bucket-keyed** window — the k2 history and the mu windows the demand floor prices from — is kept from when it was last read. Longer than the timeout on purpose: a retained measurement is the lowest capacity figure available for its bucket, and dropping it falls through to an estimate that orders *fewer* replicas | `168h` (7 days) |
 | `PROMETHEUS_SECRET_NAME` | Secret holding the Prometheus serving cert | `prometheus-web-tls` |
 | `PROMETHEUS_SECRET_NS` | Namespace of that secret | `$MONITORING_NAMESPACE` |
 | `PROM_CA_CERT_PATH` | Where the extracted Prometheus CA is written | `/tmp/prometheus-ca.crt` |
 | `GATEWAY_API_VERSION` | Gateway API version installed for llm-d | `v1.2.0` |
 | `LWS_NAMESPACE` | Namespace for LeaderWorkerSet installation | `lws-system` |
 | `LWS_CHART_VERSION` | LeaderWorkerSet Helm chart version | `0.8.0` |
+
+The three `LEARNED_STATE_*` horizons are the ages the saturation analyzer keeps what
+it has learned on, and they default to the figures above. They are replaced field by
+field, not all or nothing: a value that is unset, negative, below one minute, or
+written without a unit (`24` parses as 24 **nanoseconds**) goes back to its own
+default and the controller logs which ones it replaced. The horizons in force are
+logged once at startup as `learned-state horizons`, so the log says what is actually
+running rather than what was asked for. Shortening them is how this is exercised on
+a cluster inside a test run instead of over a week.
 
 ## Optional: scaling band after `make deploy-e2e-infra`
 
@@ -441,8 +453,9 @@ lives in decides whether editing it costs a restart.
 
 **Static** — read once at startup, so a change needs the controller restarted:
 the metrics and probe addresses, leader election, the Prometheus URL and its TLS
-material, the feature flags, **the optimization interval** (`GLOBAL_OPT_INTERVAL`)
-and **the Prometheus cache settings**. The last two read as though they were
+material, the feature flags, **the optimization interval** (`GLOBAL_OPT_INTERVAL`),
+**the learned-state horizons** (`LEARNED_STATE_*`, read once when the analyzer is
+built) and **the Prometheus cache settings**. The last two read as though they were
 dynamic and are not: the interval is fixed at load and only a test helper writes
 it afterwards, and nothing outside tests calls the cache updater.
 

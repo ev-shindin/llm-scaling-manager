@@ -62,6 +62,71 @@ const (
 	HistoryRetention = 7 * 24 * time.Hour
 )
 
+// Horizons is the three ages the saturation analyzer's learned state is kept
+// on. One struct rather than three arguments because they are the same shape
+// and were transposed once already; a field name at the call site is the only
+// thing that catches that.
+//
+// Configurable because none of it can otherwise be tested on a cluster. The
+// shortest horizon here is a day and the longest a week, so neither CI nor a
+// kind run reaches the behaviour at all -- every claim about what the sweep
+// does rests on unit tests with an injected clock. A reviewer asked for this
+// for a different reason (72h, to clear a long weekend) and both reasons are
+// good.
+type Horizons struct {
+	// EpisodeGap is how long without a WRITE before the next observation
+	// starts a new window instead of joining this one.
+	EpisodeGap time.Duration
+	// VariantTimeout is how long per-variant learned state is kept after the
+	// variant was last reported.
+	VariantTimeout time.Duration
+	// BucketRetention is how long a bucket-keyed window, and the memos that
+	// resolve its key, are kept after the window was last read.
+	BucketRetention time.Duration
+}
+
+// DefaultHorizons is what the controller runs without configuration.
+func DefaultHorizons() Horizons {
+	return Horizons{
+		EpisodeGap:      EpisodeGap,
+		VariantTimeout:  HistoryEvictionTimeout,
+		BucketRetention: HistoryRetention,
+	}
+}
+
+// MinHorizon is the floor for every field. A horizon at or below the optimize
+// cadence would evict state the current cycle is still assembling, so the
+// shortest useful value is "longer than a cycle" -- a minute leaves room for
+// the slowest shipped cadence without pretending to validate against it.
+const MinHorizon = time.Minute
+
+// Sanitized returns h with every non-positive or below-floor field replaced by
+// its default, and reports what it changed so the caller can log it.
+//
+// It does not refuse. An unusable horizon is a misconfiguration, not a reason
+// to decline to start, and the same judgement is already made for
+// GLOBAL_OPT_INTERVAL. It also does NOT enforce an ordering between the
+// fields: BucketRetention shorter than VariantTimeout is strange but coherent
+// (bucket windows would simply go first), and refusing it would be inventing a
+// constraint the code does not have.
+func (h Horizons) Sanitized() (Horizons, []string) {
+	var fixed []string
+	d := DefaultHorizons()
+	if h.EpisodeGap < MinHorizon {
+		fixed = append(fixed, "episodeGap")
+		h.EpisodeGap = d.EpisodeGap
+	}
+	if h.VariantTimeout < MinHorizon {
+		fixed = append(fixed, "variantTimeout")
+		h.VariantTimeout = d.VariantTimeout
+	}
+	if h.BucketRetention < MinHorizon {
+		fixed = append(fixed, "bucketRetention")
+		h.BucketRetention = d.BucketRetention
+	}
+	return h, fixed
+}
+
 // RollingAverage maintains a fixed-size sliding window of float64 values.
 // The saturation analyzer keeps one per history key for two readings: the
 // compute-bound capacity (k2), read through Average, and the saturated

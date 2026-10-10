@@ -157,6 +157,13 @@ func loadConfig(cfg *Config, flagSet *flag.FlagSet, configFilePath string) error
 		loggerVerbosity:      v.GetInt("V"),
 		optimizationInterval: sanitizeOptimizationInterval(
 			v.GetDuration("GLOBAL_OPT_INTERVAL"), v.GetString("GLOBAL_OPT_INTERVAL")),
+		// Left exactly as written, including unusable values: the analyzer
+		// sanitizes them field by field and logs what it replaced, so the
+		// floor lives with the thing that owns the horizons rather than being
+		// enforced twice. Unset reads 0, which it takes as "use the default".
+		learnedEpisodeGap:      v.GetDuration("LEARNED_STATE_EPISODE_GAP"),
+		learnedVariantTimeout:  v.GetDuration("LEARNED_STATE_TIMEOUT"),
+		learnedBucketRetention: v.GetDuration("LEARNED_STATE_RETENTION"),
 	}
 
 	cfg.tls = tlsConfig{

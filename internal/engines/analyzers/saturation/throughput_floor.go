@@ -111,7 +111,7 @@ func (a *SaturationAnalyzer) recordSaturatedThroughput(key string, rate float64)
 	// write in replica_capacity.go: the floor reads this window every
 	// cycle, so a use-based check never sees the write gap it is asking
 	// about.
-	if !ok || ra.WriteGapExceeds(capacity.EpisodeGap) {
+	if !ok || ra.WriteGapExceeds(a.horizons.EpisodeGap) {
 		ra = capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
 		a.saturatedThroughput[key] = ra
 		delete(a.throughputSampledAt, key)

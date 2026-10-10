@@ -75,7 +75,7 @@ var _ = Describe("the sweep's liveness test", func() {
 		for i := 1; i <= 10; i++ {
 			at := base.Add(time.Duration(i) * step)
 			a.now = func() time.Time { return at }
-			a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+			a.EvictStaleHistory()
 			a.noteReplicaStart(key, ns, decodeV, rms, logr.Discard())
 			a.noteITL(key, rms, decodeV, at, logr.Discard())
 		}
@@ -109,7 +109,7 @@ var _ = Describe("the sweep's liveness test", func() {
 		// re-stamps it.
 		gone := base.Add(2 * capacity.HistoryEvictionTimeout)
 		a.now = func() time.Time { return gone }
-		a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+		a.EvictStaleHistory()
 
 		Expect(a.startSeconds).NotTo(HaveKey(key))
 		Expect(a.startOutliers).NotTo(HaveKey(key))
@@ -137,7 +137,7 @@ var _ = Describe("the sweep's liveness test", func() {
 
 		gone := base.Add(2 * capacity.HistoryEvictionTimeout)
 		a.now = func() time.Time { return gone }
-		a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+		a.EvictStaleHistory()
 
 		Expect(a.startSeconds).NotTo(HaveKey(key),
 			"a non-decode key has no window to be swept through, so it needs a "+

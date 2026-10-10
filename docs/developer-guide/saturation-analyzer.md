@@ -437,9 +437,19 @@ token per request, so its output length is not a property of its work.
 | `ThroughputSampleSpacing` | 1m | `saturation` |
 | `DefaultExpectedOutputTokens` | 512 | `saturation` |
 | `BytesPerToken` | 4 | `saturation` |
+| `EpisodeGap` | 24h | `internal/signals/capacity` |
 | `HistoryEvictionTimeout` | 24h | `internal/signals/capacity` |
 | `HistoryRetention` | 7d | `internal/signals/capacity` |
 | `EvictionTimeout` | 7d | `internal/signals/capacity` |
+
+The first three are **defaults, not the values in force**. They are assembled into a
+`capacity.Horizons` and handed to the analyzer by `WithHorizons`, which the engine
+fills from `Config.LearnedStateHorizons()` — `LEARNED_STATE_EPISODE_GAP`,
+`LEARNED_STATE_TIMEOUT`, `LEARNED_STATE_RETENTION`. `Horizons.Sanitized` floors each
+field at `MinHorizon` (1m) independently and names the ones it replaced, so a single
+unusable value does not discard the other two. Read the pair in force off
+`a.horizons`; `EvictStaleHistory()` takes no arguments, because a horizon passed per
+sweep is a horizon no operator can reach.
 
 ### How long learned state lives
 
@@ -489,10 +499,16 @@ still being served. Two saturation episodes weeks apart then blended into one
 rolling average — measured at 3.85× for k2 and 7.9× for mu, both in the
 fewer-replicas direction.
 
-**The accelerator memo** (`lastAccelerator`) ages on the *bucket* horizon
-despite being per variant, because its value resolves into the k2 history key.
-Expiring it ahead of the window it keys moves the key to `unresolved` and makes
-a retained measurement unreachable.
+**Two memos age on the *bucket* horizon despite being per variant**, because
+each one's value resolves into a bucket key: `lastAccelerator` (into the k2
+history key, the throughput key and the ITL window key) and `fleetShape` (into
+the throughput key). Expiring either ahead of the window it keys moves the key
+to `unresolved` or to a different bucket and makes a retained measurement
+unreachable — the measurement is still in the map, and nothing will ever ask for
+it again. Both are also stamped when they are **read**, not only when written,
+for the same reason the windows are: the read path is the one that runs every
+cycle. Those two are the whole set; a new memo whose value reaches a bucket key
+has to join them.
 
 **Capacity records** age on `EvictionTimeout` (7d), so a variant parked at zero
 over a weekend keeps its engine params and capacity record. The store has no

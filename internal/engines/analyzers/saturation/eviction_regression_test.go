@@ -96,7 +96,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 			a.computeCapacityHistory[historyKey] = ra
 
 			k2Before, srcBefore := k2From(a)
-			a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+			a.EvictStaleHistory()
 			k2After, srcAfter := k2From(a)
 
 			Expect(srcAfter).To(Equal(srcBefore),
@@ -234,7 +234,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 			step := capacity.HistoryEvictionTimeout / 4
 			for i := 1; i <= 10; i++ {
 				a.now = func() time.Time { return base.Add(time.Duration(i) * step) }
-				a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+				a.EvictStaleHistory()
 				a.noteReplicaStart(key, ns, variant,
 					[]domain.ReplicaMetrics{readyPod("pod-a", 2700)}, logr.Discard())
 			}

@@ -518,7 +518,7 @@ func (a *SaturationAnalyzer) computeK2(
 			// a bucket the fleet is still serving -- two episodes weeks
 			// apart would blend, and a stale high reading would hold
 			// capacity up against today's lower, truer one.
-			if !ok || ra.WriteGapExceeds(capacity.EpisodeGap) {
+			if !ok || ra.WriteGapExceeds(a.horizons.EpisodeGap) {
 				ra = capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
 				a.computeCapacityHistory[historyKey] = ra
 			}

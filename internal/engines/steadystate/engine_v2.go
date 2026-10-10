@@ -260,7 +260,7 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 // eviction entry point is reached through an assertion rather than a direct
 // call.
 type staleHistoryEvictor interface {
-	EvictStaleHistory(variantTimeout, bucketRetention time.Duration) saturation.Evicted
+	EvictStaleHistory() saturation.Evicted
 }
 
 // evictStaleLearnedState sweeps the two stores of learned per-variant state
@@ -284,12 +284,11 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 	logger := ctrl.LoggerFrom(ctx)
 	var history saturation.Evicted
 	if evictor, ok := e.saturationV2Analyzer.(staleHistoryEvictor); ok {
-		// Two horizons, named at the call site because they differ on purpose:
-		// per-variant state goes when the variant stops being reported, while a
-		// bucket-keyed window is kept seven times longer because a retained
-		// measurement is the lowest capacity figure available for its bucket --
-		// see HistoryRetention.
-		history = evictor.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+		// The horizons live on the analyzer, which is what configuration can
+		// reach and what owns the state they govern. They are logged once at
+		// startup rather than on every sweep -- see engine.go, where the
+		// analyzer is built.
+		history = evictor.EvictStaleHistory()
 	} else {
 		// Production always satisfies it (engine.go constructs the concrete
 		// analyzer), so this is a test shape -- but a memory sweep that
@@ -319,8 +318,7 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 			"fleetShapes", history.FleetShapes,
 			"variantStamps", history.VariantStamps,
 			"capacityRecords", records,
-			"variantTimeout", capacity.HistoryEvictionTimeout,
-			"bucketRetention", capacity.HistoryRetention,
+
 			"recordTimeout", capacity.EvictionTimeout)
 	}
 }

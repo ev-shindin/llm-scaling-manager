@@ -20,9 +20,7 @@ import (
 // evictSpy is a domain.Analyzer that records how its eviction entry point was
 // called. It analyzes nothing: these tests are about the call, not the result.
 type evictSpy struct {
-	calls      int
-	timeouts   []time.Duration
-	retentions []time.Duration
+	calls int
 }
 
 func (s *evictSpy) Name() string { return "evict-spy" }
@@ -31,10 +29,8 @@ func (s *evictSpy) Analyze(context.Context, domain.AnalyzerInput) (*domain.Analy
 	return nil, nil
 }
 
-func (s *evictSpy) EvictStaleHistory(variantTimeout, bucketRetention time.Duration) saturation.Evicted {
+func (s *evictSpy) EvictStaleHistory() saturation.Evicted {
 	s.calls++
-	s.timeouts = append(s.timeouts, variantTimeout)
-	s.retentions = append(s.retentions, bucketRetention)
 	return saturation.Evicted{}
 }
 
@@ -74,13 +70,6 @@ func TestEvictStaleLearnedStateIsWiredIntoTheCycle(t *testing.T) {
 	}, nil)
 
 	require.Equal(t, 1, spy.calls, "a cycle must sweep learned state exactly once")
-	require.Equal(t, []time.Duration{capacity.HistoryEvictionTimeout}, spy.timeouts,
-		"per-variant state is swept on the same timeout the read path already checks (RollingAverage.Stale)")
-	require.Equal(t, []time.Duration{capacity.HistoryRetention}, spy.retentions,
-		"bucket-keyed windows are KEPT past the point they are trusted, so that a "+
-			"measurement the read refuses still exists to be refused -- passing the trust "+
-			"horizon here would delete it at the top of the cycle and k2 would reach the "+
-			"derived figure after all")
 }
 
 // AND THE OTHER HALF OF THE SWEEP, which nothing observed.

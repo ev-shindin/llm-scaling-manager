@@ -42,7 +42,7 @@ var _ = Describe("the sweep's own completeness", func() {
 				lastUsed: time.Now().Add(-inTheBand),
 			}
 
-			ev := a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+			ev := a.EvictStaleHistory()
 
 			Expect(a.lastAccelerator).To(HaveKey("ns/v1"),
 				"the memo must age on the same horizon as the k2 history it keys, which is "+
@@ -59,7 +59,7 @@ var _ = Describe("the sweep's own completeness", func() {
 				lastUsed: time.Now().Add(-pastBoth),
 			}
 
-			ev := a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+			ev := a.EvictStaleHistory()
 
 			Expect(a.lastAccelerator).To(BeEmpty())
 			Expect(ev.Accelerators).To(Equal(1))
@@ -74,7 +74,7 @@ var _ = Describe("the sweep's own completeness", func() {
 			a := NewSaturationAnalyzer(capacity.NewStore())
 			a.fleetShape["ns|m"] = &shapeMemo{lastSeen: time.Now().Add(-pastBoth)}
 
-			ev := a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+			ev := a.EvictStaleHistory()
 
 			Expect(a.fleetShape).To(BeEmpty(), "precondition: it was evicted")
 			Expect(ev.FleetShapes).To(Equal(1))
@@ -87,7 +87,7 @@ var _ = Describe("the sweep's own completeness", func() {
 			a := NewSaturationAnalyzer(capacity.NewStore())
 			a.variantSeenAt["ns|m|v1|NVIDIA-H200|1"] = time.Now().Add(-pastBoth)
 
-			ev := a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+			ev := a.EvictStaleHistory()
 
 			Expect(a.variantSeenAt).To(BeEmpty(), "precondition: it was evicted")
 			Expect(ev.VariantStamps).To(Equal(1))
@@ -110,7 +110,7 @@ var _ = Describe("the sweep's own completeness", func() {
 			Expect(a.throughputLastRead).To(HaveLen(1))
 
 			a.saturatedThroughput[key].TouchAt(time.Now().Add(-pastBoth))
-			a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+			a.EvictStaleHistory()
 
 			Expect(a.saturatedThroughput).To(BeEmpty())
 			Expect(a.throughputSampledAt).To(BeEmpty(),

@@ -143,6 +143,11 @@ type SaturationAnalyzer struct {
 	variantSeenAt map[string]time.Time
 	// now is the clock the memory reads; tests set it.
 	now func() time.Time
+	// horizons is how long each kind of learned state is kept. Defaulted
+	// from capacity.DefaultHorizons and overridable by configuration --
+	// which is the only way any of this is reachable on a cluster, the
+	// shortest of them being a day.
+	horizons capacity.Horizons
 }
 
 // Evicted is what one sweep of the analyzer's learned state removed, counted
@@ -218,8 +223,20 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		startOutliers:          make(map[string]int),
 		variantSeenAt:          make(map[string]time.Time),
 		now:                    time.Now,
+		horizons:               capacity.DefaultHorizons(),
 	}
 }
+
+// WithHorizons overrides how long learned state is kept, and returns a for
+// chaining. Unusable values fall back to the defaults field by field; the
+// caller logs what was replaced (capacity.Horizons.Sanitized).
+func (a *SaturationAnalyzer) WithHorizons(h capacity.Horizons) *SaturationAnalyzer {
+	a.horizons, _ = h.Sanitized()
+	return a
+}
+
+// Horizons reports the horizons in force, for the caller that logs them.
+func (a *SaturationAnalyzer) Horizons() capacity.Horizons { return a.horizons }
 
 // Name returns the analyzer identifier for logging and result metadata.
 // Note: the config value "saturation" (in analyzerName YAML field) selects this analyzer,
@@ -282,9 +299,10 @@ func (a *SaturationAnalyzer) variantIsStale(key string, now time.Time, timeout t
 // have meant -- "the demand floor just lost its mu" -- was not counted at all.
 // Each field names the map it came from, and the caller in steadystate logs
 // them under those names.
-func (a *SaturationAnalyzer) EvictStaleHistory(variantTimeout, bucketRetention time.Duration) Evicted {
+func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	variantTimeout, bucketRetention := a.horizons.VariantTimeout, a.horizons.BucketRetention
 	var evicted Evicted
 	for key, ra := range a.computeCapacityHistory {
 		if ra.Stale(bucketRetention) {

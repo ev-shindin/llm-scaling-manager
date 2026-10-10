@@ -439,12 +439,14 @@ var _ = Describe("SaturationAnalyzer", func() {
 			Expect(analyzer.lastAccelerator).To(HaveLen(1))
 
 			// A live variant keeps its memo.
-			analyzer.EvictStaleHistory(time.Hour, time.Hour)
+			horizonsForTest(analyzer, time.Hour)
+			analyzer.EvictStaleHistory()
 			Expect(analyzer.lastAccelerator).To(HaveLen(1),
 				"a memo younger than the timeout was evicted")
 
 			// One that has gone quiet loses it, on the same sweep as its history.
-			analyzer.EvictStaleHistory(0, 0)
+			horizonsForTest(analyzer, 0)
+			analyzer.EvictStaleHistory()
 			Expect(analyzer.lastAccelerator).To(BeEmpty(),
 				"the memo outlived the history it keys, so nothing ever frees it")
 			Expect(analyzer.computeCapacityHistory).To(BeEmpty())
@@ -2474,10 +2476,12 @@ var _ = Describe("the fleet-shape memo's lifetime", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(analyzer.fleetShape).To(HaveLen(1), "one cycle records one model's shape")
 
-		analyzer.EvictStaleHistory(time.Hour, time.Hour)
+		horizonsForTest(analyzer, time.Hour)
+		analyzer.EvictStaleHistory()
 		Expect(analyzer.fleetShape).To(HaveLen(1), "a memo in use is kept")
 
-		analyzer.EvictStaleHistory(0, 0)
+		horizonsForTest(analyzer, 0)
+		analyzer.EvictStaleHistory()
 		Expect(analyzer.fleetShape).To(BeEmpty(), "and a stale one goes")
 	})
 })

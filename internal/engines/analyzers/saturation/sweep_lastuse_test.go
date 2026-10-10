@@ -122,7 +122,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 			a, ra := withHistory(50000)
 			ra.TouchAt(time.Now().Add(-2 * capacity.HistoryEvictionTimeout))
 
-			a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+			a.EvictStaleHistory()
 
 			Expect(a.computeCapacityHistory).To(HaveKey(historyKey),
 				"retention is seven days and the window is one day old; a shape that "+
@@ -133,7 +133,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 			a, ra := withHistory(50000)
 			ra.TouchAt(time.Now().Add(-2 * capacity.HistoryRetention))
 
-			ev := a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+			ev := a.EvictStaleHistory()
 
 			Expect(a.computeCapacityHistory).To(BeEmpty(),
 				"retention is seven days, not forever -- the leak must still close")
@@ -236,7 +236,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 			a.recordSaturatedThroughput(own, 3.2)
 			a.saturatedThroughput[own].TouchAt(time.Now().Add(-2 * capacity.HistoryRetention))
 
-			ev := a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+			ev := a.EvictStaleHistory()
 
 			Expect(a.saturatedThroughput).To(BeEmpty(), "a bucket no decision reads is what the sweep is for")
 			Expect(ev.MuWindows).To(Equal(1),
@@ -271,7 +271,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 			a.noteITL(key, nil, variant, now, logr.Discard())
 			Expect(a.itlWindows).To(HaveKey(key), "precondition: noteITL creates the window")
 
-			a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+			a.EvictStaleHistory()
 
 			Expect(a.itlWindows).To(HaveKey(key),
 				"noteITL must stamp the key it creates state under, rather than relying on "+
@@ -322,7 +322,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 			// still stamped at base, so the sweep expires it under a live Pod.
 			swept := base.Add(capacity.HistoryEvictionTimeout + time.Minute)
 			a.now = func() time.Time { return swept }
-			a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+			a.EvictStaleHistory()
 			Expect(a.startSeenPods).To(HaveLen(1),
 				"the record of a Pod still being reported must survive the sweep whatever "+
 					"its StartSeconds reads this cycle")

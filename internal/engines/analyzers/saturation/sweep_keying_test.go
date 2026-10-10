@@ -54,7 +54,7 @@ var _ = Describe("a key-resolving memo outlives what it keys", func() {
 			a := NewSaturationAnalyzer(capacity.NewStore())
 			withShape(a, inTheBand)
 
-			ev := a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+			ev := a.EvictStaleHistory()
 
 			Expect(a.fleetShape).To(HaveKey(ns+"|"+model),
 				"the memo resolves the mu window's bucket, so expiring it first makes a "+
@@ -67,7 +67,7 @@ var _ = Describe("a key-resolving memo outlives what it keys", func() {
 			a := NewSaturationAnalyzer(capacity.NewStore())
 			withShape(a, pastBoth)
 
-			ev := a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+			ev := a.EvictStaleHistory()
 
 			Expect(a.fleetShape).To(BeEmpty(), "seven days, not forever")
 			Expect(ev.FleetShapes).To(Equal(1))
@@ -95,7 +95,7 @@ var _ = Describe("a key-resolving memo outlives what it keys", func() {
 			// Sweep a minute later. The only thing that can save the memo now
 			// is the read having re-stamped it.
 			a.now = func() time.Time { return base.Add(time.Minute) }
-			ev := a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+			ev := a.EvictStaleHistory()
 
 			Expect(a.fleetShape).To(HaveKey(ns+"|"+model),
 				"a read is use: the memo must have been re-stamped, or an idle fleet "+
@@ -116,7 +116,7 @@ var _ = Describe("a key-resolving memo outlives what it keys", func() {
 			a.recordSaturatedThroughput(key, 3.2)
 			a.saturatedThroughput[key].TouchAt(time.Now().Add(-inTheBand))
 
-			ev := a.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
+			ev := a.EvictStaleHistory()
 
 			Expect(a.saturatedThroughput).To(HaveKey(key),
 				"swept on the per-variant horizon the floor loses its rate six days early")

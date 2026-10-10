@@ -240,6 +240,26 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 
 	capacityStore := capacity.NewStore()
 	satV2 := saturation.NewSaturationAnalyzer(capacityStore)
+	// How long the analyzer keeps what it learns. Configured here rather than
+	// read per-cycle: these are process-lifetime horizons, and a sweep whose
+	// horizon moved underneath it would evict on one age and report another.
+	//
+	// Logged once, at the only moment the values are chosen, and ALWAYS --
+	// not only when they differ from the default. The shortest of them is a
+	// day, so nothing an operator can observe in a single session reveals
+	// which horizons a process is running; this line is the only record.
+	if cfg != nil {
+		gap, variant, bucket := cfg.LearnedStateHorizons()
+		satV2 = satV2.WithHorizons(capacity.Horizons{
+			EpisodeGap: gap, VariantTimeout: variant, BucketRetention: bucket,
+		})
+	}
+	h := satV2.Horizons()
+	ctrl.Log.Info("learned-state horizons",
+		"episodeGap", h.EpisodeGap,
+		"variantTimeout", h.VariantTimeout,
+		"bucketRetention", h.BucketRetention,
+		"note", "set LEARNED_STATE_EPISODE_GAP, LEARNED_STATE_TIMEOUT, LEARNED_STATE_RETENTION to change them")
 
 	// Initialize with default optimizer. The actual optimizer is selected
 	// per-cycle in optimize() from the ConfigMap's live limiters: list, since
