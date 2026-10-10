@@ -252,7 +252,7 @@ shape follow from the documented rules:
   ([measured](../../well-lit-paths/utilization-share/measured.md#rerun-with-the-cancel-fix-the-reversal-hold-did-the-same)).
   The hold is now lifted for a hard imbalance -- a receiver at or near its
   scale-up threshold and a donor well below its own after giving
-  (`immediateRebalance`) -- which no run
+  (`stabilization.skipWaitsWhen`) -- which no run
   has measured yet. A model whose long-output burst just ended is usually not
   that lightly loaded, so the hold can still bite.
 - A role that reverses direction twice within the swing window is planned on

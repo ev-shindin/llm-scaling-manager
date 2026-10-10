@@ -2,6 +2,7 @@ package config
 
 import (
 	"math"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -35,26 +36,41 @@ var _ = Describe("ResolveUtilizationShare", func() {
 		Expect(us.DefaultClass).To(Equal("standard"))
 		Expect(us.MinWeight).To(Equal(0.5))
 		Expect(us.MaxWeight).To(Equal(4.0))
-		Expect(us.ImmediateRebalanceOff).To(BeFalse())
-		Expect(us.ImmediateRebalanceReceiverLoad).To(Equal(DefaultImmediateRebalanceReceiverLoad))
-		Expect(us.ImmediateRebalanceDonorLoad).To(Equal(DefaultImmediateRebalanceDonorLoad))
+		st := us.Stabilization
+		Expect(st.ConsecutiveCyclesBeforeMove).To(Equal(DefaultConsecutiveCyclesBeforeMove))
+		Expect(st.WaitBeforeReverseMove).To(BeNil(), "auto")
+		Expect(st.FlappingWindow).To(BeNil(), "auto")
+		Expect(st.SkipWaitsOff).To(BeFalse())
+		Expect(st.SkipWaitsReceiverLoad).To(Equal(DefaultSkipWaitsReceiverLoad))
+		Expect(st.SkipWaitsDonorLoad).To(Equal(DefaultSkipWaitsDonorLoad))
 	})
 
-	It("takes the immediate-rebalance limits and its switch", func() {
+	It("takes every stabilization setting", func() {
 		off := false
-		us, err := ResolveUtilizationShare(&UtilizationShareConfig{
-			ImmediateRebalance: &UtilizationShareImmediateRebalance{Enabled: &off, ReceiverLoadAtLeast: 1, DonorLoadAtMost: 0.5},
-		})
+		us, err := ResolveUtilizationShare(&UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{
+			ConsecutiveCyclesBeforeMove: 3,
+			WaitBeforeReverseMove:       "5m",
+			FlappingWindow:              "0s",
+			SkipWaitsWhen:               &UtilizationShareSkipWaits{Enabled: &off, ReceiverLoadAtLeast: 1, DonorLoadAtMost: 0.5},
+		}})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(us.ImmediateRebalanceOff).To(BeTrue())
-		Expect(us.ImmediateRebalanceReceiverLoad).To(Equal(1.0))
-		Expect(us.ImmediateRebalanceDonorLoad).To(Equal(0.5))
-		// One bound set: the other keeps its default.
-		us, err = ResolveUtilizationShare(&UtilizationShareConfig{ImmediateRebalance: &UtilizationShareImmediateRebalance{DonorLoadAtMost: 0.7}})
+		st := us.Stabilization
+		Expect(st.ConsecutiveCyclesBeforeMove).To(Equal(3))
+		Expect(*st.WaitBeforeReverseMove).To(Equal(5 * time.Minute))
+		Expect(*st.FlappingWindow).To(BeZero(), "0s turns the flapping rule off, it is not auto")
+		Expect(st.SkipWaitsOff).To(BeTrue())
+		Expect(st.SkipWaitsReceiverLoad).To(Equal(1.0))
+		Expect(st.SkipWaitsDonorLoad).To(Equal(0.5))
+		// "auto" is the default spelled out; one load limit keeps the other's default.
+		us, err = ResolveUtilizationShare(&UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{
+			WaitBeforeReverseMove: "auto",
+			SkipWaitsWhen:         &UtilizationShareSkipWaits{DonorLoadAtMost: 0.7},
+		}})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(us.ImmediateRebalanceOff).To(BeFalse())
-		Expect(us.ImmediateRebalanceReceiverLoad).To(Equal(DefaultImmediateRebalanceReceiverLoad))
-		Expect(us.ImmediateRebalanceDonorLoad).To(Equal(0.7))
+		Expect(us.Stabilization.WaitBeforeReverseMove).To(BeNil())
+		Expect(us.Stabilization.SkipWaitsOff).To(BeFalse())
+		Expect(us.Stabilization.SkipWaitsReceiverLoad).To(Equal(DefaultSkipWaitsReceiverLoad))
+		Expect(us.Stabilization.SkipWaitsDonorLoad).To(Equal(0.7))
 	})
 
 	It("does not alias the default classes", func() {
@@ -79,19 +95,18 @@ var _ = Describe("ResolveUtilizationShare", func() {
 		Entry("no class of weight 1", UtilizationShareConfig{WeightClasses: map[string]float64{"a": 2}}, "exactly one class of weight 1"),
 		Entry("two classes of weight 1", UtilizationShareConfig{WeightClasses: map[string]float64{"a": 1, "b": 1}}, "exactly one class of weight 1"),
 		Entry("donor load limit at the receiver's: no hysteresis",
-			UtilizationShareConfig{ImmediateRebalance: &UtilizationShareImmediateRebalance{ReceiverLoadAtLeast: 0.8, DonorLoadAtMost: 0.8}}, "donorLoadAtMost"),
+			UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{SkipWaitsWhen: &UtilizationShareSkipWaits{ReceiverLoadAtLeast: 0.8, DonorLoadAtMost: 0.8}}}, "donorLoadAtMost"),
 		Entry("donor load limit above the default receiver's",
-			UtilizationShareConfig{ImmediateRebalance: &UtilizationShareImmediateRebalance{DonorLoadAtMost: 0.95}}, "donorLoadAtMost"),
-		Entry("negative donor load limit",
-			UtilizationShareConfig{ImmediateRebalance: &UtilizationShareImmediateRebalance{DonorLoadAtMost: -0.1}}, "donorLoadAtMost"),
-		Entry("NaN donor load limit",
-			UtilizationShareConfig{ImmediateRebalance: &UtilizationShareImmediateRebalance{DonorLoadAtMost: math.NaN()}}, "donorLoadAtMost"),
-		Entry("negative receiver load limit",
-			UtilizationShareConfig{ImmediateRebalance: &UtilizationShareImmediateRebalance{ReceiverLoadAtLeast: -1}}, "receiverLoadAtLeast"),
-		Entry("NaN receiver load limit",
-			UtilizationShareConfig{ImmediateRebalance: &UtilizationShareImmediateRebalance{ReceiverLoadAtLeast: math.NaN()}}, "receiverLoadAtLeast"),
-		Entry("infinite receiver load limit",
-			UtilizationShareConfig{ImmediateRebalance: &UtilizationShareImmediateRebalance{ReceiverLoadAtLeast: math.Inf(1)}}, "receiverLoadAtLeast"),
+			UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{SkipWaitsWhen: &UtilizationShareSkipWaits{DonorLoadAtMost: 0.95}}}, "donorLoadAtMost"),
+		Entry("negative donor load limit", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{SkipWaitsWhen: &UtilizationShareSkipWaits{DonorLoadAtMost: -0.1}}}, "donorLoadAtMost"),
+		Entry("NaN donor load limit", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{SkipWaitsWhen: &UtilizationShareSkipWaits{DonorLoadAtMost: math.NaN()}}}, "donorLoadAtMost"),
+		Entry("negative receiver load limit", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{SkipWaitsWhen: &UtilizationShareSkipWaits{ReceiverLoadAtLeast: -1}}}, "receiverLoadAtLeast"),
+		Entry("NaN receiver load limit", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{SkipWaitsWhen: &UtilizationShareSkipWaits{ReceiverLoadAtLeast: math.NaN()}}}, "receiverLoadAtLeast"),
+		Entry("infinite receiver load limit", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{SkipWaitsWhen: &UtilizationShareSkipWaits{ReceiverLoadAtLeast: math.Inf(1)}}}, "receiverLoadAtLeast"),
+		Entry("negative cycles", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{ConsecutiveCyclesBeforeMove: -1}}, "consecutiveCyclesBeforeMove"),
+		Entry("unparsable wait", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{WaitBeforeReverseMove: "twelve minutes"}}, "waitBeforeReverseMove"),
+		Entry("negative wait", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{WaitBeforeReverseMove: "-1m"}}, "waitBeforeReverseMove"),
+		Entry("unparsable flapping window", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{FlappingWindow: "2"}}, "flappingWindow"),
 	)
 
 	It("derives the clamp and the default class from the classes", func() {
@@ -249,22 +264,30 @@ optimizer:
 		Expect(us.Shadow).To(BeTrue())
 	})
 
-	It("reads the immediateRebalance block from YAML", func() {
+	It("reads the stabilization block from YAML", func() {
 		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{GlobalDefaultsKey: parsePolicy(quotaLimiters + `
 optimizer:
   type: utilizationShare
   utilizationShare:
-    immediateRebalance:
-      enabled: false
-      receiverLoadAtLeast: 0.95
-      donorLoadAtMost: 0.5
+    stabilization:
+      consecutiveCyclesBeforeMove: 3
+      waitBeforeReverseMove: 8m
+      flappingWindow: auto
+      skipWaitsWhen:
+        enabled: false
+        receiverLoadAtLeast: 0.95
+        donorLoadAtMost: 0.5
 `)})
 		us, selected, err := c.UtilizationShare()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(selected).To(BeTrue())
-		Expect(us.ImmediateRebalanceOff).To(BeTrue())
-		Expect(us.ImmediateRebalanceReceiverLoad).To(Equal(0.95))
-		Expect(us.ImmediateRebalanceDonorLoad).To(Equal(0.5))
+		st := us.Stabilization
+		Expect(st.ConsecutiveCyclesBeforeMove).To(Equal(3))
+		Expect(*st.WaitBeforeReverseMove).To(Equal(8 * time.Minute))
+		Expect(st.FlappingWindow).To(BeNil())
+		Expect(st.SkipWaitsOff).To(BeTrue())
+		Expect(st.SkipWaitsReceiverLoad).To(Equal(0.95))
+		Expect(st.SkipWaitsDonorLoad).To(Equal(0.5))
 	})
 
 	It("refuses to run without limiters: there is no budget to share", func() {

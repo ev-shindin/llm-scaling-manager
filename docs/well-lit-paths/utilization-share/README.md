@@ -188,7 +188,7 @@ window, that is on the order of 12 minutes. It shows as the blocked reason
 `reversal-hold`. It is lifted only for a hard imbalance: the short model's
 load is at least 0.9 of its scale-up threshold and another model's, after
 giving, is at most 0.6 of its own (both set by
-`utilizationShare.immediateRebalance`). A model whose burst just ended
+`utilizationShare.stabilization.skipWaitsWhen`). A model whose burst just ended
 usually is not that lightly loaded, so the hold can still last a whole
 burst.
 

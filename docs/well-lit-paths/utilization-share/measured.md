@@ -228,7 +228,7 @@ No pod was ever unscheduled in any arm, and every request was served.
 - Fixed now, not yet measured: a move that rebalances a hard imbalance waits
   for no reversal hold: a receiver whose load is at least 0.9 of its
   scale-up threshold and a donor whose load after giving is at most 0.6 of
-  its own (`immediateRebalance`)
+  its own (`stabilization.skipWaitsWhen`)
   ([proposal §6.2](../../proposals/utilization-share-optimizer.md#62-plan-transfers)).
   An interim rule, a receiver below three quarters of its need, is gone. This
   run predates both; a rerun is next.

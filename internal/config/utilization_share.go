@@ -8,6 +8,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -21,13 +22,16 @@ const OptimizerTypeUtilizationShare = "utilizationShare"
 // as a fraction of a role's target (§6.1 of the proposal).
 const DefaultUtilizationShareTolerance = 0.15
 
-// DefaultImmediateRebalanceReceiverLoad and DefaultImmediateRebalanceDonorLoad
-// are utilizationShare.immediateRebalance's defaults: a model's load as a
-// fraction of its scale-up threshold. Their gap is the hysteresis that keeps
-// the rebalance from oscillating.
+// The utilizationShare.stabilization defaults. Load is a model's utilization
+// as a fraction of its scale-up threshold; the gap between the two load
+// limits is the hysteresis that keeps skipped waits from oscillating.
 const (
-	DefaultImmediateRebalanceReceiverLoad = 0.9
-	DefaultImmediateRebalanceDonorLoad    = 0.6
+	DefaultConsecutiveCyclesBeforeMove = 2
+	DefaultSkipWaitsReceiverLoad       = 0.9
+	DefaultSkipWaitsDonorLoad          = 0.6
+	// StabilizationAuto derives a wait per group from its donors' scale-down
+	// window, KEDA polling and pod drain time.
+	StabilizationAuto = "auto"
 )
 
 // DefaultWeightClasses are the weight classes users pick from when the policy
@@ -118,31 +122,66 @@ type UtilizationShareConfig struct {
 	// model is left to today's optimizer. Empty plans every namespace.
 	ClusterNamespaces []string `yaml:"clusterNamespaces,omitempty"`
 
-	// ImmediateRebalance moves GPUs at once, waiting for neither the reversal
-	// hold nor the confirm cycles, from a model well below its scale-up
-	// threshold to one at or near its own. Nil takes the defaults.
-	ImmediateRebalance *UtilizationShareImmediateRebalance `yaml:"immediateRebalance,omitempty"`
+	// Stabilization is what keeps GPUs from moving back and forth between
+	// models: the waits before and between moves, and when a large imbalance
+	// may skip them. Nil takes every default.
+	Stabilization *UtilizationShareStabilization `yaml:"stabilization,omitempty"`
 }
 
-// UtilizationShareImmediateRebalance says when a move skips the waits. Load
-// is a model's utilization as a fraction of its scale-up threshold: 1 is the
-// point where it would scale up. A move is immediate when the receiver's load
-// is at least ReceiverLoadAtLeast and the donor's load, on the GPUs it keeps
-// after giving, is at most DonorLoadAtMost. The gap between them is the
-// hysteresis: the reverse move cannot qualify until demand changes by their
-// ratio. Narrow it to react to smaller imbalances, at the price of moving GPUs
-// back and forth more often.
-type UtilizationShareImmediateRebalance struct {
-	// Enabled false makes every move wait for the holds and the confirm
-	// cycles. Nil means enabled.
+// UtilizationShareStabilization is the operator's control over how fast GPUs
+// move against how often they move back. Every key is optional.
+type UtilizationShareStabilization struct {
+	// ConsecutiveCyclesBeforeMove is how many controller cycles in a row a
+	// model must look short (or have GPUs to spare) before GPUs move. Zero
+	// takes DefaultConsecutiveCyclesBeforeMove.
+	ConsecutiveCyclesBeforeMove int `yaml:"consecutiveCyclesBeforeMove,omitempty"`
+	// WaitBeforeReverseMove is how long a model that gave GPUs may not
+	// receive any, and one that received may not give: a Go duration ("12m")
+	// or "auto" (the default), twice the group's release time.
+	WaitBeforeReverseMove string `yaml:"waitBeforeReverseMove,omitempty"`
+	// FlappingWindow: a model whose moves change direction twice within it is
+	// planned on its average demand over the window, not its current one. A Go
+	// duration or "auto" (the default), eight times the time a move takes from
+	// decision to serving. "0s" turns the rule off.
+	FlappingWindow string `yaml:"flappingWindow,omitempty"`
+	// SkipWaitsWhen lets a large imbalance skip the two waits above.
+	SkipWaitsWhen *UtilizationShareSkipWaits `yaml:"skipWaitsWhen,omitempty"`
+}
+
+// UtilizationShareSkipWaits says when a move waits for neither
+// consecutiveCyclesBeforeMove nor waitBeforeReverseMove. Load is a model's
+// utilization as a fraction of its scale-up threshold: 1 is the point where it
+// would scale up. A move skips the waits when the receiver's load is at least
+// ReceiverLoadAtLeast and the donor's load, on the GPUs it keeps after giving,
+// is at most DonorLoadAtMost. The gap between them is the hysteresis: the
+// reverse move cannot qualify until demand changes by their ratio. Narrow it to
+// react to smaller imbalances, at the price of moving GPUs back and forth more
+// often.
+type UtilizationShareSkipWaits struct {
+	// Enabled false: every move waits, even when one model is at its
+	// scale-up threshold and another is nearly idle. Nil means enabled.
 	Enabled *bool `yaml:"enabled,omitempty"`
 	// ReceiverLoadAtLeast is the receiver's load, at or above which it may
-	// be funded at once. Zero takes DefaultImmediateRebalanceReceiverLoad.
+	// be funded at once. Zero takes DefaultSkipWaitsReceiverLoad.
 	ReceiverLoadAtLeast float64 `yaml:"receiverLoadAtLeast,omitempty"`
 	// DonorLoadAtMost is the donor's load after giving, at or below which it
-	// may give at once. Zero takes DefaultImmediateRebalanceDonorLoad. It
-	// must be below ReceiverLoadAtLeast.
+	// may give at once. Zero takes DefaultSkipWaitsDonorLoad. It must be
+	// below ReceiverLoadAtLeast.
 	DonorLoadAtMost float64 `yaml:"donorLoadAtMost,omitempty"`
+}
+
+// ShareStabilization is the stabilization block in force.
+type ShareStabilization struct {
+	ConsecutiveCyclesBeforeMove int
+	// WaitBeforeReverseMove and FlappingWindow are nil for "auto": derived
+	// per group.
+	WaitBeforeReverseMove *time.Duration
+	FlappingWindow        *time.Duration
+	// SkipWaitsOff, SkipWaitsReceiverLoad and SkipWaitsDonorLoad are
+	// skipWaitsWhen in force.
+	SkipWaitsOff          bool
+	SkipWaitsReceiverLoad float64
+	SkipWaitsDonorLoad    float64
 }
 
 // UtilizationShareNamespace is the per-namespace-quota-group setting.
@@ -159,12 +198,8 @@ type UtilizationShare struct {
 	ReserveGPUs    int
 	Shadow         bool
 	PhysicalGroups bool
-	// ImmediateRebalanceOff, ImmediateRebalanceReceiverLoad and
-	// ImmediateRebalanceDonorLoad are the settings in force
-	// (UtilizationShareImmediateRebalance).
-	ImmediateRebalanceOff          bool
-	ImmediateRebalanceReceiverLoad float64
-	ImmediateRebalanceDonorLoad    float64
+	// Stabilization is utilizationShare.stabilization in force.
+	Stabilization ShareStabilization
 	// Classes are the weight classes in force.
 	Classes map[string]float64
 	// DefaultClass is the class of weight 1.
@@ -200,7 +235,7 @@ func ResolveUtilizationShare(cfg *UtilizationShareConfig) (UtilizationShare, err
 	if us.ReserveGPUs < 0 {
 		return UtilizationShare{}, fmt.Errorf("utilizationShare.reserveGPUs must be >= 0, got %d", us.ReserveGPUs)
 	}
-	if err := us.resolveRebalance(cfg.ImmediateRebalance); err != nil {
+	if err := us.resolveStabilization(cfg.Stabilization); err != nil {
 		return UtilizationShare{}, err
 	}
 
@@ -252,31 +287,66 @@ func ResolveUtilizationShare(cfg *UtilizationShareConfig) (UtilizationShare, err
 	return us, nil
 }
 
-// resolveRebalance fills the immediate-rebalance settings from cfg, or the
+// resolveStabilization fills the stabilization settings from cfg, or the
 // defaults.
-func (u *UtilizationShare) resolveRebalance(cfg *UtilizationShareImmediateRebalance) error {
+func (u *UtilizationShare) resolveStabilization(cfg *UtilizationShareStabilization) error {
 	if cfg == nil {
-		cfg = &UtilizationShareImmediateRebalance{}
+		cfg = &UtilizationShareStabilization{}
 	}
-	u.ImmediateRebalanceOff = cfg.Enabled != nil && !*cfg.Enabled
-	u.ImmediateRebalanceReceiverLoad, u.ImmediateRebalanceDonorLoad = cfg.ReceiverLoadAtLeast, cfg.DonorLoadAtMost
-	if u.ImmediateRebalanceReceiverLoad == 0 {
-		u.ImmediateRebalanceReceiverLoad = DefaultImmediateRebalanceReceiverLoad
+	st := ShareStabilization{ConsecutiveCyclesBeforeMove: cfg.ConsecutiveCyclesBeforeMove}
+	if st.ConsecutiveCyclesBeforeMove == 0 {
+		st.ConsecutiveCyclesBeforeMove = DefaultConsecutiveCyclesBeforeMove
 	}
-	if u.ImmediateRebalanceDonorLoad == 0 {
-		u.ImmediateRebalanceDonorLoad = DefaultImmediateRebalanceDonorLoad
+	if st.ConsecutiveCyclesBeforeMove < 1 {
+		return fmt.Errorf("utilizationShare.stabilization.consecutiveCyclesBeforeMove must be >= 1, got %d",
+			cfg.ConsecutiveCyclesBeforeMove)
+	}
+	var err error
+	if st.WaitBeforeReverseMove, err = stabilizationDuration("waitBeforeReverseMove", cfg.WaitBeforeReverseMove); err != nil {
+		return err
+	}
+	if st.FlappingWindow, err = stabilizationDuration("flappingWindow", cfg.FlappingWindow); err != nil {
+		return err
+	}
+
+	skip := cfg.SkipWaitsWhen
+	if skip == nil {
+		skip = &UtilizationShareSkipWaits{}
+	}
+	st.SkipWaitsOff = skip.Enabled != nil && !*skip.Enabled
+	st.SkipWaitsReceiverLoad, st.SkipWaitsDonorLoad = skip.ReceiverLoadAtLeast, skip.DonorLoadAtMost
+	if st.SkipWaitsReceiverLoad == 0 {
+		st.SkipWaitsReceiverLoad = DefaultSkipWaitsReceiverLoad
+	}
+	if st.SkipWaitsDonorLoad == 0 {
+		st.SkipWaitsDonorLoad = DefaultSkipWaitsDonorLoad
 	}
 	// Written so NaN fails: every comparison with NaN is false.
-	if !(u.ImmediateRebalanceReceiverLoad > 0) || math.IsInf(u.ImmediateRebalanceReceiverLoad, 0) {
-		return fmt.Errorf("utilizationShare.immediateRebalance.receiverLoadAtLeast must be a finite value > 0, got %v",
-			cfg.ReceiverLoadAtLeast)
+	if !(st.SkipWaitsReceiverLoad > 0) || math.IsInf(st.SkipWaitsReceiverLoad, 0) {
+		return fmt.Errorf("utilizationShare.stabilization.skipWaitsWhen.receiverLoadAtLeast must be a finite value > 0, got %v",
+			skip.ReceiverLoadAtLeast)
 	}
-	if !(u.ImmediateRebalanceDonorLoad > 0 && u.ImmediateRebalanceDonorLoad < u.ImmediateRebalanceReceiverLoad) {
-		return fmt.Errorf("utilizationShare.immediateRebalance.donorLoadAtMost must be > 0 and below receiverLoadAtLeast (%v), "+
-			"or there is no hysteresis and the rebalance oscillates; got %v",
-			u.ImmediateRebalanceReceiverLoad, u.ImmediateRebalanceDonorLoad)
+	if !(st.SkipWaitsDonorLoad > 0 && st.SkipWaitsDonorLoad < st.SkipWaitsReceiverLoad) {
+		return fmt.Errorf("utilizationShare.stabilization.skipWaitsWhen.donorLoadAtMost must be > 0 and below "+
+			"receiverLoadAtLeast (%v), or there is no hysteresis and skipped waits oscillate; got %v",
+			st.SkipWaitsReceiverLoad, st.SkipWaitsDonorLoad)
 	}
+	u.Stabilization = st
 	return nil
+}
+
+// stabilizationDuration parses a stabilization wait: "" or "auto" is nil
+// (derived per group), anything else a Go duration >= 0.
+func stabilizationDuration(key, v string) (*time.Duration, error) {
+	if v == "" || v == StabilizationAuto {
+		return nil, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return nil, fmt.Errorf("utilizationShare.stabilization.%s must be %q or a duration >= 0 such as \"12m\", got %q",
+			key, StabilizationAuto, v)
+	}
+	return &d, nil
 }
 
 // InClusterGroup reports whether the cluster-scope groups plan namespace's

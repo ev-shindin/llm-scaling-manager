@@ -93,10 +93,10 @@ type ShareTransfer struct {
 	Entitled bool
 	// Urgent receivers are below their need (§6.4).
 	Urgent bool
-	// Rebalance marks a move that rebalances a hard imbalance
+	// SkippedWaits marks a move that rebalances a hard imbalance
 	// (shareHardImbalance): it waited for neither the reversal hold nor the
 	// confirm cycles.
-	Rebalance bool
+	SkippedWaits bool
 	// PlannedPods are the donor pods a node-aware plan chose (namespace/name):
 	// the ones to mark, because the holes are planned where they run (§6.5).
 	// Empty when any of the donor's pods will do.

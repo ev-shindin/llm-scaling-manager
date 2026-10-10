@@ -423,14 +423,23 @@ func shareTimingSeries(tm allocation.ShareTimings, src allocation.ShareTimingSou
 		}
 		return "default"
 	}
+	// policyOr: "policy" when the stabilization block set param, else derived.
+	policyOr := func(param string, inputs ...string) string {
+		if src[param] == shareTimingSourcePolicy {
+			return shareTimingSourcePolicy
+		}
+		return derived(inputs...)
+	}
 	return []metrics.UtilizationShareTiming{
 		{Param: constants.UtilizationShareParamWindow, Source: derived("window"), Seconds: tm.Window.Seconds()},
 		{Param: constants.UtilizationShareParamReleaseTimeout, Source: derived("window", "polling", "grace"),
 			Seconds: tm.ReleaseTimeout.Seconds()},
 		{Param: constants.UtilizationShareParamFillTimeout, Source: derived("polling"), Seconds: tm.FillTimeout.Seconds()},
-		{Param: constants.UtilizationShareParamReversalHold, Source: derived("release", "window", "polling", "grace"),
+		{Param: constants.UtilizationShareParamReversalHold,
+			Source:  policyOr(constants.UtilizationShareParamReversalHold, "release", "window", "polling", "grace"),
 			Seconds: tm.ReversalHold.Seconds()},
-		{Param: constants.UtilizationShareParamSwingWindow, Source: derived("release", "window", "polling", "grace"),
+		{Param: constants.UtilizationShareParamSwingWindow,
+			Source:  policyOr(constants.UtilizationShareParamSwingWindow, "release", "window", "polling", "grace"),
 			Seconds: tm.SwingWindow.Seconds()},
 	}
 }

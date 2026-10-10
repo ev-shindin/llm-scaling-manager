@@ -711,14 +711,15 @@ When the group acts:
   near its threshold -- and whose donor's load on what it keeps after giving
   is at most 0.6 waits for neither
   the reversal hold nor the confirmation cycles: it starts on the first cycle,
-  and the transfer is logged with `rebalance=true`. Everything else still
+  and the transfer is logged with `skippedWaits=true`. Everything else still
   applies: the cancelled pair's hold, an aborted donor's back-off, an
   exhausted donor (`GivingBusy`), the admission test above, and the donor's
   band and keep. The two thresholds are the rule's hysteresis: after the move
   the donor is at or below 0.6 and the receiver below 0.9, so the reverse move
   cannot qualify until demand itself changes by their ratio, about 1.5x. Every
   short role is above 0.9, so in practice the donor's load decides. Both
-  limits, and the switch, are the operator's (`immediateRebalance`, §8.1).
+  limits, and the switch, are the operator's (`stabilization.skipWaitsWhen`,
+  §8.1).
 
   Why it exists: the first rule exempted no receiver from the hold, on the
   simulated premise that a role that just gave rarely bursts within it.
@@ -1575,16 +1576,23 @@ none of them:
         research:
           enabled: false            # this group keeps the greedy path
       clusterNamespaces: []         # non-empty: the cluster groups plan only these namespaces' models (a canary)
-      immediateRebalance:           # a hard imbalance waits for no hold (§6.2)
-        enabled: true
-        receiverLoadAtLeast: 0.9    # receiver's load, as a fraction of its scale-up threshold
-        donorLoadAtMost: 0.6        # donor's load after giving; must be below receiverLoadAtLeast
+      stabilization:                # how fast GPUs move against how often they move back (§6.7)
+        consecutiveCyclesBeforeMove: 2  # cycles a model must look short (or spare) before a move
+        waitBeforeReverseMove: auto     # a model that gave may not receive for this long; auto = 2 x release
+        flappingWindow: auto            # two direction changes within it: plan on average demand; auto = 8 x latency
+        skipWaitsWhen:                  # a hard imbalance waits for neither (§6.2)
+          enabled: true
+          receiverLoadAtLeast: 0.9      # receiver's load, as a fraction of its scale-up threshold
+          donorLoadAtMost: 0.6          # donor's load after giving; must be below receiverLoadAtLeast
 ```
 
-Seven keys, each a decision only an operator can make: how far off target is
+Eight keys, each a decision only an operator can make: how far off target is
 worth a move, whether wakes may skip the queue, whether to act at all, whether
 WVA may hold every GPU of a type, what the priority classes are worth, which
-namespace quota groups take part, and which namespaces a cluster group plans.
+namespace quota groups take part, which namespaces a cluster group plans, and
+how fast GPUs move against how often they move back (`stabilization`: its
+waits default to values derived from the cluster, and the operator may fix
+them).
 
 `shadow` stays default `false`: that is a decision, not an oversight. The
 operator who writes `type: utilizationShare` asked for it to act; the reference
@@ -1692,7 +1700,8 @@ first and the constant changed second. It does not become a knob.
 **Every derived value is reported with its source.** A gauge
 `wva_utilization_share_effective_seconds{param, source}` (`param` =
 `window`, `release-timeout`, `fill-timeout`, `reversal-hold`, `swing-window`;
-`source` = `measured`, `scaledobject`, `pod`, `default`), and the sources in the
+`source` = `measured`, `scaledobject`, `pod`, `default`, or `policy` when
+`stabilization` sets the hold or the swing window), and the sources in the
 `Utilization share: ledger started` line when a group's ledger is (re)built. A
 log line per group whenever a value changes is not built (§13). An operator can
 always see the value in force. That is what quietly disappears when a setting is

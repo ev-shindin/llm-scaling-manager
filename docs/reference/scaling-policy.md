@@ -288,13 +288,38 @@ would move; `wva_utilization_share_replicas_to_move` says how many replicas.
 | `weightClasses` | `best-effort: 0.5`, `standard: 1`, `important: 2`, `critical: 4` | Class names and their weights. Replaces the defaults whole when set. Exactly one class must have weight `1`; it is the default class. |
 | `namespaces.<ns>.enabled` | `true` | `false` keeps that namespace's quota group on today's optimizer. |
 | `clusterNamespaces` | empty (every namespace) | A list of namespaces. When set, the cluster groups plan only the models of these namespaces; every other model is left to today's optimizer. A canary for a cluster quota. An empty entry (`""`) makes the block invalid. Does not affect namespace quota groups. |
-| `immediateRebalance.enabled` | `true` | Move GPUs at once, without the reversal hold or the second confirming cycle, from a model with plenty of headroom to one at its scale-up threshold (the two keys below). `false` makes every move wait. |
-| `immediateRebalance.receiverLoadAtLeast` | `0.9` | The receiver's load, at or above which it may be funded at once. **Load** is a model's utilization as a fraction of its scale-up threshold: `1` is where it would scale up, `0.9` is 90% of the way there. |
-| `immediateRebalance.donorLoadAtMost` | `0.6` | The donor's load on the GPUs it keeps after giving, at or below which it may give at once. Must be below `receiverLoadAtLeast`: the gap is what stops GPUs going back and forth. Raise it (or lower `receiverLoadAtLeast`) to rebalance smaller imbalances sooner, at the price of more moves that are later reversed. |
+| `stabilization` | see below | How fast GPUs move between models against how often they move back. |
+
+**Stabilization.** GPUs that move between models take minutes to become useful
+again (a replica must drain, then the receiver's must start), so moving them
+back and forth costs both models. These keys decide how much evidence a move
+needs and how long a move holds:
+
+```yaml
+utilizationShare:
+  stabilization:
+    consecutiveCyclesBeforeMove: 2
+    waitBeforeReverseMove: auto     # about 12m with a 300 s scale-down window
+    flappingWindow: auto            # about 2h
+    skipWaitsWhen:
+      enabled: true
+      receiverLoadAtLeast: 0.9
+      donorLoadAtMost: 0.6
+```
+
+| Key (under `stabilization:`) | Default | Meaning |
+| --- | --- | --- |
+| `consecutiveCyclesBeforeMove` | `2` | How many controller cycles in a row a model must look short (or have GPUs to spare) before GPUs move. Raise it to ignore brief spikes; `1` acts on the first reading. |
+| `waitBeforeReverseMove` | `auto` | After a model gives GPUs it cannot receive any for this long, and after it receives it cannot give. A duration (`12m`) or `auto`: twice the time the group's donors take to release a replica (scale-down window, KEDA polling, pod drain, or the measured time once three releases have completed). `0s` turns the wait off. |
+| `flappingWindow` | `auto` | A model whose moves change direction twice within this window is planned on its average demand over the window, not its current one, so a load that swings faster than GPUs can follow stops chasing it. A duration or `auto`: eight times the time a move takes from decision to serving. `0s` turns the rule off. |
+| `skipWaitsWhen.enabled` | `true` | Let a large imbalance skip the two waits above (`consecutiveCyclesBeforeMove` and `waitBeforeReverseMove`). `false`: every move waits, even when one model is at its scale-up threshold and another is nearly idle. |
+| `skipWaitsWhen.receiverLoadAtLeast` | `0.9` | The receiver's load at or above which it may be funded without waiting. **Load** is a model's utilization as a fraction of its scale-up threshold: `1` is where it would scale up, `0.9` is 90% of the way there. |
+| `skipWaitsWhen.donorLoadAtMost` | `0.6` | The donor's load, on the GPUs it keeps after giving, at or below which it may give without waiting. Must be below `receiverLoadAtLeast`: the gap is what stops GPUs going back and forth. Raise it (or lower `receiverLoadAtLeast`) to correct smaller imbalances sooner, at the price of more moves that are later reversed. |
 
 Nothing else is configurable. The timings a transfer runs on — how long a release
-may take, how long a receiver may stay Pending, how long a role that gave must wait
-before it receives — are derived per group, not per donor: from the slowest
+may take, how long a receiver may stay Pending, and, unless `stabilization` sets
+them, how long a role that gave must wait before it receives and the flapping
+window — are derived per group, not per donor: from the slowest
 donor configuration in the group (the longest scale-down window and polling
 interval among the donors' ScaledObjects, and the longest termination grace among
 their pod templates), and from the releases the group has measured. One model with
@@ -513,7 +538,7 @@ replica cannot receive one for the reversal hold, about twice a release time
 that take turns do not trade GPUs back and forth. The hold is lifted when the
 imbalance is hard: your model's load is at least 0.9 of its scale-up
 threshold and another model's load, on the GPUs it keeps after giving, is at
-most 0.6 of its own (`immediateRebalance` in the policy sets both). That
+most 0.6 of its own (`stabilization.skipWaitsWhen` in the policy sets both). That
 transfer starts on the first cycle, with no hold and no second confirming
 cycle; it still waits for the donor's scale-down window. If no other model is
 that lightly loaded, your model waits out the hold and shows

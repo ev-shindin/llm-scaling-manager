@@ -193,8 +193,8 @@ Work down the list in order.
    scale-down window that is on the order of 12 minutes. It is lifted for a
    **hard imbalance**: a role whose load is at least 0.9 of its scale-up
    threshold receives at once from a role whose load, after giving, is at most
-   0.6 of its own (`utilizationShare.immediateRebalance`); the controller logs
-   that transfer with `rebalance=true`, and the role does not show
+   0.6 of its own (`utilizationShare.stabilization.skipWaitsWhen`); the
+   controller logs that transfer with `skippedWaits=true`, and the role does not show
    `reversal-hold` while such a donor exists. So a role held below its need for
    the whole hold means no other role is that lightly loaded. A cancelled transfer holds only its own
    donor -> receiver pair from starting again; each role can still move with

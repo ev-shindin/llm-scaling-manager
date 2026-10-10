@@ -155,7 +155,7 @@ func TestUtilizationShareDoesNotBlameTheOwnerForTheLastReplica(t *testing.T) {
 			"ns/A/both": {Namespace: "ns", ModelID: "A"}, "ns/B/both": {Namespace: "ns", ModelID: "B"}},
 	}
 	ev := allocation.EvaluateShare(g.Roles, g.Committed, g.Thresholds, g.Budget, 0.15)
-	got := shareBlockedReasons(allocation.NewShareLedger(), g, ev, nil, allocation.ShareRebalance{}, time.Unix(0, 0), allocation.ShareTimings{})
+	got := shareBlockedReasons(allocation.NewShareLedger(), g, ev, nil, allocation.ShareSkipWaits{}, time.Unix(0, 0), allocation.ShareTimings{})
 	for _, r := range got["ns/A"] {
 		if r == constants.ScalingBlockedFloorPinned || r == constants.ScalingBlockedFloorsExceedQuota {
 			t.Fatalf("A's last replica reported as %s: its owner set no floor", r)

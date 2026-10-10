@@ -168,7 +168,7 @@ func TestUtilizationShareWholeReplicaShortIsAReason(t *testing.T) {
 			},
 		}
 		ev := allocation.EvaluateShare(g.Roles, g.Committed, g.Thresholds, g.Budget, 0.15)
-		return shareBlockedReasons(allocation.NewShareLedger(), g, ev, nil, allocation.ShareRebalance{}, time.Unix(0, 0), allocation.ShareTimings{})
+		return shareBlockedReasons(allocation.NewShareLedger(), g, ev, nil, allocation.ShareSkipWaits{}, time.Unix(0, 0), allocation.ShareTimings{})
 	}
 	if got := build(17)["ns/A"]; !slices.Contains(got, constants.ScalingBlockedWholeReplicaShort) ||
 		slices.Contains(got, constants.ScalingBlockedQuotaShort) {

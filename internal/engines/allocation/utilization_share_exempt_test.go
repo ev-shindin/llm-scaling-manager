@@ -18,7 +18,7 @@ type burstReplay struct {
 	// fresh skips the L -> Q history: no reversal hold, the control.
 	fresh bool
 	// band is the hard-imbalance band; the zero value is the default.
-	band ShareRebalance
+	band ShareSkipWaits
 	// hold, when set, adds to the ledger before the planner runs.
 	hold func(l *ShareLedger, now time.Time)
 }
@@ -55,7 +55,7 @@ func (b burstReplay) run(t *testing.T) []ShareTransfer {
 		budget += b.cHeld
 	}
 	in := SharePlanInput{Roles: roles, Held: after, Thresholds: thresholds, Budget: budget, Tolerance: 0.15,
-		Rebalance: b.band}
+		SkipWaits: b.band}
 	start := t0.Add(3 * time.Minute)
 	if b.hold != nil {
 		b.hold(l, start)
@@ -79,7 +79,7 @@ func TestShareHardImbalanceIsRebalancedThroughTheReversalHold(t *testing.T) {
 	if got := (burstReplay{lNeed: 8, qNeed: 2, lHeld: 3, qHeld: 7}).run(t); !moved(got, "Q", "L") {
 		t.Fatalf("L at 3 of a need of 8, Q at 7 of 2: no transfer back inside the hold: %v", got)
 	}
-	// Control: Q is not calm after giving (5 of 6 is above ShareRebalanceDonorLoad),
+	// Control: Q is not calm after giving (5 of 6 is above ShareSkipWaitsDonorLoad),
 	// so this is no hard imbalance and the hold stands...
 	mild := burstReplay{lNeed: 8, qNeed: 5, lHeld: 3, qHeld: 7}
 	if got := mild.run(t); moved(got, "Q", "L") {
@@ -94,15 +94,40 @@ func TestShareHardImbalanceIsRebalancedThroughTheReversalHold(t *testing.T) {
 
 // The band is the operator's: switched off, a hard imbalance waits out the
 // hold; widened, a move the default band holds goes through.
-func TestShareRebalanceBandIsConfigurable(t *testing.T) {
-	if got := (burstReplay{lNeed: 8, qNeed: 2, lHeld: 3, qHeld: 7, band: ShareRebalance{Off: true}}).run(t); moved(got, "Q", "L") {
+func TestShareSkipWaitsBandIsConfigurable(t *testing.T) {
+	if got := (burstReplay{lNeed: 8, qNeed: 2, lHeld: 3, qHeld: 7, band: ShareSkipWaits{Off: true}}).run(t); moved(got, "Q", "L") {
 		t.Fatalf("rebalance off: Q gave to L through the hold: %v", got)
 	}
 	// Q at 5 of the 6 it keeps (0.83) is not calm by default, and is under a
 	// donor load limit of 0.9 (with the receiver's above it).
-	wide := ShareRebalance{ReceiverLoad: 1, DonorLoad: 0.9}
+	wide := ShareSkipWaits{ReceiverLoad: 1, DonorLoad: 0.9}
 	if got := (burstReplay{lNeed: 8, qNeed: 5, lHeld: 3, qHeld: 7, band: wide}).run(t); !moved(got, "Q", "L") {
 		t.Fatalf("donor load limit 0.9: Q at 5 of 6 is calm, yet the hold stood: %v", got)
+	}
+}
+
+// consecutiveCyclesBeforeMove is the confirm count: 1 moves on the first
+// cycle, 3 not before the third.
+func TestShareConfirmCyclesAreConfigurable(t *testing.T) {
+	roles := []ShareRole{
+		{Key: "L", Weight: 1, Need: 8, Ceiling: 8, ReplicaGPUs: 1},
+		{Key: "Q", Weight: 1, Need: 5, Ceiling: 8, ReplicaGPUs: 1}, // not a hard imbalance
+	}
+	firstCycle := func(cycles int) int {
+		in := SharePlanInput{Roles: roles, Held: map[string]int{"L": 3, "Q": 7},
+			Thresholds: map[string]float64{"L": 0.8, "Q": 0.8}, Budget: 10, Tolerance: 0.15, ConfirmCycles: cycles}
+		l := NewShareLedger()
+		for i := range 6 {
+			if len(PlanShareTransfers(l, in, time.Unix(int64(1000+30*i), 0), simTimings()).Started) > 0 {
+				return i + 1
+			}
+		}
+		return 0
+	}
+	for cycles, want := range map[int]int{0: ShareConfirmCycles, 1: 1, 3: 3} {
+		if got := firstCycle(cycles); got != want {
+			t.Errorf("ConfirmCycles %d: first transfer on cycle %d, want %d", cycles, got, want)
+		}
 	}
 }
 
@@ -202,7 +227,7 @@ func TestShareHardImbalanceReachesSetPaths(t *testing.T) {
 
 func TestShareHardImbalance(t *testing.T) {
 	r := func(need float64) ShareRole { return ShareRole{Need: need} }
-	hi, lo := ShareRebalanceReceiverLoad, ShareRebalanceDonorLoad
+	hi, lo := ShareSkipWaitsReceiverLoad, ShareSkipWaitsDonorLoad
 	for _, c := range []struct {
 		name           string
 		rcHeld, dnLeft int
@@ -217,7 +242,7 @@ func TestShareHardImbalance(t *testing.T) {
 		{"receiver with no need", 0, 10, r(0), r(1), false},
 		{"receiver holding nothing", 0, 10, r(1), r(1), true},
 	} {
-		if got := shareHardImbalance(ShareRebalance{}, c.rcHeld, c.rc, c.dnLeft, c.dn); got != c.want {
+		if got := shareHardImbalance(ShareSkipWaits{}, c.rcHeld, c.rc, c.dnLeft, c.dn); got != c.want {
 			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
 	}

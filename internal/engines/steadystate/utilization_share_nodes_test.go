@@ -238,14 +238,14 @@ func TestShareFillBlockedReasonIsPublishedAndExpires(t *testing.T) {
 		Budget:  16,
 	}
 	l.FillBlocked("B", constants.ScalingBlockedReleaseTaken, t0.Add(time.Minute))
-	got := shareBlockedReasons(l, g, allocation.ShareEvaluation{}, nil, allocation.ShareRebalance{}, t0.Add(30*time.Second), allocation.ShareTimings{})
+	got := shareBlockedReasons(l, g, allocation.ShareEvaluation{}, nil, allocation.ShareSkipWaits{}, t0.Add(30*time.Second), allocation.ShareTimings{})
 	if !slices.Contains(got["ns/b"], constants.ScalingBlockedReleaseTaken) {
 		t.Fatalf("reasons %v, want release-taken on ns/b", got)
 	}
 	if slices.Contains(got["ns/a"], constants.ScalingBlockedReleaseTaken) {
 		t.Fatal("the reason belongs to the receiver only")
 	}
-	got = shareBlockedReasons(l, g, allocation.ShareEvaluation{}, nil, allocation.ShareRebalance{}, t0.Add(time.Minute), allocation.ShareTimings{})
+	got = shareBlockedReasons(l, g, allocation.ShareEvaluation{}, nil, allocation.ShareSkipWaits{}, t0.Add(time.Minute), allocation.ShareTimings{})
 	if slices.Contains(got["ns/b"], constants.ScalingBlockedReleaseTaken) {
 		t.Fatal("the reason outlived its report window")
 	}

@@ -109,6 +109,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		return utils.GetNamespacedKey(g.Origins[role].Namespace, variant)
 	}
 	tm, src := allocation.DeriveShareTimings(e.shareTimingInputs(g, accessor), st.ledgers[key])
+	shareStabilizationTimings(&tm, src, us.Stabilization)
 
 	// Every planned variant's desired count starts at what is running.
 	for role, vs := range g.Variants {
@@ -268,7 +269,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		out.overrides = e.shareOverrides(g, variantKey, "restart quiet period")
 		out.promised = l.Promised() + l.WakeHeld(now)
 		out.reserveDebt = shareDebtNow(l, held, g.Budget)
-		out.blocked = shareBlockedReasons(l, g, ev, nil, shareRebalance(us), now, tm)
+		out.blocked = shareBlockedReasons(l, g, ev, nil, shareSkipWaits(us), now, tm)
 		// Said, not only logged: a model under load that stops scaling for
 		// three minutes after an upgrade otherwise has no reason anywhere.
 		for _, r := range g.Roles {
@@ -291,8 +292,8 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		shareMarkOwned(l, nil), now)
 	plan := allocation.PlanShareTransfers(l, allocation.SharePlanInput{
 		Roles: g.Roles, Held: held, Thresholds: g.Thresholds, Budget: g.Budget, Tolerance: us.Tolerance,
-		Rebalance: shareRebalance(us),
-		Give:      g.Give, Grow: g.Grow, Nodes: nodes, DonorUnits: units, DomainKey: domains,
+		SkipWaits: shareSkipWaits(us), ConfirmCycles: us.Stabilization.ConsecutiveCyclesBeforeMove,
+		Give: g.Give, Grow: g.Grow, Nodes: nodes, DonorUnits: units, DomainKey: domains,
 		WakeHeld: l.WakeHeld(now), PhysicalFree: g.PhysicalFree,
 	}, now, tm)
 	for _, id := range plan.Cancelled {
@@ -382,7 +383,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			e.shareStartedEvents(g, t, set, marked[t.ID], accessor)
 			logger.Info("Utilization share: transfer started", "id", t.ID, "set", t.SetID, "donor", t.Donor,
 				"receiver", t.Receiver, "donorVariant", t.DonorVariant, "receiverVariant", t.ReceiverVariant,
-				"urgent", t.Urgent, "rebalance", t.Rebalance, "pods", marked[t.ID], "planned", len(t.PlannedPods) > 0)
+				"urgent", t.Urgent, "skippedWaits", t.SkippedWaits, "pods", marked[t.ID], "planned", len(t.PlannedPods) > 0)
 		}
 	}
 
@@ -391,7 +392,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	out.promised = l.Promised() + l.WakeHeld(now)
 	out.swinging = plan.Swinging
 	out.reserveDebt = shareDebtNow(l, held, g.Budget)
-	out.blocked = shareBlockedReasons(l, g, ev, plan.Unfunded, shareRebalance(us), now, tm)
+	out.blocked = shareBlockedReasons(l, g, ev, plan.Unfunded, shareSkipWaits(us), now, tm)
 	out.withheld = plan.Withheld
 	out.claimable = shareClaimable(l, g, held)
 	out.releasing, out.filling = countInFlight(l)
@@ -660,7 +661,7 @@ func shareDebtNow(l *allocation.ShareLedger, held map[string]int, budget int) in
 // entry, empty when nothing holds it back, so a reason that stops holding is
 // cleared.
 func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev allocation.ShareEvaluation,
-	unfunded map[string]string, rb allocation.ShareRebalance, now time.Time, tm allocation.ShareTimings) map[string][]string {
+	unfunded map[string]string, rb allocation.ShareSkipWaits, now time.Time, tm allocation.ShareTimings) map[string][]string {
 	out := map[string][]string{}
 	model := func(role string) string {
 		o := g.Origins[role]
@@ -765,11 +766,28 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 	return out
 }
 
-// shareRebalance is the hard-imbalance band the policy sets.
-func shareRebalance(us config.UtilizationShare) allocation.ShareRebalance {
-	return allocation.ShareRebalance{Off: us.ImmediateRebalanceOff,
-		ReceiverLoad: us.ImmediateRebalanceReceiverLoad, DonorLoad: us.ImmediateRebalanceDonorLoad}
+// shareSkipWaits is stabilization.skipWaitsWhen as the policy sets it.
+func shareSkipWaits(us config.UtilizationShare) allocation.ShareSkipWaits {
+	st := us.Stabilization
+	return allocation.ShareSkipWaits{Off: st.SkipWaitsOff,
+		ReceiverLoad: st.SkipWaitsReceiverLoad, DonorLoad: st.SkipWaitsDonorLoad}
 }
+
+// shareStabilizationTimings applies the policy's waitBeforeReverseMove and
+// flappingWindow over the derived ones, and records them as set by policy.
+func shareStabilizationTimings(tm *allocation.ShareTimings, src allocation.ShareTimingSource, st config.ShareStabilization) {
+	if st.WaitBeforeReverseMove != nil {
+		tm.ReversalHold = *st.WaitBeforeReverseMove
+		src[constants.UtilizationShareParamReversalHold] = shareTimingSourcePolicy
+	}
+	if st.FlappingWindow != nil {
+		tm.SwingWindow = *st.FlappingWindow
+		src[constants.UtilizationShareParamSwingWindow] = shareTimingSourcePolicy
+	}
+}
+
+// shareTimingSourcePolicy is the timing source of a value the policy set.
+const shareTimingSourcePolicy = "policy"
 
 // shareClaimable lists the group's transfers a wake may claim: still
 // releasing, for a receiver, each with the receiver's score at what it holds
