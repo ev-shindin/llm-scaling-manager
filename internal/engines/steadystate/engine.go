@@ -248,12 +248,10 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	// not only when they differ from the default. The shortest of them is a
 	// day, so nothing an operator can observe in a single session reveals
 	// which horizons a process is running; this line is the only record.
-	if cfg != nil {
-		gap, variant, bucket := cfg.LearnedStateHorizons()
-		satV2 = satV2.WithHorizons(capacity.Horizons{
-			EpisodeGap: gap, VariantTimeout: variant, BucketRetention: bucket,
-		})
-	}
+	gap, variant, bucket := cfg.LearnedStateHorizons()
+	satV2 = satV2.WithHorizons(capacity.Horizons{
+		EpisodeGap: gap, VariantTimeout: variant, BucketRetention: bucket,
+	})
 	h := satV2.Horizons()
 	ctrl.Log.Info("learned-state horizons",
 		"episodeGap", h.EpisodeGap,

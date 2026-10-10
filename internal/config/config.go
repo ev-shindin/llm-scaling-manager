@@ -606,6 +606,19 @@ func SetOptimizationIntervalForTest(c *Config, interval time.Duration) {
 	c.infrastructure.optimizationInterval = interval
 }
 
+// SetLearnedStateHorizonsForTest overrides the learned-state horizons on a test
+// Config, including to unusable values — the floor lives in
+// capacity.Horizons.Sanitized, so a caller's handling of a value an operator
+// could actually write ("24", meaning 24ns to viper) is only reachable this
+// way. Zero means "not configured". Not for production use.
+func SetLearnedStateHorizonsForTest(c *Config, episodeGap, variantTimeout, bucketRetention time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.infrastructure.learnedEpisodeGap = episodeGap
+	c.infrastructure.learnedVariantTimeout = variantTimeout
+	c.infrastructure.learnedBucketRetention = bucketRetention
+}
+
 // --- Bootstrap State Management ---
 
 // ConfigMapsBootstrapComplete returns true once the initial ConfigMap bootstrap has completed.
