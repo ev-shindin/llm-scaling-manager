@@ -21,6 +21,14 @@ const (
 	ShareMaxReplicasPerCycle = 2
 	// ShareMaxConcurrentTransfers bounds the transfers in flight per group.
 	ShareMaxConcurrentTransfers = 2
+	// ShareUrgentHeldFraction is the fraction of its need below which a
+	// receiver may be funded through the reversal hold, from a donor that
+	// keeps its own need (shareReversalExempt). Deep shortfalls only: in the
+	// §6.7 simulation of anti-phase swings an exemption for every receiver
+	// below its need reversed transfers and ran the 30-minute resonance at
+	// 2.95x the shortfall of standing still, where below 0.75 it wasted none
+	// and ran at 1.73x (1.86x with no exemption).
+	ShareUrgentHeldFraction = 0.75
 )
 
 // SharePlanInput is one group's view for one planning cycle.
@@ -234,6 +242,40 @@ type sharePlanRun struct {
 // would starve a short receiver for good.
 type shareLimits struct {
 	keep, integ map[string]int
+}
+
+// shareReversalExempt reports whether a move to receiver rc, holding rcHeld,
+// from donor dn, left with dnLeft after giving, is exempt from the reversal
+// hold: rc holds less than ShareUrgentHeldFraction of its need and dn stays at
+// or above its own. The hold stops
+// GPUs ping-ponging for headroom; it must not keep a model short while another
+// holds more than it needs. Measured on alternating bursts: GPUs moved to a
+// model whose burst had just ended (its draining backlog still read as need)
+// as the other's began, and the hold kept them there for 18 minutes -- the
+// whole burst served on 3 of 8 replicas. A role that "just gave" is exactly
+// the one about to burst when bursts alternate. The cancelled-direction hold,
+// back-offs and an exhausted donor still apply (ReceivingBlocked,
+// GivingBlocked), and a swinging role is still planned on its mean need.
+func shareReversalExempt(rcHeld int, rc ShareRole, dnLeft int, dn ShareRole) bool {
+	return rc.Need > 0 && float64(rcHeld) < ShareUrgentHeldFraction*rc.Need && float64(dnLeft) >= dn.Need
+}
+
+// shareReceiveHeld is whether rc may not receive in a move the reversal
+// exemption covers (exempt) or not.
+func shareReceiveHeld(l *ShareLedger, rc string, exempt bool, now time.Time, tm ShareTimings) bool {
+	if exempt {
+		return l.ReceivingBlocked(rc, now)
+	}
+	return l.ReceivingHeld(rc, now, tm)
+}
+
+// shareGiveHeld is whether dn may not give in a move the reversal exemption
+// covers (exempt) or not.
+func shareGiveHeld(l *ShareLedger, dn string, exempt bool, now time.Time, tm ShareTimings) bool {
+	if exempt {
+		return l.GivingBlocked(dn, now)
+	}
+	return l.GivingHeld(dn, now, tm)
 }
 
 // donorInBand reports whether donor dn holding left GPUs after giving is in its
@@ -450,8 +492,10 @@ func (p *sharePlanRun) fund(rc string, donors []string) bool {
 			continue // it has given all it can until its releases land
 		}
 		// Rule 4: a role that gave cannot receive, and one that received
-		// cannot give, within the hold.
-		if l.ReceivingHeld(rc, now, tm) || l.GivingHeld(dn, now, tm) {
+		// cannot give, within the hold -- unless the receiver is short and the
+		// donor has more than it needs (shareReversalExempt).
+		exempt := shareReversalExempt(work[rc], rr, work[dn]-gd, dr)
+		if shareReceiveHeld(l, rc, exempt, now, tm) || shareGiveHeld(l, dn, exempt, now, tm) {
 			p.plan.Withheld[ShareWithheldReversalHold]++
 			continue
 		}
@@ -560,7 +604,10 @@ func shareDonorSet(l *ShareLedger, in SharePlanInput, rc string, donors []string
 	if !ok || len(grow.PodGPUs) == 0 || in.Give == nil {
 		return nil
 	}
-	if l.ReceivingHeld(rc, now, tm) || moved[rc] >= ShareMaxReplicasPerCycle {
+	// A short receiver may be funded through its reversal hold, by donors
+	// that keep their need; each donor is checked below.
+	short := float64(work[rc]) < byKey[rc].Need
+	if shareReceiveHeld(l, rc, short, now, tm) || moved[rc] >= ShareMaxReplicasPerCycle {
 		return nil
 	}
 	need := slices.Sorted(slices.Values(grow.PodGPUs))
@@ -592,7 +639,9 @@ func shareDonorSet(l *ShareLedger, in SharePlanInput, rc string, donors []string
 			}
 			gd := max(give.GPUs, 1)
 			k := taken[dn] + 1
-			if moved[dn]+k > shareSetPace(grow) || work[dn]-k*gd < lim.keep[dn] || l.GivingHeld(dn, now, tm) {
+			exempt := shareReversalExempt(work[rc], byKey[rc], work[dn]-k*gd, byKey[dn])
+			if moved[dn]+k > shareSetPace(grow) || work[dn]-k*gd < lim.keep[dn] || shareGiveHeld(l, dn, exempt, now, tm) ||
+				(!exempt && l.ReceivingHeld(rc, now, tm)) {
 				continue
 			}
 			pods := slices.Sorted(slices.Values(give.PodGPUs))
@@ -699,7 +748,8 @@ func shareNodeSet(l *ShareLedger, in SharePlanInput, rc string, donors []string,
 	if !ok || len(grow.PodGPUs) == 0 || in.Give == nil || in.DonorUnits == nil {
 		return nil, nil, false
 	}
-	if l.ReceivingHeld(rc, now, tm) || moved[rc] >= ShareMaxReplicasPerCycle {
+	short := float64(work[rc]) < byKey[rc].Need
+	if shareReceiveHeld(l, rc, short, now, tm) || moved[rc] >= ShareMaxReplicasPerCycle {
 		return nil, nil, false
 	}
 	// Each domain is tried in turn: fixing it at the first placement would
@@ -798,8 +848,11 @@ func (s *shareNodeSearch) canGive(dn string, extra int) bool {
 		return false
 	}
 	k := s.taken[dn] + extra
-	return s.moved[dn]+k <= shareSetPace(s.in.Grow[s.rc]) && s.work[dn]-k*max(give.GPUs, 1) >= s.keep[dn] &&
-		!s.l.GivingHeld(dn, s.now, s.tm) && s.l.InFlight()+1 <= ShareMaxConcurrentTransfers
+	left := s.work[dn] - k*max(give.GPUs, 1)
+	exempt := shareReversalExempt(s.work[s.rc], s.byKey[s.rc], left, s.byKey[dn])
+	return s.moved[dn]+k <= shareSetPace(s.in.Grow[s.rc]) && left >= s.keep[dn] &&
+		!shareGiveHeld(s.l, dn, exempt, s.now, s.tm) && (exempt || !s.l.ReceivingHeld(s.rc, s.now, s.tm)) &&
+		s.l.InFlight()+1 <= ShareMaxConcurrentTransfers
 }
 
 // shareSetPace is how many replicas one donor may give a donor set in a cycle:

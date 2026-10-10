@@ -702,10 +702,21 @@ When the group acts:
   move: it holds only its own direction -- its donor from giving and its
   receiver from receiving again -- so a start and a cancel cannot loop, and
   the reverse move its cancelling demand calls for stays open. The hold blocks **transfers only**: a role on hold that
-  falls below its need still draws on idle GPUs and the reserve. Urgent
-  receivers are not exempt from it. Simulated, an exemption changed no
-  scenario (a role that just gave rarely bursts within the hold), and it would
-  reopen the reversal path the hold closes. A swinging role is planned on its
+  falls below its need still draws on idle GPUs and the reserve. A **deeply**
+  short receiver -- holding less than three quarters of its need
+  (`ShareUrgentHeldFraction`) -- is exempt, from a donor that keeps its own
+  need after giving (`shareReversalExempt`). The earlier rule exempted no
+  urgent receiver, on the simulated premise that a role that just gave rarely
+  bursts within the hold. Alternating bursts break that premise: on a cluster
+  run, GPUs moved to a model whose burst had just ended (its draining backlog
+  still read as need) as the other's began, and the hold kept them there for
+  18 minutes -- the whole burst served on 3 of 8 replicas, at a 564 s median
+  time to first token against 1 s without sharing. Exempting every receiver
+  below its need reopens the reversal path in the §6.7 swing simulation
+  (transfers reversed, the 30-minute resonance at 2.95x the shortfall of
+  standing still); below three quarters of need it reversed none and ran at
+  1.73x (1.86x with no exemption). Back-offs, the cancelled-direction hold
+  and an exhausted donor still apply. A swinging role is planned on its
   mean need (§6.7 rule 5).
 - **Entitled receivers** — an owed floor (§5.5 case 5), a fixed consumer below
   its today's-path target (§5.6), the reserve's refill (below) — are funded

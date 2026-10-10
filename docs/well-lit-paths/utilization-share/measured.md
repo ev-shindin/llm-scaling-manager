@@ -192,6 +192,33 @@ B stayed under a second in every arm, and every request was served.
   ([proposal §6.7](../../proposals/utilization-share-optimizer.md#67-why-it-does-not-oscillate-and-what-it-cannot-follow)). This run
   predates that fix; it has not been rerun.
 
+### Rerun with the cancel fix: the reversal hold did the same
+
+The same scenario on the image of `2eb607f9` (a cancel holds only its own
+direction), with a 300 s band between bursts so the report could compare the
+arms (no overlap in any arm). One run of each arm, on 2026-10-09.
+
+| time to first token, p50 / p95 | `today` | `shadow` | `share` |
+| --- | ---: | ---: | ---: |
+| B (Qwen), first 240 s of its burst | 50 s / 81 s | 41 s / 92 s | **5 s / 58 s** |
+| A (Llama), first 240 s of its burst | 113 s / 149 s | 219 s / 381 s | 178 s / 366 s |
+| A (Llama), rest of its burst | 1 s / 1 s | 1 s / 3 s | **564 s / 754 s** |
+| GPU-seconds | 16 976 | 17 599 | 28 111 |
+
+No pod was ever unscheduled in any arm, and every request was served.
+
+- Idle headroom worked for B: its burst began on 5 replicas instead of 1.
+- A ran its whole burst on 3 replicas again, this time with no cancel
+  involved. Two A -> B transfers started as B's burst ended (B's draining
+  backlog of 6000-token outputs still read as need) and landed as A's burst
+  began. A had just given and B had just received, so the reversal hold
+  (about 11 minutes each) blocked the move back. The first B -> A transfer
+  started 18 minutes into A's burst and landed after it ended.
+- Fixed afterwards: a receiver holding less than three quarters of its need
+  is exempt from the reversal hold, when the donor keeps its own need
+  ([proposal §6.2](../../proposals/utilization-share-optimizer.md#62-plan-transfers)).
+  This run predates that fix.
+
 ## P/D: not measured
 
 The same three arms were attempted on one P/D-disaggregated model

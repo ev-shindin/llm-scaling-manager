@@ -691,13 +691,21 @@ func (l *ShareLedger) rebaseDonor(t *ShareTransfer, now time.Time) {
 }
 
 // ReceivingHeld reports whether role may not receive now: it gave within the
-// reversal hold.
+// reversal hold, or it is held in the direction of a cancelled transfer
+// (ReceivingBlocked).
 func (l *ShareLedger) ReceivingHeld(role string, now time.Time, tm ShareTimings) bool {
-	if now.Before(l.noRecv[role]) {
+	if l.ReceivingBlocked(role, now) {
 		return true
 	}
 	t, ok := l.lastGave[role]
 	return ok && now.Sub(t) < tm.ReversalHold
+}
+
+// ReceivingBlocked reports whether role may not receive now for a reason no
+// shortfall lifts: it was the receiver of a transfer cancelled within the
+// reversal hold, and receiving again would repeat it.
+func (l *ShareLedger) ReceivingBlocked(role string, now time.Time) bool {
+	return now.Before(l.noRecv[role])
 }
 
 // Redirect hands a Releasing transfer's GPUs to a woken model (section 6.3):
@@ -756,11 +764,18 @@ func (l *ShareLedger) BackingOff(role string, now time.Time) bool {
 // reversal hold, its last release was aborted and it is backing off, or it
 // has given all it can (GivingBusy).
 func (l *ShareLedger) GivingHeld(role string, now time.Time, tm ShareTimings) bool {
-	if now.Before(l.giveAfter[role]) || now.Before(l.noGive[role]) || l.GivingBusy(role, now) {
+	if l.GivingBlocked(role, now) {
 		return true
 	}
 	t, ok := l.lastGot[role]
 	return ok && now.Sub(t) < tm.ReversalHold
+}
+
+// GivingBlocked reports whether role may not give now for a reason no
+// shortfall lifts: it is backing off after an abort, it is held in the
+// direction of a cancelled transfer, or it has given all it can.
+func (l *ShareLedger) GivingBlocked(role string, now time.Time) bool {
+	return now.Before(l.giveAfter[role]) || now.Before(l.noGive[role]) || l.GivingBusy(role, now)
 }
 
 // recordMove notes a role's transfer direction, holds it from reversing, and

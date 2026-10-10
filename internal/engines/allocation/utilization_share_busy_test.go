@@ -10,7 +10,9 @@ import (
 func TestShareBusyDonorIsNotAReversalHold(t *testing.T) {
 	roles := []ShareRole{
 		{Key: "D", Weight: 1, Need: 2, Ceiling: 64, ReplicaGPUs: 1},
-		{Key: "R", Weight: 1, Need: 6, Ceiling: 64, ReplicaGPUs: 1},
+		// Short (2 of 2.5) but not deeply: above ShareUrgentHeldFraction, so
+		// the reversal hold applies to it and the control below counts.
+		{Key: "R", Weight: 1, Need: 2.5, Ceiling: 64, ReplicaGPUs: 1},
 	}
 	in := SharePlanInput{Roles: roles, Held: map[string]int{"D": 8, "R": 2},
 		Thresholds: map[string]float64{"D": 0.8, "R": 0.8}, Budget: 10, Tolerance: 0.15}
