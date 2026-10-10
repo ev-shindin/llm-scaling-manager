@@ -413,6 +413,9 @@ verb_preflight() {
     if scenario_is_pd; then
         info "  P/D: every model is two roles -- prefill ${MIN_PREFILL}..${MAX_PREFILL} and decode ${MIN_DECODE}..${MAX_DECODE} replicas -- and the peak counts both"
     fi
+    if [ "$FLOOR_REPLICAS" -gt "$(floor_ceiling)" ]; then
+        warn "FLOOR_REPLICAS=${FLOOR_REPLICAS} is above a role's ceiling ($(floor_ceiling)): the floor arm will refuse to start"
+    fi
 
     # FREE ACCELERATORS ARE NOT PLACEABLE ACCELERATORS, and the difference cost
     # a whole 90-minute A/B.
@@ -691,6 +694,18 @@ role_deploys() {
 
 role_min() { if [ "$1" = prefill ]; then echo "$MIN_PREFILL"; else echo "$MIN_DECODE"; fi; }
 role_max() { if [ "$1" = prefill ]; then echo "$MAX_PREFILL"; else echo "$MAX_DECODE"; fi; }
+
+# floor_ceiling is the lowest ceiling a fleet floor must fit under:
+# set_fleet_floor raises EVERY model ScaledObject, prefill included, and KEDA
+# refuses a minReplicaCount above its maxReplicaCount. Read from the roles
+# that run, as set_arm_ceiling applies MAX_PREFILL to any prefill it finds.
+floor_ceiling() {
+    if [ "$MAX_PREFILL" -lt "$MAX_DECODE" ] && role_deploys | grep -q ' prefill$'; then
+        echo "$MAX_PREFILL"
+    else
+        echo "$MAX_DECODE"
+    fi
+}
 
 # The role of the Deployment a ScaledObject scales: decode unless it is labelled
 # prefill, which is every aggregated stack.
@@ -1541,9 +1556,13 @@ model_scaledobjects() {
 # within a cycle, and at the low rate that target is 1.
 set_fleet_floor() {
     local n="$1" so
+    # Refused here, by name: KEDA rejects the patch, and the arm would
+    # otherwise wait RESET_TIMEOUT for a floor no role can reach and report
+    # only that it did not reach it.
+    [ "$n" -le "$(floor_ceiling)" ] || die "floor ${n} is above a role's ceiling ($(floor_ceiling)): lower FLOOR_REPLICAS or raise MAX_PREFILL/MAX_DECODE"
     for so in $(model_scaledobjects); do
         k patch scaledobject "$so" --type=merge \
-            -p "{\"spec\":{\"minReplicaCount\":$n}}" >/dev/null || warn "could not set minReplicaCount on $so"
+            -p "{\"spec\":{\"minReplicaCount\":$n}}" >/dev/null || die "could not set minReplicaCount=$n on $so"
     done
     info "minReplicaCount=$n on every model ScaledObject"
 }

@@ -580,6 +580,17 @@ else
     ok "the floor arm waits for prefill as well as decode"
 fi
 
+# A floor above a role's ceiling cannot be reached: KEDA refuses the patch. The
+# arm must say so at once, not wait RESET_TIMEOUT and report a missed floor.
+case_begin
+TWO_PD_STUB=1 FLOOR_REPLICAS=2 MAX_PREFILL=1 READY=2 RESET_TIMEOUT=1 VERB_TIMEOUT=60 run_verb run floor
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q "above a role's ceiling (1)"; then
+    fail "the floor arm did not refuse a floor of 2 over a prefill ceiling of 1: rc $RC
+$(printf '%s' "$OUT" | tail -5)"
+else
+    ok "the floor arm refuses a floor above a role's ceiling, by name"
+fi
+
 # A COLD pool is the worst result this scenario can produce: the arm runs to
 # completion and reports the cost of a pool nobody would operate that way.
 case_begin
@@ -1016,7 +1027,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=58
+CASES_EXPECTED=59
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

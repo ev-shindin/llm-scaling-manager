@@ -35,7 +35,8 @@
 #       transport, and requests fall back to decode doing its own prefill:
 #       nothing crashes, the run just measures an aggregated model.
 #
-#   engine caches (both roles): VLLM_CACHE_ROOT, FLASHINFER_WORKSPACE_DIR and
+#   engine caches (both roles): vLLM's cache root (`vllm.cacheRoot`, which the
+#       harness emits as VLLM_CACHE_ROOT), FLASHINFER_WORKSPACE_DIR and
 #       TRITON_CACHE_DIR on the workload PVC's engine-cache directory, as in
 #       workload-autoscaling. two-model-shapes leaves them in /tmp, so every
 #       scale-up recompiled (12 s torch.compile + about 8 s autotune of an
@@ -91,8 +92,7 @@
 #
 #   workDir: its own.
 #
-# NOT taken from the P/D guide, deliberately: its engine-cache volume (the
-# harness workload PVC as a compile cache), its startup-probe timing
+# NOT taken from the P/D guide, deliberately: its startup-probe timing
 # (patch_harness.sh fix 10 sets the same default), its NCCL_* and NIXL debug
 # env (one accelerator per Pod, so no NCCL; the HCA list was one cluster's),
 # and its decode resources (32 CPU / 128Gi for a 32B model). Both roles here
@@ -647,6 +647,10 @@ shared:
     prefill:
       enabled: true
       vllm:
+        # The harness emits it as VLLM_CACHE_ROOT; set here, not in
+        # extraEnvVars, so the env list never names it twice (the harness
+        # always emits one, and a server-side apply rejects a duplicate).
+        cacheRoot: /engine-cache/vllm
         # The P/D guide's prefill command. vLLM on $VLLM_INFERENCE_PORT (8000):
         # the chart puts no routing sidecar on a prefill Pod, and the decode
         # Pod's sidecar calls this port. --max-num-batched-tokens is hardcoded
@@ -684,9 +688,8 @@ shared:
           # a multi-NIC RDMA node, infiniband-diags for nothing the engine runs.
           # The engine SOURCES that script (see customCommand), so on a node
           # that needs neither they are 71 s of every start, measured. iproute2
-          # stays whenever the script uses it. The cache-dir guard is inert here
-          # (no engine-cache variables are set) and kept so this block stays
-          # the guide's.
+          # stays whenever the script uses it. The appended guard falls back to
+          # the engine default for any cache directory that is not writable.
           command:
             - /bin/sh
             - -c
@@ -736,8 +739,6 @@ shared:
       extraEnvVars:
         - name: PYTORCH_ALLOC_CONF
           value: "expandable_segments:True"
-        - name: VLLM_CACHE_ROOT
-          value: /engine-cache/vllm
         - name: FLASHINFER_WORKSPACE_DIR
           value: /engine-cache/flashinfer
         - name: TRITON_CACHE_DIR
@@ -806,6 +807,7 @@ shared:
         imagePullPolicy: IfNotPresent
 
       vllm:
+        cacheRoot: /engine-cache/vllm  # as prefill's
         # The P/D guide's decode command: vLLM on $VLLM_METRICS_PORT (8200)
         # behind the routing sidecar on 8000, the same NixlConnector config as
         # prefill, and --max-num-batched-tokens 8192 rather than the harness's
@@ -890,8 +892,6 @@ shared:
       extraEnvVars:
         - name: PYTORCH_ALLOC_CONF
           value: "expandable_segments:True"
-        - name: VLLM_CACHE_ROOT
-          value: /engine-cache/vllm
         - name: FLASHINFER_WORKSPACE_DIR
           value: /engine-cache/flashinfer
         - name: TRITON_CACHE_DIR
