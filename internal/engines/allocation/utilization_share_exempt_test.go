@@ -17,6 +17,8 @@ type burstReplay struct {
 	lHeld, qHeld, cHeld int
 	// fresh skips the L -> Q history: no reversal hold, the control.
 	fresh bool
+	// band is the hard-imbalance band; the zero value is the default.
+	band ShareRebalance
 	// hold, when set, adds to the ledger before the planner runs.
 	hold func(l *ShareLedger, now time.Time)
 }
@@ -52,7 +54,8 @@ func (b burstReplay) run(t *testing.T) []ShareTransfer {
 		thresholds["C"] = 0.8
 		budget += b.cHeld
 	}
-	in := SharePlanInput{Roles: roles, Held: after, Thresholds: thresholds, Budget: budget, Tolerance: 0.15}
+	in := SharePlanInput{Roles: roles, Held: after, Thresholds: thresholds, Budget: budget, Tolerance: 0.15,
+		Rebalance: b.band}
 	start := t0.Add(3 * time.Minute)
 	if b.hold != nil {
 		b.hold(l, start)
@@ -76,7 +79,7 @@ func TestShareHardImbalanceIsRebalancedThroughTheReversalHold(t *testing.T) {
 	if got := (burstReplay{lNeed: 8, qNeed: 2, lHeld: 3, qHeld: 7}).run(t); !moved(got, "Q", "L") {
 		t.Fatalf("L at 3 of a need of 8, Q at 7 of 2: no transfer back inside the hold: %v", got)
 	}
-	// Control: Q is not calm after giving (5 of 6 is above ShareCalmPressure),
+	// Control: Q is not calm after giving (5 of 6 is above ShareRebalanceDonorLoad),
 	// so this is no hard imbalance and the hold stands...
 	mild := burstReplay{lNeed: 8, qNeed: 5, lHeld: 3, qHeld: 7}
 	if got := mild.run(t); moved(got, "Q", "L") {
@@ -86,6 +89,20 @@ func TestShareHardImbalanceIsRebalancedThroughTheReversalHold(t *testing.T) {
 	mild.fresh = true
 	if got := mild.run(t); !moved(got, "Q", "L") {
 		t.Fatalf("control: Q -> L is not planned even without the hold: %v", got)
+	}
+}
+
+// The band is the operator's: switched off, a hard imbalance waits out the
+// hold; widened, a move the default band holds goes through.
+func TestShareRebalanceBandIsConfigurable(t *testing.T) {
+	if got := (burstReplay{lNeed: 8, qNeed: 2, lHeld: 3, qHeld: 7, band: ShareRebalance{Off: true}}).run(t); moved(got, "Q", "L") {
+		t.Fatalf("rebalance off: Q gave to L through the hold: %v", got)
+	}
+	// Q at 5 of the 6 it keeps (0.83) is not calm by default, and is under a
+	// donor load limit of 0.9 (with the receiver's above it).
+	wide := ShareRebalance{ReceiverLoad: 1, DonorLoad: 0.9}
+	if got := (burstReplay{lNeed: 8, qNeed: 5, lHeld: 3, qHeld: 7, band: wide}).run(t); !moved(got, "Q", "L") {
+		t.Fatalf("donor load limit 0.9: Q at 5 of 6 is calm, yet the hold stood: %v", got)
 	}
 }
 
@@ -185,7 +202,7 @@ func TestShareHardImbalanceReachesSetPaths(t *testing.T) {
 
 func TestShareHardImbalance(t *testing.T) {
 	r := func(need float64) ShareRole { return ShareRole{Need: need} }
-	hi, lo := ShareUrgentPressure, ShareCalmPressure
+	hi, lo := ShareRebalanceReceiverLoad, ShareRebalanceDonorLoad
 	for _, c := range []struct {
 		name           string
 		rcHeld, dnLeft int
@@ -193,14 +210,14 @@ func TestShareHardImbalance(t *testing.T) {
 		want           bool
 	}{
 		{"short receiver, calm donor", 3, 6, r(8), r(2), true},
-		{"receiver exactly at the urgent pressure", 10, 10, r(10 * hi), r(1), true},
-		{"receiver just below the urgent pressure", 10, 10, r(10*hi - 0.01), r(1), false},
-		{"donor exactly at the calm pressure", 3, 10, r(8), r(10 * lo), true},
-		{"donor just above the calm pressure", 3, 10, r(8), r(10*lo + 0.01), false},
+		{"receiver load exactly at its limit", 10, 10, r(10 * hi), r(1), true},
+		{"receiver load just below its limit", 10, 10, r(10*hi - 0.01), r(1), false},
+		{"donor load exactly at its limit", 3, 10, r(8), r(10 * lo), true},
+		{"donor load just above its limit", 3, 10, r(8), r(10*lo + 0.01), false},
 		{"receiver with no need", 0, 10, r(0), r(1), false},
 		{"receiver holding nothing", 0, 10, r(1), r(1), true},
 	} {
-		if got := shareHardImbalance(c.rcHeld, c.rc, c.dnLeft, c.dn); got != c.want {
+		if got := shareHardImbalance(ShareRebalance{}, c.rcHeld, c.rc, c.dnLeft, c.dn); got != c.want {
 			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
 	}

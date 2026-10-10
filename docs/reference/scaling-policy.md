@@ -288,6 +288,9 @@ would move; `wva_utilization_share_replicas_to_move` says how many replicas.
 | `weightClasses` | `best-effort: 0.5`, `standard: 1`, `important: 2`, `critical: 4` | Class names and their weights. Replaces the defaults whole when set. Exactly one class must have weight `1`; it is the default class. |
 | `namespaces.<ns>.enabled` | `true` | `false` keeps that namespace's quota group on today's optimizer. |
 | `clusterNamespaces` | empty (every namespace) | A list of namespaces. When set, the cluster groups plan only the models of these namespaces; every other model is left to today's optimizer. A canary for a cluster quota. An empty entry (`""`) makes the block invalid. Does not affect namespace quota groups. |
+| `immediateRebalance.enabled` | `true` | Move GPUs at once, without the reversal hold or the second confirming cycle, from a model with plenty of headroom to one at its scale-up threshold (the two keys below). `false` makes every move wait. |
+| `immediateRebalance.receiverLoadAtLeast` | `0.9` | The receiver's load, at or above which it may be funded at once. **Load** is a model's utilization as a fraction of its scale-up threshold: `1` is where it would scale up, `0.9` is 90% of the way there. |
+| `immediateRebalance.donorLoadAtMost` | `0.6` | The donor's load on the GPUs it keeps after giving, at or below which it may give at once. Must be below `receiverLoadAtLeast`: the gap is what stops GPUs going back and forth. Raise it (or lower `receiverLoadAtLeast`) to rebalance smaller imbalances sooner, at the price of more moves that are later reversed. |
 
 Nothing else is configurable. The timings a transfer runs on — how long a release
 may take, how long a receiver may stay Pending, how long a role that gave must wait
@@ -508,14 +511,15 @@ today's optimizer; the controller log lists it in the `frozen` field with
 replica cannot receive one for the reversal hold, about twice a release time
 (on the order of 12 minutes with a 300 s scale-down window), so two models
 that take turns do not trade GPUs back and forth. The hold is lifted when the
-imbalance is hard: your model is at or near its scale-up threshold (its need
-at least 0.9 of what it holds) and another role would stay calm after giving
-(its need at most 0.6 of what it keeps). That transfer starts on the first
-cycle, with no hold and no second confirming cycle; it still waits for the
-donor's scale-down window. If no other role is that calm, your model waits
-out the hold and shows `reversal-hold`. The common case is a model whose
-burst of long outputs has just ended: its draining backlog still reads as
-need, so it is not calm, and transfers can even go *to* it just as your
+imbalance is hard: your model's load is at least 0.9 of its scale-up
+threshold and another model's load, on the GPUs it keeps after giving, is at
+most 0.6 of its own (`immediateRebalance` in the policy sets both). That
+transfer starts on the first cycle, with no hold and no second confirming
+cycle; it still waits for the donor's scale-down window. If no other model is
+that lightly loaded, your model waits out the hold and shows
+`reversal-hold`. The common case is a model whose burst of long outputs has
+just ended: its draining backlog still reads as load, so it is not below 0.6,
+and transfers can even go *to* it just as your
 burst begins. That is not fixed. If your model must not start a burst short,
 set its `minReplicaCount` to the replicas the burst needs: a floor is never
 taken.
@@ -536,7 +540,7 @@ under 15 000-token prompts
 ([why](../well-lit-paths/utilization-share/measured.md#pd-not-measured)).
 
 With short prompts that is right, and prefill is a fair donor. With long
-prompts, a prefill whose need reads small also counts as a calm donor, so its
+prompts, a prefill whose need reads small also counts as a lightly loaded donor, so its
 replicas can be taken at once for another model at its threshold. Keep a
 prefill floor until a prefill capacity measure ships
 ([proposal §15](../proposals/utilization-share-optimizer.md#15-deferred-to-later-prs)).

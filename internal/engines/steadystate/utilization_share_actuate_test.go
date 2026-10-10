@@ -821,7 +821,7 @@ func TestUtilizationShareBlockedReasonsFromGroupState(t *testing.T) {
 			},
 		}
 		ev := allocation.EvaluateShare(g.Roles, g.Committed, g.Thresholds, g.Budget, 0.15)
-		return shareBlockedReasons(allocation.NewShareLedger(), g, ev, nil, time.Unix(0, 0), allocation.ShareTimings{})
+		return shareBlockedReasons(allocation.NewShareLedger(), g, ev, nil, allocation.ShareRebalance{}, time.Unix(0, 0), allocation.ShareTimings{})
 	}
 
 	got := build(8, 10)

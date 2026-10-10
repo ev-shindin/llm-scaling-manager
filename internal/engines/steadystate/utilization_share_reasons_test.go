@@ -45,7 +45,7 @@ func TestUtilizationShareBlockedReasonsForAHeldBackReceiver(t *testing.T) {
 		t.Fatalf("setup: B is not short and actionable: %+v", v)
 	}
 	reasons := func(l *allocation.ShareLedger, now time.Time) []string {
-		return shareBlockedReasons(l, g, ev, nil, now, tm)["ns/B"]
+		return shareBlockedReasons(l, g, ev, nil, allocation.ShareRebalance{}, now, tm)["ns/B"]
 	}
 
 	if got := reasons(allocation.NewShareLedger(), t0); slices.ContainsFunc(got, func(r string) bool {
@@ -71,7 +71,9 @@ func TestUtilizationShareBlockedReasonsForAHeldBackReceiver(t *testing.T) {
 		mild.Roles[0].Need = 12
 		mild.Roles[2].Need = 5
 		mev := allocation.EvaluateShare(mild.Roles, mild.Committed, mild.Thresholds, mild.Budget, 0.15)
-		mildReasons := func(now time.Time) []string { return shareBlockedReasons(l, mild, mev, nil, now, tm)["ns/B"] }
+		mildReasons := func(now time.Time) []string {
+			return shareBlockedReasons(l, mild, mev, nil, allocation.ShareRebalance{}, now, tm)["ns/B"]
+		}
 		if got := mildReasons(t0.Add(time.Minute)); !slices.Contains(got, constants.ScalingBlockedReversalHold) {
 			t.Fatalf("B gave a minute ago: want reversal-hold, got %v", got)
 		}

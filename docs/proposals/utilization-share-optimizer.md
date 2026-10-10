@@ -705,10 +705,11 @@ When the group acts:
   loop; the receiver can still take from other donors and the donor give to
   others. The hold blocks **transfers only**: a role on hold that falls below
   its need still draws on idle GPUs and the reserve.
-- **A hard imbalance waits for no hold** (`shareHardImbalance`). A move whose
-  receiver's need is at least `ShareUrgentPressure` (0.9) of what it holds --
-  at or near its scale-up threshold -- and whose donor's need is at most
-  `ShareCalmPressure` (0.6) of what it keeps after giving waits for neither
+- **A hard imbalance waits for no hold** (`shareHardImbalance`). A role's
+  *load* is its need over the GPUs it holds: its utilization as a fraction of
+  its scale-up threshold. A move whose receiver's load is at least 0.9 -- at or
+  near its threshold -- and whose donor's load on what it keeps after giving
+  is at most 0.6 waits for neither
   the reversal hold nor the confirmation cycles: it starts on the first cycle,
   and the transfer is logged with `rebalance=true`. Everything else still
   applies: the cancelled pair's hold, an aborted donor's back-off, an
@@ -716,7 +717,8 @@ When the group acts:
   band and keep. The two thresholds are the rule's hysteresis: after the move
   the donor is at or below 0.6 and the receiver below 0.9, so the reverse move
   cannot qualify until demand itself changes by their ratio, about 1.5x. Every
-  short role is above 0.9, so in practice the donor's calmness decides.
+  short role is above 0.9, so in practice the donor's load decides. Both
+  limits, and the switch, are the operator's (`immediateRebalance`, §8.1).
 
   Why it exists: the first rule exempted no receiver from the hold, on the
   simulated premise that a role that just gave rarely bursts within it.
@@ -1573,6 +1575,10 @@ none of them:
         research:
           enabled: false            # this group keeps the greedy path
       clusterNamespaces: []         # non-empty: the cluster groups plan only these namespaces' models (a canary)
+      immediateRebalance:           # a hard imbalance waits for no hold (§6.2)
+        enabled: true
+        receiverLoadAtLeast: 0.9    # receiver's load, as a fraction of its scale-up threshold
+        donorLoadAtMost: 0.6        # donor's load after giving; must be below receiverLoadAtLeast
 ```
 
 Seven keys, each a decision only an operator can make: how far off target is
@@ -2334,8 +2340,8 @@ optimizer every cycle (§6.6).
          The cancel holds only its donor -> receiver pair (`PairHeld`), not
          either role (§6.3);
        - a hard imbalance waits for no reversal hold and no confirmation
-         (`shareHardImbalance`, `ShareUrgentPressure` 0.9,
-         `ShareCalmPressure` 0.6; §6.2). It replaces the interim exemption
+         (`shareHardImbalance`, `ShareRebalanceReceiverLoad` 0.9,
+         `ShareRebalanceDonorLoad` 0.6; §6.2). It replaces the interim exemption
          for a receiver below three quarters of its need
          (`ShareUrgentHeldFraction`, `shareReversalExempt`), which is gone;
        - `reversal-hold` is not reported for a role whose hold a hard
@@ -2370,7 +2376,7 @@ optimizer every cycle (§6.6).
    while the concurrency limit (2) equals the pace (2).
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4), gated on a persistent hard imbalance,
-   not on the pressure band alone (§15).
+   not on the load limits alone (§15).
 
 ## 14. Open questions
 
@@ -2434,7 +2440,7 @@ Decided, not built here:
   that never moves; 1-GPU, 45 minutes: 1.19x -> 1.01x) but hurt 20-minute
   swings (whole-node: 1.15x -> 1.31x): a faster release chases swings that
   reverse before a replica starts. So stage 3 needs a persistence gate -- the
-  hard imbalance holding for some minutes -- not only the pressure band.
+  hard imbalance holding for some minutes -- not only the load limits.
 - **A draining backlog reads as need.** After a model's burst of long outputs
   ends, its backlog still reads as need while it drains, so transfers *to* it
   can start just as the other model's burst begins. The hard-imbalance rule

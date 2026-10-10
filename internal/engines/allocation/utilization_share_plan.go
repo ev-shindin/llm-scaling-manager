@@ -21,17 +21,18 @@ const (
 	ShareMaxReplicasPerCycle = 2
 	// ShareMaxConcurrentTransfers bounds the transfers in flight per group.
 	ShareMaxConcurrentTransfers = 2
-	// ShareUrgentPressure and ShareCalmPressure bound a hard imbalance
-	// (shareHardImbalance): a receiver whose need is at least
-	// ShareUrgentPressure of what it holds -- at or near its scale-up
-	// threshold -- and a donor whose need stays at most ShareCalmPressure of
+	// ShareRebalanceReceiverLoad and ShareRebalanceDonorLoad are the default hard-imbalance
+	// band (ShareRebalance; config.DefaultImmediateRebalanceReceiverLoad and
+	// DefaultImmediateRebalanceDonorLoad): a receiver whose need is at least
+	// ShareRebalanceReceiverLoad of what it holds -- at or near its scale-up
+	// threshold -- and a donor whose need stays at most ShareRebalanceDonorLoad of
 	// what it keeps. Such a move skips the reversal hold and the confirm
 	// cycles. The gap between the two is the hysteresis that keeps it from
-	// oscillating: after the move the donor sits at or below ShareCalmPressure
-	// and the receiver below ShareUrgentPressure, so the reverse move cannot
+	// oscillating: after the move the donor sits at or below ShareRebalanceDonorLoad
+	// and the receiver below ShareRebalanceReceiverLoad, so the reverse move cannot
 	// qualify until demand itself has changed by their ratio.
-	ShareUrgentPressure = 0.9
-	ShareCalmPressure   = 0.6
+	ShareRebalanceReceiverLoad = 0.9
+	ShareRebalanceDonorLoad    = 0.6
 )
 
 // SharePlanInput is one group's view for one planning cycle.
@@ -44,6 +45,8 @@ type SharePlanInput struct {
 	Thresholds map[string]float64
 	Budget     int
 	Tolerance  float64
+	// Rebalance is the hard-imbalance band. The zero value is the default.
+	Rebalance ShareRebalance
 	// Give and Grow, when set, name the variant each role gives from and grows,
 	// and size the move by their replicas (ShareGroup.Give, ShareGroup.Grow). A
 	// role absent from a non-nil map cannot give, or cannot grow. Nil maps size
@@ -249,16 +252,61 @@ type shareLimits struct {
 
 // shareHardImbalance reports whether a move to receiver rc, holding rcHeld,
 // from donor dn, left with dnLeft after giving, rebalances a hard imbalance:
-// rc is at or near its scale-up threshold (ShareUrgentPressure) while dn stays
-// well below its own (ShareCalmPressure). Such a move does not wait: the
+// rc's load is at or near its scale-up threshold (ShareRebalanceReceiverLoad)
+// while dn's stays well below its own (ShareRebalanceDonorLoad). Load is need
+// over GPUs held: utilization as a fraction of the scale-up threshold. Such a move does not wait: the
 // reversal hold and the confirm cycles exist to stop GPUs ping-ponging for
 // headroom, and must not keep a model at its threshold while another idles.
 // Measured on alternating bursts, the hold kept a rising model at 3 of 8
 // replicas for its whole 18-minute burst while the other, idle, held 7. A
 // cancelled pair's hold, back-offs and an exhausted donor still apply
 // (PairHeld, GivingBlocked), as do §6.2 admission and the donor's band.
-func shareHardImbalance(rcHeld int, rc ShareRole, dnLeft int, dn ShareRole) bool {
-	return rc.Need > 0 && rc.Need >= ShareUrgentPressure*float64(rcHeld) && dn.Need <= ShareCalmPressure*float64(dnLeft)
+func shareHardImbalance(b ShareRebalance, rcHeld int, rc ShareRole, dnLeft int, dn ShareRole) bool {
+	if b.Off {
+		return false
+	}
+	urgent, calm := b.band()
+	return rc.Need > 0 && rc.Need >= urgent*float64(rcHeld) && dn.Need <= calm*float64(dnLeft)
+}
+
+// ShareRebalance is the band shareHardImbalance applies
+// (config.UtilizationShareImmediateRebalance). The zero value is the default.
+type ShareRebalance struct {
+	// Off makes every move wait for the holds and the confirm cycles.
+	Off bool
+	// ReceiverLoad is the receiver's load -- need over the GPUs it holds --
+	// at or above which it is at its threshold. Zero takes
+	// ShareRebalanceReceiverLoad.
+	ReceiverLoad float64
+	// DonorLoad is the donor's load on the GPUs it keeps, at or below which
+	// it is calm. Zero takes ShareRebalanceDonorLoad.
+	DonorLoad float64
+}
+
+// band returns the receiver and donor loads in force.
+func (b ShareRebalance) band() (urgent, calm float64) {
+	urgent, calm = b.ReceiverLoad, b.DonorLoad
+	if urgent == 0 {
+		urgent = ShareRebalanceReceiverLoad
+	}
+	if calm == 0 {
+		calm = ShareRebalanceDonorLoad
+	}
+	return urgent, calm
+}
+
+// Urgent reports whether a role whose need is need while holding held is at
+// or near its scale-up threshold under the band.
+func (b ShareRebalance) Urgent(need float64, held int) bool {
+	urgent, _ := b.band()
+	return !b.Off && need >= urgent*float64(held)
+}
+
+// Calm reports whether a donor whose need is need, keeping kept, is well
+// below its threshold under the band.
+func (b ShareRebalance) Calm(need float64, kept int) bool {
+	_, calm := b.band()
+	return !b.Off && need <= calm*float64(kept)
 }
 
 // shareMoveHeld reports whether donor dn may not give to receiver rc in a
@@ -330,7 +378,7 @@ func (p *sharePlanRun) hardImbalance() bool {
 		}
 		for _, dn := range p.roles {
 			left := p.committed[dn.Key] - max(dn.ReplicaGPUs, 1)
-			if dn.Key != rc.Key && left >= 0 && shareHardImbalance(p.committed[rc.Key], rc, left, dn) {
+			if dn.Key != rc.Key && left >= 0 && shareHardImbalance(p.in.Rebalance, p.committed[rc.Key], rc, left, dn) {
 				return true
 			}
 		}
@@ -507,7 +555,7 @@ func (p *sharePlanRun) fund(rc string, donors []string) bool {
 		// cannot give, within the hold -- unless the move rebalances a hard
 		// imbalance (shareHardImbalance), which waits for neither the hold
 		// nor the confirm cycles.
-		exempt := shareHardImbalance(work[rc], rr, work[dn]-gd, dr)
+		exempt := shareHardImbalance(in.Rebalance, work[rc], rr, work[dn]-gd, dr)
 		if shareMoveHeld(l, dn, rc, exempt, now, tm) {
 			p.plan.Withheld[ShareWithheldReversalHold]++
 			continue
@@ -652,7 +700,7 @@ func shareDonorSet(l *ShareLedger, in SharePlanInput, rc string, donors []string
 			}
 			gd := max(give.GPUs, 1)
 			k := taken[dn] + 1
-			exempt := shareHardImbalance(work[rc], byKey[rc], work[dn]-k*gd, byKey[dn])
+			exempt := shareHardImbalance(in.Rebalance, work[rc], byKey[rc], work[dn]-k*gd, byKey[dn])
 			if moved[dn]+k > shareSetPace(grow) || work[dn]-k*gd < lim.keep[dn] || shareMoveHeld(l, dn, rc, exempt, now, tm) {
 				continue
 			}
@@ -862,7 +910,7 @@ func (s *shareNodeSearch) canGive(dn string, extra int) bool {
 	}
 	k := s.taken[dn] + extra
 	left := s.work[dn] - k*max(give.GPUs, 1)
-	exempt := shareHardImbalance(s.work[s.rc], s.byKey[s.rc], left, s.byKey[dn])
+	exempt := shareHardImbalance(s.in.Rebalance, s.work[s.rc], s.byKey[s.rc], left, s.byKey[dn])
 	return s.moved[dn]+k <= shareSetPace(s.in.Grow[s.rc]) && left >= s.keep[dn] &&
 		!shareMoveHeld(s.l, dn, s.rc, exempt, s.now, s.tm) &&
 		s.l.InFlight()+1 <= ShareMaxConcurrentTransfers

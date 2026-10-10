@@ -268,7 +268,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		out.overrides = e.shareOverrides(g, variantKey, "restart quiet period")
 		out.promised = l.Promised() + l.WakeHeld(now)
 		out.reserveDebt = shareDebtNow(l, held, g.Budget)
-		out.blocked = shareBlockedReasons(l, g, ev, nil, now, tm)
+		out.blocked = shareBlockedReasons(l, g, ev, nil, shareRebalance(us), now, tm)
 		// Said, not only logged: a model under load that stops scaling for
 		// three minutes after an upgrade otherwise has no reason anywhere.
 		for _, r := range g.Roles {
@@ -291,7 +291,8 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		shareMarkOwned(l, nil), now)
 	plan := allocation.PlanShareTransfers(l, allocation.SharePlanInput{
 		Roles: g.Roles, Held: held, Thresholds: g.Thresholds, Budget: g.Budget, Tolerance: us.Tolerance,
-		Give: g.Give, Grow: g.Grow, Nodes: nodes, DonorUnits: units, DomainKey: domains,
+		Rebalance: shareRebalance(us),
+		Give:      g.Give, Grow: g.Grow, Nodes: nodes, DonorUnits: units, DomainKey: domains,
 		WakeHeld: l.WakeHeld(now), PhysicalFree: g.PhysicalFree,
 	}, now, tm)
 	for _, id := range plan.Cancelled {
@@ -390,7 +391,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	out.promised = l.Promised() + l.WakeHeld(now)
 	out.swinging = plan.Swinging
 	out.reserveDebt = shareDebtNow(l, held, g.Budget)
-	out.blocked = shareBlockedReasons(l, g, ev, plan.Unfunded, now, tm)
+	out.blocked = shareBlockedReasons(l, g, ev, plan.Unfunded, shareRebalance(us), now, tm)
 	out.withheld = plan.Withheld
 	out.claimable = shareClaimable(l, g, held)
 	out.releasing, out.filling = countInFlight(l)
@@ -659,7 +660,7 @@ func shareDebtNow(l *allocation.ShareLedger, held map[string]int, budget int) in
 // entry, empty when nothing holds it back, so a reason that stops holding is
 // cleared.
 func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev allocation.ShareEvaluation,
-	unfunded map[string]string, now time.Time, tm allocation.ShareTimings) map[string][]string {
+	unfunded map[string]string, rb allocation.ShareRebalance, now time.Time, tm allocation.ShareTimings) map[string][]string {
 	out := map[string][]string{}
 	model := func(role string) string {
 		o := g.Origins[role]
@@ -728,13 +729,13 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 		}
 		// What keeps a short role from receiving, when something does. A role
 		// at its scale-up threshold is exempt from the reversal hold for any
-		// donor that stays calm after giving a replica (a hard imbalance,
-		// allocation.ShareUrgentPressure / ShareCalmPressure); naming the hold
-		// then would send an operator after the wrong cause.
-		urgent := r.Need >= allocation.ShareUrgentPressure*float64(g.Committed[r.Key])
+		// donor that stays calm after giving a replica (a hard imbalance under
+		// the band rb); naming the hold then would send an operator after the
+		// wrong cause.
+		urgent := rb.Urgent(r.Need, g.Committed[r.Key])
 		calmDonor := slices.ContainsFunc(g.Roles, func(o allocation.ShareRole) bool {
 			left := g.Committed[o.Key] - max(o.ReplicaGPUs, 1)
-			return o.Key != r.Key && left >= 0 && o.Need <= allocation.ShareCalmPressure*float64(left)
+			return o.Key != r.Key && left >= 0 && rb.Calm(o.Need, left)
 		})
 		if v.Headroom < 0 && v.Actionable && !receiving[r.Key] {
 			switch {
@@ -762,6 +763,12 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 		slices.Sort(out[k])
 	}
 	return out
+}
+
+// shareRebalance is the hard-imbalance band the policy sets.
+func shareRebalance(us config.UtilizationShare) allocation.ShareRebalance {
+	return allocation.ShareRebalance{Off: us.ImmediateRebalanceOff,
+		ReceiverLoad: us.ImmediateRebalanceReceiverLoad, DonorLoad: us.ImmediateRebalanceDonorLoad}
 }
 
 // shareClaimable lists the group's transfers a wake may claim: still

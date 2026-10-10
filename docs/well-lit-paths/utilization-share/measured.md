@@ -226,15 +226,15 @@ No pod was ever unscheduled in any arm, and every request was served.
   started 18 minutes into A's burst and landed after it ended.
 - `share` spent 66% more GPU-seconds than `today` (28 111 against 16 976).
 - Fixed now, not yet measured: a move that rebalances a hard imbalance waits
-  for no reversal hold. That is a receiver at or near its scale-up threshold
-  (need at least 0.9 of what it holds) and a donor that stays calm after
-  giving (need at most 0.6 of what it keeps)
+  for no reversal hold: a receiver whose load is at least 0.9 of its
+  scale-up threshold and a donor whose load after giving is at most 0.6 of
+  its own (`immediateRebalance`)
   ([proposal §6.2](../../proposals/utilization-share-optimizer.md#62-plan-transfers)).
   An interim rule, a receiver below three quarters of its need, is gone. This
   run predates both; a rerun is next.
 - Not fixed: B's draining backlog read as need, which is what started the
   transfers to it. The hard-imbalance rule lifts the hold only when the
-  draining model is calm after giving. A model that must not start a burst
+  draining model's load after giving is at most 0.6. A model that must not start a burst
   short needs a floor sized for its burst.
 
 ## P/D: not measured

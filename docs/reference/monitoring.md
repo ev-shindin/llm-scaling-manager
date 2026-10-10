@@ -310,7 +310,7 @@ wva_model_scaling_blocked{reason=~"no-compatible-donor|floors-exceed-quota|marks
 # hold, wva_utilization_share_effective_seconds{param="reversal-hold"} (about
 # 12 minutes with a 300 s scale-down window): a transfer should have reached it
 # by then. Read the model's wva_model_scaling_blocked reason: reversal-hold
-# for the whole hold means no other role was calm enough to give, often a
+# for the whole hold means no other role was lightly loaded enough to give at once, often a
 # model whose burst just ended. On a short quota (spare_gpus below 0) it fires
 # by design: rebalancing cannot cover every need.
 wva_utilization_share_headroom < -0.25

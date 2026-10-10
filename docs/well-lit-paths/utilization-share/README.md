@@ -185,10 +185,12 @@ group scales during it. Each of those models shows the blocked reason
 is short.** That is the anti-oscillation rule. It lasts about twice a release
 time from the start of the transfer it gave in; with a 300 s scale-down
 window, that is on the order of 12 minutes. It shows as the blocked reason
-`reversal-hold`. It is lifted only for a hard imbalance: the short model is at
-or near its scale-up threshold and another model would stay well below its
-own (at most 0.6 of what it keeps) after giving. A model whose burst just
-ended usually is not that calm, so the hold can still last a whole burst.
+`reversal-hold`. It is lifted only for a hard imbalance: the short model's
+load is at least 0.9 of its scale-up threshold and another model's, after
+giving, is at most 0.6 of its own (both set by
+`utilizationShare.immediateRebalance`). A model whose burst just ended
+usually is not that lightly loaded, so the hold can still last a whole
+burst.
 
 **One slow donor slows the whole group.** The release and fill timeouts are
 derived per group, from the slowest donor configuration in it: the longest

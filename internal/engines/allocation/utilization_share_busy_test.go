@@ -9,7 +9,7 @@ import (
 // withheld count would send an operator after oscillation that is not there.
 func TestShareBusyDonorIsNotAReversalHold(t *testing.T) {
 	roles := []ShareRole{
-		// Not calm after giving (5.5 of 7 is above ShareCalmPressure): no
+		// Not calm after giving (5.5 of 7 is above ShareRebalanceDonorLoad): no
 		// hard imbalance, so the reversal hold applies and the control below
 		// counts.
 		{Key: "D", Weight: 1, Need: 5.5, Ceiling: 64, ReplicaGPUs: 1},
