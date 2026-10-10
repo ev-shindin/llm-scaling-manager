@@ -105,24 +105,40 @@ func (s *Store) Get(namespace, modelID, variantName string) *Record {
 
 // IsStale returns true if the record for the given variant is older than
 // StalenessTimeout, or if no record exists. No caller on the reconcile path
-// today, and that is not an oversight: the read paths deliberately have no
-// trust horizon.
+// today, and that is deliberate: the read paths have no trust horizon.
 //
 // StalenessTimeout is 30 minutes and EvictionTimeout is seven days, so the
-// store keeps a record 336x longer than this function would call fresh. The
-// gap is the design. A record is engine configuration and a learned capacity,
-// and for the fleets this serves both change only on a redeploy -- which
-// rewrites the record rather than ageing it. Meanwhile the figure a stale
-// record yields is the conservative one: capacity is min(k1, k2), so an old
-// measurement can only hold capacity DOWN, and refusing it falls through to a
-// derived estimate that is typically higher and orders fewer replicas. Ageing
-// records out of the read path is therefore a way to under-provision on a
-// timer; see the same argument at the k2 history read in the saturation
-// analyzer, where it was measured.
+// store keeps a record 336x longer than this function would call fresh.
+//
+// The reason to keep serving an old record is NOT that the figure is clamped.
+// A record's commonest use on the read path is rec.EngineParams, which feeds
+// estimateCapacityFromParams -- the DERIVED k2, the figure the rest of this
+// change calls the one that raises capacity. So a stale record there pushes
+// capacity UP, the opposite of the k2-history argument, which does not
+// transfer to this package. Two further paths set capacity from a record with
+// no bound from any current k1 at all:
+//
+//   - the saturation analyzer's computeReplicaCapacityFallback, taken when
+//     vllm:cache_config_info is absent. There is no live k1 on that path at
+//     all; the record IS the capacity, scaled by KvCacheThreshold, and is
+//     written back out as a synthetic TotalKvCapacityTokens.
+//   - estimateStoredCapacity's live branch, on the zero-replica path, which
+//     returns rec.EffectiveCapacity directly. That figure was min(k1, k2) when
+//     it was written, on the hardware it was written on -- not against
+//     anything current -- and LoadFromScaleTarget refuses to overwrite a live
+//     record, so a redeploy onto a smaller cache does not correct it.
+//
+// The real reason is what the alternative is. A nil record on the zero-replica
+// path falls to lookupCompatibleCapacity and then to perReplicaCapacity = 0,
+// which the optimizer skips: the variant stops being scaled at all. An old
+// figure is a worse estimate than a fresh one and a far better one than none,
+// and scale-from-zero is exactly where no record exists to be fresh.
 //
 // Kept rather than deleted because an explicit staleness predicate is the
 // right thing to have the day a caller wants one -- a diagnostic, or a
-// condition on the CR -- and because what it means is now written down.
+// condition on the CR -- and because what it means is now written down. An
+// earlier version of this comment reached the same conclusion from two
+// premises that were both false.
 func (s *Store) IsStale(namespace, modelID, variantName string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

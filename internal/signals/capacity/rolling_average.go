@@ -11,37 +11,54 @@ const (
 	// completion-rate (mu) windows recorded beside it.
 	RollingAverageWindowSize = 10
 
-	// HistoryEvictionTimeout is how long a k2 or mu reading is TRUSTED: past
-	// it the read refuses the window, because workload patterns shift and a
-	// stale observation from a very different workload can mislead scaling
-	// decisions.
+	// EpisodeGap is how long without a WRITE before the next observation is
+	// treated as the start of a new episode rather than another sample of the
+	// current one. The producers ask WriteGapExceeds and reset the window
+	// instead of adding to it, so a figure from before a long quiet period is
+	// never averaged in at 1/N weight with today's.
 	//
-	// It is a trust horizon, not a retention horizon. The two were the same
-	// constant once, and that made refusing a reading indistinguishable from
-	// never having had one -- see HistoryRetention.
+	// Its own constant, and not an alias, because the alternative was one
+	// value answering three unrelated questions -- this, the per-variant
+	// liveness horizon below, and the per-model memo horizon -- which is
+	// exactly the collapse the two clocks on RollingAverage were just split
+	// apart to undo. Tuning "when do two saturation episodes count as
+	// separate" must not silently move when a learned ITL baseline is
+	// deleted; that second one is the change this project has recorded as
+	// collapsing a fleet (itl.DefaultBaselineSec). They start at the same
+	// number and are free to diverge.
+	EpisodeGap = 24 * time.Hour
+
+	// HistoryEvictionTimeout is how long PER-VARIANT learned state is kept
+	// after the variant was last reported -- the ITL window and baseline, the
+	// start estimate and its outlier counter, and the per-model memos that
+	// key nothing. See the saturation analyzer's variantSeenAt.
+	//
+	// It is NOT a trust horizon, and an earlier revision of this comment said
+	// it was. No read refuses a window on age: see HistoryRetention for why
+	// that would be the wrong thing to do.
 	HistoryEvictionTimeout = 24 * time.Hour
 
 	// HistoryRetention is how long a bucket-keyed window is KEPT after it was
-	// last read, which is seven times longer than it is trusted.
+	// last READ. Seven times the episode gap, and the reason is not symmetry:
 	//
-	// The gap is the point. k2 falls back through history -> derived -> k1,
-	// and the DERIVED figure is typically well above the measured one: 50,000
-	// measured against 332,800 derived on one variant. Since
-	// effectiveCapacity = min(k1, k2), falling to derived RAISES capacity and
-	// orders fewer replicas, which this project has recorded as breaking TTFT
-	// irrecoverably. So "I measured this bucket and no longer trust the
-	// figure" must not fall to derived -- it falls to k1, which bounds
-	// something real.
+	// A retained measurement is the LOWEST capacity figure available for its
+	// bucket, so keeping it is how a fleet avoids being repriced upward by a
+	// formula. Since effectiveCapacity = min(k1, k2), a measured k2 can only
+	// pull capacity below k1; dropping it hands the decision to the derived
+	// estimate or to k1 itself, and k1 is the largest value that expression
+	// can take. An intermediate revision refused measurements past 24h and
+	// fell to k1 for them; measured across k1 regimes that cost between 1.8x
+	// and 18x the replicas, so the refusal is gone and only retention remains.
 	//
-	// That is only possible while the window still EXISTS to be refused. The
-	// sweep runs at the top of the cycle, before any capacity is computed, so
-	// a window evicted on the trust horizon is gone milliseconds before the
-	// read that would have refused it, and the fall-through to k1 would never
-	// fire. Keeping the window for seven days lets its existence carry the one
-	// bit that matters -- this bucket has been measured -- long after the
-	// figure stops being usable. Seven days also matches the capacity store's
-	// EvictionTimeout, and for the same reason: a variant may be quiet over a
-	// weekend and come back on Monday.
+	// (The derived figure is NOT bounded below by a measurement, which an
+	// earlier version of this comment implied. When --max-num-seqs binds,
+	// derived lands at (I + O/2)/(I + O) of the engine's physical occupancy
+	// ceiling -- 57% at I=1000, O=6000 -- so a saturated measurement can
+	// exceed it. k1 is the bound that always holds; derived is not.)
+	//
+	// Seven days also matches the capacity store's EvictionTimeout, for the
+	// reason that constant gives: a variant may be quiet over a weekend and
+	// come back on Monday.
 	HistoryRetention = 7 * 24 * time.Hour
 )
 
@@ -240,4 +257,15 @@ func (r *RollingAverage) Stale(timeout time.Duration) bool {
 // any bucket the fleet is still serving.
 func (r *RollingAverage) WriteGapExceeds(gap time.Duration) bool {
 	return time.Since(r.lastWritten) > gap
+}
+
+// WriteAge is how long ago a value was last written to this window.
+//
+// For the log line, not for a decision. Since the read no longer refuses a
+// window on age, nothing else distinguishes a measurement taken an hour ago
+// from one taken last Tuesday -- the k2-decision line reported them
+// identically, and the age has no ceiling any more. A reader chasing a replica
+// count needs to know which it is looking at.
+func (r *RollingAverage) WriteAge() time.Duration {
+	return time.Since(r.lastWritten)
 }

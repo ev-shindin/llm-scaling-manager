@@ -30,14 +30,19 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 		// larger k2 raises effectiveCapacity and orders FEWER replicas, which
 		// this project has recorded as breaking TTFT irrecoverably.
 		//
-		// The fix is retention, not a guard on the read. A measurement this
-		// fleet made is the LOWEST figure available for its bucket: since
-		// effectiveCapacity = min(k1, k2), every fall-through -- derived, or
-		// k1 itself -- is greater than or equal to it. So refusing a retained
-		// measurement can only raise capacity, whatever catches the fall. An
-		// intermediate revision of this branch added exactly such a guard and
-		// fell to k1 for it; three reviewers measured the result at between
-		// 1.8x and 48x fewer replicas depending on k1, and it is gone.
+		// The fix is retention, not a guard on the read, and the reason is
+		// narrower than an earlier version of this comment claimed.
+		//
+		// The guard that was removed fell through to PRIORITY 4, which returns
+		// k1 as k2 -- and since effectiveCapacity = min(k1, k2), k1 is the
+		// largest value that expression can take. Refusing a measurement in
+		// favour of k1 can therefore only raise capacity and order fewer
+		// replicas: measured at 1.8x to 18x depending on k1.
+		//
+		// It is NOT true that every alternative exceeds a measurement. Derived
+		// does not: see "prefers a retained measurement to a LOWER derived
+		// figure" below, which is the counterexample a reviewer built after
+		// this comment asserted the general rule. k1 is the bound that holds.
 		const historyKey = "hist-key"
 		k2From := func(a *SaturationAnalyzer) (int64, capacity.K2Source) {
 			return a.computeK2(historyKey, model, ns, variant,
@@ -78,6 +83,12 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 
 		It("gives the same answer before and after the sweep", func() {
 			// The property the eviction commit claimed and did not have.
+			//
+			// Weak on its own, and worth saying so: on the revision this was
+			// written against it passed too, because that revision answered
+			// P4-k1 both before and after. It pins "the sweep changes
+			// nothing", not "the measurement is used" -- the DescribeTable in
+			// sweep_lastuse_test.go is what pins the latter.
 			a := NewSaturationAnalyzer(capacity.NewStore())
 			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
 			ra.Add(50000)
@@ -92,6 +103,54 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 				"the sweep must not change which priority answers")
 			Expect(k2After).To(Equal(k2Before),
 				"the sweep must not change the capacity a decision reads")
+		})
+
+		// The case the rest of this file cannot reach: k2From passes nil
+		// engineParams, so Priority 3 never fires in any of its specs, while
+		// the header above used to assert a rule ABOUT Priority 3.
+		//
+		// Derived is not bounded below by a measurement. nSteady is
+		// min(B*O/(I+O), S), so when --max-num-seqs binds, derived lands at
+		// nSteady*(I + O/2) -- which is (I + O/2)/(I + O) of the engine's
+		// physical occupancy ceiling, 57% at I=1000 O=6000. Any saturated
+		// measurement above that sits in the band where retaining it orders
+		// FEWER replicas than falling to derived would.
+		//
+		// Retaining it anyway is still the right call -- it is a measurement
+		// and derived is a formula -- but the reason is not that it is always
+		// the smaller number, and nothing in the suite said so until here.
+		It("prefers a retained measurement to a LOWER derived figure", func() {
+			a := NewSaturationAnalyzer(capacity.NewStore())
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
+			ra.Add(95000)
+			ra.ObservedAt(time.Now().Add(-30 * 24 * time.Hour))
+			a.computeCapacityHistory[historyKey] = ra
+
+			// max_num_seqs=16 binds hard: derived is 16*(1000+3000) = 64,000,
+			// below the 95,000 on record.
+			params := &capacity.EngineParams{EffectiveMaxBatchedTokens: 8192, MaxNumSeqs: 16}
+			k2, src := a.computeK2(historyKey, model, ns, variant,
+				0, 0, 6000, 1000, 10,
+				params,
+				919859, // k1: large, so it clamps neither figure
+				919859,
+				domain.RoleDecode, false, logr.Discard())
+
+			Expect(src).To(Equal(capacity.K2SrcHistorical))
+			Expect(k2).To(BeNumerically("==", 95000),
+				"a month-old measurement still answers, and here it is HIGHER than the "+
+					"derived figure it displaces -- so the retention rule cannot be "+
+					"justified by 'the measurement is always the lowest option'")
+
+			// And the figure it displaced, to pin the direction rather than
+			// assert it: the same call with no history reaches Priority 3.
+			fresh := NewSaturationAnalyzer(capacity.NewStore())
+			derived, derivedSrc := fresh.computeK2(historyKey, model, ns, variant,
+				0, 0, 6000, 1000, 10, params, 919859, 919859,
+				domain.RoleDecode, false, logr.Discard())
+			Expect(derivedSrc).To(Equal(capacity.K2SrcDerived))
+			Expect(derived).To(BeNumerically("<", k2),
+				"derived below measured is what makes the general claim false")
 		})
 	})
 

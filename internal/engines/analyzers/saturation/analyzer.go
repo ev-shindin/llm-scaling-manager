@@ -258,22 +258,22 @@ func (a *SaturationAnalyzer) variantIsStale(key string, now time.Time, timeout t
 //     start estimate and its outlier counter -- measured from when the variant
 //     was last REPORTED (variantSeenAt), plus the per-model memos beside them.
 //   - bucketRetention governs the BUCKET-KEYED windows, the k2 history and the
-//     mu windows, measured from when they were last READ. It is deliberately
-//     the longer of the two: a window is kept well past the point its figure
-//     is trusted, so that a bucket the read refuses on age still EXISTS to be
-//     refused. That is what lets k2 fall through to k1 rather than to the
-//     derived figure, which is higher and would order fewer replicas. The
-//     sweep runs at the top of the cycle, before any capacity is computed, so
-//     a window evicted on the trust horizon would be gone before the read that
-//     needed to see it. See capacity.HistoryRetention.
+//     mu windows, measured from when they were last READ. It is the longer of
+//     the two because a retained measurement is the LOWEST capacity figure
+//     available for its bucket: dropping it hands the decision to a formula,
+//     and the fleet is repriced upward. See capacity.HistoryRetention for the
+//     measured cost. Nothing refuses a window on age any more -- an earlier
+//     revision did, and this comment used to describe it.
 //
-// It prunes the accelerator memo on the same timeout, and here rather than in a
-// second sweep so the two cannot drift: both are per-variant state that exists
-// only to key or stabilise capacity, and a variant that has gone quiet for the
-// timeout has no use for either. The saturated-throughput windows and the
-// decode-saturation memory go the same way -- the latter is per
-// namespace|model rather than per variant, but a model quiet for the timeout
-// has no use for it either.
+// Everything is pruned here rather than in a second sweep so the horizons
+// cannot drift, which has happened twice: both the accelerator memo and the
+// fleet-shape memo RESOLVE INTO a bucket key, so each has to outlive the
+// window its value reaches, and each was found expiring six days early. Both
+// are on bucketRetention for that reason -- see the two loops below, which say
+// so where a reader will be standing. The decode-saturation memory is per
+// namespace|model and stays on variantTimeout: nothing keys off it, and
+// DecodeSaturationMemory is minutes, so the horizon cannot affect what it is
+// for.
 //
 // The return is a per-map breakdown rather than one total, because a single
 // number could not be read: the per-variant state is swept in separate loops
@@ -300,6 +300,17 @@ func (a *SaturationAnalyzer) EvictStaleHistory(variantTimeout, bucketRetention t
 	// is exactly what retaining the window past its last read is meant to
 	// prevent. A reviewer found this; on the 24h horizon there was a
 	// six-day band where the measurement existed and could not be reached.
+	//
+	// One residual, named because the window for it widened from one day to
+	// seven. The THROUGHPUT key resolves through stableAccelerator too, and
+	// the mu it keys drives the demand floor as lambda/mu with no min()
+	// protecting it -- so a mu learned on larger hardware is too high and
+	// orders FEWER replicas. It needs an unresolvable accelerator on a
+	// variant that went quiet and came back on different hardware, and the
+	// mu window already ages on bucketRetention, so this aligns the memo with
+	// the window it keys rather than creating the exposure. Capacity itself is
+	// safe either way: k2 from the wrong hardware is still clamped by the
+	// live k1.
 	for key, memo := range a.lastAccelerator {
 		if time.Since(memo.lastUsed) > bucketRetention {
 			delete(a.lastAccelerator, key)
@@ -404,9 +415,29 @@ func (a *SaturationAnalyzer) EvictStaleHistory(variantTimeout, bucketRetention t
 	// this comment said counting was the obstacle and left these evictions
 	// unreported, so Any() could be false on a cycle that evicted something
 	// and the one log line this sweep emits stayed silent.
+	// bucketRetention, and on a.now() rather than time.Since -- for the same
+	// reason as the accelerator memo above, which a reviewer had to find twice
+	// because this map is the OTHER one that resolves into a bucket key.
+	//
+	// The (I, O) pair this memo holds is what classifyInputLength and
+	// classifyOutputLength turn into the mu window's bucket (see
+	// throughputKey). Expiring it ahead of that window moves the key: the
+	// shape reads 0, the key lands in the short/ishort bucket, and the
+	// retained measurement at the real key cannot be reached -- for up to the
+	// six days between the two horizons. nearestSaturatedThroughput cannot
+	// rescue it either, because it borrows across OUTPUT buckets within one
+	// input bucket and the input bucket moved too. The floor then reads 0,
+	// priceable(0) is false, and it abstains for the role.
+	//
+	// Which lands on the ramp out of a quiet period -- the one moment the
+	// floor is load-bearing, and the exact case HistoryRetention's comment
+	// names: quiet over a weekend, back on Monday.
+	//
+	// a.now() because the fake clock is how a spec reaches this at all; the
+	// hand-rolled per-variant loops above already use it.
 	before := len(a.fleetShape)
 	maps.DeleteFunc(a.fleetShape, func(_ string, memo *shapeMemo) bool {
-		return time.Since(memo.lastSeen) > variantTimeout
+		return now.Sub(memo.lastSeen) > bucketRetention
 	})
 	evicted.FleetShapes = before - len(a.fleetShape)
 	evicted.Pods = a.evictStartSeenPods(now, variantTimeout)

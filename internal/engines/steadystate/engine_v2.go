@@ -286,9 +286,9 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 	if evictor, ok := e.saturationV2Analyzer.(staleHistoryEvictor); ok {
 		// Two horizons, named at the call site because they differ on purpose:
 		// per-variant state goes when the variant stops being reported, while a
-		// bucket-keyed window is KEPT past the point it is trusted so that
-		// "measured, and no longer believed" stays distinguishable from "never
-		// measured" -- see HistoryRetention.
+		// bucket-keyed window is kept seven times longer because a retained
+		// measurement is the lowest capacity figure available for its bucket --
+		// see HistoryRetention.
 		history = evictor.EvictStaleHistory(capacity.HistoryEvictionTimeout, capacity.HistoryRetention)
 	} else {
 		// Production always satisfies it (engine.go constructs the concrete

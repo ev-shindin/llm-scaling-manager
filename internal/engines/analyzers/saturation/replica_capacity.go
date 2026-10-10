@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"sort"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -517,7 +518,7 @@ func (a *SaturationAnalyzer) computeK2(
 			// a bucket the fleet is still serving -- two episodes weeks
 			// apart would blend, and a stale high reading would hold
 			// capacity up against today's lower, truer one.
-			if !ok || ra.WriteGapExceeds(capacity.HistoryEvictionTimeout) {
+			if !ok || ra.WriteGapExceeds(capacity.EpisodeGap) {
 				ra = capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
 				a.computeCapacityHistory[historyKey] = ra
 			}
@@ -537,42 +538,51 @@ func (a *SaturationAnalyzer) computeK2(
 	// Priority 2: Historical — lock must cover Average() since Add() mutates
 	// the same slice from Priority 1 under the same lock.
 	//
-	// Stale() is checked here for the same reason the write path above checks
-	// it, and it was missing. Without it this read returns a window the sweep
-	// is about to delete, which makes wiring up EvictStaleHistory a BEHAVIOUR
-	// change rather than the memory fix it looks like: a k2 older than
-	// HistoryEvictionTimeout used to come back as K2SrcHistorical, and once
-	// the sweep deletes it the source falls through to the DERIVED figure
-	// instead. A derived k2 above the measured one raises effectiveCapacity
-	// and orders FEWER replicas, which is the direction this project has
-	// recorded as breaking TTFT irrecoverably.
+	// NO staleness check. A retained window answers however old its figure
+	// is, and the reason is at HistoryRetention: the measurement is the
+	// lowest capacity figure available for this bucket, so refusing it can
+	// only raise capacity. An intermediate revision guarded this read and
+	// fell through to k1; it cost between 1.8x and 18x the replicas.
 	//
-	// Touch() is why the guard is safe to add. The ONLY writer of this window
-	// is Priority 1 above, which needs a saturated queue, so without the
-	// touch the window ages on "last saturated" -- and a comfortably
-	// provisioned fleet does not saturate. Measured: a live variant serving
-	// happily for 24h went from a measured k2 of 50,000 to a derived 332,800,
-	// a 6.7x capacity rise and ~6.7x fewer replicas, for no reason but the
-	// clock. Touching on the read ages it on "last USED" instead, which is
-	// the same correction variantSeenAt makes for the ITL maps and the same
-	// reason Touch exists at all: a reading still being read is still the
-	// window being observed. A window nothing reads still ages out, so the
-	// leak closes; a window a decision depends on every cycle does not.
+	// Touch() is what keeps the window alive to be read. The ONLY writer is
+	// Priority 1 above, which needs a saturated queue, so without the touch
+	// the window ages on "last saturated" -- and a comfortably provisioned
+	// fleet does not saturate. Measured: a live variant serving happily for
+	// 24h lost its measured k2 of 50,000 to a derived 332,800, for no reason
+	// but the clock. Touching on the read ages it on "last USED", which is
+	// the same correction variantSeenAt makes for the ITL maps. A window
+	// nothing reads still ages out at HistoryRetention, so the leak closes;
+	// one a decision depends on every cycle does not.
+	//
+	// The write path above asks WriteGapExceeds, not Stale, precisely because
+	// these reads touch: a use-based check could never see the write gap it
+	// is asking about. Two clocks, two questions -- see RollingAverage.
 	a.mu.Lock()
 	var histAvg float64
 	var histLen int
+	var histAge time.Duration
 	if ra, ok := a.computeCapacityHistory[historyKey]; ok {
 		histAvg = ra.Average()
 		histLen = ra.Len()
+		histAge = ra.WriteAge()
 		ra.Touch()
 	}
 	a.mu.Unlock()
 	if histAvg > 0 {
+		// historyAgeSeconds because nothing else carries it. The read no
+		// longer refuses a window on age, so a figure measured an hour ago and
+		// one measured last Tuesday reach this line identically, and the age
+		// has no ceiling: a bucket read every cycle is retained indefinitely.
+		// wva_analyzer_target publishes the capacity with no provenance at
+		// all, and Reason carries only "P2-hist" -- so without this field an
+		// operator chasing a replica count cannot tell a live measurement from
+		// a stale one. Same line, one more field, no new cardinality.
 		logger.V(logging.DEFAULT).Info("k2-decision",
 			"modelID", modelID, "namespace", namespace, "variant", variantName,
 			"priority", capacity.K2SrcHistorical.String(), "historyKey", historyKey,
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
-			"k2", int64(histAvg), "historyWindowLen", histLen)
+			"k2", int64(histAvg), "historyWindowLen", histLen,
+			"historyAgeSeconds", int64(histAge.Seconds()))
 		return int64(histAvg), capacity.K2SrcHistorical
 	}
 
@@ -602,15 +612,25 @@ func (a *SaturationAnalyzer) computeK2(
 	// (the KV cache this replica actually has) rather than a per-step figure
 	// compared against an accumulated one.
 	//
-	// Reached only when Priority 2 found NO window, which is what makes the
-	// ordering safe: a bucket this fleet has measured keeps answering from its
-	// measurement for as long as the window is retained, however old the
-	// figure is. That is deliberate and it follows from effectiveCapacity =
-	// min(k1, k2) -- a measured k2 can only ever LOWER capacity below k1, so
-	// it is never more dangerous than the k1 it would otherwise fall back to,
-	// and preferring it can only order more replicas. An earlier revision
-	// refused a measurement past a "trust horizon" and fell to k1 for it; that
-	// could only raise capacity, so it was removed.
+	// Reached only when Priority 2 found NO window. A bucket this fleet has
+	// measured keeps answering from its measurement for as long as the window
+	// is retained, however old the figure is, and that is deliberate.
+	//
+	// The reason is narrow, so state it narrowly. The revision this replaced
+	// refused a measurement past 24h and fell through to PRIORITY 4, which
+	// returns k1 as k2 -- and since effectiveCapacity = min(k1, k2), k1 is the
+	// largest value that expression can take. So refusing a measurement in
+	// favour of k1 can only raise capacity and order fewer replicas: measured
+	// at 1.8x to 18x depending on k1.
+	//
+	// NOT because every alternative is larger than a measurement. Derived is
+	// not: when --max-num-seqs binds, estimateCapacityFromParams lands at
+	// (I + O/2)/(I + O) of the engine's physical occupancy ceiling -- 57% at
+	// I=1000, O=6000 -- so a saturated measurement can exceed it, and
+	// retaining one can then order FEWER replicas than falling to derived
+	// would have. 95,000 measured against 64,000 derived at max_num_seqs=16.
+	// An earlier version of this comment claimed the general rule and a
+	// reviewer built the counterexample. k1 is the bound that always holds.
 	isPrefill := canonicalRole(role) == domain.RolePrefill
 	if !isPrefill {
 		if k2Derived := estimateCapacityFromParams(engineParams, avgInput, avgOutput); k2Derived > 0 {
