@@ -68,6 +68,17 @@ Read the review first; the implementation design says what was built.
 - **[The alternative framing](wva-external-scaler-alternative.md)** — the reply
   to "WVA as a metric shop", keeping the capacity model in WVA.
 
+- **[An HPA left on the Kubernetes CPU default](hpa-left-on-the-cpu-default.md)**
+  — a live failure mode, measured: one refused `GetMetricSpec` and KEDA builds
+  the HPA with an empty metrics list, which Kubernetes defaults to
+  `Resource/cpu`. The ScaledObject reports Ready=True, WVA publishes the right
+  replica count every cycle, and the workload does not move. KEDA re-derives
+  only on a spec change, so one refusal is permanent. Cost two multi-day CI
+  investigations; #124 and #125 made it visible and neither fixed it. The
+  leader-election cause is already mitigated, the transport one is not, and
+  WVA holds no RBAC for HPAs so it cannot see the object that knows. Asks for
+  one decision: report, report and recover, or document and accept.
+
 ## Engine and analyzers
 
 - **[Analyzer metric interface](analyzer-metric-interface.md)**
