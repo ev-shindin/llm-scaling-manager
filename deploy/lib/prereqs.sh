@@ -714,6 +714,31 @@ then re-run this install."
     esac
 }
 
+# wva_check_kueue_cohort_read warns when a controller-only install's controller
+# could not list Kueue Cohort objects.
+#
+# The Kueue reader lists Cohorts to tell a flat cohort from a nested one before
+# it counts borrowing. Denied, borrowing reads as hierarchy-unknown and is not
+# counted; the nominal Kueue bound is unaffected, so this warns and never
+# refuses. Same phase and source rules as wva_check_kueue_namespace_read.
+wva_check_kueue_cohort_read() {
+    [ "${INSTALL_PHASE:-all}" = "wva" ] || return 0
+    local source sa
+    source="$(wva_kueue_source_configured)"
+    case "$source" in
+        ''|unknown*) return 0 ;;
+    esac
+    sa="system:serviceaccount:${WVA_NS}:wva-controller-manager"
+    case "$(can_i_as "$sa" list cohorts.kueue.x-k8s.io)" in
+        yes) log_success "The controller can list Kueue Cohorts, which counting borrowing needs" ;;
+        no)
+            log_warning "A Kueue quota source is configured ($source), and $sa cannot list cohorts.kueue.x-k8s.io."
+            log_warning "  Cohort borrowing is then not counted (reason hierarchy-unknown); the nominal Kueue cap still applies. A cluster admin re-running 'NAMESPACE=$WVA_NS make setup-prereqs' grants it."
+            ;;
+        *) log_warning "Could not verify that $sa may list cohorts.kueue.x-k8s.io (checking needs impersonate permission). Without it, Cohort borrowing is not counted." ;;
+    esac
+}
+
 check_permissions() {
     log_info "Checking permissions..."
 
@@ -872,6 +897,7 @@ $advice"
     # See wva_check_kueue_namespace_read. Before the tenant early-return: the
     # controller-only phase is exactly the one that cannot fix it.
     wva_check_kueue_namespace_read
+    wva_check_kueue_cohort_read
 
     # A tenant install has its own contract for what the CONTROLLER will need, and
     # it is not the node-read question below: the physical limiter's inventory is

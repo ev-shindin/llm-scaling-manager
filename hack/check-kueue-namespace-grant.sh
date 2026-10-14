@@ -29,14 +29,14 @@ BLUE='' GREEN='' YELLOW='' RED='' NC=''
 source "$WORK/common.sh"
 # shellcheck source=/dev/null
 source "$WORK/prereqs.sh"
-for fn in wva_check_kueue_namespace_read wva_kueue_source_configured check_permissions; do
+for fn in wva_check_kueue_namespace_read wva_check_kueue_cohort_read wva_kueue_source_configured check_permissions; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
     }
 done
 
-EXPECT_CASES=24
+EXPECT_CASES=31
 RAN=0
 FAILED=0
 
@@ -56,7 +56,7 @@ POLICY_WITH_KUEUE='limiters:
   kueue:
     enabled: true'
 
-# run_check [VAR=value...] runs wva_check_kueue_namespace_read and echoes
+# run_check [VAR=value...] runs wva_check_kueue_namespace_read (or CHECK_FN) and echoes
 # REFUSED, WARNED or OK, then the can-i question asked ("-" for none).
 #   STUB_CANI      yes | no | unknown (impersonation denied)
 #   STUB_POLICY    the cluster policy default entry in wva-policy ("" = none)
@@ -107,7 +107,7 @@ run_check() {
         WVA_LIMITER=quota WVA_QUOTA_KUEUE=true STUB_CANI=no STUB_POLICY=''
         local kv
         for kv in "$@"; do eval "$kv"; done
-        wva_check_kueue_namespace_read
+        "${CHECK_FN:-wva_check_kueue_namespace_read}"
     )
     local verdict asked
     verdict="$(head -1 "$WORK/out")"
@@ -201,6 +201,20 @@ check 'WVA_LIMITER_PHYSICAL=false leaves it out: only a warning' \
     'WARNED' "$(run_node_check WVA_LIMITER=quota WVA_QUOTA_KUEUE=true WVA_LIMITER_PHYSICAL=false)"
 check 'gpu-inventory,quota with node read -> proceeds' \
     'OK' "$(run_node_check WVA_LIMITER=gpu-inventory,quota STUB_CANI=yes)"
+# The Cohort list (borrowing). Missing it only stops borrowing from being
+# counted, so it warns and never refuses.
+check 'cohort list denied -> warned, not refused' \
+    'WARNED list cohorts.kueue.x-k8s.io' "$(run_check CHECK_FN=wva_check_kueue_cohort_read)"
+check 'cohort list granted -> proceeds' \
+    'OK list cohorts.kueue.x-k8s.io' "$(run_check CHECK_FN=wva_check_kueue_cohort_read STUB_CANI=yes)"
+check 'cohort list unverifiable -> warned' \
+    'WARNED list cohorts.kueue.x-k8s.io' "$(run_check CHECK_FN=wva_check_kueue_cohort_read STUB_CANI=unknown)"
+check 'cohort list: INSTALL_PHASE=all asks nothing' \
+    'OK -' "$(run_check CHECK_FN=wva_check_kueue_cohort_read INSTALL_PHASE=all)"
+check 'cohort list: no Kueue source asks nothing' \
+    'OK -' "$(run_check CHECK_FN=wva_check_kueue_cohort_read WVA_LIMITER=none WVA_QUOTA_KUEUE=false)"
+check 'cohort list: an unreadable policy asks nothing (the namespace check warns)' \
+    'OK -' "$(run_check CHECK_FN=wva_check_kueue_cohort_read WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_CM_FORBIDDEN=wva-policy)"
 
 # Wired into check_permissions -- which --check and the install both run --
 # BEFORE the tenant early-return, or the namespace-scoped default never reaches it.
@@ -210,6 +224,9 @@ tenant_line="$(printf '%s\n' "$body" | grep -n 'if wva_scope_is_tenant; then' | 
 check 'check_permissions calls it' 'yes' "$([ -n "$call_line" ] && echo yes || echo no)"
 check 'before the tenant early-return' 'yes' \
     "$([ -n "$call_line" ] && [ -n "$tenant_line" ] && [ "$call_line" -lt "$tenant_line" ] && echo yes || echo no)"
+cohort_line="$(printf '%s\n' "$body" | grep -n '^[[:space:]]*wva_check_kueue_cohort_read$' | head -1 | cut -d: -f1)"
+check 'check_permissions calls the cohort check before the tenant early-return' 'yes' \
+    "$([ -n "$cohort_line" ] && [ -n "$tenant_line" ] && [ "$cohort_line" -lt "$tenant_line" ] && echo yes || echo no)"
 
 if [ "$FAILED" -gt 0 ]; then
     printf '\n%d Kueue namespace-grant assertion(s) failed.\n' "$FAILED" >&2

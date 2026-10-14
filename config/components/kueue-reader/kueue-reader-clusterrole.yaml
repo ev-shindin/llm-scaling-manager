@@ -3,10 +3,13 @@ kind: ClusterRole
 metadata:
   name: kueue-reader-role
 rules:
+# Cohorts are listed to tell a flat cohort from a nested one, for borrowing.
+# Denied, borrowing reads hierarchy-unknown; the nominal bound is unaffected.
 - apiGroups:
   - kueue.x-k8s.io
   resources:
   - clusterqueues
+  - cohorts
   - resourceflavors
   verbs:
   - get

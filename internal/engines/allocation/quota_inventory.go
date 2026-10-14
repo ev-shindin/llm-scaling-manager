@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"maps"
+	"slices"
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 )
 
 // QuotaInventory enforces operator-declared GPU quotas independent of physical
@@ -46,6 +49,8 @@ type QuotaInventory struct {
 	// lastExternal fingerprints the external snapshot cfg was built from, so a
 	// change is logged once rather than every cycle.
 	lastExternal string
+	// lastBorrow fingerprints the last borrowing view logged, for the same reason.
+	lastBorrow string
 	// usedByType is the cluster-scoped usage map (Scope == QuotaScopeCluster).
 	usedByType map[string]int
 	// usedByNS is the per-namespace usage map (Scope == QuotaScopeNamespace).
@@ -184,8 +189,42 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 			}
 		}
 	}
+	q.logBorrowing(logger, ext, err != nil)
 	q.cfg = effective
 	return nil
+}
+
+// logBorrowing logs, on change only, what Kueue borrowing would add for each
+// namespace this entry governs: guaranteed, borrowable, Kueue's own borrowed
+// figure, and the reason borrowable is 0. Nothing here is applied; the
+// effective entry stays at the nominal figure. A cluster-scope entry logs
+// nothing, since borrowing moves capacity between queues and leaves the
+// cluster figure as it is. stale marks a snapshot served after a failed read,
+// whose borrowing is not counted. Callers must hold q.mu.
+func (q *QuotaInventory) logBorrowing(logger logr.Logger, ext config.ExternalQuotas, stale bool) {
+	if !q.static.KueueCountsBorrowable() || q.static.Scope != config.QuotaScopeNamespace || ext.ObservedAt.IsZero() {
+		return
+	}
+	view := make(map[string][]config.ExternalBorrow, len(ext.Borrow))
+	for ns, rows := range ext.Borrow {
+		if ns == config.QuotaLimiterReservedNamespaceKey || q.static.IsExcluded(ns) || len(rows) == 0 {
+			continue
+		}
+		if stale {
+			rows = slices.Clone(rows)
+			for i := range rows {
+				rows[i] = rows[i].Withheld(string(kueue.ReasonStale))
+			}
+		}
+		view[ns] = rows
+	}
+	fp, _ := json.Marshal(view)
+	if string(fp) == q.lastBorrow {
+		return
+	}
+	q.lastBorrow = string(fp)
+	logger.Info("Kueue borrowing read and NOT applied; the quota entry still caps at nominal",
+		"borrowByNamespace", view)
 }
 
 // EffectiveConfig returns the entry currently enforced: the static entry bounded

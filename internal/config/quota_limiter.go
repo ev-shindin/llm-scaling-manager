@@ -99,7 +99,8 @@ type QuotaLimiterConfig struct {
 // resource, per flavor, becomes a per-accelerator-type cap; a namespace is
 // granted the caps of every ClusterQueue one of its LocalQueues points at; the
 // cluster figure is the sum over all ClusterQueues. Borrowing limits and cohorts
-// are deliberately NOT counted — the bound wants the guaranteed figure.
+// are NOT counted in the bound yet: they are read and logged (CountBorrowable),
+// and the bound stays at the nominal figure.
 //
 // A ClusterQueue shared by several namespaces is a per-namespace CEILING here,
 // not a partition: each namespace with a LocalQueue on it is bounded at the
@@ -121,6 +122,20 @@ type KueueQuotaSource struct {
 	// Empty means DefaultKueueRefreshInterval. Between reads the last snapshot is
 	// served, so a quota edit in Kueue takes up to this long to bind here.
 	RefreshInterval string `yaml:"refreshInterval,omitempty" json:"refreshInterval,omitempty"`
+
+	// CountBorrowable lets the entry count GPUs its ClusterQueue can borrow from
+	// its cohort, on top of the guaranteed figure. Absent means true: borrowing
+	// is on by default, and is counted only where it is safe. false keeps exactly
+	// the nominal cap. In this release the borrowable figure is read and logged
+	// only; no limit uses it yet, whatever the setting.
+	CountBorrowable *bool `yaml:"countBorrowable,omitempty" json:"countBorrowable,omitempty"`
+}
+
+// KueueCountsBorrowable reports whether this entry reads Kueue and would count
+// borrowable capacity: the Kueue block is enabled and countBorrowable is not
+// false.
+func (q QuotaLimiterConfig) KueueCountsBorrowable() bool {
+	return q.KueueEnabled() && (q.Kueue.CountBorrowable == nil || *q.Kueue.CountBorrowable)
 }
 
 // DefaultKueueRefreshInterval is how often Kueue quotas are re-read when the
@@ -182,6 +197,10 @@ func (k *KueueQuotaSource) clone() *KueueQuotaSource {
 	if k.Resources != nil {
 		out.Resources = slices.Clone(k.Resources)
 	}
+	if k.CountBorrowable != nil {
+		v := *k.CountBorrowable
+		out.CountBorrowable = &v
+	}
 	return &out
 }
 
@@ -225,6 +244,35 @@ type ExternalQuotas struct {
 	// ObservedAt is when the source was last read successfully; zero when it
 	// never was, in which case the maps are empty and mean nothing.
 	ObservedAt time.Time
+	// Borrow is, per namespace Namespace governs, what borrowing in the
+	// source's cohorts would add. It is read and logged only: BoundBy ignores
+	// it, so no limit depends on it.
+	Borrow map[string][]ExternalBorrow
+}
+
+// ExternalBorrow is one queue's borrowing figures for one flavor and GPU
+// resource, as granted to a namespace. Guaranteed plus Borrowable is how far the
+// queue could reach in its cohort; Reason, when set, says why Borrowable is 0.
+type ExternalBorrow struct {
+	Queue       string `json:"queue"`
+	Cohort      string `json:"cohort,omitempty"`
+	Flavor      string `json:"flavor"`
+	Resource    string `json:"resource"`
+	Accelerator string `json:"accelerator,omitempty"`
+	Nominal     int    `json:"nominal"`
+	Guaranteed  int    `json:"guaranteed"`
+	Borrowable  int    `json:"borrowable"`
+	// SourceBorrowed is the source's own figure of what the queue borrows now,
+	// logged as a cross-check.
+	SourceBorrowed int    `json:"kueueBorrowed"`
+	Reason         string `json:"reason,omitempty"`
+}
+
+// Withheld returns b with borrowing not counted, for reason: the guaranteed
+// figure falls back to nominal, as when borrowing is off.
+func (b ExternalBorrow) Withheld(reason string) ExternalBorrow {
+	b.Guaranteed, b.Borrowable, b.Reason = b.Nominal, 0, reason
+	return b
 }
 
 // BoundBy returns this entry bounded by an external snapshot: the static maps and

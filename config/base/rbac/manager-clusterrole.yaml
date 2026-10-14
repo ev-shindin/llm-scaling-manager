@@ -39,6 +39,13 @@ rules:
   - patch
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - resourcequotas
+  verbs:
+  - get
+  - list
+- apiGroups:
   - apps
   resources:
   - deployments
@@ -52,6 +59,12 @@ rules:
   - apps
   resources:
   - deployments/scale
+  verbs:
+  - get
+- apiGroups:
+  - batch
+  resources:
+  - jobs
   verbs:
   - get
 - apiGroups:
@@ -73,8 +86,10 @@ rules:
   - kueue.x-k8s.io
   resources:
   - clusterqueues
+  - cohorts
   - localqueues
   - resourceflavors
+  - workloads
   verbs:
   - get
   - list

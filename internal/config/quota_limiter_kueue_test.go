@@ -5,6 +5,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"gopkg.in/yaml.v3"
 )
 
 // typed builds a namespace snapshot of purely typed grants.
@@ -249,6 +250,54 @@ var _ = Describe("KueueQuotaSource", func() {
 		out.Kueue.Enabled = false
 		Expect(entry.Kueue.Resources).To(Equal([]string{"nvidia.com/gpu"}))
 		Expect(entry.Kueue.Enabled).To(BeTrue())
+	})
+
+	It("counts borrowable capacity by default, and not when countBorrowable is false", func() {
+		parse := func(doc string) QuotaLimiterConfig {
+			var e QuotaLimiterEntries
+			Expect(yaml.Unmarshal([]byte(doc), &e)).To(Succeed())
+			Expect(e.Limiters).To(HaveLen(1))
+			return e.Limiters[0]
+		}
+		absent := parse("limiters:\n- name: q\n  type: quota\n  scope: namespace\n  kueue:\n    enabled: true\n")
+		Expect(absent.Kueue.CountBorrowable).To(BeNil())
+		Expect(absent.KueueCountsBorrowable()).To(BeTrue(), "absent means on")
+
+		off := parse("limiters:\n- name: q\n  type: quota\n  scope: namespace\n  kueue:\n    enabled: true\n    countBorrowable: false\n")
+		Expect(off.KueueCountsBorrowable()).To(BeFalse())
+
+		on := parse("limiters:\n- name: q\n  type: quota\n  scope: namespace\n  kueue:\n    enabled: true\n    countBorrowable: true\n")
+		Expect(on.KueueCountsBorrowable()).To(BeTrue())
+
+		disabled := parse("limiters:\n- name: q\n  type: quota\n  scope: namespace\n  kueue:\n    enabled: false\n    countBorrowable: true\n")
+		Expect(disabled.KueueCountsBorrowable()).To(BeFalse(), "nothing is read without the reader")
+		Expect(QuotaLimiterConfig{}.KueueCountsBorrowable()).To(BeFalse())
+	})
+
+	It("deep-copies countBorrowable", func() {
+		off := false
+		entry := QuotaLimiterConfig{Kueue: &KueueQuotaSource{Enabled: true, CountBorrowable: &off}}
+		out := entry.clone()
+		*out.Kueue.CountBorrowable = true
+		Expect(*entry.Kueue.CountBorrowable).To(BeFalse())
+	})
+
+	It("does not let borrowing figures change a bound", func() {
+		entry := QuotaLimiterConfig{
+			Name: "q", Type: "quota", Scope: QuotaScopeNamespace,
+			NamespaceQuotas: map[string]map[string]int{"default": {"H100": -1}},
+			Kueue:           &KueueQuotaSource{Enabled: true},
+		}
+		ext := typed(map[string]map[string]int{"team-a": {"H100": 9}})
+		without := entry.BoundBy(ext)
+		ext.Borrow = map[string][]ExternalBorrow{"team-a": {{Queue: "cq", Nominal: 9, Guaranteed: 0, Borrowable: 10}}}
+		Expect(entry.BoundBy(ext)).To(Equal(without))
+		Expect(without.NamespaceQuotas["team-a"]).To(Equal(map[string]int{"H100": 9}))
+	})
+
+	It("withholds a row back to nominal", func() {
+		row := ExternalBorrow{Nominal: 9, Guaranteed: 0, Borrowable: 10, Reason: "nominal-lent-out"}
+		Expect(row.Withheld("stale")).To(Equal(ExternalBorrow{Nominal: 9, Guaranteed: 9, Reason: "stale"}))
 	})
 
 	Context("validation", func() {

@@ -447,7 +447,7 @@ metadata:
     app.kubernetes.io/name: workload-variant-autoscaler
 rules:
 - apiGroups: ["kueue.x-k8s.io"]
-  resources: ["clusterqueues", "resourceflavors"]
+  resources: ["clusterqueues", "cohorts", "resourceflavors"]
   verbs: ["get", "list"]
 - apiGroups: [""]
   resources: ["namespaces"]${names}

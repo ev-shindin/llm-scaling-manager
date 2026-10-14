@@ -98,9 +98,11 @@ Role and its binding in the managed namespace).
 | create, patch | events | managed namespace | decisions and warnings on ScaledObjects |
 | get, list, watch | deployments, replicasets, statefulsets (apps) | managed namespace | scale targets and their pods |
 | get | deployments/scale | managed namespace | current replica count |
+| get, list | resourcequotas | managed namespace | a GPU ResourceQuota as the bound for cohort borrowing |
+| get | jobs (batch) | managed namespace | the owner of a Kueue-managed GPU pod, for cohort borrowing |
 | get, list, watch | inferencepools (both InferencePool API groups) | managed namespace | which EPP queue a workload sits behind |
 | get | scaledobjects (keda.sh) | managed namespace | the scale target behind a KEDA call |
-| get, list | localqueues (kueue.x-k8s.io) | managed namespace | the Kueue quota source |
+| get, list | localqueues, workloads (kueue.x-k8s.io) | managed namespace | the Kueue quota source; workloads for cohort borrowing |
 | get, list, watch | leaderworkersets; get leaderworkersets/scale | managed namespace | LWS scale targets |
 | get, list, watch | servicemonitors | managed namespace | preflight of what is scraped |
 | get, list, watch, create, update, patch, delete | leases | own namespace (`leader-election-role`) | leader election |
@@ -110,7 +112,7 @@ Role and its binding in the managed namespace).
 | get, update | configmaps named `wva-learned-state` | own namespace (`learned-state-role`) | learned state across a restart, when `LEARNED_STATE_SNAPSHOT` is on |
 | create | configmaps (any name — `create` cannot be narrowed by name) | own namespace (`utilization-share-history-role`, `controller-status-role`, `learned-state-role`) | creating the history, status and learned-state ConfigMaps the first time |
 | get, list, watch | nodes, nodes/status | **cluster** (`node-reader-role`) | resolving a variant's accelerator; required by the `gpu-inventory` limiter |
-| get, list | clusterqueues, resourceflavors | **cluster** (`kueue-reader-role`) | the Kueue quota source. Inert on a cluster without Kueue |
+| get, list | clusterqueues, cohorts, resourceflavors | **cluster** (`kueue-reader-role`) | the Kueue quota source; cohorts for cohort borrowing. Inert on a cluster without Kueue |
 | get | namespaces, by name: the managed one only | **cluster** (`kueue-reader-role`) | its labels, to evaluate a ClusterQueue `namespaceSelector` |
 | get | namespaces, by name: its own, the managed one, `wva-policy` and the namespace the managed one is labelled with | **cluster** (`policy-namespace-reader-role`) | finding a published cluster policy — see [Multi-tenancy](#multi-tenancy) |
 | create | tokenreviews, subjectaccessreviews | **cluster** (`metrics-auth-role`) | authenticating and authorizing scrapes of `:8443` |
@@ -156,7 +158,7 @@ cluster-wide. The differences that matter for review:
 | get, list, watch | **configmaps** | **every namespace** | the controller's cache filters ConfigMaps by label, but the grant does not: it can read any ConfigMap in the cluster |
 | get, list, watch, **patch** | **pods** | **every namespace** | the code patches only pods of workloads it manages and warm-pool pods, but the grant reaches every pod, `kube-system` included |
 | get, list, watch | namespaces, nodes, nodes/status | cluster | |
-| get, list | clusterqueues, localqueues, resourceflavors | cluster | |
+| get, list | clusterqueues, cohorts, localqueues, resourceflavors, workloads | cluster | |
 
 `node-reader` and `kueue-reader` are not rendered at this scope; `manager-role`
 already covers them. Leases, Events and the history ConfigMap stay namespaced in
@@ -168,7 +170,7 @@ binding and the `metrics-reader` repoint are added as above.
 | Command | Grants | To whom |
 | --- | --- | --- |
 | `make enable-physical-limiter` (gpu-inventory) | ClusterRole + binding: get, list, watch on nodes | the ServiceAccount of each targeted controller |
-| `make enable-physical-limiter WVA_QUOTA_KUEUE=true` (quota) | ClusterRole + binding: get, list on clusterqueues, resourceflavors; get on the controller's managed Namespace only, by name | the same |
+| `make enable-physical-limiter WVA_QUOTA_KUEUE=true` (quota) | ClusterRole + binding: get, list on clusterqueues, cohorts, resourceflavors; get on the controller's managed Namespace only, by name | the same |
 | `make enable-physical-limiter` | Role `wva-policy-reader` in the policy namespace (`wva-policy`, or the one a `wva.llmd.ai/policy-namespace` label names): get, list, watch on **all** ConfigMaps there, plus a RoleBinding | each controller that reads policy from that namespace |
 | `make dashboard` (OpenShift only; **not** part of a default install) | ServiceAccount `wva-grafana-datasource` with a **third legacy, non-expiring** token Secret (`wva-grafana-datasource-token`); RoleBinding to `view` on the namespace; a Role with get, list, **create** on `metrics.k8s.io` pods (the Thanos tenancy port checks `create` because Grafana POSTs) | the Grafana datasource, in the namespace the dashboard is created in. Whoever reads Secrets there can query that namespace's metrics and `view` its objects |
 
