@@ -690,9 +690,11 @@ func (c *ScalingPolicy) Validate() error {
 }
 
 // validateLimiters checks the inline Limiters list. gpu-inventory/inventory
-// entries must carry no quota fields, and at most one may be declared under
-// either spelling: there is one physical cluster, and a second entry would
-// describe the same GPUs twice. Quota entries are validated end-to-end by the
+// entries must carry no quota fields. A second physical entry is NOT an error:
+// there is one physical cluster and one physical limiter is built, so the
+// duplicate is ignored and reported (DuplicatePhysicalLimiters). Rejecting it
+// would discard the whole default policy, and that list installed before the
+// limiters composed. Quota entries are validated end-to-end by the
 // existing QuotaLimiterEntries.Validate() (name uniqueness, scope, per-type
 // ranges), so the inline and file-based quota schemas stay identical.
 func (c *ScalingPolicy) validateLimiters() error {
@@ -700,18 +702,12 @@ func (c *ScalingPolicy) validateLimiters() error {
 		return nil
 	}
 	var quotaOnes []QuotaLimiterConfig
-	physicalAt := -1
 	for i, l := range c.Limiters {
 		switch l.Type {
 		case limiterTypeGPUInventory, string(LimiterTypeInventory):
 			if l.Scope != "" || len(l.ClusterQuotas) > 0 || len(l.NamespaceQuotas) > 0 || len(l.Exclude) > 0 || l.Kueue != nil {
 				return fmt.Errorf("limiters[%d] (type %q): must not set quota fields (scope/quotas/namespaceQuotas/exclude/kueue)", i, l.Type)
 			}
-			if physicalAt >= 0 {
-				return fmt.Errorf("limiters[%d] (type %q): only one physical limiter may be declared; limiters[%d] (type %q) already is",
-					i, l.Type, physicalAt, c.Limiters[physicalAt].Type)
-			}
-			physicalAt = i
 		case string(LimiterTypeQuota):
 			quotaOnes = append(quotaOnes, l)
 		default:
@@ -726,6 +722,24 @@ func (c *ScalingPolicy) validateLimiters() error {
 		}
 	}
 	return nil
+}
+
+// DuplicatePhysicalLimiters returns the indexes of the physical (gpu-inventory
+// or inventory) entries after the first. One physical limiter is built from
+// the first; these are ignored, and callers say so.
+func (c ScalingPolicy) DuplicatePhysicalLimiters() []int {
+	var dups []int
+	seen := false
+	for i, l := range c.Limiters {
+		if !isPhysicalLimiterType(l.Type) {
+			continue
+		}
+		if seen {
+			dups = append(dups, i)
+		}
+		seen = true
+	}
+	return dups
 }
 
 // AnalyzerScore returns the AnalyzerScoreConfig.Score for the named analyzer,

@@ -150,7 +150,7 @@ others, read `wva-scaling-policy-config` in the namespace their
 
 <!-- guide:cleanup.disable start -->
 ```bash
-# Scaling becomes unbounded again for every install that reads this policy.
+# Removes the physical limiter; a quota in the same policy stays, and with none left scaling is unbounded again.
 make disable-physical-limiter
 ```
 <!-- guide:cleanup.disable end -->

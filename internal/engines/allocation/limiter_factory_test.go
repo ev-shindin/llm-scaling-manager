@@ -121,6 +121,38 @@ var _ = Describe("NewLimiterFromConfig", func() {
 	})
 })
 
+// A policy with two physical entries installed before the limiters composed.
+// It must still validate and build one physical limiter beside the quota.
+var _ = Describe("NewLimiterFromConfig with a duplicate physical entry", func() {
+	It("builds one physical limiter and the quota", func() {
+		cfg := configWithLimiters(
+			config.QuotaLimiterConfig{Type: "gpu-inventory"},
+			config.QuotaLimiterConfig{
+				Name: "cluster-quota", Type: "quota", Scope: config.QuotaScopeCluster,
+				ClusterQuotas: map[string]int{"H100": 16},
+			},
+			config.QuotaLimiterConfig{Type: "inventory"},
+		)
+		l, err := NewLimiterFromConfig(cfg, nil)
+		Expect(err).NotTo(HaveOccurred())
+		providers := ConstraintProvidersFrom(l)
+		names := make([]string, 0, len(providers))
+		for _, cp := range providers {
+			names = append(names, cp.Name())
+		}
+		Expect(names).To(Equal([]string{"gpu-limiter", "cluster-quota"}))
+	})
+
+	It("passes the controller's parse-time validation", func() {
+		p := config.ScalingPolicy{Limiters: []config.QuotaLimiterConfig{
+			{Type: "gpu-inventory"}, {Type: "inventory"},
+			{Name: "q", Type: "quota", Scope: config.QuotaScopeCluster, ClusterQuotas: map[string]int{"H100": 8}},
+		}}
+		p.ApplyDefaults()
+		Expect(p.Validate()).To(Succeed())
+	})
+})
+
 var _ = Describe("LimiterSignature", func() {
 	quota := config.QuotaLimiterConfig{
 		Name: "cluster-quota", Type: "quota", Scope: config.QuotaScopeCluster,

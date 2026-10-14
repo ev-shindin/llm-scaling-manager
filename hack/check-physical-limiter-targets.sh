@@ -473,6 +473,22 @@ else
     ok "enabling the physical limiter keeps the quota the cluster policy already declares"
 fi
 
+# And disable is its mirror: it removes the physical entry and keeps the quota.
+case_begin
+printf 'limiters:\n- type: gpu-inventory\n- name: tenant-quota\n  type: quota\n  scope: cluster\n  quotas:\n    H200: 8\n' > "$DEPLOYS/wva-policy.policy"
+PL_FN=disable_physical_limiter run_enable
+rm -f "$DEPLOYS/wva-policy.policy"
+written="$(awk '/^CALL\[/ { on = 0 } /^CALL\[patch configmap wva-scaling-policy-config -n wva-policy/ { on = 1 } on' "$CALLS")"
+if [ "$RC" -ne 0 ]; then
+    fail "disable failed over a policy that declares a quota too: $(tail -15 "$WORK/out")"
+elif [ "$written" = "${written#*name: tenant-quota}" ]; then
+    fail "disabling the physical limiter dropped the quota in the cluster policy: $written"
+elif [ "$written" != "${written#*gpu-inventory}" ]; then
+    fail "disable left the physical limiter in the cluster policy: $written"
+else
+    ok "disabling the physical limiter keeps the quota the cluster policy declares"
+fi
+
 # Messages may not claim more than the code did. Each failure below must end
 # the command non-zero, name the step, and never print "in force".
 # expect_failed <label> <substring the error must carry>
@@ -527,7 +543,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=29
+CASES_EXPECTED=30
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately."
 else

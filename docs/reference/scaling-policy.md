@@ -221,7 +221,8 @@ default: |
 
 - **Every entry is built.** A list holding both a `gpu-inventory` and `quota`
   entries bounds by both: a decision must fit the physical GPUs and every quota.
-  At most one `gpu-inventory` entry (under either spelling) is allowed.
+  One physical limiter is built: a second `gpu-inventory` entry (under either
+  spelling) is ignored, with a warning, rather than rejecting the policy.
 - `type: quota` uses the **same schema** as `QuotaLimiterConfig`, so `scope`, `quotas`,
   `namespaceQuotas`, and `exclude` all apply; multiple quota entries are composed.
   A quota entry may also set `kueue: { enabled: true }` to be bounded by the quotas

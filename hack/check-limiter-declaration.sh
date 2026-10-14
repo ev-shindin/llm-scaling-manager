@@ -869,6 +869,44 @@ limiters:
     else
         ok "declaring a quota replaces the old quota and keeps the physical limiter"
     fi
+
+    # DISABLING REMOVES ONE KIND. The mirror of the composing enable:
+    # `make disable-physical-limiter` takes the physical entry out and keeps a
+    # quota beside it. It used to remove every limiter.
+    case_begin
+    run_pl_limiter remove-gpu-inventory 'scaleUpThreshold: 0.85
+limiters:
+  - type: gpu-inventory
+  - name: tenant-q
+    type: quota
+    scope: cluster
+    quotas:
+      H200: 8'
+    wrote="$(cat "$WROTE")"
+    if [ "$PLRC" -ne 0 ]; then
+        fail "pl_set_limiter failed while removing the physical limiter: $(tail -1 "$WORK/plerr")"
+    elif ! printf '%s' "$wrote" | grep -q 'name: tenant-q'; then
+        fail "disabling the physical limiter DROPPED the quota beside it: $wrote"
+    elif printf '%s' "$wrote" | grep -q 'gpu-inventory'; then
+        fail "disabling the physical limiter left it declared: $wrote"
+    elif ! printf '%s' "$wrote" | grep -q 'scaleUpThreshold'; then
+        fail "disabling the physical limiter lost the rest of the policy: $wrote"
+    else
+        ok "disabling the physical limiter keeps the quota beside it"
+    fi
+
+    # The last entry going behaves as `none`: the default entry is patched out.
+    case_begin
+    run_pl_limiter remove-gpu-inventory 'limiters:
+  - type: gpu-inventory'
+    wrote="$(cat "$WROTE")"
+    if [ "$PLRC" -ne 0 ]; then
+        fail "pl_set_limiter failed while removing the only limiter: $(tail -1 "$WORK/plerr")"
+    elif ! printf '%s' "$wrote" | grep -q '^PATCHNULL\[default\]$'; then
+        fail "removing the last limiter did not patch data.default out, as none does: [$wrote]"
+    else
+        ok "removing the last limiter removes the default entry, as none does"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -1155,7 +1193,7 @@ fi
 # and the check still prints OK -- and the ok() suppression means the count of
 # ok lines is not comparable against a known-good run either.
 case_begin
-CASES_EXPECTED=67
+CASES_EXPECTED=69
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

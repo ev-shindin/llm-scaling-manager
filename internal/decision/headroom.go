@@ -81,6 +81,11 @@ func (s HeadroomState) String() string {
 	return "unknown"
 }
 
+// HeadroomUnlimited is the Free value of an accelerator a namespace's
+// allowance lists as unlimited and no closed cluster-scope bound caps. A reader
+// sees it as HeadroomUnbounded.
+const HeadroomUnlimited = -1
+
 // HeadroomStore holds the most recent headroom snapshot.
 type HeadroomStore struct {
 	mu   sync.RWMutex
@@ -173,7 +178,11 @@ func (s *HeadroomStore) Reading(namespace, acceleratorName string, poolsVersion 
 	}
 	perType, ok := s.last.Free[namespace]
 	if ok {
-		return perType[acceleratorName], HeadroomBounded
+		free := perType[acceleratorName]
+		if free < 0 {
+			return 0, HeadroomUnbounded // listed as unlimited, and no cluster bound caps it
+		}
+		return free, HeadroomBounded
 	}
 	if s.last.Cluster == nil || !constants.IsAcceleratorResolved(acceleratorName) {
 		return 0, HeadroomUnbounded

@@ -90,5 +90,5 @@ verify:
 
 cleanup:
   disable:
-    note: Scaling becomes unbounded again for every install that reads this policy.
+    note: Removes the physical limiter; a quota in the same policy stays, and with none left scaling is unbounded again.
     run: make disable-physical-limiter

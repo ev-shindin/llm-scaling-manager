@@ -638,6 +638,15 @@ func main() {
 				"(gpu-inventory or quota) to bound scaling.")
 		}
 
+		// One physical limiter is built however many physical entries are
+		// declared; the duplicates are accepted rather than rejected, since a
+		// rejection would discard the whole policy, and named here.
+		if dups := cfg.IgnoredPhysicalLimiters(); len(dups) > 0 {
+			setupLog.Info("WARNING: limiters declares more than one physical (gpu-inventory) entry; "+
+				"one physical limiter is built from the first and the others are ignored",
+				"ignoredIndexes", dups)
+		}
+
 		// Quota entries alone mean "no physical-capacity discovery" — including
 		// the inventory-collection call in the saturation engine. We honor that
 		// at the call site (see scalingpolicy.ShouldCollectClusterInventory),

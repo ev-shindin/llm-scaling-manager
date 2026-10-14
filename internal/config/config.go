@@ -785,6 +785,15 @@ func limiterTypesOf(limiters []QuotaLimiterConfig) []LimiterType {
 	return types
 }
 
+// IgnoredPhysicalLimiters returns the indexes of the physical entries in the
+// effective limiters list beyond the first, which are not built.
+// Thread-safe.
+func (c *Config) IgnoredPhysicalLimiters() []int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return ScalingPolicy{Limiters: c.effectiveLimitersLocked()}.DuplicatePhysicalLimiters()
+}
+
 // LimiterKinds names the declared limiter types for logs: "none", "inventory",
 // "quota", or "inventory+quota" when both are built. It keeps the single-kind
 // values the logs carried while one mode was in force.
@@ -832,8 +841,8 @@ func (c *Config) EffectiveLimiterSummary() string {
 }
 
 // EffectivePhysicalEntry returns the declared physical (gpu-inventory or
-// inventory) entry, deep-copied, and whether there is one. Validation allows at
-// most one.
+// inventory) entry, deep-copied, and whether there is one. When several are
+// declared it is the first; the rest are ignored (IgnoredPhysicalLimiters).
 // Thread-safe.
 func (c *Config) EffectivePhysicalEntry() (QuotaLimiterConfig, bool) {
 	c.mu.RLock()

@@ -272,7 +272,7 @@ kubectl get clusterrole,clusterrolebinding | grep -- "-$SUFFIX"   # anything the
 Only when no scaling-manager install remains on the cluster:
 
 ```bash
-make disable-physical-limiter   # clears the limiter from wva-policy and every policy ConfigMap a controller reads
+make disable-physical-limiter   # removes the physical limiter (WVA_LIMITER_TYPE=quota: the quota) from wva-policy and every policy ConfigMap a controller reads; the other kind stays
 kubectl delete namespace "$POLICY_NS"
 ```
 

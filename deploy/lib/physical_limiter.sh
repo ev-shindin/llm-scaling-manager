@@ -677,6 +677,21 @@ pl_set_limiter() {
     fi
     if [ "$limiter" = "none" ]; then
         updated="$(printf '%s\n' "$current" | yq 'del(.limiters)')"
+    elif [ "$limiter" = "remove-gpu-inventory" ] || [ "$limiter" = "remove-quota" ]; then
+        # Remove ONE kind and keep the other, mirroring the composing enable:
+        # disabling the physical limiter must not take a quota with it. When
+        # nothing is left the list goes, exactly as `none` does.
+        local keep
+        if [ "$limiter" = "remove-gpu-inventory" ]; then
+            keep='(.limiters // []) | map(select(.type != "gpu-inventory" and .type != "inventory"))'
+        else
+            keep='(.limiters // []) | map(select(.type != "quota"))'
+        fi
+        updated="$(printf '%s\n' "$current" | yq ".limiters = ($keep)")" \
+            || log_error "could not remove the ${limiter#remove-} limiter from the policy in ${policy_ns}."
+        if [ "$(printf '%s\n' "$updated" | yq '.limiters | length')" = "0" ]; then
+            updated="$(printf '%s\n' "$updated" | yq 'del(.limiters)')"
+        fi
     else
         # Through limiter_entry_yaml, the same builder the installer uses.
         #
@@ -708,7 +723,8 @@ pl_set_limiter() {
     # whose default entry is an empty object is a policy that says nothing while
     # looking like one that says something, and the next reader has to open it to
     # find out which.
-    if [ "$limiter" = "none" ] && [ "$(printf '%s' "$updated" | tr -d '[:space:]')" = "{}" ]; then
+    if { [ "$limiter" = "none" ] || [ "${limiter#remove-}" != "$limiter" ]; } \
+        && [ "$(printf '%s' "$updated" | tr -d '[:space:]')" = "{}" ]; then
         # The `default` ENTRY, not the ConfigMap. Deleting the object took every
         # other entry in it -- the per-model and named-tier policies an operator
         # added -- which is the same data loss this file was just fixed for, on
@@ -1043,6 +1059,13 @@ enable_physical_limiter() {
 }
 
 disable_physical_limiter() {
+    # The kind to remove: the one enable published (WVA_LIMITER_TYPE). Only
+    # that kind goes; a limiter of the other kind in the same policy stays.
+    local limiter="${WVA_LIMITER_TYPE:-gpu-inventory}"
+    case "$limiter" in
+        gpu-inventory|quota) ;;
+        *) log_error "WVA_LIMITER_TYPE must be gpu-inventory or quota (got '$limiter')" ;;
+    esac
     pl_refuse_policy_ns_override
     local policy_ns; policy_ns="$(pl_policy_ns)"
     local ns cm_ns res targets="" cleared=0 cleared_ns=" " to_restart=""
@@ -1092,8 +1115,8 @@ disable_physical_limiter() {
             log_error "could not read ${cm_ns}/wva-scaling-policy-config, and this is not a NotFound: ${probe}
     Refusing to report a limiter removed from a policy this command cannot see."
         fi
-        pl_set_limiter "$cm_ns" none
-        log_success "Removed the limiter from ${cm_ns}/wva-scaling-policy-config"
+        pl_set_limiter "$cm_ns" "remove-$limiter"
+        log_success "Removed the $limiter limiter from ${cm_ns}/wva-scaling-policy-config (a limiter of the other kind, if declared, stays)"
         cleared=$((cleared + 1))
         cleared_ns="$cleared_ns$cm_ns "
     done

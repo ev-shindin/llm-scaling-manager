@@ -78,6 +78,13 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 			logger.Info("Ignoring limiters on a non-default saturation config entry; "+
 				"the GPU limiter is selected only from the \"default\" entry", "key", key)
 		}
+		// A second physical entry is accepted (rejecting it would drop the whole
+		// policy) but only one physical limiter is built; say which were ignored.
+		if dups := satConfig.DuplicatePhysicalLimiters(); key == config.GlobalDefaultsKey && len(dups) > 0 {
+			logger.Info("WARNING: limiters declares more than one physical (gpu-inventory) entry; "+
+				"one physical limiter is built from the first and the others are ignored",
+				"key", key, "ignoredIndexes", dups)
+		}
 		// optimizer: sits beside limiters: and is read from the same place only.
 		if key != config.GlobalDefaultsKey && satConfig.Optimizer != nil {
 			logger.Info("Ignoring optimizer on a non-default saturation config entry; "+

@@ -585,7 +585,8 @@ Every entry in it is built:
 | `{type: quota, ...}` entries | Operator-declared quotas. |
 | both | Physical GPUs **and** every quota: a decision must fit all of them. |
 
-At most one `gpu-inventory` entry is allowed (the `inventory` spelling counts).
+One physical limiter is built. A second `gpu-inventory` (or `inventory`) entry
+is ignored and logged as a warning; it does not reject the policy.
 
 The set is exposed on `*config.Config` as `EffectiveLimiterTypes()`,
 `HasPhysicalLimiter()`, `HasQuotaLimiter()` and `EffectiveQuotaEntries()`, all

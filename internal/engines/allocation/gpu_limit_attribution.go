@@ -110,7 +110,14 @@ func namespaceHeadroom(constraints []*ResourceConstraints) map[string]map[string
 	}
 	for _, perType := range out {
 		for accType, free := range perType {
-			if key, ok := accelerator.FindKey(cluster, accType); ok {
+			key, ok := accelerator.FindKey(cluster, accType)
+			if !ok {
+				continue
+			}
+			if free < 0 {
+				// Unlimited in the namespace: the cluster figure is the bound.
+				perType[accType] = cluster[key]
+			} else {
 				perType[accType] = min(free, cluster[key])
 			}
 		}
@@ -155,7 +162,15 @@ func namespaceAllowance(constraints []*ResourceConstraints) map[string]map[strin
 			}
 			for accType, rp := range perType {
 				if rp.Limit < 0 {
-					continue // unlimited for this (namespace, type)
+					// Unlimited for this (namespace, type): carried as the
+					// decision.HeadroomUnlimited sentinel. Skipping it left the
+					// type absent from a present namespace, which a reader takes
+					// as DENIED -- a warm pool under an unlimited allowance was
+					// held at zero. A finite bound from another provider wins.
+					if _, seen := free[accType]; !seen {
+						free[accType] = decision.HeadroomUnlimited
+					}
+					continue
 				}
 				avail := rp.Limit - rp.Used
 				if avail < 0 {
@@ -164,7 +179,7 @@ func namespaceAllowance(constraints []*ResourceConstraints) map[string]map[strin
 					// invites arithmetic that accidentally grants some back.
 					avail = 0
 				}
-				if prev, seen := free[accType]; !seen || avail < prev {
+				if prev, seen := free[accType]; !seen || prev < 0 || avail < prev {
 					free[accType] = avail
 				}
 			}

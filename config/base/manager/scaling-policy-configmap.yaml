@@ -148,8 +148,8 @@ data:
   #             off. WVA logs this at startup.
   #   ALL OF    every entry is built, and scaling must fit all of them: the
   #             forms below combine, (a) and (b) together bounding by the GPUs
-  #             that exist AND the declared caps. At most one gpu-inventory
-  #             entry.
+  #             that exist AND the declared caps. One physical limiter is
+  #             built; a second gpu-inventory entry is ignored with a warning.
   #
   #   # (a) physical-capacity limiter:
   #   limiters:

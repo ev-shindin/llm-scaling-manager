@@ -98,6 +98,15 @@ type ShareGroup struct {
 	// tightest cluster-wide figure, and a namespace-scope quota's aggregate (the
 	// sum of its namespace caps, open) is not one -- that quota bounds a
 	// namespace group through its own budget instead.
+	//
+	// So with a namespace-scope quota alone ClusterFree is unbounded, and that
+	// is safe: a namespace group's Budget is its own cap (net of what it holds)
+	// and the idle fill never places past Budget (shareIdle, fillIdleShare), so
+	// every namespace stays within its own cap and their sum within the sum of
+	// the caps. The old aggregate-free bound was tighter in one case only: when
+	// ANOTHER namespace already holds more than its own cap, the aggregate's
+	// free figure fell below this namespace's, coupling one tenant's fill to
+	// another's overage. That coupling is gone.
 	ClusterFree int
 	// PoolCarve is the warm pools' unheld target taken out of Budget.
 	PoolCarve int

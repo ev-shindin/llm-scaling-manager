@@ -50,7 +50,8 @@ INFO  GPU limiter constructed  {"type": "none", "limiters": "none", "name": "no-
 
 > **Both kinds bound together.** Declare `gpu-inventory` and `quota` in one
 > `limiters:` list and every one is built: a decision must fit the GPUs that
-> exist **and** the allowance. Declare at most one `gpu-inventory` entry.
+> exist **and** the allowance. One physical limiter is built: a second
+> `gpu-inventory` entry is ignored, with a warning in the controller log.
 >
 > **Upgrading from a release that built only one.** There, a quota entry made
 > the physical one inert. Now both apply, which can hold a model lower when

@@ -400,8 +400,9 @@ var _ = Describe("Config.EffectiveLimiterTypes / EffectiveQuotaEntries", func() 
 	})
 })
 
-// One physical cluster, one physical entry: a second one, under either
-// spelling, would describe the same GPUs twice.
+// One physical cluster, one physical limiter. A second physical entry is
+// ignored, not rejected: a rejection discards the whole default policy, and
+// such a list installed before the limiters composed.
 var _ = Describe("ScalingPolicy limiters validation", func() {
 	validate := func(limiters ...QuotaLimiterConfig) error {
 		p := ScalingPolicy{Limiters: limiters}
@@ -413,10 +414,16 @@ var _ = Describe("ScalingPolicy limiters validation", func() {
 		Expect(validate(QuotaLimiterConfig{Type: "gpu-inventory", Name: "gpu"}, quota)).To(Succeed())
 	})
 
-	It("rejects two physical entries under either spelling", func() {
+	It("accepts two physical entries under either spelling and reports the duplicate", func() {
 		for _, pair := range [][2]string{{"gpu-inventory", "gpu-inventory"}, {"inventory", "gpu-inventory"}, {"gpu-inventory", "inventory"}} {
-			err := validate(QuotaLimiterConfig{Type: pair[0]}, quota, QuotaLimiterConfig{Type: pair[1]})
-			Expect(err).To(MatchError(ContainSubstring("only one physical limiter")), "%v", pair)
+			limiters := []QuotaLimiterConfig{{Type: pair[0]}, quota, {Type: pair[1]}}
+			Expect(validate(limiters...)).To(Succeed(), "%v", pair)
+			Expect(ScalingPolicy{Limiters: limiters}.DuplicatePhysicalLimiters()).To(Equal([]int{2}), "%v", pair)
+
+			c := &Config{}
+			c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{"default": {Limiters: limiters}})
+			Expect(c.EffectiveLimiterTypes()).To(Equal([]LimiterType{LimiterTypeInventory, LimiterTypeQuota}))
+			Expect(c.IgnoredPhysicalLimiters()).To(Equal([]int{2}))
 		}
 	})
 })
