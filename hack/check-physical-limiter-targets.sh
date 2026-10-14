@@ -452,6 +452,27 @@ else
     ok "namespace-scoped controllers are restarted after the write; a cluster-scoped one is not"
 fi
 
+# Enabling the physical limiter COMPOSES with a quota the cluster policy
+# already declares. Every declared limiter is built and both bound, so the
+# quota must survive the write; the command used to replace the whole list.
+case_begin
+printf 'limiters:\n- name: tenant-quota\n  type: quota\n  scope: cluster\n  quotas:\n    H200: 8\n' > "$DEPLOYS/wva-policy.policy"
+run_enable
+rm -f "$DEPLOYS/wva-policy.policy"
+# The payload spans lines: from the patch call up to the next recorded call.
+written="$(awk '/^CALL\[/ { on = 0 } /^CALL\[patch configmap wva-scaling-policy-config -n wva-policy/ { on = 1 } on' "$CALLS")"
+if [ "$RC" -ne 0 ]; then
+    fail "enable failed over a policy that declares a quota: $(tail -15 "$WORK/out")"
+elif [ -z "$written" ]; then
+    fail "enable did not patch the wva-policy ConfigMap: $(grep -c CALL "$CALLS") calls"
+elif [ "$written" = "${written#*name: tenant-quota}" ]; then
+    fail "enabling the physical limiter dropped the quota already in the cluster policy: $written"
+elif [ "$written" = "${written#*type: gpu-inventory}" ]; then
+    fail "enable did not declare the physical limiter: $written"
+else
+    ok "enabling the physical limiter keeps the quota the cluster policy already declares"
+fi
+
 # Messages may not claim more than the code did. Each failure below must end
 # the command non-zero, name the step, and never print "in force".
 # expect_failed <label> <substring the error must carry>
@@ -506,7 +527,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=28
+CASES_EXPECTED=29
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately."
 else

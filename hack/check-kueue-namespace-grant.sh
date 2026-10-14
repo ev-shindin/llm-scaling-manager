@@ -36,7 +36,7 @@ for fn in wva_check_kueue_namespace_read wva_kueue_source_configured check_permi
     }
 done
 
-EXPECT_CASES=18
+EXPECT_CASES=24
 RAN=0
 FAILED=0
 
@@ -158,6 +158,49 @@ check 'an unreadable policy is unknown: warned, not silently no source' \
 check 'unknown source, read already granted -> quiet' \
     'OK get namespaces/wva-ctl' \
     "$(run_check WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_CM_FORBIDDEN=wva-policy STUB_CANI=yes)"
+
+# WVA_LIMITER is a list: one naming quota beside gpu-inventory still reads Kueue.
+check 'a list naming quota with Kueue is a configured source' \
+    'REFUSED get namespaces/wva-ctl' "$(run_check WVA_LIMITER=gpu-inventory,quota)"
+
+# The physical limiter needs node read, which only the admin setup phase grants.
+# Composed with a quota -- named, or added beside a Kueue-bounded quota on a
+# cluster-scoped install -- a controller that cannot list nodes is refused with
+# that remedy, rather than installed into NotReady.
+# run_node_check [VAR=value...] echoes REFUSED, WARNED or OK for
+# wva_check_limiter_node_read over the set wva_limiter_set resolves.
+run_node_check() {
+    : > "$WORK/out"
+    (
+        log_info() { :; }
+        log_success() { :; }
+        log_warning() { echo "WARNED" >> "$WORK/out"; }
+        log_error() { echo "REFUSED" >> "$WORK/out"; printf '%s\n' "$1" > "$WORK/refusal"; exit 1; }
+        kubectl() {
+            case "${STUB_CANI:-no}" in
+                yes) echo yes; return 0 ;;
+                no) echo no; return 1 ;;
+                *) echo 'Error from server (Forbidden): cannot impersonate'; return 1 ;;
+            esac
+        }
+        WVA_SCOPE=cluster WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_CANI=no
+        local kv
+        for kv in "$@"; do eval "$kv"; done
+        wva_check_limiter_node_read "$(wva_limiter_set)" "system:serviceaccount:wva-ctl:wva-controller-manager"
+    )
+    printf '%s' "$(head -1 "$WORK/out")"
+    [ -s "$WORK/out" ] || printf 'OK'
+}
+check 'gpu-inventory,quota without node read -> refused' \
+    'REFUSED' "$(run_node_check WVA_LIMITER=gpu-inventory,quota)"
+check 'the node-read refusal names make setup-prereqs' '1' \
+    "$(run_node_check WVA_LIMITER=gpu-inventory,quota >/dev/null; grep -c 'make setup-prereqs' "$WORK/refusal")"
+check 'a Kueue quota on a cluster-scoped install adds gpu-inventory, so node read is required' \
+    'REFUSED' "$(run_node_check WVA_LIMITER=quota WVA_QUOTA_KUEUE=true)"
+check 'WVA_LIMITER_PHYSICAL=false leaves it out: only a warning' \
+    'WARNED' "$(run_node_check WVA_LIMITER=quota WVA_QUOTA_KUEUE=true WVA_LIMITER_PHYSICAL=false)"
+check 'gpu-inventory,quota with node read -> proceeds' \
+    'OK' "$(run_node_check WVA_LIMITER=gpu-inventory,quota STUB_CANI=yes)"
 
 # Wired into check_permissions -- which --check and the install both run --
 # BEFORE the tenant early-return, or the namespace-scoped default never reaches it.

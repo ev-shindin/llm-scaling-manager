@@ -321,7 +321,7 @@ main() {
         # premise, ScaledObjects are its own output. This reports what is already
         # registered, so the reader knows whether 'adopt' will come up in the plan.
         wva_report_scaledobjects
-        log_success "Preflight passed for ENVIRONMENT=$ENVIRONMENT, WVA_SCOPE=${WVA_SCOPE:-<platform default>}, WVA_LIMITER=${WVA_LIMITER:-none}"
+        log_success "Preflight passed for ENVIRONMENT=$ENVIRONMENT, WVA_SCOPE=${WVA_SCOPE:-<platform default>}, WVA_LIMITER=${WVA_LIMITER:-none} (limiters: $(effective_limiter_summary))"
         exit 0
     fi
 

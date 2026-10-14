@@ -481,8 +481,8 @@ print_summary() {
 
     echo "  Worth knowing:"
     case "$(effective_limiter_summary)" in
-        none) echo "    - No GPU limiter: scaling is UNBOUNDED. Set WVA_LIMITER=gpu-inventory or quota" ;;
-        *)    echo "    - GPU limiter: $(effective_limiter_summary). A workload whose accelerator does not resolve gets no budget and will not scale up" ;;
+        none) echo "    - No GPU limiter: scaling is UNBOUNDED. Set WVA_LIMITER=gpu-inventory, quota, or both (gpu-inventory,quota)" ;;
+        *)    echo "    - GPU limiters: $(effective_limiter_summary), all in force together. A workload whose accelerator does not resolve gets no budget and will not scale up" ;;
     esac
     if [ "${ENABLE_SCALE_TO_ZERO:-false}" = "true" ]; then
         echo "    - Scale-to-zero is ON: an idle model can be parked at 0 and woken on demand"
@@ -500,7 +500,8 @@ print_summary() {
     echo "=========================================="
 }
 
-# effective_limiter_summary echoes the limiter this install declared.
+# effective_limiter_summary echoes the limiter set this install declared
+# (wva_limiter_set), or WVA_LIMITER as given when it cannot be resolved.
 effective_limiter_summary() {
-    echo "${WVA_LIMITER:-none}"
+    wva_limiter_set 2>/dev/null || echo "${WVA_LIMITER:-none}"
 }

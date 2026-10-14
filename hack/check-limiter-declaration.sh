@@ -417,12 +417,101 @@ else
     [ "$(printf '%s\n' "$merged" | yq '.scaleUpThreshold')" = "0.85" ] \
         || fail "the merge lost scaleUpThreshold -- a rejected or truncated policy costs every default in it"
     [ "$(printf '%s\n' "$merged" | yq '.limiters | length')" = "1" ] \
-        || fail "the merge APPENDED instead of replacing; two limiters means the other is silently unenforced"
+        || fail "the merge APPENDED instead of replacing; the install's list is its whole limiter set"
     [ "$(printf '%s\n' "$merged" | yq '.limiters[0].name')" = "install-quota" ] \
         || fail "the merge did not replace the previous limiter: $merged"
     [ "$(printf '%s\n' "$merged" | yq '.limiters[0].namespaceQuotas.tenant-a.H200')" = "8" ] \
         || fail "the budget did not survive the merge: $merged"
     ok "the entry merges into the policy, replacing the old limiters and keeping the rest"
+fi
+
+# ---------------------------------------------------------------------------
+# WVA_LIMITER is a SET. Every limiter in it is built and a decision must fit all
+# of them, so a list declares each one, physical first.
+# ---------------------------------------------------------------------------
+
+# Normalised: physical first, each kind once, separators either commas or spaces.
+case_begin
+got="$(limiter_types_of 'quota,gpu-inventory' 2>&1)"; got2="$(limiter_types_of 'inventory quota quota' 2>&1)"
+if [ "$got" != "gpu-inventory quota" ] || [ "$got2" != "inventory quota" ]; then
+    fail "limiter_types_of did not normalise the set: [$got] [$got2]"
+elif [ "$(limiter_types_of '' 2>&1)" != none ] || [ "$(limiter_types_of none 2>&1)" != none ]; then
+    fail "an empty WVA_LIMITER, or none, is not the empty set"
+else
+    ok "a limiter list is normalised, physical first"
+fi
+
+# Refusals: two physical entries (the controller refuses them too), none beside
+# a limiter, and an unknown kind.
+for bad in 'gpu-inventory,inventory' 'none,quota' 'gpu-inventory,bogus'; do
+    case_begin
+    if ( limiter_types_of "$bad" ) >/dev/null 2>&1; then
+        fail "WVA_LIMITER='$bad' was accepted"
+    else
+        ok "WVA_LIMITER='$bad' is refused"
+    fi
+done
+
+# Both entries, and no IGNORED warning: WVA_QUOTAS belongs to the quota entry
+# beside the physical one, not to the physical one.
+case_begin
+OUT="$(WVA_SCOPE=namespace WVA_WATCH_NS=tenant-a WVA_QUOTAS='H200=8' WVA_QUOTA_KUEUE=true \
+    limiter_set_yaml 'gpu-inventory quota' 2>"$WORK/err")"; RC=$?; ERR="$(cat "$WORK/err")"
+if [ "$RC" -ne 0 ]; then
+    fail "limiter_set_yaml refused a valid set: $ERR"
+else
+    [ "$(printf '%s\n' "$OUT" | yq '.[0].type')" = "gpu-inventory" ] \
+        || fail "the physical entry is not first: $OUT"
+    [ "$(printf '%s\n' "$OUT" | yq '.[1].name')" = "install-quota" ] \
+        || fail "the quota entry is missing: $OUT"
+    [ "$(printf '%s\n' "$OUT" | yq '.[1].kueue.enabled')" = "true" ] \
+        || fail "the quota entry lost its kueue block: $OUT"
+    printf '%s' "$ERR" | grep -q 'IGNORED' \
+        && fail "a composed set warned that WVA_QUOTAS or WVA_QUOTA_KUEUE is IGNORED; the quota takes them: $ERR"
+    ok "a set emits the physical entry first, then the quota, with no IGNORED warning"
+fi
+
+# The installer's own policy REPLACES the whole list with the set it declares.
+case_begin
+merged="$(
+    WVA_SCOPE=namespace WVA_WATCH_NS=tenant-a WVA_QUOTAS='H200=8' \
+        policy_declared_limiters 'gpu-inventory,quota' 'scaleUpThreshold: 0.85
+limiters:
+  - type: gpu-inventory
+  - name: stale
+    type: quota
+    scope: cluster
+    quotas:
+      H200: 1' >/dev/null 2>"$WORK/err"
+    printf '%s\n' "$POLICY_DECLARED"
+)"
+if [ "$(printf '%s\n' "$merged" | yq '.limiters | length')" != "2" ] \
+    || printf '%s' "$merged" | grep -q 'name: stale'; then
+    fail "the install did not replace its list with the declared set: [$merged] $(cat "$WORK/err")"
+else
+    ok "the install declares exactly its set, replacing the old list"
+fi
+
+# A Kueue-bounded quota on a cluster-scoped install gets the physical limiter
+# beside it, so the GPUs it may borrow are checked to exist. Not with
+# WVA_LIMITER_PHYSICAL=false, and not on a namespace-scoped install, which cannot
+# list nodes.
+for spec in 'cluster true true gpu-inventory quota' 'cluster true false quota' \
+            'namespace true true quota' 'cluster false true quota'; do
+    case_begin
+    read -r sc kq ph want <<< "$spec"
+    got="$(WVA_LIMITER=quota WVA_SCOPE="$sc" WVA_QUOTA_KUEUE="$kq" WVA_LIMITER_PHYSICAL="$ph" wva_limiter_set 2>&1)"
+    if [ "$got" != "$want" ]; then
+        fail "wva_limiter_set (scope $sc, kueue $kq, physical $ph) = [$got], want [$want]"
+    else
+        ok "wva_limiter_set (scope $sc, kueue $kq, physical $ph) = $want"
+    fi
+done
+case_begin
+if ( WVA_LIMITER=quota WVA_LIMITER_PHYSICAL=maybe wva_limiter_set ) >/dev/null 2>&1; then
+    fail "WVA_LIMITER_PHYSICAL=maybe was accepted"
+else
+    ok "WVA_LIMITER_PHYSICAL must be true or false"
 fi
 
 # ---------------------------------------------------------------------------
@@ -734,6 +823,52 @@ limiters:
     else
         ok "disabling a fuller policy drops only the limiters list"
     fi
+
+    # ENABLING COMPOSES. Every declared limiter is built and a decision must fit
+    # all of them, so publishing the physical limiter to a policy that already
+    # carries a quota keeps the quota, and the reverse. It used to REPLACE the
+    # list, because a quota entry then silenced a physical one anyway.
+    case_begin
+    run_pl_limiter gpu-inventory 'scaleUpThreshold: 0.85
+limiters:
+  - name: tenant-q
+    type: quota
+    scope: cluster
+    quotas:
+      H200: 8'
+    wrote="$(cat "$WROTE")"
+    if [ "$PLRC" -ne 0 ]; then
+        fail "pl_set_limiter failed while adding the physical limiter beside a quota: $(tail -1 "$WORK/plerr")"
+    elif ! printf '%s' "$wrote" | grep -q 'name: tenant-q'; then
+        fail "enabling the physical limiter DROPPED the quota already declared: $wrote"
+    elif ! printf '%s' "$wrote" | grep -q 'type: gpu-inventory'; then
+        fail "enabling the physical limiter did not declare it: $wrote"
+    elif [ "$(printf '%s' "$wrote" | grep -c 'type: gpu-inventory')" -ne 1 ]; then
+        fail "the physical limiter is declared more than once: $wrote"
+    else
+        ok "enabling the physical limiter keeps the quota beside it"
+    fi
+
+    case_begin
+    run_pl_limiter quota 'limiters:
+  - type: gpu-inventory
+  - name: old-quota
+    type: quota
+    scope: cluster
+    quotas:
+      H200: 1'
+    wrote="$(cat "$WROTE")"
+    if [ "$PLRC" -ne 0 ]; then
+        fail "pl_set_limiter failed while declaring a quota beside the physical limiter: $(tail -1 "$WORK/plerr")"
+    elif ! printf '%s' "$wrote" | grep -q 'type: gpu-inventory'; then
+        fail "declaring a quota DROPPED the physical limiter already declared: $wrote"
+    elif printf '%s' "$wrote" | grep -q 'name: old-quota'; then
+        fail "declaring a quota kept the old quota entry beside it; one kind replaces its own kind: $wrote"
+    elif ! printf '%s' "$wrote" | grep -q 'name: install-quota'; then
+        fail "declaring a quota did not write it: $wrote"
+    else
+        ok "declaring a quota replaces the old quota and keeps the physical limiter"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -1020,7 +1155,7 @@ fi
 # and the check still prints OK -- and the ok() suppression means the count of
 # ok lines is not comparable against a known-good run either.
 case_begin
-CASES_EXPECTED=54
+CASES_EXPECTED=67
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

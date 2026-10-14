@@ -104,6 +104,92 @@ wva_warn_unsupported_scope() {
     log_warning "  To install it without them:  SKIP_CHECKS=true"
 }
 
+# The limiter set an install declares. Here rather than in limiter_policy.sh
+# because the prerequisite checks read it too, and they are sourced, and
+# tested, with only this file beside them.
+#
+# limiter_types_of <list> echoes the limiter set a WVA_LIMITER value names,
+# normalised: space-separated, the physical limiter first, each kind once, and
+# `none` for an empty set. The list separates entries with commas or spaces:
+# `gpu-inventory,quota`.
+#
+# Every declared limiter is built and a decision must fit all of them, so the
+# list is a SET of bounds: the physical one (the GPUs that exist) and the quota
+# (an allowance). At most one physical entry, under either spelling, which the
+# controller also refuses; `none` beside anything else is a contradiction.
+# Refusals go through log_error.
+limiter_types_of() {
+    local list="${1:-none}" t physical="" quota="" saw_none=0 n=0 reset_glob=1
+    case "$-" in *f*) reset_glob=0 ;; esac
+    set -f
+    for t in $(printf '%s' "$list" | tr ',' ' '); do
+        n=$((n + 1))
+        case "$t" in
+            none) saw_none=1 ;;
+            gpu-inventory|inventory)
+                if [ -n "$physical" ] && [ "$physical" != "$t" ]; then
+                    [ "$reset_glob" = 1 ] && set +f
+                    log_error "WVA_LIMITER names the physical limiter twice ('$physical' and '$t'). There is one physical cluster; declare it once."
+                fi
+                physical="$t" ;;
+            quota) quota="quota" ;;
+            *)
+                [ "$reset_glob" = 1 ] && set +f
+                log_error "WVA_LIMITER entries must be 'none', 'gpu-inventory' or 'quota' (a comma-separated list composes them: gpu-inventory,quota), got '$t' in '$list'" ;;
+        esac
+    done
+    [ "$reset_glob" = 1 ] && set +f
+    if [ "$saw_none" = 1 ] && { [ -n "$physical" ] || [ -n "$quota" ]; }; then
+        log_error "WVA_LIMITER='$list' names 'none' beside a limiter. Name the limiters, or none alone."
+    fi
+    if [ "$n" -eq 0 ] || { [ -z "$physical" ] && [ -z "$quota" ]; }; then
+        echo none
+        return 0
+    fi
+    printf '%s\n' "$(printf '%s %s' "$physical" "$quota" | sed 's/^ *//; s/ *$//')"
+}
+
+# limiter_set_has <set> <kind> reports whether a limiter_types_of set holds the
+# kind: `physical` (either spelling) or `quota`.
+limiter_set_has() {
+    case "$2" in
+        physical) case " $1 " in *" gpu-inventory "*|*" inventory "*) return 0 ;; esac ;;
+        quota) case " $1 " in *" quota "*) return 0 ;; esac ;;
+    esac
+    return 1
+}
+
+# wva_limiter_set echoes the limiter set this install declares: WVA_LIMITER,
+# normalised by limiter_types_of, plus a gpu-inventory entry when the quota reads
+# Kueue on a cluster-scoped install.
+#
+# Why the addition. A Kueue-bounded quota is an allowance, and nothing in it
+# checks that the GPUs exist; the physical limiter does. It needs the controller
+# to list nodes, which the admin setup phase grants and check_permissions
+# verifies. It is added unless WVA_LIMITER_PHYSICAL=false, and never on a
+# namespace-scoped install, whose controller cannot list nodes. A gpu-inventory
+# entry WVA_LIMITER names itself is kept whatever WVA_LIMITER_PHYSICAL says.
+wva_limiter_set() {
+    local lset physical_opt="${WVA_LIMITER_PHYSICAL:-true}" scope
+    case "$physical_opt" in
+        true|false) ;;
+        *) log_error "WVA_LIMITER_PHYSICAL must be 'true' or 'false', got '$physical_opt'" ;;
+    esac
+    lset="$(limiter_types_of "${WVA_LIMITER:-none}")" || exit 1
+    if [ "${WVA_QUOTA_KUEUE:-false}" = "true" ] && [ "$physical_opt" = "true" ] \
+        && limiter_set_has "$lset" quota && ! limiter_set_has "$lset" physical; then
+        if declare -F wva_install_scope >/dev/null; then
+            scope="$(wva_install_scope)" || exit 1
+        else
+            scope="${WVA_SCOPE:-namespace}"
+        fi
+        if [ "$scope" = "cluster" ]; then
+            lset="gpu-inventory $lset"
+        fi
+    fi
+    echo "$lset"
+}
+
 # wva_scope_is_tenant reports whether this install manages ONE namespace.
 #
 # It says nothing about what the install creates. That is a question about the

@@ -626,11 +626,15 @@ pl_grant_published_policy_read() {
     log_success "  ${ns}/${sa} may read cluster policy in $target (Role wva-policy-reader, RoleBinding wva-policy-reader-$(wva_ns_suffix "$ns"))"
 }
 
-# pl_set_limiter writes the limiters list into the policy ConfigMap's default
-# entry, preserving every other setting in it.
+# pl_set_limiter writes the limiter into the policy ConfigMap's default entry,
+# preserving every other setting in it.
 #
-# It REPLACES rather than appends: two limiter kinds in one list is not a chain,
-# a quota entry wins over a gpu-inventory one, and the loser is built as nothing.
+# It COMPOSES: an entry of the kind it declares (the physical limiter, or the
+# quota) replaces the existing entries of that kind, and an entry of the other
+# kind is kept. Every declared limiter is built and a decision must fit all of
+# them, so enabling the physical limiter on a policy that already carries a
+# quota bounds by both rather than dropping the quota. `none` still removes
+# every limiter.
 pl_set_limiter() {
     local policy_ns="$1" limiter="$2" current updated exists=0
     # ABSENT and FAILED are different answers, and folding them together
@@ -697,7 +701,7 @@ pl_set_limiter() {
         # installer's own rule would pick -- that namespace gets the budget and
         # every other one gets ZERO, so this command would stop scaling
         # everywhere it was meant to bound it.
-        policy_declared_limiters "$limiter" "$current" default
+        policy_declared_limiters "$limiter" "$current" default compose
         updated="$POLICY_DECLARED"
     fi
     # An entry that is now empty is removed, not written as "{}". A ConfigMap

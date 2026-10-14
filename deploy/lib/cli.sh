@@ -53,14 +53,19 @@ Environment Variables:
                                changing your global current-context (default: unset)
 
  Scaling behaviour
-  WVA_LIMITER                  none (default) | gpu-inventory | quota. none means scaling is UNBOUNDED.
-                               gpu-inventory requires the controller to be able to list nodes.
-  WVA_QUOTAS                   REQUIRED by WVA_LIMITER=quota: the per-accelerator budget, as
+  WVA_LIMITER                  none (default) | gpu-inventory | quota | gpu-inventory,quota. A list
+                               declares every limiter in it, and scaling must fit all of them.
+                               none means scaling is UNBOUNDED. gpu-inventory requires the
+                               controller to be able to list nodes, which make setup-prereqs grants.
+  WVA_LIMITER_PHYSICAL         true (default) | false. With WVA_QUOTA_KUEUE=true on a cluster-scoped
+                               install, a gpu-inventory limiter is added beside the quota so the
+                               GPUs are checked to exist; false leaves it out.
+  WVA_QUOTAS                   REQUIRED when WVA_LIMITER names quota: the per-accelerator budget, as
                                TYPE=N pairs — WVA_QUOTAS='H200=8 A100=4'. Use -1 for no cap on a
                                type. There is no default: a quota limiter with no budget is not
                                unlimited, it is zero for every accelerator, and the fleet freezes.
                                The TYPE is the name WVA resolves, which it logs per variant.
-  WVA_QUOTA_KUEUE              true | false (default). With WVA_LIMITER=quota, also read Kueue: per
+  WVA_QUOTA_KUEUE              true | false (default). With a quota limiter, also read Kueue: per
                                namespace and accelerator type the SMALLER of the Kueue nominal
                                quota and WVA_QUOTAS applies. Name the types in WVA_QUOTAS with -1
                                to let Kueue set the figure: WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true.

@@ -270,8 +270,18 @@ wva_cluster_policy_limiter() {
     fi
     cm="$(printf '%s\n' "$listing" | grep -E "configmap/(wva-)?scaling-policy-config$" | head -1 | cut -d/ -f2 || true)"
     [ -n "$cm" ] || return 0
-    kubectl get configmap "$cm" -n "$policy_ns" -o jsonpath='{.data.default}' 2>/dev/null \
-        | yq -r '.limiters[0].type // ""' 2>/dev/null || true
+    # The physical limiter when the list declares one, wherever it sits: every
+    # declared limiter is built, and it is the one that needs node read. The
+    # first entry alone missed it behind a quota. The types are listed by the
+    # parser and chosen here, in the shell.
+    local types
+    types="$(kubectl get configmap "$cm" -n "$policy_ns" -o jsonpath='{.data.default}' 2>/dev/null \
+        | yq -r '(.limiters // [])[] | .type' 2>/dev/null || true)"
+    if printf '%s\n' "$types" | grep -qxE 'gpu-inventory|inventory'; then
+        echo gpu-inventory
+        return 0
+    fi
+    printf '%s\n' "$types" | head -1
 }
 
 # check_tenant_install enforces the contract for a scope that creates no
@@ -576,7 +586,7 @@ wva_model_server_count() {
 # Sources, in the controller's own terms (internal/controller/policy_namespace.go,
 # mirrored by pl_policy_resolution):
 #
-#   this install's WVA_LIMITER=quota with WVA_QUOTA_KUEUE=true;
+#   this install's WVA_LIMITER naming quota, with WVA_QUOTA_KUEUE=true;
 #   the controller's OWN ConfigMap in WVA_NS -- always: it is the only source
 #     of an admin-owned controller (cluster scope, or WVA_WATCH_NS naming
 #     another namespace), and the fallback of a self-managed one. An upgrade
@@ -590,7 +600,8 @@ wva_model_server_count() {
 # A Forbidden or otherwise unreadable read is "unknown", never "no source": the
 # caller warns rather than staying silent about a source it could not see.
 wva_kueue_source_configured() {
-    if [ "${WVA_LIMITER:-none}" = "quota" ] && [ "${WVA_QUOTA_KUEUE:-false}" = "true" ]; then
+    if limiter_set_has "$(limiter_types_of "${WVA_LIMITER:-none}" 2>/dev/null)" quota \
+        && [ "${WVA_QUOTA_KUEUE:-false}" = "true" ]; then
         echo "WVA_QUOTA_KUEUE=true"
         return 0
     fi
@@ -708,6 +719,12 @@ check_permissions() {
 
     local ns="${WVA_NS}" denied=() sa="system:serviceaccount:${WVA_NS}:wva-controller-manager"
     local kinds kind resource namespaced cluster_denied="" unknown=()
+    # The limiter set this install will declare, printed so the reader sees it
+    # before anything changes -- including a gpu-inventory entry wva_limiter_set
+    # adds beside a Kueue-bounded quota.
+    local lset
+    lset="$(wva_limiter_set)" || exit 1
+    log_info "Limiters this install declares: ${lset}"
 
     # What this install creates, read from the RENDERED overlay rather than
     # inferred from the scope name. The scope does not decide it: the
@@ -846,7 +863,7 @@ $advice"
     # No `declare -F` guard: install.sh sources limiter_policy.sh
     # unconditionally, so a missing function is a broken source tree, and
     # skipping a safety check on it would fail open.
-    if [ "${WVA_LIMITER:-none}" = "quota" ]; then
+    if limiter_set_has "$lset" quota; then
         limiter_entry_yaml quota >/dev/null || exit 1
         log_success "WVA_QUOTAS parses, so the quota limiter can be declared at the end of the install"
     fi
@@ -866,21 +883,37 @@ $advice"
     fi
 
     # What the CONTROLLER will need once it is running.
-    local node_read
+    wva_check_limiter_node_read "$lset" "$sa"
+
+    log_success "Permissions look sufficient"
+}
+
+# wva_check_limiter_node_read <limiter set> <service account> checks the node
+# read a physical limiter needs. With gpu-inventory in the set -- named in
+# WVA_LIMITER, or added beside a Kueue-bounded quota (wva_limiter_set) -- a
+# controller that cannot list nodes is REFUSED, with the remedy: the admin
+# setup phase grants it. Installing anyway leaves a controller that goes
+# NotReady and a fleet that never scales up.
+wva_check_limiter_node_read() {
+    local lset="$1" sa="$2" node_read
     node_read="$(can_i_as "$sa" list nodes)"
-    if [ "${WVA_LIMITER:-none}" = "gpu-inventory" ]; then
+    if limiter_set_has "$lset" physical; then
         case "$node_read" in
             yes)
                 log_success "The controller can list nodes, which the gpu-inventory limiter requires"
                 ;;
             no)
-                log_error "WVA_LIMITER=gpu-inventory needs the controller to list nodes, and $sa cannot.
+                log_error "The limiters '${lset}' include gpu-inventory, which needs the controller to list nodes, and $sa cannot.
 
 A GPU-aware limiter allocates out of per-accelerator pools. Without nodes, a
 variant's accelerator never resolves, it is charged to no pool, it receives no
-budget, and it NEVER SCALES UP — with nothing in the logs to say why.
+budget, and it NEVER SCALES UP — with nothing in the logs to say why. The
+controller would also go NotReady (its gpu-policy readiness check).
 
-Either grant the node read, or install without the limiter (WVA_LIMITER=none)."
+Node read is cluster-scoped; the admin setup phase grants it: have a cluster
+admin run 'make setup-prereqs', then install again. Or install without the
+physical limiter: drop gpu-inventory from WVA_LIMITER, or, when it was added
+beside a Kueue-bounded quota, pass WVA_LIMITER_PHYSICAL=false."
                 ;;
             *)
                 # Cannot impersonate, so this is unanswerable from here. It is not a
@@ -888,7 +921,7 @@ Either grant the node read, or install without the limiter (WVA_LIMITER=none)."
                 # controller publishes wva_node_access_denied if it turns out not to
                 # have it. Say what to watch instead of guessing.
                 log_warning "Could not verify that $sa may list nodes (checking needs impersonate permission, which you do not have)."
-                log_warning "  WVA_LIMITER=gpu-inventory requires it. After the install, confirm with: kubectl get --raw /metrics | grep wva_node_access_denied — 1 means every variant is getting no GPU budget and will not scale up."
+                log_warning "  The gpu-inventory limiter requires it. After the install, confirm with: kubectl get --raw /metrics | grep wva_node_access_denied — 1 means every variant is getting no GPU budget and will not scale up."
                 ;;
         esac
     else
@@ -902,8 +935,6 @@ Either grant the node read, or install without the limiter (WVA_LIMITER=none)."
                 ;;
         esac
     fi
-
-    log_success "Permissions look sufficient"
 }
 
 # wva_report_scaledobjects says what already registers workloads with WVA. It never
