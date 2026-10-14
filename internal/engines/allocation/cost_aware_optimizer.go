@@ -3,11 +3,16 @@ package allocation
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"sort"
+	"strings"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 )
@@ -372,72 +377,278 @@ func variantDemandShare(vcs []domain.VariantCapacity, variantName, role string) 
 	}
 }
 
-// mergeConstraints combines GPU budget constraints from multiple providers.
-// Used by GreedyByScoreOptimizer; lives here since CostAwareOptimizer owns the shared helpers.
+// mergeConstraints combines the per-type GPU budgets of every provider into one
+// budget per accelerator: the INTERSECTION of what they allow, at the smallest
+// figure any of them gives. Used by GreedyByScoreOptimizer and the placement
+// check; lives here since CostAwareOptimizer owns the shared helpers.
+//
+// A type is allowed only if every provider with a view on it allows it. A
+// provider whose Pools are closed (ResourceConstraints.PoolsClosed: physical
+// inventory, a cluster-scope quota) has a view on every type, so a type it does
+// not list is merged as an explicit 0. Before this, the minimum was taken only
+// over the providers that listed a type, so a type one provider omitted passed
+// whenever another listed it: a cluster quota of {H100: 8} beside a physical
+// pool of {H100: 16, A100: 4} let A100 through. An open provider (a
+// namespace-scope quota's aggregate of its namespace caps) bounds only the types
+// it lists and denies nothing, exactly as before. The catch-all "unknown" pool
+// is never zeroed, because physical inventory never lists it and a quota that
+// declares it means it.
+//
+// The types considered are every key of every provider's Pools AND of its
+// NamespacePools. Without the namespace keys, a type a closed provider denied
+// would simply be missing here, and the namespace check reads a missing cluster
+// key as "no cluster bound" -- letting a namespace entry of {A100: 4} re-admit
+// the A100 a cluster quota of {H100: 8} denies.
+//
+// Types are matched by accelerator identity (accelerator.FindKey), not exact
+// string: physical keys are short names ("H100") and quota keys are whatever the
+// operator wrote ("NVIDIA-H100-80GB-HBM3"). The result carries one key per
+// accelerator wherever the providers agree on its budget; see collapseSpellings
+// for which spelling is kept.
+//
+// The unlimited sentinel (Limit < 0) is an unbounded budget, math.MaxInt, so the
+// optimizer allocates the type up to the model's fair-share demand. Leaving it
+// absent would let fairShareRolePick read a 0 budget and silently deny the type,
+// inverting the -1 = unlimited semantic. A finite pool from any provider still
+// wins through the minimum.
 func mergeConstraints(constraints []*ResourceConstraints) map[string]int {
-	merged := make(map[string]int)
+	names := constraintTypeNames(constraints)
+	merged := make(map[string]int, len(names))
+	for _, name := range names {
+		budget, bounded := 0, false
+		for _, c := range constraints {
+			if c == nil {
+				continue
+			}
+			b, ok := clusterBound(c, name)
+			if !ok {
+				continue
+			}
+			if !bounded || b < budget {
+				budget, bounded = b, true
+			}
+		}
+		// A name only a namespace allowlist spells, with no closed provider in
+		// play, has no cluster bound at all: absent, as it always was.
+		if bounded {
+			merged[name] = budget
+		}
+	}
+	return collapseSpellings(merged, func(name string) bool {
+		for _, c := range constraints {
+			if c == nil || !c.PoolsClosed {
+				continue
+			}
+			if _, ok := c.Pools[name]; ok {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// clusterBound is the budget one provider's per-type pools put on the
+// accelerator called name, and whether it bounds it at all.
+//
+// A closed provider bounds every name: by its matching pool, or at 0 when it has
+// none (except "unknown"; see mergeConstraints). It matches by identity in both
+// directions, which is the rule the placement check has always used: its
+// "NVIDIA-H100-80GB-HBM3" pool answers for an "H100", and its "H100" pool for
+// the long name.
+//
+// An open provider bounds only the names it lists, and only through a key at
+// least as broad as name (coversName). Its aggregate of {NVIDIA-H100-80GB-HBM3: 4}
+// bounds that product and nothing else; reading it as a bound on every "H100"
+// would cap an excluded namespace's other H100 products at a figure that was
+// never theirs.
+func clusterBound(c *ResourceConstraints, name string) (int, bool) {
+	var (
+		key    string
+		listed bool
+	)
+	if c.PoolsClosed {
+		key, listed = accelerator.FindKey(c.Pools, name)
+	} else {
+		key, listed = coveringKey(c.Pools, name)
+	}
+	if !listed {
+		if c.PoolsClosed && name != constants.DefaultAcceleratorName {
+			return 0, true
+		}
+		return 0, false
+	}
+	pool := c.Pools[key]
+	if pool.Limit < 0 {
+		return math.MaxInt, true
+	}
+	return pool.Available(), true
+}
+
+// constraintTypeNames is every accelerator spelling any provider uses, in its
+// cluster pools or in any namespace's, sorted so the merge is deterministic.
+func constraintTypeNames(constraints []*ResourceConstraints) []string {
+	seen := map[string]bool{}
 	for _, c := range constraints {
 		if c == nil {
 			continue
 		}
-		for accType, pool := range c.Pools {
-			if pool.Limit < 0 {
-				// Unlimited sentinel: no finite cap. Represent it as an
-				// unbounded budget (math.MaxInt) so the optimizer allocates the
-				// type up to the model's fair-share demand. Leaving it absent
-				// would let fairShareRolePick read a 0 budget and silently deny
-				// the type — inverting the -1 = unlimited semantic. A finite
-				// pool from any provider still wins via the min() below, since
-				// Available() < math.MaxInt; only set the sentinel when no finite
-				// budget is present yet.
-				if _, ok := merged[accType]; !ok {
-					merged[accType] = math.MaxInt
-				}
-				continue
-			}
-			if existing, ok := merged[accType]; !ok || pool.Available() < existing {
-				merged[accType] = pool.Available()
+		for name := range c.Pools {
+			seen[name] = true
+		}
+		for _, perType := range c.NamespacePools {
+			for name := range perType {
+				seen[name] = true
 			}
 		}
 	}
-	return merged
+	return slices.Sorted(maps.Keys(seen))
+}
+
+// coversName reports whether a pool keyed key bounds an accelerator called name:
+// the same name ignoring case, or key is a short name that name reduces to. A
+// long key never covers a short name, nor a different long name, since "H100"
+// may be any of several products and only one of them is key.
+func coversName(key, name string) bool {
+	if strings.EqualFold(key, name) {
+		return true
+	}
+	return accelerator.NormalizeAcceleratorName(key) == key && accelerator.SameName(key, name)
+}
+
+// coveringKey returns the key of pools that covers name (coversName): name
+// itself when present, else the lexically smallest covering key, so the answer
+// does not depend on map order.
+func coveringKey[V any](pools map[string]V, name string) (string, bool) {
+	if _, ok := pools[name]; ok {
+		return name, true
+	}
+	var matches []string
+	for key := range pools {
+		if coversName(key, name) {
+			matches = append(matches, key)
+		}
+	}
+	if len(matches) == 0 {
+		return "", false
+	}
+	return slices.Min(matches), true
+}
+
+// collapseSpellings leaves one key per accelerator where providers spelled it
+// differently but agree on its budget, so a consumer cannot spend the same GPUs
+// once under "H100" and again under "NVIDIA-H100-80GB-HBM3".
+//
+// The spelling kept is the most specific one: a long product name over a short
+// name, then the lexically smallest. Every consumer looks a workload's
+// accelerator up by identity (accelerator.FindKey), under which a short key
+// answers for every product that reduces to it while a long key answers only for
+// itself and its short name. Keeping "H100" where a closed quota granted only
+// "NVIDIA-H100-80GB-HBM3" would therefore admit an "NVIDIA-H100-SXM5-80GB"
+// workload the quota never granted; keeping the long name cannot. Physical keys
+// are always short names, so in practice this keeps the operator's spelling.
+//
+// A short name is folded into a longer one only when that longer spelling is a
+// key of a closed provider (closedKey): only then is the narrower product all
+// there is. An open provider's long key bounds that product alone, and the
+// short name stays to answer for the others. Spellings that differ only in case
+// are always one accelerator and always folded. Where budgets differ the
+// spellings stay apart, because they genuinely name different allowances.
+func collapseSpellings(budgets map[string]int, closedKey func(string) bool) map[string]int {
+	out := make(map[string]int, len(budgets))
+	for name, budget := range budgets {
+		folded := false
+		for other, b := range budgets {
+			if other == name || b != budget || !moreSpecific(other, name) || !accelerator.SameName(other, name) {
+				continue
+			}
+			if strings.EqualFold(other, name) || closedKey(other) {
+				folded = true
+				break
+			}
+		}
+		if !folded {
+			out[name] = budget
+		}
+	}
+	return out
+}
+
+// moreSpecific orders accelerator spellings for collapseSpellings: a long
+// product name before a short name, then lexically. It is a strict total order,
+// so of two spellings exactly one is kept.
+func moreSpecific(a, b string) bool {
+	aLong := accelerator.NormalizeAcceleratorName(a) != a
+	bLong := accelerator.NormalizeAcceleratorName(b) != b
+	if aLong != bLong {
+		return aLong
+	}
+	return a < b
 }
 
 // mergeNamespaceConstraints merges the per-(namespace, accelerator type) pools
-// across providers into available-GPU budgets, taking the most restrictive
-// (minimum available) where providers overlap. Returns nil when no provider
+// across providers into available-GPU budgets. Returns nil when no provider
 // carries namespace pools, so the per-type-only path is unaffected.
 //
 // A namespace present in any provider's NamespacePools is materialized in the
 // result even when its inner map is empty — its presence marks a CLOSED
 // allowlist (deny-all when empty) that the optimizer enforces by allocating
-// only the listed types. An unlimited (-1 sentinel) pool is carried through as
-// a negative budget so the optimizer can distinguish "unlimited" from a finite
-// cap; tighterBudget treats it as +infinity when taking the minimum.
+// only the listed types.
+//
+// Several providers holding one namespace are intersected, like the cluster
+// pools: a type is allowed only if EVERY provider that holds the namespace lists
+// it (by accelerator identity), at the tightest figure among them, and is an
+// explicit 0 otherwise. Taking the minimum only over the providers that listed a
+// type let a second entry of x: {A100: 4} re-admit the A100 that x: {H100: 4}
+// denies. A provider that does not hold the namespace adds no rule for it.
+//
+// An unlimited (-1 sentinel) pool is carried through as a negative budget so
+// the optimizer can distinguish "unlimited" from a finite cap; tighterBudget
+// treats it as +infinity when taking the minimum.
 func mergeNamespaceConstraints(constraints []*ResourceConstraints) map[string]map[string]int {
-	var merged map[string]map[string]int
+	holders := map[string][]map[string]ResourcePool{}
 	for _, c := range constraints {
 		if c == nil {
 			continue
 		}
 		for ns, perType := range c.NamespacePools {
-			if merged == nil {
-				merged = make(map[string]map[string]int)
+			holders[ns] = append(holders[ns], perType)
+		}
+	}
+	if len(holders) == 0 {
+		return nil
+	}
+	merged := make(map[string]map[string]int, len(holders))
+	for ns, pools := range holders {
+		names := map[string]bool{}
+		for _, perType := range pools {
+			for name := range perType {
+				names[name] = true
 			}
-			inner, ok := merged[ns]
-			if !ok {
-				inner = make(map[string]int)
-				merged[ns] = inner // present (even if empty) marks a closed namespace
-			}
-			for accType, pool := range perType {
-				budget := nsPoolBudget(pool)
-				if existing, ok := inner[accType]; ok {
-					inner[accType] = tighterBudget(existing, budget)
+		}
+		inner := make(map[string]int, len(names))
+		for name := range names {
+			for i, perType := range pools {
+				budget := 0 // not listed by this holder: denied
+				if key, listed := accelerator.FindKey(perType, name); listed {
+					budget = nsPoolBudget(perType[key])
+				}
+				if i == 0 {
+					inner[name] = budget
 				} else {
-					inner[accType] = budget
+					inner[name] = tighterBudget(inner[name], budget)
 				}
 			}
 		}
+		// Every holder's allowlist is closed for this namespace, so any spelling
+		// one of them lists is a closed key.
+		merged[ns] = collapseSpellings(inner, func(name string) bool {
+			for _, perType := range pools {
+				if _, ok := perType[name]; ok {
+					return true
+				}
+			}
+			return false
+		}) // present (even if empty) marks a closed namespace
 	}
 	return merged
 }

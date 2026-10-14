@@ -299,8 +299,17 @@ func (i *TypeInventory) AcceleratorTypes() []string {
 	return types
 }
 
+// PoolsClosed reports true: a type no node carries has no GPUs, so physical
+// inventory denies every type it did not discover.
+func (i *TypeInventory) PoolsClosed() bool {
+	return true
+}
+
 // Ensure TypeInventory implements Inventory interface
 var _ Inventory = (*TypeInventory)(nil)
+
+// Ensure TypeInventory declares its pools closed
+var _ ClosedPoolsInventory = (*TypeInventory)(nil)
 
 // soleAcceleratorType returns the only discovered accelerator type, and whether
 // the cluster is homogeneous in that sense. Callers must already hold the lock.

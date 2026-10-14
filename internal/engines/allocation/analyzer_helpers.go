@@ -577,7 +577,10 @@ func allocateForModelPaired(
 			targets[v] += k
 			pickerState[role] = math.Max(0, pickerState[role]-float64(k)*prc)
 			if available != nil {
-				available[accFromVCs(variants, v)] -= k * gpusPerReplicaFromState(stateMap, v)
+				// Debit the key the pick read the budget from, which is the
+				// pool's spelling of the variant's accelerator, not necessarily
+				// the variant's own.
+				available[budgetKey(available, accFromVCs(variants, v))] -= k * gpusPerReplicaFromState(stateMap, v)
 			}
 		}
 		// Update model-level Remaining via the P-anchor role so fairShareValue

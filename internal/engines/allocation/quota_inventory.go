@@ -86,7 +86,17 @@ var (
 	_ Inventory               = (*QuotaInventory)(nil)
 	_ NamespaceAwareInventory = (*QuotaInventory)(nil)
 	_ UsageBasisReporter      = (*QuotaInventory)(nil)
+	_ ClosedPoolsInventory    = (*QuotaInventory)(nil)
 )
+
+// PoolsClosed reports true for a cluster-scope quota, which denies every type
+// the operator did not list. A namespace-scope quota's per-type pools are the
+// sum of its namespace caps and deny nothing: its allowlists are per namespace
+// (NamespaceResourcePools), and a namespace it excludes stays open. Scope is
+// read from the static entry, which never changes after construction.
+func (q *QuotaInventory) PoolsClosed() bool {
+	return q.static.Scope == config.QuotaScopeCluster
+}
 
 // UsageBasis returns ManagedUsage: a quota is an allowance granted to WVA, so
 // only the GPUs WVA's own variants hold may be drawn against it.

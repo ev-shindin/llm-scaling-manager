@@ -83,9 +83,23 @@ type ResourceConstraints struct {
 	// that only impose cluster/per-type constraints. The optimizer caps a
 	// model's allocation at min(per-type pool, this namespace's pool).
 	NamespacePools map[string]map[string]ResourcePool
-	TotalLimit     int
-	TotalUsed      int
-	TotalAvail     int
+	// PoolsClosed reports whether Pools is a CLOSED allowlist: an accelerator
+	// type it does not list has no capacity under this provider, rather than
+	// being outside its concern. Physical inventory is closed (an undiscovered
+	// type has no GPUs), and so is a cluster-scope quota (a type the operator did
+	// not grant is denied). A namespace-scope quota's Pools is NOT closed: it is
+	// the sum of its namespace caps, which bounds the types it lists but denies
+	// nothing, because the closed allowlists of that provider are per namespace,
+	// in NamespacePools.
+	//
+	// It is what lets mergeConstraints intersect providers instead of uniting
+	// them: a type one closed provider omits is merged as an explicit 0, however
+	// generously another provider lists it. False preserves the open reading for
+	// a provider that does not say.
+	PoolsClosed bool
+	TotalLimit  int
+	TotalUsed   int
+	TotalAvail  int
 	// PoolsVersion is the version of the warm-pool figure
 	// (decision.WarmPoolGPUsVersion) that the usage these constraints were
 	// computed against included. Set by the engine that built the usage views,
@@ -156,6 +170,25 @@ type Inventory interface {
 	// GetResourcePools returns per-type resource availability.
 	// Each key is an accelerator type (e.g., "A100", "H100").
 	GetResourcePools() map[string]ResourcePool
+}
+
+// ClosedPoolsInventory is an Inventory that says whether its per-type pools
+// (GetResourcePools) are a closed allowlist, which DefaultLimiter carries onto
+// ResourceConstraints.PoolsClosed. Optional: an inventory that does not
+// implement it is read as open, which is how every provider was read before
+// providers were intersected.
+type ClosedPoolsInventory interface {
+	Inventory
+
+	// PoolsClosed reports whether a type GetResourcePools does not list is
+	// denied by this inventory.
+	PoolsClosed() bool
+}
+
+// poolsClosedOf reports whether inv declares its per-type pools closed.
+func poolsClosedOf(inv Inventory) bool {
+	c, ok := inv.(ClosedPoolsInventory)
+	return ok && c.PoolsClosed()
 }
 
 // NamespaceAwareInventory is an Inventory whose constraints depend on the

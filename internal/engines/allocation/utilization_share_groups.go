@@ -197,16 +197,21 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		if !single {
 			continue // multi-accelerator: a fixed consumer; its GPUs are already out of the free budget
 		}
-		_, nsScoped := availableByNS[req.Namespace]
+		nsBudget, nsScoped := availableByNS[req.Namespace]
 		scope := ""
+		budgets := available
 		if nsScoped {
 			if opts.NamespaceEnabled != nil && !opts.NamespaceEnabled(req.Namespace) {
 				continue
 			}
 			scope = req.Namespace
+			budgets = nsBudget
 		} else if !opts.ClusterIsQuota && !opts.PhysicalGroups {
 			continue
 		}
+		// The group takes the budget's spelling of the accelerator, so models that
+		// spell one GPU differently share one group and its budget is found below.
+		acc = budgetKey(budgets, acc)
 		g := group(acc, scope)
 
 		why := ""
@@ -275,7 +280,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		g.PoolCarve = poolCarve(opts.PoolUnheld, k.acc, k.scope)
 		g.Budget = max(0, free+g.listed-opts.ReserveGPUs-g.PoolCarve)
 		g.PhysicalFree = math.MaxInt
-		if pf, ok := available[k.acc]; ok && pf >= 0 && pf < math.MaxInt {
+		if pf, ok := available[budgetKey(available, k.acc)]; ok && pf >= 0 && pf < math.MaxInt {
 			g.PhysicalFree = pf
 		}
 		slices.SortFunc(g.Roles, func(a, b ShareRole) int { return cmp.Compare(a.Key, b.Key) })
@@ -479,13 +484,17 @@ func shareGrowVariant(vs []variantRecord, stateMap map[string]domain.VariantRepl
 // poolCarve is a group's share of the warm pools' unheld target: a namespace
 // group's own namespace's, the cluster group every namespace's -- a pool in a
 // namespace with its own quota spends the cluster's quota too.
+//
+// A pool's accelerator is matched by identity, since the group carries the
+// budget's spelling and the pool its own.
 func poolCarve(unheld map[string]map[string]int, acc, scope string) int {
 	if scope != "" {
-		return max(0, unheld[scope][acc])
+		byType := unheld[scope]
+		return max(0, byType[budgetKey(byType, acc)])
 	}
 	sum := 0
 	for _, byType := range unheld {
-		sum += max(0, byType[acc])
+		sum += max(0, byType[budgetKey(byType, acc)])
 	}
 	return sum
 }

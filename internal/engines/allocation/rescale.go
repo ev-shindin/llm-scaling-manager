@@ -9,6 +9,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 )
@@ -237,10 +238,15 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 			continue
 		}
 		scope := ""
+		budgets := available
 		if nsScoped {
 			scope = req.Namespace
+			budgets = availableByNS[req.Namespace]
 		}
-		k := groupKey{accType, scope}
+		// Group under the budget's own spelling of the accelerator, so two models
+		// that spell one GPU differently compete for one budget instead of each
+		// being handed all of it, and the reads below find it.
+		k := groupKey{budgetKey(budgets, accType), scope}
 		groups[k] = append(groups[k], req)
 	}
 
@@ -297,8 +303,11 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 		// The water-fill target above intentionally uses the full quota; fills pace
 		// toward it over cycles as physical GPUs free up.
 		fillable := free
+		// The group is keyed by the namespace allowlist's spelling; the cluster
+		// pool may spell the accelerator differently.
+		clusterKey := budgetKey(available, k.accType)
 		if k.scope != "" {
-			if cur, ok := available[k.accType]; ok && cur != math.MaxInt {
+			if cur, ok := available[clusterKey]; ok && cur != math.MaxInt {
 				fillable = min(fillable, cur)
 			}
 		}
@@ -318,8 +327,8 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 				// A namespace fill also draws from the shared physical pool; debit the
 				// finite cluster budget too (mirroring allocateForModel). Bounded by
 				// fillable above, this can never drive the cluster budget negative.
-				if cur, ok := available[k.accType]; ok && cur != math.MaxInt {
-					available[k.accType] -= consumed
+				if cur, ok := available[clusterKey]; ok && cur != math.MaxInt {
+					available[clusterKey] -= consumed
 				}
 			} else {
 				available[k.accType] -= consumed
@@ -485,7 +494,9 @@ func markRoleGPULimited(
 }
 
 // singleAccType returns the accelerator type shared by all variants, or false if
-// they span more than one (multi-accelerator, deferred) or none is set.
+// they span more than one (multi-accelerator, deferred) or none is set. Variants
+// that spell one accelerator differently share it (accelerator.SameName); the
+// first spelling is returned, and callers resolve it against their budget.
 func singleAccType(vcs []variantRecord) (string, bool) {
 	accType := ""
 	for _, vc := range vcs {
@@ -494,7 +505,7 @@ func singleAccType(vcs []variantRecord) (string, bool) {
 		}
 		if accType == "" {
 			accType = vc.AcceleratorName
-		} else if accType != vc.AcceleratorName {
+		} else if !accelerator.SameName(accType, vc.AcceleratorName) {
 			return "", false
 		}
 	}
@@ -511,7 +522,7 @@ func modelCurrentGPUs(req ModelScalingRequest, accType string) int {
 	stateMap := buildStateMap(req.VariantStates)
 	total := 0
 	for _, vc := range records {
-		if vc.AcceleratorName != accType {
+		if !accelerator.SameName(vc.AcceleratorName, accType) {
 			continue
 		}
 		total += stateMap[vc.VariantName].CurrentReplicas * gpusPerReplicaFromState(stateMap, vc.VariantName)
@@ -534,7 +545,7 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 
 		floorGPUs, maxGPUs, maxBounded := 0, 0, true
 		for _, vc := range records {
-			if vc.AcceleratorName != accType {
+			if !accelerator.SameName(vc.AcceleratorName, accType) {
 				continue
 			}
 			g := gpusPerReplicaFromState(stateMap, vc.VariantName)
@@ -618,7 +629,7 @@ func bestVariantForRole(records []variantRecord, stateMap map[string]domain.Vari
 func variantsOnType(vcs []variantRecord, accType string) []variantRecord {
 	out := make([]variantRecord, 0, len(vcs))
 	for _, vc := range vcs {
-		if vc.AcceleratorName == accType {
+		if accelerator.SameName(vc.AcceleratorName, accType) {
 			out = append(out, vc)
 		}
 	}

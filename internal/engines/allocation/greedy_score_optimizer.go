@@ -312,8 +312,11 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 		// draw down infinity) and (b) defeat the fairShareScaleUp stop-check,
 		// whose `== math.MaxInt` guard would then miss it and let the totalGPUs
 		// sum overflow with two or more unlimited types.
-		if cur, clusterCapped := available[accType]; clusterCapped && cur != math.MaxInt {
-			available[accType] -= consumed
+		// accType is the namespace allowlist's spelling when the namespace is
+		// closed, which need not be the cluster pool's: resolve by identity.
+		clusterKey := budgetKey(available, accType)
+		if cur, clusterCapped := available[clusterKey]; clusterCapped && cur != math.MaxInt {
+			available[clusterKey] -= consumed
 		}
 		if nsBudget != nil {
 			// Decrement only finite namespace caps; the unlimited sentinel
@@ -354,15 +357,18 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 // aggregate, which previously let one namespace draw on another's quota). For a
 // listed type: a finite cap binds at min(cluster, cap); an unlimited cap binds
 // at the cluster budget for that type, or is unbounded (math.MaxInt) when the
-// cluster does not constrain it.
+// cluster does not constrain it. The cluster budget is found by accelerator
+// identity, since the namespace allowlist and the cluster pools may spell one
+// GPU differently.
 func effectiveAvailable(available, nsBudget map[string]int) map[string]int {
 	if nsBudget == nil {
 		return maps.Clone(available)
 	}
 	eff := make(map[string]int, len(nsBudget))
 	for accType, nsAvail := range nsBudget {
+		cv, clusterCapped := available[budgetKey(available, accType)]
 		if nsAvail < 0 { // unlimited for this (namespace, type)
-			if cv, ok := available[accType]; ok {
+			if clusterCapped {
 				eff[accType] = cv
 			} else {
 				eff[accType] = math.MaxInt
@@ -370,7 +376,7 @@ func effectiveAvailable(available, nsBudget map[string]int) map[string]int {
 			continue
 		}
 		eff[accType] = nsAvail
-		if cv, ok := available[accType]; ok && cv < nsAvail {
+		if clusterCapped && cv < nsAvail {
 			eff[accType] = cv
 		}
 	}
@@ -408,7 +414,7 @@ func fairShareRolePick(target float64, roles []string, limited gpuLimitTracker) 
 			if gpusPR <= 0 {
 				gpusPR = 1
 			}
-			gpusAvail := available[vc.AcceleratorName]
+			gpusAvail := available[budgetKey(available, vc.AcceleratorName)]
 			if gpusAvail < gpusPR {
 				gpuBlocked = append(gpuBlocked, vc.VariantName)
 				continue

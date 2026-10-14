@@ -21,10 +21,11 @@ import (
 //   - A namespace that appears in any provider's NamespacePools is a CLOSED
 //     allowlist: an accelerator type it does not list is denied outright, and a
 //     listed type is capped at the tighter of its cluster and namespace budgets
-//     (see mergeNamespaceConstraints).
+//     (see mergeNamespaceConstraints and GPUBudgets).
 //   - An accelerator type no provider knows about is denied, matching the
 //     optimizer's treatment of absent constraints as zero capacity rather than
-//     unlimited.
+//     unlimited; so is a type a closed provider omits, which the merge carries
+//     as an explicit 0.
 //
 // No constraints at all means "unknown", which returns true. That mirrors the
 // engine's own fallback when no provider can supply constraints: proceed rather
@@ -36,8 +37,11 @@ func FitsGPUBudget(constraints []*ResourceConstraints, namespace string, demand 
 		return true
 	}
 
-	perType := mergeConstraints(constraints)
-	nsBudgets, nsScoped := mergeNamespaceConstraints(constraints)[namespace]
+	// One map for every branch below, so a workload with no named accelerator
+	// is judged against the same figures as one that names its GPU. It used to
+	// read the namespace allowlist alone, which let a namespace cap of {H100: 4}
+	// wake a workload onto H100s the cluster had none of.
+	budgets, _ := GPUBudgets(constraints, namespace)
 
 	for rawType, need := range demand {
 		if need <= 0 {
@@ -48,43 +52,20 @@ func FitsGPUBudget(constraints []*ResourceConstraints, namespace string, demand 
 		// so it fits if any pool does. Resolving it to a named pool would be a
 		// guess the scheduler is free to contradict; see anyPoolFits.
 		if rawType == constants.DefaultAcceleratorName {
-			if nsScoped {
-				if !anyPoolFits(nsBudgets, need) {
-					return false
-				}
-				continue
-			}
-			if !anyPoolFits(perType, need) {
+			if !anyPoolFits(budgets, need) {
 				return false
 			}
 			continue
 		}
 
-		var budget int
-		if nsScoped {
-			// A namespace present in any provider's NamespacePools is a CLOSED
-			// allowlist, and it — not the cluster aggregate — decides what this
-			// namespace may use. Resolve against it FIRST: a type the namespace
-			// grants as unlimited is legitimately absent from the cluster Pools
-			// (aggregateNamespacePools omits the -1 sentinel), so resolving
-			// against the cluster first would deny a wake the optimizer allows.
-			nsKey, listed := resolveAcceleratorKey(nsBudgets, rawType)
-			if !listed {
-				return false
-			}
-			budget = nsBudgets[nsKey]
-			// Still bounded by the cluster pool where one is known: a namespace
-			// may not be granted more than physically exists.
-			if clusterKey, known := resolveAcceleratorKey(perType, rawType); known {
-				budget = tighterBudget(budget, perType[clusterKey])
-			}
-		} else {
-			accType, known := resolveAcceleratorKey(perType, rawType)
-			if !known {
-				return false
-			}
-			budget = perType[accType]
+		// In a closed namespace the map is the allowlist, so an unlisted type is
+		// denied; on the open path it is the merged cluster pools, where a
+		// missing key is a type no provider knows and is denied too.
+		key, known := resolveAcceleratorKey(budgets, rawType)
+		if !known {
+			return false
 		}
+		budget := budgets[key]
 
 		// A negative budget survives tighterBudget only when every contributing
 		// budget was unlimited.
@@ -122,8 +103,12 @@ func GPUBudgets(constraints []*ResourceConstraints, namespace string) (map[strin
 		return perType, false
 	}
 
-	// Mirrors the namespace branch of FitsGPUBudget: the allowlist decides what the
-	// namespace may use, still bounded by the cluster pool where one is known.
+	// The allowlist decides what the namespace may use, still bounded by the
+	// cluster pool where one is known: a namespace may not be granted more than
+	// physically exists. It is resolved from the allowlist FIRST because a type
+	// the namespace grants as unlimited is legitimately absent from the cluster
+	// pools (aggregateNamespacePools omits the -1 sentinel); resolving against
+	// the cluster first would deny a wake the optimizer allows.
 	budgets := make(map[string]int, len(nsBudgets))
 	for accType, budget := range nsBudgets {
 		if clusterKey, known := resolveAcceleratorKey(perType, accType); known {
@@ -152,6 +137,20 @@ func GPUBudgets(constraints []*ResourceConstraints, namespace string) (map[strin
 // demand check — so they cannot drift in how they reconcile a name.
 func resolveAcceleratorKey(known map[string]int, declared string) (string, bool) {
 	return accelerator.FindKey(known, declared)
+}
+
+// budgetKey is the key of budgets that the accelerator a workload declares is
+// spent from: the identity match (resolveAcceleratorKey), or the declared name
+// itself when budgets holds none, so a read finds no budget and a debit lands
+// where it always did. Every budget read and debit in the optimizers goes
+// through it, because a read by exact string held a variant that declared
+// "NVIDIA-H100-80GB-HBM3" at one replica against a pool keyed "H100" that the
+// placement check, matching by identity, said had room.
+func budgetKey(budgets map[string]int, declared string) string {
+	if key, ok := resolveAcceleratorKey(budgets, declared); ok {
+		return key
+	}
+	return declared
 }
 
 // anyPoolFits reports whether some pool in budgets can take need GPUs.

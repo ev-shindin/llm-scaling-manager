@@ -96,6 +96,7 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 		TotalLimit:   l.inventory.TotalLimit(),
 		TotalUsed:    l.inventory.TotalUsed(),
 		TotalAvail:   l.inventory.TotalAvailable(),
+		PoolsClosed:  poolsClosedOf(l.inventory),
 	}
 
 	// Step 4: For namespace-aware inventories carrying per-namespace caps for the
@@ -115,6 +116,11 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 			rc.NamespacePools = nsPools
 			rc.Pools = aggregateNamespacePools(nsPools)
 			rc.TotalLimit, rc.TotalUsed, rc.TotalAvail = poolTotals(rc.Pools)
+			// The aggregate is a sum of per-namespace allowlists, not an
+			// allowlist itself: a type no namespace lists may still be used by
+			// an excluded namespace, which this provider leaves open. It keeps
+			// bounding the types it lists, through the merge's minimum.
+			rc.PoolsClosed = false
 		}
 	}
 	return rc, nil
