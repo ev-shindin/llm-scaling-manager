@@ -62,7 +62,7 @@ or pass `WVA_DEFAULT_SO=plan|edit|true` to the install. See
 | `IMG` | `ghcr.io/ev-shindin/llm-scaling-manager:main` | controller image |
 | `PROMETHEUS_URL` | detected | the Prometheus the controller reads |
 | `KEDA_HELM_INSTALL` | `false` | install KEDA with Helm |
-| `WVA_LIMITER` | `none` | `none` leaves scaling unbounded except by `maxReplicaCount`; see [bounding GPU usage](../../docs/guides/admin-gpu-bounding/) |
+| `WVA_LIMITER` | `none` | `none` leaves scaling unbounded except by `maxReplicaCount`; `gpu-inventory,quota` bounds by both; see [bounding GPU usage](../../docs/guides/admin-gpu-bounding/) |
 | `SKIP_CHECKS` | `false` | skip the preflight |
 
 `deploy/install.sh --help` prints every variable the installer reads.

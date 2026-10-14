@@ -165,10 +165,9 @@ where the bound must hold, and use a `ResourceQuota` for a tenant you do not
 trust. It also bounds only what the scaling manager asks for: raising `maxReplicaCount` or adding
 a second KEDA trigger bypasses it.
 
-**Declare one kind, not both.** `limiters:` is a list but only one is built, and
-a quota entry wins — declaring `quota` alongside `gpu-inventory` gives the caps
-and no physical limiter at all. The scaling manager names what it dropped rather than doing it
-silently.
+**Both kinds bound together.** Declare `gpu-inventory` and `quota` and both
+apply: a model must fit the GPUs that exist and its allowance. Enabling one kind
+on a policy that already declares the other keeps the other.
 
 ## Configuration
 

@@ -365,7 +365,8 @@ scaling manager asks for; the quota bounds what the cluster admits
 | Quota entry with no entry for an accelerator type | that type is denied | closed |
 | Kueue unreadable, never read since start | the static quota entry alone; with `-1` that is no cap | **open** |
 | Kueue unreadable after a good read | the last good snapshot stays in force | held |
-| Two limiter kinds declared | only the quota is built; the physical limiter is dropped and named as `notEnforced` | **open** on physical capacity |
+| Two limiter kinds declared | both are built; a decision must fit both | closed |
+| One limiter unavailable in a cycle (usage not observed yet, or an error) | skipped and named in the log; the others still bound. Only when every one is unavailable is a decision unchecked; scale-from-zero then uses its last constraints if under 5 minutes old | held |
 | The installer cannot tell where KEDA runs | no external-scaler NetworkPolicy is applied; the installer warns and `make verify-deployment` reports `:9090` open | **open**, and reported |
 | The external-scaler NetworkPolicy names a namespace KEDA does not run in | KEDA's calls are dropped; ScaledObjects go not-Ready and nothing scales | closed |
 

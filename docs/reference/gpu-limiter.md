@@ -43,20 +43,23 @@ kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
 ```
 
 ```
-INFO  GPU limiter constructed  {"type": "quota", "name": "install-quota"}   # bounded
-INFO  GPU limiter constructed  {"type": "none", "name": "no-limiter"}       # NOT bounded
+INFO  GPU limiter constructed  {"type": "quota", "limiters": "quota/install-quota", ...}                    # bounded
+INFO  GPU limiter constructed  {"type": "inventory+quota", "limiters": "inventory+quota/gpu,install-quota", ...}  # bounded by both
+INFO  GPU limiter constructed  {"type": "none", "limiters": "none", "name": "no-limiter"}                  # NOT bounded
 ```
 
-> **Declare one kind, not both.** `limiters:` is a list, and it reads like a set
-> of bounds that all apply. It is not. One limiter is built, and a quota entry
-> wins: declaring `quota` alongside `gpu-inventory` gives you the declared caps
-> and **no physical limiter at all**, so nothing checks whether the GPUs exist.
-> That is the dangerous direction — the config says "bounded by real GPUs too"
-> and a scale-from-zero wake can still be placed onto a full accelerator.
+> **Both kinds bound together.** Declare `gpu-inventory` and `quota` in one
+> `limiters:` list and every one is built: a decision must fit the GPUs that
+> exist **and** the allowance. Declare at most one `gpu-inventory` entry.
 >
-> The scaling manager says so rather than dropping it silently: the ConfigMap parse and the
-> startup log both name what is not enforced (`notEnforced`). Bounding by
-> `min(physical, quota)` is [issue #1003](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1003).
+> **Upgrading from a release that built only one.** There, a quota entry made
+> the physical one inert. Now both apply, which can hold a model lower when
+> other workloads (training jobs included) hold GPUs. For one release the
+> controller logs `Upgrade note (transitional)` with every target the quota
+> alone would have set differently.
+>
+> If one limiter cannot be consulted in a cycle (its usage is not observed yet,
+> or it errors), it is skipped and named in the log; the others still bound.
 
 ## Who is allowed to change the bound
 

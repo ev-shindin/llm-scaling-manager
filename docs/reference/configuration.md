@@ -16,10 +16,11 @@ Every option `deploy/install.sh` reads. Verified against the script: each entry 
 |----------|-------------|---------|
 | `ENVIRONMENT` | Deployment environment (`kubernetes` or `openshift`) | `kubernetes` |
 | `WVA_SCOPE` | `cluster` or `namespace` — see [Scope](../guides/install-cluster-wide/). `namespace` everywhere, including `deploy/install.sh` run directly. It used to be inferred from the platform (`namespace` on OpenShift, `cluster` elsewhere); that inference is gone. Cluster scope still works and warns that it is WIP | `namespace` (`SCOPE=cluster` to change it) |
-| `WVA_LIMITER` | `none`, `gpu-inventory` or `quota` — declares the limiter in the scaling-policy ConfigMap | `none` |
-| `WVA_QUOTAS` | Required by `WVA_LIMITER=quota`: the per-accelerator budget, as `TYPE=N` pairs, separated by spaces or commas (`'H200=8 A100=4'`). `-1` is no cap on that type. No default — an empty quota entry is zero, not unlimited | — |
+| `WVA_LIMITER` | `none`, `gpu-inventory`, `quota`, or a list such as `gpu-inventory,quota` — declares the limiters in the scaling-policy ConfigMap. Every limiter in the list bounds scaling. `gpu-inventory` needs node read, which `make setup-prereqs` grants | `none` |
+| `WVA_LIMITER_PHYSICAL` | With `WVA_QUOTA_KUEUE=true` on a cluster-scoped install, a `gpu-inventory` limiter is added beside the quota so the GPUs are checked to exist. `false` leaves it out | `true` |
+| `WVA_QUOTAS` | Required when `WVA_LIMITER` names `quota`: the per-accelerator budget, as `TYPE=N` pairs, separated by spaces or commas (`'H200=8 A100=4'`). `-1` is no cap on that type. No default — an empty quota entry is zero, not unlimited | — |
 | `WVA_QUOTA_SCOPE` | `namespace` (each managed namespace gets the budget) or `cluster` (one budget across all of them) | `namespace` |
-| `WVA_QUOTA_KUEUE` | With `WVA_LIMITER=quota`: `true` also reads Kueue, and per namespace and accelerator type the **smaller** of the Kueue nominal quota and `WVA_QUOTAS` applies. Kueue's usual flavors name no accelerator type, so name the types in `WVA_QUOTAS` with `-1` and Kueue sets the figure (`WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true`). Needs the Kueue CRDs and, for a namespace-scoped install, the `kueue-reader` prerequisite. See [the Kueue-bounded quotas path](../well-lit-paths/kueue-bounded-quotas/) | `false` |
+| `WVA_QUOTA_KUEUE` | With a quota limiter: `true` also reads Kueue, and per namespace and accelerator type the **smaller** of the Kueue nominal quota and `WVA_QUOTAS` applies. Kueue's usual flavors name no accelerator type, so name the types in `WVA_QUOTAS` with `-1` and Kueue sets the figure (`WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true`). Needs the Kueue CRDs and, for a namespace-scoped install, the `kueue-reader` prerequisite. See [the Kueue-bounded quotas path](../well-lit-paths/kueue-bounded-quotas/) | `false` |
 | `WVA_WATCH_NS` | Namespace a namespace-scoped controller **manages**, when that differs from the one it runs in. Setting it puts the controller outside the namespace it manages, so the workloads' owner does not administer the controller — the arrangement where a GPU bound actually holds. See [the GPU limiter](gpu-limiter.md#the-arrangement-where-the-bound-does-hold) | the controller's own namespace |
 | `INSTALL_PHASE` | `prereqs` (cluster admin: namespace, RBAC, ServiceMonitor, Prometheus/KEDA) \| `wva` (the controller) \| `all`. **Usually leave it unset**: an install that is not told picks the half left to do — `wva` when the caller cannot create cluster-scoped objects, or when the admin half is already in place. `make setup-prereqs` is the `prereqs` phase — see [deploy/](../../deploy/) | auto |
 | `WVA_PROJECT` | Repository root the script installs from | `$PWD` |
@@ -607,6 +608,7 @@ is no CLI flag and no environment variable:
   on the cluster.
 - `{type: quota, ...}` — enforce operator-declared per-accelerator caps, at
   cluster or namespace scope, declared inline.
+- both — every entry is built, and scaling must fit all of them.
 
 Because it is dynamic, the engine rebuilds the limiter when the ConfigMap
 changes and no restart is involved, except for the startup-read case above,

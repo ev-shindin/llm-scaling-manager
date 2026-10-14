@@ -103,6 +103,13 @@ WVA_LIMITER=quota WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true make deploy-wva ...
 WVA_LIMITER_TYPE=quota WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true make enable-physical-limiter
 ```
 
+On a cluster-scoped install, `make deploy-wva` with `WVA_QUOTA_KUEUE=true` also
+declares a `gpu-inventory` limiter beside the quota, so scaling must fit the GPUs
+that exist as well as the Kueue quota. It prints the resulting limiter set. Pass
+`WVA_LIMITER_PHYSICAL=false` to leave it out. The physical limiter needs the
+controller to list nodes; without that read the install refuses and says to run
+`make setup-prereqs`. A namespace-scoped install never adds it.
+
 The LocalQueue read is in the controller's Role (`wva-manager-role`), which is an
 admin-phase object: the tenant's `make deploy-wva` does not apply Roles. So a
 namespace-scoped controller installed before this feature existed needs **a

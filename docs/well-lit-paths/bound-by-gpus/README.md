@@ -43,11 +43,10 @@ autoscaler, not the cluster.
 
 ## Which limiter
 
-They answer different questions, but **declare one, not both**: the controller
-builds a single limiter, and when the `limiters:` list holds both kinds the
-quota wins and the physical limiter is dropped (it is logged as `notEnforced`).
-Pick the question that matters more; a `ResourceQuota` is the backstop for the
-other.
+They answer different questions, and you can **declare both**: every limiter
+in the `limiters:` list is built, and a model must fit all of them. Enabling one
+kind keeps the other. Declare both when the allowance can exceed the GPUs that
+exist, for example a Kueue quota on a shared cluster.
 
 The shipped policy declares no limiter at all. `gpu-inventory` is only the
 default of `WVA_LIMITER_TYPE`, the variable `make enable-physical-limiter` reads.
