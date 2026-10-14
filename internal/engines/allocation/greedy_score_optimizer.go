@@ -6,6 +6,7 @@ import (
 	"math"
 	"sort"
 
+	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -27,6 +28,37 @@ type GreedyByScoreOptimizer struct {
 	// current cycle (set by the engine before Optimize). Zero value = off, which
 	// keeps the additive fair-share behaviour unchanged.
 	Rescale RescaleFlags
+
+	// quiet suppresses the pass's side effects: limit attribution, which
+	// publishes warm-pool headroom and contention and counts limited decisions.
+	// Set only on the copy ShadowOptimize runs.
+	quiet bool
+}
+
+// ShadowOptimize runs the optimizer over constraints for comparison only: it
+// returns the decisions a real pass would make, and publishes nothing, counts
+// nothing and logs nothing. The engine uses it to show, beside the real
+// allocation, what a subset of the limiters alone would have allowed.
+func (o *GreedyByScoreOptimizer) ShadowOptimize(
+	ctx context.Context,
+	requests []ModelScalingRequest,
+	constraints []*ResourceConstraints,
+) []domain.VariantDecision {
+	shadow := *o
+	shadow.quiet = true
+	return shadow.Optimize(ctrl.LoggerInto(ctx, logr.Discard()), requests, constraints)
+}
+
+// attributeGPULimits is applyGPULimitAttribution unless the pass is a shadow.
+func (o *GreedyByScoreOptimizer) attributeGPULimits(
+	decisions []domain.VariantDecision,
+	limited gpuLimitTracker,
+	constraints []*ResourceConstraints,
+) {
+	if o.quiet {
+		return
+	}
+	applyGPULimitAttribution(decisions, limited, constraints)
 }
 
 // NewGreedyByScoreOptimizer creates a new GreedyByScoreOptimizer.
@@ -135,7 +167,7 @@ func (o *GreedyByScoreOptimizer) Optimize(
 		stateMap := buildStateMap(w.req.VariantStates)
 		vcMap := buildCapacityMap(w.records)
 		decisions := buildDecisionsWithOptimizer(w.req, stateMap, vcMap, w.targets, "greedy-by-score")
-		applyGPULimitAttribution(decisions, w.limited, constraints)
+		o.attributeGPULimits(decisions, w.limited, constraints)
 		logger.V(logging.DEBUG).Info("Greedy-by-score optimizer decisions (scale-up)",
 			"modelID", w.req.ModelID,
 			"decisions", len(decisions))

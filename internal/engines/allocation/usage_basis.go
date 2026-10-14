@@ -65,25 +65,17 @@ func UsageBasisOf(v any) UsageBasis {
 	return PhysicalUsage
 }
 
-// PhysicalUsageConfigured reports whether the limiter cfg selects contains any
-// provider that consumes the physical view.
+// PhysicalUsageConfigured reports whether the limiters cfg declares contain any
+// provider that consumes the physical view: true whenever a physical entry is
+// declared, alone or beside quota entries, since every declared limiter is built.
 //
-// It answers from the mode rather than from a built limiter because callers need
-// it before (and independently of) constructing one — notably the usage observer,
-// which starts before either engine. The two must agree, which
+// It answers from the declared types rather than from a built limiter because
+// callers need it before (and independently of) constructing one — notably the
+// usage observer, which starts before either engine. The two must agree, which
 // TestPhysicalUsageConfiguredMatchesTheBuiltLimiter checks by building the
-// limiter for each mode and comparing the bases its providers declare.
-//
-// Unknown modes answer true: observing when nothing needs it costs a walk of the
-// pod cache, while not observing when something does turns the capacity check off
-// silently.
+// limiter for each declaration and comparing the bases its providers declare.
 func PhysicalUsageConfigured(cfg *config.Config) bool {
-	switch cfg.EffectiveLimiterMode() {
-	case config.LimiterTypeNone, config.LimiterTypeQuota:
-		return false
-	default:
-		return true
-	}
+	return cfg.HasPhysicalLimiter()
 }
 
 // NodeUsageWanted reports whether the GPU usage refresher should walk the
@@ -102,10 +94,11 @@ func NodeUsageWanted(cfg *config.Config, namespaceScoped bool) bool {
 // a mixed set of providers from one place.
 //
 // Each view is the (cluster per-type, per-namespace per-type) pair that
-// ComputeConstraints consumes. A view may be nil, meaning "not observed": callers
-// must check NeedsMissingView before computing constraints, because a nil map is
-// indistinguishable at the provider from a confident claim that nothing is in
-// use, and a provider told nothing is in use reports its whole capacity free.
+// ComputeConstraints consumes. A view may be nil, meaning "not observed": a
+// provider that needs it must not be called (ComputeAvailableConstraints skips
+// it), because a nil map is indistinguishable at the provider from a confident
+// claim that nothing is in use, and a provider told nothing is in use reports its
+// whole capacity free.
 type GPUUsageViews struct {
 	// PhysicalByType / PhysicalByNamespace: every GPU held on the cluster's GPU
 	// nodes (see internal/gpuusage).
@@ -144,18 +137,4 @@ func (v GPUUsageViews) Has(basis UsageBasis) bool {
 		return v.ManagedByType != nil
 	}
 	return v.PhysicalByType != nil
-}
-
-// MissingBasis returns the first basis some provider needs that has not been
-// observed, and whether there is one. Callers use it to decide between computing
-// constraints and falling back to "unknown" — a decision that must be taken
-// before any provider is called, since asking a provider with a nil view yields a
-// confident-looking constraint built on no evidence.
-func (v GPUUsageViews) MissingBasis(providers []ConstraintProvider) (UsageBasis, bool) {
-	for _, cp := range providers {
-		if basis := UsageBasisOf(cp); !v.Has(basis) {
-			return basis, true
-		}
-	}
-	return PhysicalUsage, false
 }

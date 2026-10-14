@@ -62,9 +62,10 @@ func (l *DefaultLimiter) UsageBasis() UsageBasis {
 // a quota but zero current usage must still appear here (with an empty inner
 // map) for its caps to be materialized and enforced.
 //
-// Remaining gap (tracked by the limiter chain, sub-issue #1003): composing a
-// physical-inventory limiter with a quota limiter as min(physical, quota) within
-// a single ComputeConstraints. See docs/reference/quota-limiter.md.
+// A physical-inventory limiter and quota limiters compose as separate
+// DefaultLimiters grouped in a CompositeLimiter, not inside one
+// ComputeConstraints: each is fed its own usage basis, and the optimizer
+// intersects their constraints. See docs/reference/quota-limiter.md.
 func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map[string]int, usageByNamespace map[string]map[string]int) (*ResourceConstraints, error) {
 	// Step 1: Refresh inventory to get latest limits from the cluster
 	//

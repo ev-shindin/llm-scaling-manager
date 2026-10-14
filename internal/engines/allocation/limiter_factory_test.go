@@ -9,7 +9,7 @@ import (
 
 // configWithLimiters builds a test Config whose global "default" saturation
 // entry declares the given inline limiters — the sole source of limiter
-// selection that NewLimiterFromConfig consults (via EffectiveLimiterMode /
+// selection that NewLimiterFromConfig consults (via EffectiveLimiterTypes /
 // EffectiveQuotaEntries).
 func configWithLimiters(limiters ...config.QuotaLimiterConfig) *config.Config {
 	GinkgoHelper()
@@ -83,5 +83,64 @@ var _ = Describe("NewLimiterFromConfig", func() {
 		Expect(comp.Constituents()).To(HaveLen(2))
 		Expect(comp.Constituents()[0].Name()).To(Equal("cluster-quota"))
 		Expect(comp.Constituents()[1].Name()).To(Equal("namespace-quota"))
+	})
+
+	// A quota entry used to select quota mode outright, and the physical entry
+	// beside it was never built: the policy read as bounded by real GPUs while
+	// nothing consulted them.
+	It("builds the physical limiter AND every quota entry when both are declared", func() {
+		for _, physical := range []string{"gpu-inventory", "inventory"} {
+			cfg := configWithLimiters(
+				config.QuotaLimiterConfig{
+					Name: "tenant-quota", Type: "quota", Scope: config.QuotaScopeNamespace,
+					NamespaceQuotas: map[string]map[string]int{"team-a": {"H100": 8}},
+				},
+				config.QuotaLimiterConfig{Type: physical, Name: "gpu"},
+				config.QuotaLimiterConfig{
+					Name: "cluster-quota", Type: "quota", Scope: config.QuotaScopeCluster,
+					ClusterQuotas: map[string]int{"H100": 16},
+				},
+			)
+			l, err := NewLimiterFromConfig(cfg, nil)
+			Expect(err).NotTo(HaveOccurred())
+
+			comp, ok := l.(*CompositeLimiter)
+			Expect(ok).To(BeTrue(), "a composed set should produce a CompositeLimiter")
+			providers := ConstraintProvidersFrom(comp)
+			names := make([]string, 0, len(providers))
+			bases := make([]UsageBasis, 0, len(providers))
+			for _, cp := range providers {
+				names = append(names, cp.Name())
+				bases = append(bases, UsageBasisOf(cp))
+			}
+			Expect(names).To(Equal([]string{"gpu-limiter", "tenant-quota", "cluster-quota"}),
+				"physical first, then every quota entry in declared order")
+			Expect(bases).To(Equal([]UsageBasis{PhysicalUsage, ManagedUsage, ManagedUsage}),
+				"the physical limiter counts every GPU on the nodes; a quota only the scaling manager's pods")
+		}
+	})
+})
+
+var _ = Describe("LimiterSignature", func() {
+	quota := config.QuotaLimiterConfig{
+		Name: "cluster-quota", Type: "quota", Scope: config.QuotaScopeCluster,
+		ClusterQuotas: map[string]int{"H100": 16},
+	}
+
+	It("changes when a physical entry is added beside a quota, or removed", func() {
+		quotaOnly := LimiterSignature(configWithLimiters(quota))
+		composed := LimiterSignature(configWithLimiters(config.QuotaLimiterConfig{Type: "gpu-inventory"}, quota))
+		Expect(composed).NotTo(Equal(quotaOnly))
+		Expect(LimiterSignature(configWithLimiters(quota))).To(Equal(quotaOnly), "removing it restores the signature")
+	})
+
+	It("changes when the physical entry itself changes", func() {
+		Expect(LimiterSignature(configWithLimiters(config.QuotaLimiterConfig{Type: "gpu-inventory", Name: "a"}, quota))).
+			NotTo(Equal(LimiterSignature(configWithLimiters(config.QuotaLimiterConfig{Type: "gpu-inventory", Name: "b"}, quota))))
+	})
+
+	It("is stable for equal configs", func() {
+		Expect(LimiterSignature(configWithLimiters(config.QuotaLimiterConfig{Type: "gpu-inventory"}, quota))).
+			To(Equal(LimiterSignature(configWithLimiters(config.QuotaLimiterConfig{Type: "gpu-inventory"}, quota))))
 	})
 })

@@ -59,7 +59,7 @@ func applyGPULimitAttribution(
 	defer func() {
 		now := time.Now()
 		decision.PublishGPUContention(contended, now)
-		decision.PublishHeadroom(namespaceHeadroom(constraints), poolsVersionOf(constraints), now)
+		publishHeadroom(constraints, now)
 	}()
 
 	if len(limited) == 0 {
@@ -88,17 +88,60 @@ func applyGPULimitAttribution(
 }
 
 // namespaceHeadroom is how many GPUs of each accelerator each namespace may
-// still take, across every provider, tightest bound winning.
+// still take, across every provider, tightest bound winning -- the closed
+// cluster-scope bound (clusterHeadroom) included, as GPUBudgets bounds a
+// namespace's allowance by the cluster pools: a namespace may not be granted
+// more than the cluster has free.
 //
-// Only namespaces some provider actually CAPS appear. A namespace nobody bounds
+// Only namespaces some provider actually CAPS appear. A namespace nobody caps
 // is absent rather than present-with-a-large-number, because "unconstrained" and
 // "a lot left" are different answers and a caller has to be able to tell them
-// apart -- a warm pool must grow freely in the first case.
+// apart -- a warm pool must grow freely in the first case. It is still bounded
+// by the cluster figure, which is published beside this (Headroom.Cluster).
 //
 // Mirrors effectiveAvailable: a negative Limit is the unlimited sentinel and
-// imposes no bound, and an accelerator a namespace's allowlist does not name is
-// a hard deny, which is zero rather than absent.
+// imposes no namespace bound, and an accelerator a namespace's allowlist does
+// not name is a hard deny, which is zero rather than absent.
 func namespaceHeadroom(constraints []*ResourceConstraints) map[string]map[string]int {
+	out := namespaceAllowance(constraints)
+	cluster := clusterHeadroom(constraints)
+	if cluster == nil {
+		return out
+	}
+	for _, perType := range out {
+		for accType, free := range perType {
+			if key, ok := accelerator.FindKey(cluster, accType); ok {
+				perType[accType] = min(free, cluster[key])
+			}
+		}
+	}
+	return out
+}
+
+// clusterHeadroom is the free GPUs per accelerator under every closed
+// cluster-scope provider (the physical inventory, a cluster-scope quota), merged
+// as the optimizer merges them, or nil when no closed provider is in force. A
+// namespace-scope quota's aggregate is left out: it is open, and it bounds a
+// namespace through that namespace's own allowance instead.
+func clusterHeadroom(constraints []*ResourceConstraints) map[string]int {
+	closed := closedConstraints(constraints)
+	if len(closed) == 0 {
+		return nil
+	}
+	return mergeConstraints(closed)
+}
+
+// publishHeadroom publishes the warm pool's headroom from one cycle's
+// constraints: each capped namespace's allowance and the closed cluster-scope
+// bound.
+func publishHeadroom(constraints []*ResourceConstraints, now time.Time) {
+	decision.PublishHeadroomBounds(namespaceHeadroom(constraints), clusterHeadroom(constraints),
+		poolsVersionOf(constraints), now)
+}
+
+// namespaceAllowance is the free GPUs per (namespace, accelerator) under the
+// namespace pools alone, tightest provider winning.
+func namespaceAllowance(constraints []*ResourceConstraints) map[string]map[string]int {
 	out := map[string]map[string]int{}
 	for _, c := range constraints {
 		if c == nil {
@@ -194,7 +237,7 @@ func bindingProvider(constraints []*ResourceConstraints, namespace, accType stri
 // constraints to headroom stays in one place and every publisher agrees about
 // what an absent namespace means.
 func PublishNamespaceHeadroom(constraints []*ResourceConstraints, now time.Time) {
-	decision.PublishHeadroom(namespaceHeadroom(constraints), poolsVersionOf(constraints), now)
+	publishHeadroom(constraints, now)
 }
 
 // PublishUnboundedHeadroom records that NO limiter bounds any namespace, as of

@@ -612,7 +612,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Build the initial GPU limiter from the effective limiter mode — the
+		// Build the initial GPU limiter from every declared limiter — the
 		// limiters: list on the saturation "default" config, which is the sole
 		// source. The ConfigMaps were bootstrapped above, so the selection is
 		// already visible here. The engine rebuilds the limiter live (see
@@ -622,7 +622,8 @@ func main() {
 			setupLog.Error(err, "failed to build GPU limiter")
 			return err
 		}
-		setupLog.Info("GPU limiter constructed", "type", cfg.EffectiveLimiterMode(), "name", gpuLimiter.Name())
+		setupLog.Info("GPU limiter constructed", "type", cfg.LimiterKinds(), "limiters", cfg.EffectiveLimiterSummary(),
+			"name", gpuLimiter.Name())
 
 		// Declaring no limiter is a legitimate configuration, but it is worth saying
 		// out loud: it means scaling is bounded by nothing WVA knows about. The
@@ -630,36 +631,24 @@ func main() {
 		// published without a capacity check, so a variant can be woken onto an
 		// accelerator that is already full. There is no longer a hidden default
 		// limiter making this safe.
-		if cfg.EffectiveLimiterMode() == config.LimiterTypeNone {
+		if !cfg.LimitersDeclared() {
 			setupLog.Info("No limiters declared in the saturation-scaling ConfigMap: scaling is " +
 				"UNCONSTRAINED. The optimizer allocates without a GPU budget and scale-from-zero " +
 				"wakes are published without a capacity check. Add a limiters: entry " +
 				"(gpu-inventory or quota) to bound scaling.")
 		}
 
-		// A limiters: list with more than one kind reads as several bounds that all
-		// apply. Only one is built, quota wins, and the physical one is dropped —
-		// so the fleet is bounded by the declared allowance while nothing checks
-		// whether the GPUs exist. Said at startup as well as at ConfigMap parse,
-		// because this is where an operator looks to see what is limiting them.
-		if dropped := cfg.UnenforcedLimiterTypes(); len(dropped) > 0 {
-			setupLog.Info("WARNING: declared limiters that are NOT enforced: a quota entry selects the "+
-				"quota limiter, and it is the only one built. Physical GPU capacity is not "+
-				"consulted, so scaling is bounded by the declared allowance alone. Declare one "+
-				"kind, or track issue #1003 for bounding by min(physical, quota)",
-				"notEnforced", dropped, "enforcing", cfg.EffectiveLimiterMode())
-		}
-
-		// Quota mode means "no physical-capacity discovery" — including the
-		// inventory-collection call in the saturation engine. We honor that
+		// Quota entries alone mean "no physical-capacity discovery" — including
+		// the inventory-collection call in the saturation engine. We honor that
 		// at the call site (see scalingpolicy.ShouldCollectClusterInventory),
 		// but warn loudly here so an operator who explicitly enabled
 		// WVA_LIMITED_MODE sees that their inventory log will be suppressed.
-		if cfg.EffectiveLimiterMode() == config.LimiterTypeQuota && cfg.LimitedModeEnabled() {
-			setupLog.Info("Quota limiter mode is active; cluster inventory collection is disabled "+
-				"despite WVA_LIMITED_MODE=true (no Node API access in quota mode). "+
-				"To re-enable cluster inventory logging, switch to inventory mode.",
-				"limiterType", cfg.EffectiveLimiterMode(),
+		// A quota beside a physical entry no longer suppresses it: both are built.
+		if cfg.LimitedModeEnabled() && cfg.LimitersDeclared() && !cfg.HasPhysicalLimiter() {
+			setupLog.Info("Only quota limiters are declared; cluster inventory collection is disabled "+
+				"despite WVA_LIMITED_MODE=true (no Node API access without a physical limiter). "+
+				"To re-enable cluster inventory logging, declare a gpu-inventory limiter.",
+				"limiters", cfg.EffectiveLimiterSummary(),
 				"limitedModeEnabled", cfg.LimitedModeEnabled())
 		}
 
@@ -982,24 +971,9 @@ func main() {
 	// nothing like the alternative: every variant quietly charged to no accelerator
 	// pool, given no budget, and never scaling up again.
 	if err := mgr.AddReadyzCheck("gpu-policy", func(req *http.Request) error {
-		if cfg.EffectiveLimiterMode() != config.LimiterTypeInventory {
-			return nil
-		}
-		// Ask the API server, rather than reading the flag the optimization loop
-		// sets. Reading the flag made this a ONE-WAY LATCH, and the loop that would
-		// have cleared it runs downstream of the very thing going NotReady breaks:
-		// no endpoints on the external-scaler Service, so KEDA stops calling, so the
-		// registry empties on its TTL, so the optimizer returns early every cycle
-		// and never retries node discovery. Granting the RBAC — which is exactly
-		// what the error below tells an admin to do — would not have recovered it.
-		// Only deleting the pod would, and a transient Forbidden during RBAC
-		// propagation would have parked the controller permanently.
-		if err := nodeReadProbe(req.Context(), policyProbe); err != nil {
-			return fmt.Errorf("cluster policy declares a gpu-inventory limiter but this controller may not list nodes: %w. "+
-				"Every variant would be charged to no accelerator pool, receive no GPU budget and never scale up. "+
-				"Grant its ServiceAccount get/list/watch on nodes, or remove the limiter from cluster policy", err)
-		}
-		return nil
+		return gpuPolicyReady(req.Context(), cfg, func(ctx context.Context) error {
+			return nodeReadProbe(ctx, policyProbe)
+		})
 	}); err != nil {
 		setupLog.Error(err, "unable to set up the GPU policy ready check")
 		os.Exit(1)
@@ -1041,6 +1015,36 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// gpuPolicyReady is the "gpu-policy" readiness check: when cluster policy
+// declares a physical limiter -- alone, or beside quota entries, since every
+// declared limiter is built -- the controller must be able to list nodes.
+//
+// Armed by HasPhysicalLimiter, not by a single limiter mode: while a quota entry
+// collapsed the policy to quota mode, the gate went quiet exactly when a quota
+// was added beside the physical entry, and a composed set without node read
+// would leave the physical limiter failing every cycle.
+//
+// probe asks the API server, rather than reading the flag the optimization loop
+// sets. Reading the flag made this a ONE-WAY LATCH, and the loop that would have
+// cleared it runs downstream of the very thing going NotReady breaks: no
+// endpoints on the external-scaler Service, so KEDA stops calling, so the
+// registry empties on its TTL, so the optimizer returns early every cycle and
+// never retries node discovery. Granting the RBAC — which is exactly what the
+// error below tells an admin to do — would not have recovered it. Only deleting
+// the pod would, and a transient Forbidden during RBAC propagation would have
+// parked the controller permanently.
+func gpuPolicyReady(ctx context.Context, cfg *config.Config, probe func(context.Context) error) error {
+	if !cfg.HasPhysicalLimiter() {
+		return nil
+	}
+	if err := probe(ctx); err != nil {
+		return fmt.Errorf("cluster policy declares a gpu-inventory limiter but this controller may not list nodes: %w. "+
+			"Every variant would be charged to no accelerator pool, receive no GPU budget and never scale up. "+
+			"Grant its ServiceAccount get/list/watch on nodes, or remove the limiter from cluster policy", err)
+	}
+	return nil
 }
 
 // nodeReadProbeCache rate-limits the readiness gate's node check. A readiness

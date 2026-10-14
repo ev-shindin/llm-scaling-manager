@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"slices"
 	"time"
 )
 
@@ -224,13 +223,13 @@ type ScalingPolicy struct {
 
 	// Limiters is the sole source that selects the GPU limiter for the scaling
 	// pipeline; it is applied live (no restart) and is honored only on the cluster
-	// "default" entry (a budget-scope setting, like EnableRescale). A limiters list
-	// selects a single mode — a quota entry wins over any gpu-inventory entry.
-	// Each entry is either
-	//   - {type: gpu-inventory}  — physical GPU limiter, no quota fields; or
+	// "default" entry (a budget-scope setting, like EnableRescale). Every entry
+	// is built, and a decision must fit all of them. Each entry is either
+	//   - {type: gpu-inventory}  — physical GPU limiter, no quota fields; at most
+	//     one (the "inventory" alias counts too); or
 	//   - {type: quota, ...}     — an inline quota entry (see QuotaLimiterConfig).
-	// With no limiters declared, the physical-inventory limiter is used.
-	// See Config.EffectiveLimiterMode / Config.EffectiveQuotaEntries.
+	// With no limiters declared, nothing limits.
+	// See Config.EffectiveLimiterTypes / Config.EffectiveQuotaEntries.
 	Limiters []QuotaLimiterConfig `yaml:"limiters,omitempty"`
 
 	// Optimizer selects and configures the fleet's optimizer. Like Limiters it is
@@ -606,7 +605,7 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 		c.ScaleFromZero = override.ScaleFromZero
 	}
 	// Limiters is intentionally NOT merged: it is a cluster-"default"-scope setting
-	// read only from the global default entry (see Config.EffectiveLimiterMode), so
+	// read only from the global default entry (see Config.EffectiveLimiterTypes), so
 	// a per-model override's limiters would never be consumed. Optimizer is not
 	// merged for the same reason (see Config.UtilizationShare).
 	if override.ModelID != "" {
@@ -691,20 +690,28 @@ func (c *ScalingPolicy) Validate() error {
 }
 
 // validateLimiters checks the inline Limiters list. gpu-inventory/inventory
-// entries must carry no quota fields; quota entries are validated end-to-end by
-// the existing QuotaLimiterEntries.Validate() (name uniqueness, scope, per-type
+// entries must carry no quota fields, and at most one may be declared under
+// either spelling: there is one physical cluster, and a second entry would
+// describe the same GPUs twice. Quota entries are validated end-to-end by the
+// existing QuotaLimiterEntries.Validate() (name uniqueness, scope, per-type
 // ranges), so the inline and file-based quota schemas stay identical.
 func (c *ScalingPolicy) validateLimiters() error {
 	if len(c.Limiters) == 0 {
 		return nil
 	}
 	var quotaOnes []QuotaLimiterConfig
+	physicalAt := -1
 	for i, l := range c.Limiters {
 		switch l.Type {
 		case limiterTypeGPUInventory, string(LimiterTypeInventory):
 			if l.Scope != "" || len(l.ClusterQuotas) > 0 || len(l.NamespaceQuotas) > 0 || len(l.Exclude) > 0 || l.Kueue != nil {
 				return fmt.Errorf("limiters[%d] (type %q): must not set quota fields (scope/quotas/namespaceQuotas/exclude/kueue)", i, l.Type)
 			}
+			if physicalAt >= 0 {
+				return fmt.Errorf("limiters[%d] (type %q): only one physical limiter may be declared; limiters[%d] (type %q) already is",
+					i, l.Type, physicalAt, c.Limiters[physicalAt].Type)
+			}
+			physicalAt = i
 		case string(LimiterTypeQuota):
 			quotaOnes = append(quotaOnes, l)
 		default:
@@ -719,47 +726,6 @@ func (c *ScalingPolicy) validateLimiters() error {
 		}
 	}
 	return nil
-}
-
-// UnenforcedLimiterTypes returns the limiter types this policy declares that
-// will NOT be built, in declaration order and de-duplicated. Empty when
-// everything declared is enforced.
-//
-// The limiters: list reads like a set of bounds that all apply. It is not:
-// Config.EffectiveLimiterMode collapses it to ONE mode — quota if any entry is
-// quota — and NewLimiterFromConfig builds only that. So a policy declaring both
-// quota and gpu-inventory gets the quota caps and NO physical limiter at all,
-// which is the dangerous direction: the operator reads the config as "bounded by
-// real GPUs as well" while nothing consults physical capacity, and a
-// scale-from-zero wake can be placed onto an accelerator that is already full.
-//
-// Bounding by min(physical, quota) is issue #1003. Until that exists, the drop
-// has to be visible — validateLimiters deliberately does not reject the
-// combination, because refusing a config that used to install is a worse failure
-// than one that says what it is doing.
-func (c ScalingPolicy) UnenforcedLimiterTypes() []string {
-	if len(c.Limiters) == 0 {
-		return nil
-	}
-	hasQuota := false
-	for _, l := range c.Limiters {
-		if l.Type == string(LimiterTypeQuota) {
-			hasQuota = true
-			break
-		}
-	}
-	if !hasQuota {
-		// Every entry is a physical one, and the inventory limiter is built.
-		return nil
-	}
-	var dropped []string
-	for _, l := range c.Limiters {
-		if l.Type == string(LimiterTypeQuota) || slices.Contains(dropped, l.Type) {
-			continue
-		}
-		dropped = append(dropped, l.Type)
-	}
-	return dropped
 }
 
 // AnalyzerScore returns the AnalyzerScoreConfig.Score for the named analyzer,

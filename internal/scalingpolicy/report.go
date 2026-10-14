@@ -208,9 +208,10 @@ func joinSorted(values []string) string {
 //     SCALES UP. Nothing errors; it simply sits at its current replica count.
 //
 // Reported once per change per variant, so a persistent misconfiguration does not
-// print every cycle.
-func (p *ChangeReporter) ReportUnresolvedAccelerator(ctx context.Context, namespace, variant, limiterMode string) {
-	limited := limiterMode != "" && limiterMode != string(config.LimiterTypeNone)
+// print every cycle. limiter is Config.EffectiveLimiterSummary: "none" (or empty)
+// when no limiter is declared, otherwise the limiters in force.
+func (p *ChangeReporter) ReportUnresolvedAccelerator(ctx context.Context, namespace, variant, limiter string) {
+	limited := limiter != "" && limiter != string(config.LimiterTypeNone)
 	if !p.changed("accel|"+namespace+"/"+variant, strconv.FormatBool(limited)) {
 		return
 	}
@@ -220,7 +221,7 @@ func (p *ChangeReporter) ReportUnresolvedAccelerator(ctx context.Context, namesp
 		logger.Info("Accelerator not resolved and a GPU limiter is declared: this variant will "+
 			"NOT be allocated any GPU budget and therefore will not scale up. Set a GPU product "+
 			"key in the workload's nodeSelector or nodeAffinity.",
-			"namespace", namespace, "variant", variant, "limiter", limiterMode)
+			"namespace", namespace, "variant", variant, "limiter", limiter)
 		return
 	}
 	logger.Info("Accelerator not resolved: this variant's GPUs are charged to no accelerator "+

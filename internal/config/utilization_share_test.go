@@ -347,7 +347,7 @@ optimizer:
 			_, selected, err := c.UtilizationShare()
 			Expect(selected).To(BeFalse())
 			Expect(err).To(MatchError(ContainSubstring(msg)))
-			Expect(c.EffectiveLimiterMode()).To(Equal(LimiterTypeQuota))
+			Expect(c.EffectiveLimiterTypes()).To(Equal([]LimiterType{LimiterTypeQuota}))
 			Expect(c.EffectiveQuotaEntries()).To(HaveLen(1))
 		},
 		Entry("a type error", `
@@ -411,7 +411,7 @@ optimizer:
 		_, selected, err := c.UtilizationShare()
 		Expect(selected).To(BeFalse())
 		Expect(err).To(MatchError(ContainSubstring("optimizer")))
-		Expect(c.EffectiveLimiterMode()).To(Equal(LimiterTypeQuota))
+		Expect(c.EffectiveLimiterTypes()).To(Equal([]LimiterType{LimiterTypeQuota}))
 	})
 
 	It("ignores the global map's optimizer once a separated cluster policy has none", func() {

@@ -72,7 +72,7 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 			continue
 		}
 		// limiters: is a cluster-"default"-scope setting read only from the global
-		// default entry (Config.EffectiveLimiterMode). Warn if it appears elsewhere so
+		// default entry (Config.EffectiveLimiterTypes). Warn if it appears elsewhere so
 		// a misplaced block is not silently ignored.
 		if key != config.GlobalDefaultsKey && len(satConfig.Limiters) > 0 {
 			logger.Info("Ignoring limiters on a non-default saturation config entry; "+
@@ -82,23 +82,6 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 		if key != config.GlobalDefaultsKey && satConfig.Optimizer != nil {
 			logger.Info("Ignoring optimizer on a non-default saturation config entry; "+
 				"the optimizer is selected only from the \"default\" entry, beside limiters", "key", key)
-		}
-		// The limiters: list reads like a set of bounds that all apply; it is not.
-		// One mode is selected, quota wins, and anything else declared is built as
-		// nothing. Silence here is the hazard: the operator reads the config as
-		// bounded by real GPUs too, while nothing consults physical capacity and a
-		// scale-from-zero wake can land on a full accelerator.
-		//
-		// Only for the default entry: limiters anywhere else are ignored whole, and
-		// the warning above already says so.
-		if dropped := satConfig.UnenforcedLimiterTypes(); key == config.GlobalDefaultsKey && len(dropped) > 0 {
-			// "WARNING:" rather than a level, because logr has none between Info and
-			// Error: V-levels only go more verbose. Same convention as cmd/main.go.
-			logger.Info("WARNING: some declared limiters will NOT be enforced; a quota entry "+
-				"selects the quota limiter and it is the only one built, so physical "+
-				"GPU capacity is not consulted at all. Declare one kind, or track "+
-				"issue #1003 for bounding by min(physical, quota)",
-				"key", key, "notEnforced", dropped, "enforcing", config.LimiterTypeQuota)
 		}
 		// Analyzer DEFINITIONS are tier-level, like limiters. A named policy
 		// selects and weights analyzers by name; it does not get to invent the

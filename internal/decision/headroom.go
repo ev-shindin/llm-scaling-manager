@@ -4,6 +4,9 @@ import (
 	"maps"
 	"sync"
 	"time"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 )
 
 // Headroom is how many GPUs of an accelerator a namespace may still take under
@@ -26,6 +29,17 @@ type Headroom struct {
 	// from a present namespace is denied, because a namespace-scoped quota is a
 	// closed allowlist.
 	Free map[string]map[string]int
+	// Cluster is accelerator → GPUs still free under every CLOSED cluster-scope
+	// limiter (the physical inventory, a cluster-scope quota), intersected the
+	// way the optimizer merges them. It bounds a namespace absent from Free too:
+	// such a namespace is not unconstrained when the cluster's GPUs are bounded.
+	// An accelerator absent from a non-nil Cluster is denied, since a closed
+	// limiter that does not list a type has none of it. Nil when no closed
+	// cluster-scope limiter is in force.
+	//
+	// Without it a warm pool on a physically bounded cluster read "unbounded"
+	// and asked for Pods the nodes could not hold, which then sat Pending.
+	Cluster map[string]int
 	// At is when this was computed. A stale reading is worse than none: the pool
 	// would size itself against an allowance that has since been spent.
 	At time.Time
@@ -48,10 +62,11 @@ const (
 	// read it as zero either.
 	HeadroomUnknown HeadroomState = iota
 	// HeadroomUnbounded: a current snapshot in which no limiter constrains this
-	// namespace. Grow freely.
+	// namespace, at namespace or cluster scope. Grow freely.
 	HeadroomUnbounded
-	// HeadroomBounded: a current snapshot names this namespace; Free is what is
-	// left, and zero is a real zero.
+	// HeadroomBounded: a current snapshot bounds this namespace, by its own
+	// allowance or a closed cluster-scope bound; Free is what is left, and zero
+	// is a real zero.
 	HeadroomBounded
 )
 
@@ -82,6 +97,12 @@ func NewHeadroomStore() *HeadroomStore { return &HeadroomStore{} }
 // no pool that has ever published can match, so such a snapshot never lets a
 // pool grow.
 func (s *HeadroomStore) Publish(free map[string]map[string]int, poolsVersion uint64, now time.Time) {
+	s.PublishBounds(free, nil, poolsVersion, now)
+}
+
+// PublishBounds is Publish with the closed cluster-scope bound (see
+// Headroom.Cluster); nil means no closed cluster-scope limiter is in force.
+func (s *HeadroomStore) PublishBounds(free map[string]map[string]int, cluster map[string]int, poolsVersion uint64, now time.Time) {
 	// The outer map by hand and the inner ones with maps.Clone, which is shallow.
 	copied := make(map[string]map[string]int, len(free))
 	for ns, perType := range free {
@@ -89,7 +110,7 @@ func (s *HeadroomStore) Publish(free map[string]map[string]int, poolsVersion uin
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.last = &Headroom{Free: copied, At: now, PoolsVersion: poolsVersion}
+	s.last = &Headroom{Free: copied, Cluster: maps.Clone(cluster), At: now, PoolsVersion: poolsVersion}
 }
 
 // Get returns the latest snapshot.
@@ -139,17 +160,29 @@ func (s *HeadroomStore) Available(namespace, accelerator string, maxAge time.Dur
 // A PRESENT namespace with an ABSENT accelerator is a real answer and it is
 // zero: a namespace-scoped quota is a closed allowlist, so an accelerator it
 // does not name is one the namespace may not use at all.
-func (s *HeadroomStore) Reading(namespace, accelerator string, poolsVersion uint64, maxAge time.Duration, now time.Time) (int, HeadroomState) {
+//
+// A namespace absent from Free is still bounded by the closed cluster-scope
+// figure when there is one (Headroom.Cluster), matched by accelerator identity
+// as the optimizer matches it. An unresolved accelerator is exempt, as the
+// optimizer's merge exempts its catch-all pool: no physical inventory lists it.
+func (s *HeadroomStore) Reading(namespace, acceleratorName string, poolsVersion uint64, maxAge time.Duration, now time.Time) (int, HeadroomState) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.last == nil || now.Sub(s.last.At) > maxAge || s.last.PoolsVersion < poolsVersion {
 		return 0, HeadroomUnknown
 	}
 	perType, ok := s.last.Free[namespace]
-	if !ok {
+	if ok {
+		return perType[acceleratorName], HeadroomBounded
+	}
+	if s.last.Cluster == nil || !constants.IsAcceleratorResolved(acceleratorName) {
 		return 0, HeadroomUnbounded
 	}
-	return perType[accelerator], HeadroomBounded
+	key, listed := accelerator.FindKey(s.last.Cluster, acceleratorName)
+	if !listed {
+		return 0, HeadroomBounded
+	}
+	return s.last.Cluster[key], HeadroomBounded
 }
 
 // DefaultHeadroom is the process-wide store. Published by the allocation layer,
@@ -159,6 +192,12 @@ var DefaultHeadroom = NewHeadroomStore()
 // PublishHeadroom records a snapshot in the default store.
 func PublishHeadroom(free map[string]map[string]int, poolsVersion uint64, now time.Time) {
 	DefaultHeadroom.Publish(free, poolsVersion, now)
+}
+
+// PublishHeadroomBounds records a snapshot, closed cluster-scope bound included,
+// in the default store. See HeadroomStore.PublishBounds.
+func PublishHeadroomBounds(free map[string]map[string]int, cluster map[string]int, poolsVersion uint64, now time.Time) {
+	DefaultHeadroom.PublishBounds(free, cluster, poolsVersion, now)
 }
 
 // GPUHeadroom reads the default store. See HeadroomStore.Available.

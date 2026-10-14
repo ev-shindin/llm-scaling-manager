@@ -1,19 +1,16 @@
 package allocation
 
 // CompositeLimiter groups a slice of Limiter instances under one name so that a
-// quota config declaring several entries presents as a single limiter to the
-// engine.
+// policy declaring several limiters -- the physical one and every quota entry --
+// presents as a single limiter to the engine.
 //
 // It carries no logic of its own: the constituents are constraint providers, and
 // the engine reaches them through Constituents() (see gpuConstraintProviders),
-// computing constraints from each and merging them. The most-restrictive cap
-// wins at merge time, in the optimizer.
-//
-// CompositeLimiter is the minimal wiring needed to enable an operator to
-// deploy a quota config that declares both cluster-scope and namespace-scope
-// entries before the full limiter chain (sub-issue #1003) lands. The chain
-// will replace it with explicit ordering and physical-bound composition
-// (min(physical, quota)) within a single ComputeConstraints.
+// computing constraints from each, each on the usage basis it asked for, and
+// merging them by intersection (mergeConstraints): a decision must fit every
+// constituent, which is how min(physical, quota) is enforced. A constituent
+// whose usage is not observed, or that fails, is skipped and the rest still
+// bound (ComputeAvailableConstraints).
 type CompositeLimiter struct {
 	name     string
 	limiters []Limiter

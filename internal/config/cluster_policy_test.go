@@ -29,7 +29,7 @@ var _ = Describe("Config cluster policy", func() {
 			"default": {Limiters: quotaOf(32)},
 		})
 		Expect(c.ClusterPolicyIsSeparate()).To(BeFalse())
-		Expect(c.EffectiveLimiterMode()).To(Equal(LimiterTypeQuota))
+		Expect(c.EffectiveLimiterTypes()).To(Equal([]LimiterType{LimiterTypeQuota}))
 		Expect(c.EffectiveQuotaEntries()[0].ClusterQuotas["H100"]).To(Equal(32))
 	})
 
@@ -39,7 +39,7 @@ var _ = Describe("Config cluster policy", func() {
 		c.UpdateClusterPolicy(&ScalingPolicy{Limiters: quotaOf(8)})
 
 		Expect(c.ClusterPolicyIsSeparate()).To(BeTrue())
-		Expect(c.EffectiveLimiterMode()).To(Equal(LimiterTypeQuota))
+		Expect(c.EffectiveLimiterTypes()).To(Equal([]LimiterType{LimiterTypeQuota}))
 		Expect(c.EffectiveQuotaEntries()[0].ClusterQuotas["H100"]).To(Equal(8))
 	})
 
@@ -69,7 +69,7 @@ var _ = Describe("Config cluster policy", func() {
 			"default": {Limiters: []QuotaLimiterConfig{}},
 		})
 
-		Expect(c.EffectiveLimiterMode()).To(Equal(LimiterTypeQuota))
+		Expect(c.EffectiveLimiterTypes()).To(Equal([]LimiterType{LimiterTypeQuota}))
 	})
 
 	It("reports no limiter when cluster policy declares none", func() {
@@ -82,7 +82,7 @@ var _ = Describe("Config cluster policy", func() {
 		})
 		c.UpdateClusterPolicy(&ScalingPolicy{})
 
-		Expect(c.EffectiveLimiterMode()).To(Equal(LimiterTypeNone))
+		Expect(c.EffectiveLimiterTypes()).To(BeEmpty())
 		Expect(c.EffectiveQuotaEntries()).To(BeEmpty())
 	})
 
@@ -111,7 +111,7 @@ var _ = Describe("Config cluster policy", func() {
 		})
 		c.UpdateClusterPolicy(&ScalingPolicy{Limiters: quotaOf(8)})
 
-		Expect(c.EffectiveLimiterMode()).To(Equal(LimiterTypeQuota))
+		Expect(c.EffectiveLimiterTypes()).To(Equal([]LimiterType{LimiterTypeQuota}))
 		Expect(c.EffectiveQuotaEntries()).To(HaveLen(1))
 	})
 

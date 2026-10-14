@@ -88,10 +88,17 @@ type ShareGroup struct {
 	// Variants lists every variant of each planned role. Once the optimizer is
 	// active it owns all their targets, not only the ones a transfer touches.
 	Variants map[string][]ShareVariant
-	// PhysicalFree bounds what a fill may place this cycle: the cluster's free
-	// GPUs of the type, which a namespace quota can exceed (as in applyRescale).
-	// math.MaxInt when the cluster pool is unbounded or unknown.
-	PhysicalFree int
+	// ClusterFree bounds what a fill may place this cycle: the free GPUs of the
+	// type under every CLOSED cluster-scope bound -- the physical inventory and
+	// a cluster-scope quota, intersected -- which a namespace quota can exceed
+	// (as in applyRescale). math.MaxInt when no closed provider bounds the type.
+	//
+	// It was PhysicalFree, read off every provider's merged pools. Once a
+	// physical limiter and quotas compose it is no longer physical: it is the
+	// tightest cluster-wide figure, and a namespace-scope quota's aggregate (the
+	// sum of its namespace caps, open) is not one -- that quota bounds a
+	// namespace group through its own budget instead.
+	ClusterFree int
 	// PoolCarve is the warm pools' unheld target taken out of Budget.
 	PoolCarve int
 	// Thresholds is each role's scale-up threshold k_r.
@@ -118,9 +125,11 @@ type ShareGroup struct {
 
 // ShareGroupOptions controls which groups BuildShareGroups returns.
 type ShareGroupOptions struct {
-	// ClusterIsQuota reports whether the cluster-scope budget is a quota. When
-	// it is not, it is the physical inventory, and the cluster group is built
-	// only with PhysicalGroups.
+	// ClusterIsQuota reports whether the cluster-scope budget is a quota: a
+	// cluster-scope quota entry is declared, alone or beside a physical
+	// limiter. When it is not, the cluster budget is the physical inventory (or
+	// a namespace-scope quota's aggregate), and the cluster group is built only
+	// with PhysicalGroups.
 	ClusterIsQuota bool
 	PhysicalGroups bool
 	// NamespaceEnabled reports whether a namespace-quota group takes part. Nil
@@ -162,6 +171,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 	}
 	available := mergeConstraints(constraints)
 	availableByNS := mergeNamespaceConstraints(constraints)
+	clusterFree := mergeConstraints(closedConstraints(constraints))
 
 	type key struct{ acc, scope string }
 	groups := make(map[key]*ShareGroup)
@@ -279,15 +289,28 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		}
 		g.PoolCarve = poolCarve(opts.PoolUnheld, k.acc, k.scope)
 		g.Budget = max(0, free+g.listed-opts.ReserveGPUs-g.PoolCarve)
-		g.PhysicalFree = math.MaxInt
-		if pf, ok := available[budgetKey(available, k.acc)]; ok && pf >= 0 && pf < math.MaxInt {
-			g.PhysicalFree = pf
+		g.ClusterFree = math.MaxInt
+		if cf, ok := clusterFree[budgetKey(clusterFree, k.acc)]; ok && cf >= 0 && cf < math.MaxInt {
+			g.ClusterFree = cf
 		}
 		slices.SortFunc(g.Roles, func(a, b ShareRole) int { return cmp.Compare(a.Key, b.Key) })
 		slices.Sort(g.Frozen)
 		out = append(out, *g)
 	}
 	return out
+}
+
+// closedConstraints returns the constraints whose per-type pools are a closed
+// allowlist (ResourceConstraints.PoolsClosed): the physical inventory and
+// cluster-scope quotas.
+func closedConstraints(constraints []*ResourceConstraints) []*ResourceConstraints {
+	var closed []*ResourceConstraints
+	for _, c := range constraints {
+		if c != nil && c.PoolsClosed {
+			closed = append(closed, c)
+		}
+	}
+	return closed
 }
 
 type shareRoleInput struct {

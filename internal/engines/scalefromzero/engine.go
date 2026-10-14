@@ -155,6 +155,11 @@ type Engine struct {
 	// the same loop, and a second mutex would only invite them to be taken in
 	// different orders.
 	lastBudgets map[string]string
+	// lastGood is each namespace's last successful constraints, used to check a
+	// wake when every provider is unavailable (see gpuConstraints). Guarded by
+	// snapshotMu: it is placement state, not logging state.
+	snapshotMu sync.Mutex
+	lastGood   map[string]constraintSnapshot
 	// QueueFallback reads the flow-control queue from Prometheus when the direct
 	// EPP scrape fails. Nil disables it — every method guards its receiver — and
 	// the engine then behaves exactly as it did before the fallback existed. See
@@ -211,13 +216,13 @@ func (e *Engine) refreshLimiter(ctx context.Context) {
 	limiter, err := e.limiterBuilder()
 	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to rebuild the GPU limiter from config; "+
-			"keeping the previous one", "effectiveMode", e.config.EffectiveLimiterMode())
+			"keeping the previous one", "limiters", e.config.EffectiveLimiterSummary())
 		return
 	}
 	e.gpuLimiter = limiter
 	e.limiterSig = sig
 	log.FromContext(ctx).Info("Scale-from-zero: GPU limiter (re)built from config",
-		"type", e.config.EffectiveLimiterMode(), "name", limiter.Name())
+		"type", e.config.LimiterKinds(), "limiters", e.config.EffectiveLimiterSummary(), "name", limiter.Name())
 }
 
 // currentGPULimiter reads the active limiter under the lock, so a placement is

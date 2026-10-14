@@ -15,8 +15,8 @@ import (
 // QuotaInventory enforces operator-declared GPU quotas independent of physical
 // cluster inventory. It implements the Inventory interface for use in the
 // limiter pipeline. Each instance is tied to exactly one QuotaLimiterConfig
-// scope — a deployment that needs both cluster and namespace caps composes two
-// QuotaInventory instances via the limiter chain (sub-issue #1003).
+// scope — a deployment that needs both cluster and namespace caps declares two
+// entries, and NewLimiterFromConfig groups them in a CompositeLimiter.
 //
 // Quota values come from the entry's static maps and, when the entry names one,
 // an external QuotaSource (Kueue): Refresh reads the source and installs the
@@ -25,9 +25,10 @@ import (
 // TypeInventory: callers invoke SetUsed (or SetUsedByNamespace) before each
 // cycle, then read the pools.
 //
-// QuotaInventory is decoupled from physical inventory. The limiter chain will
-// compose a QuotaInventory with TypeInventory so allocations are bounded by
-// min(physical, quota); used standalone, no physical bound is enforced.
+// QuotaInventory is decoupled from physical inventory. When a policy also
+// declares a physical limiter, NewLimiterFromConfig builds both and the
+// optimizer intersects their constraints, so allocations are bounded by
+// min(physical, quota); a quota declared alone enforces no physical bound.
 type QuotaInventory struct {
 	name string
 	// static is the entry as configured, immutable after construction.

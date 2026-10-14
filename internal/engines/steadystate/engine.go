@@ -120,6 +120,12 @@ type Engine struct {
 	limiterSig     string
 	limiterMu      sync.Mutex
 
+	// lastQuotaAloneDiff is the last quota-alone versus composed allocation
+	// difference reported (see reportQuotaAloneAllocation), so the transitional
+	// upgrade log prints when the difference changes, not every cycle. Written
+	// only from the optimize goroutine.
+	lastQuotaAloneDiff string
+
 	// metricsRegistry is used to access metrics sources for request count queries
 	metricsRegistry *source.SourceRegistry
 	// Variants is the set of workloads KEDA has called WVA about — discovery. Nil
@@ -589,15 +595,15 @@ func (e *Engine) recordDefaultConfigMetrics() {
 	// the operational dashboard and the zero-allocatable-GPU alert, which both
 	// reference it.
 	if cfg, ok := globalSatCfgMap["default"]; ok {
-		limiterEnabled := e.Config.EffectiveLimiterMode() != config.LimiterTypeNone
+		limiterEnabled := e.Config.LimitersDeclared()
 		metrics.SetConfigInfo(cfg.GetAnalyzerName(), limiterEnabled, e.Config.ScaleToZeroEnabled())
 	}
 }
 
 // SetLimiterBuilder installs a builder that rebuilds the GPU limiter from the
 // current effective config. The engine calls it at the top of each optimize
-// cycle and swaps the limiter when the effective limiter mode / quota entries
-// change — so switching the ConfigMap's limiters: list takes effect without a
+// cycle and swaps the limiter when the declared limiters (types, physical entry,
+// quota entries) change — so switching the ConfigMap's limiters: list takes effect without a
 // restart. Call before StartOptimizeLoop. Passing nil disables live rebuilds
 // (the injected GPULimiter is used as-is, e.g. in tests).
 func (e *Engine) SetLimiterBuilder(builder func() (allocation.Limiter, error)) {
@@ -625,13 +631,13 @@ func (e *Engine) refreshLimiter(ctx context.Context) {
 	limiter, err := e.limiterBuilder()
 	if err != nil {
 		ctrl.LoggerFrom(ctx).Error(err, "failed to rebuild GPU limiter from config; keeping the previous limiter",
-			"effectiveMode", e.Config.EffectiveLimiterMode())
+			"limiters", e.Config.EffectiveLimiterSummary())
 		return
 	}
 	e.GPULimiter = limiter
 	e.limiterSig = sig
 	ctrl.LoggerFrom(ctx).Info("GPU limiter (re)built from config",
-		"type", e.Config.EffectiveLimiterMode(), "name", limiter.Name())
+		"type", e.Config.LimiterKinds(), "limiters", e.Config.EffectiveLimiterSummary(), "name", limiter.Name())
 }
 
 // limiterSignature detects when the limiter config changed. Delegates to the
@@ -739,9 +745,9 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 		defer e.ReplicaMetricsCollector.EndCycle()
 	}
 
-	// Collect accelerator inventory (only in limited mode AND only when the
-	// inventory-based limiter is active). In quota mode (an inline limiters: quota
-	// entry), the controller deliberately runs without consulting physical capacity —
+	// Collect accelerator inventory (only in limited mode AND only when a physical
+	// limiter is declared). With quota entries alone, the controller deliberately
+	// runs without consulting physical capacity —
 	// listing Nodes here would defeat that contract (and trigger a
 	// controller-runtime Node informer for the lifetime of the process). The
 	// collected inventory is currently only logged anyway (see comment at
@@ -791,9 +797,8 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	// silently not enforced, which is what that flag allowed. V2
 	// (saturation-token-based) is the sole analysis path and always uses the
 	// optimizer pipeline.
-	limiterMode := e.Config.EffectiveLimiterMode()
 	savedOptimizer := e.optimizer
-	if limiterMode == config.LimiterTypeNone {
+	if !e.Config.LimitersDeclared() {
 		e.optimizer = allocation.NewCostAwareOptimizer()
 	} else {
 		e.optimizer = allocation.NewGreedyByScoreOptimizer()
@@ -802,7 +807,7 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 		e.recordActiveOptimizer() // optimizer has changed, record active optimizer
 	}
 	logger.V(logging.DEBUG).Info("Optimizer selected", "analyzer", analyzerName,
-		"optimizer", e.optimizer.Name(), "limiter", limiterMode)
+		"optimizer", e.optimizer.Name(), "limiter", e.Config.EffectiveLimiterSummary())
 
 	// V2 (saturation): saturation.Analyzer → AnalyzerResult → Optimizer.Optimize → Enforcer bridge.
 	mode := modeLabelForAnalyzer(analyzerName)
@@ -1027,14 +1032,16 @@ func modelPolicy(vas []llmdVariantAutoscalingV1alpha1.VariantAutoscaling) (strin
 // available capacity (deny-all), NOT as unlimited — so if it were run with
 // empty constraints it would silently suppress all scale-up.
 //
-// Therefore, whenever real constraints cannot be obtained — the limiter does
-// not provide constraints (no ConstraintProvider), no usage has been observed on
-// a basis some provider needs, or computing them failed because, e.g., node
-// objects are not readable on this cluster — we fall back to the cost-aware
-// optimizer, which is the engine's unlimited path (the same optimizer used when
-// no limiter is declared), so scale-up proceeds unconstrained instead of being
-// blocked. A constraint that is present but reports zero GPUs is left intact:
-// that is a genuine "no capacity" signal and should still block scale-up.
+// A provider whose usage basis has not been observed, or whose constraints
+// cannot be computed (e.g. node objects are not readable on this cluster), is
+// SKIPPED and named in the log; the other providers still bound the cycle (see
+// allocation.ComputeAvailableConstraints). Only when no provider can supply
+// constraints -- the limiter provides none, or every one is unavailable -- do we
+// fall back to the cost-aware optimizer, which is the engine's unlimited path
+// (the same optimizer used when no limiter is declared), so scale-up proceeds
+// unconstrained instead of being blocked. A constraint that is present but
+// reports zero GPUs is left intact: that is a genuine "no capacity" signal and
+// should still block scale-up.
 //
 // Providers do not all consume the same usage figure. A physical inventory is fed
 // every GPU held on the cluster's nodes; a quota is fed only what WVA's own
@@ -1082,61 +1089,49 @@ func (e *Engine) selectV2Optimizer(
 	// hold. One figure broadcast to both answers the wrong question for one of
 	// them — see allocation.UsageBasis.
 	views := gpuUsageViews(requests)
-	if basis, missing := views.MissingBasis(providers); missing {
-		// No observation on a basis some provider needs. Constraints built on an
-		// absent usage figure would not be "unknown", they would be a confident
-		// claim that nothing is running — and GreedyByScore would allocate the
-		// whole cluster against it. Fall back to the unlimited optimizer, the same
-		// posture this function already takes when no provider can supply
-		// constraints.
-		logger.V(logging.DEBUG).Info("No GPU usage observation yet on a basis some provider needs; "+
-			"using the unlimited optimizer for this cycle", "basis", basis.String())
-		// The models scale unbounded this cycle; the pool follows the same
-		// posture rather than being held against a limit nobody could compute.
-		allocation.PublishUnboundedHeadroom(views.PoolsVersion, time.Now())
-		return allocation.NewCostAwareOptimizer(), nil
-	}
-
-	var constraints []*allocation.ResourceConstraints
-	for _, cp := range providers {
-		usageByType, usageByNS := views.For(cp)
-		constraint, err := cp.ComputeConstraints(ctx, usageByType, usageByNS)
-		if err != nil {
-			logger.Error(err, "Failed to compute GPU constraints, skipping provider", "provider", cp.Name())
-			continue
-		}
-		constraints = append(constraints, views.Stamp(constraint))
-
-		// What the limiter decided this cycle, as numbers.
-		//
-		// Nothing reported this, and the gap is expensive: a quota that fails to
-		// bind and a quota that was never declared look identical from outside,
-		// and the three things that could be wrong -- the cap, the usage charged
-		// against it, and whether the namespace was materialized at all -- are
-		// each invisible. Chasing one cost a day of fifteen-minute cluster runs
-		// that this line would have answered on the first.
-		logger.V(logging.DEBUG).Info("GPU constraints computed",
-			"provider", cp.Name(),
-			"basis", allocation.UsageBasisOf(cp).String(),
-			"usageByType", usageByType,
-			"usageByNamespace", usageByNS,
-			"pools", constraint.Pools,
-			"namespacePools", constraint.NamespacePools,
-			"totalLimit", constraint.TotalLimit,
-			"totalUsed", constraint.TotalUsed,
-			"totalAvail", constraint.TotalAvail)
+	constraints, skipped := allocation.ComputeAvailableConstraints(ctx, providers, views,
+		func(cp allocation.ConstraintProvider, constraint *allocation.ResourceConstraints,
+			usageByType map[string]int, usageByNS map[string]map[string]int) {
+			// What the limiter decided this cycle, as numbers.
+			//
+			// Nothing reported this, and the gap is expensive: a quota that fails
+			// to bind and a quota that was never declared look identical from
+			// outside, and the three things that could be wrong -- the cap, the
+			// usage charged against it, and whether the namespace was
+			// materialized at all -- are each invisible. Chasing one cost a day
+			// of fifteen-minute cluster runs that this line would have answered
+			// on the first.
+			logger.V(logging.DEBUG).Info("GPU constraints computed",
+				"provider", cp.Name(),
+				"basis", allocation.UsageBasisOf(cp).String(),
+				"usageByType", usageByType,
+				"usageByNamespace", usageByNS,
+				"pools", constraint.Pools,
+				"namespacePools", constraint.NamespacePools,
+				"totalLimit", constraint.TotalLimit,
+				"totalUsed", constraint.TotalUsed,
+				"totalAvail", constraint.TotalAvail)
+		})
+	for _, s := range skipped {
+		// Named, so a bound that stopped applying is visible: the decision is
+		// still checked against every other provider, and silence here would
+		// read as "every limiter agreed".
+		logger.Info("GPU constraint provider unavailable this cycle; the others still bound it",
+			"provider", s.Name, "reason", s.Reason)
 	}
 
 	// GreedyByScore treats absent constraints as zero available capacity
 	// (deny-all), not as unlimited. When no provider could supply constraints
-	// (limiter is not constraint-backed, or every provider failed — e.g. GPU
-	// capacity cannot be discovered), fall back to the cost-aware optimizer, the
-	// engine's unlimited path, so scale-up proceeds instead of being silently
-	// blocked.
+	// -- every one's usage view is unobserved, or every one failed (the usual
+	// cause is the Node API, for an inventory limiter without node read) --
+	// fall back to the cost-aware optimizer, the engine's unlimited path, so
+	// scale-up proceeds instead of being silently blocked. Constraints built on
+	// an absent usage figure would not be "unknown", they would be a confident
+	// claim that nothing is running, which is why an unobserved basis skips its
+	// provider instead of feeding it nothing.
 	if len(constraints) == 0 {
-		// Same posture as above: every provider failed (the usual cause is the
-		// Node API, for an inventory limiter without node read), the models
-		// scale unbounded, and so may the pool.
+		// The models scale unbounded this cycle; the pool follows the same
+		// posture rather than being held against a limit nobody could compute.
 		allocation.PublishUnboundedHeadroom(views.PoolsVersion, time.Now())
 		return allocation.NewCostAwareOptimizer(), nil
 	}
@@ -1988,7 +1983,7 @@ func (e *Engine) applySaturationDecisions(
 		// cycle.
 		if !constants.IsAcceleratorResolved(acceleratorName) {
 			e.emitAcceleratorNotResolvedEvent(&updateVa)
-			e.policies.ReportUnresolvedAccelerator(ctx, va.Namespace, vaName, string(e.Config.EffectiveLimiterMode()))
+			e.policies.ReportUnresolvedAccelerator(ctx, va.Namespace, vaName, e.Config.EffectiveLimiterSummary())
 		}
 
 		// Stage the just-computed decision on the in-memory VA so that

@@ -14,7 +14,7 @@ import (
 func fillCase(t *testing.T, budget int, integer map[string]int) map[string]int {
 	t.Helper()
 	g := allocation.ShareGroup{
-		Budget: budget, PhysicalFree: 1 << 20,
+		Budget: budget, ClusterFree: 1 << 20,
 		Roles: []allocation.ShareRole{
 			{Key: "A", Weight: 1, Need: 4, ReplicaGPUs: 1},
 			{Key: "B", Weight: 1, Need: 4, ReplicaGPUs: 1},
@@ -56,7 +56,7 @@ func TestShareFillSkipsUnreleasedGPUs(t *testing.T) {
 func TestShareFillIsUnpacedBelowNeed(t *testing.T) {
 	fill := func(need float64) int {
 		g := allocation.ShareGroup{
-			Budget: 8, PhysicalFree: 1 << 20,
+			Budget: 8, ClusterFree: 1 << 20,
 			Roles: []allocation.ShareRole{{Key: "B", Weight: 1, Need: need, ReplicaGPUs: 1}},
 			Grow:  map[string]allocation.ShareVariant{"B": {Name: "b", GPUs: 1}},
 		}
