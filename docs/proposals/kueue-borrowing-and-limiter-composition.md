@@ -256,8 +256,9 @@ Why each one:
   `ResourceQuota` whose `hard` is at most nominal plus `borrowingLimit`. A
   ResourceQuota of 1000 proves nothing. When `borrowingLimit` is unset, only
   the physical limiter qualifies.
-- **Fresh status.** If the CRDs are installed without a running Kueue, status
-  is never written.
+- **Fresh status.** A snapshot is stale when the last read failed or is older
+  than twice `refreshInterval`. If the CRDs are installed without a running
+  Kueue, status is never written.
 - **Flat cohort, no `effectiveQuotas`, no Fair Sharing.** The formula in B3
   does not cover those cases yet (B9).
 - **Readable objects.** A Forbidden read is never treated as "no ResourceQuota"
@@ -517,10 +518,19 @@ grace period does. The ReplicaSet recreates the pod gated. The
 
 ### B7. Where borrowed capacity may be spent
 
-- **Scale-from-zero** wakes against the guaranteed pool only. A model woken
-  onto borrowed capacity can be preempted before it serves.
-- **The warm pool and rescale** use the guaranteed pool only.
-- **Growth** may spend it, through the greedy optimizer, under B4 and B5.
+- **Scale-from-zero, the warm pool and rescale** use capacity **within
+  nominal** only, never borrowed capacity. A model woken onto borrowed capacity
+  can be preempted before it serves.
+  - For a queue that can reclaim, within nominal is `N_Q`.
+  - For a `Never` queue, it is `min(N_Q, max(U_Q, G_Q) + cohortFree)`, which is
+    what Kueue would admit right now without borrowing.
+
+  This is not the guaranteed figure. Under Kueue's default (`Never`), an idle
+  queue's guaranteed figure is 0, and using it here would stop every idle
+  namespace on a default Kueue setup from waking. Today it can wake, so it must
+  still be able to. Step 4's implementation found this.
+- **Growth** may spend borrowed capacity, through the greedy optimizer, under B4
+  and B5.
 
 ### B8. What does not change
 
@@ -770,3 +780,7 @@ shortfall. It is folded into revision 5 with every round-4 minor.
 
 Round 5 (revision 5): all five approved, with no blocker or major. Their minors
 are folded into this text. Implementation starts with step 1.
+
+Amended during implementation (step 4): B7 uses capacity within nominal, not
+the guaranteed figure, for scale-from-zero, the warm pool and rescale. B1 now
+defines "stale".
