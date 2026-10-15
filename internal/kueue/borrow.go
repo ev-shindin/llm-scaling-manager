@@ -10,8 +10,9 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 )
 
-// Labels and scheduling gates Kueue puts on the pods it manages. The managed
-// check that reads them is pod-side and belongs to the engine, not the reader.
+// Labels and scheduling gates Kueue puts on the pods it manages. A tenant can
+// write any of them into its own pod template, so none is proof that Kueue
+// charges a pod; the managed check (Eligibility) asks for the Workload.
 const (
 	// ManagedLabel marks a pod Kueue manages through the pod integration.
 	ManagedLabel = "kueue.x-k8s.io/managed"

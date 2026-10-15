@@ -9,6 +9,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -23,10 +25,11 @@ import (
 // KindWorkload is Kueue's Workload kind, read by the managed check.
 const KindWorkload = "Workload"
 
-// ownerDepth is how far up a pod's controller chain the managed check looks
-// for a queue-name label: the pod's own controller (a Job, a ReplicaSet, a
-// StatefulSet) and that one's controller (a Deployment, a LeaderWorkerSet).
-const ownerDepth = 2
+// ownerDepth is how far up a pod's controller chain the managed check looks for
+// an object Kueue owns a Workload for. Four reaches a LeaderWorkerSet from a
+// worker pod: worker StatefulSet, leader pod, leader StatefulSet, then the
+// LeaderWorkerSet. A Job pod or a leader pod is matched within two.
+const ownerDepth = 4
 
 // NamespaceEligibility is the engine-side half of the B1 conditions for one
 // namespace: the ones read from the namespace's own pods and ResourceQuotas
@@ -56,7 +59,7 @@ type NamespaceEligibility struct {
 // ResourceQuotas are read unstructured, which this project never caches, so they
 // go to the API server directly and need only get/list (no watch): per
 // namespace and interval one ResourceQuota list, at most one Workload list, and
-// one get per distinct owner of an unlabelled GPU pod.
+// one get per distinct owner of a GPU pod no Workload below it matched.
 type Eligibility struct {
 	client   client.Client
 	interval time.Duration
@@ -134,24 +137,31 @@ func (e *Eligibility) evaluate(ctx context.Context, ns string, prev NamespaceEli
 	return got
 }
 
-// managed reports whether every GPU pod in ns is managed by Kueue, and whether
-// that was known: false when the namespace has no GPU pod or its pods could
-// not be listed.
+// managed reports whether every GPU pod in ns is charged to Kueue, and whether
+// that was known: false when the namespace has no GPU pod, or its pods or its
+// Workloads could not be listed for a reason that may pass.
 //
-// A pod is managed when it carries Kueue's managed label or its admission
-// gate, which record what Kueue did, not what was asked of it. A pod of a
-// Kueue-managed Job or other integration carries neither (Kueue suspends its
-// owner instead); it counts when its controller, or that one's controller,
-// carries the queue-name label and a Workload in the namespace is owned by that
-// object. A queue-name label alone is not proof: Kueue may have that integration
-// off, or not select the namespace.
+// A pod counts only when Kueue has a Workload for it: a Workload owned by the
+// pod itself (the pod integration), or by an object up its controller chain (a
+// Job, a LeaderWorkerSet), that has quota reserved or is admitted. A pod behind
+// Kueue's admission gate counts when such a Workload exists at all, reserved or
+// not: Kueue creates the Workload before it lifts the gate, and a gated pod
+// holds no GPU.
+//
+// Kueue's managed label, its admission gate and the queue-name label are not
+// proof on their own. A tenant can write each of them into its own pod template,
+// and in a namespace Kueue's webhook does not cover the pod then runs uncharged
+// while borrowing is unlocked.
+//
+// One Workload list per evaluation, taken only when the namespace has a GPU
+// pod; an owner is read only when no Workload matched below it.
 func (e *Eligibility) managed(ctx context.Context, ns string) (bool, bool) {
 	var pods corev1.PodList
 	if err := e.client.List(ctx, &pods, client.InNamespace(ns)); err != nil {
 		return false, false
 	}
 	owners := map[types.UID]*unstructured.Unstructured{}
-	var workloadOwners map[types.UID]bool
+	var workloads map[types.UID]bool
 	found := false
 	for i := range pods.Items {
 		pod := &pods.Items[i]
@@ -159,26 +169,17 @@ func (e *Eligibility) managed(ctx context.Context, ns string) (bool, bool) {
 			continue
 		}
 		found = true
-		if PodManaged(pod) {
-			continue
+		if workloads == nil {
+			var known bool
+			if workloads, known = e.workloadsByOwner(ctx, ns); !known {
+				return false, false
+			}
 		}
-		if workloadOwners == nil {
-			workloadOwners = e.workloadOwners(ctx, ns)
-		}
-		if !e.ownerManaged(ctx, ns, pod, owners, workloadOwners) {
+		if !e.podCharged(ctx, ns, pod, owners, workloads) {
 			return false, true
 		}
 	}
 	return found, found
-}
-
-// PodManaged reports whether a pod carries Kueue's managed label or its
-// admission gate.
-func PodManaged(pod *corev1.Pod) bool {
-	if pod.Labels[ManagedLabel] == "true" {
-		return true
-	}
-	return PodGated(pod)
 }
 
 // PodGated reports whether a pod is held behind Kueue's admission gate.
@@ -188,13 +189,25 @@ func PodGated(pod *corev1.Pod) bool {
 	})
 }
 
-// ownerManaged walks pod's controller chain up to ownerDepth objects for one
-// carrying the queue-name label, and reports whether a Workload is owned by it.
-// An owner that cannot be read ends the walk: not managed.
-func (e *Eligibility) ownerManaged(ctx context.Context, ns string, pod *corev1.Pod,
-	cache map[types.UID]*unstructured.Unstructured, workloadOwners map[types.UID]bool) bool {
+// podCharged reports whether a Workload Kueue charges for pod exists: one owned
+// by the pod or by an object up its controller chain (at most ownerDepth
+// objects), reserved or admitted, or, for a pod behind the admission gate, any
+// such Workload. An owner that cannot be read ends the walk: not charged.
+func (e *Eligibility) podCharged(ctx context.Context, ns string, pod *corev1.Pod,
+	cache map[types.UID]*unstructured.Unstructured, workloads map[types.UID]bool) bool {
+	gated := PodGated(pod)
+	charged := func(uid types.UID) bool {
+		reserved, exists := workloads[uid]
+		return reserved || (gated && exists)
+	}
+	if charged(pod.UID) {
+		return true
+	}
 	ref := metav1.GetControllerOf(pod)
 	for depth := 0; ref != nil && depth < ownerDepth; depth++ {
+		if charged(ref.UID) {
+			return true
+		}
 		owner, ok := cache[ref.UID]
 		if !ok {
 			owner = &unstructured.Unstructured{}
@@ -207,34 +220,51 @@ func (e *Eligibility) ownerManaged(ctx context.Context, ns string, pod *corev1.P
 		if owner == nil {
 			return false
 		}
-		if owner.GetLabels()[QueueNameLabel] != "" {
-			return workloadOwners[ref.UID]
-		}
 		ref = metav1.GetControllerOf(owner)
 	}
 	return false
 }
 
-// workloadOwners is the UIDs of every object a Workload in ns names as an
-// owner. Empty when the Workloads cannot be listed, which leaves an unlabelled
-// pod unmanaged.
-func (e *Eligibility) workloadOwners(ctx context.Context, ns string) map[types.UID]bool {
+// workloadsByOwner maps the UID of every object a Workload in ns names as an
+// owner to whether some Workload it owns is reserved or admitted. known is
+// false when the list failed for a reason that may pass; a Workload kind the
+// cluster does not serve, or a Forbidden list, is known and empty, which leaves
+// every GPU pod uncharged.
+func (e *Eligibility) workloadsByOwner(ctx context.Context, ns string) (map[types.UID]bool, bool) {
 	out := map[types.UID]bool{}
 	mapping, err := e.client.RESTMapper().RESTMapping(schema.GroupKind{Group: Group, Kind: KindWorkload})
 	if err != nil {
-		return out
+		return out, meta.IsNoMatchError(err)
 	}
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(mapping.GroupVersionKind.GroupVersion().WithKind(KindWorkload + "List"))
 	if err := e.client.List(ctx, list, client.InNamespace(ns)); err != nil {
-		return out
+		return out, apierrors.IsForbidden(err) || meta.IsNoMatchError(err)
 	}
-	for _, w := range list.Items {
-		for _, ref := range w.GetOwnerReferences() {
-			out[ref.UID] = true
+	for i := range list.Items {
+		reserved := workloadReserved(&list.Items[i])
+		for _, ref := range list.Items[i].GetOwnerReferences() {
+			out[ref.UID] = out[ref.UID] || reserved
 		}
 	}
-	return out
+	return out, true
+}
+
+// workloadReserved reports whether Kueue has reserved quota for a Workload or
+// admitted it: status.admission is set, or condition QuotaReserved or Admitted
+// is True. Status is Kueue's to write, not the tenant's.
+func workloadReserved(w *unstructured.Unstructured) bool {
+	if adm, found, _ := unstructured.NestedMap(w.Object, "status", "admission"); found && adm != nil {
+		return true
+	}
+	conds, _, _ := unstructured.NestedSlice(w.Object, "status", "conditions")
+	for _, raw := range conds {
+		cond, _ := raw.(map[string]interface{})
+		if (cond["type"] == "QuotaReserved" || cond["type"] == "Admitted") && cond["status"] == "True" {
+			return true
+		}
+	}
+	return false
 }
 
 // gpuQuota reads the namespace's ResourceQuotas, unstructured so the read goes

@@ -52,7 +52,7 @@ func eligibilityClient(funcs *interceptor.Funcs, objs ...client.Object) client.C
 // gpuPod is a pod in eligNS requesting n GPUs, owned by owner when set.
 func gpuPod(name string, n int64, owner *unstructured.Unstructured, mutate ...func(*corev1.Pod)) *corev1.Pod {
 	p := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: eligNS},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: eligNS, UID: types.UID("pod-" + name)},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{"nvidia.com/gpu": *resource.NewQuantity(n, resource.DecimalSI)},
 			Limits:   corev1.ResourceList{"nvidia.com/gpu": *resource.NewQuantity(n, resource.DecimalSI)},
@@ -90,11 +90,52 @@ func owned(apiVersion, kind, name, uid, queue string, parent *unstructured.Unstr
 	return u
 }
 
-// workloadFor is a Kueue Workload owned by owner.
-func workloadFor(owner *unstructured.Unstructured) *unstructured.Unstructured {
+// pendingWorkloadFor is a Kueue Workload owned by owner, with no quota
+// reserved yet.
+func pendingWorkloadFor(owner client.Object) *unstructured.Unstructured {
 	w := obj("v1beta2", KindWorkload, eligNS, "wl-"+owner.GetName(), map[string]interface{}{})
-	w.SetOwnerReferences([]metav1.OwnerReference{controllerRef(owner)})
+	yes := true
+	gvk := owner.GetObjectKind().GroupVersionKind()
+	apiVersion, kind := gvk.GroupVersion().String(), gvk.Kind
+	if _, isPod := owner.(*corev1.Pod); isPod {
+		apiVersion, kind = "v1", "Pod"
+	}
+	w.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: apiVersion, Kind: kind, Name: owner.GetName(), UID: owner.GetUID(), Controller: &yes}})
 	return w
+}
+
+// workloadFor is a Kueue Workload owned by owner with quota reserved, as Kueue
+// writes it: status.admission and condition QuotaReserved.
+func workloadFor(owner client.Object) *unstructured.Unstructured {
+	w := pendingWorkloadFor(owner)
+	w.Object["status"] = map[string]interface{}{
+		"admission":  map[string]interface{}{"clusterQueue": "cq"},
+		"conditions": []interface{}{map[string]interface{}{"type": "QuotaReserved", "status": "True"}},
+	}
+	return w
+}
+
+// admittedOnlyWorkloadFor carries only condition Admitted, no status.admission.
+func admittedOnlyWorkloadFor(owner client.Object) *unstructured.Unstructured {
+	w := pendingWorkloadFor(owner)
+	w.Object["status"] = map[string]interface{}{
+		"conditions": []interface{}{map[string]interface{}{"type": "Admitted", "status": "True"}},
+	}
+	return w
+}
+
+// labelled sets Kueue's managed label on a pod, as Kueue's webhook would and
+// as a tenant can.
+func labelled(p *corev1.Pod) { p.Labels = map[string]string{ManagedLabel: "true"} }
+
+// gated puts a pod behind Kueue's admission gate.
+func gated(p *corev1.Pod) { p.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: AdmissionGate}} }
+
+// chargedPod is a labelled GPU pod and the reserved Workload Kueue's pod
+// integration owns it by.
+func chargedPod(name string) []client.Object {
+	p := gpuPod(name, 8, nil, labelled)
+	return []client.Object{p, workloadFor(p)}
 }
 
 func resourceQuota(hard map[string]interface{}) *unstructured.Unstructured {
@@ -116,36 +157,76 @@ var _ = Describe("Eligibility: the engine-side borrowing conditions", func() {
 	sts := owned("apps/v1", "StatefulSet", "serve-0", "sts-uid", "", lws)
 	rs := owned("apps/v1", "ReplicaSet", "web-abc", "rs-uid", "", nil)
 
+	// The LeaderWorkerSet worker chain: worker pod, worker StatefulSet (owned
+	// by the leader pod), leader pod, leader StatefulSet, LeaderWorkerSet.
+	leader := owned("v1", "Pod", "serve-0", "leader-uid", "", sts)
+	workerSts := owned("apps/v1", "StatefulSet", "serve-0-workers", "wsts-uid", "", leader)
+
+	labelledPod := gpuPod("p", 8, nil, labelled)
+	gatedPod := gpuPod("p", 8, nil, labelled, gated)
 	DescribeTable("the managed check",
-		func(want Reason, objs ...client.Object) {
+		func(want Reason, objs []client.Object) {
 			Expect(evaluate(eligibilityClient(nil, objs...)).Reason).To(Equal(want))
 		},
-		Entry("a pod with Kueue's managed label", Reason(""),
-			gpuPod("p", 8, nil, func(p *corev1.Pod) { p.Labels = map[string]string{ManagedLabel: "true"} })),
-		Entry("a pod behind Kueue's admission gate", Reason(""),
-			gpuPod("p", 8, nil, func(p *corev1.Pod) {
-				p.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: AdmissionGate}}
-			})),
-		Entry("a Job-owned pod: the Job carries the queue name and a Workload is owned by it", Reason(""),
-			job, workloadFor(job), gpuPod("p", 8, job)),
+		Entry("a labelled pod with a reserved Workload of its own", Reason(""), chargedPod("p")),
+		Entry("a labelled pod whose Workload carries only Admitted", Reason(""),
+			[]client.Object{labelledPod, admittedOnlyWorkloadFor(labelledPod)}),
+		Entry("Kueue's managed label without a Workload is not proof: a tenant can write it", ReasonNotKueueManaged,
+			[]client.Object{labelledPod}),
+		Entry("a running labelled pod whose Workload has no quota reserved is not charged", ReasonNotKueueManaged,
+			[]client.Object{labelledPod, pendingWorkloadFor(labelledPod)}),
+		Entry("a pod behind the admission gate with its Workload, reserved or not", Reason(""),
+			[]client.Object{gatedPod, pendingWorkloadFor(gatedPod)}),
+		Entry("the admission gate without a Workload is not proof", ReasonNotKueueManaged,
+			[]client.Object{gatedPod}),
+		Entry("a Job-owned pod: a reserved Workload is owned by the Job", Reason(""),
+			[]client.Object{job, workloadFor(job), gpuPod("p", 8, job)}),
 		Entry("a Job-owned pod with a queue-name label and no Workload is not proof", ReasonNotKueueManaged,
-			job, gpuPod("p", 8, job)),
-		Entry("a LeaderWorkerSet pod: StatefulSet, then the LWS with the queue name and its Workload", Reason(""),
-			lws, sts, workloadFor(lws), gpuPod("p", 8, sts)),
-		Entry("a LeaderWorkerSet pod without a Workload", ReasonNotKueueManaged,
-			lws, sts, gpuPod("p", 8, sts)),
+			[]client.Object{job, gpuPod("p", 8, job)}),
+		Entry("a LeaderWorkerSet leader pod: StatefulSet, then the LWS and its reserved Workload", Reason(""),
+			[]client.Object{lws, sts, workloadFor(lws), gpuPod("p", 8, sts, labelled)}),
+		Entry("a LeaderWorkerSet worker pod: four owners up to the LWS", Reason(""),
+			[]client.Object{lws, sts, leader, workerSts, workloadFor(lws), gpuPod("w", 8, workerSts, labelled)}),
+		Entry("a labelled LeaderWorkerSet pod without a Workload", ReasonNotKueueManaged,
+			[]client.Object{lws, sts, gpuPod("p", 8, sts, labelled)}),
 		Entry("one unmanaged GPU pod hides GPUs from Kueue for the whole namespace", ReasonNotKueueManaged,
-			gpuPod("a", 8, nil, func(p *corev1.Pod) { p.Labels = map[string]string{ManagedLabel: "true"} }),
-			rs, gpuPod("b", 8, rs)),
+			append(chargedPod("a"), rs, gpuPod("b", 8, rs))),
 		Entry("a pod without GPUs is not judged", Reason(""),
-			gpuPod("a", 8, nil, func(p *corev1.Pod) { p.Labels = map[string]string{ManagedLabel: "true"} }),
-			gpuPod("cpu", 0, rs)),
-		Entry("no GPU pod on the first read: not managed", ReasonNotKueueManaged),
+			append(chargedPod("a"), gpuPod("cpu", 0, rs))),
+		Entry("no GPU pod on the first read: not managed", ReasonNotKueueManaged, []client.Object(nil)),
 	)
 
+	It("keeps the previous answer when the Workloads cannot be listed for a reason that may pass", func() {
+		fail := false
+		funcs := &interceptor.Funcs{List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == KindWorkload+"List" && fail {
+				return apierrors.NewServiceUnavailable("blip")
+			}
+			return cl.List(ctx, list, opts...)
+		}}
+		c := eligibilityClient(funcs, chargedPod("p")...)
+		now := time.Unix(0, 0)
+		e := NewEligibility(c, Options{RefreshInterval: time.Minute, now: func() time.Time { return now }})
+		Expect(e.Evaluate(context.Background(), []string{eligNS})[eligNS].Reason).To(BeEmpty())
+		fail = true
+		now = now.Add(2 * time.Minute)
+		Expect(e.Evaluate(context.Background(), []string{eligNS})[eligNS].Reason).To(BeEmpty())
+	})
+
+	It("reads a Forbidden Workload list as not managed", func() {
+		funcs := &interceptor.Funcs{List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == KindWorkload+"List" {
+				return apierrors.NewForbidden(schema.GroupResource{Group: Group, Resource: "workloads"}, "", errors.New("no RBAC"))
+			}
+			return cl.List(ctx, list, opts...)
+		}}
+		Expect(evaluate(eligibilityClient(funcs, chargedPod("p")...)).Reason).To(Equal(ReasonNotKueueManaged))
+	})
+
 	It("keeps the previous answer for a namespace with no GPU pod", func() {
-		managed := gpuPod("p", 8, nil, func(p *corev1.Pod) { p.Labels = map[string]string{ManagedLabel: "true"} })
-		c := eligibilityClient(nil, managed)
+		objs := chargedPod("p")
+		managed := objs[0]
+		c := eligibilityClient(nil, objs...)
 		now := time.Unix(0, 0)
 		e := NewEligibility(c, Options{RefreshInterval: time.Minute, now: func() time.Time { return now }})
 		Expect(e.Evaluate(context.Background(), []string{eligNS})[eligNS].Reason).To(BeEmpty())
@@ -172,20 +253,18 @@ var _ = Describe("Eligibility: the engine-side borrowing conditions", func() {
 	})
 
 	It("reads the tightest GPU hard limit of the namespace's ResourceQuotas", func() {
-		managed := gpuPod("p", 8, nil, func(p *corev1.Pod) { p.Labels = map[string]string{ManagedLabel: "true"} })
-		got := evaluate(eligibilityClient(nil, managed, resourceQuota(map[string]interface{}{"requests.nvidia.com/gpu": "16", "cpu": "100"})))
+		got := evaluate(eligibilityClient(nil, append(chargedPod("p"), resourceQuota(map[string]interface{}{"requests.nvidia.com/gpu": "16", "cpu": "100"}))...))
 		Expect(got.Reason).To(BeEmpty())
 		Expect(got.GPUQuota).To(Equal(map[string]int{"nvidia.com/gpu": 16}))
 	})
 
 	It("reads a Forbidden ResourceQuota list as unreadable, never as absent", func() {
-		managed := gpuPod("p", 8, nil, func(p *corev1.Pod) { p.Labels = map[string]string{ManagedLabel: "true"} })
 		funcs := &interceptor.Funcs{List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == "ResourceQuotaList" {
 				return apierrors.NewForbidden(schema.GroupResource{Resource: "resourcequotas"}, "", errors.New("no RBAC"))
 			}
 			return cl.List(ctx, list, opts...)
 		}}
-		Expect(evaluate(eligibilityClient(funcs, managed)).Reason).To(Equal(ReasonResourceQuotaUnreadable))
+		Expect(evaluate(eligibilityClient(funcs, chargedPod("p")...)).Reason).To(Equal(ReasonResourceQuotaUnreadable))
 	})
 })
