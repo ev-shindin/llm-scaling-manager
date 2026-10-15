@@ -126,19 +126,24 @@ func (e *Engine) releaseBorrowed(ctx context.Context, requests []allocation.Mode
 }
 
 // restoreHeldReleases is for a process whose first cycles count no borrowing:
-// once, it reads the persisted ledger, and keeps a governor only when that
+// once the persisted ledger has been read, it keeps a governor only when that
 // ledger pins something (a release in flight or a placement-timeout hold), so
 // those pins, and the window after which they are dropped, survive a restart.
 // Otherwise it leaves no governor and the ledger unloaded, for the first cycle
-// that counts borrowing to load. Reports whether a governor now exists.
+// that counts borrowing to load. A read that failed is tried again next cycle.
+// Reports whether a governor now exists.
 func (e *Engine) restoreHeldReleases(ctx context.Context) bool {
 	st := &e.borrowing
 	if st.holdChecked {
 		return false
 	}
-	st.holdChecked = true
 	st.governor = allocation.NewBorrowGovernor(e.borrowSettings())
 	e.loadBorrowLedger(ctx)
+	if !st.ledgerLoaded {
+		st.governor = nil
+		return false
+	}
+	st.holdChecked = true
 	if l := st.governor.Ledger(); len(l.Entries) > 0 || len(l.TimeoutHeld) > 0 {
 		return true
 	}
@@ -164,8 +169,11 @@ func (e *Engine) loadBorrowLedger(ctx context.Context) {
 	}
 	raw, found, err := controllerstatus.ReadKey(ctx, reader, config.SystemNamespace(), controllerstatus.KeyBorrowReleaseLedger)
 	if err != nil {
-		ctrl.LoggerFrom(ctx).Info("Cannot read the persisted borrowing release ledger yet; waiting lenders are treated as having a release in flight until their next fresh read",
-			"error", err.Error())
+		if !st.ledgerErrLogged {
+			st.ledgerErrLogged = true
+			ctrl.LoggerFrom(ctx).Info("Cannot read the persisted borrowing release ledger yet; waiting lenders are treated as having a release in flight until their next fresh read, and the read is tried again each cycle",
+				"error", err.Error())
+		}
 		return
 	}
 	st.ledgerLoaded = true

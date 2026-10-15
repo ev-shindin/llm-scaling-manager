@@ -40,10 +40,12 @@ type borrowingState struct {
 	// governor decides the placement hold, the cooldowns and the releases of
 	// borrowed capacity (borrowing_release.go); nil until a cycle borrows.
 	governor *allocation.BorrowGovernor
-	// ledgerLoaded is set once the persisted release ledger was read back.
-	ledgerLoaded bool
+	// ledgerLoaded is set once the persisted release ledger was read back;
+	// ledgerErrLogged once a failed read was logged.
+	ledgerLoaded    bool
+	ledgerErrLogged bool
 	// holdChecked is set once a cycle that counts no borrowing, before any
-	// that does, looked for persisted pins (restoreHeldReleases).
+	// that does, read the persisted pins (restoreHeldReleases).
 	holdChecked bool
 	// lastLedger is the ledger last handed to the status publisher.
 	lastLedger string
