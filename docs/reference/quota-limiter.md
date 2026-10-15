@@ -311,10 +311,10 @@ published (`wva_quota_borrow_withheld`):
 
 | Condition | Reason when it fails |
 |---|---|
-| Kueue manages every GPU pod in the namespace (its `managed` label or admission gate, or an owner with a queue name and a Workload) | `not-kueue-managed` |
+| Kueue charges every GPU pod in the namespace: a Workload owned by the pod, or by an owner up its chain, has quota reserved (for a pod at Kueue's admission gate, the Workload exists). Kueue's labels and gate alone are not enough, since a tenant can write them | `not-kueue-managed` |
 | Something checks that borrowed GPUs exist: a `gpu-inventory` limiter, or a GPU `ResourceQuota` at most nominal plus `borrowingLimit` | `no-gpu-bound` |
 | The namespace's ResourceQuotas are readable | `resourcequota-unreadable` |
-| The Kueue read is fresh (not failed, not older than twice `refreshInterval`) and Kueue has written queue status | `stale`, `no-status` |
+| The Kueue read is fresh (not failed, not older than twice `refreshInterval`; a Cohort or ResourceQuota list that fails for a reason other than Forbidden also reads as stale) and Kueue has written queue status | `stale`, `no-status` |
 | The cohort is flat, and its Cohort objects are readable | `hierarchical-cohort`, `hierarchy-unknown` |
 | No queue in the cohort uses `status.effectiveQuotas`, and Fair Sharing is off | `effective-quotas`, `fair-sharing` |
 | The queue is in a cohort, active, and its borrowing fields parse | `no-cohort`, `inactive`, `malformed` |
@@ -322,8 +322,8 @@ published (`wva_quota_borrow_withheld`):
 **The three figures.** Where borrowing is counted, a namespace has:
 
 - **guaranteed**: what it keeps whatever the cohort does. That is the nominal
-  quota for a queue that can reclaim. For a queue with
-  `reclaimWithinCohort: Never` it is what the queue already uses or keeps
+  quota for a queue that can reclaim (`reclaimWithinCohort: Any`). For a queue
+  with `Never` or `LowerPriority` it is what the queue already uses or keeps
   back from lending; nominal a peer holds stays with the peer (reason
   `nominal-lent-out`).
 - **borrow cap**: how far past guaranteed it may go: nominal plus
@@ -351,7 +351,8 @@ itself:
   partner). The wait stretches up to three times while the cluster autoscaler
   reports `TriggeredScaleUp` on the pod. Until it places, the variant borrows
   nothing new.
-- **A waiting lender.** A lender with `reclaimWithinCohort: Never` that waits
+- **A waiting lender.** A lender with `reclaimWithinCohort: Never` or
+  `LowerPriority` (Kueue then preempts only lower priorities) that waits
   for capacity it lent gets one unit back at a time (a replica, a P/D pair, a
   LeaderWorkerSet group), never below a namespace's guaranteed figure or a
   variant's `minReplicaCount`. Lowest priority first, then the most recently
