@@ -515,6 +515,47 @@ elif [ "$written" != "${written#*gpu-inventory}" ]; then
 else
     ok "disabling the physical limiter keeps the quota the cluster policy declares"
 fi
+case_begin
+if ! grep -q 'Removed the gpu-inventory limiter from wva-policy/wva-scaling-policy-config; the quota limiter declared there stays' "$WORK/out"; then
+    fail "disable did not say the quota stays beside the removed physical limiter: $(grep -i 'removed\|bound' "$WORK/out")"
+elif grep -q 'bounded by nothing' "$WORK/out"; then
+    fail "disable said scaling is bounded by nothing while the quota stays: $(grep 'bounded by nothing' "$WORK/out")"
+else
+    ok "disable says the quota still bounds, not that nothing does"
+fi
+
+# The documented undo of a QUOTA run without WVA_LIMITER_TYPE=quota: the policy
+# holds only a quota, so there is no physical limiter to remove. It used to
+# print "Removed the gpu-inventory limiter" and exit 0, with the quota in force.
+case_begin
+printf 'limiters:\n- name: tenant-quota\n  type: quota\n  scope: cluster\n  quotas:\n    H200: 8\n' > "$DEPLOYS/wva-policy.policy"
+PL_FN=disable_physical_limiter run_enable
+if [ "$RC" -eq 0 ]; then
+    fail "disable exited 0 having removed nothing while the quota stays: $(tail -6 "$WORK/out")"
+elif grep -q 'Removed the gpu-inventory limiter from wva-policy' "$WORK/out"; then
+    fail "disable announced a removal from a policy holding only a quota: $(grep 'Removed the' "$WORK/out")"
+elif grep -q 'CALL\[patch configmap wva-scaling-policy-config -n wva-policy' "$CALLS"; then
+    fail "disable wrote a policy it had nothing to remove from"
+elif ! grep -q 'no gpu-inventory entry in wva-policy/wva-scaling-policy-config; nothing removed; the quota limiter stays' "$WORK/out"; then
+    fail "disable did not say there was no physical entry and the quota stays: $(tail -6 "$WORK/out")"
+elif ! grep -q 'WVA_LIMITER_TYPE=quota' "$WORK/out"; then
+    fail "disable did not say how to remove the quota: $(tail -4 "$WORK/out")"
+else
+    ok "disable over a quota-only policy removes nothing, exits non-zero, and names WVA_LIMITER_TYPE=quota"
+fi
+# And with WVA_LIMITER_TYPE=quota the quota goes.
+case_begin
+PL_FN=disable_physical_limiter run_enable WVA_LIMITER_TYPE=quota
+rm -f "$DEPLOYS/wva-policy.policy"
+if [ "$RC" -ne 0 ]; then
+    fail "disable WVA_LIMITER_TYPE=quota failed over a quota-only policy: $(tail -6 "$WORK/out")"
+elif ! grep -q 'CALL\[patch configmap wva-scaling-policy-config -n wva-policy --type=merge -p {"data":{"default":null}}' "$CALLS"; then
+    fail "disable WVA_LIMITER_TYPE=quota did not remove the quota-only default entry: $(grep 'CALL\[patch' "$CALLS")"
+elif ! grep -q 'Removed the quota limiter from wva-policy/wva-scaling-policy-config' "$WORK/out"; then
+    fail "disable WVA_LIMITER_TYPE=quota did not report the removal: $(tail -6 "$WORK/out")"
+else
+    ok "disable WVA_LIMITER_TYPE=quota removes a quota-only policy's entry"
+fi
 
 # Messages may not claim more than the code did. Each failure below must end
 # the command non-zero, name the step, and never print "in force".
@@ -570,7 +611,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=32
+CASES_EXPECTED=35
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately."
 else

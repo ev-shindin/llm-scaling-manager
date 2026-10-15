@@ -90,5 +90,8 @@ verify:
 
 cleanup:
   disable:
-    note: Removes the physical limiter; a quota in the same policy stays, and with none left scaling is unbounded again.
-    run: make disable-physical-limiter
+    note: Removes the physical limiter; a quota in the same policy stays, and with none left scaling is unbounded again. To remove a quota, add WVA_LIMITER_TYPE=quota.
+    run: |
+      make disable-physical-limiter
+      # a quota instead:
+      # make disable-physical-limiter WVA_LIMITER_TYPE=quota

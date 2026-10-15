@@ -19,7 +19,7 @@
 - **Turn borrowing off, keep the Kueue cap:** add `WVA_QUOTA_KUEUE_BORROW=false` to the same command as `WVA_QUOTA_KUEUE=true`. It writes `countBorrowable: false` on the entry ([Borrowing](#borrowing)).
 - **Undo** (no guide step). Left at `-1` without Kueue, the entry is no cap at all, so replace it rather than only dropping the flag:
   - One install (namespace owner): re-run `make deploy-wva` with `WVA_LIMITER=quota`, a finite `WVA_QUOTAS` and no `WVA_QUOTA_KUEUE`, or with no `WVA_LIMITER` to declare no limiter.
-  - Cluster policy (cluster admin): re-run `make enable-physical-limiter WVA_LIMITER_TYPE=quota` with a finite `WVA_QUOTAS` and no `WVA_QUOTA_KUEUE`, or `make disable-physical-limiter`.
+  - Cluster policy (cluster admin): re-run `make enable-physical-limiter WVA_LIMITER_TYPE=quota` with a finite `WVA_QUOTAS` and no `WVA_QUOTA_KUEUE`, or `make disable-physical-limiter WVA_LIMITER_TYPE=quota` to remove the quota. Without `WVA_LIMITER_TYPE=quota` it removes only the physical limiter.
 
 ## What it is
 

@@ -150,8 +150,10 @@ others, read `wva-scaling-policy-config` in the namespace their
 
 <!-- guide:cleanup.disable start -->
 ```bash
-# Removes the physical limiter; a quota in the same policy stays, and with none left scaling is unbounded again.
+# Removes the physical limiter; a quota in the same policy stays, and with none left scaling is unbounded again. To remove a quota, add WVA_LIMITER_TYPE=quota.
 make disable-physical-limiter
+# a quota instead:
+# make disable-physical-limiter WVA_LIMITER_TYPE=quota
 ```
 <!-- guide:cleanup.disable end -->
 

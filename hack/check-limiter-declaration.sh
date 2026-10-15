@@ -956,6 +956,29 @@ limiters:
     else
         ok "removing the last limiter removes the default entry, as none does"
     fi
+
+    # NOTHING OF THAT KIND: write nothing, and say what stays. Removing the
+    # physical limiter from a policy that holds only a quota reported "Removed
+    # the gpu-inventory limiter" -- the documented undo of a quota, which left
+    # the quota in force.
+    case_begin
+    run_pl_limiter remove-gpu-inventory 'limiters:
+  - name: tenant-q
+    type: quota
+    scope: cluster
+    quotas:
+      H200: 8'
+    wrote="$(cat "$WROTE")"
+    calls="$(cat "$CALLS")"
+    if [ "$PLRC" -ne 3 ]; then
+        fail "removing a kind the policy does not declare returned $PLRC, want 3 (nothing removed): $(tail -1 "$WORK/plerr")"
+    elif [ -n "$wrote" ] || printf '%s' "$calls" | grep -qE 'CALL\[(apply|patch)'; then
+        fail "removing a kind the policy does not declare wrote the policy anyway: [$wrote] calls: $calls"
+    elif ! grep -q 'no gpu-inventory entry.*nothing removed.*the quota limiter stays' "$WORK/plerr"; then
+        fail "removing a kind the policy does not declare did not say the quota stays: $(cat "$WORK/plerr")"
+    else
+        ok "removing a kind the policy does not declare writes nothing and says the other kind stays"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -1242,7 +1265,7 @@ fi
 # and the check still prints OK -- and the ok() suppression means the count of
 # ok lines is not comparable against a known-good run either.
 case_begin
-CASES_EXPECTED=73
+CASES_EXPECTED=74
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else
