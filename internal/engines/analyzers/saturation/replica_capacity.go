@@ -84,6 +84,14 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	}
 	historyKey := a.historyKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
 		rm.AvgOutputTokens, config.QueueLengthThreshold)
+	// A Ready replica of the variant's own is the variant serving this
+	// bucket, which is the only time a borrow's clock runs (k2_borrow.go). A
+	// bridge is the pool's engine lent to the variant, and a Pod that is not
+	// Ready serves nothing.
+	serving := rm.Ready && !rm.FromWarmPool
+	if serving {
+		a.noteBorrowServing(historyKey, a.now())
+	}
 	k2, k2Priority := a.computeK2(
 		historyKey,
 		modelID, namespace, rm.VariantName,
@@ -95,6 +103,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		rm.TotalKvCapacityTokens,
 		role,
 		downstreamSaturated,
+		serving,
 		logger,
 	)
 	// The same saturated moment that yields a k2 observation yields the
@@ -401,6 +410,9 @@ func (a *SaturationAnalyzer) computeK2(
 	kvCeiling int64,
 	role string,
 	downstreamSaturated bool,
+	// serving is a Ready replica of the variant's own: only it starts or
+	// advances a borrow's clock (borrowedK2).
+	serving bool,
 	logger logr.Logger,
 ) (int64, capacity.K2Source) {
 	// Priority 1: Observed (queue saturated)
@@ -634,7 +646,7 @@ func (a *SaturationAnalyzer) computeK2(
 	isPrefill := canonicalRole(role) == domain.RolePrefill
 	if !isPrefill {
 		if k2Derived := estimateCapacityFromParams(engineParams, avgInput, avgOutput); k2Derived > 0 {
-			if b, ok := a.borrowedK2(historyKey, modelID, min(k1, k2Derived), engineParams); ok {
+			if b, ok := a.borrowedK2(historyKey, modelID, min(k1, k2Derived), engineParams, serving); ok {
 				logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, min(k1, k2Derived), capacity.K2SrcDerived)
 				return b.k2, capacity.K2SrcBorrowed
 			}
@@ -648,7 +660,7 @@ func (a *SaturationAnalyzer) computeK2(
 	}
 
 	// Priority 4: Fallback to k1
-	if b, ok := a.borrowedK2(historyKey, modelID, k1, engineParams); ok {
+	if b, ok := a.borrowedK2(historyKey, modelID, k1, engineParams, serving); ok {
 		logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, k1, capacity.K2SrcFallback)
 		return b.k2, capacity.K2SrcBorrowed
 	}

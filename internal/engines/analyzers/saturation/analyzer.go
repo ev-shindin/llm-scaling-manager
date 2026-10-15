@@ -70,8 +70,14 @@ type SaturationAnalyzer struct {
 	// must NOT be reset by a donor that comes and goes, which would hold a
 	// borrowed figure at full strength again. A bucket the variant has never
 	// measured gets its own clock: see k2_borrow.go for why per bucket and not
-	// per variant. Swept a retention after the relaxation ended.
+	// per variant. Moved forward by the time the variant did not serve the
+	// bucket, so start-to-now is serving time (noteBorrowServing).
 	k2BorrowedSince map[string]time.Time
+	// k2BorrowState is, per k2BorrowedSince key, the clock's last serving
+	// cycle, when it was last read, and what the borrow was armed on. A spent
+	// borrow re-arms only on new evidence (borrowState.rearms), so the clock
+	// is kept for as long as its variant exists and swept with it.
+	k2BorrowState map[string]*borrowState
 	// pendingRestore is learned state restored after a controller restart and
 	// not yet installed, keyed namespace/variant: it waits for its variant's
 	// first cycle, when the engine configuration it runs is known, and is
@@ -266,6 +272,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		lastAccelerator:        make(map[string]acceleratorMemo),
 		saturatedThroughput:    make(map[string]*capacity.RollingAverage),
 		k2BorrowedSince:        make(map[string]time.Time),
+		k2BorrowState:          make(map[string]*borrowState),
 		pendingRestore:         make(map[string]*pendingVariant),
 		throughputSampledAt:    make(map[string]time.Time),
 		throughputLastRead:     make(map[string]float64),
@@ -384,6 +391,16 @@ func (a *SaturationAnalyzer) NoteVariantsPresent(namespace, modelID string, vari
 		for _, p := range prefixes {
 			if strings.HasPrefix(key, p) {
 				a.noteVariantSeen(key, now)
+				break
+			}
+		}
+	}
+	// A borrow's clock is swept on the same liveness, and keyed the k2 way
+	// (namespace|variant|model|...), so it is matched on its own prefixes.
+	for key, st := range a.k2BorrowState {
+		for _, v := range variantNames {
+			if strings.HasPrefix(key, namespace+"|"+v+"|"+modelID+"|") {
+				st.seen = now
 				break
 			}
 		}
@@ -569,20 +586,34 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			evicted.MuWindows++
 		}
 	}
-	// A borrow's start goes a retention after its relaxation ended, and not
-	// sooner: deleting it restarts the borrow at full strength, so a variant
-	// that never saturates would be held at the donor's figure by the sweep
-	// instead of by a donor. After that long the restart is a deliberate
-	// re-probe: a variant that still has no reading of its own borrows again.
-	// Not on the variant's own window appearing: an own window displaces the
-	// borrow already (P2 reads it first), and a clock kept until its age runs
-	// out is what stops a variant hovering at full strength by moving between
-	// its own buckets.
+	// A borrow's clock goes with its variant: when nothing has read it,
+	// ticked it or found the variant present for VariantTimeout. Not on its
+	// age. Dropping a spent clock is what used to re-arm the borrow at full
+	// strength a retention after it ended -- a weekly re-probe that held
+	// extra replicas for a variant already living on its own figure, with no
+	// new evidence behind it (see k2_borrow.go). Not on the variant's own
+	// window appearing either: an own window displaces the borrow already
+	// (P2 reads it first), and a kept clock is what stops a variant hovering
+	// at full strength by moving between its own buckets.
+	//
+	// A clock with no state predates it -- restored from an older snapshot
+	// and never read since -- and keeps the old rule.
 	borrowLife := BorrowedK2Hold + BorrowedK2Relax + bucketRetention
 	for key, since := range a.k2BorrowedSince {
-		if a.now().Sub(since) > borrowLife {
+		st := a.k2BorrowState[key]
+		gone := st == nil && a.now().Sub(since) > borrowLife
+		if st != nil {
+			gone = a.now().Sub(st.seen) > variantTimeout
+		}
+		if gone {
 			delete(a.k2BorrowedSince, key)
+			delete(a.k2BorrowState, key)
 			evicted.K2Borrows++
+		}
+	}
+	for key := range a.k2BorrowState {
+		if _, ok := a.k2BorrowedSince[key]; !ok {
+			delete(a.k2BorrowState, key)
 		}
 	}
 	// Restored entries for a variant that has not been analysed since the

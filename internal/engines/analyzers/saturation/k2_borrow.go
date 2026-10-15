@@ -1,6 +1,7 @@
 package saturation
 
 import (
+	"math"
 	"strings"
 	"time"
 
@@ -45,12 +46,27 @@ import (
 // most one hold per output bucket a variant passes through, extra replicas
 // for a bounded time, which the k2 asymmetry ranks as the cheaper error.
 //
-// A clock is not reset by a donor that goes and comes back. It re-arms in two
-// bounded ways, both deliberate: a retention after the relaxation ended the
-// sweep drops it, so a variant that has still never measured that bucket
-// borrows again -- a weekly re-probe -- and a controller restart drops it with
-// every other learned figure, the donors' windows included, so nothing is
-// borrowed until a donor has measured again.
+// THE CLOCK COUNTS SERVING TIME. It advances only on cycles where a Ready
+// replica of the variant's own serves the bucket (noteBorrowServing). A
+// variant parked at zero, or whose traffic is in another bucket, does not use
+// the borrowed figure, so the hold and the relaxation wait for it: measured on
+// the wall clock, a canary parked overnight woke fully relaxed and spent none
+// of the protection it was given. A warm-pool bridge, or a Pod that is not
+// Ready, reads a borrow but neither starts its clock nor moves it -- neither
+// is the variant serving.
+//
+// A SPENT BORROW STAYS SPENT. A clock is not reset by a donor that goes and
+// comes back, and it is no longer dropped a retention after the relaxation
+// ended: that drop used to re-arm the borrow at full strength once a week, for
+// a variant that had already lived on its own figure for days -- a periodic
+// cost with no new evidence behind it, about 42 GPU-hours per replica per
+// bucket on whole 8-GPU nodes. The clock now keeps what it was armed on, the
+// donor's figure and the borrower's engine configuration, and re-arms only
+// when one of them has changed (borrowState.rearms): a donor that has measured
+// something materially different, or a borrower redeployed with other flags,
+// is a new question; the passage of time is not. The clock goes when its
+// variant does (EvictStaleHistory, on the variant's liveness). A controller
+// restart keeps it through the learned-state snapshot, if that is on.
 
 const (
 	// BorrowedK2Hold is how long a borrowed k2 is used at full strength
@@ -62,7 +78,44 @@ const (
 	// fraction of the gap per cycle, so the fleet thins a replica at a time
 	// and the first saturation is a short, measured one rather than a cliff.
 	BorrowedK2Relax = 6 * time.Hour
+	// BorrowedK2TickGap is the longest gap between two serving cycles that
+	// the clock counts as serving time. Longer than any reconcile interval
+	// with room for a missed cycle or two; a longer gap -- the variant parked,
+	// or serving another bucket -- is paused time and is not counted.
+	BorrowedK2TickGap = 5 * time.Minute
+	// BorrowedK2RearmChange is how far a donor's figure must have moved, as a
+	// fraction of the figure the borrow was armed on, before a spent borrow
+	// re-arms. Well above a window's cycle-to-cycle drift, so a donor that is
+	// merely still measuring does not restart a borrow.
+	BorrowedK2RearmChange = 0.2
 )
+
+// borrowState is what a borrow's clock keeps beside its start
+// (k2BorrowedSince): when the variant last served the bucket, when anything
+// last read the clock or found the variant present, and what the borrow was
+// armed on.
+type borrowState struct {
+	// tick is the last serving cycle; the start is moved forward by any gap
+	// past BorrowedK2TickGap, so start-to-tick is serving time only.
+	tick time.Time
+	// seen is when the clock was last read, ticked or its variant noted
+	// present. The clock is swept on it, with the variant's other state.
+	seen time.Time
+	// donorK2 and args are the evidence the borrow was armed on: the donor's
+	// figure and the borrower's engine configuration (Fingerprint).
+	donorK2 int64
+	args    string
+}
+
+// rearms says whether a spent borrow may start again: the donor's figure has
+// moved by more than BorrowedK2RearmChange, or the borrower's engine
+// configuration is not the one the borrow was armed under.
+func (st *borrowState) rearms(donorK2 int64, args string) bool {
+	if args != st.args {
+		return true
+	}
+	return math.Abs(float64(donorK2-st.donorK2)) > BorrowedK2RearmChange*float64(st.donorK2)
+}
 
 // k2Borrow is the outcome of borrowedK2 for one replica's decision.
 type k2Borrow struct {
@@ -70,7 +123,16 @@ type k2Borrow struct {
 	donor   string        // the lending variant's name
 	donorK2 int64         // what the donor measured
 	relaxed float64       // 0 at full strength, 1 when fully relaxed to own
-	age     time.Duration // how long this variant has been borrowing
+	age     time.Duration // how long this variant has been borrowing, in serving time
+}
+
+// relaxedAt is how far a borrow of the given age has relaxed: 0 through the
+// hold, then linearly to 1 over the relaxation.
+func relaxedAt(age time.Duration) float64 {
+	if age <= BorrowedK2Hold {
+		return 0
+	}
+	return float64(age-BorrowedK2Hold) / float64(BorrowedK2Relax)
 }
 
 // splitVariantKey splits a historyKey into its namespace, variant and the rest
@@ -82,6 +144,35 @@ func splitVariantKey(key string) (namespace, variant, rest string, ok bool) {
 		return "", "", "", false
 	}
 	return parts[0], parts[1], parts[2], true
+}
+
+// noteBorrowServing advances the borrow clock of a history key on a cycle
+// where a Ready replica of the variant's own serves it. A key with no clock is
+// left alone: serving does not start a borrow, borrowing does.
+func (a *SaturationAnalyzer) noteBorrowServing(key string, now time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.noteBorrowServingLocked(key, now)
+}
+
+// noteBorrowServingLocked is noteBorrowServing for a caller holding a.mu.
+func (a *SaturationAnalyzer) noteBorrowServingLocked(key string, now time.Time) {
+	since, ok := a.k2BorrowedSince[key]
+	if !ok {
+		return
+	}
+	st := a.k2BorrowState[key]
+	if st == nil {
+		// A clock restored from a snapshot written before this state
+		// existed: no serving time is known, so the next gap counts from now.
+		st = &borrowState{tick: now}
+		a.k2BorrowState[key] = st
+	}
+	if gap := now.Sub(st.tick); !st.tick.IsZero() && gap > BorrowedK2TickGap {
+		a.k2BorrowedSince[key] = since.Add(gap - BorrowedK2TickGap)
+	}
+	st.tick = now
+	st.seen = now
 }
 
 // borrowedK2 returns a sibling's measured k2 for a replica whose own window
@@ -100,8 +191,14 @@ func splitVariantKey(key string) (namespace, variant, rest string, ok bool) {
 // own k2). Compared against its own k2 alone, a donor between k1 and a derived
 // k2 above k1 was "lower", was reported as P2-borrow and started the clock,
 // while capacity -- clamped to k1 either way -- did not move. ok is false when
-// there is nothing to borrow, or the relaxation has run its course.
-func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownParams *capacity.EngineParams) (k2Borrow, bool) {
+// there is nothing to borrow, or the relaxation has run its course and nothing
+// has changed since.
+//
+// serving says whether the replica asking is a Ready replica of the variant's
+// own. Only such a replica starts a clock, advances it, or re-arms a spent
+// one; any other reads the borrow as the clock stood at the variant's last
+// serving cycle, at full strength if it never served.
+func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownParams *capacity.EngineParams, serving bool) (k2Borrow, bool) {
 	if own <= 0 || ownParams == nil {
 		return k2Borrow{}, false
 	}
@@ -142,31 +239,59 @@ func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownPa
 		return k2Borrow{}, false
 	}
 
-	clockKey := ownKey
+	at := func(age time.Duration) k2Borrow {
+		f := relaxedAt(age)
+		return k2Borrow{
+			k2:      best.k2 + int64(f*float64(own-best.k2)),
+			donor:   best.variant,
+			donorK2: best.k2,
+			relaxed: f,
+			age:     age,
+		}
+	}
 	now := a.now()
+	args := ownParams.Fingerprint()
 	a.mu.Lock()
-	since, started := a.k2BorrowedSince[clockKey]
+	defer a.mu.Unlock()
+	arm := func() (k2Borrow, bool) {
+		a.k2BorrowedSince[ownKey] = now
+		a.k2BorrowState[ownKey] = &borrowState{tick: now, seen: now, donorK2: best.k2, args: args}
+		return at(0), true
+	}
+	since, started := a.k2BorrowedSince[ownKey]
 	if !started {
-		since = now
-		a.k2BorrowedSince[clockKey] = since
+		if !serving {
+			return at(0), true
+		}
+		return arm()
 	}
-	a.mu.Unlock()
-
-	age := now.Sub(since)
-	f := 0.0
-	if age > BorrowedK2Hold {
-		f = float64(age-BorrowedK2Hold) / float64(BorrowedK2Relax)
+	if serving {
+		a.noteBorrowServingLocked(ownKey, now)
+		since = a.k2BorrowedSince[ownKey]
 	}
-	if f >= 1 {
-		return k2Borrow{}, false
+	st := a.k2BorrowState[ownKey]
+	if st == nil {
+		st = &borrowState{}
+		a.k2BorrowState[ownKey] = st
 	}
-	return k2Borrow{
-		k2:      best.k2 + int64(f*float64(own-best.k2)),
-		donor:   best.variant,
-		donorK2: best.k2,
-		relaxed: f,
-		age:     age,
-	}, true
+	st.seen = now
+	if st.args == "" {
+		// Restored from a snapshot that did not record what the borrow was
+		// armed on: today's figures are the evidence from here on.
+		st.donorK2, st.args = best.k2, args
+	}
+	end := now
+	if !serving && !st.tick.IsZero() {
+		end = st.tick
+	}
+	age := end.Sub(since)
+	if relaxedAt(age) < 1 {
+		return at(age), true
+	}
+	if serving && st.rearms(best.k2, args) {
+		return arm()
+	}
+	return k2Borrow{}, false
 }
 
 // logBorrowedK2 is the k2-decision line for a borrowed figure. It names the

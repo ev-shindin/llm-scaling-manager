@@ -59,6 +59,11 @@ type LearnedState struct {
 	Accelerators    map[string]AcceleratorSnapshot `json:"accelerators,omitempty"`
 	ITLLines        map[string]LineSnapshot        `json:"itlLines,omitempty"`
 	K2BorrowedSince map[string]time.Time           `json:"k2BorrowedSince,omitempty"`
+	// K2BorrowState is what each borrow clock keeps beside its start, keyed
+	// like K2BorrowedSince. A document written before it existed has none;
+	// its clocks are restored under the old rule and take today's figures as
+	// what they were armed on (borrowedK2).
+	K2BorrowState map[string]BorrowStateSnapshot `json:"k2BorrowState,omitempty"`
 	// Config is the engine-configuration fingerprint each variant ran when
 	// this was exported, keyed namespace/variant.
 	Config map[string]string `json:"config,omitempty"`
@@ -76,6 +81,14 @@ type ThroughputSnapshot struct {
 type AcceleratorSnapshot struct {
 	Name     string    `json:"name"`
 	LastUsed time.Time `json:"lastUsed"`
+}
+
+// BorrowStateSnapshot is a borrow clock's state (borrowState).
+type BorrowStateSnapshot struct {
+	Tick    time.Time `json:"tick"`
+	Seen    time.Time `json:"seen"`
+	DonorK2 int64     `json:"donorK2"`
+	Args    string    `json:"args"`
 }
 
 // LineSnapshot is a fitted ITL line shared under an engine configuration.
@@ -168,7 +181,13 @@ func (p *pendingVariant) alive(now, wall time.Time, h capacity.Horizons) bool {
 		}
 	}
 	borrowLife := BorrowedK2Hold + BorrowedK2Relax + h.BucketRetention
-	for _, since := range s.K2BorrowedSince {
+	for k, since := range s.K2BorrowedSince {
+		if st, ok := s.K2BorrowState[k]; ok {
+			if within(st.Seen, now, h.VariantTimeout) {
+				return true
+			}
+			continue
+		}
 		if within(since, now, borrowLife) {
 			return true
 		}
@@ -237,6 +256,7 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 		Accelerators:    make(map[string]AcceleratorSnapshot, len(a.lastAccelerator)),
 		ITLLines:        make(map[string]LineSnapshot, len(a.itlLines)),
 		K2BorrowedSince: make(map[string]time.Time, len(a.k2BorrowedSince)),
+		K2BorrowState:   make(map[string]BorrowStateSnapshot, len(a.k2BorrowState)),
 		Config:          map[string]string{},
 	}
 	for k, ra := range a.computeCapacityHistory {
@@ -267,6 +287,9 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 	for k, v := range a.k2BorrowedSince {
 		s.K2BorrowedSince[k] = v
 	}
+	for k, st := range a.k2BorrowState {
+		s.K2BorrowState[k] = BorrowStateSnapshot{Tick: st.tick, Seen: st.seen, DonorK2: st.donorK2, Args: st.args}
+	}
 	a.mu.Unlock()
 
 	// The configuration each variant runs, read outside a.mu: the store has
@@ -285,6 +308,12 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 		note(k)
 	}
 	for k := range s.VariantSeenAt {
+		note(k)
+	}
+	// A borrowing variant can have a clock and nothing else: no window of its
+	// own, which is why it borrows. Unnamed here, its clock had no
+	// configuration to be checked against and was not restored.
+	for k := range s.K2BorrowedSince {
 		note(k)
 	}
 	for v, m := range models {
@@ -319,6 +348,7 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 		mergeAbsent(s.ITLBaseline, p.state.ITLBaseline)
 		mergeAbsent(s.StartSeconds, p.state.StartSeconds)
 		mergeAbsent(s.K2BorrowedSince, p.state.K2BorrowedSince)
+		mergeAbsent(s.K2BorrowState, p.state.K2BorrowState)
 		mergeAbsent(s.Accelerators, p.state.Accelerators)
 	}
 	return s
@@ -333,6 +363,7 @@ func dropVariant(s *LearnedState, v string) {
 	maps.DeleteFunc(s.ITLBaseline, func(k string, _ float64) bool { return of(k) })
 	maps.DeleteFunc(s.StartSeconds, func(k string, _ float64) bool { return of(k) })
 	maps.DeleteFunc(s.K2BorrowedSince, func(k string, _ time.Time) bool { return of(k) })
+	maps.DeleteFunc(s.K2BorrowState, func(k string, _ BorrowStateSnapshot) bool { return of(k) })
 	delete(s.Accelerators, v)
 }
 
@@ -444,6 +475,12 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 				p.state.K2BorrowedSince = map[string]time.Time{}
 			}
 			p.state.K2BorrowedSince[k] = since
+			if st, ok := s.K2BorrowState[k]; ok {
+				if p.state.K2BorrowState == nil {
+					p.state.K2BorrowState = map[string]BorrowStateSnapshot{}
+				}
+				p.state.K2BorrowState[k] = st
+			}
 		}
 	}
 	for v, p := range a.pendingRestore {
@@ -555,10 +592,29 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState) int {
 	borrowLife := BorrowedK2Hold + BorrowedK2Relax + h.BucketRetention
 	for k, since := range s.K2BorrowedSince {
 		since, inTime := notFuture(since, now)
-		if _, live := a.k2BorrowedSince[k]; live || since.IsZero() || !inTime || now.Sub(since) > borrowLife {
+		if _, live := a.k2BorrowedSince[k]; live || since.IsZero() || !inTime {
+			continue
+		}
+		// A clock with its state is kept for as long as its variant is seen,
+		// spent or not: dropping a spent clock is what re-arms a borrow with
+		// no new evidence (k2_borrow.go). One from an older document has no
+		// state and keeps the old rule, its start.
+		st, hasState := s.K2BorrowState[k]
+		if !hasState {
+			if now.Sub(since) > borrowLife {
+				continue
+			}
+			a.k2BorrowedSince[k] = since
+			kept++
+			continue
+		}
+		seen, seenInTime := notFuture(st.Seen, now)
+		tick, tickInTime := notFuture(st.Tick, now)
+		if seen.IsZero() || !seenInTime || !tickInTime || now.Sub(seen) > h.VariantTimeout {
 			continue
 		}
 		a.k2BorrowedSince[k] = since
+		a.k2BorrowState[k] = &borrowState{tick: tick, seen: seen, donorK2: st.DonorK2, args: st.Args}
 		kept++
 	}
 	return kept
@@ -586,6 +642,12 @@ func (a *SaturationAnalyzer) notePendingPresent(namespace string, prefixes, vari
 			m.LastUsed = time.Now()
 			p.state.Accelerators[namespace+"/"+v] = m
 		}
+		for key, st := range p.state.K2BorrowState {
+			if strings.HasPrefix(key, namespace+"|"+v+"|") {
+				st.Seen = now
+				p.state.K2BorrowState[key] = st
+			}
+		}
 	}
 }
 
@@ -605,5 +667,6 @@ func (a *SaturationAnalyzer) ForgetLearnedState() {
 	clear(a.lastAccelerator)
 	clear(a.itlLines)
 	clear(a.k2BorrowedSince)
+	clear(a.k2BorrowState)
 	clear(a.pendingRestore)
 }

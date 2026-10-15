@@ -60,6 +60,16 @@ var _ = Describe("borrowing a sibling's k2", func() {
 	keyOf := func(variant string) string {
 		return a.historyKey("test-model", "test-ns", variant, "H100", 1, domain.RoleBoth, 50, 5)
 	}
+	// serve moves the clock d forward a minute at a time, the variant
+	// serving key on every step as a Ready own replica does every cycle: the
+	// borrow clock counts serving time, so a jump with no cycles in it would
+	// read as the variant parked.
+	serve := func(key string, d time.Duration) {
+		for end := clock.Add(d); clock.Before(end); {
+			clock = clock.Add(time.Minute)
+			a.noteBorrowServing(key, clock)
+		}
+	}
 
 	It("starts a new variant from a compatible sibling's lower k2", func() {
 		cycle(4000, 6, 1000, 16000, 0) // variant-a measures 4000; variant-b has nothing
@@ -69,7 +79,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			"variant-b's own figure is k1 = 12800; the sibling measured 4000 on the same engine")
 		Expect(capacityOf(result, "variant-a")).To(Equal(float64(4000)),
 			"the donor reads its own window, unchanged by lending it")
-		b, ok := a.borrowedK2(keyOf("variant-b"), "test-model", 12800, params(256))
+		b, ok := a.borrowedK2(keyOf("variant-b"), "test-model", 12800, params(256), true)
 		Expect(ok).To(BeTrue())
 		Expect(b.donor).To(Equal("variant-a"), "the donor is named, so the borrow can be traced")
 	})
@@ -121,22 +131,22 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			ra.Add(4000)
 			a.computeCapacityHistory[donor] = ra
 		})
-		borrow := func() (k2Borrow, bool) { return a.borrowedK2(own, "test-model", 12800, params(256)) }
+		borrow := func() (k2Borrow, bool) { return a.borrowedK2(own, "test-model", 12800, params(256), true) }
 
 		It("holds, then relaxes linearly to the variant's own figure, then stops", func() {
 			b, ok := borrow()
 			Expect(ok).To(BeTrue())
 			Expect(b.k2).To(Equal(int64(4000)), "full strength at the start")
 
-			clock = clock.Add(BorrowedK2Hold)
+			serve(own, BorrowedK2Hold)
 			b, _ = borrow()
 			Expect(b.k2).To(Equal(int64(4000)), "and through the hold")
 
-			clock = clock.Add(BorrowedK2Relax / 2)
+			serve(own, BorrowedK2Relax/2)
 			b, _ = borrow()
 			Expect(b.k2).To(Equal(int64(8400)), "halfway between 4000 and 12800 halfway through")
 
-			clock = clock.Add(BorrowedK2Relax / 2)
+			serve(own, BorrowedK2Relax/2)
 			_, ok = borrow()
 			Expect(ok).To(BeFalse(), "fully relaxed: the variant is on its own figure")
 		})
@@ -147,7 +157,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 
 			saved := a.computeCapacityHistory[donor]
 			delete(a.computeCapacityHistory, donor)
-			clock = clock.Add(BorrowedK2Hold + BorrowedK2Relax/2)
+			serve(own, BorrowedK2Hold+BorrowedK2Relax/2)
 			_, ok = borrow()
 			Expect(ok).To(BeFalse(), "precondition: no donor, nothing borrowed")
 
@@ -172,27 +182,73 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			// would read test-ns's variant-a window under other-ns's record.
 			store.Update("other-ns", "test-model", "variant-a", capacity.Record{EngineParams: params(256)})
 			other := a.historyKey("test-model", "other-ns", "variant-b", "H100", 1, domain.RoleBoth, 50, 5)
-			_, ok := a.borrowedK2(other, "test-model", 12800, params(256))
+			_, ok := a.borrowedK2(other, "test-model", 12800, params(256), true)
 			Expect(ok).To(BeFalse())
 		})
 
-		It("keeps its clock for its life, then lets the variant borrow again as a re-probe", func() {
+		It("keeps a spent borrow spent while nothing has changed", func() {
 			_, ok := borrow()
 			Expect(ok).To(BeTrue())
-			clockKey := own
+			serve(own, BorrowedK2Hold+BorrowedK2Relax)
+			_, ok = borrow()
+			Expect(ok).To(BeFalse(), "precondition: fully relaxed")
 
-			clock = clock.Add(BorrowedK2Hold + BorrowedK2Relax + a.horizons.BucketRetention - time.Minute)
-			a.computeCapacityHistory[donor].TouchAt(clock) // the donor's owner still reads it
-			Expect(a.EvictStaleHistory().K2Borrows).To(BeZero())
-			Expect(a.k2BorrowedSince).To(HaveKey(clockKey),
-				"swept early, the clock restarts and the variant is held at the donor's figure again")
+			// Eight days on its own figure, past the retention that used to
+			// drop the clock and re-arm the borrow at full strength.
+			for range 8 {
+				clock = clock.Add(24 * time.Hour)
+				a.computeCapacityHistory[donor].TouchAt(clock) // the donor's owner still reads it
+				a.NoteVariantsPresent("test-ns", "test-model", []string{"variant-b"})
+				Expect(a.EvictStaleHistory().K2Borrows).To(BeZero(),
+					"a spent clock was swept while its variant exists")
+			}
+			_, ok = borrow()
+			Expect(ok).To(BeFalse(), "a spent borrow re-armed at full strength with no new evidence")
+		})
 
-			clock = clock.Add(2 * time.Minute)
-			a.computeCapacityHistory[donor].TouchAt(clock)
-			Expect(a.EvictStaleHistory().K2Borrows).To(Equal(1))
+		It("re-arms when the donor has measured something materially different", func() {
+			_, ok := borrow()
+			Expect(ok).To(BeTrue())
+			serve(own, BorrowedK2Hold+BorrowedK2Relax)
+
+			a.computeCapacityHistory[donor] = capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
+			a.computeCapacityHistory[donor].Add(3600)
+			_, ok = borrow()
+			Expect(ok).To(BeFalse(), "a 10% move is a donor still measuring, not new evidence")
+
+			a.computeCapacityHistory[donor] = capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
+			a.computeCapacityHistory[donor].Add(2000)
 			b, ok := borrow()
-			Expect(ok).To(BeTrue(), "a variant that has still never measured itself borrows again")
-			Expect(b.k2).To(Equal(int64(4000)), "from full strength: this is the deliberate weekly re-probe")
+			Expect(ok).To(BeTrue(), "the donor halved its figure and the spent borrow ignored it")
+			Expect(b.k2).To(Equal(int64(2000)), "re-armed from full strength")
+			Expect(b.relaxed).To(BeZero())
+		})
+
+		It("re-arms when the borrower's engine configuration changed", func() {
+			_, ok := borrow()
+			Expect(ok).To(BeTrue())
+			serve(own, BorrowedK2Hold+BorrowedK2Relax)
+			_, ok = borrow()
+			Expect(ok).To(BeFalse(), "precondition: spent")
+
+			// --enforce-eager is in the configuration digest and does not
+			// change capacity compatibility, so the donor still lends.
+			redeployed := params(256)
+			redeployed.EnforceEager = true
+			b, ok := a.borrowedK2(own, "test-model", 12800, redeployed, true)
+			Expect(ok).To(BeTrue(), "a redeployed borrower is a new question and was refused a borrow")
+			Expect(b.k2).To(Equal(int64(4000)))
+		})
+
+		It("goes with its variant, not on its age", func() {
+			_, ok := borrow()
+			Expect(ok).To(BeTrue())
+			clock = clock.Add(a.horizons.VariantTimeout + time.Hour)
+			a.computeCapacityHistory[donor].TouchAt(clock)
+			Expect(a.EvictStaleHistory().K2Borrows).To(Equal(1),
+				"a clock no one read or found present for VariantTimeout was kept")
+			Expect(a.k2BorrowedSince).NotTo(HaveKey(own))
+			Expect(a.k2BorrowState).NotTo(HaveKey(own))
 		})
 
 		It("gives a bucket the variant has never measured its own hold, and keeps each bucket's clock", func() {
@@ -209,16 +265,100 @@ var _ = Describe("borrowing a sibling's k2", func() {
 
 			_, ok := borrow()
 			Expect(ok).To(BeTrue())
-			clock = clock.Add(BorrowedK2Hold + BorrowedK2Relax)
+			serve(own, BorrowedK2Hold+BorrowedK2Relax)
 			_, ok = borrow()
 			Expect(ok).To(BeFalse(), "precondition: fully relaxed in the first bucket")
 
-			b, ok := a.borrowedK2(longOwn, "test-model", 12800, params(256))
+			b, ok := a.borrowedK2(longOwn, "test-model", 12800, params(256), true)
 			Expect(ok).To(BeTrue(), "a bucket the variant never measured went straight to k1")
 			Expect(b.k2).To(Equal(int64(4000)), "from full strength, for the new bucket")
 
 			_, ok = borrow()
 			Expect(ok).To(BeFalse(), "the first bucket's clock was restarted by the second's")
+		})
+	})
+
+	Describe("a clock that counts serving time", func() {
+		var own, donor string
+		BeforeEach(func() {
+			own, donor = keyOf("variant-b"), keyOf("variant-a")
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
+			ra.Add(4000)
+			a.computeCapacityHistory[donor] = ra
+		})
+
+		It("pauses while the variant is parked", func() {
+			_, ok := a.borrowedK2(own, "test-model", 12800, params(256), true)
+			Expect(ok).To(BeTrue())
+			serve(own, 10*time.Minute)
+
+			clock = clock.Add(10 * time.Hour) // parked: no cycle serves the bucket
+			a.computeCapacityHistory[donor].TouchAt(clock)
+			b, ok := a.borrowedK2(own, "test-model", 12800, params(256), true)
+			Expect(ok).To(BeTrue(), "a canary parked overnight woke with its borrow spent")
+			Expect(b.age).To(Equal(10*time.Minute+BorrowedK2TickGap),
+				"serving time, plus the gap a missed cycle may leave")
+			Expect(b.k2).To(Equal(int64(4000)), "still inside the hold")
+		})
+
+		It("is not started by a replica that does not serve the variant", func() {
+			b, ok := a.borrowedK2(own, "test-model", 12800, params(256), false)
+			Expect(ok).To(BeTrue(), "a bridge reads the borrow")
+			Expect(b.k2).To(Equal(int64(4000)))
+			Expect(a.k2BorrowedSince).To(BeEmpty(), "a bridge started the variant's clock")
+		})
+
+		It("is read by a non-serving replica as it stood at the last serving cycle", func() {
+			_, ok := a.borrowedK2(own, "test-model", 12800, params(256), true)
+			Expect(ok).To(BeTrue())
+			serve(own, BorrowedK2Hold+BorrowedK2Relax/2)
+			clock = clock.Add(10 * time.Hour)
+			a.computeCapacityHistory[donor].TouchAt(clock)
+
+			b, ok := a.borrowedK2(own, "test-model", 12800, params(256), false)
+			Expect(ok).To(BeTrue(), "a bridge on a parked variant read the borrow as spent")
+			Expect(b.relaxed).To(BeNumerically("~", 0.5, 1e-9))
+		})
+
+		It("runs on every serving cycle, with or without a donor to read", func() {
+			_, ok := a.borrowedK2(own, "test-model", 12800, params(256), true)
+			Expect(ok).To(BeTrue())
+			saved := a.computeCapacityHistory[donor]
+			delete(a.computeCapacityHistory, donor)
+			ownPod := makeReplicaMetrics("pod-b", "variant-b", 1000, 16000, 0, 100, 50)
+			ownPod.Ready = true
+			for end := clock.Add(BorrowedK2Hold + BorrowedK2Relax/2); clock.Before(end); {
+				clock = clock.Add(time.Minute)
+				_, err := a.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{ownPod}, states[1:]))
+				Expect(err).NotTo(HaveOccurred())
+			}
+			saved.TouchAt(clock)
+			a.computeCapacityHistory[donor] = saved
+			b, ok := a.borrowedK2(own, "test-model", 12800, params(256), false)
+			Expect(ok).To(BeTrue())
+			Expect(b.relaxed).To(BeNumerically("~", 0.5, 0.01),
+				"three and a half hours of serving with no donor in sight were counted as parked")
+		})
+
+		It("starts on a Ready own replica through Analyze, and not on a bridge", func() {
+			cycleWith := func(b domain.ReplicaMetrics) *domain.AnalyzerResult {
+				result, err := a.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{
+					makeReplicaMetrics("pod-a", "variant-a", 1000, 16000, 0, 100, 50), b,
+				}, states))
+				Expect(err).NotTo(HaveOccurred())
+				clock = clock.Add(15 * time.Second)
+				return result
+			}
+			bridge := makeReplicaMetrics("pool-1", "variant-b", 1000, 16000, 0, 100, 50)
+			bridge.Ready, bridge.FromWarmPool = true, true
+			Expect(capacityOf(cycleWith(bridge), "variant-b")).To(Equal(float64(4000)),
+				"a bridge prices from the borrow")
+			Expect(a.k2BorrowedSince).To(BeEmpty(), "a bridge started the variant's clock")
+
+			ownPod := makeReplicaMetrics("pod-b", "variant-b", 1000, 16000, 0, 100, 50)
+			ownPod.Ready = true
+			Expect(capacityOf(cycleWith(ownPod), "variant-b")).To(Equal(float64(4000)))
+			Expect(a.k2BorrowedSince).To(HaveKey(own), "a Ready own replica did not start the clock")
 		})
 	})
 
@@ -233,7 +373,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			store.Update("test-ns", "test-model", "variant-c", capacity.Record{EngineParams: params(256)})
 			seed("variant-a", 50, 3000)
 			seed("variant-c", 50, 6000)
-			b, ok := a.borrowedK2(keyOf("variant-b"), "test-model", 12800, params(256))
+			b, ok := a.borrowedK2(keyOf("variant-b"), "test-model", 12800, params(256), true)
 			Expect(ok).To(BeTrue())
 			Expect(b.k2).To(Equal(int64(6000)), "the least far below own: the fewest replicas spent on someone else's figure")
 			Expect(b.donor).To(Equal("variant-c"))
@@ -243,7 +383,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			// A k2 is occupancy at saturation, and how much a saturated replica
 			// holds depends on how long its answers are.
 			seed("variant-a", 5000, 4000)
-			_, ok := a.borrowedK2(keyOf("variant-b"), "test-model", 12800, params(256))
+			_, ok := a.borrowedK2(keyOf("variant-b"), "test-model", 12800, params(256), true)
 			Expect(ok).To(BeFalse())
 		})
 	})

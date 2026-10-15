@@ -325,8 +325,14 @@ distance.
    measured gets its own hold. Keyed per variant, a variant past its first
    6.5 hours went straight to its own k1 in a new bucket (3.2x in review),
    which is this gap again; per bucket, the cost is at most one hold per
-   bucket, in replicas. A retention after a clock ends the variant may borrow
-   again (a weekly re-probe), and a restart clears it.
+   bucket, in replicas. The clock counts serving time only -- cycles where a
+   Ready replica of the variant's own serves the bucket -- so a parked
+   canary does not wake with its hold spent, and a warm-pool bridge reads a
+   borrow without starting it. A spent borrow stays spent: the clock keeps
+   the donor's figure and the borrower's configuration it was armed on, and
+   re-arms only when one of them changes (more than 20% for the donor). An
+   earlier version dropped the clock a retention after it ended, which
+   re-armed the borrow at full strength once a week with no new evidence.
    One side effect, accepted: the priced capacity is written to the capacity
    store as a live record, and `Store.FindCompatible` reads records across
    namespaces for zero-replica variants. A borrowed figure can reach another
