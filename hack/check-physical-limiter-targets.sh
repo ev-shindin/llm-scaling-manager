@@ -459,6 +459,21 @@ elif wva_policy_patch | grep -q 'countBorrowable'; then
 else
     ok "an unset WVA_QUOTA_KUEUE_BORROW leaves countBorrowable out of the cluster policy"
 fi
+# WVA_QUOTA_KUEUE_BORROW without WVA_QUOTA_KUEUE: there is no Kueue block to put
+# it on, so the published policy carries neither, and the command says so.
+case_begin
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE_BORROW=false WVA_QUOTAS=H200=8
+if [ "$RC" -ne 0 ]; then
+    fail "enable with WVA_QUOTA_KUEUE_BORROW but no WVA_QUOTA_KUEUE failed: $(tail -15 "$WORK/out")"
+elif ! grep -q 'CALL\[patch configmap wva-scaling-policy-config -n wva-policy' "$CALLS"; then
+    fail "enable wrote no cluster policy, so the absence below proves nothing: $(tail -15 "$WORK/out")"
+elif wva_policy_patch | grep -q 'kueue\|countBorrowable'; then
+    fail "WVA_QUOTA_KUEUE_BORROW without WVA_QUOTA_KUEUE wrote a Kueue field: $(wva_policy_patch | head -12)"
+elif ! grep -q 'WVA_QUOTA_KUEUE_BORROW=false is set, but WVA_QUOTA_KUEUE is not true.*IGNORED' "$WORK/out"; then
+    fail "WVA_QUOTA_KUEUE_BORROW without WVA_QUOTA_KUEUE was ignored silently: $(tail -6 "$WORK/out")"
+else
+    ok "WVA_QUOTA_KUEUE_BORROW without WVA_QUOTA_KUEUE is ignored by enable, with a warning"
+fi
 
 # A namespace-scoped controller does not watch a policy namespace outside the
 # one it manages, so it sees the new policy only after a restart -- which
@@ -611,7 +626,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=35
+CASES_EXPECTED=36
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately."
 else
