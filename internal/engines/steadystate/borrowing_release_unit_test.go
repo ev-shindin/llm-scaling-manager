@@ -50,7 +50,7 @@ func TestModelOfPodAndPreemptedPod(t *testing.T) {
 			model: "b/chat", preempted: true, preemptAt: at.Time},
 		{name: "an LWS pod, matched by its set-name label, whatever its name",
 			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "unrelated-0", Labels: map[string]string{lwsv1.SetNameLabelKey: "code"}},
-				Status: corev1.PodStatus{Conditions: terminating("Evicted", "Preempted to accommodate a workload")}},
+				Status: corev1.PodStatus{Conditions: terminating("WorkloadEvicted", "Preempted to accommodate a workload")}},
 			model: "b/code", preempted: true, preemptAt: at.Time},
 		{name: "an LWS label naming no model's set matches nothing, not a name prefix",
 			pod:   corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-1", Labels: map[string]string{lwsv1.SetNameLabelKey: "other"}}},
@@ -61,6 +61,27 @@ func TestModelOfPodAndPreemptedPod(t *testing.T) {
 		{name: "a pod terminated for another reason is not preempted",
 			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-7d9f-def"},
 				Status: corev1.PodStatus{Conditions: terminating("WorkloadEvictedDueToPodsReadyTimeout", "")}},
+			model: "b/chat"},
+		// Kueue review m7: only reason WorkloadEvictedDueToPreempted, or an
+		// older Kueue's generic WorkloadEvicted with a message naming the
+		// preemption, is one; any other eviction reason is not, whatever its
+		// message says.
+		{name: "evicted for an admission check is not preempted",
+			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-a"},
+				Status: corev1.PodStatus{Conditions: terminating("WorkloadEvictedDueToAdmissionCheck", "")}},
+			model: "b/chat"},
+		{name: "evicted by a stopped ClusterQueue is not preempted, even with Preempted in its message",
+			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-b"},
+				Status: corev1.PodStatus{Conditions: terminating("WorkloadEvictedDueToClusterQueueStopped",
+					"The ClusterQueue is stopped; the workload was Preempted earlier")}},
+			model: "b/chat"},
+		{name: "evicted as an inactive Workload is not preempted",
+			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-c"},
+				Status: corev1.PodStatus{Conditions: terminating("WorkloadEvictedDueToInactiveWorkload", "Preempted")}},
+			model: "b/chat"},
+		{name: "a reason that only contains Preempted is not the preemption reason",
+			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-d"},
+				Status: corev1.PodStatus{Conditions: terminating("NotPreempted", "")}},
 			model: "b/chat"},
 		{name: "a TerminationTarget condition that is not True is not preempted",
 			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-x"}, Status: corev1.PodStatus{Conditions: []corev1.PodCondition{

@@ -41,6 +41,13 @@ const (
 // to delete, with the reason it stops the pod.
 const kueueTerminationTarget = "TerminationTarget"
 
+// TerminationTarget reasons: Kueue's for a preempted Workload, and the generic
+// one an older Kueue wrote for every eviction.
+const (
+	kueueReasonEvictedByPreemption = "WorkloadEvictedDueToPreempted"
+	kueueReasonEvicted             = "WorkloadEvicted"
+)
+
 // borrowSettings are the governor's timings from the policy.
 func (e *Engine) borrowSettings() allocation.BorrowSettings {
 	s := allocation.DefaultBorrowSettings()
@@ -206,11 +213,13 @@ func (e *Engine) persistBorrowLedger(ctx context.Context) {
 
 // observePreemptions starts the cooldown of each model one of whose pods Kueue
 // preempted, from when it did, and returns the namespaces whose preemptions
-// could not be read: their models borrow nothing new this cycle. Three
+// could not be read -- or every borrowing namespace, after the watch dropped
+// preemptions past its bound: their models borrow nothing new this cycle. Three
 // sources:
-//   - the pods the pod informer saw marked for a preemption since the last
-//     cycle (Engine.Preemptions): the one that does not miss a preempted pod
-//     and Workload that are gone within seconds, as they usually are;
+//   - the pods the pod informer saw marked for a preemption (Engine.Preemptions),
+//     with those of an earlier cycle not matched to a model yet: the one that
+//     does not miss a preempted pod and Workload that are gone within seconds,
+//     as they usually are;
 //   - Workloads with Evicted=True, reason Preempted (one API list). A
 //     LeaderWorkerSet's Workload is owned by the LeaderWorkerSet itself and is
 //     matched by its name and UID; a pod's by the pod.
@@ -227,22 +236,9 @@ func (e *Engine) observePreemptions(ctx context.Context, constraints []*allocati
 	if e.client == nil {
 		return nil
 	}
-	if st.preemptSeen == nil {
-		st.preemptSeen = map[types.UID]string{}
-	}
-	if st.preemptErrLogged == nil {
-		st.preemptErrLogged = map[string]bool{}
-	}
-	if st.watchSeen == nil {
-		st.watchSeen = map[types.UID]time.Time{}
-	}
+	e.initPreemptState(now)
 	logger := ctrl.LoggerFrom(ctx)
 	cooldown := e.borrowSettings().Cooldown
-	for uid, at := range st.watchSeen {
-		if now.Sub(at) > cooldown {
-			delete(st.watchSeen, uid)
-		}
-	}
 	namespaces := map[string]bool{}
 	for _, c := range constraints {
 		if c == nil {
@@ -253,53 +249,27 @@ func (e *Engine) observePreemptions(ctx context.Context, constraints []*allocati
 		}
 	}
 	var unknown map[string]bool
+	e.collectWatched(ctx, now)
+	if !st.preemptDroppedAt.IsZero() {
+		// The watch, or the pending list, dropped preemptions past its bound:
+		// a model of any borrowing namespace may have been preempted unseen,
+		// so none borrows anything new this cycle (preemptions-unreadable).
+		// A drop older than the cooldown no longer matters.
+		if now.Sub(st.preemptDroppedAt) <= cooldown && len(namespaces) > 0 {
+			unknown = make(map[string]bool, len(namespaces))
+			for ns := range namespaces {
+				unknown[ns] = true
+			}
+			logger.Info("Preemptions were dropped past the watch's bound; every namespace counting borrowing borrows nothing new this cycle",
+				"namespaces", len(namespaces))
+		}
+		st.preemptDroppedAt = time.Time{}
+	}
 	listed := map[types.UID]bool{}
 	read := map[string]bool{}
+	e.matchPending(ctx, requests, scaleTargets, now, listed)
 	mark := func(ns, model string, uids []types.UID, w kueue.PreemptedWorkload, key string) {
-		fresh := false
-		for _, uid := range uids {
-			listed[uid] = true
-			_, watched := st.watchSeen[uid]
-			if _, ok := st.preemptSeen[uid]; !ok && !watched {
-				fresh = true
-				st.preemptSeen[uid] = ns
-			}
-		}
-		if !fresh || model == "" {
-			return
-		}
-		at := w.At
-		if at.IsZero() || at.After(now) {
-			at = now
-		}
-		if now.Sub(at) > cooldown {
-			return // found again after a restart: its cooldown is over
-		}
-		st.governor.MarkPreempted(model, at)
-		e.recordReclaim(model, w, now, key)
-		logger.Info("Kueue preempted a pod of a borrowing model; it borrows nothing new for the cooldown",
-			"modelID", model, "uid", string(uids[0]), "preemptedAt", at)
-	}
-	observed, dropped := e.Preemptions.drain()
-	if dropped > 0 {
-		logger.Info("The preemption watch dropped preemptions past its bound between two cycles; the Workload and pod reads still see what remains",
-			"dropped", dropped)
-	}
-	// Every namespace, not only those counting borrowing this cycle: the
-	// preempted pod itself can withhold its namespace for as long as it
-	// terminates (measured on kind: 30s of not-kueue-managed, its Workload
-	// already gone), and a preemption dropped then is never seen again. A pod
-	// of no known model matches nothing.
-	for _, o := range observed {
-		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: o.Namespace, Name: o.Name, UID: o.UID,
-			Labels: o.Labels, OwnerReferences: o.OwnerRefs}}
-		model := modelOfPod(requests, scaleTargets, o.Namespace, p)
-		mark(o.Namespace, model, []types.UID{o.UID},
-			kueue.PreemptedWorkload{UID: o.UID, Owners: []string{o.Name}, At: o.At},
-			preemptionKey(o.Namespace, o.UID, o.Labels))
-		if _, ok := st.watchSeen[o.UID]; !ok {
-			st.watchSeen[o.UID] = now
-		}
+		e.markPreemption(ctx, ns, model, uids, w, key, now, listed)
 	}
 	for ns := range namespaces {
 		wls, err := kueue.PreemptedWorkloads(ctx, e.client, ns)
@@ -350,16 +320,166 @@ func (e *Engine) observePreemptions(ctx context.Context, constraints []*allocati
 	return unknown
 }
 
+// idlePreemptions drains the preemption watch in a cycle that counts no
+// borrowing, so its buffer never fills while borrowing is off: with a
+// governor, the preemptions of a known model start their cooldowns now;
+// without one, they wait in the bounded pending list for the first cycle that
+// has one.
+func (e *Engine) idlePreemptions(ctx context.Context, requests []allocation.ModelScalingRequest,
+	scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) {
+	e.initPreemptState(now)
+	e.collectWatched(ctx, now)
+	if e.borrowing.governor == nil {
+		return
+	}
+	e.matchPending(ctx, requests, scaleTargets, now, nil)
+}
+
+// initPreemptState readies the preemption bookkeeping and forgets the watched
+// preemptions older than the cooldown.
+func (e *Engine) initPreemptState(now time.Time) {
+	st := &e.borrowing
+	if st.preemptSeen == nil {
+		st.preemptSeen = map[types.UID]string{}
+	}
+	if st.preemptErrLogged == nil {
+		st.preemptErrLogged = map[string]bool{}
+	}
+	if st.watchSeen == nil {
+		st.watchSeen = map[types.UID]time.Time{}
+	}
+	cooldown := e.borrowSettings().Cooldown
+	for uid, at := range st.watchSeen {
+		if now.Sub(at) > cooldown {
+			delete(st.watchSeen, uid)
+		}
+	}
+}
+
+// collectWatched moves what the preemption watch buffered into the pending
+// list, oldest first, one entry per pod, dropping what is older than the
+// cooldown. The list is bounded like the watch; a drop by either is recorded
+// (preemptDroppedAt) for the next cycle that counts borrowing.
+func (e *Engine) collectWatched(ctx context.Context, now time.Time) {
+	st := &e.borrowing
+	logger := ctrl.LoggerFrom(ctx)
+	cooldown := e.borrowSettings().Cooldown
+	observed, dropped := e.Preemptions.drain()
+	if dropped > 0 {
+		st.preemptDroppedAt = now
+		logger.Info("The preemption watch dropped preemptions past its bound between two cycles; namespaces counting borrowing borrow nothing new for a cycle",
+			"dropped", dropped)
+	}
+	st.watchPending = slices.DeleteFunc(st.watchPending, func(o observedPreemption) bool { return now.Sub(o.At) > cooldown })
+	pending := make(map[types.UID]bool, len(st.watchPending))
+	for _, o := range st.watchPending {
+		pending[o.UID] = true
+	}
+	for _, o := range observed {
+		if o.At.IsZero() || o.At.After(now) {
+			o.At = now
+		}
+		if now.Sub(o.At) > cooldown || pending[o.UID] {
+			continue
+		}
+		pending[o.UID] = true
+		st.watchPending = append(st.watchPending, o)
+	}
+	if over := len(st.watchPending) - e.Preemptions.bound(); over > 0 {
+		st.watchPending = slices.Delete(st.watchPending, 0, over)
+		st.preemptDroppedAt = now
+		logger.Info("Preemptions of no known model filled the pending list; the oldest were dropped", "dropped", over)
+	}
+}
+
+// matchPending starts the cooldown of every pending watched preemption whose
+// pod belongs to a known model, and keeps the others, until they expire, for
+// a later cycle: a model missing from this cycle's requests (say discovery
+// lost it for a cycle) is matched once it is back. Every namespace, not only
+// those counting borrowing this cycle: the preempted pod itself can withhold
+// its namespace for as long as it terminates (measured on kind: 30s of
+// not-kueue-managed, its Workload already gone).
+func (e *Engine) matchPending(ctx context.Context, requests []allocation.ModelScalingRequest,
+	scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time, listed map[types.UID]bool) {
+	st := &e.borrowing
+	kept := st.watchPending[:0]
+	for _, o := range st.watchPending {
+		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: o.Namespace, Name: o.Name, UID: o.UID,
+			Labels: o.Labels, OwnerReferences: o.OwnerRefs}}
+		model := modelOfPod(requests, scaleTargets, o.Namespace, p)
+		if model == "" {
+			kept = append(kept, o)
+			continue
+		}
+		e.markPreemption(ctx, o.Namespace, model, []types.UID{o.UID},
+			kueue.PreemptedWorkload{UID: o.UID, Owners: []string{o.Name}, At: o.At},
+			preemptionKey(o.Namespace, o.UID, o.Labels), now, listed)
+		if _, ok := st.watchSeen[o.UID]; !ok {
+			st.watchSeen[o.UID] = now
+		}
+	}
+	clear(st.watchPending[len(kept):])
+	st.watchPending = kept
+}
+
+// markPreemption starts model's cooldown for a preemption identified by uids,
+// unless one of them was counted already (by the watch or a list). A
+// preemption of no known model is not recorded as seen, so it still counts
+// once its model is known. listed, when set, collects the UIDs the lists saw.
+func (e *Engine) markPreemption(ctx context.Context, ns, model string, uids []types.UID, w kueue.PreemptedWorkload,
+	key string, now time.Time, listed map[types.UID]bool) {
+	st := &e.borrowing
+	if listed != nil {
+		for _, uid := range uids {
+			listed[uid] = true
+		}
+	}
+	if model == "" {
+		return
+	}
+	fresh := false
+	for _, uid := range uids {
+		_, watched := st.watchSeen[uid]
+		if _, ok := st.preemptSeen[uid]; !ok && !watched {
+			fresh = true
+			st.preemptSeen[uid] = ns
+		}
+	}
+	if !fresh {
+		return
+	}
+	at := w.At
+	if at.IsZero() || at.After(now) {
+		at = now
+	}
+	if now.Sub(at) > e.borrowSettings().Cooldown {
+		return // found again after a restart: its cooldown is over
+	}
+	st.governor.MarkPreempted(model, at)
+	e.recordReclaim(model, w, now, key)
+	ctrl.LoggerFrom(ctx).Info("Kueue preempted a pod of a borrowing model; it borrows nothing new for the cooldown",
+		"modelID", model, "uid", string(uids[0]), "preemptedAt", at)
+}
+
 // preemptedPod reports whether Kueue marked a pod for termination because its
-// Workload was preempted, and when: the TerminationTarget condition, reason
-// WorkloadEvictedDueToPreempted (or an older Kueue's generic reason with the
-// eviction message naming the preemption).
+// Workload was preempted, and when: the TerminationTarget condition with
+// reason exactly WorkloadEvictedDueToPreempted, or, from an older Kueue that
+// wrote only the generic reason WorkloadEvicted, a message naming the
+// preemption. Other evictions -- WorkloadEvictedDueToPodsReadyTimeout,
+// ...AdmissionCheck, ...ClusterQueueStopped, ...InactiveWorkload -- are not
+// preemptions and start no cooldown.
+//
+// Kueue gives every preemption that reason: a preemption within the model's
+// own ClusterQueue, or by Fair Sharing, starts the cooldown as well as a
+// lender's reclaim does. Accepted: the model was preempted either way.
 func preemptedPod(p *corev1.Pod) (time.Time, bool) {
 	for _, c := range p.Status.Conditions {
 		if string(c.Type) != kueueTerminationTarget || c.Status != corev1.ConditionTrue {
 			continue
 		}
-		if strings.Contains(c.Reason, "Preempted") || strings.Contains(c.Message, "Preempted") {
+		switch {
+		case c.Reason == kueueReasonEvictedByPreemption,
+			c.Reason == kueueReasonEvicted && strings.Contains(c.Message, "Preempted"):
 			return c.LastTransitionTime.Time, true
 		}
 	}

@@ -176,5 +176,70 @@ var _ = Describe("PreemptionWatch", func() {
 			e.prepareBorrowing(ctx, borrowing(), reqs, targets, now)
 			Expect(e.borrowing.governor.BorrowBlocked("b", "m", "v", now)).To(BeFalse())
 		})
+
+		// Review round 4 (security #3, bug hunter N2): a drop past the bound
+		// was only logged, so a preemption it lost started no cooldown and
+		// nothing said so.
+		It("borrows nothing new for a cycle in any borrowing namespace after the watch dropped preemptions", func() {
+			w := NewPreemptionWatch(1)
+			w.Handler().OnDelete(marked("other-abc-1", "pod-8", nil))
+			w.Handler().OnDelete(marked("other-abc-2", "pod-9", nil))
+			e := engine(w)
+			e.prepareBorrowing(ctx, borrowing(), reqs, targets, now)
+			Expect(e.borrowing.cycle.PreemptionUnknown).To(HaveKey("b"), "a preemption may have been lost")
+			Expect(e.borrowing.governor.BorrowBlocked("b", "m", "v", now)).To(BeTrue())
+			next := now.Add(15 * time.Second)
+			e.prepareBorrowing(ctx, borrowing(), reqs, targets, next)
+			Expect(e.borrowing.cycle.PreemptionUnknown).To(BeEmpty(), "for that cycle only")
+			Expect(e.borrowing.governor.BorrowBlocked("b", "m", "v", next)).To(BeFalse())
+		})
+
+		It("drains the watch in a cycle that counts no borrowing, starting the cooldown when a governor exists", func() {
+			w := NewPreemptionWatch(0)
+			e := engine(w)
+			e.prepareBorrowing(ctx, borrowing(), reqs, targets, now) // a governor now exists
+			Expect(e.borrowing.governor.BorrowBlocked("b", "m", "v", now)).To(BeFalse())
+			w.Handler().OnDelete(marked("v-abc-1", "pod-1", nil))
+			e.prepareBorrowing(ctx, nil, reqs, targets, now.Add(15*time.Second)) // no borrowing counted
+			left, _ := w.drain()
+			Expect(left).To(BeEmpty(), "drained although the cycle counted no borrowing")
+			Expect(e.borrowing.governor.BorrowBlocked("b", "m", "v", now.Add(30*time.Second))).To(BeTrue(), "the cooldown started")
+		})
+
+		It("keeps a preemption drained without a governor for the first cycle that has one", func() {
+			w := NewPreemptionWatch(0)
+			e := engine(w)
+			w.Handler().OnDelete(marked("v-abc-1", "pod-1", nil))
+			e.prepareBorrowing(ctx, nil, reqs, targets, now)
+			Expect(e.borrowing.governor).To(BeNil())
+			e.prepareBorrowing(ctx, borrowing(), reqs, targets, now.Add(15*time.Second))
+			Expect(e.borrowing.governor.BorrowBlocked("b", "m", "v", now.Add(15*time.Second))).To(BeTrue())
+		})
+
+		// Review round 4 (bug hunter N3): a watched preemption of a model
+		// missing from that cycle's requests was put into watchSeen and never
+		// matched again, so its cooldown was lost.
+		It("matches a watched preemption once its model is back in the requests", func() {
+			w := NewPreemptionWatch(0)
+			w.Handler().OnDelete(marked("v-abc-1", "pod-1", nil))
+			e := engine(w)
+			e.prepareBorrowing(ctx, borrowing(), nil, targets, now) // the model is missing this cycle
+			Expect(e.borrowing.governor.BorrowBlocked("b", "m", "v", now)).To(BeFalse())
+			next := now.Add(15 * time.Second)
+			e.prepareBorrowing(ctx, borrowing(), reqs, targets, next)
+			Expect(e.borrowing.governor.BorrowBlocked("b", "m", "v", next)).To(BeTrue(), "the cooldown started from Kueue's time")
+			Expect(e.borrowing.governor.BorrowBlocked("b", "m", "v", now.Add(10*time.Minute))).To(BeFalse())
+			Expect(e.borrowing.watchPending).To(BeEmpty())
+		})
+
+		It("forgets an unmatched watched preemption after the cooldown", func() {
+			w := NewPreemptionWatch(0)
+			w.Handler().OnDelete(marked("other-abc-1", "pod-9", nil))
+			e := engine(w)
+			e.prepareBorrowing(ctx, borrowing(), reqs, targets, now)
+			Expect(e.borrowing.watchPending).To(HaveLen(1))
+			e.prepareBorrowing(ctx, borrowing(), reqs, targets, now.Add(time.Hour))
+			Expect(e.borrowing.watchPending).To(BeEmpty())
+		})
 	})
 })

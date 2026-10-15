@@ -40,9 +40,11 @@ type observedPreemption struct {
 // condition (reason WorkloadEvictedDueToPreempted) before it deletes the pod,
 // and the delete event carries it in the pod's final state.
 //
-// The handler only buffers; the engine drains the buffer once per cycle
-// (observePreemptions), where the pods are matched to models. Safe for
-// concurrent use.
+// The handler only buffers; the engine drains the buffer every cycle, whether
+// or not the cycle counts borrowing (observePreemptions, idlePreemptions),
+// into a pending list where the pods are matched to models. A drop past the
+// bound makes every namespace counting borrowing borrow nothing new for a
+// cycle (preemptions-unreadable). Safe for concurrent use.
 type PreemptionWatch struct {
 	mu       sync.Mutex
 	capacity int
@@ -122,6 +124,16 @@ func (w *PreemptionWatch) drain() ([]observedPreemption, int) {
 	w.items, w.dropped = nil, 0
 	w.index = map[types.UID]bool{}
 	return items, dropped
+}
+
+// bound is the most preemptions the watch holds between drains, which also
+// bounds the engine's pending list; DefaultPreemptionWatchCapacity without a
+// watch.
+func (w *PreemptionWatch) bound() int {
+	if w == nil {
+		return DefaultPreemptionWatchCapacity
+	}
+	return w.capacity
 }
 
 // preemptionKey identifies one preemption for counting: a pod group -- a

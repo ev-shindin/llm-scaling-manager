@@ -56,6 +56,15 @@ type borrowingState struct {
 	// (Engine.Preemptions), kept for the cooldown: they are gone by the next
 	// list, so preemptSeen's keep-while-listed rule would forget them.
 	watchSeen map[types.UID]time.Time
+	// watchPending is the watched preemptions not matched to a model yet,
+	// oldest first: the model may be missing from a cycle's requests, or the
+	// cycle has no governor. Kept until matched or older than the cooldown,
+	// bounded like the watch.
+	watchPending []observedPreemption
+	// preemptDroppedAt is when the watch or watchPending last dropped a
+	// preemption past its bound, zero once a cycle counting borrowing acted on
+	// it.
+	preemptDroppedAt time.Time
 	// preemptCounted is the preemptions already counted in
 	// wva_kueue_preempted_pods_total, by preemptionKey, kept for the cooldown.
 	preemptCounted map[string]time.Time
@@ -92,6 +101,7 @@ func (e *Engine) prepareBorrowing(ctx context.Context, constraints []*allocation
 	}
 	st.inFlight.Observe(observeVariants(requests))
 	if !allocation.HasBorrowing(constraints) {
+		e.idlePreemptions(ctx, requests, scaleTargets, now)
 		return constraints
 	}
 	if e.Config != nil && e.Config.HasPhysicalLimiter() {
