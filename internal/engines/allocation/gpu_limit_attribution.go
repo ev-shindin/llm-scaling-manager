@@ -139,6 +139,14 @@ func namespaceHeadroom(constraints []*ResourceConstraints) map[string]map[string
 // both would weigh one provider twice), and a type the namespace does not list
 // is a hard deny — availability 0, the tightest bound there is.
 //
+// The cluster pools follow mergeConstraints: a cluster bound that does not list
+// the type denies it, availability 0, and is credited for it -- otherwise a
+// cluster quota of {H100: 8} beside a physical pool of {A100: 4} would let A100
+// be blamed on the physical limiter, which is the one that allowed it. A
+// namespace-scope provider that does not hold the namespace bounds nothing
+// here. Types are matched over the family/product tree (allowlistBound), as
+// everywhere a workload's accelerator meets a pool key.
+//
 // Unlimited sentinels (Limit < 0) impose no bound and are skipped. Returns ""
 // when no provider finitely bounds the type, which leaves LimitedBy empty rather
 // than crediting a limiter that did not constrain anything.
@@ -155,17 +163,20 @@ func bindingProvider(constraints []*ResourceConstraints, namespace, accType stri
 			continue
 		}
 		if perType, ok := c.NamespacePools[namespace]; ok {
-			pool, listed := perType[accType]
+			avail, unlimited, listed := allowlistBound(perType, accType)
 			switch {
 			case !listed:
 				consider(0, c.ProviderName)
-			case pool.Limit >= 0:
-				consider(pool.Available(), c.ProviderName)
+			case !unlimited:
+				consider(avail, c.ProviderName)
 			}
 			continue
 		}
-		if pool, ok := c.Pools[accType]; ok && pool.Limit >= 0 {
-			consider(pool.Available(), c.ProviderName)
+		if !isClusterBound(c) {
+			continue
+		}
+		if avail, bounds := clusterBound(c.Pools, accType); bounds && avail != math.MaxInt {
+			consider(avail, c.ProviderName)
 		}
 	}
 	return name

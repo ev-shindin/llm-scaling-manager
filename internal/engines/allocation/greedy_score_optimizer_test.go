@@ -1630,7 +1630,7 @@ var _ = Describe("GreedyByScoreOptimizer", func() {
 			Expect(dm["v"].TargetReplicas).To(BeNumerically(">=", 4), "unlimited ns cap scales to demand, bounded only by the cluster budget")
 		})
 
-		It("does not scale a purely-unlimited namespace config with no finite cluster cap (documented V2 limitation)", func() {
+		It("scales a purely-unlimited namespace config with no cluster bound, unbounded", func() {
 			r := &satEntryFixture{
 				ModelID: "m", Namespace: "team-a", RequiredCapacity: 50000,
 				VariantCapacities: []vcFixture{
@@ -1643,12 +1643,13 @@ var _ = Describe("GreedyByScoreOptimizer", func() {
 					VariantStates: []domain.VariantReplicaState{{VariantName: "v", CurrentReplicas: 1, GPUsPerReplica: 2}},
 				}),
 			}
-			// All-unlimited ns config: aggregateNamespacePools yields an empty
-			// cluster Pools, so available is empty and fairShareScaleUp's
-			// totalGPUs==0 guard stops immediately. This is the documented
-			// under-provision boundary (not an isolation breach) — pinned here so
-			// it can't silently change. Pools is built via aggregateNamespacePools
-			// to stay faithful to what ComputeConstraints would emit.
+			// All-unlimited ns config. It used to stop at once: the namespace
+			// aggregate, empty here, was read as the cluster budget, and an
+			// empty budget stopped the fair share. A namespace-scope quota is no
+			// cluster bound, so with none in force the namespace is bounded by its
+			// allowance alone, which is unlimited. Pools is built via
+			// aggregateNamespacePools to stay faithful to what ComputeConstraints
+			// would emit.
 			nsPools := map[string]map[string]ResourcePool{"team-a": {"A100": {Limit: -1}}}
 			constraints := []*ResourceConstraints{
 				{Pools: aggregateNamespacePools(nsPools), NamespacePools: nsPools},
@@ -1657,7 +1658,7 @@ var _ = Describe("GreedyByScoreOptimizer", func() {
 			decisions := optimizer.Optimize(ctx, requests, constraints)
 			dm := decisionMap(decisions)
 
-			Expect(dm["v"].TargetReplicas).To(Equal(1), "no finite cluster budget -> no V2 scaling (documented limitation)")
+			Expect(dm["v"].TargetReplicas).To(Equal(6), "grows to its demand: 1 held + 5 wanted")
 		})
 	})
 })
@@ -1687,9 +1688,15 @@ var _ = Describe("effectiveAvailable", func() {
 		Expect(eff).To(HaveKeyWithValue("A100", 8))
 	})
 
-	It("treats an unlimited listed type as unbounded when the cluster does not cap it", func() {
-		eff := effectiveAvailable(map[string]int{}, map[string]int{"A100": -1})
+	It("treats an unlimited listed type as unbounded when no cluster bound is in force", func() {
+		eff := effectiveAvailable(nil, map[string]int{"A100": -1})
 		Expect(eff).To(HaveKeyWithValue("A100", math.MaxInt))
+	})
+
+	It("denies a listed type the cluster bounds do not hold", func() {
+		eff := effectiveAvailable(map[string]int{"H100": 8}, map[string]int{"A100": -1, "H100": 4})
+		Expect(eff).To(Equal(map[string]int{"A100": 0, "H100": 4}),
+			"every cluster bound is a closed allowlist")
 	})
 
 	It("denies everything for a closed deny-all namespace (empty nsBudget)", func() {

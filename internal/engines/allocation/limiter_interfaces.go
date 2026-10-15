@@ -83,9 +83,19 @@ type ResourceConstraints struct {
 	// that only impose cluster/per-type constraints. The optimizer caps a
 	// model's allocation at min(per-type pool, this namespace's pool).
 	NamespacePools map[string]map[string]ResourcePool
-	TotalLimit     int
-	TotalUsed      int
-	TotalAvail     int
+	// NamespaceScoped reports a namespace-scope provider: its bounds are its
+	// per-namespace allowlists (NamespacePools), and its Pools are only their
+	// sum, for reporting. Such a provider does not bound the cluster: a
+	// namespace it excludes bypasses it. Every other provider's Pools is a
+	// cluster bound and a CLOSED allowlist -- a type it does not list has no
+	// capacity under it (physical inventory, a cluster-scope quota) -- and the
+	// optimizer intersects them (mergeConstraints). A provider that carries
+	// NamespacePools is read as namespace-scoped whether or not it sets this;
+	// it is set so that one with no active namespace is read the same way.
+	NamespaceScoped bool
+	TotalLimit      int
+	TotalUsed       int
+	TotalAvail      int
 	// PoolsVersion is the version of the warm-pool figure
 	// (decision.WarmPoolGPUsVersion) that the usage these constraints were
 	// computed against included. Set by the engine that built the usage views,
@@ -156,6 +166,24 @@ type Inventory interface {
 	// GetResourcePools returns per-type resource availability.
 	// Each key is an accelerator type (e.g., "A100", "H100").
 	GetResourcePools() map[string]ResourcePool
+}
+
+// NamespaceScopedInventory is an Inventory that says whether it is
+// namespace-scoped, which DefaultLimiter carries onto
+// ResourceConstraints.NamespaceScoped. Optional: an inventory that does not
+// implement it bounds the cluster.
+type NamespaceScopedInventory interface {
+	Inventory
+
+	// NamespaceScoped reports whether this inventory's bounds are per
+	// namespace only, its per-type pools no cluster bound.
+	NamespaceScoped() bool
+}
+
+// namespaceScopedOf reports whether inv declares itself namespace-scoped.
+func namespaceScopedOf(inv Inventory) bool {
+	c, ok := inv.(NamespaceScopedInventory)
+	return ok && c.NamespaceScoped()
 }
 
 // NamespaceAwareInventory is an Inventory whose constraints depend on the

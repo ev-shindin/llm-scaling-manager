@@ -9,6 +9,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 )
 
@@ -83,10 +84,21 @@ func NewQuotaInventoryWithSource(cfg config.QuotaLimiterConfig, source QuotaSour
 
 // Compile-time interface assertions.
 var (
-	_ Inventory               = (*QuotaInventory)(nil)
-	_ NamespaceAwareInventory = (*QuotaInventory)(nil)
-	_ UsageBasisReporter      = (*QuotaInventory)(nil)
+	_ Inventory                = (*QuotaInventory)(nil)
+	_ NamespaceAwareInventory  = (*QuotaInventory)(nil)
+	_ UsageBasisReporter       = (*QuotaInventory)(nil)
+	_ NamespaceScopedInventory = (*QuotaInventory)(nil)
 )
+
+// NamespaceScoped reports true for a namespace-scope quota: its bounds are its
+// per-namespace allowlists (NamespaceResourcePools), and its per-type pools,
+// their sum, bound nothing cluster-wide -- a namespace it excludes bypasses it.
+// A cluster-scope quota is a cluster bound that denies every type the operator
+// did not list. Scope is read from the static entry, which never changes after
+// construction.
+func (q *QuotaInventory) NamespaceScoped() bool {
+	return q.static.Scope == config.QuotaScopeNamespace
+}
 
 // UsageBasis returns ManagedUsage: a quota is an allowance granted to WVA, so
 // only the GPUs WVA's own variants hold may be drawn against it.
@@ -215,7 +227,7 @@ func (q *QuotaInventory) SetUsed(usedByType map[string]int) {
 func reconcileUsageKeys(known map[string]int, declared map[string]int) map[string]int {
 	out := make(map[string]int, len(declared))
 	for name, count := range declared {
-		if key, ok := resolveAcceleratorKey(known, name); ok {
+		if key, ok := accelerator.FindKey(known, name); ok {
 			out[key] += count
 		}
 	}

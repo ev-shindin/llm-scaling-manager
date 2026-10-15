@@ -37,7 +37,7 @@ func heldIdleGroup(t *testing.T, held bool) ShareGroup {
 func heldIdleTargets(g ShareGroup) map[string]int {
 	p := PlanShareTransfers(NewShareLedger(), SharePlanInput{
 		Roles: g.Roles, Held: g.Committed, Thresholds: g.Thresholds, DownThresholds: g.DownThresholds,
-		Budget: g.Budget, Tolerance: 0.15, Give: g.Give, Grow: g.Grow, PhysicalFree: g.PhysicalFree,
+		Budget: g.Budget, Tolerance: 0.15, Give: g.Give, Grow: g.Grow, PhysicalFree: g.ClusterFree,
 		Headroom: ShareHeadroom{Capped: true, Replicas: 1, ReturnLoad: 0.6}, Origins: g.Origins,
 	}, time.Unix(100000, 0), simTimings())
 	out := map[string]int{}

@@ -950,7 +950,9 @@ var _ = Describe("CostAwareOptimizer", func() {
 			merged := mergeConstraints(constraints)
 
 			Expect(merged["A100"]).To(Equal(6))
-			Expect(merged["H100"]).To(Equal(4))
+			// Both are cluster bounds, each a closed allowlist: the second has
+			// no H100, so none is allowed.
+			Expect(merged).To(HaveKeyWithValue("H100", 0))
 		})
 
 		It("mergeConstraints carries an unlimited (negative) pool through as an unbounded budget", func() {

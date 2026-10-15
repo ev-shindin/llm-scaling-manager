@@ -192,7 +192,7 @@ func (i *TypeInventory) SetUsed(usedByType map[string]int) {
 	total := 0
 	soleType, homogeneous := i.soleAcceleratorType()
 	for declared, count := range usedByType {
-		key, ok := resolveAcceleratorKey(i.limitByType, declared)
+		key, ok := accelerator.FindKey(i.limitByType, declared)
 		if !ok {
 			// No discovered type owns this name — an unresolved accelerator, or a
 			// type that has since left the cluster.

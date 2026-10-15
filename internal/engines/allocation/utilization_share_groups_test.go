@@ -130,13 +130,13 @@ var _ = Describe("BuildShareGroups", func() {
 		// team-a has its own quota; team-b does not; team-c has a quota and
 		// no model, so no group. Every pool spends the cluster quota.
 		reqs := []ModelScalingRequest{shareReq("A", "team-a", 4000, 4), shareReq("B", "team-b", 3000, 4)}
-		cons := []*ResourceConstraints{{
-			Pools: map[string]ResourcePool{"A100": {Limit: 32, Used: 8}},
-			NamespacePools: map[string]map[string]ResourcePool{
+		cons := []*ResourceConstraints{
+			{Pools: map[string]ResourcePool{"A100": {Limit: 32, Used: 8}}},
+			{NamespacePools: map[string]map[string]ResourcePool{
 				"team-a": {"A100": {Limit: 8, Used: 4}},
 				"team-c": {"A100": {Limit: 8, Used: 0}},
-			},
-		}}
+			}},
+		}
 		unheld := map[string]map[string]int{"team-a": {"A100": 1}, "team-b": {"A100": 2}, "team-c": {"A100": 4}}
 		carve := map[string]int{}
 		for _, g := range BuildShareGroups(reqs, cons, ShareGroupOptions{ClusterIsQuota: true, PoolUnheld: unheld}) {
@@ -310,10 +310,10 @@ var _ = Describe("BuildShareGroups: floors, ceilings and replica sizes", func() 
 var _ = Describe("BuildShareGroups: scopes and bounds", func() {
 	It("builds a namespace-quota group beside the cluster group, each with its own budget", func() {
 		reqs := []ModelScalingRequest{shareReq("A", "team-a", 4000, 4), shareReq("B", "other", 3000, 8)}
-		cons := []*ResourceConstraints{{
-			Pools:          map[string]ResourcePool{"A100": {Limit: 16, Used: 12}},
-			NamespacePools: map[string]map[string]ResourcePool{"team-a": {"A100": {Limit: 8, Used: 4}}},
-		}}
+		cons := []*ResourceConstraints{
+			{Pools: map[string]ResourcePool{"A100": {Limit: 16, Used: 12}}},
+			{NamespacePools: map[string]map[string]ResourcePool{"team-a": {"A100": {Limit: 8, Used: 4}}}},
+		}
 		groups := BuildShareGroups(reqs, cons, ShareGroupOptions{ClusterIsQuota: true})
 		Expect(groups).To(HaveLen(2))
 		Expect(groups[0].Scope).To(BeEmpty())

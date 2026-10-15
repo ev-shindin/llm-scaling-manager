@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"math"
+	"slices"
 	"sort"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -89,6 +90,12 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	logger := ctrl.LoggerFrom(ctx).WithName(o.Name())
 	available := mergeConstraints(constraints)
 	availableByNS := mergeNamespaceConstraints(constraints)
+	if len(constraints) == 0 {
+		// No constraints at all is not "no cluster bound": this optimizer denies
+		// rather than guesses. The engine never runs it so -- with no provider
+		// available it falls back to the cost-aware optimizer, its unlimited path.
+		available = map[string]int{}
+	}
 
 	// Rescale pre-pass: for enabled, contended (type, budget-scope) groups, compute
 	// priority-weighted targets and produce reclaim/fill decisions, consuming free
@@ -200,18 +207,10 @@ func (o *GreedyByScoreOptimizer) fairShareScaleUp(
 			break
 		}
 
-		totalGPUs := 0
-		for _, v := range available {
-			// An unbounded (math.MaxInt) budget marks an unlimited quota type;
-			// saturate rather than overflow the sum, which is only used for the
-			// "== 0" stop check below.
-			if v == math.MaxInt {
-				totalGPUs = math.MaxInt
-				break
-			}
-			totalGPUs += v
-		}
-		if totalGPUs == 0 {
+		// Nothing left for any model still asking. Per model, because the
+		// cluster budget alone does not say: with no cluster bound in force it
+		// is nil (unbounded) and a namespace's allowance is what runs out.
+		if !anyBudgetLeft(active, available, availableByNS) {
 			logger.V(logging.DEBUG).Info("GreedyByScore: no GPUs remaining, stopping fair-share")
 			break
 		}
@@ -288,21 +287,24 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 	// so later same-namespace models correctly see the reduced remaining budget.
 	nsBudget := availableByNS[w.req.Namespace]
 	effAvail := effectiveAvailable(available, nsBudget)
-	beforeEff := maps.Clone(effAvail)
 
 	// Unified path: fairShareRolePick behind the RolePickFn interface.
 	// α logic removed in commit 3.
 	pick := fairShareRolePick(target, w.roles, w.limited)
-	allocateForModelPaired(ctx, w.e, w.records, stateMap, effAvail,
+	spent := allocateForModelPaired(ctx, w.e, w.records, stateMap, effAvail,
 		w.targets, pick, ps, w.roles)
 
-	// Reconcile: apply what was consumed (before − after) to the cluster-wide
-	// budget and, where this namespace caps the type, to the namespace budget.
-	// Only decrement the cluster budget for types it actually constrains (a type
-	// present in `available`); a type bounded solely by the namespace must not
-	// drive the cluster budget negative and pollute the loop's totalGPUs check.
-	for accType, before := range beforeEff {
-		consumed := before - effAvail[accType]
+	// Reconcile: apply what was spent to the cluster-wide budget and, where
+	// this namespace caps the type, to the namespace budget. What was spent, not
+	// the change in effAvail: the in-loop debit also drew down every key that
+	// covers the one spent, so a GPU spent under a long spelling would be
+	// counted again under its short name. Only decrement the cluster budget for
+	// types it actually constrains (a type present in `available`); a type
+	// bounded solely by the namespace must not drive the cluster budget
+	// negative and pollute the loop's totalGPUs check. Sorted, so the clamps in
+	// debitBudget do not depend on map order.
+	for _, accType := range slices.Sorted(maps.Keys(spent)) {
+		consumed := spent[accType]
 		if consumed <= 0 {
 			continue
 		}
@@ -312,16 +314,15 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 		// draw down infinity) and (b) defeat the fairShareScaleUp stop-check,
 		// whose `== math.MaxInt` guard would then miss it and let the totalGPUs
 		// sum overflow with two or more unlimited types.
-		if cur, clusterCapped := available[accType]; clusterCapped && cur != math.MaxInt {
-			available[accType] -= consumed
-		}
-		if nsBudget != nil {
-			// Decrement only finite namespace caps; the unlimited sentinel
-			// (negative) imposes no budget to draw down.
-			if nsCap, capped := nsBudget[accType]; capped && nsCap >= 0 {
-				nsBudget[accType] -= consumed
-			}
-		}
+		// accType is the namespace allowlist's spelling when the namespace is
+		// closed, which need not be the cluster pool's: resolve by identity.
+		// debitBudget also debits the family key that covers this one, and
+		// leaves a nil (unbounded) cluster budget nil.
+		debitBudget(available, budgetKey(available, accType), consumed)
+		// The namespace budget the same way: accType is its own key, and a
+		// family key the namespace also lists draws down with it. The
+		// unlimited sentinel (negative) is never drawn down.
+		debitBudget(nsBudget, accType, consumed)
 	}
 
 	// Recompute w.remaining for fair-share ordering.
@@ -344,7 +345,8 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 //
 // nsBudget == nil → the namespace is OPEN (a cluster-scope quota, or an
 // excluded namespace): the model is bound only by the cluster budget, so the
-// result is a copy of `available`.
+// result is a copy of `available` -- nil, unbounded, when no cluster bound is
+// in force.
 //
 // nsBudget != nil → the namespace is a CLOSED allowlist (namespace-scope
 // quota): the model may use ONLY the accelerator types the namespace lists,
@@ -354,15 +356,19 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 // aggregate, which previously let one namespace draw on another's quota). For a
 // listed type: a finite cap binds at min(cluster, cap); an unlimited cap binds
 // at the cluster budget for that type, or is unbounded (math.MaxInt) when the
-// cluster does not constrain it.
+// cluster does not constrain it. The cluster budget is found by accelerator
+// identity (clusterBudgetFor), since the namespace allowlist and the cluster
+// pools may spell one GPU differently, and a type a non-nil cluster budget does
+// not hold is 0 there: every cluster bound is a closed allowlist.
 func effectiveAvailable(available, nsBudget map[string]int) map[string]int {
 	if nsBudget == nil {
 		return maps.Clone(available)
 	}
 	eff := make(map[string]int, len(nsBudget))
 	for accType, nsAvail := range nsBudget {
+		cv, clusterCapped := clusterBudgetFor(available, accType)
 		if nsAvail < 0 { // unlimited for this (namespace, type)
-			if cv, ok := available[accType]; ok {
+			if clusterCapped {
 				eff[accType] = cv
 			} else {
 				eff[accType] = math.MaxInt
@@ -370,7 +376,7 @@ func effectiveAvailable(available, nsBudget map[string]int) map[string]int {
 			continue
 		}
 		eff[accType] = nsAvail
-		if cv, ok := available[accType]; ok && cv < nsAvail {
+		if clusterCapped && cv < nsAvail {
 			eff[accType] = cv
 		}
 	}
@@ -408,7 +414,7 @@ func fairShareRolePick(target float64, roles []string, limited gpuLimitTracker) 
 			if gpusPR <= 0 {
 				gpusPR = 1
 			}
-			gpusAvail := available[vc.AcceleratorName]
+			gpusAvail := budgetOf(available, vc.AcceleratorName)
 			if gpusAvail < gpusPR {
 				gpuBlocked = append(gpuBlocked, vc.VariantName)
 				continue
@@ -440,6 +446,19 @@ func fairShareRolePick(target float64, roles []string, limited gpuLimitTracker) 
 		}
 		return "", 0
 	}
+}
+
+// anyBudgetLeft reports whether some model in active could still be granted a
+// GPU: its effective budget (effectiveAvailable) is not empty. A model in a
+// namespace with an allowance is bounded by it; one without reads the cluster
+// budget, which is unbounded when nil.
+func anyBudgetLeft(active []*modelWork, available map[string]int, availableByNS map[string]map[string]int) bool {
+	for _, w := range active {
+		if budgetTotal(effectiveAvailable(available, availableByNS[w.req.Namespace])) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // filterActive returns modelWork entries that still have remaining > 0.

@@ -27,7 +27,7 @@ func TestFillIdleSharePlacesADomainReceiverInOneDomain(t *testing.T) {
 			e := &Engine{}
 			e.utilizationShare.desired = map[string]int{}
 			g := allocation.ShareGroup{
-				AcceleratorType: "A100", Budget: 16, PhysicalFree: math.MaxInt,
+				AcceleratorType: "A100", Budget: 16, ClusterFree: math.MaxInt,
 				Roles: []allocation.ShareRole{{Key: "B", Weight: 1, Need: 16, Ceiling: 16, ReplicaGPUs: 8}},
 				Grow:  map[string]allocation.ShareVariant{"B": {Name: "b", GPUs: 8, PodGPUs: []int{4, 4}}},
 			}
@@ -64,7 +64,7 @@ func TestFillIdleShareRecordsWhoItLeftShort(t *testing.T) {
 			e.utilizationShare.desired = map[string]int{}
 			l := allocation.NewShareLedger()
 			g := allocation.ShareGroup{
-				AcceleratorType: "A100", Budget: 16, PhysicalFree: tc.physicalFree,
+				AcceleratorType: "A100", Budget: 16, ClusterFree: tc.physicalFree,
 				Roles: []allocation.ShareRole{{Key: "B", Weight: 1, Need: 16, Ceiling: 16, ReplicaGPUs: 8}},
 				Grow:  map[string]allocation.ShareVariant{"B": {Name: "b", GPUs: 8, PodGPUs: []int{8}}},
 			}

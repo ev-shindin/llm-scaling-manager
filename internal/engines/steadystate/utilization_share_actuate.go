@@ -307,7 +307,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		Roles: g.Roles, Held: held, Thresholds: g.Thresholds, DownThresholds: g.DownThresholds, BusiestQueueLoad: g.BusiestQueueLoad, Budget: g.Budget, Tolerance: us.Tolerance,
 		SkipWaits: shareSkipWaits(us), ConfirmCycles: us.Stabilization.ConsecutiveCyclesBeforeMove,
 		Give: g.Give, Grow: g.Grow, Nodes: nodes, DonorUnits: units, DomainKey: domains,
-		WakeHeld: l.WakeHeld(now), PhysicalFree: g.PhysicalFree,
+		WakeHeld: l.WakeHeld(now), PhysicalFree: g.ClusterFree,
 		Headroom: allocation.ShareHeadroom{Capped: true, Replicas: us.MaxHeadroomReplicas, ReturnLoad: us.Stabilization.ReturnSpareLoad},
 		Origins:  g.Origins,
 	}, now, tm)
@@ -498,7 +498,7 @@ func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g 
 	for _, c := range committed {
 		idle -= c
 	}
-	idle = min(idle, g.PhysicalFree)
+	idle = min(idle, g.ClusterFree)
 	integer := map[string]int{}
 	for _, v := range ev.Roles {
 		integer[v.Key] = v.Integer

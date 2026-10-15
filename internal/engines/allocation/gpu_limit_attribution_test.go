@@ -41,15 +41,15 @@ var _ = Describe("bindingProvider", func() {
 			"an unlisted type is availability 0, the tightest bound there is")
 	})
 
-	It("falls back to a provider's cluster pool for a namespace it does not scope", func() {
+	It("credits no namespace-scope provider for a namespace it does not scope", func() {
 		constraints := []*ResourceConstraints{
 			{ProviderName: "namespace-quota",
 				Pools:          map[string]ResourcePool{"A100": {Limit: 8, Used: 3}},
 				NamespacePools: map[string]map[string]ResourcePool{"team-a": {"A100": {Limit: 1}}},
 			},
 		}
-		Expect(bindingProvider(constraints, "team-z", "A100")).To(Equal("namespace-quota"),
-			"team-z is open (excluded), so the cluster pool is what bounds it")
+		Expect(bindingProvider(constraints, "team-z", "A100")).To(BeEmpty(),
+			"team-z is excluded: it bypasses the quota, whose aggregate is no cluster bound")
 	})
 
 	It("skips unlimited sentinels and returns empty when nothing finitely bounds the type", func() {
@@ -59,11 +59,11 @@ var _ = Describe("bindingProvider", func() {
 		Expect(bindingProvider(constraints, "team-a", "A100")).To(BeEmpty())
 	})
 
-	It("returns empty for an accelerator type no provider constrains", func() {
+	It("credits a cluster bound that does not list the type (a closed allowlist)", func() {
 		constraints := []*ResourceConstraints{
 			{ProviderName: "gpu-limiter", Pools: map[string]ResourcePool{"A100": {Limit: 4}}},
 		}
-		Expect(bindingProvider(constraints, "team-a", "L40S")).To(BeEmpty())
+		Expect(bindingProvider(constraints, "team-a", "L40S")).To(Equal("gpu-limiter"))
 	})
 
 	It("tolerates a nil constraint entry", func() {

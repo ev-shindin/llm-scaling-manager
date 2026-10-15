@@ -91,11 +91,12 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 
 	// Step 3: Expose per-type availability
 	rc := &ResourceConstraints{
-		ProviderName: l.name,
-		Pools:        l.inventory.GetResourcePools(),
-		TotalLimit:   l.inventory.TotalLimit(),
-		TotalUsed:    l.inventory.TotalUsed(),
-		TotalAvail:   l.inventory.TotalAvailable(),
+		ProviderName:    l.name,
+		Pools:           l.inventory.GetResourcePools(),
+		TotalLimit:      l.inventory.TotalLimit(),
+		TotalUsed:       l.inventory.TotalUsed(),
+		TotalAvail:      l.inventory.TotalAvailable(),
+		NamespaceScoped: namespaceScopedOf(l.inventory),
 	}
 
 	// Step 4: For namespace-aware inventories carrying per-namespace caps for the
@@ -115,6 +116,10 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 			rc.NamespacePools = nsPools
 			rc.Pools = aggregateNamespacePools(nsPools)
 			rc.TotalLimit, rc.TotalUsed, rc.TotalAvail = poolTotals(rc.Pools)
+			// The aggregate is reported, never merged as a cluster bound: each
+			// namespace it holds is bounded by its own allowlist, and one it
+			// excludes bypasses it.
+			rc.NamespaceScoped = true
 		}
 	}
 	return rc, nil

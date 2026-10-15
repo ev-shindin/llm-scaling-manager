@@ -209,10 +209,10 @@ func TestFitsGPUBudgetNamespaceScoped(t *testing.T) {
 		{
 			// A namespace may not be granted more than physically exists.
 			name: "an unlimited namespace grant is still bounded by the cluster pool",
-			constraints: []*ResourceConstraints{nsPools(
-				map[string]ResourcePool{"A100": {Limit: 4, Used: 3}},
-				map[string]map[string]ResourcePool{budgetNS: {"A100": {Limit: -1}}},
-			)},
+			constraints: []*ResourceConstraints{
+				{ProviderName: "gpu-limiter", Pools: map[string]ResourcePool{"A100": {Limit: 4, Used: 3}}},
+				nsPools(nil, map[string]map[string]ResourcePool{budgetNS: {"A100": {Limit: -1}}}),
+			},
 			demand: map[string]int{"A100": 2},
 			want:   false,
 		},

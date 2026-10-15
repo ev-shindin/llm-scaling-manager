@@ -463,6 +463,12 @@ type RolePickFn func(
 // committed without it. Treating it as blocking is what left prefill pinned at
 // one replica through a 1119-deep queue while decode sat at its ceiling
 // (docs/proposals/prefill-starved-by-exhausted-role.md).
+//
+// It returns the GPUs it spent per key of available, as debited -- once per
+// spend, under the key the pick read. A caller that reconciles another budget
+// must use these rather than the change in available: debitBudget also draws
+// down every key that covers the one spent, so the per-key change counts a GPU
+// spent under a long spelling again under its short name.
 func allocateForModelPaired(
 	ctx context.Context,
 	e *NamedAnalyzerResult,
@@ -473,8 +479,9 @@ func allocateForModelPaired(
 	pick RolePickFn,
 	pickerState RolePairedState,
 	roles []string,
-) {
+) map[string]int {
 	logger := ctrl.LoggerFrom(ctx)
+	spent := map[string]int{}
 	for anyRoleNeedsScaleUp(pickerState, roles) {
 		variantByRole := make(map[string]string, len(roles))
 		capByRole := make(map[string]int, len(roles))
@@ -577,7 +584,15 @@ func allocateForModelPaired(
 			targets[v] += k
 			pickerState[role] = math.Max(0, pickerState[role]-float64(k)*prc)
 			if available != nil {
-				available[accFromVCs(variants, v)] -= k * gpusPerReplicaFromState(stateMap, v)
+				// Debit the key the pick read the budget from, which is the
+				// pool's spelling of the variant's accelerator, not necessarily
+				// the variant's own -- and, through debitBudget, every key that
+				// covers it, so the other role of a pair spelled differently
+				// sees the GPUs this one took.
+				key := budgetKey(available, accFromVCs(variants, v))
+				n := k * gpusPerReplicaFromState(stateMap, v)
+				debitBudget(available, key, n)
+				spent[key] += n
 			}
 		}
 		// Update model-level Remaining via the P-anchor role so fairShareValue
@@ -591,4 +606,5 @@ func allocateForModelPaired(
 		}
 		logger.V(logging.DEBUG).Info("scale-up: joint role commit", "deltaUtil", deltaUtil)
 	}
+	return spent
 }
