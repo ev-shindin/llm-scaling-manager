@@ -175,14 +175,38 @@ func TestKueueLenderWaitingThresholdIsTheDefaultCooldown(t *testing.T) {
 		"the threshold must equal the default borrowCooldown")
 }
 
-// The thrashing alert counts the release counter per model over an hour. Its
-// first form counted starts of a wva_model_scaling_blocked reason at one-minute
+// The thrashing alert counts releases per model over an hour. Its first form
+// counted starts of a wva_model_scaling_blocked reason at one-minute
 // resolution, which misses a reason that sets and clears between two samples.
 func TestKueueBorrowThrashingCountsReleasesPerModel(t *testing.T) {
 	expr := alertExpr(t, "WVAKueueBorrowThrashing")
-	assert.Equal(t, []string{"wva_borrow_releases_total"}, ExtractMetricNames(expr))
 	assert.Contains(t, expr, "increase(wva_borrow_releases_total[1h])")
 	assert.Contains(t, expr, "by (exported_namespace, model_name)",
 		"group by the scraped model namespace, as the other per-model alerts do")
 	assert.Regexp(t, `>\s*3\s*$`, expr)
+}
+
+// Kueue's preemptions are not releases: they are counted on
+// wva_kueue_preempted_pods_total. With an Any lender -- the recommended setup --
+// they are how borrowed capacity is lost, so an alert reading only the release
+// counter could never fire there. The model that is only preempted has no
+// release series at all, so each side must fall back to the other's "* 0"
+// instead of making the sum empty.
+func TestKueueBorrowThrashingCountsPreemptionsAlone(t *testing.T) {
+	expr := alertExpr(t, "WVAKueueBorrowThrashing")
+	compact := regexp.MustCompile(`\s+`).ReplaceAllString(expr, " ")
+	const (
+		releases  = "sum by (exported_namespace, model_name) (increase(wva_borrow_releases_total[1h]))"
+		preempted = "sum by (exported_namespace, model_name) (increase(wva_kueue_preempted_pods_total[1h]))"
+	)
+	assert.Contains(t, compact, "( "+preempted+" or "+releases+" * 0 )",
+		"preemptions alone must reach the sum: with no release series, the release side falls back to zero")
+	assert.Contains(t, compact, "( "+releases+" or "+preempted+" * 0 )",
+		"releases alone must reach the sum: with no preemption series, the preemption side falls back to zero")
+	assert.Contains(t, compact, ") + on (exported_namespace, model_name) (",
+		"the two sides join on the labels both counters share")
+	assert.ElementsMatch(t,
+		[]string{"wva_borrow_releases_total", "wva_kueue_preempted_pods_total",
+			"wva_borrow_releases_total", "wva_kueue_preempted_pods_total"},
+		ExtractMetricNames(expr))
 }

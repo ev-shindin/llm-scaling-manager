@@ -148,11 +148,28 @@ spec:
         summary: "{{ $value }} pod(s) of {{ $labels.exported_namespace }}/{{ $labels.variant_name }} unplaced past the placement timeout"
         description: "Grouped by exported_namespace: the series carries the model's namespace. These pods have been Unschedulable, or held at Kueue's admission gate, for longer than the placement timeout (default 5 minutes), and stayed so for 5 more minutes. Borrowed replicas are released at the timeout, so what stays is usually within guaranteed quota: no node fits the pod, Kueue has not admitted it, or the cluster autoscaler is still adding a node. Check 'kubectl describe pod' for the scheduling message and the Workload's admission status."
 
+    # Two counters, because the two ways of losing borrowed capacity are counted
+    # apart: the scaling manager's own releases (wva_borrow_releases_total) and
+    # Kueue's preemptions (wva_kueue_preempted_pods_total). Each side is
+    # "(A or B * 0)", so a model with only one kind of loss -- no series at all
+    # for the other counter -- still sums to a value instead of to nothing.
     - alert: WVAKueueBorrowThrashing
-      expr: sum by (exported_namespace, model_name) (increase(wva_borrow_releases_total[1h])) > 3
+      expr: |
+        (
+          sum by (exported_namespace, model_name) (increase(wva_borrow_releases_total[1h]))
+          or
+          sum by (exported_namespace, model_name) (increase(wva_kueue_preempted_pods_total[1h])) * 0
+        )
+        + on (exported_namespace, model_name)
+        (
+          sum by (exported_namespace, model_name) (increase(wva_kueue_preempted_pods_total[1h]))
+          or
+          sum by (exported_namespace, model_name) (increase(wva_borrow_releases_total[1h])) * 0
+        )
+        > 3
       for: 1m
       labels:
         severity: warning
       annotations:
         summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} lost borrowed capacity more than 3 times in an hour"
-        description: "Counts wva_borrow_releases_total over the last hour, every cause together: each time the model lost borrowed capacity, given back to a waiting lender or taken by Kueue (the cause label says which). The model keeps growing onto capacity its cohort's lenders keep taking back: every cycle costs a cold start. Raise the model's guaranteed quota (nominalQuota), lengthen borrowCooldown, or set countBorrowable: false for it."
+        description: "Counts, over the last hour, the borrowed replicas the scaling manager gave back (wva_borrow_releases_total: to a waiting lender, or after a placement timeout) plus the pods Kueue preempted (wva_kueue_preempted_pods_total). With a lender that reclaims (reclaimWithinCohort Any), Kueue's preemptions are the usual cause. The model keeps growing onto capacity its cohort's lenders keep taking back: every cycle costs a cold start. Raise the model's guaranteed quota (nominalQuota), lengthen borrowCooldown, or set countBorrowable: false for it."

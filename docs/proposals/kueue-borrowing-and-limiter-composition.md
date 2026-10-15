@@ -807,8 +807,10 @@ Where the code settled a detail this text leaves open, or differs from it:
   (guaranteed plus borrow cap), not the sum of guaranteed figures.
 - **ResourceQuota.** With several GPU ResourceQuotas, the tightest `hard`
   bounds the reach.
-- **Thrash alert.** Counts `increase(wva_borrow_releases_total[1h])` per
-  model, every cause together.
+- **Thrash alert.** Per model, sums over an hour the releases
+  (`wva_borrow_releases_total`, both causes) and Kueue's preemptions
+  (`wva_kueue_preempted_pods_total`), which are counted apart. Either alone
+  can fire it.
 - **Wakes stay within nominal.** Scale-from-zero, the warm pool and
   rescale use the within-nominal figure (what Kueue admits now without
   borrowing), not a guaranteed one.

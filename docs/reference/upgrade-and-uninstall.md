@@ -183,9 +183,9 @@ What it costs to run:
 - **The transitional comparison.** Where both kinds are declared, the
   controller also computes what the quota alone would have decided, at most
   once every 10 cycles, and logs `Upgrade note (transitional)` with the set
-  of variants that differ. It goes in the next release.
-- **Borrowing state survives a restart.** Borrowing state is kept in
-  `wva-controller-status` across restarts.
+  of variants that differ. It is removed in the next release.
+- **Borrowing state survives a restart**: it is kept in
+  `wva-controller-status`.
 
 ### The external-scaler NetworkPolicy
 
