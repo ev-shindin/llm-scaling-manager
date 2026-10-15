@@ -96,7 +96,7 @@ var _ = Describe("what on-call sees of borrowing, engine side", func() {
 		reqs := model(t0)
 		cs := e.prepareBorrowing(ctx, world(16, now), reqs, targets, now)
 		ds := decisionsFor()
-		e.releaseBorrowed(ctx, ds, targets)
+		e.releaseBorrowed(ctx, ds, targets, now)
 		Expect(ds[0].TargetReplicas).To(Equal(1))
 		var ev string
 		Expect(rec.Events).To(Receive(&ev))
@@ -127,7 +127,7 @@ var _ = Describe("what on-call sees of borrowing, engine side", func() {
 			now = t0.Add(d)
 			cs = e.prepareBorrowing(ctx, world(16, now, lender), reqs, targets, now)
 			ds = decisionsFor()
-			e.releaseBorrowed(ctx, ds, targets)
+			e.releaseBorrowed(ctx, ds, targets, now)
 		}
 		var ev string
 		Expect(rec.Events).To(Receive(&ev))
@@ -174,7 +174,7 @@ var _ = Describe("what on-call sees of borrowing, engine side", func() {
 		reqs := model(t0)
 		cs := e.prepareBorrowing(ctx, world(16, now), reqs, targets, now)
 		ds := decisionsFor()
-		e.releaseBorrowed(ctx, ds, targets)
+		e.releaseBorrowed(ctx, ds, targets, now)
 		e.publishBorrowSignals(cs, reqs, ds, now)
 		Expect(reasons()).NotTo(BeEmpty())
 

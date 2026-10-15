@@ -44,8 +44,14 @@ type borrowingState struct {
 	ledgerLoaded bool
 	// lastLedger is the ledger last handed to the status publisher.
 	lastLedger string
-	// preemptSeen is the preempted Workloads already counted, by UID.
-	preemptSeen map[types.UID]bool
+	// preemptSeen is the preemptions already counted -- the preempted pods'
+	// UIDs, else the Workload's -- and their namespace; kept while listed.
+	preemptSeen map[types.UID]string
+	// preemptErrLogged and eventsErrLogged are the namespaces whose
+	// preemption or cluster-autoscaler Event read failed and was logged, until
+	// a read succeeds.
+	preemptErrLogged map[string]bool
+	eventsErrLogged  map[string]bool
 	// cycle is this cycle's input to the governor, kept for the releases
 	// after the optimizer; zero when the cycle borrows nothing.
 	cycle allocation.BorrowCycle

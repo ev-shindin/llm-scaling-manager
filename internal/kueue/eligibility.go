@@ -343,7 +343,10 @@ type PreemptedWorkload struct {
 	// Owners are the names of the objects the Workload is owned by: a pod for
 	// the pod integration, a LeaderWorkerSet or Job otherwise.
 	Owners []string
-	At     time.Time
+	// OwnerRefs are the same owners with their kind and UID, so a caller can
+	// match a LeaderWorkerSet or a pod exactly rather than by name.
+	OwnerRefs []metav1.OwnerReference
+	At        time.Time
 }
 
 // PreemptedWorkloads lists the Workloads in ns that Kueue preempted. Read
@@ -367,8 +370,8 @@ func PreemptedWorkloads(ctx context.Context, c client.Client, ns string) ([]Pree
 				continue
 			}
 			at, _ := time.Parse(time.RFC3339, fmt.Sprint(cond["lastTransitionTime"]))
-			pw := PreemptedWorkload{UID: w.GetUID(), At: at}
-			for _, ref := range w.GetOwnerReferences() {
+			pw := PreemptedWorkload{UID: w.GetUID(), At: at, OwnerRefs: w.GetOwnerReferences()}
+			for _, ref := range pw.OwnerRefs {
 				pw.Owners = append(pw.Owners, ref.Name)
 			}
 			out = append(out, pw)

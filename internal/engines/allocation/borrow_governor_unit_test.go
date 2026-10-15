@@ -192,6 +192,72 @@ var _ = Describe("BorrowGovernor release units", func() {
 		})
 	})
 
+	Describe("between cycles that count borrowing", func() {
+		It("keeps releases in flight in force in a cycle that counts none, and drops them once borrowing stays off", func() {
+			g := NewBorrowGovernor(settings)
+			l, err := UnmarshalBorrowLedger(`{"entries":[{"cohort":"c","lender":"l","flavor":"h100","resource":"nvidia.com/gpu",` +
+				`"releasedAt":"1970-01-01T05:33:20Z","units":[{"namespace":"b","variant":"m-v","to":3}]}],"timeoutHeld":{"b/x-v":1}}`)
+			Expect(err).NotTo(HaveOccurred())
+			g.Restore(l)
+			reqs := []ModelScalingRequest{govModel("m", 4, 8), govModel("x", 2, 8)}
+			ds := decisionsOf(reqs)
+			ds[0].TargetReplicas, ds[1].TargetReplicas = 6, 3 // the demand floor asks for more
+			g.HoldReleases(t0, ds)
+			Expect(targets(ds)).To(Equal(map[string]int{"m-v": 3, "x-v": 1}))
+
+			later := t0.Add(settings.Cooldown + settings.ReleaseActuation + time.Minute)
+			ds = decisionsOf(reqs)
+			g.HoldReleases(later, ds)
+			Expect(targets(ds)).To(Equal(map[string]int{"m-v": 4, "x-v": 2}), "borrowing has stayed off: nothing is pinned")
+			Expect(g.Ledger().Entries).To(BeEmpty())
+		})
+
+		It("persists the cooldowns and the placement-timeout holds, and restores them", func() {
+			g := NewBorrowGovernor(settings)
+			g.MarkPreempted("b/m", t0)
+			pd := unplacedVariant(govModel("x", 2, 8), "x-v", t0)
+			c := BorrowCycle{Now: t0.Add(settings.PlacementTimeout + time.Minute), Constraints: govWorld{used: 16}.constraints(),
+				Requests: []ModelScalingRequest{pd}}
+			g.Observe(c)
+			g.Releases(c, decisionsOf(c.Requests))
+			raw, err := g.MarshalLedger()
+			Expect(err).NotTo(HaveOccurred())
+			l, err := UnmarshalBorrowLedger(raw)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(l.ModelCooldown).To(HaveKey("b/m"))
+			Expect(l.ModelCooldown).To(HaveKey("b/x"))
+			Expect(l.TimeoutHeld).To(HaveKeyWithValue("b/x-v", 1))
+
+			restarted := NewBorrowGovernor(settings)
+			restarted.Restore(l)
+			now := t0.Add(7 * time.Minute)
+			Expect(restarted.BorrowBlocked("b", "m", "m-v", now)).To(BeTrue(), "the preemption cooldown survives the restart")
+			ds := decisionsOf([]ModelScalingRequest{govModel("x", 2, 8)})
+			restarted.HoldReleases(now, ds)
+			Expect(targets(ds)["x-v"]).To(Equal(1))
+		})
+
+		It("prunes expired cooldowns and clamps one past the setting", func() {
+			g := NewBorrowGovernor(settings)
+			g.MarkPreempted("b/old", t0)
+			g.Restore(BorrowLedger{ModelCooldown: map[string]time.Time{"b/far": t0.Add(24 * time.Hour)}})
+			now := t0.Add(settings.Cooldown + time.Minute)
+			g.Observe(BorrowCycle{Now: now})
+			l := g.Ledger()
+			Expect(l.ModelCooldown).NotTo(HaveKey("b/old"))
+			Expect(l.ModelCooldown["b/far"]).To(BeTemporally("<=", now.Add(settings.Cooldown+time.Minute)))
+		})
+
+		It("blocks borrowed growth in a namespace whose preemptions could not be read", func() {
+			g := NewBorrowGovernor(settings)
+			g.Observe(BorrowCycle{Now: t0, PreemptionUnknown: map[string]bool{"b": true}})
+			Expect(g.BorrowBlocked("b", "m", "m-v", t0)).To(BeTrue())
+			Expect(g.BorrowBlocked("other", "m", "m-v", t0)).To(BeFalse())
+			g.Observe(BorrowCycle{Now: t0.Add(30 * time.Second)})
+			Expect(g.BorrowBlocked("b", "m", "m-v", t0.Add(30*time.Second))).To(BeFalse())
+		})
+	})
+
 	Describe("a waiting lender that cannot reclaim, against a P/D borrower", func() {
 		warm := func(w govWorld, reqs []ModelScalingRequest) []BorrowRelease {
 			g := NewBorrowGovernor(settings)

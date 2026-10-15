@@ -14,8 +14,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -27,14 +26,20 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
-// Cluster-autoscaler event reasons on a pending pod.
+// Cluster-autoscaler event reasons on a pending pod, and its component name.
 const (
 	eventTriggeredScaleUp  = "TriggeredScaleUp"
 	eventNotTriggerScaleUp = "NotTriggerScaleUp"
+	clusterAutoscaler      = "cluster-autoscaler"
 )
+
+// kueueTerminationTarget is the pod condition Kueue sets on a pod it is about
+// to delete, with the reason it stops the pod.
+const kueueTerminationTarget = "TerminationTarget"
 
 // borrowSettings are the governor's timings from the policy.
 func (e *Engine) borrowSettings() allocation.BorrowSettings {
@@ -61,10 +66,10 @@ func (e *Engine) governBorrowing(ctx context.Context, constraints []*allocation.
 		st.governor.SetSettings(e.borrowSettings())
 	}
 	e.loadBorrowLedger(ctx)
-	e.observePreemptions(ctx, constraints, requests, scaleTargets, now)
+	unknown := e.observePreemptions(ctx, constraints, requests, scaleTargets, now)
 	st.cycle = allocation.BorrowCycle{
 		Now: now, Constraints: constraints, Requests: requests, Gated: gated,
-		ScaleUpPending: e.scaleUpPending(ctx, requests, now),
+		ScaleUpPending: e.scaleUpPending(ctx, requests, now), PreemptionUnknown: unknown,
 	}
 	st.governor.Observe(st.cycle)
 	return allocation.BlockCohorts(constraints, st.governor.BlockedCohorts(now))
@@ -84,26 +89,35 @@ func (e *Engine) borrowBlocked() func(namespace, modelID, variant string) bool {
 
 // releaseBorrowed runs the governor's half after every stage that sets a
 // target: releases lower the decisions and stay in force until they land. Each
-// is logged; the ledger is persisted when it changed.
+// is logged, counted and recorded as an Event; the ledger is persisted when it
+// changed. In a cycle that counts no borrowing nothing new is decided, but the
+// releases already in flight still hold (BorrowGovernor.HoldReleases): a
+// transient read failure must not let the demand floor raise them again.
 func (e *Engine) releaseBorrowed(ctx context.Context, decisions []domain.VariantDecision,
-	scaleTargets map[string]scaletarget.ScaleTargetAccessor) {
+	scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) {
 	st := &e.borrowing
-	if st.governor == nil || st.cycle.Now.IsZero() {
+	if st.governor == nil {
+		return
+	}
+	if st.cycle.Now.IsZero() {
+		st.governor.HoldReleases(now, decisions)
+		e.persistBorrowLedger(ctx)
 		return
 	}
 	logger := ctrl.LoggerFrom(ctx)
 	for _, r := range st.governor.Releases(st.cycle, decisions) {
 		logger.Info("Releasing borrowed capacity",
-			"namespace", r.Namespace, "model", r.ModelID, "variant", r.Variant,
+			"namespace", r.Namespace, "modelID", r.ModelID, "variant", r.Variant,
 			"from", r.From, "to", r.To, "cause", string(r.Cause),
 			"lenderClusterQueue", r.Lender.Lender, "cohort", r.Lender.Cohort, "flavor", r.Lender.Flavor)
+		metrics.CountBorrowRelease(r.Namespace, r.ModelID, string(r.Cause))
 		acc := scaleTargets[r.Namespace+"/"+r.Variant]
 		e.borrowReleasedEvent(r, acc)
 		if acc != nil && scaletarget.IsLeaderWorkerSet(acc) {
 			e.checkLWSScaleDown(ctx, r, acc)
 		}
 	}
-	e.persistBorrowLedger()
+	e.persistBorrowLedger(ctx)
 }
 
 // loadBorrowLedger reads the persisted ledger back, once. Until it succeeds
@@ -142,9 +156,13 @@ func (e *Engine) loadBorrowLedger(ctx context.Context) {
 }
 
 // persistBorrowLedger hands the ledger to the status publisher when changed.
-func (e *Engine) persistBorrowLedger() {
+func (e *Engine) persistBorrowLedger(ctx context.Context) {
 	st := &e.borrowing
-	raw := st.governor.MarshalLedger()
+	raw, err := st.governor.MarshalLedger()
+	if err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "Cannot persist the borrowing release ledger; the last persisted one stays")
+		return
+	}
 	if raw == st.lastLedger {
 		return
 	}
@@ -153,17 +171,32 @@ func (e *Engine) persistBorrowLedger() {
 }
 
 // observePreemptions starts the cooldown of each model one of whose pods Kueue
-// preempted: a Workload with Evicted=True, reason Preempted, owned by a pod of
-// one of the model's variants. One Workload list per borrowing namespace.
+// preempted, from when it did, and returns the namespaces whose preemptions
+// could not be read: their models borrow nothing new this cycle. Two sources,
+// one per borrowing namespace each:
+//   - Workloads with Evicted=True, reason Preempted (one API list). A
+//     LeaderWorkerSet's Workload is owned by the LeaderWorkerSet itself and is
+//     matched by its name and UID; a pod's by the pod.
+//   - Pods carrying Kueue's TerminationTarget condition for a preemption (the
+//     cached pod informer). Kueue sets it before it deletes the pod, and a
+//     pod's Workload goes with the pod, often between two cycles.
+//
+// A preemption older than the cooldown starts nothing; the UIDs counted are
+// kept only while still listed.
 func (e *Engine) observePreemptions(ctx context.Context, constraints []*allocation.ResourceConstraints,
-	requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) {
+	requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) map[string]bool {
 	st := &e.borrowing
 	if e.client == nil {
-		return
+		return nil
 	}
 	if st.preemptSeen == nil {
-		st.preemptSeen = map[types.UID]bool{}
+		st.preemptSeen = map[types.UID]string{}
 	}
+	if st.preemptErrLogged == nil {
+		st.preemptErrLogged = map[string]bool{}
+	}
+	logger := ctrl.LoggerFrom(ctx)
+	cooldown := e.borrowSettings().Cooldown
 	namespaces := map[string]bool{}
 	for _, c := range constraints {
 		if c == nil {
@@ -173,60 +206,191 @@ func (e *Engine) observePreemptions(ctx context.Context, constraints []*allocati
 			namespaces[ns] = true
 		}
 	}
+	var unknown map[string]bool
+	listed := map[types.UID]bool{}
+	read := map[string]bool{}
+	mark := func(ns, model string, uids []types.UID, w kueue.PreemptedWorkload) {
+		fresh := false
+		for _, uid := range uids {
+			listed[uid] = true
+			if _, ok := st.preemptSeen[uid]; !ok {
+				fresh = true
+				st.preemptSeen[uid] = ns
+			}
+		}
+		if !fresh || model == "" {
+			return
+		}
+		at := w.At
+		if at.IsZero() || at.After(now) {
+			at = now
+		}
+		if now.Sub(at) > cooldown {
+			return // found again after a restart: its cooldown is over
+		}
+		st.governor.MarkPreempted(model, at)
+		e.recordReclaim(model, w, now)
+		logger.Info("Kueue preempted a pod of a borrowing model; it borrows nothing new for the cooldown",
+			"modelID", model, "uid", string(uids[0]), "preemptedAt", at)
+	}
 	for ns := range namespaces {
 		wls, err := kueue.PreemptedWorkloads(ctx, e.client, ns)
 		if err != nil {
+			if unknown == nil {
+				unknown = map[string]bool{}
+			}
+			unknown[ns] = true
+			if !st.preemptErrLogged[ns] {
+				st.preemptErrLogged[ns] = true
+				logger.Error(err, "Cannot read Kueue preemptions; the namespace borrows nothing new until they can be read",
+					"namespace", ns)
+			}
 			continue
 		}
+		delete(st.preemptErrLogged, ns)
+		read[ns] = true
 		for _, w := range wls {
-			if st.preemptSeen[w.UID] {
+			model, uids := modelOfOwners(requests, scaleTargets, ns, w.OwnerRefs)
+			if len(uids) == 0 {
+				uids = []types.UID{w.UID}
+			}
+			mark(ns, model, uids, w)
+		}
+		var pods corev1.PodList
+		if err := e.client.List(ctx, &pods, client.InNamespace(ns)); err != nil {
+			continue
+		}
+		for i := range pods.Items {
+			p := &pods.Items[i]
+			at, ok := preemptedPod(p)
+			if !ok {
 				continue
 			}
-			st.preemptSeen[w.UID] = true
-			if model := modelOfPods(requests, scaleTargets, ns, w.Owners); model != "" {
-				st.governor.MarkPreempted(model, now)
-				e.recordReclaim(model, w, now)
-				ctrl.LoggerFrom(ctx).Info("Kueue preempted a pod of a borrowing model; it borrows nothing new for the cooldown",
-					"model", model, "workload", string(w.UID))
-			}
+			model := modelOfPod(requests, scaleTargets, ns, p)
+			mark(ns, model, []types.UID{p.UID}, kueue.PreemptedWorkload{UID: p.UID, Owners: []string{p.Name}, At: at})
 		}
 	}
+	for uid, ns := range st.preemptSeen {
+		if read[ns] && !listed[uid] {
+			delete(st.preemptSeen, uid)
+		}
+	}
+	return unknown
 }
 
-// modelOfPods is "namespace/model" of the variant whose scale target owns a
-// pod named in owners: a Deployment's pods are named <deployment>-<hash>-<id>,
-// a LeaderWorkerSet's <lws>-<group>[-<worker>]. The longest matching name wins.
-func modelOfPods(requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
-	ns string, owners []string) string {
+// preemptedPod reports whether Kueue marked a pod for termination because its
+// Workload was preempted, and when: the TerminationTarget condition, reason
+// WorkloadEvictedDueToPreempted (or an older Kueue's generic reason with the
+// eviction message naming the preemption).
+func preemptedPod(p *corev1.Pod) (time.Time, bool) {
+	for _, c := range p.Status.Conditions {
+		if string(c.Type) != kueueTerminationTarget || c.Status != corev1.ConditionTrue {
+			continue
+		}
+		if strings.Contains(c.Reason, "Preempted") || strings.Contains(c.Message, "Preempted") {
+			return c.LastTransitionTime.Time, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// modelOfOwners is "namespace/model" of the variant whose scale target owns a
+// preempted Workload, and the UIDs that identify the preemption: the pods it
+// is owned by, so a pod seen through its TerminationTarget condition is not
+// counted twice. A LeaderWorkerSet owner matches its scale target by name and
+// UID; a pod by its name, <deployment>-<hash>-<id> or <lws>-<group>, the
+// longest scale-target prefix winning.
+func modelOfOwners(requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
+	ns string, owners []metav1.OwnerReference) (string, []types.UID) {
+	model := ""
+	var pods []types.UID
+	for _, o := range owners {
+		if o.Kind == "Pod" {
+			pods = append(pods, o.UID)
+			if m := modelByPodName(requests, scaleTargets, ns, o.Name); m != "" {
+				model = m
+			}
+			continue
+		}
+		forEachTarget(requests, scaleTargets, ns, func(m string, acc scaletarget.ScaleTargetAccessor) {
+			if acc.GetName() == o.Name && (o.UID == "" || acc.GetUID() == "" || acc.GetUID() == o.UID) {
+				model = m
+			}
+		})
+	}
+	return model, pods
+}
+
+// modelOfPod is "namespace/model" of the variant whose scale target owns a
+// pod: a LeaderWorkerSet's pods by their set-name label, a Deployment's by
+// name prefix.
+func modelOfPod(requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
+	ns string, p *corev1.Pod) string {
+	if set := p.Labels[lwsv1.SetNameLabelKey]; set != "" {
+		model := ""
+		forEachTarget(requests, scaleTargets, ns, func(m string, acc scaletarget.ScaleTargetAccessor) {
+			if scaletarget.IsLeaderWorkerSet(acc) && acc.GetName() == set {
+				model = m
+			}
+		})
+		return model
+	}
+	return modelByPodName(requests, scaleTargets, ns, p.Name)
+}
+
+// modelByPodName matches a pod name to the longest "<scale target>-" prefix.
+func modelByPodName(requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
+	ns, pod string) string {
 	best, bestLen := "", 0
+	forEachTarget(requests, scaleTargets, ns, func(m string, acc scaletarget.ScaleTargetAccessor) {
+		prefix := acc.GetName() + "-"
+		if strings.HasPrefix(pod, prefix) && len(prefix) > bestLen {
+			best, bestLen = m, len(prefix)
+		}
+	})
+	return best
+}
+
+// forEachTarget calls f with "namespace/model" and the scale target of every
+// variant in ns that has one.
+func forEachTarget(requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
+	ns string, f func(model string, acc scaletarget.ScaleTargetAccessor)) {
 	for _, req := range requests {
 		if req.Namespace != ns {
 			continue
 		}
 		for _, st := range req.VariantStates {
-			acc := scaleTargets[ns+"/"+st.VariantName]
-			if acc == nil {
-				continue
-			}
-			prefix := acc.GetName() + "-"
-			for _, o := range owners {
-				if strings.HasPrefix(o, prefix) && len(prefix) > bestLen {
-					best, bestLen = ns+"/"+req.ModelID, len(prefix)
-				}
+			if acc := scaleTargets[ns+"/"+st.VariantName]; acc != nil {
+				f(ns+"/"+req.ModelID, acc)
 			}
 		}
 	}
-	return best
 }
 
 // scaleUpPending is, per variant with an unplaced pod old enough for the
 // placement timeout to matter, whether a cluster-autoscaler TriggeredScaleUp
-// on one of its unplaced pods is not followed by a NotTriggerScaleUp. One
-// Event list per such namespace. A scale-up that is never triggered does not
-// pause the timeout.
+// on one of its unplaced pods is not followed by a NotTriggerScaleUp. Two
+// Event lists per such namespace, straight from the API server and narrowed
+// by reason, so neither every Event of the namespace nor a cluster-wide Event
+// informer is read; only Events on a Pod reported by the cluster autoscaler
+// count. A scale-up that is never triggered does not pause the timeout.
+//
+// An Event list that fails is logged once per namespace (until one succeeds)
+// and reads as no scale-up pending: the timeout keeps running. Pausing on an
+// unreadable list would let an Events outage hold a borrowed replica that
+// cannot place for three timeouts; running it at worst releases a replica a
+// new node was about to take, which the next cycle may grow back.
 func (e *Engine) scaleUpPending(ctx context.Context, requests []allocation.ModelScalingRequest, now time.Time) map[string]bool {
-	if e.client == nil {
+	var reader client.Reader = e.client
+	if e.apiReader != nil {
+		reader = e.apiReader
+	}
+	if reader == nil {
 		return nil
+	}
+	st := &e.borrowing
+	if st.eventsErrLogged == nil {
+		st.eventsErrLogged = map[string]bool{}
 	}
 	timeout := e.borrowSettings().PlacementTimeout
 	byNS := map[string]map[string]string{} // ns -> pod -> variant
@@ -245,32 +409,39 @@ func (e *Engine) scaleUpPending(ctx context.Context, requests []allocation.Model
 	}
 	out := map[string]bool{}
 	for ns, pods := range byNS {
-		list := &unstructured.UnstructuredList{}
-		list.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "EventList"})
-		if err := e.client.List(ctx, list, client.InNamespace(ns)); err != nil {
+		latest := map[string]map[string]time.Time{} // reason -> pod -> time
+		var failed error
+		for _, reason := range []string{eventTriggeredScaleUp, eventNotTriggerScaleUp} {
+			var list corev1.EventList
+			if err := reader.List(ctx, &list, client.InNamespace(ns), client.MatchingFields{"reason": reason}); err != nil {
+				failed = err
+				break
+			}
+			latest[reason] = map[string]time.Time{}
+			for i := range list.Items {
+				ev := &list.Items[i]
+				if ev.InvolvedObject.Kind != "Pod" || !fromClusterAutoscaler(ev) {
+					continue
+				}
+				if _, ok := pods[ev.InvolvedObject.Name]; !ok {
+					continue
+				}
+				if at := eventTime(ev); at.After(latest[reason][ev.InvolvedObject.Name]) {
+					latest[reason][ev.InvolvedObject.Name] = at
+				}
+			}
+		}
+		if failed != nil {
+			if !st.eventsErrLogged[ns] {
+				st.eventsErrLogged[ns] = true
+				ctrl.LoggerFrom(ctx).Error(failed, "Cannot read cluster-autoscaler Events; the placement timeout runs without waiting for a scale-up",
+					"namespace", ns)
+			}
 			continue
 		}
-		triggered, notTriggered := map[string]time.Time{}, map[string]time.Time{}
-		for _, ev := range list.Items {
-			pod, _, _ := unstructured.NestedString(ev.Object, "involvedObject", "name")
-			if _, ok := pods[pod]; !ok {
-				continue
-			}
-			reason, _, _ := unstructured.NestedString(ev.Object, "reason")
-			at := eventTime(&ev)
-			switch reason {
-			case eventTriggeredScaleUp:
-				if at.After(triggered[pod]) {
-					triggered[pod] = at
-				}
-			case eventNotTriggerScaleUp:
-				if at.After(notTriggered[pod]) {
-					notTriggered[pod] = at
-				}
-			}
-		}
+		delete(st.eventsErrLogged, ns)
 		for pod, variant := range pods {
-			if t, ok := triggered[pod]; ok && !notTriggered[pod].After(t) {
+			if t, ok := latest[eventTriggeredScaleUp][pod]; ok && !latest[eventNotTriggerScaleUp][pod].After(t) {
 				out[ns+"/"+variant] = true
 			}
 		}
@@ -278,19 +449,21 @@ func (e *Engine) scaleUpPending(ctx context.Context, requests []allocation.Model
 	return out
 }
 
+// fromClusterAutoscaler reports whether the cluster autoscaler reported ev.
+func fromClusterAutoscaler(ev *corev1.Event) bool {
+	return ev.Source.Component == clusterAutoscaler || ev.ReportingController == clusterAutoscaler
+}
+
 // eventTime is an Event's latest occurrence: lastTimestamp, else eventTime,
 // else its creation.
-func eventTime(ev *unstructured.Unstructured) time.Time {
-	for _, f := range []string{"lastTimestamp", "eventTime"} {
-		if s, ok, _ := unstructured.NestedString(ev.Object, f); ok && s != "" {
-			for _, layout := range []string{time.RFC3339, time.RFC3339Nano} {
-				if t, err := time.Parse(layout, s); err == nil {
-					return t
-				}
-			}
-		}
+func eventTime(ev *corev1.Event) time.Time {
+	switch {
+	case !ev.LastTimestamp.IsZero():
+		return ev.LastTimestamp.Time
+	case !ev.EventTime.IsZero():
+		return ev.EventTime.Time
 	}
-	return ev.GetCreationTimestamp().Time
+	return ev.CreationTimestamp.Time
 }
 
 // checkLWSScaleDown logs when the group a LeaderWorkerSet removes on scale-down

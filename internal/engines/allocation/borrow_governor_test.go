@@ -278,7 +278,9 @@ var _ = Describe("BorrowGovernor", func() {
 		w := govWorld{lenders: []kueue.LenderState{never(32)}, used: 32}
 		g, rel, now := warm(w, reqs)
 		Expect(rel).To(HaveLen(1))
-		l, err := UnmarshalBorrowLedger(g.MarshalLedger())
+		raw, err := g.MarshalLedger()
+		Expect(err).NotTo(HaveOccurred())
+		l, err := UnmarshalBorrowLedger(raw)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(l.Entries).To(HaveLen(1))
 

@@ -38,10 +38,13 @@ const (
 	ReleasePlacementTimeout ReleaseCause = "placement-timeout"
 )
 
+// EntryReason says why a ledger entry is notable.
+type EntryReason string
+
 // ReasonReleaseNotActuated marks a ledger entry still in flight after twice
 // the termination grace plus the KEDA scale-down window: the target was never
 // actuated, or a pod is stuck. It keeps blocking.
-const ReasonReleaseNotActuated = "release-not-actuated"
+const ReasonReleaseNotActuated EntryReason = "release-not-actuated"
 
 // BorrowSettings are the governor's timings.
 type BorrowSettings struct {
@@ -96,14 +99,22 @@ type ReleaseLedgerEntry struct {
 	Unknown bool `json:"unknown,omitempty"`
 	// Reason is ReasonReleaseNotActuated once the entry outlived
 	// ReleaseActuation.
-	Reason string `json:"reason,omitempty"`
+	Reason EntryReason `json:"reason,omitempty"`
 }
 
 // BorrowLedger is the persisted state: the entries and, per cohort flavor, the
-// GPUs released while its lenders keep waiting.
+// GPUs released while its lenders keep waiting; the cooldowns in force, per
+// cohort and per "namespace/model", until when (rounded up to the minute, so
+// a cooldown extended every cycle rewrites the ledger once a minute); and the
+// placement-timeout releases still in force, per "namespace/variant", their
+// target. All of it is bounded by the cohorts, models and variants the
+// controller governs, and pruned as it expires.
 type BorrowLedger struct {
-	Entries  []ReleaseLedgerEntry `json:"entries"`
-	Released map[string]int       `json:"released,omitempty"`
+	Entries        []ReleaseLedgerEntry `json:"entries"`
+	Released       map[string]int       `json:"released,omitempty"`
+	CohortCooldown map[string]time.Time `json:"cohortCooldown,omitempty"`
+	ModelCooldown  map[string]time.Time `json:"modelCooldown,omitempty"`
+	TimeoutHeld    map[string]int       `json:"timeoutHeld,omitempty"`
 }
 
 // BorrowRelease is one release, for logs now and for events and metrics later.
@@ -129,6 +140,10 @@ type BorrowCycle struct {
 	// has a cluster-autoscaler TriggeredScaleUp not followed by a
 	// NotTriggerScaleUp: the placement timeout then waits, up to three times.
 	ScaleUpPending map[string]bool
+	// PreemptionUnknown is the namespaces whose Kueue preemptions could not
+	// be read this cycle: a model there may have been preempted unseen, so
+	// none of them grows on borrowed capacity.
+	PreemptionUnknown map[string]bool
 }
 
 type lenderWatch struct {
@@ -155,7 +170,11 @@ type BorrowGovernor struct {
 	lastGrown      map[string]time.Time
 	timeoutHeld    map[string]stickyRelease
 	held           map[string]bool
+	preemptUnknown map[string]bool
 	started        bool
+	// idleSince is when cycles stopped counting borrowing (HoldReleases
+	// without Observe); zero while they count it.
+	idleSince time.Time
 }
 
 // NewBorrowGovernor returns an empty governor.
@@ -164,6 +183,7 @@ func NewBorrowGovernor(s BorrowSettings) *BorrowGovernor {
 		settings: s, watches: map[LenderKey]*lenderWatch{}, ledger: map[LenderKey]*ReleaseLedgerEntry{},
 		released: map[string]int{}, cohortCooldown: map[string]time.Time{}, modelCooldown: map[string]time.Time{},
 		lastGrown: map[string]time.Time{}, timeoutHeld: map[string]stickyRelease{}, held: map[string]bool{},
+		preemptUnknown: map[string]bool{},
 	}
 }
 
@@ -206,6 +226,22 @@ func (g *BorrowGovernor) Restore(l BorrowLedger) {
 			g.released[fk] = n
 		}
 	}
+	restoreClocks(g.cohortCooldown, l.CohortCooldown)
+	restoreClocks(g.modelCooldown, l.ModelCooldown)
+	for k, to := range l.TimeoutHeld {
+		if _, held := g.timeoutHeld[k]; !held && to >= 0 && strings.Contains(k, "/") {
+			g.timeoutHeld[k] = stickyRelease{to: to}
+		}
+	}
+}
+
+// restoreClocks adds the persisted untils dst does not hold.
+func restoreClocks(dst, src map[string]time.Time) {
+	for k, until := range src {
+		if _, held := dst[k]; !held && k != "" && !until.IsZero() {
+			dst[k] = until
+		}
+	}
 }
 
 // Ledger returns the state to persist, in a stable order.
@@ -224,13 +260,40 @@ func (g *BorrowGovernor) ledgerLocked() BorrowLedger {
 	if len(g.released) > 0 {
 		out.Released = maps.Clone(g.released)
 	}
+	out.CohortCooldown = persistClocks(g.cohortCooldown)
+	out.ModelCooldown = persistClocks(g.modelCooldown)
+	if len(g.timeoutHeld) > 0 {
+		out.TimeoutHeld = map[string]int{}
+		for k, r := range g.timeoutHeld {
+			out.TimeoutHeld[k] = r.to
+		}
+	}
+	return out
+}
+
+// persistClocks is the untils rounded up to the minute, nil when empty.
+func persistClocks(m map[string]time.Time) map[string]time.Time {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]time.Time, len(m))
+	for k, until := range m {
+		r := until.Truncate(time.Minute)
+		if r.Before(until) {
+			r = r.Add(time.Minute)
+		}
+		out[k] = r.UTC()
+	}
 	return out
 }
 
 // MarshalLedger is Ledger as JSON, for the controller-status ConfigMap.
-func (g *BorrowGovernor) MarshalLedger() string {
-	b, _ := json.Marshal(g.Ledger())
-	return string(b)
+func (g *BorrowGovernor) MarshalLedger() (string, error) {
+	b, err := json.Marshal(g.Ledger())
+	if err != nil {
+		return "", fmt.Errorf("borrow release ledger: %w", err)
+	}
+	return string(b), nil
 }
 
 // UnmarshalBorrowLedger parses a persisted ledger.
@@ -245,12 +308,16 @@ func UnmarshalBorrowLedger(s string) (BorrowLedger, error) {
 	return l, nil
 }
 
-// MarkPreempted starts the model's cooldown: Kueue preempted one of its
-// borrowed pods. modelKey is "namespace/model".
-func (g *BorrowGovernor) MarkPreempted(modelKey string, now time.Time) {
+// MarkPreempted starts the model's cooldown from at, when Kueue preempted one
+// of its borrowed pods: a preemption found again after a restart cools down
+// only for what is left of its cooldown, and never shortens a later one.
+// modelKey is "namespace/model".
+func (g *BorrowGovernor) MarkPreempted(modelKey string, at time.Time) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.modelCooldown[modelKey] = now.Add(g.settings.Cooldown)
+	if until := at.Add(g.settings.Cooldown); until.After(g.modelCooldown[modelKey]) {
+		g.modelCooldown[modelKey] = until
+	}
 }
 
 // BlockedCohorts is the cohorts where nothing new may be borrowed now: a
@@ -269,12 +336,16 @@ func (g *BorrowGovernor) BlockedCohorts(now time.Time) map[string]bool {
 }
 
 // BorrowBlocked reports whether a variant may not grow on borrowed capacity
-// now: its model is cooling down after a preemption, or the variant has
-// unplaced replicas (the placement hold; for a LeaderWorkerSet until the whole
-// group placed). Guaranteed growth is never blocked here.
+// now: its model is cooling down after a preemption, its namespace's
+// preemptions could not be read this cycle, or the variant has unplaced
+// replicas (the placement hold; for a LeaderWorkerSet until the whole group
+// placed). Guaranteed growth is never blocked here.
 func (g *BorrowGovernor) BorrowBlocked(namespace, modelID, variant string, now time.Time) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.preemptUnknown[namespace] {
+		return true
+	}
 	if until, ok := g.modelCooldown[namespace+"/"+modelID]; ok && now.Before(until) {
 		return true
 	}
@@ -287,12 +358,15 @@ func (g *BorrowGovernor) BorrowBlocked(namespace, modelID, variant string, now t
 func (g *BorrowGovernor) Observe(c BorrowCycle) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.idleSince = time.Time{}
+	g.preemptUnknown = maps.Clone(c.PreemptionUnknown)
 	for _, e := range g.ledger {
 		if e.ReleasedAt.After(c.Now) {
 			e.ReleasedAt = c.Now // a restored stamp from the future
 		}
 	}
 	states := indexStates(c.Requests)
+	g.pruneClocks(c.Now, states)
 	g.held = map[string]bool{}
 	for k, s := range states {
 		if s.state.UnplacedReplicas > 0 {
@@ -359,6 +433,27 @@ func (g *BorrowGovernor) Observe(c BorrowCycle) {
 		}
 	}
 	g.started = true
+}
+
+// pruneClocks drops expired cooldowns and clamps one further away than the
+// cooldown (a restored, or changed, setting), and forgets the growth of
+// variants no longer observed.
+func (g *BorrowGovernor) pruneClocks(now time.Time, states map[string]variantRef) {
+	for _, m := range []map[string]time.Time{g.cohortCooldown, g.modelCooldown} {
+		for k, until := range m {
+			switch {
+			case !now.Before(until):
+				delete(m, k)
+			case until.Sub(now) > g.settings.Cooldown:
+				m[k] = now.Add(g.settings.Cooldown)
+			}
+		}
+	}
+	for k := range g.lastGrown {
+		if _, ok := states[k]; !ok {
+			delete(g.lastGrown, k)
+		}
+	}
 }
 
 // observeLender advances one lender's debounce on a new read, and resets it,
@@ -440,8 +535,18 @@ func (g *BorrowGovernor) Releases(c BorrowCycle, decisions []domain.VariantDecis
 	nsBorrow := namespaceBorrowed(c.Constraints, c.Gated)
 	out := g.timeoutReleases(c, states, namespaceHeldPast(c.Constraints))
 	out = append(out, g.lenderReleases(c, states, nsBorrow)...)
+	g.applyPins(decisions, byVariant)
+	for i := range decisions {
+		d := &decisions[i]
+		if d.TargetReplicas > d.CurrentReplicas {
+			g.lastGrown[d.Namespace+"/"+d.VariantName] = c.Now
+		}
+	}
+	return out
+}
 
-	// Releases in flight stay in force.
+// applyPins keeps every release in flight in force on decisions.
+func (g *BorrowGovernor) applyPins(decisions []domain.VariantDecision, byVariant map[string]int) {
 	for _, e := range g.ledger {
 		for _, u := range e.Units {
 			lowerTo(decisions, byVariant, u.Namespace+"/"+u.Variant, u.To, "borrow-released")
@@ -450,13 +555,35 @@ func (g *BorrowGovernor) Releases(c BorrowCycle, decisions []domain.VariantDecis
 	for k, r := range g.timeoutHeld {
 		lowerTo(decisions, byVariant, k, r.to, "borrow-unplaced")
 	}
-	for i := range decisions {
-		d := &decisions[i]
-		if d.TargetReplicas > d.CurrentReplicas {
-			g.lastGrown[d.Namespace+"/"+d.VariantName] = c.Now
-		}
+}
+
+// HoldReleases keeps the releases in flight in force in a cycle that counts
+// no borrowing, so neither the demand floor nor the hold raises a released
+// variant again while, say, a Kueue read failed; nothing new is decided and
+// nothing advances. Once cycles have counted no borrowing for the cooldown
+// plus the actuation window, borrowing is taken to be off: the release state
+// is dropped, and the next cycle that counts borrowing starts as after a
+// restart, assuming a release in flight for every waiting lender until its
+// next fresh read.
+func (g *BorrowGovernor) HoldReleases(now time.Time, decisions []domain.VariantDecision) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.idleSince.IsZero() {
+		g.idleSince = now
 	}
-	return out
+	if now.Sub(g.idleSince) > g.settings.Cooldown+g.settings.ReleaseActuation {
+		clear(g.ledger)
+		clear(g.watches)
+		clear(g.released)
+		clear(g.timeoutHeld)
+		g.started = false
+		return
+	}
+	byVariant := map[string]int{}
+	for i := range decisions {
+		byVariant[decisions[i].Namespace+"/"+decisions[i].VariantName] = i
+	}
+	g.applyPins(decisions, byVariant)
 }
 
 // timeoutReleases releases borrowed units unplaced past the placement timeout

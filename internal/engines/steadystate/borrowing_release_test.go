@@ -2,6 +2,7 @@ package steadystate
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -12,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
@@ -38,10 +40,11 @@ var _ = Describe("giving borrowed capacity back, engine side", func() {
 	})
 
 	Describe("the cluster-autoscaler wait", func() {
-		event := func(name, pod, reason string, at time.Time) *unstructured.Unstructured {
+		sourced := func(name, pod, reason, component string, at time.Time) *unstructured.Unstructured {
 			u := &unstructured.Unstructured{Object: map[string]interface{}{
 				"involvedObject": map[string]interface{}{"kind": "Pod", "name": pod},
 				"reason":         reason,
+				"source":         map[string]interface{}{"component": component},
 				"lastTimestamp":  at.UTC().Format(time.RFC3339),
 			}}
 			u.SetAPIVersion("v1")
@@ -50,12 +53,29 @@ var _ = Describe("giving borrowed capacity back, engine side", func() {
 			u.SetName(name)
 			return u
 		}
+		event := func(name, pod, reason string, at time.Time) *unstructured.Unstructured {
+			return sourced(name, pod, reason, "cluster-autoscaler", at)
+		}
 		reqs := []allocation.ModelScalingRequest{{ModelID: "m", Namespace: "b", VariantStates: []domain.VariantReplicaState{{
 			VariantName: "v", UnplacedReplicas: 1, UnplacedSince: now.Add(-6 * time.Minute), UnplacedPods: []string{"v-1"}}}}}
+		var lists []*client.ListOptions
+		var listErr error
 		pending := func(objs ...client.Object) map[string]bool {
 			scheme := runtime.NewScheme()
 			Expect(corev1.AddToScheme(scheme)).To(Succeed())
-			e := &Engine{Config: config.NewTestConfig(), client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()}
+			lists = nil
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
+				WithIndex(&corev1.Event{}, "reason", func(o client.Object) []string { return []string{o.(*corev1.Event).Reason} }).
+				WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					lo := &client.ListOptions{}
+					lo.ApplyOptions(opts)
+					lists = append(lists, lo)
+					if listErr != nil {
+						return listErr
+					}
+					return cl.List(ctx, list, opts...)
+				}}).Build()
+			e := &Engine{Config: config.NewTestConfig(), client: c}
 			return e.scaleUpPending(ctx, reqs, now)
 		}
 
@@ -66,6 +86,21 @@ var _ = Describe("giving borrowed capacity back, engine side", func() {
 				event("e2", "v-1", eventNotTriggerScaleUp, now.Add(-time.Minute)),
 			)).To(BeEmpty(), "a later NotTriggerScaleUp ends the wait at once")
 			Expect(pending()).To(BeEmpty(), "a scale-up never triggered does not pause the timeout")
+		})
+
+		It("counts only the cluster autoscaler's Events, read by reason rather than the whole namespace", func() {
+			Expect(pending(sourced("e1", "v-1", eventTriggeredScaleUp, "someone-else", now.Add(-5*time.Minute)))).To(BeEmpty(),
+				"an Event another component wrote with the same reason does not pause the timeout")
+			Expect(lists).NotTo(BeEmpty())
+			for _, lo := range lists {
+				Expect(lo.FieldSelector).NotTo(BeNil(), "every Event list is narrowed by a field selector")
+			}
+		})
+
+		It("keeps the timeout running when the Events cannot be read", func() {
+			listErr = errors.New("forbidden")
+			defer func() { listErr = nil }()
+			Expect(pending(event("e1", "v-1", eventTriggeredScaleUp, now.Add(-5*time.Minute)))).To(BeEmpty())
 		})
 	})
 
@@ -78,7 +113,7 @@ var _ = Describe("giving borrowed capacity back, engine side", func() {
 		e.borrowing.governor = allocation.NewBorrowGovernor(allocation.DefaultBorrowSettings())
 		e.borrowing.governor.Restore(allocation.BorrowLedger{Entries: []allocation.ReleaseLedgerEntry{{
 			LenderKey: allocation.LenderKey{Cohort: "c", Lender: "l", Flavor: "h100", Resource: "nvidia.com/gpu"}, ReleasedAt: now, Unknown: true}}})
-		e.persistBorrowLedger()
+		e.persistBorrowLedger(ctx)
 		raw := pub.Data()[controllerstatus.KeyBorrowReleaseLedger]
 		Expect(raw).To(ContainSubstring(`"lender":"l"`))
 

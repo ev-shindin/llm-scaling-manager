@@ -1342,7 +1342,9 @@ func (e *Engine) optimizeV2(
 	// Cohort borrowing: what Kueue has not reserved yet leaves the shared
 	// pools, and the cycle's node view is built (borrowing.go). A no-op
 	// without borrowing.
-	constraints = e.prepareBorrowing(ctx, constraints, requests, variantScaleTargets, time.Now())
+	// One clock reading for every borrowing step of the cycle.
+	borrowNow := time.Now()
+	constraints = e.prepareBorrowing(ctx, constraints, requests, variantScaleTargets, borrowNow)
 	// Scope-coupled rescale enablement (cluster + per-namespace) is resolved from
 	// config and handed to the GPU-aware optimizer for this cycle.
 	if g, ok := optimizer.(*allocation.GreedyByScoreOptimizer); ok {
@@ -1372,11 +1374,11 @@ func (e *Engine) optimizeV2(
 	// Stage 3b: release borrowed capacity a waiting lender or an unplaced
 	// replica asks back, last, so nothing above raises it again
 	// (borrowing_release.go). A no-op without borrowing.
-	e.releaseBorrowed(ctx, allDecisions, variantScaleTargets)
+	e.releaseBorrowed(ctx, allDecisions, variantScaleTargets, borrowNow)
 	// What on-call sees: the budgets the cycle used, the borrowing reasons,
 	// unplaced pods and waiting lenders (borrowing_signals.go). Every cycle,
 	// so a cleared condition clears its series.
-	e.publishBorrowSignals(constraints, requests, allDecisions, time.Now())
+	e.publishBorrowSignals(constraints, requests, allDecisions, borrowNow)
 
 	// Stage 4: Enrich decisions with KV cache token data from replicaMetrics.
 	// Utilization, RequiredCapacity, and SpareCapacity are already set by
