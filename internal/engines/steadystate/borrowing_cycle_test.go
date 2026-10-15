@@ -68,7 +68,7 @@ var _ = Describe("a waiting reclaiming lender in the steady-state cycle", func()
 		optimizer.BorrowBlocked = e.borrowBlocked()
 		decisions := e.decideV2(ctx, optimizer, requests, c, nil)
 		e.recordBorrowDraws(optimizer)
-		e.releaseBorrowed(ctx, decisions, nil)
+		e.releaseBorrowed(ctx, decisions, nil, now)
 		return decisions, optimizer.BorrowDraws()
 	}
 	targetOf := func(decisions []domain.VariantDecision) int {

@@ -421,7 +421,7 @@ var _ = Describe("Kueue cohort borrowing - applied against a live Kueue", Label(
 		// starts the cooldown checked below. Without this the spec passed with
 		// preemption detection broken, because the placement timeout alone
 		// also lowers A's target.
-		reclaimLine := `Kueue preempted a pod of a borrowing model.*"model": ?"` +
+		reclaimLine := `Kueue preempted a pod of a borrowing model.*"modelID": ?"` +
 			regexp.QuoteMeta(nsA+"/"+modelA) + `"`
 		Eventually(func(g Gomega) {
 			g.Expect(controllerLogsSince(triggered)).To(MatchRegexp(reclaimLine))
