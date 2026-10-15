@@ -3,7 +3,9 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -235,16 +237,22 @@ var _ = Describe("Kueue cohort borrowing - applied against a live Kueue", Label(
 		DeferCleanup(func() {
 			// The ScaledObject first, so KEDA stops scaling A up again; then
 			// every workload, because Kueue holds a ClusterQueue while anything
-			// reserves in it.
+			// reserves in it. The waits are best effort: an Expect here aborted
+			// the cleanup before the cohort was deleted, and leaked it into the
+			// next run. The cohort is always deleted (finalizers forced as a
+			// last resort), and only then are the errors reported.
 			bg := context.Background()
 			_ = fixtures.DeleteScaledObject(bg, crClient, nsA, soA)
 			_ = k8sClient.BatchV1().Jobs(nsA).Delete(bg, loadJob, metav1.DeleteOptions{
 				PropagationPolicy: ptr.To(metav1.DeletePropagationBackground),
 			})
-			Expect(fixtures.WaitDeploymentGone(bg, k8sClient, nsA, depA, "app="+depA, 3*time.Minute)).To(Succeed())
-			Expect(fixtures.WaitDeploymentGone(bg, k8sClient, nsA, outsider, "app="+outsider, 2*time.Minute)).To(Succeed())
-			Expect(fixtures.WaitDeploymentGone(bg, k8sClient, nsB, lender, "app="+lender, 2*time.Minute)).To(Succeed())
-			Expect(fixtures.DeleteKueueCohort(bg, crClient, cohort)).To(Succeed())
+			cleanupErrs := []error{
+				fixtures.WaitDeploymentGone(bg, k8sClient, nsA, depA, "app="+depA, 3*time.Minute),
+				fixtures.WaitDeploymentGone(bg, k8sClient, nsA, outsider, "app="+outsider, 2*time.Minute),
+				fixtures.WaitDeploymentGone(bg, k8sClient, nsB, lender, "app="+lender, 2*time.Minute),
+				fixtures.DeleteKueueCohort(bg, crClient, cohort),
+			}
+			Expect(errors.Join(cleanupErrs...)).NotTo(HaveOccurred(), "cleanup left Kueue state behind")
 		})
 
 		By("Declaring the physical limiter and a namespace quota bounded by Kueue, countBorrowable unset")
@@ -298,8 +306,13 @@ var _ = Describe("Kueue cohort borrowing - applied against a live Kueue", Label(
 			g.Expect(deployment(g, nsA, depA).Status.ReadyReplicas).To(Equal(int32(nominal)), unreadyPods(nsA))
 		}, scaleSettle, 5*time.Second).Should(Succeed(), "A never reached its nominal %d under load", nominal)
 
+		// The positive half first, so the hold below cannot pass vacuously: the
+		// controller withholds for this reason, and queue a's status really
+		// carries A's reservation (a status read that found nothing would read
+		// Borrowed as zero too).
 		Eventually(func(g Gomega) {
 			g.Expect(borrowRowA(g).Reason).To(Equal("not-kueue-managed"))
+			g.Expect(queueStatus(g, queueA).Reserved).To(Equal(nominal))
 		}, 3*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("A holds at nominal; queue a borrows nothing")
@@ -404,6 +417,16 @@ var _ = Describe("Kueue cohort borrowing - applied against a live Kueue", Label(
 		}, kueueSettle, poll).Should(Succeed())
 		measure("reclaim: lender's request to Kueue preempting", preempted.Sub(triggered))
 
+		// The scaling manager must have SEEN the preemption: that is what
+		// starts the cooldown checked below. Without this the spec passed with
+		// preemption detection broken, because the placement timeout alone
+		// also lowers A's target.
+		reclaimLine := `Kueue preempted a pod of a borrowing model.*"model": ?"` +
+			regexp.QuoteMeta(nsA+"/"+modelA) + `"`
+		Eventually(func(g Gomega) {
+			g.Expect(controllerLogsSince(triggered)).To(MatchRegexp(reclaimLine))
+		}, scaleSettle, 5*time.Second).Should(Succeed(), "the scaling manager never recorded Kueue's preemption of A")
+
 		var lowered time.Time
 		Eventually(func(g Gomega) {
 			g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(Equal(int32(nominal)),
@@ -427,13 +450,29 @@ var _ = Describe("Kueue cohort borrowing - applied against a live Kueue", Label(
 		Eventually(func(g Gomega) {
 			g.Expect(queueStatus(g, queueB).Reserved).To(BeZero())
 		}, kueueSettle, poll).Should(Succeed())
-		// The cooldown runs from the preemption the engine saw and from the
-		// release; hold the check until a margin before the earlier one ends.
-		quiet := time.Until(preempted.Add(borrowCooldown - 20*time.Second))
-		Expect(quiet).To(BeNumerically(">", 20*time.Second), "too little cooldown left to check")
-		Consistently(func(g Gomega) {
-			g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(BeNumerically("<=", nominal))
-		}, quiet, 5*time.Second).Should(Succeed(), "A borrowed again inside the cooldown")
+		// The cooldown starts when the engine sees the preemption, which is
+		// after b asked for its GPU (triggered). So triggered + borrowCooldown
+		// is the EARLIEST the cooldown can end; the check stops a margin before
+		// that, and so never runs past the cooldown whenever the engine saw it.
+		const margin, minQuiet = 20 * time.Second, 20 * time.Second
+		cooldownStart := triggered
+		quiet := time.Until(cooldownStart.Add(borrowCooldown - margin))
+		skipped := ""
+		if quiet < minQuiet {
+			// Too slow a cluster to check the hold: say so, and still check
+			// that A borrows again after the cooldown. Skipped at the end, so
+			// the spec reports as skipped rather than as a pass.
+			skipped = fmt.Sprintf("only %s of borrowCooldown %s left after b's GPUs were freed (cooldown started by %s); "+
+				"the hold inside the cooldown was not checked", quiet.Round(time.Second), borrowCooldown,
+				cooldownStart.Format(time.RFC3339))
+			By("SKIPPING the in-cooldown hold: " + skipped)
+		} else {
+			// Positive precondition, asserted above: A settled at nominal with
+			// every pod placed, and the engine logged the preemption.
+			Consistently(func(g Gomega) {
+				g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(BeNumerically("<=", nominal))
+			}, quiet, 5*time.Second).Should(Succeed(), "A borrowed again inside the cooldown")
+		}
 
 		By("After the cooldown A borrows again")
 		var regrown time.Time
@@ -442,6 +481,9 @@ var _ = Describe("Kueue cohort borrowing - applied against a live Kueue", Label(
 			regrown = time.Now()
 		}, borrowCooldown+scaleSettle, poll).Should(Succeed())
 		measure("preemption to A borrowing again (cooldown "+borrowCooldown.String()+")", regrown.Sub(preempted))
+		if skipped != "" {
+			Skip(skipped)
+		}
 	})
 })
 

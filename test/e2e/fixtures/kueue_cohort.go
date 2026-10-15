@@ -2,6 +2,7 @@ package fixtures
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -134,16 +135,41 @@ func DeleteKueueCohort(ctx context.Context, c client.Client, kc KueueCohort) err
 	if err != nil {
 		return err
 	}
+	// Every object is deleted, whatever happens to the one before it: a
+	// cleanup that stopped at the first held ClusterQueue leaked the rest into
+	// the next run.
+	var errs []error
 	for i := len(objs) - 1; i >= 0; i-- {
 		obj := objs[i]
 		if err := c.Delete(ctx, obj); err != nil && !errors.IsNotFound(err) {
-			return fmt.Errorf("delete %s %s: %w", obj.GetKind(), obj.GetName(), err)
-		}
-		if err := waitGone(ctx, c, obj); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("delete %s %s: %w", obj.GetKind(), obj.GetName(), err))
 		}
 	}
-	return nil
+	for i := len(objs) - 1; i >= 0; i-- {
+		obj := objs[i]
+		if err := waitGone(ctx, c, obj); err == nil {
+			continue
+		}
+		// Still held (Kueue's in-use finalizers, typically a workload that
+		// outlived its pods): the final, forced delete. The error stays, so the
+		// run reports that cleanup needed it.
+		errs = append(errs, forceRemoveFinalizers(ctx, c, obj))
+		if err := waitGone(ctx, c, obj); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return stderrors.Join(errs...)
+}
+
+// forceRemoveFinalizers clears obj's finalizers so a delete already issued
+// completes. It reports that it had to, as an error, even when it succeeded.
+func forceRemoveFinalizers(ctx context.Context, c client.Client, obj *unstructured.Unstructured) error {
+	held := obj.DeepCopy()
+	err := c.Patch(ctx, held, client.RawPatch(types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`)))
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("%s %s held after deletion; removing its finalizers failed: %w", obj.GetKind(), obj.GetName(), err)
+	}
+	return fmt.Errorf("%s %s held after deletion; its finalizers were removed", obj.GetKind(), obj.GetName())
 }
 
 // SetKueueReclaim sets a ClusterQueue's spec.preemption.reclaimWithinCohort.
