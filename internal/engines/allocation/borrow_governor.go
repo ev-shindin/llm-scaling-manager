@@ -74,9 +74,9 @@ type LenderKey struct {
 
 func (k LenderKey) flavorKey() string { return k.Cohort + "/" + k.Flavor + "/" + k.Resource }
 
-// ReleasedReplicas is one variant's part of a released unit: its target after
+// releasedReplicas is one variant's part of a released unit: its target after
 // the release.
-type ReleasedReplicas struct {
+type releasedReplicas struct {
 	Namespace string `json:"namespace"`
 	Variant   string `json:"variant"`
 	To        int    `json:"to"`
@@ -88,7 +88,7 @@ type ReleasedReplicas struct {
 // resets when the lender stops waiting.
 type ReleaseLedgerEntry struct {
 	LenderKey
-	Units      []ReleasedReplicas `json:"units,omitempty"`
+	Units      []releasedReplicas `json:"units,omitempty"`
 	ReleasedAt time.Time          `json:"releasedAt"`
 	PodsGoneAt *time.Time         `json:"podsGoneAt,omitempty"`
 	// Unknown is an entry assumed after a restart for a waiting lender with
@@ -174,15 +174,38 @@ func (g *BorrowGovernor) SetSettings(s BorrowSettings) {
 	g.settings = s
 }
 
-// Restore loads a persisted ledger. Call before the first Observe.
+// Restore loads a persisted ledger, normally before the first Observe. What it
+// cannot use is dropped: an entry naming no complete lender, one that is
+// neither assumed (Unknown) nor carries a unit, a unit that releases nothing,
+// and a released figure that is not positive. A Restore that comes late --
+// after cycles have run -- adds only what the governor does not already hold,
+// never overwriting a newer entry. Entries stamped in the future, and figures
+// past what the settings allow, are clamped by the next Observe.
 func (g *BorrowGovernor) Restore(l BorrowLedger) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for i := range l.Entries {
 		e := l.Entries[i]
-		g.ledger[e.LenderKey] = &e
+		k := e.LenderKey
+		if k.Cohort == "" || k.Lender == "" || k.Flavor == "" || k.Resource == "" || e.ReleasedAt.IsZero() {
+			continue
+		}
+		e.Units = slices.DeleteFunc(slices.Clone(e.Units), func(u releasedReplicas) bool {
+			return u.Namespace == "" || u.Variant == "" || u.To < 0
+		})
+		if len(e.Units) == 0 && !e.Unknown {
+			continue
+		}
+		if _, held := g.ledger[k]; held {
+			continue
+		}
+		g.ledger[k] = &e
 	}
-	maps.Copy(g.released, l.Released)
+	for fk, n := range l.Released {
+		if _, held := g.released[fk]; n > 0 && !held && strings.Count(fk, "/") >= 2 {
+			g.released[fk] = n
+		}
+	}
 }
 
 // Ledger returns the state to persist, in a stable order.
@@ -264,6 +287,11 @@ func (g *BorrowGovernor) BorrowBlocked(namespace, modelID, variant string, now t
 func (g *BorrowGovernor) Observe(c BorrowCycle) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	for _, e := range g.ledger {
+		if e.ReleasedAt.After(c.Now) {
+			e.ReleasedAt = c.Now // a restored stamp from the future
+		}
+	}
 	states := indexStates(c.Requests)
 	g.held = map[string]bool{}
 	for k, s := range states {
@@ -277,30 +305,56 @@ func (g *BorrowGovernor) Observe(c BorrowCycle) {
 		}
 	}
 	chunks, _ := mergeSharedPools(c.Constraints)
-	waitingOn := map[string]bool{}
 	seen := map[LenderKey]bool{}
+	// listed is every pool of the cycle, fresh holds the value false for a
+	// stale one; rawWaiting is the fresh pools some lender of which read
+	// waiting, undebounced.
+	listed, rawWaiting := map[string]bool{}, map[string]bool{}
+	anyStale := false
 	for _, ch := range chunks {
+		listed[ch.key()] = !ch.Stale
+		anyStale = anyStale || ch.Stale
 		for _, l := range ch.Lenders {
 			key := LenderKey{Cohort: ch.Cohort, Lender: l.Queue, Flavor: ch.Flavor, Resource: ch.Resource}
 			seen[key] = true
 			if ch.Stale {
-				if g.waiting(key, c.Now) {
-					waitingOn[key.flavorKey()] = true
-				}
 				continue // frozen: nothing about this lender changes
 			}
+			rawWaiting[ch.key()] = rawWaiting[ch.key()] || l.Waiting
 			g.observeLender(key, l.Waiting, ch.ReadAt, c.Now)
 			if e := g.ledger[key]; e != nil {
 				g.advanceEntry(e, ch.ReadAt, states, c.Now)
 			}
 			if g.waiting(key, c.Now) {
-				waitingOn[key.flavorKey()] = true
 				g.cohortCooldown[ch.Cohort] = c.Now.Add(g.settings.Cooldown)
 			}
 		}
 	}
+	// known is a pool read fresh this cycle, or one no longer listed in a cycle
+	// that read nothing stale (its cohort or flavor went).
+	known := func(fk string) bool {
+		fresh, ok := listed[fk]
+		return fresh || (!ok && !anyStale)
+	}
+	// A lender missing from a pool read fresh -- its ClusterQueue deleted,
+	// stopped, or moved to another cohort -- waits for nothing: its watch and
+	// its release in flight go, or the release would pin its variant forever.
+	for k := range g.watches {
+		if !seen[k] && known(k.flavorKey()) {
+			delete(g.watches, k)
+		}
+	}
+	for k := range g.ledger {
+		if !seen[k] && known(k.flavorKey()) {
+			delete(g.ledger, k)
+		}
+	}
+	// What a flavor's lenders were handed back is forgotten only once a fresh
+	// read finds none of them waiting. Not on the debounced figure: right
+	// after a restart no lender has two reads yet, and the persisted figure
+	// must survive that.
 	for fk := range g.released {
-		if !waitingOn[fk] {
+		if known(fk) && !rawWaiting[fk] {
 			delete(g.released, fk)
 		}
 	}
@@ -513,11 +567,11 @@ func (g *BorrowGovernor) lenderReleases(c BorrowCycle, states map[string]variant
 			k := pick.req.Namespace + "/" + v
 			s := states[k].state
 			to := s.CurrentReplicas - pick.unit[v]
-			entry.Units = append(entry.Units, ReleasedReplicas{Namespace: pick.req.Namespace, Variant: v, To: to})
+			entry.Units = append(entry.Units, releasedReplicas{Namespace: pick.req.Namespace, Variant: v, To: to})
 			out = append(out, BorrowRelease{Namespace: pick.req.Namespace, ModelID: pick.req.ModelID, Variant: v,
 				From: s.CurrentReplicas, To: to, Cause: ReleaseLenderWaiting, Lender: w.key})
 		}
-		slices.SortFunc(entry.Units, func(a, b ReleasedReplicas) int { return strings.Compare(a.Variant, b.Variant) })
+		slices.SortFunc(entry.Units, func(a, b releasedReplicas) int { return strings.Compare(a.Variant, b.Variant) })
 		g.ledger[w.key] = entry
 		g.released[fk] += pick.gpus
 		nsBorrow[pick.req.Namespace][pick.typeKey] -= pick.gpus

@@ -77,7 +77,7 @@ var _ = Describe("giving borrowed capacity back, engine side", func() {
 		e := &Engine{Config: config.NewTestConfig(), client: c, Status: pub}
 		e.borrowing.governor = allocation.NewBorrowGovernor(allocation.DefaultBorrowSettings())
 		e.borrowing.governor.Restore(allocation.BorrowLedger{Entries: []allocation.ReleaseLedgerEntry{{
-			LenderKey: allocation.LenderKey{Cohort: "c", Lender: "l", Flavor: "h100", Resource: "nvidia.com/gpu"}, ReleasedAt: now}}})
+			LenderKey: allocation.LenderKey{Cohort: "c", Lender: "l", Flavor: "h100", Resource: "nvidia.com/gpu"}, ReleasedAt: now, Unknown: true}}})
 		e.persistBorrowLedger()
 		raw := pub.Data()[controllerstatus.KeyBorrowReleaseLedger]
 		Expect(raw).To(ContainSubstring(`"lender":"l"`))

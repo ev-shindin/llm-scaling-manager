@@ -120,6 +120,78 @@ var _ = Describe("BorrowGovernor release units", func() {
 		Expect(tg["m1-v"] + tg["m2-v"]).To(Equal(2), "the namespace keeps its guaranteed 2")
 	})
 
+	Describe("the ledger", func() {
+		// warmRelease takes a governor through the debounce until it released
+		// one replica of a 4 x 8-GPU model to a lender waiting for 32.
+		warmRelease := func() (*BorrowGovernor, govWorld, time.Time) {
+			g := NewBorrowGovernor(settings)
+			w := govWorld{lenders: []kueue.LenderState{never(32)}, used: 32}
+			reqs := []ModelScalingRequest{govModel("m", 4, 8)}
+			for _, d := range []time.Duration{0, 30 * time.Second, 61 * time.Second} {
+				w.readAt = t0.Add(d)
+				c := BorrowCycle{Now: t0.Add(d), Constraints: w.constraints(), Requests: reqs}
+				g.Observe(c)
+				g.Releases(c, decisionsOf(reqs))
+			}
+			Expect(g.Ledger().Entries).To(HaveLen(1))
+			Expect(g.Ledger().Entries[0].Units).To(HaveLen(1))
+			return g, w, t0.Add(61 * time.Second)
+		}
+
+		It("drops a release whose lender left the pool, so it stops pinning the variant", func() {
+			g, w, now := warmRelease()
+			w.lenders = nil // the lender's ClusterQueue was deleted
+			reqs := []ModelScalingRequest{govModel("m", 4, 8)}
+			var tg map[string]int
+			for i := 0; i < 50; i++ {
+				now = now.Add(30 * time.Second)
+				w.readAt = now
+				c := BorrowCycle{Now: now, Constraints: w.constraints(), Requests: reqs}
+				g.Observe(c)
+				ds := decisionsOf(reqs)
+				g.Releases(c, ds)
+				tg = targets(ds)
+			}
+			Expect(tg["m-v"]).To(Equal(4), "the pin is cleared")
+			Expect(g.Ledger().Entries).To(BeEmpty())
+			Expect(g.WaitingLenders(now)).To(BeEmpty())
+		})
+
+		It("keeps a persisted released figure through the first cycle after a restart", func() {
+			g := NewBorrowGovernor(settings)
+			g.Restore(BorrowLedger{Released: map[string]int{"c/h100/nvidia.com/gpu": 8}})
+			w := govWorld{lenders: []kueue.LenderState{never(8)}, used: 32, readAt: t0}
+			g.Observe(BorrowCycle{Now: t0, Constraints: w.constraints(), Requests: []ModelScalingRequest{govModel("m", 4, 8)}})
+			Expect(g.Ledger().Released).To(HaveKeyWithValue("c/h100/nvidia.com/gpu", 8))
+
+			w.lenders = []kueue.LenderState{{Queue: "lender", LentOut: 8}}
+			w.readAt = t0.Add(30 * time.Second)
+			g.Observe(BorrowCycle{Now: t0.Add(30 * time.Second), Constraints: w.constraints(), Requests: []ModelScalingRequest{govModel("m", 4, 8)}})
+			Expect(g.Ledger().Released).To(BeEmpty(), "forgotten once a fresh read finds no lender waiting")
+		})
+
+		It("does not let a late Restore overwrite a newer entry", func() {
+			g, _, _ := warmRelease()
+			key := g.Ledger().Entries[0].LenderKey
+			g.Restore(BorrowLedger{Entries: []ReleaseLedgerEntry{{LenderKey: key, ReleasedAt: t0, Unknown: true}}})
+			Expect(g.Ledger().Entries).To(HaveLen(1))
+			Expect(g.Ledger().Entries[0].Unknown).To(BeFalse())
+			Expect(g.Ledger().Entries[0].Units).To(HaveLen(1))
+		})
+
+		It("drops what a restored ledger cannot use", func() {
+			g := NewBorrowGovernor(settings)
+			l, err := UnmarshalBorrowLedger(`{"entries":[` +
+				`{"cohort":"c","lender":"","flavor":"h100","resource":"nvidia.com/gpu","releasedAt":"2026-01-01T00:00:00Z","unknown":true},` +
+				`{"cohort":"c","lender":"l","flavor":"h100","resource":"nvidia.com/gpu","releasedAt":"2026-01-01T00:00:00Z"}],` +
+				`"released":{"c/h100/nvidia.com/gpu":-5}}`)
+			Expect(err).NotTo(HaveOccurred())
+			g.Restore(l)
+			Expect(g.Ledger().Entries).To(BeEmpty(), "no lender; neither assumed nor carrying a unit")
+			Expect(g.Ledger().Released).To(BeEmpty())
+		})
+	})
+
 	Describe("a waiting lender that cannot reclaim, against a P/D borrower", func() {
 		warm := func(w govWorld, reqs []ModelScalingRequest) []BorrowRelease {
 			g := NewBorrowGovernor(settings)
