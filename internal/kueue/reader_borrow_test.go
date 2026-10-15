@@ -86,6 +86,7 @@ var _ = Describe("Reader borrowing figures", func() {
 	teamA := config.ExternalBorrow{
 		Queue: "team-a-cq", Cohort: "c", Flavor: "h100", Resource: "nvidia.com/gpu",
 		Accelerator: h100Product, Nominal: 9, Guaranteed: 0, Borrowable: 10,
+		BorrowCap: 1, WithinNominal: 9,
 		Reason: string(ReasonNominalLentOut),
 	}
 
@@ -106,6 +107,36 @@ var _ = Describe("Reader borrowing figures", func() {
 			Expect(snap.Cluster).To(Equal(typedCaps(map[string]int{h100Product: 21})))
 		})
 	}
+
+	It("publishes each namespace's grant at the guaranteed and within-nominal figures, and the cohort's free pool", func() {
+		const v = "v1beta2"
+		snap := readBorrow(newCohortClient(v, docsExample(v, "cohortName")...))
+		// Both queues are Never and idle: nothing guaranteed, each could take its
+		// whole nominal from the free pool without borrowing.
+		Expect(snap.NamespaceGuaranteed).To(Equal(map[string]config.ExternalCaps{
+			"team-a": typedCaps(map[string]int{h100Product: 0}),
+			"team-b": typedCaps(map[string]int{h100Product: 0}),
+		}))
+		Expect(snap.NamespaceWithinNominal).To(Equal(map[string]config.ExternalCaps{
+			"team-a": typedCaps(map[string]int{h100Product: 9}),
+			"team-b": typedCaps(map[string]int{h100Product: 12}),
+		}))
+		Expect(snap.SharedPools).To(Equal([]config.ExternalSharedPool{{
+			Cohort: "c", Flavor: "h100", Resource: "nvidia.com/gpu", Accelerator: h100Product,
+			NodeLabels: map[string]string{"nvidia.com/gpu.product": h100Product}, Free: 21,
+		}}))
+	})
+
+	It("falls back to nominal for both figures where borrowing is withheld", func() {
+		const v = "v1beta2"
+		objs := docsExample(v, "cohortName")
+		delete(objs[2].(*unstructured.Unstructured).Object, "status")
+		snap := readBorrow(newCohortClient(v, objs...))
+		Expect(snap.NamespaceGuaranteed).To(Equal(snap.Namespace))
+		Expect(snap.NamespaceWithinNominal).To(Equal(snap.Namespace))
+		Expect(snap.SharedPools[0].Free).To(Equal(0))
+		Expect(snap.SharedPools[0].Reason).To(Equal(string(ReasonNoStatus)))
+	})
 
 	It("withholds a nested cohort: an implicit root a Cohort names as its parent", func() {
 		const v = "v1beta2"

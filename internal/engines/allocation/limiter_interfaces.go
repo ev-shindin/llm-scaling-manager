@@ -107,6 +107,31 @@ type ResourceConstraints struct {
 	// headroom published from these constraints carries it on, so a warm pool
 	// can tell a snapshot that has charged its Pods from one that has not.
 	PoolsVersion uint64
+
+	// The three figures of cohort borrowing (B4), set only by a provider that
+	// counts it -- a namespace-scope Kueue quota with countBorrowable on, for
+	// the namespaces where every B1 condition holds. All nil otherwise, and then
+	// every consumer behaves exactly as before borrowing was counted.
+	//
+	// Where they are set, NamespacePools carries the GUARANTEED figure as each
+	// namespace's Limit, and Pools aggregates the reach (guaranteed plus borrow
+	// cap) so the cluster-wide figure of an open provider does not bound
+	// borrowing at the sum of guaranteed figures. The greedy optimizer spends the
+	// guaranteed pool first, then draws from SharedPools up to NamespaceBorrow's
+	// cap. Every other consumer reads a copy without them: WithinNominal for
+	// scale-from-zero, the warm pool and rescale, GuaranteedOnly for the
+	// utilization-share optimizer.
+
+	// NamespaceBorrow is, per namespace and accelerator type (NamespacePools'
+	// spelling), how far the namespace may go past its guaranteed figure.
+	NamespaceBorrow map[string]map[string]NamespaceBorrow
+	// SharedPools are the cohorts' free pools, one chunk per cohort, flavor and
+	// GPU resource, spent once across every namespace in the cohort.
+	SharedPools []SharedPoolChunk
+	// NamespaceCohorts maps a namespace to the cohorts of the queues it is
+	// granted, for every namespace the provider read -- not only those it counts
+	// borrowing for -- so the engine can charge a gated pod to its cohort.
+	NamespaceCohorts map[string][]string
 }
 
 // ConstraintProvider exposes hard constraints for the optimizer.

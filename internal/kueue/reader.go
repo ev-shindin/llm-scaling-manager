@@ -20,9 +20,11 @@
 // The same read also takes what cohort borrowing depends on (borrow.go): each
 // ClusterQueue's cohort, lending and borrowing limits, reclaim policy and
 // reservation status, each ResourceFlavor's tolerations, and the Cohort
-// objects, listed to tell a flat cohort from a nested one. Those figures are
-// logged only; no bound uses them yet, and a failure to read them never fails
-// the read.
+// objects, listed to tell a flat cohort from a nested one. From them it
+// publishes each namespace's grant at the guaranteed and within-nominal figures
+// and the cohorts' free pools, which a quota entry that counts borrowing applies
+// where the engine-side conditions hold (eligibility.go). A failure to read the
+// Cohort objects never fails the read.
 //
 // Nothing here is watched. Reads happen on demand, at most once per refresh
 // interval, and the last snapshot is kept so a failed read leaves the previous
@@ -33,6 +35,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -292,11 +295,87 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		// the grant is news again and is logged again.
 		r.warnedLabels = false
 	}
+	borrowing := ComputeBorrowing(topo, false)
+	guaranteed, within, err := r.borrowCaps(queues, flavorType, borrowing, nsQueues, byNamespace)
+	if err != nil {
+		return config.ExternalQuotas{}, err
+	}
 	return config.ExternalQuotas{
-		Namespace: byNamespace,
-		Cluster:   cluster,
-		Borrow:    borrowRows(ComputeBorrowing(topo, false), topo, flavorType, nsQueues),
+		Namespace:              byNamespace,
+		Cluster:                cluster,
+		Borrow:                 borrowRows(borrowing, topo, flavorType, nsQueues),
+		NamespaceGuaranteed:    guaranteed,
+		NamespaceWithinNominal: within,
+		SharedPools:            sharedPools(borrowing, flavorType),
 	}, nil
+}
+
+// borrowCaps builds, per namespace, the grant at each queue's guaranteed figure
+// and at its within-nominal figure, by exactly the rules the nominal grant is
+// built by (clusterQueueCaps): a namespace gets the sum over the queues it is
+// granted, and one whose grant was withheld keeps its grant of nothing. A queue
+// whose borrowing is withheld has both figures at nominal, so for it the three
+// grants agree.
+func (r *Reader) borrowCaps(queues []unstructured.Unstructured, flavorType map[string]string, b Borrowing,
+	nsQueues map[string][]string, nominal map[string]config.ExternalCaps) (guaranteed, within map[string]config.ExternalCaps, err error) {
+	byQueueG := make(map[string]config.ExternalCaps, len(queues))
+	byQueueW := make(map[string]config.ExternalCaps, len(queues))
+	for i := range queues {
+		name := queues[i].GetName()
+		figs := make(map[ResourceKey]QueueFigures, len(b.Queues[name]))
+		for _, f := range b.Queues[name] {
+			figs[f.ResourceKey] = f
+		}
+		at := func(pick func(QueueFigures) int) func(ResourceKey, int) int {
+			return func(key ResourceKey, nominal int) int {
+				if f, ok := figs[key]; ok {
+					return pick(f)
+				}
+				return nominal
+			}
+		}
+		if byQueueG[name], err = r.clusterQueueCapsAt(&queues[i], flavorType, at(func(f QueueFigures) int { return f.Guaranteed })); err != nil {
+			return nil, nil, err
+		}
+		if byQueueW[name], err = r.clusterQueueCapsAt(&queues[i], flavorType, at(func(f QueueFigures) int { return f.WithinNominal })); err != nil {
+			return nil, nil, err
+		}
+	}
+	guaranteed = make(map[string]config.ExternalCaps, len(nominal))
+	within = make(map[string]config.ExternalCaps, len(nominal))
+	for ns := range nominal {
+		var g, w config.ExternalCaps
+		names := nsQueues[ns]
+		if len(names) == 0 {
+			// Governed but granted nothing (a withheld grant): the same nothing.
+			g, w = nominal[ns], nominal[ns]
+		}
+		for _, name := range names {
+			g = addCaps(g, byQueueG[name])
+			w = addCaps(w, byQueueW[name])
+		}
+		guaranteed[ns], within[ns] = g, w
+	}
+	return guaranteed, within, nil
+}
+
+// sharedPools converts the cohorts' free pools for the config snapshot.
+func sharedPools(b Borrowing, flavorType map[string]string) []config.ExternalSharedPool {
+	out := make([]config.ExternalSharedPool, 0, len(b.Pools))
+	for _, p := range b.Pools {
+		out = append(out, config.ExternalSharedPool{
+			Cohort:         p.Cohort,
+			Flavor:         p.Flavor,
+			Resource:       p.Resource,
+			Accelerator:    flavorType[p.Flavor],
+			NodeLabels:     maps.Clone(p.NodeLabels),
+			Tolerations:    slices.Clone(p.Tolerations),
+			Free:           p.Free,
+			Reason:         string(p.Reason),
+			WaitingLenders: slices.Clone(p.WaitingLenders),
+		})
+	}
+	return out
 }
 
 // borrowRows attributes each queue's borrowing figures to the namespaces it is
@@ -326,6 +405,9 @@ func borrowRows(b Borrowing, t Topology, flavorType map[string]string, nsQueues 
 					Nominal:        f.Nominal,
 					Guaranteed:     f.Guaranteed,
 					Borrowable:     f.Borrowable,
+					BorrowCap:      f.BorrowCap,
+					WithinNominal:  f.WithinNominal,
+					LentOut:        f.LentOut,
 					SourceBorrowed: f.KueueBorrowed,
 					Reason:         string(reason),
 				})
@@ -691,6 +773,14 @@ func (r *Reader) list(ctx context.Context, kind string, opts ...client.ListOptio
 // single resource is the loosest bound no one resource contradicts. A cluster
 // that needs the distinction pins `kueue.resources` to one vendor.
 func (r *Reader) clusterQueueCaps(cq *unstructured.Unstructured, flavorType map[string]string) (config.ExternalCaps, error) {
+	return r.clusterQueueCapsAt(cq, flavorType, nil)
+}
+
+// clusterQueueCapsAt is clusterQueueCaps with each GPU line's figure taken from
+// figure(key, nominal) instead of its nominalQuota; nil takes the nominal
+// figure. The borrowing grants (guaranteed, within nominal) go through it so they
+// follow every rule the nominal grant does.
+func (r *Reader) clusterQueueCapsAt(cq *unstructured.Unstructured, flavorType map[string]string, figure func(ResourceKey, int) int) (config.ExternalCaps, error) {
 	var caps config.ExternalCaps
 	groups, _, err := unstructured.NestedSlice(cq.Object, "spec", "resourceGroups")
 	if err != nil {
@@ -724,6 +814,9 @@ func (r *Reader) clusterQueueCaps(cq *unstructured.Unstructured, flavorType map[
 				n, err := quantityField(rq, "nominalQuota")
 				if err != nil {
 					return caps, fmt.Errorf("kueue: ClusterQueue %q flavor %q resource %q: %w", cq.GetName(), name, resName, err)
+				}
+				if figure != nil {
+					n = figure(ResourceKey{Flavor: name, Resource: resName}, n)
 				}
 				accType, known := flavorType[name]
 				switch {

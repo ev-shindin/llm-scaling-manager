@@ -67,6 +67,22 @@ const (
 	ReasonNominalLentOut Reason = "nominal-lent-out"
 )
 
+// Reasons decided per namespace on the engine side, from the namespace's own
+// pods and ResourceQuotas rather than from the Kueue read (B1).
+const (
+	// ReasonNotKueueManaged: a GPU pod in the namespace is not managed by
+	// Kueue, so Kueue's usage misses GPUs serving holds and the cohort looks
+	// idler than it is. Also the first answer for a namespace with no GPU pods.
+	ReasonNotKueueManaged Reason = "not-kueue-managed"
+	// ReasonNoGPUBound: nothing checks that borrowed GPUs exist: no physical
+	// limiter, and no namespace ResourceQuota on a GPU resource at most
+	// nominal plus borrowingLimit.
+	ReasonNoGPUBound Reason = "no-gpu-bound"
+	// ReasonResourceQuotaUnreadable: the namespace's ResourceQuotas could not
+	// be read. Never read as "no ResourceQuota".
+	ReasonResourceQuotaUnreadable Reason = "resourcequota-unreadable"
+)
+
 // ResourceKey names one GPU resource of one flavor.
 type ResourceKey struct {
 	Flavor   string
@@ -159,6 +175,14 @@ type QueueFigures struct {
 	Borrowable int
 	// BorrowCap is the borrowing limit, config.QuotaUnlimited when unset.
 	BorrowCap int
+	// WithinNominal is what the queue could reach without borrowing (B7):
+	// Nominal for a queue that can reclaim, min(N, max(U, G) + cohortFree) for
+	// one that cannot. Nominal whenever Reason is set.
+	WithinNominal int
+	// LentOut is, for a counted queue that can reclaim, the part of its nominal
+	// a peer may hold now: N - max(U, G). Growth into it is guaranteed but
+	// debits the cohort's free pool (B3). 0 otherwise.
+	LentOut int
 	// CohortFree is the cohort's free pool for this key; 0 when withheld.
 	CohortFree int
 	// KueueBorrowed is Kueue's own borrowed figure, a cross-check.
@@ -257,6 +281,7 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 				ResourceKey:   key,
 				Nominal:       r.Nominal,
 				Guaranteed:    r.Nominal,
+				WithinNominal: r.Nominal,
 				BorrowCap:     config.QuotaUnlimited,
 				KueueBorrowed: r.Borrowed,
 				Reason:        reason,
@@ -267,6 +292,7 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 			if reason == "" {
 				f.CohortFree = cohortFree(members[q.Cohort], key)
 				f.Guaranteed, f.Borrowable = reach(q, r, f.CohortFree)
+				f.WithinNominal, f.LentOut = withinNominal(q, r, f.CohortFree)
 				if f.Guaranteed < r.Nominal {
 					f.GuaranteedReason = ReasonNominalLentOut
 				}
@@ -379,6 +405,25 @@ func reach(q QueueState, r QueueResource, free int) (guaranteed, borrowable int)
 	}
 	guaranteed = min(r.Nominal, base)
 	return guaranteed, max(0, top-guaranteed)
+}
+
+// withinNominal returns what a counted queue could reach without borrowing, and
+// the part of its nominal a peer may hold now (B3, B7).
+//
+// A queue that can reclaim reaches its nominal whatever its peers hold, since
+// Kueue preempts them; the gap between what it keeps or uses and its nominal is
+// lent out, and growing into it takes those GPUs back from the free pool. A
+// queue that cannot reclaim reaches only what Kueue would admit now without
+// borrowing: what it keeps or uses, plus the free pool, never past nominal.
+// Using its guaranteed figure here instead would stop an idle queue on Kueue's
+// default (Never) from ever waking.
+func withinNominal(q QueueState, r QueueResource, free int) (within, lentOut int) {
+	_, kept := r.lent()
+	base := max(r.Reserved, kept)
+	if q.CanReclaim() {
+		return r.Nominal, max(0, r.Nominal-base)
+	}
+	return min(r.Nominal, addCapped(base, free)), 0
 }
 
 // compareKeys orders resource keys by flavor, then resource.

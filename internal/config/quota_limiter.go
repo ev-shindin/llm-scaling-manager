@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 )
 
@@ -98,9 +100,11 @@ type QuotaLimiterConfig struct {
 // pending. The mapping is: a ClusterQueue's nominalQuota for a GPU extended
 // resource, per flavor, becomes a per-accelerator-type cap; a namespace is
 // granted the caps of every ClusterQueue one of its LocalQueues points at; the
-// cluster figure is the sum over all ClusterQueues. Borrowing limits and cohorts
-// are NOT counted in the bound yet: they are read and logged (CountBorrowable),
-// and the bound stays at the nominal figure.
+// cluster figure is the sum over all ClusterQueues. With CountBorrowable (the
+// default), a namespace-scope entry also counts what its queues can borrow from
+// their cohorts, where that is safe: the namespace's cap becomes its guaranteed
+// figure and the greedy optimizer may draw past it from the cohort's free pool
+// (docs/proposals/kueue-borrowing-and-limiter-composition.md, Part B).
 //
 // A ClusterQueue shared by several namespaces is a per-namespace CEILING here,
 // not a partition: each namespace with a LocalQueue on it is bounded at the
@@ -125,9 +129,8 @@ type KueueQuotaSource struct {
 
 	// CountBorrowable lets the entry count GPUs its ClusterQueue can borrow from
 	// its cohort, on top of the guaranteed figure. Absent means true: borrowing
-	// is on by default, and is counted only where it is safe. false keeps exactly
-	// the nominal cap. In this release the borrowable figure is read and logged
-	// only; no limit uses it yet, whatever the setting.
+	// is on by default, and is counted only where it is safe (B1). false keeps
+	// exactly the nominal cap, as before borrowing was read.
 	CountBorrowable *bool `yaml:"countBorrowable,omitempty" json:"countBorrowable,omitempty"`
 }
 
@@ -245,9 +248,41 @@ type ExternalQuotas struct {
 	// never was, in which case the maps are empty and mean nothing.
 	ObservedAt time.Time
 	// Borrow is, per namespace Namespace governs, what borrowing in the
-	// source's cohorts would add. It is read and logged only: BoundBy ignores
-	// it, so no limit depends on it.
+	// source's cohorts would add. BoundBy ignores it; a quota entry that counts
+	// borrowing reads it beside NamespaceGuaranteed and NamespaceWithinNominal.
 	Borrow map[string][]ExternalBorrow
+	// NamespaceGuaranteed is Namespace at each queue's guaranteed figure
+	// instead of its nominal one, built by the same rules (typed and untyped
+	// grants, inactive queues), so it can stand in for Namespace in BoundBy for
+	// a namespace whose borrowing is counted. Where a queue's borrowing is
+	// withheld its guaranteed figure is its nominal, so the two agree.
+	NamespaceGuaranteed map[string]ExternalCaps
+	// NamespaceWithinNominal is Namespace at each queue's within-nominal figure
+	// (ExternalBorrow.WithinNominal): what scale-from-zero, the warm pool and
+	// rescale may spend (B7).
+	NamespaceWithinNominal map[string]ExternalCaps
+	// SharedPools are the cohorts' free pools, one per cohort, flavor and GPU
+	// resource, each spent once across every namespace in the cohort.
+	SharedPools []ExternalSharedPool
+}
+
+// ExternalSharedPool is one cohort's free capacity of one flavor and GPU
+// resource, and where pods of that flavor may run.
+type ExternalSharedPool struct {
+	Cohort   string `json:"cohort"`
+	Flavor   string `json:"flavor"`
+	Resource string `json:"resource"`
+	// Accelerator is the product the flavor's node labels name; empty for a
+	// flavor without a product label.
+	Accelerator string              `json:"accelerator,omitempty"`
+	NodeLabels  map[string]string   `json:"nodeLabels,omitempty"`
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+	// Free is the cohort's free pool; 0 when Reason is set.
+	Free   int    `json:"free"`
+	Reason string `json:"reason,omitempty"`
+	// WaitingLenders are the member queues that, in this read, wait for
+	// capacity they lent (kueue.LenderWaiting). Not debounced.
+	WaitingLenders []string `json:"waitingLenders,omitempty"`
 }
 
 // ExternalBorrow is one queue's borrowing figures for one flavor and GPU
@@ -262,16 +297,34 @@ type ExternalBorrow struct {
 	Nominal     int    `json:"nominal"`
 	Guaranteed  int    `json:"guaranteed"`
 	Borrowable  int    `json:"borrowable"`
+	// BorrowCap is the queue's borrowingLimit, QuotaUnlimited when unset.
+	BorrowCap int `json:"borrowCap"`
+	// WithinNominal is what the queue could reach without borrowing (B7).
+	WithinNominal int `json:"withinNominal"`
+	// LentOut is the guaranteed part of a reclaiming queue's nominal a peer may
+	// hold now; growing into it debits the cohort's free pool.
+	LentOut int `json:"lentOut,omitempty"`
 	// SourceBorrowed is the source's own figure of what the queue borrows now,
 	// logged as a cross-check.
 	SourceBorrowed int    `json:"kueueBorrowed"`
 	Reason         string `json:"reason,omitempty"`
 }
 
+// Counted reports whether the row's borrowing is counted: no reason, or only
+// the reason that qualifies a guaranteed figure below nominal.
+func (b ExternalBorrow) Counted() bool {
+	return b.Reason == "" || b.Reason == BorrowReasonNominalLentOut
+}
+
+// BorrowReasonNominalLentOut is the one ExternalBorrow reason under which
+// borrowing is still counted: it qualifies the guaranteed figure, it does not
+// withhold. It mirrors kueue.ReasonNominalLentOut, which config cannot import.
+const BorrowReasonNominalLentOut = "nominal-lent-out"
+
 // Withheld returns b with borrowing not counted, for reason: the guaranteed
-// figure falls back to nominal, as when borrowing is off.
+// and within-nominal figures fall back to nominal, as when borrowing is off.
 func (b ExternalBorrow) Withheld(reason string) ExternalBorrow {
-	b.Guaranteed, b.Borrowable, b.Reason = b.Nominal, 0, reason
+	b.Guaranteed, b.WithinNominal, b.Borrowable, b.LentOut, b.Reason = b.Nominal, b.Nominal, 0, 0, reason
 	return b
 }
 

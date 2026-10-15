@@ -296,8 +296,11 @@ var _ = Describe("KueueQuotaSource", func() {
 	})
 
 	It("withholds a row back to nominal", func() {
-		row := ExternalBorrow{Nominal: 9, Guaranteed: 0, Borrowable: 10, Reason: "nominal-lent-out"}
-		Expect(row.Withheld("stale")).To(Equal(ExternalBorrow{Nominal: 9, Guaranteed: 9, Reason: "stale"}))
+		row := ExternalBorrow{Nominal: 9, Guaranteed: 0, WithinNominal: 5, LentOut: 2, Borrowable: 10, Reason: "nominal-lent-out"}
+		Expect(row.Counted()).To(BeTrue(), "nominal-lent-out qualifies the guaranteed figure; it does not withhold")
+		withheld := row.Withheld("stale")
+		Expect(withheld).To(Equal(ExternalBorrow{Nominal: 9, Guaranteed: 9, WithinNominal: 9, Reason: "stale"}))
+		Expect(withheld.Counted()).To(BeFalse())
 	})
 
 	Context("validation", func() {

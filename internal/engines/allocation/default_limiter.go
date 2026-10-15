@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 )
 
 // DefaultLimiter exposes an Inventory's resource availability as hard
@@ -122,9 +124,44 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 			// an excluded namespace, which this provider leaves open. It keeps
 			// bounding the types it lists, through the merge's minimum.
 			rc.PoolsClosed = false
+			if bi, ok := l.inventory.(BorrowingInventory); ok {
+				addBorrowing(rc, bi, activeNamespaces)
+			}
 		}
 	}
 	return rc, nil
+}
+
+// addBorrowing carries the cohort borrowing an inventory counts onto rc. The
+// namespace pools stay at the guaranteed figure; the open aggregate becomes the
+// reach (guaranteed plus cap), since a sum of guaranteed figures would bound the
+// borrowing namespaces at exactly what borrowing exists to exceed.
+func addBorrowing(rc *ResourceConstraints, bi BorrowingInventory, activeNamespaces []string) {
+	byNS, pools, cohorts := bi.Borrowing(activeNamespaces)
+	if len(byNS) == 0 {
+		return
+	}
+	rc.NamespaceBorrow, rc.SharedPools, rc.NamespaceCohorts = byNS, pools, cohorts
+	reach := reachPools(rc.NamespacePools, byNS)
+	rc.TotalLimit, rc.TotalUsed, rc.TotalAvail = poolTotals(aggregateNamespacePools(reach))
+	rc.Pools = reachAggregate(reach)
+}
+
+// reachAggregate is aggregateNamespacePools for a borrowing provider's reach,
+// except that a type some namespace may reach without a bound of this
+// provider's (an unset borrowingLimit, bounded only by the shared pool) is the
+// unlimited sentinel rather than left to the other namespaces' sum: that sum
+// would cap the unbounded namespace at the GPUs the bounded ones may reach.
+func reachAggregate(nsPools map[string]map[string]ResourcePool) map[string]ResourcePool {
+	agg := aggregateNamespacePools(nsPools)
+	for _, perType := range nsPools {
+		for accType, pool := range perType {
+			if pool.Limit < 0 {
+				agg[accType] = ResourcePool{Limit: config.QuotaUnlimited}
+			}
+		}
+	}
+	return agg
 }
 
 // aggregateNamespacePools sums per-(namespace, type) pools into a per-type

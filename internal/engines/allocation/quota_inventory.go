@@ -11,6 +11,7 @@ import (
 	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 )
@@ -56,6 +57,70 @@ type QuotaInventory struct {
 	// usedByNS is the per-namespace usage map (Scope == QuotaScopeNamespace).
 	// Outer key: namespace; inner key: accelerator type.
 	usedByNS map[string]map[string]int
+
+	// borrowOpts, set by EnableBorrowing, lets the entry count cohort borrowing
+	// when it also says countBorrowable. Zero (no Eligibility) counts none.
+	borrowOpts BorrowOptions
+	// borrow is the borrowing view the last Refresh installed with cfg, nil
+	// when no namespace's borrowing is counted. cfg then holds every counted
+	// namespace at its guaranteed figure.
+	borrow *borrowView
+	// now is the clock the staleness of a snapshot is judged by; nil is
+	// time.Now.
+	now func() time.Time
+}
+
+// BorrowEligibility evaluates the engine-side B1 conditions per namespace
+// (kueue.Eligibility in production).
+type BorrowEligibility interface {
+	Evaluate(ctx context.Context, namespaces []string) map[string]kueue.NamespaceEligibility
+}
+
+// BorrowOptions turns on counting cohort borrowing for a Kueue-backed,
+// namespace-scope entry with countBorrowable on.
+type BorrowOptions struct {
+	// Physical is set when a physical limiter is declared beside the entry: a
+	// GPU bound is then in force for every namespace (B1).
+	Physical bool
+	// Eligibility evaluates whether Kueue manages a namespace's GPU pods and
+	// reads its ResourceQuotas. Nil counts no borrowing.
+	Eligibility BorrowEligibility
+}
+
+// borrowView is the borrowing an entry counts after one Refresh.
+type borrowView struct {
+	// effective is the entry with every counted namespace at its guaranteed
+	// figure; kept so a stale read can freeze it.
+	effective config.QuotaLimiterConfig
+	byNS      map[string]map[string]NamespaceBorrow
+	pools     []SharedPoolChunk
+	cohorts   map[string][]string
+	// withheld is, per namespace read but not counted, why.
+	withheld map[string]string
+	// frozen marks a view kept over a stale read: no new borrowing.
+	frozen bool
+}
+
+// EnableBorrowing lets the inventory count cohort borrowing, when its entry
+// reads Kueue at namespace scope and does not set countBorrowable: false.
+// Without it the entry caps at nominal whatever countBorrowable says.
+func (q *QuotaInventory) EnableBorrowing(opts BorrowOptions) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.borrowOpts = opts
+}
+
+// countsBorrowing reports whether this entry may count borrowing at all.
+func (q *QuotaInventory) countsBorrowing() bool {
+	return q.borrowOpts.Eligibility != nil && q.static.KueueCountsBorrowable() && q.static.Scope == config.QuotaScopeNamespace
+}
+
+// clock is now, or time.Now.
+func (q *QuotaInventory) clock() time.Time {
+	if q.now != nil {
+		return q.now()
+	}
+	return time.Now()
 }
 
 // QuotaSource supplies caps owned by an external authority that a quota entry
@@ -93,7 +158,19 @@ var (
 	_ NamespaceAwareInventory = (*QuotaInventory)(nil)
 	_ UsageBasisReporter      = (*QuotaInventory)(nil)
 	_ ClosedPoolsInventory    = (*QuotaInventory)(nil)
+	_ BorrowingInventory      = (*QuotaInventory)(nil)
 )
+
+// BorrowingInventory is a NamespaceAwareInventory that may count cohort
+// borrowing. DefaultLimiter carries its figures onto ResourceConstraints.
+type BorrowingInventory interface {
+	NamespaceAwareInventory
+
+	// Borrowing returns, for the active namespaces it counts borrowing for,
+	// their figures per accelerator type, the shared pools of their cohorts,
+	// and every namespace's cohorts. All nil when it counts none.
+	Borrowing(activeNamespaces []string) (map[string]map[string]NamespaceBorrow, []SharedPoolChunk, map[string][]string)
+}
 
 // PoolsClosed reports true for a cluster-scope quota, which denies every type
 // the operator did not list. A namespace-scope quota's per-type pools are the
@@ -155,6 +232,14 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 	if !ext.ObservedAt.IsZero() {
 		effective = q.static.BoundBy(ext)
 	}
+	// Borrowing is computed outside the lock: the eligibility check may read
+	// the API server.
+	var view *borrowView
+	if q.countsBorrowing() && !ext.ObservedAt.IsZero() {
+		if !q.snapshotStale(ext, err) {
+			view = q.computeBorrowing(ctx, ext)
+		}
+	}
 	// Maps marshal with sorted keys, so equal snapshots fingerprint equal.
 	fp, _ := json.Marshal(struct {
 		Read bool // never-read and read-but-empty must not fingerprint alike
@@ -189,42 +274,294 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 			}
 		}
 	}
-	q.logBorrowing(logger, ext, err != nil)
+	stale := q.countsBorrowing() && !ext.ObservedAt.IsZero() && q.snapshotStale(ext, err)
+	switch {
+	case view != nil && len(view.byNS) > 0:
+		effective = view.effective
+	case stale && q.borrow != nil:
+		// Stale reads freeze, never shrink (B6): every figure stays where it
+		// was, and nothing new is borrowed. An API blip must not cause a
+		// reclaim the cluster did not ask for.
+		frozen := *q.borrow
+		frozen.frozen = true
+		frozen.pools = slices.Clone(q.borrow.pools)
+		for i := range frozen.pools {
+			frozen.pools[i].Free = 0
+		}
+		view, effective = &frozen, q.borrow.effective
+	}
+	q.logBorrowing(logger, ext, view, stale)
+	if view != nil && len(view.byNS) == 0 {
+		// Nothing counted: the entry caps at nominal, exactly as with
+		// countBorrowable: false. The view only carried the reasons to log.
+		view = nil
+	}
 	q.cfg = effective
+	q.borrow = view
 	return nil
 }
 
-// logBorrowing logs, on change only, what Kueue borrowing would add for each
-// namespace this entry governs: guaranteed, borrowable, Kueue's own borrowed
-// figure, and the reason borrowable is 0. Nothing here is applied; the
-// effective entry stays at the nominal figure. A cluster-scope entry logs
-// nothing, since borrowing moves capacity between queues and leaves the
-// cluster figure as it is. stale marks a snapshot served after a failed read,
-// whose borrowing is not counted. Callers must hold q.mu.
-func (q *QuotaInventory) logBorrowing(logger logr.Logger, ext config.ExternalQuotas, stale bool) {
-	if !q.static.KueueCountsBorrowable() || q.static.Scope != config.QuotaScopeNamespace || ext.ObservedAt.IsZero() {
+// snapshotStale reports whether a Kueue snapshot is stale (B1): the last read
+// failed, or the snapshot is older than twice the refresh interval.
+func (q *QuotaInventory) snapshotStale(ext config.ExternalQuotas, readErr error) bool {
+	return readErr != nil || q.clock().Sub(ext.ObservedAt) > 2*q.static.KueueRefreshInterval()
+}
+
+// computeBorrowing derives the borrowing this entry counts from a fresh
+// snapshot. A view with no counted namespace (empty byNS) carries only the
+// reasons, and the entry then caps at nominal exactly as it does with
+// countBorrowable: false.
+//
+// A namespace's borrowing is counted only when every B1 condition holds: the
+// source's (fresh, status written, flat cohort, no effectiveQuotas, no Fair
+// Sharing -- a row whose borrowing is withheld carries the reason and nominal
+// figures), and the engine-side ones evaluated here (Kueue manages every GPU pod
+// in the namespace, its ResourceQuotas are readable, and a GPU bound is in
+// force). A counted namespace's cap becomes its guaranteed figure, bounded by
+// the static entry as the nominal figure is; every other namespace keeps the
+// nominal figure.
+func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.ExternalQuotas) *borrowView {
+	candidates := make([]string, 0, len(ext.Borrow))
+	for ns, rows := range ext.Borrow {
+		if ns == config.QuotaLimiterReservedNamespaceKey || q.static.IsExcluded(ns) || !slices.ContainsFunc(rows, config.ExternalBorrow.Counted) {
+			continue
+		}
+		candidates = append(candidates, ns)
+	}
+	slices.Sort(candidates)
+	elig := q.borrowOpts.Eligibility.Evaluate(ctx, candidates)
+
+	view := &borrowView{withheld: map[string]string{}, cohorts: map[string][]string{}}
+	counted := map[string]bool{}
+	for _, ns := range candidates {
+		e := elig[ns]
+		reason := string(e.Reason)
+		if reason == "" && !q.borrowOpts.Physical && !resourceQuotaBounds(ext.Borrow[ns], e.GPUQuota) {
+			reason = string(kueue.ReasonNoGPUBound)
+		}
+		if reason != "" {
+			view.withheld[ns] = reason
+			continue
+		}
+		counted[ns] = true
+	}
+	if len(counted) == 0 {
+		return view
+	}
+
+	at := func(figures map[string]config.ExternalCaps) config.ExternalQuotas {
+		out := ext
+		out.Namespace = maps.Clone(ext.Namespace)
+		for ns := range counted {
+			if caps, ok := figures[ns]; ok {
+				out.Namespace[ns] = caps
+			}
+		}
+		return out
+	}
+	view.effective = q.static.BoundBy(at(ext.NamespaceGuaranteed))
+	within := q.static.BoundBy(at(ext.NamespaceWithinNominal))
+
+	view.byNS = map[string]map[string]NamespaceBorrow{}
+	for ns := range counted {
+		perType := map[string]NamespaceBorrow{}
+		for accType, guaranteed := range view.effective.NamespaceQuotas[ns] {
+			b, ok := q.namespaceBorrow(ns, accType, guaranteed, ext.Borrow[ns], elig[ns].GPUQuota)
+			if !ok {
+				continue
+			}
+			if key, found := accelerator.FindKey(within.NamespaceQuotas[ns], accType); found {
+				b.WithinNominal = within.NamespaceQuotas[ns][key]
+			}
+			perType[accType] = b
+		}
+		view.byNS[ns] = perType
+	}
+	inCohort := map[string]bool{}
+	for ns, rows := range ext.Borrow {
+		for _, r := range rows {
+			if r.Cohort == "" || !r.Counted() || slices.Contains(view.cohorts[ns], r.Cohort) {
+				continue
+			}
+			view.cohorts[ns] = append(view.cohorts[ns], r.Cohort)
+			if counted[ns] {
+				inCohort[r.Cohort] = true
+			}
+		}
+	}
+	for _, p := range ext.SharedPools {
+		if p.Reason != "" || !inCohort[p.Cohort] {
+			continue
+		}
+		view.pools = append(view.pools, SharedPoolChunk{
+			Cohort: p.Cohort, Flavor: p.Flavor, Resource: p.Resource, Free: p.Free,
+			FlavorPlacement: kueue.FlavorPlacement{
+				AcceleratorType: p.Accelerator, NodeLabels: maps.Clone(p.NodeLabels), Tolerations: slices.Clone(p.Tolerations),
+			},
+		})
+	}
+	return view
+}
+
+// namespaceBorrow derives one namespace's borrowing figures for one type from
+// the rows of the queues it is granted: the typed rows naming that accelerator,
+// or, when none does, the untyped ones (a flavor without a product label grants
+// every type the entry names, as in BoundBy).
+//
+// The reach is each counted row's nominal plus its borrowing limit (unlimited
+// when one is unset) and each withheld row's nominal, bounded by the static
+// entry and the namespace ResourceQuota; the cap is the reach past the
+// guaranteed figure. A type with an unlimited guaranteed figure needs no
+// borrowing. Reports false when no row names the type.
+func (q *QuotaInventory) namespaceBorrow(ns, accType string, guaranteed int, rows []config.ExternalBorrow, gpuQuota map[string]int) (NamespaceBorrow, bool) {
+	matched := slices.DeleteFunc(slices.Clone(rows), func(r config.ExternalBorrow) bool {
+		return r.Accelerator == "" || !accelerator.SameName(r.Accelerator, accType)
+	})
+	if len(matched) == 0 {
+		matched = slices.DeleteFunc(slices.Clone(rows), func(r config.ExternalBorrow) bool { return r.Accelerator != "" })
+	}
+	if len(matched) == 0 {
+		return NamespaceBorrow{}, false
+	}
+	b := NamespaceBorrow{WithinNominal: guaranteed}
+	if guaranteed < 0 {
+		return b, true
+	}
+	reach, unlimited := 0, false
+	for _, r := range matched {
+		switch {
+		case !r.Counted():
+			reach += r.Nominal
+		case r.BorrowCap < 0:
+			unlimited = true
+		default:
+			reach += r.Nominal + r.BorrowCap
+		}
+		if r.Counted() {
+			b.LentOut += r.LentOut
+		}
+	}
+	bound := func(c int) {
+		if c < 0 {
+			return
+		}
+		if unlimited || c < reach {
+			reach, unlimited = c, false
+		}
+	}
+	if static, excluded := q.static.QuotaForNamespace(ns); !excluded {
+		if key, ok := accelerator.FindKey(static, accType); ok {
+			bound(static[key])
+		}
+	}
+	for _, r := range matched {
+		if hard, ok := gpuQuota[r.Resource]; ok {
+			bound(hard)
+		}
+	}
+	b.Cap = config.QuotaUnlimited
+	if !unlimited {
+		b.Cap = max(0, reach-guaranteed)
+	}
+	return b, true
+}
+
+// resourceQuotaBounds reports whether a namespace ResourceQuota is a GPU bound
+// (B1): for every GPU resource the namespace's counted queues borrow, a hard
+// limit at most nominal plus borrowingLimit. A ResourceQuota of 1000 proves
+// nothing, and with borrowingLimit unset nothing does.
+func resourceQuotaBounds(rows []config.ExternalBorrow, gpuQuota map[string]int) bool {
+	reach := map[string]int{}
+	for _, r := range rows {
+		if !r.Counted() {
+			continue
+		}
+		if r.BorrowCap < 0 {
+			return false
+		}
+		reach[r.Resource] += r.Nominal + r.BorrowCap
+	}
+	if len(reach) == 0 {
+		return false
+	}
+	for res, n := range reach {
+		hard, ok := gpuQuota[res]
+		if !ok || hard > n {
+			return false
+		}
+	}
+	return true
+}
+
+// Borrowing returns, for the active namespaces this entry counts borrowing
+// for, their borrowing figures, the shared pools their cohorts hold, and the
+// cohorts of every namespace read. All nil when no borrowing is counted.
+func (q *QuotaInventory) Borrowing(activeNamespaces []string) (map[string]map[string]NamespaceBorrow, []SharedPoolChunk, map[string][]string) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	if q.borrow == nil {
+		return nil, nil, nil
+	}
+	byNS := map[string]map[string]NamespaceBorrow{}
+	for _, ns := range activeNamespaces {
+		if perType, ok := q.borrow.byNS[ns]; ok {
+			byNS[ns] = maps.Clone(perType)
+		}
+	}
+	cohorts := make(map[string][]string, len(q.borrow.cohorts))
+	for ns, cs := range q.borrow.cohorts {
+		cohorts[ns] = slices.Clone(cs)
+	}
+	return byNS, slices.Clone(q.borrow.pools), cohorts
+}
+
+// logBorrowing logs, on change only, the borrowing this entry counts for each
+// namespace it governs: guaranteed, borrowable, Kueue's own borrowed figure,
+// and why borrowable is 0 where it is -- the source's reason, or the
+// engine-side one (not-kueue-managed, no-gpu-bound, resourcequota-unreadable).
+// A cluster-scope entry logs nothing, since borrowing moves capacity between
+// queues and leaves the cluster figure as it is. stale marks a snapshot served
+// after a failed read or past twice the refresh interval: figures freeze and
+// nothing new is borrowed. Callers must hold q.mu.
+func (q *QuotaInventory) logBorrowing(logger logr.Logger, ext config.ExternalQuotas, view *borrowView, stale bool) {
+	if !q.countsBorrowing() || ext.ObservedAt.IsZero() {
 		return
 	}
-	view := make(map[string][]config.ExternalBorrow, len(ext.Borrow))
+	rowsByNS := make(map[string][]config.ExternalBorrow, len(ext.Borrow))
 	for ns, rows := range ext.Borrow {
 		if ns == config.QuotaLimiterReservedNamespaceKey || q.static.IsExcluded(ns) || len(rows) == 0 {
 			continue
 		}
-		if stale {
+		reason := ""
+		switch {
+		case stale && (view == nil || view.byNS[ns] == nil):
+			reason = string(kueue.ReasonStale)
+		case view != nil && view.withheld[ns] != "":
+			reason = view.withheld[ns]
+		}
+		if reason != "" {
 			rows = slices.Clone(rows)
 			for i := range rows {
-				rows[i] = rows[i].Withheld(string(kueue.ReasonStale))
+				if rows[i].Counted() {
+					rows[i] = rows[i].Withheld(reason)
+				}
 			}
 		}
-		view[ns] = rows
+		rowsByNS[ns] = rows
 	}
-	fp, _ := json.Marshal(view)
+	fp, _ := json.Marshal(struct {
+		Rows   map[string][]config.ExternalBorrow
+		Frozen bool
+	}{rowsByNS, view != nil && view.frozen})
 	if string(fp) == q.lastBorrow {
 		return
 	}
 	q.lastBorrow = string(fp)
-	logger.Info("Kueue borrowing read and NOT applied; the quota entry still caps at nominal",
-		"borrowByNamespace", view)
+	msg := "Kueue borrowing counted where every condition holds; guaranteed is the namespace cap, borrowable is drawn from the cohort's free pool"
+	if view != nil && view.frozen {
+		msg = "Kueue snapshot stale: borrowing frozen at the last figures, nothing new is borrowed"
+	}
+	logger.Info(msg, "borrowByNamespace", rowsByNS)
 }
 
 // EffectiveConfig returns the entry currently enforced: the static entry bounded
