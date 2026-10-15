@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 )
 
 // DefaultLimiter exposes an Inventory's resource availability as hard
@@ -79,6 +81,11 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 	//
 	// Remaining gap: a node that is cordoned or NotReady still contributes its
 	// GPUs to Limit.
+	if m, ok := l.inventory.(ManagedNamespacesSetter); ok && usageByNamespace != nil {
+		// The active namespaces are those with managed variants: per-namespace
+		// reads (the borrowing eligibility check) need cover no other.
+		m.SetManagedNamespaces(slices.Collect(maps.Keys(usageByNamespace)))
+	}
 	if err := l.inventory.Refresh(ctx); err != nil {
 		return nil, fmt.Errorf("failed to refresh inventory: %w", err)
 	}
@@ -121,9 +128,46 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 			// namespace it holds is bounded by its own allowlist, and one it
 			// excludes bypasses it.
 			rc.NamespaceScoped = true
+			if bi, ok := l.inventory.(BorrowingInventory); ok {
+				addBorrowing(rc, bi, activeNamespaces)
+			}
 		}
 	}
 	return rc, nil
+}
+
+// addBorrowing carries the cohort borrowing an inventory counts onto rc. The
+// namespace pools stay at the guaranteed figure; the reported aggregate becomes
+// the reach (guaranteed plus cap). Like every namespace-scope aggregate it is
+// never merged as a cluster bound: the borrowing namespaces are bounded by their
+// own pools, their caps and the shared pools.
+func addBorrowing(rc *ResourceConstraints, bi BorrowingInventory, activeNamespaces []string) {
+	rc.BorrowWithheld = bi.BorrowWithheld(activeNamespaces)
+	byNS, pools, cohorts := bi.Borrowing(activeNamespaces)
+	if len(byNS) == 0 {
+		return
+	}
+	rc.NamespaceBorrow, rc.SharedPools, rc.NamespaceCohorts = byNS, pools, cohorts
+	reach := reachPools(rc.NamespacePools, byNS)
+	rc.TotalLimit, rc.TotalUsed, rc.TotalAvail = poolTotals(aggregateNamespacePools(reach))
+	rc.Pools = reachAggregate(reach)
+}
+
+// reachAggregate is aggregateNamespacePools for a borrowing provider's reach,
+// except that a type some namespace may reach without a bound of this
+// provider's (an unset borrowingLimit, bounded only by the shared pool) is the
+// unlimited sentinel rather than left to the other namespaces' sum: that sum
+// would cap the unbounded namespace at the GPUs the bounded ones may reach.
+func reachAggregate(nsPools map[string]map[string]ResourcePool) map[string]ResourcePool {
+	agg := aggregateNamespacePools(nsPools)
+	for _, perType := range nsPools {
+		for accType, pool := range perType {
+			if pool.Limit < 0 {
+				agg[accType] = ResourcePool{Limit: config.QuotaUnlimited}
+			}
+		}
+	}
+	return agg
 }
 
 // aggregateNamespacePools sums per-(namespace, type) pools into a per-type

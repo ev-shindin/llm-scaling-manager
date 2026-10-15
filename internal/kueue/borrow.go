@@ -10,32 +10,6 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 )
 
-// Labels and scheduling gates Kueue puts on the pods it manages. A tenant can
-// write any of them into its own pod template, so none is proof that Kueue
-// charges a pod; the managed check (Eligibility) asks for the Workload.
-const (
-	// ManagedLabel marks a pod Kueue manages through the pod integration.
-	ManagedLabel = "kueue.x-k8s.io/managed"
-	// QueueNameLabel names the LocalQueue a workload asks for. It is a request,
-	// not proof that Kueue manages the object.
-	QueueNameLabel = "kueue.x-k8s.io/queue-name"
-	// PodGroupNameLabel names the pod group a pod belongs to: Kueue admits a
-	// pod group -- a LeaderWorkerSet group included -- as one Workload.
-	PodGroupNameLabel = "kueue.x-k8s.io/pod-group-name"
-	// AdmissionGate holds a managed pod until Kueue admits its workload.
-	AdmissionGate = "kueue.x-k8s.io/admission"
-	// TopologyGate holds a managed pod until Topology-Aware Scheduling assigns it.
-	TopologyGate = "kueue.x-k8s.io/topology"
-)
-
-// Reclaim policies of a ClusterQueue's spec.preemption.reclaimWithinCohort.
-// Absent means ReclaimNever.
-const (
-	ReclaimNever         = "Never"
-	ReclaimLowerPriority = "LowerPriority"
-	ReclaimAny           = "Any"
-)
-
 // Reason says why borrowing is not counted for a queue, or qualifies its
 // guaranteed figure. The empty Reason means borrowing is counted.
 type Reason string
@@ -76,6 +50,11 @@ const (
 	// included. Quota reserved is then not admission, and a check may send the
 	// workload to another cluster.
 	ReasonAdmissionChecks Reason = "admission-checks"
+	// ReasonKueueVersionUntested: the Kueue controller runs a version outside
+	// TestedKueueVersions, so the fields and semantics borrowing relies on
+	// (kueue_constants.go) are not known to hold. The nominal quotas still
+	// apply.
+	ReasonKueueVersionUntested Reason = "kueue-version-untested"
 	// ReasonNominalLentOut qualifies a guaranteed figure below nominal: the
 	// queue cannot reclaim, and a peer holds the rest of its nominal quota.
 	ReasonNominalLentOut Reason = "nominal-lent-out"
@@ -95,6 +74,9 @@ const (
 	// ReasonResourceQuotaUnreadable: the namespace's ResourceQuotas could not
 	// be read. Never read as "no ResourceQuota".
 	ReasonResourceQuotaUnreadable Reason = "resourcequota-unreadable"
+	// ReasonNotSelected: the quota entry's kueue.borrowNamespaces does not
+	// list the namespace, so its borrowing is not counted (a pilot).
+	ReasonNotSelected Reason = "not-selected"
 )
 
 // ResourceKey names one GPU resource of one flavor.
@@ -189,6 +171,9 @@ type Topology struct {
 	// Never read as "no Cohort objects": that would call every cohort flat.
 	CohortsUnreadable bool
 	Flavors           map[string]FlavorPlacement
+	// VersionUntested is set when the Kueue controller runs a version outside
+	// TestedKueueVersions. An unknown version does not set it.
+	VersionUntested bool
 }
 
 // QueueFigures is what one ClusterQueue could reach for one flavor and GPU
@@ -390,6 +375,9 @@ func withheldReason(t Topology, cohort string, qs []QueueState, stale bool) Reas
 	if stale {
 		return ReasonStale
 	}
+	if t.VersionUntested {
+		return ReasonKueueVersionUntested
+	}
 	for _, q := range qs {
 		// Inactive members too: their usage counts in the free pool.
 		if !q.HasStatus {
@@ -492,6 +480,29 @@ func withinNominal(q QueueState, r QueueResource, free int) (within, lentOut int
 		return r.Nominal, max(0, r.Nominal-base)
 	}
 	return min(r.Nominal, addCapped(base, free)), 0
+}
+
+// BorrowDrift is, per ClusterQueue in a cohort whose reservation status Kueue
+// has written, the GPUs by which the borrowed figure computed here (usage
+// past nominal, per flavor and GPU resource) differs from Kueue's own
+// status.flavorsReservation[].borrowed, summed over the queue's GPU resources
+// as absolute differences. It is the conformance check of this package's
+// reading of Kueue: 0 while the two agree (wva_kueue_borrow_drift_gpus, and an
+// e2e assertion against a live Kueue).
+func BorrowDrift(t Topology) map[string]int {
+	out := map[string]int{}
+	for name, q := range t.Queues {
+		if q.Cohort == "" || !q.HasStatus {
+			continue
+		}
+		drift := 0
+		for _, r := range q.Resources {
+			computed := max(0, r.Reserved-r.Nominal)
+			drift = addCapped(drift, max(computed-r.Borrowed, r.Borrowed-computed))
+		}
+		out[name] = drift
+	}
+	return out
 }
 
 // compareKeys orders resource keys by flavor, then resource.

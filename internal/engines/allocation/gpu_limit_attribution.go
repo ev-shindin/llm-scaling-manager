@@ -136,6 +136,10 @@ func clusterHeadroom(constraints []*ResourceConstraints) map[string]int {
 // constraints: each capped namespace's allowance and the closed cluster-scope
 // bound.
 func publishHeadroom(constraints []*ResourceConstraints, now time.Time) {
+	// The warm pool spends capacity within nominal only, never borrowed
+	// capacity (B7): a pool Pod on borrowed GPUs is the first thing a reclaim
+	// takes.
+	constraints = WithinNominal(constraints)
 	decision.PublishHeadroomBounds(namespaceHeadroom(constraints), clusterHeadroom(constraints),
 		poolsVersionOf(constraints), now)
 }

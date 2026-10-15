@@ -567,12 +567,6 @@ type RolePickFn func(
 // committed without it. Treating it as blocking is what left prefill pinned at
 // one replica through a 1119-deep queue while decode sat at its ceiling
 // (docs/proposals/prefill-starved-by-exhausted-role.md).
-//
-// It returns the GPUs it spent per key of available, as debited -- once per
-// spend, under the key the pick read. A caller that reconciles another budget
-// must use these rather than the change in available: debitBudget also draws
-// down every key that covers the one spent, so the per-key change counts a GPU
-// spent under a long spelling again under its short name.
 func allocateForModelPaired(
 	ctx context.Context,
 	e *NamedAnalyzerResult,
@@ -583,6 +577,35 @@ func allocateForModelPaired(
 	pick RolePickFn,
 	pickerState RolePairedState,
 	roles []string,
+) {
+	allocateForModelPairedPlaced(ctx, e, variants, stateMap, available, targets, pick, pickerState, roles, nil)
+}
+
+// allocateForModelPairedPlaced is allocateForModelPaired with a placer that
+// places each iteration's commit replica by replica before it is committed:
+// against the namespace's guaranteed budget, then the cohort's shared pools and
+// the node view (modelPlacer.placeUnit). The flat budget alone cannot say that
+// two 4-GPU holes do not hold one 8-GPU replica, or that a borrowed replica must
+// land whole in one flavor. A unit that does not place is trimmed at its shape;
+// one that cannot place one replica of each role ends the pass, as scarcity
+// does. A nil placer is allocateForModelPaired exactly.
+//
+// It returns the GPUs it spent per key of available, as debited -- once per
+// spend, under the key the pick read. A caller that reconciles another budget
+// must use these rather than the change in available: debitBudget also draws
+// down every key that covers the one spent, so the per-key change counts a GPU
+// spent under a long spelling again under its short name.
+func allocateForModelPairedPlaced(
+	ctx context.Context,
+	e *NamedAnalyzerResult,
+	variants []variantRecord,
+	stateMap map[string]domain.VariantReplicaState,
+	available map[string]int,
+	targets map[string]int,
+	pick RolePickFn,
+	pickerState RolePairedState,
+	roles []string,
+	placer *modelPlacer,
 ) map[string]int {
 	logger := ctrl.LoggerFrom(ctx)
 	spent := map[string]int{}
@@ -684,6 +707,9 @@ func allocateForModelPaired(
 		// must fit it together. Not even one replica of each fitting together
 		// is SCARCITY, and ends the pass the same way.
 		if !fitPairToBudget(picked, kByRole, variantByRole, variants, stateMap, available) {
+			break
+		}
+		if placer != nil && !placer.placeUnit(picked, kByRole, variantByRole, variants, stateMap) {
 			break
 		}
 

@@ -80,26 +80,38 @@ var kueueReaders = struct {
 type sharedReader struct {
 	key    string
 	reader *kueue.Reader
+	// eligibility evaluates the engine-side borrowing conditions for the same
+	// entry, shared for the same reason as the reader: one check per namespace
+	// and interval, not one per engine.
+	eligibility *kueue.Eligibility
+	// memory keeps the entry's last counted borrowing view, so a limiter
+	// rebuilt while the reader is stale freezes at it instead of starting from
+	// the nominal cap.
+	memory *borrowMemory
 }
 
-// sharedKueueReader returns the Reader for entry, creating or replacing it when
-// none exists yet with the same options. One process has one client, so the
-// client is not part of the key.
-func sharedKueueReader(entry config.QuotaLimiterConfig, kubeClient client.Client, namespace string) *kueue.Reader {
+// sharedKueue returns the Reader and Eligibility for entry, creating or
+// replacing them when none exist yet with the same options. One process has one
+// client, so the client is not part of the key.
+func sharedKueue(entry config.QuotaLimiterConfig, kubeClient client.Client, namespace string) *sharedReader {
 	opts := kueue.Options{
 		Resources:       entry.Kueue.Resources,
 		RefreshInterval: entry.KueueRefreshInterval(),
 		Namespace:       namespace,
 	}
+	if entry.Kueue != nil {
+		opts.ControllerNamespace = entry.Kueue.ControllerNamespace
+	}
 	key, _ := json.Marshal(opts)
 	kueueReaders.Lock()
 	defer kueueReaders.Unlock()
 	if s, ok := kueueReaders.byEntry[entry.Name]; ok && s.key == string(key) {
-		return s.reader
+		return s
 	}
-	r := kueue.NewReader(kubeClient, opts)
-	kueueReaders.byEntry[entry.Name] = &sharedReader{key: string(key), reader: r}
-	return r
+	s := &sharedReader{key: string(key), reader: kueue.NewReader(kubeClient, opts), eligibility: kueue.NewEligibility(kubeClient, opts),
+		memory: &borrowMemory{}}
+	kueueReaders.byEntry[entry.Name] = s
+	return s
 }
 
 // LimiterSignature is a deterministic fingerprint of the config inputs that
@@ -159,13 +171,21 @@ func newQuotaLimiters(cfg *config.Config, kubeClient client.Client) ([]Limiter, 
 	constituents := make([]Limiter, 0, len(entries))
 	for _, entry := range entries {
 		var source QuotaSource
+		var shared *sharedReader
 		if entry.KueueEnabled() {
 			if kubeClient == nil {
 				return nil, fmt.Errorf("limiter factory: quota entry %q enables kueue but no Kubernetes client is available", entry.Name)
 			}
-			source = sharedKueueReader(entry, kubeClient, cfg.WatchNamespace())
+			shared = sharedKueue(entry, kubeClient, cfg.WatchNamespace())
+			source = shared.reader
 		}
-		constituents = append(constituents, NewDefaultLimiter(entry.Name, NewQuotaInventoryWithSource(entry, source)))
+		inv := NewQuotaInventoryWithSource(entry, source)
+		if shared != nil && entry.KueueCountsBorrowable() {
+			// Counted only where every B1 condition holds; a physical limiter
+			// declared beside the entry is the GPU bound for every namespace.
+			inv.EnableBorrowing(BorrowOptions{Physical: cfg.HasPhysicalLimiter(), Eligibility: shared.eligibility, Memory: shared.memory})
+		}
+		constituents = append(constituents, NewDefaultLimiter(entry.Name, inv))
 	}
 	return constituents, nil
 }

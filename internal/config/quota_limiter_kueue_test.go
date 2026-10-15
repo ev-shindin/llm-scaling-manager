@@ -282,6 +282,16 @@ var _ = Describe("KueueQuotaSource", func() {
 		Expect(*entry.Kueue.CountBorrowable).To(BeFalse())
 	})
 
+	It("deep-copies borrowNamespaces and selects by it", func() {
+		entry := QuotaLimiterConfig{Kueue: &KueueQuotaSource{Enabled: true, BorrowNamespaces: []string{"team-a"}}}
+		out := entry.clone()
+		out.Kueue.BorrowNamespaces[0] = "team-b"
+		Expect(entry.Kueue.BorrowNamespaces).To(Equal([]string{"team-a"}))
+		Expect(entry.KueueBorrowSelected("team-a")).To(BeTrue())
+		Expect(entry.KueueBorrowSelected("team-b")).To(BeFalse())
+		Expect(QuotaLimiterConfig{Kueue: &KueueQuotaSource{Enabled: true}}.KueueBorrowSelected("any")).To(BeTrue(), "empty selects all")
+	})
+
 	It("does not let borrowing figures change a bound", func() {
 		entry := QuotaLimiterConfig{
 			Name: "q", Type: "quota", Scope: QuotaScopeNamespace,

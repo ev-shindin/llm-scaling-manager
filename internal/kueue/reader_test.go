@@ -133,6 +133,16 @@ func forbidden(name string) error {
 }
 
 // typedCaps is a grant of typed caps only.
+// denyNamespaceList forbids listing Namespaces, as the RBAC of a
+// namespace-scoped install does, so the reader falls back to one get per
+// namespace.
+func denyNamespaceList(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+	if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == "NamespaceList" {
+		return forbidden("namespaces")
+	}
+	return cl.List(ctx, list, opts...)
+}
+
 func typedCaps(m map[string]int) config.ExternalCaps { return config.ExternalCaps{ByType: m} }
 
 func newFakeClient(version string, objs ...client.Object) client.Client {
@@ -456,6 +466,7 @@ var _ = Describe("Reader", func() {
 					localQueue(v, "team-b", "lq2", "open-cq"),
 				).
 				WithInterceptorFuncs(interceptor.Funcs{
+					List: denyNamespaceList,
 					Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
 						return forbidden(key.Name)
 					},
@@ -493,6 +504,7 @@ var _ = Describe("Reader", func() {
 					localQueue(v, "team-a", "lq", "team-a-cq"),
 				).
 				WithInterceptorFuncs(interceptor.Funcs{
+					List: denyNamespaceList,
 					Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
 						if fail {
 							return apierrors.NewServiceUnavailable("etcd leader change")
@@ -526,6 +538,7 @@ var _ = Describe("Reader", func() {
 					localQueue(v, "team-a", "lq", "team-a-cq"),
 				).
 				WithInterceptorFuncs(interceptor.Funcs{
+					List: denyNamespaceList,
 					// The caller gives up while the label read is in flight; the
 					// API answers with a status error rather than ctx.Err().
 					Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
@@ -556,6 +569,7 @@ var _ = Describe("Reader", func() {
 					localQueue(v, "team-a", "lq-3", "cq-3"),
 				).
 				WithInterceptorFuncs(interceptor.Funcs{
+					List: denyNamespaceList,
 					Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
 						gets++
 						return forbidden(key.Name)
@@ -602,6 +616,7 @@ var _ = Describe("Reader", func() {
 					localQueue(v, "team-a", "lq", "team-a-cq"),
 				).
 				WithInterceptorFuncs(interceptor.Funcs{
+					List: denyNamespaceList,
 					Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
 						if deny {
 							return forbidden(key.Name)

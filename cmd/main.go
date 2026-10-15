@@ -66,6 +66,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/gpunodes"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/gpuusage"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kubecache"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	prometheusutil "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/prometheus"
@@ -490,6 +491,14 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+
+	// Kueue Workloads -- the borrowing managed check, the preemption check and
+	// the lender-waiting signal -- are read through an informer of this cache,
+	// indexed on owner UID. It starts on the first read, so a cluster without
+	// Kueue, or a policy that does not count borrowing, starts none and needs
+	// no watch on Workloads; until it syncs, reads go to the API server. A
+	// namespace-scoped install caches its own namespace only, as for pods.
+	kueue.UseWorkloadSource(kueue.NewInformerWorkloads(mgr.GetCache(), mgr.GetClient()))
 
 	// Initialize metrics
 	setupLog.Info("Creating metrics emitter instance")

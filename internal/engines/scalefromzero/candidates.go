@@ -275,6 +275,11 @@ func (e *Engine) placementFor(ctx context.Context, namespace string) placement {
 	// score (section 6.3 of that proposal) is not built; a wake waits for idle
 	// GPUs instead.
 	constraints = allocation.WithholdPromised(constraints, decision.LatestSharePromised(now))
+	// A wake spends capacity within nominal only, never borrowed capacity: a
+	// model woken onto borrowed GPUs can be preempted before it serves (B7).
+	// Within nominal, not guaranteed -- an idle queue on Kueue's default
+	// (Never) has a guaranteed figure of 0, and must still wake.
+	constraints = allocation.WithinNominal(constraints)
 	e.logBudgets(ctx, namespace, constraints, views, skipped, snapshotAge)
 	p.constraints = constraints
 	return p

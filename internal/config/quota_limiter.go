@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 )
@@ -149,6 +150,23 @@ type KueueQuotaSource struct {
 	// two fresh reads, before it counts as waiting (B6); a Go duration. Empty
 	// means DefaultLenderDebounce.
 	LenderDebounce string `yaml:"lenderDebounce,omitempty" json:"lenderDebounce,omitempty"`
+
+	// BorrowNamespaces, when set, limits counting borrowable capacity to these
+	// namespaces, so borrowing can be piloted on a few before the whole entry.
+	// Every other namespace caps at nominal, withheld with reason
+	// not-selected. Empty means every namespace the entry governs.
+	BorrowNamespaces []string `yaml:"borrowNamespaces,omitempty" json:"borrowNamespaces,omitempty"`
+
+	// ControllerNamespace is the namespace of the Kueue controller Deployment
+	// (kueue-controller-manager), whose image tag tells the Kueue version
+	// borrowing is checked against. Empty means kueue-system.
+	ControllerNamespace string `yaml:"controllerNamespace,omitempty" json:"controllerNamespace,omitempty"`
+}
+
+// KueueBorrowSelected reports whether the entry's borrowNamespaces selects ns:
+// true when the list is empty or names ns.
+func (q QuotaLimiterConfig) KueueBorrowSelected(ns string) bool {
+	return q.Kueue == nil || len(q.Kueue.BorrowNamespaces) == 0 || slices.Contains(q.Kueue.BorrowNamespaces, ns)
 }
 
 // Defaults of the borrowing timings (the Kueue borrowing proposal, PR #161,
@@ -242,6 +260,19 @@ func (k *KueueQuotaSource) validate(location string) error {
 			errs = append(errs, fmt.Errorf("%s.kueue.resources[%d]: resource name must not be empty", location, i))
 		}
 	}
+	seen := make(map[string]bool, len(k.BorrowNamespaces))
+	for i, ns := range k.BorrowNamespaces {
+		switch {
+		case len(validation.IsDNS1123Label(ns)) > 0:
+			errs = append(errs, fmt.Errorf("%s.kueue.borrowNamespaces[%d]: %q is not a namespace name", location, i, ns))
+		case seen[ns]:
+			errs = append(errs, fmt.Errorf("%s.kueue.borrowNamespaces[%d]: %q is listed twice", location, i, ns))
+		}
+		seen[ns] = true
+	}
+	if k.ControllerNamespace != "" && len(validation.IsDNS1123Label(k.ControllerNamespace)) > 0 {
+		errs = append(errs, fmt.Errorf("%s.kueue.controllerNamespace: %q is not a namespace name", location, k.ControllerNamespace))
+	}
 	for _, f := range []struct{ name, value string }{
 		{"refreshInterval", k.RefreshInterval},
 		{"placementTimeout", k.PlacementTimeout},
@@ -274,6 +305,9 @@ func (k *KueueQuotaSource) clone() *KueueQuotaSource {
 	if k.CountBorrowable != nil {
 		v := *k.CountBorrowable
 		out.CountBorrowable = &v
+	}
+	if k.BorrowNamespaces != nil {
+		out.BorrowNamespaces = slices.Clone(k.BorrowNamespaces)
 	}
 	return &out
 }

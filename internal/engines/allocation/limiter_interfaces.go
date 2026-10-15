@@ -103,6 +103,37 @@ type ResourceConstraints struct {
 	// headroom published from these constraints carries it on, so a warm pool
 	// can tell a snapshot that has charged its Pods from one that has not.
 	PoolsVersion uint64
+
+	// The three figures of cohort borrowing (B4), set only by a provider that
+	// counts it -- a namespace-scope Kueue quota with countBorrowable on, for
+	// the namespaces where every B1 condition holds. All nil otherwise, and then
+	// every consumer behaves exactly as before borrowing was counted.
+	//
+	// Where they are set, NamespacePools carries the GUARANTEED figure as each
+	// namespace's Limit, and Pools aggregates the reach (guaranteed plus borrow
+	// cap), for reporting: the provider is NamespaceScoped, so its aggregate is
+	// never a cluster bound, and borrowing is bounded by the namespace's own
+	// figures, the shared pools and the cluster bounds. The greedy optimizer spends the
+	// guaranteed pool first, then draws from SharedPools up to NamespaceBorrow's
+	// cap. Every other consumer reads a copy without them: WithinNominal for
+	// scale-from-zero, the warm pool and rescale, GuaranteedOnly for the
+	// utilization-share optimizer.
+
+	// NamespaceBorrow is, per namespace and accelerator type (NamespacePools'
+	// spelling), how far the namespace may go past its guaranteed figure.
+	NamespaceBorrow map[string]map[string]NamespaceBorrow
+	// SharedPools are the cohorts' free pools, one chunk per cohort, flavor and
+	// GPU resource, spent once across every namespace in the cohort.
+	SharedPools []SharedPoolChunk
+	// NamespaceCohorts maps a namespace to the cohorts of the queues it is
+	// granted, for every namespace the provider read -- not only those it counts
+	// borrowing for -- so the engine can charge a gated pod to its cohort.
+	NamespaceCohorts map[string][]string
+	// BorrowWithheld is, per active namespace a borrowing-capable provider
+	// reads cohort borrowing for and does not count it, why (a kueue.Reason).
+	// Set even when no namespace counts borrowing; read only to report
+	// (LimiterBudgets), never to decide.
+	BorrowWithheld map[string]string
 }
 
 // ConstraintProvider exposes hard constraints for the optimizer.

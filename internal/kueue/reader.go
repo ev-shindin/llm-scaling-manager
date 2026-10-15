@@ -58,18 +58,6 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 )
 
-// Group is the Kueue API group. The version is resolved from the cluster's
-// RESTMapper at read time, never hardcoded.
-const Group = "kueue.x-k8s.io"
-
-// Kinds read by the Reader.
-const (
-	KindClusterQueue   = "ClusterQueue"
-	KindLocalQueue     = "LocalQueue"
-	KindResourceFlavor = "ResourceFlavor"
-	KindCohort         = "Cohort"
-)
-
 // Options configures a Reader.
 type Options struct {
 	// Resources are the extended-resource names that count as GPUs. Empty means
@@ -87,6 +75,14 @@ type Options struct {
 	// result (Forbidden is not absent). ClusterQueues and ResourceFlavors are
 	// cluster-scoped and are always listed cluster-wide.
 	Namespace string
+
+	// ControllerNamespace is where the Kueue controller's Deployment is read
+	// for its version; empty means DefaultControllerNamespace.
+	ControllerNamespace string
+
+	// Workloads, when set, is where Workloads are read; nil reads through
+	// WorkloadsVia at the time of the read. Not part of the options' identity.
+	Workloads WorkloadSource `json:"-"`
 
 	// now is the clock; nil means time.Now. Tests inject one.
 	now func() time.Time
@@ -107,8 +103,15 @@ type Reader struct {
 	warnedLabels bool
 	// warnedCohorts is set once a failed Cohort list has been logged.
 	warnedCohorts bool
+	// nsListDenied is set once a Namespace LIST was Forbidden (a
+	// namespace-scoped install): labels are then read with one GET per
+	// namespace, as that RBAC allows, for the life of the Reader.
+	nsListDenied bool
 	// warnedNoStatus holds the cohort members logged as having no status.
 	warnedNoStatus map[string]bool
+	// version is the Kueue controller's version as last read, at versionAt.
+	version   ControllerVersion
+	versionAt time.Time
 }
 
 // NewReader constructs a Reader over the given client. Reads of unstructured
@@ -283,6 +286,12 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 	}
 	cohorts, unreadable, cohortsStale := r.cohorts(ctx)
 	topo.Cohorts, topo.CohortsUnreadable = cohorts, unreadable || cohortsStale
+	if slices.ContainsFunc(slices.Collect(maps.Values(topo.Queues)), func(q QueueState) bool { return q.Cohort != "" }) {
+		// Only borrowing depends on the version, and only a queue in a cohort
+		// can borrow: a cluster without cohorts costs no read.
+		version := r.controllerVersion(ctx)
+		topo.VersionUntested = version.Known && !version.Tested
+	}
 	// A read cut short by the caller is not a snapshot, even when every call
 	// it made happened to return: a client that ignores ctx (or one that turned
 	// the cancellation into some other error) must not cache what it saw.
@@ -752,11 +761,18 @@ func clusterQueueAdmission(cq *unstructured.Unstructured) namespaceAdmission {
 	return namespaceAdmission{selector: sel}
 }
 
+// nsListedKey marks, in a read's Namespace cache, that every Namespace was
+// listed: a namespace missing from the cache then does not exist. No
+// namespace is named "".
+const nsListedKey = ""
+
 // admitsNamespace reports whether a ClusterQueue admits ns. Namespace labels
-// are read only when the selector needs them, once per namespace per read —
-// a failed read included. The read is unstructured, so it goes to the API
-// server rather than starting a cluster-wide Namespace informer; it needs get
-// on namespaces.
+// are read only when the selector needs them, by ONE list of every Namespace
+// per read, so a read costs one call however many namespaces have
+// LocalQueues. Where that list is Forbidden (a namespace-scoped install, whose
+// RBAC names its namespaces), each namespace is read with a get instead, once
+// per read -- a failed read included. Both are unstructured, so they go to
+// the API server rather than starting a cluster-wide Namespace informer.
 //
 // A Forbidden or NotFound read returns a *withheldError; any other failure is
 // returned as is and must fail the caller's whole read.
@@ -767,7 +783,14 @@ func (r *Reader) admitsNamespace(ctx context.Context, a namespaceAdmission, ns s
 	case a.selector == nil:
 		return false, nil
 	}
+	if err := r.listNamespaces(ctx, cache); err != nil {
+		return false, err
+	}
 	got, ok := cache[ns]
+	if !ok && r.listedAll(cache) {
+		got = nsRead{err: &withheldError{ns: ns, err: apierrors.NewNotFound(schema.GroupResource{Resource: "namespaces"}, ns)}}
+		cache[ns], ok = got, true
+	}
 	if !ok {
 		u := &unstructured.Unstructured{}
 		u.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "Namespace"})
@@ -787,6 +810,36 @@ func (r *Reader) admitsNamespace(ctx context.Context, a namespaceAdmission, ns s
 		return false, got.err
 	}
 	return a.selector.Matches(got.labels), nil
+}
+
+// listedAll reports whether cache holds every Namespace from one list.
+func (r *Reader) listedAll(cache map[string]nsRead) bool {
+	_, ok := cache[nsListedKey]
+	return ok
+}
+
+// listNamespaces fills cache from one list of every Namespace, once per read.
+// A Forbidden list is remembered (nsListDenied) and leaves the cache to the
+// per-namespace gets; any other failure is returned and fails the read.
+// Callers must hold r.mu.
+func (r *Reader) listNamespaces(ctx context.Context, cache map[string]nsRead) error {
+	if r.nsListDenied || r.listedAll(cache) {
+		return nil
+	}
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "NamespaceList"})
+	if err := r.client.List(ctx, list); err != nil {
+		if apierrors.IsForbidden(err) {
+			r.nsListDenied = true
+			return nil
+		}
+		return fmt.Errorf("kueue: listing namespaces for their labels: %w", err)
+	}
+	for i := range list.Items {
+		cache[list.Items[i].GetName()] = nsRead{labels: labels.Set(list.Items[i].GetLabels())}
+	}
+	cache[nsListedKey] = nsRead{}
+	return nil
 }
 
 // addCaps sums two grants. Typed caps are merged by accelerator identity: two

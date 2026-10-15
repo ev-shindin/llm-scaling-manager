@@ -123,10 +123,20 @@ rules:
   - kueue.x-k8s.io
   resources:
   - localqueues
+  verbs:
+  - get
+  - list
+# Workloads are read through an informer (the borrowing managed check, the
+# preemption check, the lender-waiting signal), so they need watch. Denied,
+# the reads fall back to a list and borrowing is withheld where they fail.
+- apiGroups:
+  - kueue.x-k8s.io
+  resources:
   - workloads
   verbs:
   - get
   - list
+  - watch
 - apiGroups:
   - leaderworkerset.x-k8s.io
   resources:

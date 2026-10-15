@@ -79,8 +79,11 @@ package controller
 // list reads as "hierarchy unknown", never as flat. Workloads, the namespace's
 // own ResourceQuotas and the owners of GPU pods (Jobs; the apps kinds and
 // LeaderWorkerSets are granted above) back the checks that decide whether
-// borrowing may be counted. get and list only, never watch; nothing is written.
-// +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=cohorts;workloads,verbs=get;list
+// borrowing may be counted. Workloads are read through an informer of the
+// manager's cache (kueue.InformerWorkloads), started on first use, so they
+// need watch; everything else is get and list only. Nothing is written.
+// +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=cohorts,verbs=get;list
+// +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=workloads,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get
 //

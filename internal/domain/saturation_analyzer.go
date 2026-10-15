@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"time"
+
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -265,6 +267,15 @@ type VariantReplicaState struct {
 	FilledReplicas int
 	// PodGPUs is each pod's GPUs in one replica; see VariantMetadata.PodGPUs.
 	PodGPUs []int
+	// Placements is each pod template's node placement; see
+	// VariantMetadata.Placements.
+	Placements []PodPlacement
+	// UnplacedReplicas, UnplacedSince, UnplacedPods and UnplacedAt: see
+	// VariantMetadata.UnplacedReplicas.
+	UnplacedReplicas int
+	UnplacedSince    time.Time
+	UnplacedPods     []string
+	UnplacedAt       map[string]time.Time
 	// GPUsPerReplica is the number of GPUs required per replica, extracted from
 	// the deployment's container resource requests (nvidia.com/gpu, amd.com/gpu, etc.).
 	// Defaults to 1 if no GPU requests are found.
