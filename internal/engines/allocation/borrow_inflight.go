@@ -1,6 +1,8 @@
 package allocation
 
 import (
+	"cmp"
+	"maps"
 	"slices"
 	"sync"
 )
@@ -18,6 +20,9 @@ import (
 // reservation) or its desired count goes back below that target. The release
 // steps of the proposal (B5, B6) extend this record; it is keyed by namespace,
 // variant and chunk so a release can find what a variant borrowed and where.
+//
+// It is safe for concurrent use. Every method accepts a nil receiver, which
+// records nothing and holds nothing.
 type BorrowInFlight struct {
 	mu      sync.Mutex
 	entries map[inFlightKey]BorrowDraw
@@ -96,27 +101,24 @@ func (b *BorrowInFlight) Entries() []BorrowDraw {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	out := make([]BorrowDraw, 0, len(b.entries))
-	for _, d := range b.entries {
-		out = append(out, d)
+	keys := slices.SortedFunc(maps.Keys(b.entries), compareInFlightKeys)
+	out := make([]BorrowDraw, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, b.entries[k])
 	}
-	slices.SortFunc(out, func(x, y BorrowDraw) int {
-		kx, ky := keyOfDraw(x), keyOfDraw(y)
-		return compareInFlightKeys(kx, ky)
-	})
 	return out
 }
 
+// compareInFlightKeys orders keys by namespace, variant, cohort, flavor and
+// resource. Keys are unique in the record, so the order is total.
 func compareInFlightKeys(a, b inFlightKey) int {
-	for _, p := range [][2]string{{a.namespace, b.namespace}, {a.variant, b.variant}, {a.cohort, b.cohort}, {a.flavor, b.flavor}, {a.resource, b.resource}} {
-		switch {
-		case p[0] < p[1]:
-			return -1
-		case p[0] > p[1]:
-			return 1
-		}
-	}
-	return 0
+	return cmp.Or(
+		cmp.Compare(a.namespace, b.namespace),
+		cmp.Compare(a.variant, b.variant),
+		cmp.Compare(a.cohort, b.cohort),
+		cmp.Compare(a.flavor, b.flavor),
+		cmp.Compare(a.resource, b.resource),
+	)
 }
 
 // DeductUnreserved returns copies of constraints whose shared pools no longer

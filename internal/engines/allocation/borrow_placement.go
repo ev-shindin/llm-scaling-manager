@@ -42,6 +42,10 @@ type nsBorrowLeft struct {
 // draw, the shared pools, and the node view. Draws mutate it, so a pool is
 // spent once across every namespace in its cohort and a node hole once across
 // every model. Nil when no constraint counts borrowing.
+//
+// The methods the pass calls whether or not it borrows (reachFor,
+// newModelPlacer, drawsByVariant) accept a nil receiver and then answer "no
+// borrowing"; the others are reached only through a non-nil state.
 type borrowState struct {
 	borrow  map[string]map[string]*nsBorrowLeft
 	reach   map[string]map[string]int
