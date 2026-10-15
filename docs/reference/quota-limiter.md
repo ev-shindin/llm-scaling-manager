@@ -310,7 +310,8 @@ Otherwise the namespace caps at nominal, and the reason is logged and
 published (`wva_quota_borrow_withheld`). Withholding stops new borrowing
 only: a withheld namespace that Kueue still reads as borrowing borrows
 nothing new, and its borrowed replicas can still be given back to a waiting
-lender.
+lender. While it still borrows, it is capped at its guaranteed figure, not at
+nominal, so it does not grow into nominal a peer has borrowed.
 
 | Condition | Reason when it fails |
 |---|---|
