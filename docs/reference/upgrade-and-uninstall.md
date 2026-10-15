@@ -156,6 +156,116 @@ they enable. Do this, in order:
      kubectl get cm wva-controller-status -n "$NS" \
        -o jsonpath='{.data.policyNamespace} {.data.limiter} {.data.policyAccepted}{"\n"}'
      ```
+     It prints, for example, `wva-policy inventory+quota/gpu-inventory,tenant-quota true`:
+     the limiter types joined by `+`, then the name of every entry
+     ([what changed in this format](#limiters)).
+
+#### Limiters
+
+**Before you upgrade**, list the limiter types every policy declares. A
+cluster admin runs this; a namespace owner runs the inner command for their own
+namespace:
+
+```bash
+for ns in $(kubectl get cm -A --field-selector metadata.name=wva-scaling-policy-config \
+    -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{end}'); do
+  printf '%s: ' "$ns"
+  kubectl get cm wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' \
+    | yq -r '[.limiters[]?.type] | join(",")'
+done
+```
+
+For each line that lists `gpu-inventory` (or `inventory`, the same limiter)
+**and** `quota`:
+
+- **Check that the controller reading it can list nodes**:
+  ```bash
+  kubectl auth can-i list nodes --as=system:serviceaccount:<controller-namespace>:wva-controller-manager
+  ```
+  `no` is typical for a namespace-scoped install. The controller stays Ready
+  after the upgrade, skips the physical limiter and keeps bounding by the quota,
+  as it did before; it logs `Cluster policy declares gpu-inventory beside quota
+  limiters, but this controller may not list nodes` and sets
+  `wva_constraint_provider_skipped{provider="gpu-limiter",reason="node_read_denied"}`
+  to 1. To have both bound, a cluster admin runs `make setup-prereqs` for that
+  install (or `make enable-physical-limiter`); to keep the quota alone, drop the
+  `gpu-inventory` entry. A policy that lists `gpu-inventory` **alone** still
+  takes a controller without node read NotReady, as before.
+- **Check that every entry lists every GPU type its models use.** A type one
+  entry does not list is now denied even when another entry lists it, so a
+  model can lose a type it scaled on before. Print the entries and compare their
+  types with the `accelerator` the controller logs for each model:
+  ```bash
+  kubectl get cm wva-scaling-policy-config -n <ns> -o jsonpath='{.data.default}' | yq '.limiters'
+  ```
+  The physical limiter lists the GPUs the nodes advertise
+  (`wva_available_gpus`).
+
+What changes without a config change:
+
+- **A policy that declares both `gpu-inventory` and `quota` is bounded by
+  both.** Before, the quota alone applied and the physical entry was never
+  built. This can be tighter where other workloads hold GPUs. For this release
+  only, the controller also computes what the quota alone would have decided, at
+  most once every 10 cycles, and logs `Upgrade note (transitional)` naming the
+  variants that differ. That note is removed in the next release.
+- **A type one limiter entry denies stays denied** when another entry lists
+  it. Before, entries listing different types allowed the union (bug fix).
+- **Budgets follow the GPU family and product names.** A family key such as
+  `H100` bounds the sum of its products (`NVIDIA-H100-80GB-HBM3`, ...), so two
+  models, or the two roles of one P/D model, spelled differently can no longer
+  order the same GPUs twice. An allowlist that names a family and some of its
+  products denies the products it does not name (bug fix).
+- **A P/D pair commits only what fits together.** Before, a budget of 8 with
+  two 8-GPU roles ordered 16 (bug fix).
+- **A namespace-scope quota bounds only the namespaces it lists.** A namespace
+  it excludes is no longer bounded by the sum of the other tenants' caps: it is
+  bounded by the cluster bounds (the physical limiter or a cluster-scope quota),
+  and unbounded when there are none.
+- **A namespace allowance that is unlimited (`-1`) for every type now scales**
+  when nothing else bounds the cluster. It never did.
+- **Two utilization-share namespace groups on one GPU type split the free
+  cluster GPUs** rather than each counting all of them.
+- **A limiter that cannot be consulted in a cycle is skipped; the others still
+  bound.** Before, one missing input lifted every limiter. A skip sets
+  `wva_constraint_provider_skipped` and is logged when it starts and ends.
+- **Scale-from-zero debits each wake against its fallback snapshot**, so wakes
+  during a limiter outage cannot all pass on the same free GPUs. A wake with no
+  check at all counts in `wva_scale_from_zero_wake_unchecked_total`.
+
+What you read changes:
+
+- **`wva-controller-status` `.data.limiter`** was `<mode>/<names>`, and a policy
+  declaring both kinds read `quota/<quota names>`. It is now the limiter types
+  joined by `+`, then every entry's name: `inventory+quota/gpu,tenant-quota`. An
+  unnamed physical entry is named after its type:
+  `inventory+quota/gpu-inventory,tenant-quota`. The guides' `jsonpath` recipes
+  print this form.
+- **Log keys.** `GPU limiter constructed` and `GPU limiter (re)built from config`
+  carry `limiterTypes` (was `type`), in the same `+` form; `Loaded cluster
+  policy from the policy namespace` carries `limiterTypes` (was `limiterMode`).
+  A query on the old keys finds nothing.
+- **A second physical entry** logs `Ignoring physical (gpu-inventory) limiters
+  entries after the first` (was `WARNING: limiters declares more than one
+  physical (gpu-inventory) entry`).
+- **New metrics**: `wva_constraint_provider_skipped` and
+  `wva_scale_from_zero_wake_unchecked_total` ([Prometheus](prometheus.md)).
+
+**Rolling back** to an older controller reads a policy that declares both kinds
+as quota-only again: the physical limiter stops bounding, and that release only
+warns about it (`notEnforced`).
+
+Installer:
+
+- `WVA_LIMITER` takes a list: `WVA_LIMITER=gpu-inventory,quota`. Left unset, it
+  keeps the live policy's limiters, and the prerequisite check now asks for node
+  read against those: it warns, with the remedy, when a kept `gpu-inventory`
+  entry has none.
+- `make enable-physical-limiter` keeps a limiter of the other kind already in
+  the policy.
+- `make disable-physical-limiter` (also `make disable-limiter`) removes the kind
+  `WVA_LIMITER_TYPE` names: `gpu-inventory` (the default), `quota`, or `all`.
+  Exit codes are in [Uninstall](#policy-namespace-and-limiter-leftovers-cluster-admin).
 
 ### The external-scaler NetworkPolicy
 
@@ -319,14 +429,25 @@ kubectl get clusterrole,clusterrolebinding | grep -- "-$SUFFIX"   # anything the
 Only when no scaling-manager install remains on the cluster:
 
 ```bash
-make disable-physical-limiter   # clears the limiter from wva-policy and every policy ConfigMap a controller reads
+make disable-limiter WVA_LIMITER_TYPE=all   # every limiter, from wva-policy and every policy ConfigMap a controller reads
 kubectl delete namespace "$POLICY_NS"
 ```
+
+`WVA_LIMITER_TYPE=all` removes every limiter, of either kind, and exits 0 also
+where none is declared, so it is safe in an uninstall script. `make
+disable-limiter` is the same target as `make disable-physical-limiter`.
+
+With `WVA_LIMITER_TYPE=gpu-inventory` (the default) or `quota` it removes that
+kind only and keeps the other. Run on a policy that holds only the other kind,
+it removes nothing and exits non-zero, naming the kind that stays: `make` prints
+`make: *** [Makefile:<line>: disable-physical-limiter] Error 1` and itself exits
+2.
 
 `disable-physical-limiter` leaves the read-only RBAC in place on purpose; the
 namespace delete removes it. Like `enable-physical-limiter`, it needs `kubectl`,
 `jq` and `yq`. Where no limiter is declared it changes nothing and prints
-`No limiter declared in <ns>/wva-scaling-policy-config; nothing to remove.` A
+`No limiter declared in <ns>/wva-scaling-policy-config; nothing to remove.`,
+then warns `Nothing removed`, and exits 0. A
 failed edit stops with an error naming the step, and never leaves an emptied
 ConfigMap.
 

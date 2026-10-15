@@ -73,7 +73,13 @@ declared; the saturation engine is the only consumer that reads the published
 snapshot as-is. The scale-from-zero engine calls `EnsureFresh` when it decides a
 wake, so the timer being off does not affect it, and it asks only when a
 physical provider exists. A quota-only deployment never walks the cluster for a
-number nothing reads. See [quota limiter](../reference/quota-limiter.md#resource-access-in-quota-mode).
+number nothing reads. See [quota limiter](../reference/quota-limiter.md#resource-access-with-quotas-only).
+
+**Physical and quota bound together.** Declare both and each provider gets its
+own view: the physical limiter every GPU on the nodes, each quota only what our
+variants hold. The optimizer takes the smaller budget per accelerator, and a
+type either one denies is denied. The warm pool's headroom takes the same
+figures, the physical bound included.
 
 **A missing view is not zero.** Absent means "unknown", which both engines treat
 as permissive. An empty map claims that nothing is in use, and a provider handed

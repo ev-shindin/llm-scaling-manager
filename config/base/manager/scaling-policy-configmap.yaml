@@ -146,13 +146,10 @@ data:
   #   NONE      declare nothing, or an empty list: scaling is unconstrained. Both
   #             the optimizer budget and the scale-from-zero capacity check are
   #             off. WVA logs this at startup.
-  #   ONE MODE  a limiters list selects a SINGLE mode today: a quota entry wins
-  #             over any gpu-inventory entry, so pick one of the two forms below,
-  #             not both. Declaring both gives you the quota caps and NO physical
-  #             limiter, so nothing checks whether the GPUs exist — WVA reports
-  #             what it dropped (`notEnforced`) at parse and at startup rather
-  #             than leaving that invisible. Composing them as min(physical,
-  #             quota) is the limiter chain's job, tracked in issue #1003.
+  #   ALL OF    every entry is built, and scaling must fit all of them: the
+  #             forms below combine, (a) and (b) together bounding by the GPUs
+  #             that exist AND the declared caps. One physical limiter is
+  #             built; a second gpu-inventory entry is ignored with a warning.
   #
   #   # (a) physical-capacity limiter:
   #   limiters:

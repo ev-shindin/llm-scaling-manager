@@ -195,7 +195,9 @@ namespace) and its own ConfigMap in its install namespace.
 restarts. A cluster-scoped controller watches the policy namespace and picks the
 edit up live.
 
-A `limiters:` list selects a **single mode**, so declare **one** of these forms:
+Every entry in a `limiters:` list is built, and scaling must fit all of them. The
+forms below combine: (a) and (b) in one list bound by the GPUs that exist **and**
+the declared caps.
 
 ```yaml
 # (a) physical-capacity limiter. NOT a default -- with no limiters: list,
@@ -217,9 +219,10 @@ default: |
       quotas: { H100: 32 }
 ```
 
-- **Single mode.** With both a `quota` and a `gpu-inventory` entry, the quota
-  wins and `gpu-inventory` is ignored; only one limiter is built. (Composing
-  physical and quota caps is tracked in #1003.)
+- **Every entry is built.** A list holding a `gpu-inventory` and `quota`
+  entries bounds by both: a decision must fit the physical GPUs and every quota.
+  One physical limiter is built: a second `gpu-inventory` entry (under either
+  spelling) is ignored, with a warning, rather than rejecting the policy.
 - `type: quota` uses the **same schema** as `QuotaLimiterConfig`: `scope`,
   `quotas`, `namespaceQuotas` and `exclude` all apply, and several quota entries
   compose. A quota entry may set `kueue: { enabled: true }` to be bounded by

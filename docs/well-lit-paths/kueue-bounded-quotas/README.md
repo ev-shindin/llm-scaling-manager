@@ -208,7 +208,9 @@ transition, not its latency.
   `WVA_LIMITER=none`. With no `WVA_LIMITER`, the installer keeps the entry.
 - Cluster policy (cluster admin): re-run
   `make enable-physical-limiter WVA_LIMITER_TYPE=quota` with a finite
-  `WVA_QUOTAS` and no `WVA_QUOTA_KUEUE`, or run `make disable-physical-limiter`.
+  `WVA_QUOTAS` and no `WVA_QUOTA_KUEUE`, or run
+  `make disable-physical-limiter WVA_LIMITER_TYPE=quota` to remove the quota.
+  Without `WVA_LIMITER_TYPE=quota` it removes only the physical limiter.
 
 ### How it is tested
 

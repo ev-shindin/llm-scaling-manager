@@ -166,6 +166,7 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 - **[Analyzer checklists](developer-guide/analyzer-checklists.md)** — what a new analyzer must show before it graduates
 - **[Analyzer evidence](developer-guide/analyzer-evidence.md)** — what each scaling signal was measured to do, and on which run
 - **[Benchmark internals](developer-guide/benchmark-guide.md)** · **[two-variant benchmark](developer-guide/two-variant-wva-benchmark.md)** · **[recorded results](developer-guide/benchmark-results.md)** · **[an example k2 decision report](developer-guide/benchmark-k2-decisions-example.md)**
+- **[How the limiter set is built](developer-guide/limiter-composition.md)** — reading, building and rebuilding the declared limiters, skipping an unavailable one, the scale-from-zero snapshot
 - **[Release process](developer-guide/release-process.md)** · **[Contributing](../CONTRIBUTING.md)**
 
 ## What this project is

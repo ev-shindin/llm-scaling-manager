@@ -790,7 +790,7 @@ test install whose controller ran in `workload-variant-autoscaler-system`:
 
 ### `wva_pod_access_denied`
 - **Type**: Gauge
-- **Description**: `1` while a namespace-scoped controller with a `gpu-inventory` limiter in force may not list Pods cluster-wide, so the GPUs other namespaces hold on shared nodes cannot be counted; `0` otherwise. Under a quota limiter, or none, nothing reads that count, so it stays `0`. Absent on a cluster-scoped controller.
+- **Description**: `1` while a namespace-scoped controller with a `gpu-inventory` limiter in force (alone or beside quota limiters) may not list Pods cluster-wide, so the GPUs other namespaces hold on shared nodes cannot be counted; `0` otherwise. Under quota limiters alone, or none, nothing reads that count, so it stays `0`. Absent on a cluster-scoped controller.
 - **Labels**: optional `controller_instance`
 - **Use Case**: while `1`, GPU usage counts only the controller's own namespace, so the physical limiter can admit scale-ups onto nodes other namespaces fill. See [GPU limiter](gpu-limiter.md#when-policy-demands-a-limiter-the-controller-cannot-serve).
 
@@ -808,7 +808,7 @@ test install whose controller ran in `workload-variant-autoscaler-system`:
 
 ### `wva_node_access_denied`
 - **Type**: Gauge
-- **Description**: `1` while a configured physical GPU limiter cannot read nodes, `0` when it can. Absent when no physical limiter is configured — nothing is asking for them.
+- **Description**: `1` while a physical GPU limiter declared alone cannot read nodes, `0` when it can. Absent when no physical limiter is configured — nothing is asking for them. Beside a quota it stays `0`: the physical limiter is skipped, the quota still bounds, and `wva_constraint_provider_skipped{reason="node_read_denied"}` reports it.
 - **Labels**: optional `controller_instance`
 - **Use Case**: the combination that fails with no other symptom. A GPU-aware limiter allocates out of per-accelerator pools, so without nodes every variant is charged to no pool, receives no budget, and stops scaling up — and an unresolved accelerator is otherwise a normal state, so nothing else complains. Alert on `wva_node_access_denied == 1`; the shipped `WVANodeAccessDenied` rule does.
 
@@ -817,6 +817,22 @@ test install whose controller ran in `workload-variant-autoscaler-system`:
 - **Description**: `1` when the controller took limiters and quotas from its own ConfigMap because reading the Namespaces that decide the policy source (`wva-policy`, or the `wva.llmd.ai/policy-namespace` label on the managed namespace) was Forbidden; `0` otherwise. Set once at startup.
 - **Labels**: optional `controller_instance`
 - **Use Case**: a `1` means a cluster policy may be published that this controller cannot see, so it may run under a weaker bound than an admin believes. Grant the read with `NAMESPACE=<ns> make setup-prereqs` or `make enable-physical-limiter`. The shipped `WVAPolicyNamespaceUnverified` rule (warning, after 10m) alerts on it, by `namespace`: a controller-level gauge carries no model namespace. See [GPU limiter](gpu-limiter.md#what-the-controller-does-with-that).
+
+### `wva_constraint_provider_skipped`
+- **Type**: Gauge
+- **Description**: `1` while a declared GPU limiter is left out of scaling decisions. The series is removed when it bounds again, so no series means every declared limiter is in force.
+- **Labels**: `provider` (the limiter's name: `gpu-limiter` for the physical one, the entry name for a quota), `reason` (`unobserved`: its GPU usage has not been observed; `failed`: it could not compute its constraints; `no_constraints`; `node_read_denied`: `gpu-inventory` declared beside a quota on a controller that may not list nodes), optional `controller_instance`
+- **Use Case**: a skipped limiter lifts its bound. The others still apply, because a decision must fit every limiter that answered, but nothing checks what the skipped one would deny. A short `unobserved` after a restart is normal; anything sustained is not:
+  ```promql
+  max_over_time(wva_constraint_provider_skipped[10m]) == 1
+  ```
+  The shipped `WVAConstraintProviderSkipped` rule (warning, after 10m) alerts on it.
+
+### `wva_scale_from_zero_wake_unchecked_total`
+- **Type**: Counter
+- **Description**: scale-from-zero wakes published with no GPU capacity check although limiters are declared: every limiter was unavailable and no constraints younger than 5 minutes were on hand.
+- **Labels**: `namespace` (the model's; read as `exported_namespace`), optional `controller_instance`
+- **Use Case**: any increase is a wake that may land on a full accelerator. Read with `wva_constraint_provider_skipped`, which says which limiters were out.
 
 ### `wva_scale_from_zero_queue_fallback_active`
 - **Type**: Gauge
@@ -1511,13 +1527,14 @@ notifications link to it.
 
 | alert | severity | for | fires when | what to do | runbook |
 | --- | --- | --- | --- | --- | --- |
-| `WVANodeAccessDenied` | critical | 2m | a `gpu-inventory` limiter is configured and the controller may not list nodes. **No variant scales up.** | grant the controller's ServiceAccount get/list/watch on nodes (cluster admin: `make enable-physical-limiter` grants every controller it finds and verifies when it runs; re-run it after a new install), or remove the limiter | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
+| `WVANodeAccessDenied` | critical | 2m | a `gpu-inventory` limiter is declared alone and the controller may not list nodes. **No variant scales up.** Beside a quota, `WVAConstraintProviderSkipped` fires instead | grant the controller's ServiceAccount get/list/watch on nodes (cluster admin: `make enable-physical-limiter` grants every controller it finds and verifies when it runs; re-run it after a new install), or remove the limiter | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
 | `WVAModelParkedWhileRequestsRefused` | critical | 5m | a model has 0 replicas and EPP returns `ServiceUnavailable` for it: traffic is being dropped | read `wva_model_scaling_blocked` for the model first | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAModelHasNoWakeSignal` | warning | 10m | blocked reason `no-wake-signal`: EPP exports no flow-control queue, so a parked model cannot wake | enable the EPP `flowControl` feature gate, then restart the EPP Deployment (it reads its config once at start) | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAScalerTargetsUndecided` | warning | 10m | `wva_scaler_undecided_targets` above 0 in a namespace: the scaler answers those ScaledObjects their current count, so their replica counts are frozen | `wva_scaler_undecided_answers_total` says why; the log line `external scaler has no decision for this target` names each one | [T: ScaledObject](troubleshooting.md#scaledobject-ready-false-or-targets-unknown) |
 | `WVAHighErrorRate` | warning | 5m | `wva_errors_total` above 6/min for one `component`/`error_type` | grep the controller log for the `error_type` text | [Logs](monitoring.md#the-logs) |
 | `WVAMetricsCollectionFailing` | warning | 5m | `wva_metrics_collection_errors_total` above 5/min for one `query_type`/`reason`: decisions run on stale data | check Prometheus reachability and the controller's Prometheus settings | [T: metrics stale](troubleshooting.md#metrics-stale-or-missing) |
 | `WVAPolicyNamespaceUnverified` | warning | 10m | the controller may not read Namespaces, so it cannot tell whether an admin published cluster policy for it. It runs on its own ConfigMap, which may be weaker than the admin intends | (cluster admin) `NAMESPACE=<ns> make setup-prereqs`, then restart the controller: the value is set once at startup | [T: policy namespace unverified](troubleshooting.md#cluster-policy-is-not-applied-policy-namespace-unverified) |
+| `WVAConstraintProviderSkipped` | warning | 10m | a declared limiter has been left out of decisions (`provider`, `reason`); the others still bound, so models scale past what it would allow | `node_read_denied`: (cluster admin) `make setup-prereqs`, or drop `gpu-inventory`. `failed`: the `GPU constraint provider skipped` log line says why | [T: GPUs held](troubleshooting.md#gpus-held-or-quota-spent) |
 | `WVAGPUResourceExhausted` | warning | 5m | GPU-labeled nodes report zero allocatable GPUs of a type. Only with a `gpu-inventory` limiter | (cluster admin) check the nodes' allocatable GPUs and the device-plugin pods. No alert does not mean GPUs are free: the metric exists only with that limiter | [T: GPUs held](troubleshooting.md#gpus-held-or-quota-spent) |
 | `WVAReplicaScalingThrashing` | warning | 10m | more than 2 cycles per minute for one variant whose decision was not `no-change`. The counter rises on every such cycle, so it fires on flapping **and** on a scale-up the workload never catches up with: actuation stuck, Pods Pending, slow replica starts | read the model's `scaling-decision` lines: `tgt` alternating is flapping; `tgt` steady above `curr` is actuation not landing | [T: flapping](troubleshooting.md#a-model-is-flapping), [T: actuation stuck](troubleshooting.md#desired-is-not-current-actuation-stuck) |
 | `WVAModelWillNotScaleToZero` | info | 15m | blocked reason `variant-floor` or `policy-forbids-zero`: the configuration asks to park and forbids it | make the two halves agree | [will not park](../guides/scale-to-zero/README.md#when-a-model-will-not-park) |

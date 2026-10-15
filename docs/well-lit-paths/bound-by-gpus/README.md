@@ -26,7 +26,8 @@ You need a cluster admin, and controllers installed by
 3. [Check it works](../../guides/admin-gpu-bounding/README.md#verification): each controller reports the limiter `inventory/<name>`, not `none`.
 
 To undo, the admin runs `make disable-physical-limiter`
-([Cleanup](../../guides/admin-gpu-bounding/README.md#cleanup)). To bound one
+([Cleanup](../../guides/admin-gpu-bounding/README.md#cleanup)). It removes only
+the physical limiter; a quota in the same policy stays. To bound one
 install instead, its namespace owner adds `WVA_LIMITER=gpu-inventory` to
 `make deploy-wva` ([configuration](../../reference/configuration.md#core-configuration));
 the same owner can edit it away.
@@ -77,10 +78,10 @@ where that restart is not acceptable now. A later `make deploy-wva` without
 
 ### Which limiter
 
-**Declare one, not both.** The controller builds a single limiter. When the
-`limiters:` list holds both kinds, the quota wins and the physical limiter is
-dropped (logged as `notEnforced`). A `ResourceQuota` is the backstop for the
-other question.
+**You can declare both.** Every limiter in the `limiters:` list is built, and a
+model must fit all of them. Enabling one kind keeps the other. Declare both when
+the allowance can exceed the GPUs that exist, for example a Kueue quota on a
+shared cluster.
 
 | | `gpu-inventory` | `quota` |
 | --- | --- | --- |

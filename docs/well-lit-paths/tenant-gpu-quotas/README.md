@@ -34,9 +34,12 @@ and a cluster admin for a budget the tenant cannot edit
 3. Check it works: a model held at its allowance raises `wva_decisions_limited_total` or a `ResourceConstrained` Event. A fully spent quota shows neither ([Verifying it](#verifying-it)).
 
 The `<accelerator>` key must match the accelerator name the controller logs
-exactly. To undo, the admin runs `make disable-physical-limiter`
-([Cleanup](../../guides/admin-gpu-bounding/README.md#cleanup)); for one
-install, re-run `make deploy-wva` with `WVA_LIMITER=none`.
+exactly. To undo, the admin runs
+`make disable-physical-limiter WVA_LIMITER_TYPE=quota`
+([Cleanup](../../guides/admin-gpu-bounding/README.md#cleanup)); without
+`WVA_LIMITER_TYPE=quota` it removes only the physical limiter and leaves the
+quota in force. For one install, re-run `make deploy-wva` with
+`WVA_LIMITER=none`.
 
 ## What it costs
 
@@ -128,11 +131,12 @@ manager had placed nothing. "The hardware is full" is the physical limiter's
 statement.
 
 **Ceilings, not reservations.** A finite cap guarantees a tenant never
-*exceeds* it, never that it can *reach* it. The cluster aggregate is the sum of
-the finite caps. A namespace that is unlimited (`-1`) or excluded draws from
-that aggregate without adding to it, and can use budget a capped peer would
-have used. Nobody exceeds their own authorization, but know this before you
-promise a team its number.
+*exceeds* it, never that it can *reach* it. The quota bounds only the
+namespaces it lists. A namespace that is unlimited (`-1`) or excluded is
+bounded only by the cluster bounds (a `gpu-inventory` entry or a cluster-scope
+quota; nothing, without one), so it can use GPUs a capped peer would have used.
+Nobody exceeds their own authorization, but know this before you promise a team
+its number.
 
 **A missing entry denies.** `0` or no entry for an accelerator type means no
 allocation; `-1` means unbounded. A typo in a type name is therefore a denial.
@@ -173,7 +177,8 @@ V(1)) means the budget is in the controller's own `wva-scaling-policy-config`.
 namespace you normally cannot read: ask the admin for read access or the
 figures. The admin can also read
 `kubectl get cm wva-controller-status -n <wva-namespace> -o jsonpath='{.data.policyNamespace} {.data.limiter} {.data.policyAccepted}'`,
-which shows `quota/<name>`.
+which shows `quota/<name>` (`inventory+quota/gpu-inventory,<name>` when a
+`gpu-inventory` entry is declared beside it).
 
 A clamped decision shows in Prometheus (labels `variant_name`,
 `limiter_name`; the model's namespace is `exported_namespace`):

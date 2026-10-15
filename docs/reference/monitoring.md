@@ -200,7 +200,8 @@ wva_metrics_freshness_status{status!="fresh"} > 0
 
 | metric | meaning |
 | --- | --- |
-| `wva_node_access_denied` | `1` = a GPU limiter is configured but nodes are unreadable. Every variant gets no budget and **will not scale up**. |
+| `wva_node_access_denied` | `1` = a GPU limiter is declared alone but nodes are unreadable. Every variant gets no budget and **will not scale up**. Beside a quota it stays `0`; see the next row. |
+| `wva_constraint_provider_skipped` | `1` = a declared limiter is left out of decisions (by `provider` and `reason`); the others still bound. The opposite failure: scaling may go past what it would allow. |
 | `wva_decisions_limited_total` | rising = a limiter is capping decisions. Pair with `wva_available_gpus` and `wva_spare_capacity`. A fully spent quota can leave it flat: compare what the quota allows with what the model holds. |
 | `wva_variant_at_max_replicas` | `1` = the variant sits on its own `maxReplicaCount`. With utilization still above the scale-up threshold, raise `maxReplicaCount`; more GPUs will not help. |
 | `wva_unmeasured_queue` | non-zero = requests queue for a model with no attributed replica: the pods serving it are not scraped or not attributed, so nothing scales. |

@@ -43,18 +43,24 @@ kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
 ```
 
 ```
-INFO  GPU limiter constructed  {"type": "quota", "name": "install-quota"}   # bounded
-INFO  GPU limiter constructed  {"type": "none", "name": "no-limiter"}       # NOT bounded
+INFO  GPU limiter constructed  {"type": "quota", "limiters": "quota/install-quota", ...}                    # bounded
+INFO  GPU limiter constructed  {"type": "inventory+quota", "limiters": "inventory+quota/gpu,install-quota", ...}  # bounded by both
+INFO  GPU limiter constructed  {"type": "none", "limiters": "none", "name": "no-limiter"}                  # NOT bounded
 ```
 
-> **Declare one kind, not both.** `limiters:` is a list, but only one limiter is
-> built, and a quota entry wins. `quota` next to `gpu-inventory` gives the
-> declared caps and **no physical limiter**, so nothing checks whether the GPUs
-> exist, and a scale-from-zero wake can land on a full accelerator.
+> **Both kinds bound together.** Declare `gpu-inventory` and `quota` in one
+> `limiters:` list and every one is built: a decision must fit the GPUs that
+> exist **and** the allowance. One physical limiter is built: a second
+> `gpu-inventory` entry is ignored, with a warning in the controller log.
 >
-> The ConfigMap parse and the startup log both name what is not enforced
-> (`notEnforced`). Bounding by `min(physical, quota)` is
-> [issue #1003](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1003).
+> **Upgrading from a release that built only one.** There, a quota entry made
+> the physical one inert. Now both apply, which can hold a model lower when
+> other workloads (training jobs included) hold GPUs. For one release the
+> controller logs `Upgrade note (transitional)` naming every variant whose
+> target the quota alone would have set differently, checked every tenth cycle.
+>
+> If one limiter cannot be consulted in a cycle (its usage is not observed yet,
+> or it errors), it is skipped and named in the log; the others still bound.
 
 ## Who is allowed to change the bound
 
@@ -221,6 +227,14 @@ the policy namespace already exists.
 If cluster policy declares `gpu-inventory` and the controller may not list nodes,
 it reports **not ready** and stays that way.
 
+Declared **beside a quota**, it does not go NotReady. It skips the physical
+limiter and the quota still bounds every decision. It logs `Cluster policy
+declares gpu-inventory beside quota limiters, but this controller may not list
+nodes` when that starts, and
+`wva_constraint_provider_skipped{provider="gpu-limiter",reason="node_read_denied"}`
+is 1 until the read is granted. Such a policy was bounded by the quota alone
+before limiters composed, so failing the pod would freeze scaling on upgrade.
+
 It is a *readiness* check, not a startup one, because this can happen at two
 times:
 
@@ -243,8 +257,9 @@ which the node-reader grant does not include. Without it the list is Forbidden,
 and usage counts only the controller's own namespace, so GPUs other namespaces
 hold on those nodes read as free. While a `gpu-inventory` limiter is in force,
 `wva_pod_access_denied` is **1** and an error is logged. Grant `list` on `pods`
-cluster-wide, or bound with a quota limiter. Under a quota limiter, or none, the
-undercount bounds nothing: the gauge stays 0 and the log says so once at info.
+cluster-wide, or drop `gpu-inventory` and bound with a quota limiter alone (a
+quota declared beside `gpu-inventory` leaves the physical limiter reading this
+count). Under quota limiters alone, or none, the undercount bounds nothing: the gauge stays 0 and the log says so once at info.
 
 ### What this does and does not bound
 
@@ -361,6 +376,12 @@ it is reported three ways:
 - `wva_node_access_denied` set to **1**;
 - the **`WVANodeAccessDenied`** alert (critical, fires after 2m) if you installed
   with `DEPLOY_ALERTING_RULES=true`.
+
+That is for `gpu-inventory` declared alone. Beside a quota, the controller
+still scales: the physical limiter is skipped and the quota bounds. Then
+`wva_node_access_denied` stays 0, and the skip is reported as
+`wva_constraint_provider_skipped{reason="node_read_denied"}` and the
+**`WVAConstraintProviderSkipped`** alert (warning, after 10m).
 
 ## FMA namespaces: the GPU picture is a lower bound
 

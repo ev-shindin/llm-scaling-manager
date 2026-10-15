@@ -105,7 +105,9 @@ kubectl get cm wva-controller-status -n ${NAMESPACE} \
 - `policyNamespace` is the controller's own namespace: your ConfigMap's
   `limiters:` are in force.
 - Any other value (such as `wva-policy`): the limiters come from there and yours
-  are ignored. `limiter` names the one in force.
+  are ignored. `limiter` names those in force: their types joined by `+`, then
+  every entry's name, such as `quota/install-quota` or
+  `inventory+quota/gpu-inventory,install-quota`.
 - **Forbidden** (normal in the out-of-reach shape): you cannot read the
   controller's namespace. Ask your admin, or read the Events on your
   ScaledObjects. A limiter holding a scale-up shows as `ResourceConstrained`:

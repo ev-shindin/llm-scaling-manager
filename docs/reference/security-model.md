@@ -406,11 +406,13 @@ scaling manager asks for; the quota bounds what the cluster admits
 | Cannot tell whether `wva-policy` exists (an API error other than NotFound or Forbidden) | refuses to start | closed |
 | Forbidden reading Namespaces (namespace-scoped, Kubernetes, no `make setup-prereqs` grant) | not treated as "no policy namespace": it uses its own ConfigMap, logs `Cannot tell whether a cluster admin published policy` with the fix at Info, and sets `wva_policy_namespace_unverified` = 1 (alert `WVAPolicyNamespaceUnverified`, installed only with `DEPLOY_ALERTING_RULES=true`) | **open**, and reported |
 | A ClusterQueue with a `namespaceSelector`, the managed Namespace's labels unreadable | that queue's grant is withheld from the namespace | closed |
-| `gpu-inventory` declared, node read denied | NotReady via the `gpu-policy` readiness check; `wva_node_access_denied` = 1 (alert `WVANodeAccessDenied` with `DEPLOY_ALERTING_RULES=true`) | closed |
+| `gpu-inventory` declared beside a quota, node read denied | Ready; the physical limiter is skipped and the quota bounds; `wva_constraint_provider_skipped{reason="node_read_denied"}` = 1 | held |
+| `gpu-inventory` declared alone, node read denied | NotReady via the `gpu-policy` readiness check; `wva_node_access_denied` = 1 (alert `WVANodeAccessDenied` with `DEPLOY_ALERTING_RULES=true`) | closed |
 | Quota entry with no entry for an accelerator type | that type is denied | closed |
 | Kueue unreadable, never read since start | the static quota entry alone; with `-1` that is no cap | **open** |
 | Kueue unreadable after a good read | the last good snapshot stays in force | held |
-| Two limiter kinds declared | only the quota is built; the physical limiter is dropped and named as `notEnforced` | **open** on physical capacity |
+| Two limiter kinds declared | both are built; a decision must fit both | closed |
+| One limiter unavailable in a cycle (usage not observed yet, or an error) | skipped, logged when the skip starts and ends, and `wva_constraint_provider_skipped` = 1; the others still bound. Only when every one is unavailable is a decision unchecked; scale-from-zero then uses its last constraints if under 5 minutes old, debiting each wake from them (best-effort: per namespace and accelerator name), and counts a wake with no check in `wva_scale_from_zero_wake_unchecked_total` | held |
 | The installer cannot tell where KEDA runs | no external-scaler NetworkPolicy is applied; the installer warns and `make verify-deployment` reports `:9090` open | **open**, and reported |
 | The external-scaler NetworkPolicy names a namespace KEDA does not run in | KEDA's calls are dropped; ScaledObjects go not-Ready and nothing scales | closed |
 
