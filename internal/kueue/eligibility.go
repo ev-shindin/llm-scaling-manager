@@ -38,8 +38,10 @@ type NamespaceEligibility struct {
 	// Reason is why borrowing must not be counted in the namespace
 	// (ReasonNotKueueManaged, ReasonResourceQuotaUnreadable), ReasonStale when
 	// a ResourceQuota read failed for a reason that may pass (the caller then
-	// freezes, as for a stale snapshot), or empty. The GPU bound condition needs
-	// the queue figures and is the caller's.
+	// freezes this namespace's borrowing at its last figures), or empty. A
+	// failure that lasts longer than unreadableAfter refresh intervals is no
+	// longer stale but ReasonResourceQuotaUnreadable. The GPU bound condition
+	// needs the queue figures and is the caller's.
 	Reason Reason
 	// GPUQuota is, per GPU resource name, the tightest hard limit any of the
 	// namespace's ResourceQuotas sets on it (requests.<name> or <name>). Absent
@@ -53,7 +55,16 @@ type NamespaceEligibility struct {
 	// askedAt is when the namespace was last asked about; Evaluate forgets
 	// one not asked about for long.
 	askedAt time.Time
+	// failingSince is when the namespace's ResourceQuota reads began failing
+	// for a reason that may pass; zero while they succeed.
+	failingSince time.Time
 }
+
+// unreadableAfter is how many refresh intervals a ResourceQuota read may keep
+// failing for a reason that may pass before the namespace is withheld as
+// unreadable instead of frozen: a freeze is for a blip, and one tenant's
+// failing reads must not hold that tenant's borrowing frozen indefinitely.
+const unreadableAfter = 5
 
 // Eligibility evaluates the engine-side B1 conditions per namespace, at most
 // once per refresh interval per namespace, and keeps the answers.
@@ -117,8 +128,8 @@ func (e *Eligibility) Evaluate(ctx context.Context, namespaces []string) map[str
 			out[ns] = prev
 			continue
 		}
-		got := e.evaluate(ctx, ns, prev, seen)
-		if got.Reason != ReasonStale {
+		got := e.evaluate(ctx, ns, prev, seen, now)
+		if got.Reason != ReasonStale && got.failingSince.IsZero() {
 			got.EvaluatedAt = now
 		}
 		got.askedAt = now
@@ -139,7 +150,7 @@ func (e *Eligibility) Evaluate(ctx context.Context, namespaces []string) map[str
 const forgetAfter = time.Hour
 
 // evaluate runs both checks for one namespace.
-func (e *Eligibility) evaluate(ctx context.Context, ns string, prev NamespaceEligibility, seen bool) NamespaceEligibility {
+func (e *Eligibility) evaluate(ctx context.Context, ns string, prev NamespaceEligibility, seen bool, now time.Time) NamespaceEligibility {
 	got := NamespaceEligibility{}
 	managed, known := e.managed(ctx, ns)
 	switch {
@@ -152,6 +163,14 @@ func (e *Eligibility) evaluate(ctx context.Context, ns string, prev NamespaceEli
 		got.managed = prev.managed
 	}
 	quota, err := e.gpuQuota(ctx, ns)
+	if err != nil && !apierrors.IsForbidden(err) {
+		got.failingSince = now
+		if seen && !prev.failingSince.IsZero() {
+			got.failingSince = prev.failingSince
+		}
+	}
+	failingTooLong := e.interval > 0 && !got.failingSince.IsZero() &&
+		now.Sub(got.failingSince) >= unreadableAfter*e.interval
 	switch {
 	case !got.managed:
 		got.Reason = ReasonNotKueueManaged
@@ -160,10 +179,16 @@ func (e *Eligibility) evaluate(ctx context.Context, ns string, prev NamespaceEli
 		// be the very bound borrowing relies on. Forbidden lasts until someone
 		// grants the read, so the answer is kept for the interval.
 		got.Reason = ReasonResourceQuotaUnreadable
+	case failingTooLong:
+		// Failing for unreadableAfter intervals is no blip: withheld, as for
+		// Forbidden. Asked again on the next call, so it recovers as soon as
+		// a read passes.
+		got.Reason = ReasonResourceQuotaUnreadable
+		quota = prev.GPUQuota
 	case err != nil:
-		// A read that may pass by the next cycle: stale, which freezes the
-		// entry's borrowing rather than dropping it to nominal, and is not
-		// kept for the interval (Evaluate asks again next call). The last
+		// A read that may pass by the next cycle: stale, which freezes this
+		// namespace's borrowing rather than dropping it to nominal, and is
+		// not kept for the interval (Evaluate asks again next call). The last
 		// figures read stand in meanwhile.
 		got.Reason = ReasonStale
 		quota = prev.GPUQuota

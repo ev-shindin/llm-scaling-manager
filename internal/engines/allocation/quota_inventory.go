@@ -246,16 +246,20 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 	}
 	// Borrowing is computed outside the lock: the eligibility check may read
 	// the API server. A namespace whose ResourceQuota read may pass by the
-	// next cycle makes the whole read stale: it freezes like a failed read.
+	// next cycle freezes alone (computeBorrowing); only a stale Kueue read
+	// freezes the whole entry.
 	var view *borrowView
 	stale := false
 	if q.countsBorrowing() && !ext.ObservedAt.IsZero() {
 		stale = q.snapshotStale(ext, err)
 		if !stale {
-			view, stale = q.computeBorrowing(ctx, ext)
-			if stale {
-				view = nil
+			q.mu.RLock()
+			last := q.borrow
+			q.mu.RUnlock()
+			if last == nil {
+				last = q.borrowOpts.Memory.load(q.memoryKey())
 			}
+			view = q.computeBorrowing(ctx, ext, last)
 		}
 	}
 	// Maps marshal with sorted keys, so equal snapshots fingerprint equal.
@@ -397,9 +401,14 @@ func (q *QuotaInventory) snapshotStale(ext config.ExternalQuotas, readErr error)
 // the static entry as the nominal figure is; every other namespace keeps the
 // nominal figure.
 //
-// stale reports that a namespace's engine-side answer was kueue.ReasonStale (a
-// read that may pass): the caller then treats the whole read as stale.
-func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.ExternalQuotas) (view *borrowView, stale bool) {
+// A namespace whose engine-side answer is kueue.ReasonStale (a ResourceQuota
+// read that may pass) freezes alone: when last counted it, it stays counted,
+// at the fresh Kueue figures and its last ResourceQuota figures, and marked
+// Frozen, so it borrows nothing new; when last did not, it is withheld as
+// stale. Every other namespace borrows and is released as usual, so one
+// tenant's failing ResourceQuota reads starve no one else. The eligibility
+// check turns a failure that persists into resourcequota-unreadable.
+func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.ExternalQuotas, last *borrowView) (view *borrowView) {
 	candidates := make([]string, 0, len(ext.Borrow))
 	for ns, rows := range ext.Borrow {
 		if ns == config.QuotaLimiterReservedNamespaceKey || q.static.IsExcluded(ns) || !slices.ContainsFunc(rows, config.ExternalBorrow.Counted) {
@@ -411,11 +420,13 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 	elig := q.borrowOpts.Eligibility.Evaluate(ctx, candidates)
 
 	view = &borrowView{withheld: map[string]string{}, cohorts: map[string][]string{}}
-	counted := map[string]bool{}
+	counted, frozen := map[string]bool{}, map[string]bool{}
 	for _, ns := range candidates {
 		e := elig[ns]
-		stale = stale || e.Reason == kueue.ReasonStale
 		reason := string(e.Reason)
+		if e.Reason == kueue.ReasonStale && last != nil && last.byNS[ns] != nil {
+			reason, frozen[ns] = "", true
+		}
 		if reason == "" && !q.borrowOpts.Physical && !resourceQuotaBounds(ext.Borrow[ns], e.GPUQuota) {
 			reason = string(kueue.ReasonNoGPUBound)
 		}
@@ -425,8 +436,8 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 		}
 		counted[ns] = true
 	}
-	if len(counted) == 0 || stale {
-		return view, stale
+	if len(counted) == 0 {
+		return view
 	}
 
 	at := func(figures map[string]config.ExternalCaps) config.ExternalQuotas {
@@ -453,6 +464,7 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 			if key, found := accelerator.FindKey(within.NamespaceQuotas[ns], accType); found {
 				b.WithinNominal = within.NamespaceQuotas[ns][key]
 			}
+			b.Frozen = frozen[ns]
 			perType[accType] = b
 		}
 		view.byNS[ns] = perType
@@ -485,7 +497,7 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 			},
 		})
 	}
-	return view, false
+	return view
 }
 
 // namespaceBorrow derives one namespace's borrowing figures for one type from
@@ -647,7 +659,7 @@ func (q *QuotaInventory) logBorrowing(logger logr.Logger, ext config.ExternalQuo
 			applied[ns] = map[string]appliedBorrow{}
 			for t, b := range perType {
 				applied[ns][t] = appliedBorrow{Guaranteed: view.effective.NamespaceQuotas[ns][t], BorrowCap: b.Cap,
-					WithinNominal: b.WithinNominal, NominalLentOut: b.NominalLentOut}
+					WithinNominal: b.WithinNominal, NominalLentOut: b.NominalLentOut, Frozen: b.Frozen}
 			}
 		}
 	}
@@ -685,6 +697,9 @@ type appliedBorrow struct {
 	BorrowCap      int `json:"borrowCap"`
 	WithinNominal  int `json:"withinNominal"`
 	NominalLentOut int `json:"nominalLentOut,omitempty"`
+	// Frozen: the namespace's ResourceQuota read failed; nothing new is
+	// borrowed for it until a read passes.
+	Frozen bool `json:"frozen,omitempty"`
 }
 
 // governsBorrowRows reports whether ns's borrowing rows are this entry's to

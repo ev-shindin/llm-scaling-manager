@@ -85,6 +85,9 @@ func LimiterBudgets(constraints []*ResourceConstraints, blocked map[string]bool)
 // borrowableNow is min(cap, free GPUs of ns's cohorts' chunks serving acc), and
 // why it is 0 when it is.
 func borrowableNow(c *ResourceConstraints, ns, acc string, nb NamespaceBorrow, blocked map[string]bool) (int, string) {
+	if nb.Frozen {
+		return 0, string(kueue.ReasonStale)
+	}
 	if nb.Cap == 0 {
 		return 0, BorrowReasonNoBorrowCap
 	}

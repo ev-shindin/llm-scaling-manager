@@ -75,13 +75,17 @@ func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrow
 				bs.borrow[ns] = map[string]*nsBorrowLeft{}
 			}
 			for accType, b := range perType {
+				drawable := b.Cap
+				if b.Frozen {
+					drawable = 0 // its ResourceQuota read failed: nothing new
+				}
 				prev, seen := bs.borrow[ns][accType]
 				if !seen {
-					bs.borrow[ns][accType] = &nsBorrowLeft{cap: b.Cap, lentOut: b.LentOut}
+					bs.borrow[ns][accType] = &nsBorrowLeft{cap: drawable, lentOut: b.LentOut}
 					continue
 				}
 				// Two Kueue-backed entries hold the namespace: the tighter cap.
-				prev.cap = tighterBudget(prev.cap, b.Cap)
+				prev.cap = tighterBudget(prev.cap, drawable)
 				prev.lentOut = max(prev.lentOut, b.LentOut)
 			}
 		}

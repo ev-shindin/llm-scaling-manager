@@ -194,12 +194,60 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 		frozenAtGuaranteed(b.inv, constraintsOf(b))
 	})
 
-	It("freezes when a namespace's ResourceQuota read may pass (eligibility stale)", func() {
+	// A ResourceQuota read that may pass freezes that namespace alone: its
+	// figures stay, it draws nothing new, and the cohort's pools stay fresh,
+	// so the other namespaces keep borrowing and lenders keep being released
+	// to. Before, it made the whole entry stale: every pool read Free 0 and
+	// Stale, which also froze every lender release in the cohort.
+	It("freezes only the namespace whose ResourceQuota read may pass (eligibility stale)", func() {
+		rowB := row
+		rowB.Queue = "team-b-cq"
+		two := snapshot
+		two.Namespace = map[string]config.ExternalCaps{
+			"team-a": {ByType: map[string]int{"H100": 8}}, "team-b": {ByType: map[string]int{"H100": 8}}}
+		two.NamespaceGuaranteed = map[string]config.ExternalCaps{
+			"team-a": {ByType: map[string]int{"H100": 0}}, "team-b": {ByType: map[string]int{"H100": 0}}}
+		two.NamespaceWithinNominal = map[string]config.ExternalCaps{
+			"team-a": {ByType: map[string]int{"H100": 8}}, "team-b": {ByType: map[string]int{"H100": 8}}}
+		two.Borrow = map[string][]config.ExternalBorrow{"team-a": {row}, "team-b": {rowB}}
+		two.SharedPools = []config.ExternalSharedPool{{Cohort: "c", Flavor: "h100", Resource: "nvidia.com/gpu",
+			Accelerator: "H100", Free: 16, Lenders: []config.ExternalLender{{Queue: "lender-cq", Waiting: true}}}}
+
 		elig := &fakeEligibility{}
+		b := build(entry(nil), elig, true, two)
+		both := map[string]map[string]int{"team-a": {}, "team-b": {}}
+		_, err := b.lim.ComputeConstraints(ctx, nil, both)
+		Expect(err).NotTo(HaveOccurred())
+
+		elig.byNS = map[string]kueue.NamespaceEligibility{"team-b": {Reason: kueue.ReasonStale}}
+		c, err := b.lim.ComputeConstraints(ctx, nil, both)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(c.SharedPools).To(HaveLen(1))
+		Expect(c.SharedPools[0].Stale).To(BeFalse(), "the cohort's pool stays fresh: lender releases go on")
+		Expect(c.SharedPools[0].Free).To(Equal(16), "team-a still borrows")
+		Expect(c.SharedPools[0].Lenders).To(HaveLen(1))
+		Expect(b.inv.EffectiveConfig().NamespaceQuotas["team-b"]).To(Equal(map[string]int{"H100": 0}),
+			"team-b keeps its figures: never shrunk back to nominal")
+		Expect(c.NamespaceBorrow["team-b"]["H100"].Cap).To(Equal(16))
+
+		bs := newBorrowState([]*ResourceConstraints{c}, nil)
+		Expect(bs.borrow["team-a"]["H100"].cap).To(Equal(16), "team-a may draw")
+		Expect(bs.borrow["team-b"]["H100"].cap).To(Equal(0), "team-b draws nothing new while frozen")
+
+		reasons := map[string]string{}
+		for _, lb := range LimiterBudgets([]*ResourceConstraints{c}, nil) {
+			reasons[lb.Namespace] = lb.Reason
+		}
+		Expect(reasons).To(Equal(map[string]string{"team-a": "", "team-b": string(kueue.ReasonStale)}))
+	})
+
+	It("withholds, as stale, a namespace whose ResourceQuota read fails before it was ever counted", func() {
+		elig := &fakeEligibility{byNS: map[string]kueue.NamespaceEligibility{"team-a": {Reason: kueue.ReasonStale}}}
 		b := build(entry(nil), elig, true, snapshot)
-		constraintsOf(b)
-		elig.byNS = map[string]kueue.NamespaceEligibility{"team-a": {Reason: kueue.ReasonStale}}
-		frozenAtGuaranteed(b.inv, constraintsOf(b))
+		c := constraintsOf(b)
+		Expect(c.NamespaceBorrow).To(BeNil(), "no figures to freeze at")
+		Expect(c.BorrowWithheld).To(HaveKeyWithValue("team-a", string(kueue.ReasonStale)))
+		Expect(b.inv.EffectiveConfig().NamespaceQuotas["team-a"]).To(Equal(map[string]int{"H100": 8}))
 	})
 
 	It("keeps the frozen view across a limiter rebuild while the source is stale", func() {

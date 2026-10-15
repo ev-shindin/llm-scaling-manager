@@ -313,8 +313,8 @@ published (`wva_quota_borrow_withheld`):
 |---|---|
 | Kueue charges every GPU pod in the namespace: a Workload owned by the pod, or by an owner up its chain, has quota reserved (for a pod at Kueue's admission gate, the Workload exists). Kueue's labels and gate alone are not enough, since a tenant can write them | `not-kueue-managed` |
 | Something checks that borrowed GPUs exist: a `gpu-inventory` limiter, or a GPU `ResourceQuota` at most nominal plus `borrowingLimit` | `no-gpu-bound` |
-| The namespace's ResourceQuotas are readable | `resourcequota-unreadable` |
-| The Kueue read is fresh (not failed, not older than twice `refreshInterval`; a Cohort or ResourceQuota list that fails for a reason other than Forbidden also reads as stale) and Kueue has written queue status | `stale`, `no-status` |
+| The namespace's ResourceQuotas are readable (Forbidden at once; any other failure after five refresh intervals of failing) | `resourcequota-unreadable` |
+| The Kueue read is fresh (not failed, not older than twice `refreshInterval`; a Cohort list that fails for a reason other than Forbidden also reads as stale) and Kueue has written queue status | `stale`, `no-status` |
 | The cohort is flat, and its Cohort objects are readable | `hierarchical-cohort`, `hierarchy-unknown` |
 | No queue in the cohort uses `status.effectiveQuotas`, and Fair Sharing is off | `effective-quotas`, `fair-sharing` |
 | The queue is in a cohort, active, and its borrowing fields parse | `no-cohort`, `inactive`, `malformed` |
@@ -362,8 +362,15 @@ itself:
   borrows nothing new for the same time.
 - **The ledger.** Releases in flight are kept under `borrowReleaseLedger` in
   the `wva-controller-status` ConfigMap, so a restart does not release twice.
-- **A stale read freezes everything**: nothing new is borrowed and nothing is
-  given back until reads recover.
+- **A stale Kueue read freezes everything**: nothing new is borrowed and
+  nothing is given back until reads recover.
+- **A failed ResourceQuota read freezes one namespace.** When one namespace's
+  ResourceQuotas cannot be read (other than Forbidden), only that namespace
+  freezes: it keeps its last figures, borrows nothing new (reason `stale`),
+  and can still be released to a waiting lender. Every other namespace borrows
+  and gives back as usual. After five refresh intervals of failing it is
+  withheld as `resourcequota-unreadable` and capped at nominal, until a read
+  passes.
 
 **Settings**, on the entry's `kueue:` block:
 

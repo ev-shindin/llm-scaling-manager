@@ -37,6 +37,11 @@ type NamespaceBorrow struct {
 	// figure is below nominal (kueue.ReasonNominalLentOut). Reported, not
 	// spent: it is why a capped model of the namespace sits below nominal.
 	NominalLentOut int
+	// Frozen marks a namespace whose ResourceQuota read failed for a reason
+	// that may pass: its figures are the last it read, and nothing new is
+	// borrowed for it (its draw allowance is 0) until a read passes. What it
+	// holds stays, and releases to a waiting lender still apply to it.
+	Frozen bool
 }
 
 // SharedPoolChunk is one cohort's free GPUs of one flavor and GPU resource. A

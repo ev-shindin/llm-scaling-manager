@@ -299,6 +299,43 @@ var _ = Describe("Eligibility: the engine-side borrowing conditions", func() {
 		Expect(rqLists).To(Equal(3))
 	})
 
+	// A freeze is for a blip. A tenant whose ResourceQuota reads keep failing
+	// is withheld as unreadable after unreadableAfter intervals, and recovers
+	// on the first read that passes.
+	It("turns a ResourceQuota read that keeps failing into unreadable after five intervals", func() {
+		fail := false
+		funcs := &interceptor.Funcs{List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == "ResourceQuotaList" && fail {
+				return apierrors.NewInternalError(errors.New("etcd timeout"))
+			}
+			return cl.List(ctx, list, opts...)
+		}}
+		c := eligibilityClient(funcs, append(chargedPod("p"), resourceQuota(map[string]interface{}{"requests.nvidia.com/gpu": "16"}))...)
+		now := time.Unix(0, 0)
+		e := NewEligibility(c, Options{RefreshInterval: time.Minute, now: func() time.Time { return now }})
+		Expect(e.Evaluate(context.Background(), []string{eligNS})[eligNS].Reason).To(BeEmpty())
+
+		fail = true
+		now = now.Add(2 * time.Minute)
+		for i := 0; i < 5; i++ {
+			got := e.Evaluate(context.Background(), []string{eligNS})[eligNS]
+			Expect(got.Reason).To(Equal(ReasonStale), "still a blip after %d minutes", i)
+			now = now.Add(time.Minute - time.Second)
+		}
+		now = now.Add(time.Minute)
+		got := e.Evaluate(context.Background(), []string{eligNS})[eligNS]
+		Expect(got.Reason).To(Equal(ReasonResourceQuotaUnreadable), "failing for five intervals")
+		Expect(got.GPUQuota).To(Equal(map[string]int{"nvidia.com/gpu": 16}))
+
+		fail = false
+		now = now.Add(time.Second)
+		Expect(e.Evaluate(context.Background(), []string{eligNS})[eligNS].Reason).To(BeEmpty(), "recovers on the first passing read")
+		fail = true
+		now = now.Add(2 * time.Minute)
+		Expect(e.Evaluate(context.Background(), []string{eligNS})[eligNS].Reason).To(Equal(ReasonStale),
+			"a new failure starts a new count")
+	})
+
 	It("forgets a namespace no longer asked about", func() {
 		c := eligibilityClient(nil, chargedPod("p")...)
 		now := time.Unix(0, 0)
