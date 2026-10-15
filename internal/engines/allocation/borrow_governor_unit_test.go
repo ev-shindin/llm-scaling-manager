@@ -125,7 +125,7 @@ var _ = Describe("BorrowGovernor release units", func() {
 			groups := map[string]time.Time{"1": t0, "2": now.Add(-time.Minute)}
 			rel := run(g, now, govWorld{g: 16, used: 48}, unplacedPods(govModel("x", 3, 16), groups))
 			Expect(rel).To(HaveLen(1))
-			Expect(rel[0].From - rel[0].To).To(Equal(1), "one group past the timeout: one group released")
+			Expect(rel[0].From-rel[0].To).To(Equal(1), "one group past the timeout: one group released")
 		})
 
 		// Review finding (bug hunter): pastSince is not persisted. After a

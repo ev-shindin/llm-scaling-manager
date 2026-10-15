@@ -283,8 +283,9 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 		g := NewBorrowGovernor(DefaultBorrowSettings())
 		reqs := []ModelScalingRequest{borrowModel("team-a", "m", 8, 1, 0, nil)}
 		reqs[0].VariantStates[0].AcceleratorName = "H100"
-		var rel []BorrowRelease
-		for _, d := range []time.Duration{0, 30 * time.Second, 61 * time.Second} {
+		steps := []time.Duration{0, 30 * time.Second, 61 * time.Second}
+		rel := make([]BorrowRelease, 0, 1)
+		for _, d := range steps {
 			cycle := *c
 			cycle.SharedPools = []SharedPoolChunk{c.SharedPools[0]}
 			cycle.SharedPools[0].ReadAt = observed.Add(d)
