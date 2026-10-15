@@ -120,6 +120,16 @@ type Engine struct {
 	limiterSig     string
 	limiterMu      sync.Mutex
 
+	// lastQuotaAloneDiff is the last quota-alone versus composed allocation
+	// difference reported (see reportQuotaAloneAllocation), so the transitional
+	// upgrade log prints when the difference changes, not every cycle. Written
+	// only from the optimize goroutine.
+	lastQuotaAloneDiff string
+	// quotaAloneCycles counts the cycles reportQuotaAloneAllocation was
+	// eligible to run in, so its shadow pass runs once per
+	// quotaAloneReportEvery of them. TRANSITIONAL, with it.
+	quotaAloneCycles int
+
 	// providerSkips publishes the constraint providers left out of the last
 	// decision (wva_constraint_provider_skipped) and logs when that set changes.
 	providerSkips providerSkipReport

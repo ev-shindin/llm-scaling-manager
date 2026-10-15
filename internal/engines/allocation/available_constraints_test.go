@@ -5,6 +5,10 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
 // physicalLimiterName is the name NewLimiterFromConfig gives the physical limiter.
@@ -94,6 +98,40 @@ func TestComputeAvailableConstraintsSkipsOnlyTheUnavailable(t *testing.T) {
 			t.Fatalf("H100 budget %d with a provider skipped, %d with all; skipping must never deny more", s, a)
 		}
 	})
+}
+
+// The shadow pass behind the transitional upgrade log decides as a real pass
+// does, and publishes nothing: a second publish from a quota-only shadow would
+// overwrite the warm pool's headroom with the bound that no longer applies.
+func TestShadowOptimizePublishesNothing(t *testing.T) {
+	decision.DefaultHeadroom.Reset()
+	t.Cleanup(decision.DefaultHeadroom.Reset)
+
+	o := NewGreedyByScoreOptimizer()
+	// Wants 4 more replicas (40000/10000); the budget affords 2.
+	reqs := []ModelScalingRequest{withSatEntry(&satEntryFixture{
+		ModelID: "A", Namespace: "default", AnalyzedAt: time.Now(), RequiredCapacity: 40000,
+		VariantCapacities: []vcFixture{
+			{VariantName: "A-v", AcceleratorName: "A100", Cost: 5, ReplicaCount: 1, PerReplicaCapacity: 10000},
+		},
+	}, ModelScalingRequest{
+		ModelID: "A", Namespace: "default",
+		VariantStates: []domain.VariantReplicaState{{VariantName: "A-v", CurrentReplicas: 1, GPUsPerReplica: 1}},
+	})}
+	cons := []*ResourceConstraints{{ProviderName: "q",
+		Pools: map[string]ResourcePool{"A100": {Limit: 2}}}}
+
+	shadow := decisionMap(o.ShadowOptimize(context.Background(), reqs, cons))
+	if _, ok := decision.DefaultHeadroom.Get(); ok {
+		t.Fatal("a shadow pass published warm-pool headroom")
+	}
+	real := decisionMap(o.Optimize(context.Background(), reqs, cons))
+	if _, ok := decision.DefaultHeadroom.Get(); !ok || !real["A-v"].WasLimited {
+		t.Fatal("setup: the real pass should limit the scale-up and publish headroom")
+	}
+	if shadow["A-v"].TargetReplicas != real["A-v"].TargetReplicas || real["A-v"].TargetReplicas != 3 {
+		t.Fatalf("shadow target %d, real target %d; want both 3", shadow["A-v"].TargetReplicas, real["A-v"].TargetReplicas)
+	}
 }
 
 // ClusterFree is the tightest CLOSED cluster figure. A namespace-scope quota's
