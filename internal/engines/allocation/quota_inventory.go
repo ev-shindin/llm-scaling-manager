@@ -50,8 +50,11 @@ type QuotaInventory struct {
 	// lastExternal fingerprints the external snapshot cfg was built from, so a
 	// change is logged once rather than every cycle.
 	lastExternal string
-	// lastBorrow fingerprints the last borrowing view logged, for the same reason.
-	lastBorrow string
+	// lastBorrowNS fingerprints, per namespace, the borrowing last logged for
+	// it, and lastBorrowFrozen whether that view was frozen: the borrowing line
+	// carries only the namespaces that changed (logBorrowing).
+	lastBorrowNS     map[string]string
+	lastBorrowFrozen bool
 	// usedByType is the cluster-scoped usage map (Scope == QuotaScopeCluster).
 	usedByType map[string]int
 	// usedByNS is the per-namespace usage map (Scope == QuotaScopeNamespace).
@@ -77,6 +80,10 @@ type QuotaInventory struct {
 	// Refresh (SetManagedNamespaces): only they are evaluated for borrowing.
 	// nil, never set, evaluates every namespace Kueue grants borrowing in.
 	managedNS map[string]bool
+	// neverRead is set while the entry reads Kueue, leaves some type
+	// unlimited in its static caps, and has never read Kueue successfully:
+	// that type is unbounded (KueueNeverRead).
+	neverRead bool
 }
 
 // ManagedNamespacesSetter is an Inventory that is told, before each Refresh,
@@ -100,6 +107,16 @@ func (q *QuotaInventory) SetManagedNamespaces(namespaces []string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.managedNS = set
+}
+
+// KueueNeverRead reports whether the entry reads Kueue, its static caps leave
+// some accelerator type unlimited (-1), and no Kueue read has succeeded since
+// it was built: nothing bounds that type. Reported (wva_kueue_never_read),
+// not acted on.
+func (q *QuotaInventory) KueueNeverRead() bool {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.neverRead
 }
 
 // BorrowEligibility evaluates the engine-side B1 conditions per namespace
@@ -366,6 +383,7 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 	}
 	q.cfg = effective
 	q.borrow = view
+	q.neverRead = q.static.KueueEnabled() && ext.ObservedAt.IsZero() && q.static.HasUnlimitedCap()
 	return nil
 }
 
@@ -690,6 +708,11 @@ func (q *QuotaInventory) Borrowing(activeNamespaces []string) (map[string]map[st
 // namespace it governs: guaranteed, borrowable, Kueue's own borrowed figure,
 // and why borrowable is 0 where it is -- the source's reason, or the
 // engine-side one (not-kueue-managed, no-gpu-bound, resourcequota-unreadable).
+// The line carries only the namespaces whose figures changed since the last
+// line, at most maxLoggedBorrowNamespaces of them in name order, and names the
+// namespaces that dropped out; omittedNamespaces counts what the cap left out,
+// so a cohort of hundreds of namespaces does not log hundreds of rows every
+// time one of them moves.
 // A cluster-scope entry logs nothing, since borrowing moves capacity between
 // queues and leaves the cluster figure as it is. frozenWhy is set when figures
 // freeze and nothing new is borrowed: kueue.ReasonStale for a snapshot served
@@ -736,24 +759,75 @@ func (q *QuotaInventory) logBorrowing(logger logr.Logger, ext config.ExternalQuo
 			}
 		}
 	}
-	fp, _ := json.Marshal(struct {
-		Rows    map[string][]config.ExternalBorrow
-		Applied map[string]map[string]appliedBorrow
-		Frozen  bool
-	}{rowsByNS, applied, view != nil && view.frozen})
-	if string(fp) == q.lastBorrow {
+	frozen := view != nil && view.frozen
+	current := make(map[string]string, len(rowsByNS)+len(applied))
+	for _, ns := range slices.Concat(slices.Collect(maps.Keys(rowsByNS)), slices.Collect(maps.Keys(applied))) {
+		fp, _ := json.Marshal(struct {
+			Rows     []config.ExternalBorrow
+			Applied  map[string]appliedBorrow
+			Withheld string
+		}{rowsByNS[ns], applied[ns], q.withheld[ns]})
+		current[ns] = string(fp)
+	}
+	var changed, removed []string
+	for ns, fp := range current {
+		if q.lastBorrowNS[ns] != fp {
+			changed = append(changed, ns)
+		}
+	}
+	for ns := range q.lastBorrowNS {
+		if _, ok := current[ns]; !ok {
+			removed = append(removed, ns)
+		}
+	}
+	if len(changed) == 0 && len(removed) == 0 && frozen == q.lastBorrowFrozen {
 		return
 	}
-	q.lastBorrow = string(fp)
+	q.lastBorrowNS, q.lastBorrowFrozen = current, frozen
+	slices.Sort(changed)
+	slices.Sort(removed)
+	omitted := 0
+	if n := len(changed) + len(removed); n > maxLoggedBorrowNamespaces {
+		omitted = n - maxLoggedBorrowNamespaces
+		if len(changed) > maxLoggedBorrowNamespaces {
+			changed, removed = changed[:maxLoggedBorrowNamespaces], nil
+		} else {
+			removed = removed[:maxLoggedBorrowNamespaces-len(changed)]
+		}
+	}
+	rows := make(map[string][]config.ExternalBorrow, len(changed))
+	app := make(map[string]map[string]appliedBorrow, len(changed))
+	withheld := make(map[string]string, len(changed))
+	for _, ns := range changed {
+		if r, ok := rowsByNS[ns]; ok {
+			rows[ns] = r
+		}
+		if a, ok := applied[ns]; ok {
+			app[ns] = a
+		}
+		if w := q.withheld[ns]; w != "" {
+			withheld[ns] = w
+		}
+	}
 	msg := BorrowAppliedLogMessage
 	switch {
-	case view != nil && view.frozen && frozenWhy == kueue.ReasonKueueControllerDown:
+	case frozen && frozenWhy == kueue.ReasonKueueControllerDown:
 		msg = BorrowControllerDownLogMessage
-	case view != nil && view.frozen:
+	case frozen:
 		msg = BorrowFrozenLogMessage
 	}
-	logger.Info(msg, "borrowByNamespace", rowsByNS, "appliedByNamespace", applied, "withheldByNamespace", q.withheld)
+	kv := []any{"borrowByNamespace", rows, "appliedByNamespace", app, "withheldByNamespace", withheld}
+	if len(removed) > 0 {
+		kv = append(kv, "removedNamespaces", removed)
+	}
+	if omitted > 0 {
+		kv = append(kv, "omittedNamespaces", omitted)
+	}
+	logger.Info(msg, kv...)
 }
+
+// maxLoggedBorrowNamespaces caps the namespaces one borrowing line names.
+const maxLoggedBorrowNamespaces = 50
 
 // The borrowing log line, on change only. The e2e suite and operators search
 // for these.

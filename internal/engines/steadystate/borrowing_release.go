@@ -27,6 +27,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
@@ -115,7 +116,9 @@ func (e *Engine) releaseBorrowed(ctx context.Context, requests []allocation.Mode
 				"the smallest unit that keeps the model serviceable is larger than what it borrows",
 				"namespace", r.Namespace, "modelID", r.ModelID, "cause", string(r.Cause), "guaranteedGPUs", r.GuaranteedGPUs)
 		}
+		metrics.CountBorrowRelease(r.Namespace, r.ModelID, string(r.Cause))
 		acc := scaleTargets[r.Namespace+"/"+r.Variant]
+		e.borrowReleasedEvent(r, acc)
 		if acc != nil && scaletarget.IsLeaderWorkerSet(acc) {
 			e.checkLWSScaleDown(ctx, r, acc)
 		}
@@ -457,6 +460,7 @@ func (e *Engine) markPreemption(ctx context.Context, ns, model string, uids []ty
 		return // found again after a restart: its cooldown is over
 	}
 	st.governor.MarkPreempted(model, at)
+	e.recordReclaim(model, w, now, key)
 	ctrl.LoggerFrom(ctx).Info("Kueue preempted a pod of a borrowing model; it borrows nothing new for the cooldown",
 		"modelID", model, "uid", string(uids[0]), "preemptedAt", at)
 }

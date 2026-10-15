@@ -48,6 +48,50 @@ func TestStampLimiterBudgetsCapsTheEntries(t *testing.T) {
 	}
 }
 
+// Review finding (on-call): the cap kept the first 200 entries in key order, so
+// on a large cluster the withheld namespace on-call was looking for, or the one
+// that just changed, could be the one left out.
+func TestStampLimiterBudgetsKeepsWithheldAndChangedOverTheCap(t *testing.T) {
+	t0 := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	cur := make([]LimiterBudget, 0, MaxLimiterBudgetEntries+10)
+	for i := range MaxLimiterBudgetEntries + 10 {
+		cur = append(cur, LimiterBudget{Limiter: "kq", Namespace: fmt.Sprintf("ns-%04d", i), Accelerator: "H100", Borrowable: 2})
+	}
+	first := StampLimiterBudgets(LimiterBudgets{}, cur, t0)
+
+	last := len(cur) - 1
+	// The last entry is withheld, the one before it changed: both are past
+	// the cap in key order.
+	cur[last].Borrowable, cur[last].Reason = 0, "not-kueue-managed"
+	cur[last-1].Borrowable = 3
+	second := StampLimiterBudgets(first, cur, t0.Add(time.Minute))
+	names := map[string]bool{}
+	for _, e := range second.Entries {
+		names[e.Namespace] = true
+	}
+	if len(second.Entries) != MaxLimiterBudgetEntries || second.Truncated != 10 {
+		t.Fatalf("got %d entries, truncated %d", len(second.Entries), second.Truncated)
+	}
+	if !names[cur[last].Namespace] {
+		t.Errorf("the withheld entry %s was dropped by the cap", cur[last].Namespace)
+	}
+	if !names[cur[last-1].Namespace] {
+		t.Errorf("the entry that just changed, %s, was dropped by the cap", cur[last-1].Namespace)
+	}
+	for i := 1; i < len(second.Entries); i++ {
+		if second.Entries[i-1].Namespace > second.Entries[i].Namespace {
+			t.Fatalf("kept entries are not in key order at %d", i)
+		}
+	}
+
+	third := StampLimiterBudgets(second, cur, t0.Add(2*time.Minute))
+	for _, e := range third.Entries {
+		if e.Namespace == "ns-0000" && e.AsOf != t0.Format(time.RFC3339) {
+			t.Errorf("an entry the cap dropped and kept again read as changed: asOf %q", e.AsOf)
+		}
+	}
+}
+
 func TestSetLimiterBudgetsWritesAndRemovesTheKey(t *testing.T) {
 	w := &writes{}
 	p, c := newTestPublisher(t, w)

@@ -34,6 +34,9 @@ import (
 var (
 	labelMatchers = regexp.MustCompile(`\{[^}]*\}`)
 	quotedStrings = regexp.MustCompile(`"[^"]*"`)
+	// rangeSelectors are [5m] and subquery [1h:1m] brackets: the ":1m" of a
+	// subquery otherwise scans as a recording-rule name.
+	rangeSelectors = regexp.MustCompile(`\[[^\]]*\]`)
 	// identifiers matches Prometheus metric naming: alphanumerics, underscores,
 	// and colons for recording rules.
 	identifiers = regexp.MustCompile(`\b([a-zA-Z_:][a-zA-Z0-9_:]*)\b`)
@@ -68,12 +71,14 @@ var promQLKeywords = map[string]bool{
 	"query_type": true, "reason": true, "direction": true, "limiter_name": true,
 	"accelerator_type": true, "accelerator_vendor": true, "accelerator_model": true,
 	"controller_instance": true, "deployment": true, "service": true, "le": true,
+	"cohort": true, "cluster_queue": true,
 }
 
 // ExtractMetricNames returns the metric names an expression references.
 func ExtractMetricNames(expr string) []string {
 	expr = labelMatchers.ReplaceAllString(expr, "")
 	expr = quotedStrings.ReplaceAllString(expr, "")
+	expr = rangeSelectors.ReplaceAllString(expr, "")
 
 	var out []string
 	for _, name := range identifiers.FindAllString(expr, -1) {

@@ -56,6 +56,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
 // Options configures a Reader.
@@ -328,6 +329,7 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		r.warnedLabels = false
 	}
 	r.warnNoStatus(ctx, topo)
+	metrics.PublishKueueBorrowDrift(BorrowDrift(topo))
 	borrowing := ComputeBorrowing(topo, cohortsStale)
 	guaranteed, within, err := r.borrowCaps(queues, flavorType, borrowing, nsQueues, byNamespace)
 	if err != nil {

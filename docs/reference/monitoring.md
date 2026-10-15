@@ -402,6 +402,7 @@ Every reason the controller emits:
 | `ThroughputAnalyzerRestartRequired` | Warning | ConfigMap (global scaling policy, controller namespace) | the throughput analyzer was enabled or disabled in config, but analyzer registration is fixed at startup | restart the controller: `kubectl rollout restart -n "$NS" deploy/wva-controller-manager` |
 | `UtilizationShareGiving`, `UtilizationShareReceiving`, `UtilizationShareReceived`, `UtilizationShareCancelled`, `UtilizationShareRedirected` | Normal | Deployment / LeaderWorkerSet | a utilization-share transfer started, landed, was called off or redirected | none; [details](#events-on-the-models-scale-targets) |
 | `UtilizationShareReleaseAborted`, `UtilizationShareWrongPod`, `UtilizationShareFillTimedOut`, `UtilizationShareDonorNotSteerable` | Warning | Deployment / LeaderWorkerSet | a transfer did not land | [details](#events-on-the-models-scale-targets) |
+| `BorrowedCapacityReleased` | Normal (cause `lender-waiting`), Warning (cause `placement-timeout`) | Deployment / LeaderWorkerSet | the scaling manager lowered the model to give borrowed Kueue GPUs back: to the lender ClusterQueue the message names, or because borrowed replicas did not place in time. One per release | none, normally; [replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing) |
 
 At most one Event per model variant per cycle, except `ResourceConstrained`,
 which can join a `ScaledUp`. The API server keeps Events for about an hour

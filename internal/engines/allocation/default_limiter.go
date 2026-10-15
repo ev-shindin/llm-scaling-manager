@@ -106,6 +106,9 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 		TotalAvail:      l.inventory.TotalAvailable(),
 		NamespaceScoped: namespaceScopedOf(l.inventory),
 	}
+	if r, ok := l.inventory.(KueueReadReporter); ok {
+		rc.KueueNeverRead = r.KueueNeverRead()
+	}
 
 	// Step 4: For namespace-aware inventories carrying per-namespace caps for the
 	// active namespaces, expose them via NamespacePools and derive the cluster

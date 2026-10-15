@@ -180,6 +180,28 @@ func (q QuotaLimiterConfig) KueueBorrowSelected(ns string) bool {
 	return q.Kueue == nil || len(q.Kueue.BorrowNamespaces) == 0 || slices.Contains(q.Kueue.BorrowNamespaces, ns)
 }
 
+// HasUnlimitedCap reports whether the entry's static caps, in its scope, leave
+// some accelerator type unlimited (QuotaUnlimited, -1): only an external
+// source then bounds that type.
+func (q QuotaLimiterConfig) HasUnlimitedCap() bool {
+	if q.Scope == QuotaScopeCluster {
+		for _, v := range q.ClusterQuotas {
+			if v == QuotaUnlimited {
+				return true
+			}
+		}
+		return false
+	}
+	for _, perType := range q.NamespaceQuotas {
+		for _, v := range perType {
+			if v == QuotaUnlimited {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // KueueReleasesToNonReclaiming reports whether this entry hands borrowed
 // replicas back to waiting lenders that cannot reclaim
 // (releaseToNonReclaimingLenders, off by default).

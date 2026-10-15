@@ -3,6 +3,7 @@ package allocation
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -442,6 +443,62 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 		Expect(count()).To(Equal(1))
 		Expect(strings.Join(lines, "\n")).To(ContainSubstring(`"reason":"not-kueue-managed"`))
 		Expect(strings.Join(lines, "\n")).To(ContainSubstring(`"withheldByNamespace":{"team-a":"not-kueue-managed"}`))
+	})
+
+	// Review finding (scale): every change logged every governed namespace's
+	// rows, so one namespace moving in a cohort of hundreds logged hundreds.
+	It("logs only the namespaces that changed, at most 50, and counts the rest", func() {
+		var lines []string
+		lctx := logr.NewContext(ctx, funcr.NewJSON(func(obj string) {
+			if strings.Contains(obj, BorrowAppliedLogMessage) {
+				lines = append(lines, obj)
+			}
+		}, funcr.Options{}))
+		many := func(n, sourceBorrowedOfFirst int) config.ExternalQuotas {
+			s := config.ExternalQuotas{ObservedAt: observed, Namespace: map[string]config.ExternalCaps{},
+				NamespaceGuaranteed: map[string]config.ExternalCaps{}, NamespaceWithinNominal: map[string]config.ExternalCaps{},
+				Borrow: map[string][]config.ExternalBorrow{}}
+			for i := range n {
+				ns := fmt.Sprintf("team-%03d", i)
+				r := row
+				r.Queue = ns + "-cq"
+				if i == 0 {
+					r.SourceBorrowed = sourceBorrowedOfFirst
+				}
+				s.Namespace[ns] = config.ExternalCaps{ByType: map[string]int{"H100": 8}}
+				s.NamespaceGuaranteed[ns] = config.ExternalCaps{ByType: map[string]int{"H100": 0}}
+				s.NamespaceWithinNominal[ns] = config.ExternalCaps{ByType: map[string]int{"H100": 8}}
+				s.Borrow[ns] = []config.ExternalBorrow{r}
+			}
+			return s
+		}
+		src := &fakeQuotaSource{}
+		src.push(many(60, 0), nil)
+		inv := NewQuotaInventoryWithSource(entry(nil), src)
+		inv.now = fresh
+		inv.EnableBorrowing(BorrowOptions{Physical: true, Eligibility: &fakeEligibility{}})
+		Expect(inv.Refresh(lctx)).To(Succeed())
+		Expect(lines).To(HaveLen(1))
+		Expect(lines[0]).To(ContainSubstring(`"omittedNamespaces":10`), "60 changed, 50 named")
+		Expect(lines[0]).To(ContainSubstring(`"team-049"`))
+		Expect(lines[0]).NotTo(ContainSubstring(`"team-050"`))
+
+		src.results = nil
+		src.push(many(60, 3), nil)
+		Expect(inv.Refresh(lctx)).To(Succeed())
+		Expect(lines).To(HaveLen(2))
+		Expect(lines[1]).To(ContainSubstring(`"team-000"`))
+		Expect(lines[1]).NotTo(ContainSubstring(`"team-001"`), "only the namespace that changed")
+		Expect(lines[1]).NotTo(ContainSubstring("omittedNamespaces"))
+
+		src.results = nil
+		src.push(many(59, 3), nil)
+		Expect(inv.Refresh(lctx)).To(Succeed())
+		Expect(lines).To(HaveLen(3))
+		Expect(lines[2]).To(ContainSubstring(`"removedNamespaces":["team-059"]`))
+
+		Expect(inv.Refresh(lctx)).To(Succeed())
+		Expect(lines).To(HaveLen(3), "no change, no line")
 	})
 
 	It("logs the applied figures beside the rows: guaranteed, borrow cap, Kueue's own borrowed", func() {
