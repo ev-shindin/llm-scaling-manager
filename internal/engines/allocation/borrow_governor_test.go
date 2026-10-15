@@ -387,6 +387,42 @@ var _ = Describe("BorrowGovernor", func() {
 			g.Observe(c)
 			Expect(g.Releases(c, decisionsOf(c.Requests))).To(BeEmpty(), "Kueue reclaims for it")
 		})
+
+		// The live-Kueue e2e (kueue_borrow_test.go, spec 4): nominal 2, queue
+		// a reclaims (Any) and already reserves its whole nominal, and Kueue
+		// preempted a borrowed pod -- the ReplicaSet's replacement is gated.
+		// The namespace holds 3 replicas of 1 GPU, 1 of them gated: the gated
+		// one is past guaranteed, Kueue has nothing to reclaim for it, and it
+		// must go after the timeout.
+		gatedReplacement := func(lentOut, used int) BorrowCycle {
+			r := govModel("m", used, 1)
+			r = unplaced(r, 0, t0)
+			c := borrowQuota(0, nsBorrow{ns: "b", guaranteed: 2, used: used, cap: config.QuotaUnlimited, lentOut: lentOut})
+			return BorrowCycle{Now: t0.Add(settings.PlacementTimeout + time.Second),
+				Constraints: []*ResourceConstraints{c}, Requests: []ModelScalingRequest{r},
+				Gated: map[string]map[string]int{"b": {"H100": 1}}}
+		}
+
+		It("releases a gated replica past guaranteed when its queue reserves its full nominal", func() {
+			g := NewBorrowGovernor(settings)
+			c := gatedReplacement(0, 3)
+			g.Observe(c)
+			ds := decisionsOf(c.Requests)
+			rel := g.Releases(c, ds)
+			Expect(rel).To(HaveLen(1), "the gated replacement of a preempted borrowed pod is borrowed")
+			Expect(rel[0].Cause).To(Equal(ReleasePlacementTimeout))
+			Expect(rel[0].From).To(Equal(3))
+			Expect(rel[0].To).To(Equal(2))
+			Expect(targets(ds)).To(Equal(map[string]int{"m-v": 2}))
+			Expect(g.BorrowBlocked("b", "m", "m-v", c.Now.Add(time.Minute))).To(BeTrue(), "the model's cooldown starts")
+		})
+
+		It("exempts a gated replica within guaranteed while its reclaiming queue has nominal lent out", func() {
+			g := NewBorrowGovernor(settings)
+			c := gatedReplacement(1, 2) // holds 2 of 2, 1 gated: a peer holds 1 of a's nominal
+			g.Observe(c)
+			Expect(g.Releases(c, decisionsOf(c.Requests))).To(BeEmpty(), "Kueue reclaims the lent-out GPU for it")
+		})
 	})
 
 	It("stops the greedy optimizer from borrowing for a blocked variant, not from growing within guaranteed", func() {

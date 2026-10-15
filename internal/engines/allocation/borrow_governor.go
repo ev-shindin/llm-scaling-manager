@@ -384,7 +384,7 @@ func (g *BorrowGovernor) Releases(c BorrowCycle, decisions []domain.VariantDecis
 		byVariant[decisions[i].Namespace+"/"+decisions[i].VariantName] = i
 	}
 	nsBorrow := namespaceBorrowed(c.Constraints, c.Gated)
-	out := g.timeoutReleases(c, states, nsBorrow)
+	out := g.timeoutReleases(c, states, namespaceHeldPast(c.Constraints))
 	out = append(out, g.lenderReleases(c, states, nsBorrow)...)
 
 	// Releases in flight stay in force.
@@ -408,9 +408,13 @@ func (g *BorrowGovernor) Releases(c BorrowCycle, decisions []domain.VariantDecis
 // timeoutReleases releases borrowed units unplaced past the placement timeout
 // (B5): the unplaced replicas a borrowing namespace holds past its guaranteed
 // figure, a P/D unit at the pair's ratio with the partner that placed. Growth
-// within guaranteed -- a reclaiming queue's growth below nominal included --
-// is exempt, since Kueue reclaims for it. The model's cooldown starts.
-func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]variantRef, nsBorrow map[string]map[string]int) []BorrowRelease {
+// within guaranteed -- a reclaiming queue's growth into nominal it lent out --
+// is exempt, since Kueue reclaims for it. "Past guaranteed" counts the
+// replicas the namespace holds, gated ones included (heldPast): a replica
+// Kueue gates while its queue already reserves its whole guaranteed figure --
+// the replacement of a preempted borrowed pod -- has nothing to reclaim and
+// would wait forever. The model's cooldown starts.
+func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]variantRef, heldPast map[string]map[string]int) []BorrowRelease {
 	var out []BorrowRelease
 	for _, req := range c.Requests {
 		for _, st := range req.VariantStates {
@@ -428,7 +432,7 @@ func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]varian
 			if c.Now.Sub(st.UnplacedSince) < timeout {
 				continue
 			}
-			borrowed := borrowedFor(nsBorrow, req.Namespace, accOf(req, st.VariantName))
+			borrowed := borrowedFor(heldPast, req.Namespace, accOf(req, st.VariantName))
 			gpr := max(st.GPUsPerReplica, 1)
 			if borrowed < gpr {
 				continue // within guaranteed: Kueue reclaims for it
@@ -698,9 +702,19 @@ func accOf(req ModelScalingRequest, variant string) string {
 	return ""
 }
 
+// namespaceHeldPast is, per borrowing namespace and type, the GPUs its
+// variants hold past its guaranteed figure, gated and unplaced replicas
+// included: the placement timeout asks whether an unplaced replica depends on
+// borrowing, and one past the guaranteed figure does whether or not Kueue has
+// reserved for it. Within the figure Kueue admits, or reclaims lent-out
+// nominal, for it.
+func namespaceHeldPast(constraints []*ResourceConstraints) map[string]map[string]int {
+	return namespaceBorrowed(constraints, nil)
+}
+
 // namespaceBorrowed is, per borrowing namespace and type, the GPUs it holds
 // past its guaranteed figure, not counting gated pods: they hold no
-// reservation, so there is nothing of theirs to hand back.
+// reservation, so there is nothing of theirs to hand back to a lender.
 func namespaceBorrowed(constraints []*ResourceConstraints, gated map[string]map[string]int) map[string]map[string]int {
 	out := map[string]map[string]int{}
 	for _, c := range constraints {
