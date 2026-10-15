@@ -259,13 +259,16 @@ When `ENABLE_SCALE_TO_ZERO=true` (set by `make deploy-e2e-infra` when `SCALE_TO_
 `make install-kueue-e2e`. By default (`KUEUE_CONTROLLER=true`) that runs
 `deploy/ci-pr-checks/install-kueue.sh`, which:
 
-- applies the pinned release manifest (`KUEUE_VERSION`, default `v0.20.0`,
-  image from `registry.k8s.io`);
+- downloads the pinned release manifest (`KUEUE_VERSION`, default `v0.20.0`,
+  image from `registry.k8s.io`), checks its sha256, then applies it. Another
+  version needs `KUEUE_MANIFEST_SHA256` as well;
 - waits for the rollout, then for the webhook to answer;
 - narrows Kueue's job webhooks to namespaces labelled `llm-d.ai/kueue-e2e`
   (`KUEUE_WEBHOOK_NAMESPACE_LABEL`). Upstream they cover every namespace with
   `failurePolicy: Fail`, so a restarting Kueue would fail pod creation for the
-  whole suite.
+  whole suite. Only the webhooks are narrowed, so a queue-labelled pod in an
+  unlabelled namespace runs unmanaged: fine on a throwaway kind cluster, never
+  on one whose quotas matter.
 
 With `KUEUE_CONTROLLER=false` it runs `install-kueue-crds.sh` instead, which
 installs the CRDs alone. The quota spec passes either way; the borrowing spec

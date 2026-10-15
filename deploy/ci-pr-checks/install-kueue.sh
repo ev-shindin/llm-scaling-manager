@@ -28,9 +28,24 @@
 # spec too. The borrowing spec labels the namespaces it creates; nothing else
 # goes through Kueue. Webhooks whose namespaceSelector is absent or empty (the
 # cluster-scoped kinds: ClusterQueue, ResourceFlavor, ...) are left as they are.
+#
+# Only the webhooks are narrowed, not Kueue's managedJobsNamespaceSelector. So
+# a pod carrying a kueue.x-k8s.io/queue-name label in an UNLABELLED namespace
+# is not gated or admitted by Kueue: it runs unmanaged, outside every quota.
+# Acceptable on a throwaway kind cluster where only the borrowing spec uses
+# queues; never use this narrowing on a cluster whose quotas matter.
+#
+# The release manifest is downloaded to a temporary file and checked against a
+# pinned sha256 before it is applied. KUEUE_VERSION other than the pinned one
+# needs KUEUE_MANIFEST_SHA256 too.
 set -euo pipefail
 
-KUEUE_VERSION="${KUEUE_VERSION:-v0.20.0}"
+# sha256 of the v0.20.0 release manifests.yaml (1798228 bytes, fetched twice and
+# compared). Re-pin it when KUEUE_VERSION's default moves.
+PINNED_VERSION=v0.20.0
+PINNED_SHA256=cc43e751842904b5227af934e57942a4dd0b94b22692718969cbbdb7116c093e
+
+KUEUE_VERSION="${KUEUE_VERSION:-$PINNED_VERSION}"
 KUEUE_NAMESPACE=kueue-system
 KUEUE_DEPLOYMENT=kueue-controller-manager
 KUEUE_IMAGE="registry.k8s.io/kueue/kueue:${KUEUE_VERSION}"
@@ -40,6 +55,17 @@ WEBHOOK_TIMEOUT_SECONDS="${KUEUE_WEBHOOK_TIMEOUT_SECONDS:-180}"
 WEBHOOK_LABEL="${KUEUE_WEBHOOK_NAMESPACE_LABEL:-}"
 
 die() { echo "install-kueue: $*" >&2; exit 1; }
+
+if [ -n "${KUEUE_MANIFEST_SHA256:-}" ]; then
+    MANIFEST_SHA256="$KUEUE_MANIFEST_SHA256"
+elif [ "$KUEUE_VERSION" = "$PINNED_VERSION" ]; then
+    MANIFEST_SHA256="$PINNED_SHA256"
+else
+    die "KUEUE_VERSION=${KUEUE_VERSION} has no pinned checksum; set KUEUE_MANIFEST_SHA256 to the sha256 of its manifests.yaml"
+fi
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
 
 # Any Kueue manager elsewhere is somebody else's install.
 foreign="$(kubectl get deploy -A -l app.kubernetes.io/name=kueue,control-plane=controller-manager \
@@ -57,8 +83,19 @@ fi
 
 if [ -z "$current" ]; then
     echo "Installing Kueue ${KUEUE_VERSION} (${MANIFEST_URL})"
+    manifest="$tmpdir/manifests.yaml"
+    curl -fsSL --retry 3 -o "$manifest" "$MANIFEST_URL" \
+        || die "could not download ${MANIFEST_URL}"
+    if command -v sha256sum >/dev/null 2>&1; then
+        got="$(sha256sum "$manifest" | cut -d' ' -f1)"
+    else
+        got="$(shasum -a 256 "$manifest" | cut -d' ' -f1)"
+    fi
+    [ "$got" = "$MANIFEST_SHA256" ] \
+        || die "${MANIFEST_URL} has sha256 ${got}, want ${MANIFEST_SHA256}; refusing to apply it"
+    echo "Manifest sha256 verified: ${got}"
     # Server-side: the CRD schemas are far past the client-side annotation limit.
-    kubectl apply --server-side -f "$MANIFEST_URL" >/dev/null
+    kubectl apply --server-side -f "$manifest" >/dev/null
 elif [ "$current" = "$KUEUE_IMAGE" ]; then
     echo "Kueue ${KUEUE_VERSION} already installed; checking it is ready"
 else
@@ -98,8 +135,7 @@ fi
 # in after the pod starts, and until then every Kueue object create fails. Probe
 # with a server-side dry-run of a ResourceFlavor -- it goes through the webhook
 # and persists nothing.
-probe="$(mktemp)"
-trap 'rm -f "$probe" "$probe.err"' EXIT
+probe="$tmpdir/probe.yaml"
 printf '%s\n' 'apiVersion: kueue.x-k8s.io/v1beta2' 'kind: ResourceFlavor' 'metadata:' \
     '  name: install-kueue-webhook-probe' > "$probe"
 deadline=$(( $(date +%s) + WEBHOOK_TIMEOUT_SECONDS ))
