@@ -154,11 +154,24 @@ var _ = Describe("PreemptionWatch", func() {
 			Expect(e.borrowing.preemptCounted).To(HaveLen(1))
 		})
 
-		It("ignores a preemption in a namespace that borrows nothing", func() {
+		// Live e2e: the preempted pod, terminating with its Workload gone,
+		// withheld its own namespace (not-kueue-managed) for 30s. A preemption
+		// drained in that window must still start the cooldown.
+		It("starts the cooldown while the model's namespace is withheld this cycle", func() {
 			w := NewPreemptionWatch(0)
-			p := marked("v-abc-1", "pod-1", nil)
-			p.Namespace = "elsewhere"
-			w.Handler().OnDelete(p)
+			w.Handler().OnDelete(marked("v-abc-1", "pod-1", nil))
+			e := engine(w)
+			other := borrowing()
+			other[0].NamespacePools = map[string]map[string]allocation.ResourcePool{"x": {"H100": {Limit: 0, Used: 16}}}
+			other[0].NamespaceBorrow = map[string]map[string]allocation.NamespaceBorrow{"x": {"H100": {Cap: -1}}}
+			other[0].NamespaceCohorts = map[string][]string{"x": {"c"}}
+			e.prepareBorrowing(ctx, other, reqs, targets, now)
+			Expect(e.borrowing.governor.BorrowBlocked("b", "m", "v", now)).To(BeTrue())
+		})
+
+		It("ignores a preempted pod of no known model", func() {
+			w := NewPreemptionWatch(0)
+			w.Handler().OnDelete(marked("other-abc-1", "pod-9", nil))
 			e := engine(w)
 			e.prepareBorrowing(ctx, borrowing(), reqs, targets, now)
 			Expect(e.borrowing.governor.BorrowBlocked("b", "m", "v", now)).To(BeFalse())

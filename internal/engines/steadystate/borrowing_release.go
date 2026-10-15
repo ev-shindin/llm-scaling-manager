@@ -277,10 +277,12 @@ func (e *Engine) observePreemptions(ctx context.Context, constraints []*allocati
 		logger.Info("The preemption watch dropped preemptions past its bound between two cycles; the Workload and pod reads still see what remains",
 			"dropped", dropped)
 	}
+	// Every namespace, not only those counting borrowing this cycle: the
+	// preempted pod itself can withhold its namespace for as long as it
+	// terminates (measured on kind: 30s of not-kueue-managed, its Workload
+	// already gone), and a preemption dropped then is never seen again. A pod
+	// of no known model matches nothing.
 	for _, o := range observed {
-		if !namespaces[o.Namespace] {
-			continue // not a borrowing namespace: no model of it can borrow
-		}
 		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: o.Namespace, Name: o.Name, UID: o.UID,
 			Labels: o.Labels, OwnerReferences: o.OwnerRefs}}
 		model := modelOfPod(requests, scaleTargets, o.Namespace, p)
