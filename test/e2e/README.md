@@ -30,6 +30,7 @@ and read each `[SKIPPED]` reason.
 | `USE_SIMULATOR=false` on a GPU cluster | warm-pool drain (label `gpu`, in neither tier) |
 | LeaderWorkerSet is served (`DEPLOY_LWS=true`) | LeaderWorkerSet scale-from-zero, warm-pool group |
 | Kueue CRDs are served | Kueue quota limiter |
+| A Kueue controller is running (`KUEUE_CONTROLLER=true`, the default on kind) | Kueue cohort borrowing |
 | InferenceObjective CRD is served | scale-from-zero and park-and-wake specs |
 | Grafana is deployed | operational dashboard |
 | Prometheus is reachable at `https://localhost:9090` | metric assertions in many specs; the make targets start this port-forward themselves |
@@ -45,6 +46,7 @@ and read each `[SKIPPED]` reason.
 | `make test-e2e-smoke` | `smoke` | every PR into `main` or `dev` that changes something besides `docs/**`, `README.md`, `CONTRIBUTING.md`, `LICENSE`, `OWNERS` or `PROJECT`, with `SCALE_TO_ZERO_ENABLED=false` |
 | `make test-e2e-full` | `full && !smoke && !flaky` | PRs that touch code, config or tests, with `SCALE_TO_ZERO_ENABLED=true` and `DEPLOY_LWS=true` |
 | `make test-e2e-multi-controller` | `multi-controller` specs | — |
+| `make test-e2e-kueue-borrow` | `kueue-borrow` (needs `make install-kueue-e2e` first) | — (runs inside `full`) |
 | `make test-e2e-smoke-with-setup` / `test-e2e-full-with-setup` | deploy the infra first, then run the tier | what CI runs |
 
 Smoke and full are **disjoint**: the full target excludes `smoke`, so run both

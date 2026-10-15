@@ -321,10 +321,11 @@ jobs:
             exit 0
           fi
           echo "$changed" | sed 's/^/  /'
-          # The compiled surface, plus the two things that DRIVE this suite:
-          # test-e2e-full-with-setup lives in the Makefile and the job in the
-          # workflow, so a change to either can break the run it would skip.
-          if echo "$changed" | grep -qE '(\.go|go\.mod|go\.sum|Dockerfile|Makefile)$|^(config|test)/|^\.github/workflows/'; then
+          # The compiled surface, plus the things that DRIVE this suite:
+          # test-e2e-full-with-setup lives in the Makefile, the job in the
+          # workflow, and the Kueue and kind installs it runs in
+          # deploy/ci-pr-checks, so a change to any can break the run it would skip.
+          if echo "$changed" | grep -qE '(\.go|go\.mod|go\.sum|Dockerfile|Makefile)$|^(config|test)/|^\.github/workflows/|^deploy/ci-pr-checks/'; then
             echo 'Compiled surface touched -- running the full suite.'
             echo 'run=true' >> $GITHUB_OUTPUT
           else
@@ -379,6 +380,15 @@ jobs:
           IMG: ${{ steps.build-image.outputs.image }}
           SKIP_BUILD: "true"
           DELETE_CLUSTER: "false"
+          # The live-Kueue borrowing spec (kueue_borrow_test.go) runs in this
+          # job, on this cluster, rather than in a job of its own: a second
+          # job would repeat the whole kind, image and infra setup this one
+          # already pays for, to add about a minute of Kueue install and a few
+          # minutes of spec. The Kueue job
+          # webhooks are narrowed to the namespaces that spec creates
+          # (KUEUE_WEBHOOK_NAMESPACE_LABEL), so the rest of the suite does not
+          # depend on Kueue being up. The default; stated so it is visible here.
+          KUEUE_CONTROLLER: "true"
           # Same simulator saturation tuning as smoke — defaults are too high for reliable scale-up signals.
         run: |
           make test-e2e-full-with-setup

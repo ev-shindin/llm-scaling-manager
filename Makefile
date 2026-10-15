@@ -1243,11 +1243,59 @@ test-e2e-multi-controller-with-setup: deploy-e2e-infra test-e2e-multi-controller
 .PHONY: test-e2e-full-with-setup
 test-e2e-full-with-setup:
 	DEPLOY_LWS=true SCALER_BACKEND=keda $(MAKE) deploy-e2e-infra
-	@# The Kueue-bounded quota spec (kueue_quota_test.go) lists Kueue objects, so
-	@# the three CRDs it reads must exist. kind only: the script refuses a cluster
-	@# that already has them, and a shared cluster is not ours to add CRDs to.
-	@if [ "$(ENVIRONMENT)" = "kind-emulator" ]; then deploy/ci-pr-checks/install-kueue-crds.sh; fi
+	@# Kueue, kind only: a shared cluster is not ours to install Kueue into.
+	@# The quota-reader spec (kueue_quota_test.go) needs only the three CRDs; the
+	@# borrowing spec (kueue_borrow_test.go) needs the controller, and the
+	@# quota-reader spec passes against it too. KUEUE_CONTROLLER=false installs
+	@# the CRDs alone, and the borrowing spec then FAILS on kind, saying why.
+	@if [ "$(ENVIRONMENT)" = "kind-emulator" ]; then $(MAKE) install-kueue-e2e; fi
 	$(MAKE) test-e2e-full
+
+# Whether the kind e2e installs Kueue's controller (true) or only its CRDs.
+KUEUE_CONTROLLER ?= true
+# The namespace label Kueue's job webhooks are narrowed to on the kind e2e, so a
+# restarting Kueue cannot fail pod creation in the rest of the suite. Must match
+# fixtures.KueueE2ENamespaceLabel.
+KUEUE_WEBHOOK_NAMESPACE_LABEL ?= llm-d.ai/kueue-e2e
+
+# Installs Kueue onto the current (kind) cluster for the e2e: the controller
+# through deploy/ci-pr-checks/install-kueue.sh, or with KUEUE_CONTROLLER=false the
+# three CRDs alone through install-kueue-crds.sh. Both scripts pin a version and
+# refuse to change a Kueue somebody else installed.
+.PHONY: install-kueue-e2e
+install-kueue-e2e: ## Install Kueue (controller, or CRDs only with KUEUE_CONTROLLER=false) onto the kind e2e cluster
+	@if [ "$(KUEUE_CONTROLLER)" = "true" ]; then \
+		KUEUE_WEBHOOK_NAMESPACE_LABEL=$(KUEUE_WEBHOOK_NAMESPACE_LABEL) deploy/ci-pr-checks/install-kueue.sh; \
+	else \
+		deploy/ci-pr-checks/install-kueue-crds.sh; \
+	fi
+
+# Runs only the live-Kueue borrowing spec (label kueue-borrow). It is part of the
+# full suite as well; this target is for iterating on it. Needs the Kueue
+# controller: `make install-kueue-e2e` on a cluster from deploy-e2e-infra.
+.PHONY: test-e2e-kueue-borrow
+test-e2e-kueue-borrow: ## Run the live-Kueue cohort borrowing e2e spec
+	@echo "Running the live-Kueue borrowing e2e spec..."
+	$(eval FOCUS_ARGS := $(if $(FOCUS),-ginkgo.focus="$(FOCUS)",))
+	$(eval SKIP_ARGS := $(if $(SKIP),-ginkgo.skip="$(SKIP)",))
+	KUBECONFIG=$(KUBECONFIG) \
+	ENVIRONMENT=$(ENVIRONMENT) \
+	WVA_NAMESPACE=$(CONTROLLER_NAMESPACE) \
+	LLMD_NAMESPACE=$(E2E_EMULATED_LLMD_NAMESPACE) \
+	MONITORING_NAMESPACE=$(E2E_MONITORING_NAMESPACE) \
+	USE_SIMULATOR=$(USE_SIMULATOR) \
+	SCALE_TO_ZERO_ENABLED=$(SCALE_TO_ZERO_ENABLED) \
+	SCALER_BACKEND=keda \
+	KEDA_NAMESPACE=$(E2E_KEDA_NAMESPACE) \
+	MODEL_ID=$(MODEL_ID) \
+	go test ./test/e2e/ -timeout $(E2E_GO_TIMEOUT) -v -ginkgo.v -ginkgo.timeout=$(E2E_TIMEOUT) \
+		-ginkgo.label-filter="kueue-borrow" $(FOCUS_ARGS) $(SKIP_ARGS); \
+	TEST_EXIT_CODE=$$?; \
+	echo ""; \
+	echo "=========================================="; \
+	echo "Test execution completed. Exit code: $$TEST_EXIT_CODE"; \
+	echo "=========================================="; \
+	exit $$TEST_EXIT_CODE
 
 
 ##@ llm-d-benchmark CLI (standup / run / teardown)
@@ -2648,6 +2696,7 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@for script in deploy/lib/*.sh; do bash -n "$$script"; done
 	@for script in deploy/*/install.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
 	@for script in deploy/kind-emulator/*.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
+	@for script in deploy/ci-pr-checks/*.sh; do bash -n "$$script"; done
 	@echo "Checking for apostrophes inside quoted jq/yq programs..."
 	@# `bash -n` catches an ODD number and misses an EVEN one, which
 	@# rebalances the quoting and hands jq a truncated program. Both have

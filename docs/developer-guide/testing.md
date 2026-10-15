@@ -231,18 +231,56 @@ This deploys:
 
 When `ENABLE_SCALE_TO_ZERO=true` (set by `make deploy-e2e-infra` when `SCALE_TO_ZERO_ENABLED=true`), **`install-epp.sh`** enables the **flowControl feature gate** on the EPP so it exposes `inference_extension_flow_control_queue_size`. The **InferenceObjective** `e2e-default` is created by the scale-from-zero tests (`test/e2e/fixtures`), not by the install scripts.
 
-**Kueue CRDs (full suite on kind).** `kueue_quota_test.go` (label `kueue-quota`)
-proves a quota entry bounded by Kueue against a real API server. It needs only
-the three Kueue **CRDs** (ClusterQueue, LocalQueue, ResourceFlavor), not Kueue's
-controller — the reader lists objects and never talks to Kueue.
-`make test-e2e-full-with-setup` installs them on kind through
-`deploy/ci-pr-checks/install-kueue-crds.sh` (pinned `KUEUE_VERSION`). On kind
-the spec **fails rather than skips** when the kinds are absent, so a missing
-setup step is never read as coverage; run the script by hand before a bare
-`make test-e2e-full` on kind. On any other cluster (the OpenShift CI included)
-nothing installs them, and the spec runs when the cluster serves the kinds and
-skips — saying so in the `-v` output — when it does not. The script leaves a
-cluster that already has the CRDs untouched and exits 0.
+**Kueue (full suite on kind).** Two specs read Kueue:
+
+- `kueue_quota_test.go` (label `kueue-quota`) proves a quota entry bounded by
+  Kueue against a real API server. It needs only the three Kueue **CRDs**
+  (ClusterQueue, LocalQueue, ResourceFlavor): the reader lists objects and
+  never talks to Kueue.
+- `kueue_borrow_test.go` (label `kueue-borrow`) needs Kueue's **controller**.
+  It builds a two-queue cohort and lets Kueue admit, borrow and reclaim, then
+  checks the scaling manager's read-only borrowing line ("Kueue borrowing read
+  and NOT applied") against the ClusterQueue status at each step:
+  - queue a borrows 4 GPUs past its nominal 8;
+  - a `Never` lender waits with work pending;
+  - the lender is switched to `Any`, Kueue deletes one of a's pods, and the
+    replacement waits at the admission gate.
+
+  It takes about 2 minutes once Kueue is up.
+
+`make test-e2e-full-with-setup` installs Kueue on kind through
+`make install-kueue-e2e`. By default (`KUEUE_CONTROLLER=true`) that runs
+`deploy/ci-pr-checks/install-kueue.sh`, which:
+
+- applies the pinned release manifest (`KUEUE_VERSION`, default `v0.20.0`,
+  image from `registry.k8s.io`);
+- waits for the rollout, then for the webhook to answer;
+- narrows Kueue's job webhooks to namespaces labelled `llm-d.ai/kueue-e2e`
+  (`KUEUE_WEBHOOK_NAMESPACE_LABEL`). Upstream they cover every namespace with
+  `failurePolicy: Fail`, so a restarting Kueue would fail pod creation for the
+  whole suite.
+
+With `KUEUE_CONTROLLER=false` it runs `install-kueue-crds.sh` instead, which
+installs the CRDs alone. The quota spec passes either way; the borrowing spec
+then fails.
+
+On kind both specs **fail rather than skip** when what they need is missing, so
+a missing setup step is never read as coverage. On any other cluster (the
+OpenShift CI included) nothing installs Kueue: each spec runs when the cluster
+has what it needs and skips, saying so in the `-v` output, when it does not.
+Both scripts refuse to change a Kueue somebody else installed.
+
+To run the borrowing spec alone on a kind cluster from `make deploy-e2e-infra`:
+
+```bash
+make install-kueue-e2e
+make test-e2e-kueue-borrow
+```
+
+Check the summary says `Ran 4 of ... Specs` with no skips. The spec pins its pods
+to a GPU product no node carries (`NVIDIA-KUEUEBORROW-80GB`), so Kueue admits
+them and they stay `Pending` unscheduled. That is expected: Kueue charges quota
+at admission, not placement.
 
 **Utilization-share optimizer (full suite).** `utilization_share_test.go`
 (label `utilization-share`) runs the optimizer of
