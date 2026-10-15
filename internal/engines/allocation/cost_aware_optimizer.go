@@ -573,6 +573,72 @@ func collapseSpellings(budgets map[string]int, closedKey func(string) bool) map[
 	return out
 }
 
+// coversOther reports whether budget key s is a broader spelling than key l of
+// the same accelerator: s covers l (coversName) and the two are not one
+// spelling in different case.
+func coversOther(s, l string) bool {
+	return !strings.EqualFold(s, l) && coversName(s, l)
+}
+
+// debitBudget spends n GPUs of the merged cluster budget under key.
+//
+// collapseSpellings keeps two spellings of one GPU apart when their budgets
+// differ: a physical pool of {H100: 16} beside a namespace-scope aggregate of
+// {NVIDIA-H100-80GB-HBM3: 4} merges to both keys. Every GPU spent under the long
+// key is also one of the 16 H100s, so spending it debits every broader key that
+// covers it too; otherwise one namespace spends 4 on the long key, another 16 on
+// "H100", and 20 are ordered against 16. Conversely a long key never holds more
+// than the broader key that covers it, so after any debit each covered key is
+// clamped to its cover. An unbounded (math.MaxInt) budget is never drawn down,
+// and no budget goes below 0.
+func debitBudget(budgets map[string]int, key string, n int) {
+	if n <= 0 {
+		return
+	}
+	if cur, ok := budgets[key]; ok && cur != math.MaxInt {
+		budgets[key] = max(0, cur-n)
+	}
+	for other, v := range budgets {
+		if v != math.MaxInt && coversOther(other, key) {
+			budgets[other] = max(0, v-n)
+		}
+	}
+	for l, lv := range budgets {
+		for s, sv := range budgets {
+			if sv < lv && coversOther(s, l) {
+				lv = sv
+			}
+		}
+		budgets[l] = lv
+	}
+}
+
+// budgetTotal is the number of GPUs a merged cluster budget still holds,
+// saturating at math.MaxInt for an unbounded key. A key a broader key covers is
+// counted through that cover only (see debitBudget), so {H100: 16,
+// NVIDIA-H100-80GB-HBM3: 4} holds 16, not 20. Used for the optimizer's "nothing
+// left" stop check.
+func budgetTotal(budgets map[string]int) int {
+	total := 0
+	for key, v := range budgets {
+		covered := false
+		for other := range budgets {
+			if coversOther(other, key) {
+				covered = true
+				break
+			}
+		}
+		if covered {
+			continue
+		}
+		if v == math.MaxInt {
+			return math.MaxInt
+		}
+		total += v
+	}
+	return total
+}
+
 // moreSpecific orders accelerator spellings for collapseSpellings: a long
 // product name before a short name, then lexically. It is a strict total order,
 // so of two spellings exactly one is kept.

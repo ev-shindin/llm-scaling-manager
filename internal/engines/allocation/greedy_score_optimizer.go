@@ -272,18 +272,9 @@ func (o *GreedyByScoreOptimizer) fairShareScaleUp(
 			break
 		}
 
-		totalGPUs := 0
-		for _, v := range available {
-			// An unbounded (math.MaxInt) budget marks an unlimited quota type;
-			// saturate rather than overflow the sum, which is only used for the
-			// "== 0" stop check below.
-			if v == math.MaxInt {
-				totalGPUs = math.MaxInt
-				break
-			}
-			totalGPUs += v
-		}
-		if totalGPUs == 0 {
+		// An unbounded (math.MaxInt) budget marks an unlimited quota type and
+		// saturates the sum; a spelling another key covers is counted once.
+		if budgetTotal(available) == 0 {
 			logger.V(logging.DEBUG).Info("GreedyByScore: no GPUs remaining, stopping fair-share")
 			break
 		}
@@ -395,10 +386,8 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 		// sum overflow with two or more unlimited types.
 		// accType is the namespace allowlist's spelling when the namespace is
 		// closed, which need not be the cluster pool's: resolve by identity.
-		clusterKey := budgetKey(available, accType)
-		if cur, clusterCapped := available[clusterKey]; clusterCapped && cur != math.MaxInt {
-			available[clusterKey] -= consumed
-		}
+		// debitBudget also debits the broader spelling that covers this one.
+		debitBudget(available, budgetKey(available, accType), consumed)
 		if reach != nil {
 			// The guaranteed budget is spent first and never below 0; what
 			// went past it was borrowed, and the placer has debited the pools.

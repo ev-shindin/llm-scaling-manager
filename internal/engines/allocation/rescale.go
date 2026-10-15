@@ -327,11 +327,9 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 				// A namespace fill also draws from the shared physical pool; debit the
 				// finite cluster budget too (mirroring allocateForModel). Bounded by
 				// fillable above, this can never drive the cluster budget negative.
-				if cur, ok := available[clusterKey]; ok && cur != math.MaxInt {
-					available[clusterKey] -= consumed
-				}
+				debitBudget(available, clusterKey, consumed)
 			} else {
-				available[k.accType] -= consumed
+				debitBudget(available, k.accType, consumed)
 			}
 		}
 	}

@@ -64,10 +64,7 @@ func (o *GreedyByScoreOptimizer) applyRescaleWithinNominal(
 		if consumed <= 0 || before == math.MaxInt {
 			continue
 		}
-		key := budgetKey(available, accType)
-		if cur, ok := available[key]; ok && cur != math.MaxInt {
-			available[key] = max(0, cur-consumed)
-		}
+		debitBudget(available, budgetKey(available, accType), consumed)
 	}
 	return decisions, handled
 }
