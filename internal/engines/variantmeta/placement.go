@@ -24,9 +24,12 @@ var GateGrace = 30 * time.Second
 // scheduler reports Unschedulable, and pods held at Kueue's admission gate for
 // longer than GateGrace. A pod pulling an image or loading weights is placed:
 // it has a node. On a LeaderWorkerSet a replica is a group, unplaced while any
-// of its pods is. since is when the oldest unplaced pod became so (the
+// of its pods is. since is when the newest unplaced pod became so (the
 // Unschedulable condition's transition, or the gated pod's creation), pods
-// their names, sorted.
+// their names, sorted. The newest, not the oldest: the placement timeout
+// releases borrowed replicas once since is older than the timeout, and an old
+// pod that never placed for its own reason must not make a replica ordered a
+// minute ago look timed out.
 func placement(ctx context.Context, k8sClient client.Client, namespace string,
 	scaleTarget scaletarget.ScaleTargetAccessor, now time.Time) (unplaced int, since time.Time, pods []string) {
 	if k8sClient == nil || scaleTarget == nil {
@@ -49,7 +52,7 @@ func countUnplaced(list []corev1.Pod, group bool, now time.Time) (unplaced int, 
 			continue
 		}
 		pods = append(pods, p.Name)
-		if since.IsZero() || at.Before(since) {
+		if at.After(since) {
 			since = at
 		}
 		if !group {

@@ -78,8 +78,9 @@ type VariantMetadata struct {
 	// admission gate for longer than one cycle. Pulling an image or loading
 	// weights is not unplaced. In scale-target units: a LeaderWorkerSet group
 	// is unplaced while any of its pods is, so a hold on it lifts only once the
-	// whole group has placed. UnplacedSince is when the oldest unplaced pod
-	// became so, UnplacedPods their names. Same pod listing as PendingReplicas'
+	// whole group has placed. UnplacedSince is when the newest unplaced pod
+	// became so (an old pod stuck for its own reason must not time out a
+	// fresh replica), UnplacedPods their names. Same pod listing as PendingReplicas'
 	// ages.
 	UnplacedReplicas int
 	UnplacedSince    time.Time

@@ -48,8 +48,8 @@ func TestCountUnplacedIsNarrow(t *testing.T) {
 	if n != 2 || len(pods) != 2 || pods[0] != "a" || pods[1] != "b" {
 		t.Fatalf("unplaced = %d %v, want 2 [a b]: a fresh gate, a pulling image and a loading pod are not unplaced", n, pods)
 	}
-	if !since.Equal(now.Add(-10 * time.Minute)) {
-		t.Fatalf("since = %v, want the Unschedulable transition", since)
+	if !since.Equal(now.Add(-5 * time.Minute)) {
+		t.Fatalf("since = %v, want the newest unplaced pod (b, gated 5m), not the oldest (a, unschedulable 10m)", since)
 	}
 }
 
