@@ -9,6 +9,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 )
@@ -437,6 +438,109 @@ func roleAtCeiling(
 	return usable
 }
 
+// fitPairToBudget scales one iteration's per-role replica counts (kByRole) down
+// until the roles that draw on one accelerator budget fit it TOGETHER, and
+// reports false when not even one replica of each such role does, in which case
+// nothing may be committed.
+//
+// The pick sizes every role against the whole budget, as if it were alone, and
+// the budget is debited only after the joint commit. Two roles on one
+// accelerator therefore each saw all of it: a budget of 8 GPUs with an 8-GPU
+// prefill and an 8-GPU decode replica ordered 8+8. Each role's accelerator
+// resolves to a budget key (budgetKey), and every key that covers it
+// (accelerator.Covers: the key itself, a spelling that differs only in case,
+// the family key of a product) bounds the roles under it TOGETHER. A merged
+// budget can hold a family and its products -- a physical pool of {H100: 8}
+// beside a quota of {NVIDIA-H100-80GB-HBM3: 8, NVIDIA-H100-SXM5-80GB: 8}: a
+// prefill on the one product and a decode on the other both draw on the H100
+// key, while each product key bounds its own role alone. Roles on different
+// accelerators are checked against their own pools. A role whose key the
+// budget does not hold has none. available is the effective budget the caller
+// passes -- in the greedy optimizer already the tighter of the cluster and
+// namespace budgets -- so fitting it fits both. A nil budget (unconstrained) or
+// an unbounded one (math.MaxInt) fits anything.
+//
+// The scale-down only approximates the ratio the k computation chose: every
+// role in a group is scaled by the same factor, rounded down and never below
+// one replica, so a role with few replicas keeps a larger share than its
+// partner; then the role holding the most GPUs gives one replica at a time
+// until the group fits, which can move the ratio further. A role whose k is
+// already 0 stays 0.
+func fitPairToBudget(
+	picked []string,
+	kByRole map[string]int,
+	variantByRole map[string]string,
+	variants []variantRecord,
+	stateMap map[string]domain.VariantReplicaState,
+	available map[string]int,
+) bool {
+	if available == nil || len(picked) < 2 {
+		return true
+	}
+	roleKey := make(map[string]string, len(picked))
+	keySet := make(map[string]bool, len(available)+len(picked))
+	for key := range available {
+		keySet[key] = true
+	}
+	for _, role := range picked {
+		if kByRole[role] <= 0 {
+			continue
+		}
+		key := budgetKey(available, accFromVCs(variants, variantByRole[role]))
+		roleKey[role] = key
+		keySet[key] = true
+	}
+	// Sorted, so the scale-down does not depend on map order.
+	keys := slices.Sorted(maps.Keys(keySet))
+	groups := make(map[string][]string, len(keys))
+	for _, key := range keys {
+		for _, role := range picked {
+			if rk, ok := roleKey[role]; ok && accelerator.Covers(key, rk) {
+				groups[key] = append(groups[key], role)
+			}
+		}
+	}
+	gpus := func(role string) int {
+		return gpusPerReplicaFromState(stateMap, variantByRole[role])
+	}
+	for _, key := range keys {
+		roles := groups[key]
+		budget, bounded := available[key]
+		if bounded && budget == math.MaxInt {
+			continue
+		}
+		budget = max(budget, 0)
+		sum := 0
+		for _, role := range roles {
+			sum += kByRole[role] * gpus(role)
+		}
+		if sum <= budget {
+			continue
+		}
+		for _, role := range roles {
+			kByRole[role] = max(1, kByRole[role]*budget/sum)
+		}
+		for {
+			sum = 0
+			largest := ""
+			for _, role := range roles {
+				sum += kByRole[role] * gpus(role)
+				if kByRole[role] > 1 && (largest == "" || kByRole[role]*gpus(role) > kByRole[largest]*gpus(largest)) {
+					largest = role
+				}
+			}
+			if sum <= budget {
+				break
+			}
+			if largest == "" {
+				return false // one replica of each does not fit together
+			}
+			kByRole[largest]--
+		}
+	}
+	return true
+}
+
 // RolePickFn is the role-generic optimizer variant selector for the unified
 // allocateForModelPaired loop. Called once per role per iteration; returns the
 // chosen variant and its resource cap. Returning ("", 0) signals no variant
@@ -574,6 +678,12 @@ func allocateForModelPaired(
 			}
 		}
 		if !anyPositive {
+			break
+		}
+		// Each role was sized against the whole budget on its own; the pair
+		// must fit it together. Not even one replica of each fitting together
+		// is SCARCITY, and ends the pass the same way.
+		if !fitPairToBudget(picked, kByRole, variantByRole, variants, stateMap, available) {
 			break
 		}
 

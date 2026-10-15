@@ -147,6 +147,75 @@ func TestTwoProductsOfOneFamilyShareThePhysicalPool(t *testing.T) {
 	}
 }
 
+// 8 physical H100s, a cluster quota of 8 per product: a P/D model with prefill
+// on one product and decode on the other, 8 GPUs a replica, cannot place a
+// pair; two single-role models on the two products place one replica between
+// them; and the share optimizer's groups split the 8 free GPUs.
+func TestProductsOfOneFamilyDoNotEachSeeTheWholeFamily(t *testing.T) {
+	build := func() []*ResourceConstraints {
+		return []*ResourceConstraints{
+			famPhysical(t, map[string]int{famHBM3: 8}),
+			famClusterQuota(t, map[string]int{famHBM3: 8, famSXM5: 8}),
+		}
+	}
+
+	t.Run("P/D pair", func(t *testing.T) {
+		r := &satEntryFixture{
+			ModelID: "pd", Namespace: "a", AnalyzedAt: time.Now(),
+			RequiredCapacity: 80000,
+			RoleCapacities: map[string]domain.RoleCapacity{
+				"prefill": {Role: "prefill", RequiredCapacity: 40000, TotalDemand: 40000},
+				"decode":  {Role: "decode", RequiredCapacity: 40000, TotalDemand: 40000},
+			},
+			VariantCapacities: []vcFixture{
+				{VariantName: "prefill-v", AcceleratorName: famHBM3, Cost: 5, Role: "prefill", PerReplicaCapacity: 10000},
+				{VariantName: "decode-v", AcceleratorName: famSXM5, Cost: 5, Role: "decode", PerReplicaCapacity: 10000},
+			},
+		}
+		req := withSatEntry(r, ModelScalingRequest{
+			ModelID: "pd", Namespace: "a", Disaggregated: true, Priority: 1,
+			VariantStates: []domain.VariantReplicaState{
+				{VariantName: "prefill-v", GPUsPerReplica: 8, Role: "prefill"},
+				{VariantName: "decode-v", GPUsPerReplica: 8, Role: "decode"},
+			},
+		})
+		got := famTargets(build(), req)
+		if gpus := (got["prefill-v"] + got["decode-v"]) * 8; gpus > 8 {
+			t.Errorf("ordered %v replicas of 8 GPUs (%d GPUs) against 8 physical H100s", got, gpus)
+		}
+	})
+
+	t.Run("two single-role models", func(t *testing.T) {
+		got := famTargets(build(), famWanting("a", "ma", famHBM3, 4, 8), famWanting("b", "mb", famSXM5, 4, 8))
+		if gpus := (got["ma-v"] + got["mb-v"]) * 8; gpus != 8 {
+			t.Errorf("ordered %v replicas of 8 GPUs (%d GPUs), want 8: one replica on the 8 H100s", got, gpus)
+		}
+	})
+
+	t.Run("share groups", func(t *testing.T) {
+		share := func(model, acc string) ModelScalingRequest {
+			req := withSatEntry(&satEntryFixture{
+				ModelID: model, Namespace: "a", TotalDemand: 4000,
+				VariantCapacities: []vcFixture{{VariantName: model + "-v", AcceleratorName: acc, Cost: 5, PerReplicaCapacity: 1000}},
+			}, ModelScalingRequest{
+				ModelID: model, Namespace: "a",
+				VariantStates: []domain.VariantReplicaState{{VariantName: model + "-v", GPUsPerReplica: 1, MinReplicas: ptrInt(1)}},
+			})
+			req.CompositeSignal.ScaleUpThreshold = 0.8
+			return req
+		}
+		groups := BuildShareGroups([]ModelScalingRequest{share("ma", famHBM3), share("mb", famSXM5)}, build(),
+			ShareGroupOptions{ClusterIsQuota: true})
+		if len(groups) != 2 {
+			t.Fatalf("groups %+v, want one per product", groups)
+		}
+		if sum := groups[0].ClusterFree + groups[1].ClusterFree; sum > 8 || sum == 0 {
+			t.Errorf("ClusterFree %d + %d = %d, but 8 H100s are free in all",
+				groups[0].ClusterFree, groups[1].ClusterFree, sum)
+		}
+	})
+}
+
 // A spend under a product also draws down the namespace's family key. Quota
 // only: x may take 4 H100s in all, 3 of them HBM3; y's cap keeps the quota's
 // aggregate from bounding x.
