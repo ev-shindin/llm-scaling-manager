@@ -42,6 +42,14 @@ func never(lentOut int) kueue.LenderState {
 	return kueue.LenderState{Queue: "lender", Waiting: true, LentOut: lentOut}
 }
 
+// seenPast runs c once at an earlier time, so the namespaces c sees past
+// guaranteed are known past it since then: a governor never told counts the
+// placement timeout from its first cycle (observePast).
+func seenPast(g *BorrowGovernor, c BorrowCycle, at time.Time) {
+	c.Now = at
+	g.Observe(c)
+}
+
 // decisionsOf are no-change decisions for every variant of the requests.
 func decisionsOf(reqs []ModelScalingRequest) []domain.VariantDecision {
 	out := make([]domain.VariantDecision, 0, len(reqs))
@@ -357,6 +365,7 @@ var _ = Describe("BorrowGovernor", func() {
 			g := NewBorrowGovernor(settings)
 			pd := unplaced(pdModel(8), 1, t0) // decode unplaced, prefill placed
 			c := BorrowCycle{Now: t0.Add(6 * time.Minute), Constraints: govWorld{used: 16}.constraints(), Requests: []ModelScalingRequest{pd}}
+			seenPast(g, c, t0)
 			g.Observe(c)
 			ds := decisionsOf(c.Requests)
 			rel := g.Releases(c, ds)
@@ -374,11 +383,13 @@ var _ = Describe("BorrowGovernor", func() {
 				g.Observe(c)
 				return g.Releases(c, decisionsOf(c.Requests))
 			}
+			Expect(cycle(0)).To(BeEmpty())
 			Expect(cycle(6*time.Minute)).To(BeEmpty(), "TriggeredScaleUp: the timeout waits")
 			Expect(cycle(16*time.Minute)).To(HaveLen(1), "capped at three times the timeout")
 
 			g = NewBorrowGovernor(settings)
 			pending = nil // a later NotTriggerScaleUp ends the wait
+			Expect(cycle(0)).To(BeEmpty())
 			Expect(cycle(6 * time.Minute)).To(HaveLen(1))
 		})
 
@@ -408,6 +419,7 @@ var _ = Describe("BorrowGovernor", func() {
 		It("releases a gated replica past guaranteed when its queue reserves its full nominal", func() {
 			g := NewBorrowGovernor(settings)
 			c := gatedReplacement(0, 3)
+			seenPast(g, c, t0)
 			g.Observe(c)
 			ds := decisionsOf(c.Requests)
 			rel := g.Releases(c, ds)

@@ -76,9 +76,11 @@ var _ = Describe("BorrowGovernor release units", func() {
 	t0 := time.Unix(20000, 0)
 	settings := DefaultBorrowSettings()
 
-	// timeout runs one cycle past the placement timeout.
+	// timeout runs one cycle at t0, when the namespace is first seen past
+	// guaranteed, and one past the placement timeout.
 	timeout := func(g, used int, reqs ...ModelScalingRequest) ([]BorrowRelease, map[string]int) {
 		gov := NewBorrowGovernor(settings)
+		gov.Observe(BorrowCycle{Now: t0, Constraints: govWorld{g: g, used: used}.constraints(), Requests: reqs})
 		c := BorrowCycle{Now: t0.Add(settings.PlacementTimeout + time.Minute), Constraints: govWorld{g: g, used: used}.constraints(), Requests: reqs}
 		gov.Observe(c)
 		ds := decisionsOf(reqs)
@@ -119,10 +121,26 @@ var _ = Describe("BorrowGovernor release units", func() {
 		It("releases one LeaderWorkerSet group when one group is past the timeout and another is fresh", func() {
 			g := NewBorrowGovernor(settings)
 			now := t0.Add(settings.PlacementTimeout + time.Minute)
+			Expect(run(g, t0, govWorld{g: 16, used: 48}, unplacedPods(govModel("x", 3, 16), map[string]time.Time{"1": t0}))).To(BeEmpty())
 			groups := map[string]time.Time{"1": t0, "2": now.Add(-time.Minute)}
 			rel := run(g, now, govWorld{g: 16, used: 48}, unplacedPods(govModel("x", 3, 16), groups))
 			Expect(rel).To(HaveLen(1))
 			Expect(rel[0].From - rel[0].To).To(Equal(1), "one group past the timeout: one group released")
+		})
+
+		// Review finding (bug hunter): pastSince is not persisted. After a
+		// restart, a namespace already past guaranteed got a zero clock, so a
+		// pod stuck for an hour -- within guaranteed before, say -- timed out
+		// on the first cycle. The clock starts at the restart instead.
+		It("starts the clock at a restart for a namespace already past guaranteed", func() {
+			g := NewBorrowGovernor(settings)
+			stuck := map[string]time.Time{"old": t0.Add(-time.Hour)}
+			world := govWorld{g: 16, used: 24}
+			Expect(run(g, t0, world, unplacedPods(govModel("x", 3, 8), maps.Clone(stuck)))).To(BeEmpty(),
+				"the first cycle after a restart: nothing is known of when the namespace began borrowing")
+			Expect(run(g, t0.Add(settings.PlacementTimeout-time.Second), world, unplacedPods(govModel("x", 3, 8), maps.Clone(stuck)))).To(BeEmpty())
+			Expect(run(g, t0.Add(settings.PlacementTimeout), world, unplacedPods(govModel("x", 3, 8), maps.Clone(stuck)))).To(HaveLen(1),
+				"one placement timeout after the restart")
 		})
 
 		// The round-1 finding stays fixed: a pod stuck since before the
@@ -212,6 +230,7 @@ var _ = Describe("BorrowGovernor release units", func() {
 			gov := NewBorrowGovernor(settings)
 			c := BorrowCycle{Now: t0.Add(settings.PlacementTimeout + time.Minute), Constraints: govWorld{g: 16, used: 24}.constraints(),
 				Requests: []ModelScalingRequest{pd}}
+			seenPast(gov, c, t0)
 			gov.Observe(c)
 			Expect(gov.Releases(c, decisionsOf(c.Requests))).To(HaveLen(1))
 
@@ -257,6 +276,7 @@ var _ = Describe("BorrowGovernor release units", func() {
 		c := BorrowCycle{Now: t0.Add(settings.PlacementTimeout + time.Minute),
 			Constraints: []*ResourceConstraints{borrowQuota(0, nsBorrow{ns: "b", guaranteed: 2, used: 3, cap: config.QuotaUnlimited})},
 			Requests:    []ModelScalingRequest{m1, m2}}
+		seenPast(gov, c, t0)
 		gov.Observe(c)
 		ds := decisionsOf(c.Requests)
 		rel := gov.Releases(c, ds)
@@ -343,6 +363,7 @@ var _ = Describe("BorrowGovernor release units", func() {
 			x := unplacedVariant(govModel("x", 3, 8), "x-v", t0)
 			at := t0.Add(2 * time.Minute)
 			c := BorrowCycle{Now: at, Constraints: govWorld{used: 24}.constraints(), Requests: []ModelScalingRequest{x}}
+			seenPast(g, c, t0)
 			g.Observe(c)
 			Expect(g.Releases(c, decisionsOf(c.Requests))).To(BeEmpty(), "inside the default placement timeout")
 			shorter := settings
@@ -392,6 +413,7 @@ var _ = Describe("BorrowGovernor release units", func() {
 			pd := unplacedVariant(govModel("x", 2, 8), "x-v", t0)
 			c := BorrowCycle{Now: t0.Add(settings.PlacementTimeout + time.Minute), Constraints: govWorld{used: 16}.constraints(),
 				Requests: []ModelScalingRequest{pd}}
+			seenPast(g, c, t0)
 			g.Observe(c)
 			g.Releases(c, decisionsOf(c.Requests))
 			raw, err := g.MarshalLedger()
@@ -421,6 +443,7 @@ var _ = Describe("BorrowGovernor release units", func() {
 			x := unplacedVariant(govModel("x", 3, 8), "x-v", t0)
 			c := BorrowCycle{Now: t0.Add(settings.PlacementTimeout + time.Minute), Constraints: govWorld{used: 24}.constraints(),
 				Requests: []ModelScalingRequest{x}}
+			seenPast(g, c, t0)
 			g.Observe(c)
 			Expect(g.Releases(c, decisionsOf(c.Requests))).To(HaveLen(1))
 			Expect(g.Ledger().TimeoutHeld).To(HaveKeyWithValue("b/x-v", 2))

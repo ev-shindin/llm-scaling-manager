@@ -97,7 +97,7 @@ var _ = Describe("what on-call sees of borrowing", func() {
 			g := NewBorrowGovernor(DefaultBorrowSettings())
 			r := govModel("m", 2, 8)
 			r.VariantStates[0].UnplacedReplicas, r.VariantStates[0].UnplacedSince = 1, t0
-			g.Observe(BorrowCycle{Now: t0, Requests: []ModelScalingRequest{r}})
+			g.Observe(BorrowCycle{Now: t0, Constraints: govWorld{used: 16}.constraints(), Requests: []ModelScalingRequest{r}})
 			Expect(g.VariantStatus("b", "m-v")).To(Equal(VariantBorrowStatus{Unplaced: true}))
 
 			c := BorrowCycle{Now: t0.Add(6 * time.Minute), Constraints: govWorld{used: 16}.constraints(), Requests: []ModelScalingRequest{r}}

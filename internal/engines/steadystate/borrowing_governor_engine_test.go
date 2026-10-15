@@ -158,6 +158,9 @@ var _ = Describe("borrowing governor, engine side", func() {
 			return []domain.VariantDecision{{Namespace: "b", ModelID: "m", VariantName: "v", AcceleratorName: "H100",
 				CurrentReplicas: 2, TargetReplicas: target, GPUsPerReplica: 8}}
 		}
+		before := now.Add(-6 * time.Minute) // the namespace is seen past guaranteed
+		e.prepareBorrowing(ctx, borrowing(), unplaced, deployment, before)
+		e.releaseBorrowed(ctx, unplaced, decisions(2), deployment, before)
 		e.prepareBorrowing(ctx, borrowing(), unplaced, deployment, now)
 		ds := decisions(2)
 		e.releaseBorrowed(ctx, unplaced, ds, deployment, now)

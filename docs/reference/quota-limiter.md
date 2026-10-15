@@ -351,7 +351,8 @@ itself:
   partner). The wait stretches up to three times while the cluster autoscaler
   reports `TriggeredScaleUp` on the pod. Until it places, the variant borrows
   nothing new. Each unplaced replica is timed on its own, from when it became
-  unplaced or from when its namespace began borrowing, whichever is later: a
+  unplaced or from when its namespace began borrowing (after a restart: from
+  the restart), whichever is later: a
   replica stuck before the namespace borrowed does not time out a fresh
   borrowed one, and new unplaced replicas do not reset the oldest one's clock.
   A LeaderWorkerSet group is one replica, timed from when its newest unplaced

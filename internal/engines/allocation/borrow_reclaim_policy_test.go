@@ -44,6 +44,7 @@ var _ = Describe("BorrowGovernor under each reclaim policy", func() {
 			Requests: []ModelScalingRequest{r},
 			Gated:    map[string]map[string]int{"b": {"H100": 1}}}
 		g := NewBorrowGovernor(settings)
+		seenPast(g, c, t0)
 		g.Observe(c)
 		return g.Releases(c, decisionsOf(c.Requests))
 	}

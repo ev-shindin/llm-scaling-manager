@@ -180,13 +180,9 @@ type BorrowGovernor struct {
 	preemptUnknown map[string]bool
 	// pastSince is, per "namespace/type", since when the namespace has held
 	// GPUs past its guaranteed figure, as Observe saw it: the earliest a pod
-	// of it can have been unplaced as a borrowed one. Zero when nothing was
-	// known of it the cycle before (observePast).
+	// of it can have been unplaced as a borrowed one (observePast).
 	pastSince map[string]time.Time
-	// within is the "namespace/type" keys the last Observe saw within
-	// guaranteed.
-	within  map[string]bool
-	started bool
+	started   bool
 	// idleSince is when cycles stopped counting borrowing (HoldReleases
 	// without Observe); zero while they count it.
 	idleSince time.Time
@@ -459,28 +455,23 @@ func (g *BorrowGovernor) Observe(c BorrowCycle) {
 }
 
 // observePast records when each borrowing namespace went past its guaranteed
-// figure, per type. The clock starts at this cycle only when the previous
-// cycle saw the namespace within guaranteed; one seen past guaranteed for the
-// first time with nothing known before -- after a start, or when borrowing
-// was not counted -- gets a zero time, so each unplaced pod counts from its
-// own time rather than having its clock restarted.
+// figure, per type: the first cycle that sees it past guaranteed. That is
+// also the first cycle after a start, or after cycles that counted no
+// borrowing, for a namespace already past guaranteed then: pastSince is not
+// persisted, and a zero clock would let a pod unplaced for an hour, say
+// within guaranteed before the restart, time out at once. Starting it at the
+// restart costs at most one placement timeout more.
 func (g *BorrowGovernor) observePast(c BorrowCycle) {
-	within := map[string]bool{}
 	past := map[string]bool{}
 	for ns, perType := range namespaceHeldPast(c.Constraints) {
 		for t, n := range perType {
-			k := ns + "/" + t
 			if n <= 0 {
-				within[k] = true
 				continue
 			}
+			k := ns + "/" + t
 			past[k] = true
 			if _, ok := g.pastSince[k]; !ok {
-				var since time.Time
-				if g.within[k] {
-					since = c.Now
-				}
-				g.pastSince[k] = since
+				g.pastSince[k] = c.Now
 			}
 		}
 	}
@@ -489,7 +480,6 @@ func (g *BorrowGovernor) observePast(c BorrowCycle) {
 			delete(g.pastSince, k)
 		}
 	}
-	g.within = within
 }
 
 // pruneClocks drops expired cooldowns and clamps one further away than the
@@ -643,7 +633,6 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 		clear(g.released)
 		clear(g.timeoutHeld)
 		clear(g.pastSince)
-		clear(g.within)
 		g.started = false
 		return
 	}

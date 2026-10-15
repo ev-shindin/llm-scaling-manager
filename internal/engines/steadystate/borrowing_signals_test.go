@@ -118,6 +118,8 @@ var _ = Describe("what on-call sees of borrowing, engine side", func() {
 		e := &Engine{Config: config.NewTestConfig(), Recorder: rec}
 		now := t0.Add(6 * time.Minute)
 		reqs := model(t0)
+		e.prepareBorrowing(ctx, world(16, t0), reqs, targets, t0) // the namespace is seen past guaranteed
+		e.releaseBorrowed(ctx, reqs, decisionsFor(), targets, t0)
 		cs := e.prepareBorrowing(ctx, world(16, now), reqs, targets, now)
 		ds := decisionsFor()
 		e.releaseBorrowed(ctx, reqs, ds, targets, now)
