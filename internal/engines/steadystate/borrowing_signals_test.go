@@ -170,10 +170,13 @@ var _ = Describe("what on-call sees of borrowing, engine side", func() {
 	It("counts a recent Kueue preemption and holds lender-reclaimed for the cooldown; an old one counts nothing", func() {
 		e := &Engine{Config: config.NewTestConfig()}
 		cs := e.prepareBorrowing(ctx, world(8, t0), model(time.Time{}), targets, t0)
-		e.recordReclaim("a/m", kueue.PreemptedWorkload{Owners: []string{"v-abc-1", "v-abc-2"}, At: t0.Add(-time.Minute)}, t0)
-		e.recordReclaim("a/old", kueue.PreemptedWorkload{Owners: []string{"x"}, At: t0.Add(-time.Hour)}, t0)
+		e.recordReclaim("a/m", kueue.PreemptedWorkload{Owners: []string{"v-abc-1", "v-abc-2"}, At: t0.Add(-time.Minute)}, t0, "group/a/g1")
+		e.recordReclaim("a/old", kueue.PreemptedWorkload{Owners: []string{"x"}, At: t0.Add(-time.Hour)}, t0, "pod/x")
 		Expect(series(constants.WVAKueuePreemptedPodsTotal, constants.LabelNamespace, constants.LabelModelName)).To(
-			Equal(map[string]float64{"a,m": 2}))
+			Equal(map[string]float64{"a,m": 1}), "one preempted Workload, a two-pod group, counts once")
+		e.recordReclaim("a/m", kueue.PreemptedWorkload{Owners: []string{"v-abc-2"}, At: t0.Add(-time.Minute)}, t0, "group/a/g1")
+		Expect(series(constants.WVAKueuePreemptedPodsTotal, constants.LabelNamespace, constants.LabelModelName)).To(
+			Equal(map[string]float64{"a,m": 1}), "the same group seen again through another pod counts nothing more")
 
 		e.publishBorrowSignals(cs, model(time.Time{}), decisionsFor(), t0)
 		Expect(reasons()).To(Equal(map[string]float64{"m,lender-reclaimed": 1}))

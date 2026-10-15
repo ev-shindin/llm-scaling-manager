@@ -430,6 +430,8 @@ func (e *Eligibility) gpuQuota(ctx context.Context, ns string) (map[string]int, 
 // Evicted=True with reason Preempted.
 type PreemptedWorkload struct {
 	UID types.UID
+	// Name is the Workload's name; for a pod group, the group's name.
+	Name string
 	// Owners are the names of the objects the Workload is owned by: a pod for
 	// the pod integration, a LeaderWorkerSet or Job otherwise.
 	Owners []string
@@ -460,7 +462,7 @@ func PreemptedWorkloads(ctx context.Context, c client.Client, ns string) ([]Pree
 				continue
 			}
 			at, _ := time.Parse(time.RFC3339, fmt.Sprint(cond["lastTransitionTime"]))
-			pw := PreemptedWorkload{UID: w.GetUID(), At: at, OwnerRefs: w.GetOwnerReferences()}
+			pw := PreemptedWorkload{UID: w.GetUID(), Name: w.GetName(), At: at, OwnerRefs: w.GetOwnerReferences()}
 			for _, ref := range pw.OwnerRefs {
 				pw.Owners = append(pw.Owners, ref.Name)
 			}

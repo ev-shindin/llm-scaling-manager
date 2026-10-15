@@ -846,9 +846,11 @@ const (
 	// otherwise. Labels: namespace, variant_name.
 	WVAKueueUnplacedPods = "wva_kueue_unplaced_pods"
 
-	// WVAKueuePreemptedPodsTotal is a counter of managed pods Kueue preempted
-	// (a Workload evicted with reason Preempted) in a namespace that counts
-	// borrowing. Labels: namespace, model_name.
+	// WVAKueuePreemptedPodsTotal is a counter of preempted Workloads of a
+	// model: Kueue preemptions (a Workload evicted with reason Preempted) in a
+	// namespace that counts borrowing, one per Workload, so a LeaderWorkerSet
+	// or pod group counts once. The name predates that and is kept for the
+	// alert and dashboards that read it. Labels: namespace, model_name.
 	WVAKueuePreemptedPodsTotal = "wva_kueue_preempted_pods_total"
 
 	// WVABorrowReleasesTotal is a counter of the variant targets the scaling

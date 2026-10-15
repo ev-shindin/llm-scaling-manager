@@ -188,12 +188,12 @@ func waitingLenders(waits []allocation.LenderWait, borrowing map[string]bool, no
 	return out
 }
 
-// recordReclaim counts a Kueue preemption of a model's pods -- one per pod the
-// preempted Workload names as its owner, so a LeaderWorkerSet group counts
-// once -- and holds the lender-reclaimed reason for the cooldown after it. A
-// preemption older than the cooldown, one a restart finds again, counts
-// nothing.
-func (e *Engine) recordReclaim(modelKey string, w kueue.PreemptedWorkload, now time.Time) {
+// recordReclaim counts a Kueue preemption of a model's pods -- once per
+// preempted Workload, by key (preemptionKey), so a LeaderWorkerSet or pod
+// group whose pods arrive one by one counts once -- and holds the
+// lender-reclaimed reason for the cooldown after it. A preemption older than
+// the cooldown, one a restart finds again, counts nothing.
+func (e *Engine) recordReclaim(modelKey string, w kueue.PreemptedWorkload, now time.Time, key string) {
 	cooldown := e.borrowSettings().Cooldown
 	at := w.At
 	if at.IsZero() || at.After(now) {
@@ -214,8 +214,20 @@ func (e *Engine) recordReclaim(modelKey string, w kueue.PreemptedWorkload, now t
 			delete(st.reclaimedUntil, k)
 		}
 	}
+	if st.preemptCounted == nil {
+		st.preemptCounted = map[string]time.Time{}
+	}
+	for k, seen := range st.preemptCounted {
+		if now.Sub(seen) > cooldown {
+			delete(st.preemptCounted, k)
+		}
+	}
+	if _, counted := st.preemptCounted[key]; counted && key != "" {
+		return
+	}
+	st.preemptCounted[key] = now
 	ns, model, _ := strings.Cut(modelKey, "/")
-	metrics.CountKueuePreemptedPods(ns, model, max(1, len(w.Owners)))
+	metrics.CountKueuePreemptedPods(ns, model, 1)
 }
 
 // borrowReleasedEvent records, on the released variant's scale target, that

@@ -50,6 +50,13 @@ type borrowingState struct {
 	// preemptSeen is the preemptions already counted -- the preempted pods'
 	// UIDs, else the Workload's -- and their namespace; kept while listed.
 	preemptSeen map[types.UID]string
+	// watchSeen is the preempted pods the pod informer reported
+	// (Engine.Preemptions), kept for the cooldown: they are gone by the next
+	// list, so preemptSeen's keep-while-listed rule would forget them.
+	watchSeen map[types.UID]time.Time
+	// preemptCounted is the preemptions already counted in
+	// wva_kueue_preempted_pods_total, by preemptionKey, kept for the cooldown.
+	preemptCounted map[string]time.Time
 	// preemptErrLogged and eventsErrLogged are the namespaces whose
 	// preemption or cluster-autoscaler Event read failed and was logged, until
 	// a read succeeds.

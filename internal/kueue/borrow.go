@@ -19,6 +19,9 @@ const (
 	// QueueNameLabel names the LocalQueue a workload asks for. It is a request,
 	// not proof that Kueue manages the object.
 	QueueNameLabel = "kueue.x-k8s.io/queue-name"
+	// PodGroupNameLabel names the pod group a pod belongs to: Kueue admits a
+	// pod group -- a LeaderWorkerSet group included -- as one Workload.
+	PodGroupNameLabel = "kueue.x-k8s.io/pod-group-name"
 	// AdmissionGate holds a managed pod until Kueue admits its workload.
 	AdmissionGate = "kueue.x-k8s.io/admission"
 	// TopologyGate holds a managed pod until Topology-Aware Scheduling assigns it.

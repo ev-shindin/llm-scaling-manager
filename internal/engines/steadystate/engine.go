@@ -98,6 +98,12 @@ type Engine struct {
 	// controller-status ConfigMap. Nil-safe: tests leave it unset.
 	Status *controllerstatus.Publisher
 
+	// Preemptions records Kueue's preemptions of managed pods from the
+	// manager's pod informer, between cycles. Nil: preemptions are read only
+	// by listing, once per cycle, which misses a pod and Workload that are gone
+	// within seconds.
+	Preemptions *PreemptionWatch
+
 	// ReplicaMetricsCollector is the collector for replica metrics using the source infrastructure
 	ReplicaMetricsCollector *collector.ReplicaMetricsCollector
 

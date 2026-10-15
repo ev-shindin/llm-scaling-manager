@@ -198,8 +198,11 @@ func (e *Engine) persistBorrowLedger(ctx context.Context) {
 
 // observePreemptions starts the cooldown of each model one of whose pods Kueue
 // preempted, from when it did, and returns the namespaces whose preemptions
-// could not be read: their models borrow nothing new this cycle. Two sources,
-// one per borrowing namespace each:
+// could not be read: their models borrow nothing new this cycle. Three
+// sources:
+//   - the pods the pod informer saw marked for a preemption since the last
+//     cycle (Engine.Preemptions): the one that does not miss a preempted pod
+//     and Workload that are gone within seconds, as they usually are;
 //   - Workloads with Evicted=True, reason Preempted (one API list). A
 //     LeaderWorkerSet's Workload is owned by the LeaderWorkerSet itself and is
 //     matched by its name and UID; a pod's by the pod.
@@ -222,8 +225,16 @@ func (e *Engine) observePreemptions(ctx context.Context, constraints []*allocati
 	if st.preemptErrLogged == nil {
 		st.preemptErrLogged = map[string]bool{}
 	}
+	if st.watchSeen == nil {
+		st.watchSeen = map[types.UID]time.Time{}
+	}
 	logger := ctrl.LoggerFrom(ctx)
 	cooldown := e.borrowSettings().Cooldown
+	for uid, at := range st.watchSeen {
+		if now.Sub(at) > cooldown {
+			delete(st.watchSeen, uid)
+		}
+	}
 	namespaces := map[string]bool{}
 	for _, c := range constraints {
 		if c == nil {
@@ -236,11 +247,12 @@ func (e *Engine) observePreemptions(ctx context.Context, constraints []*allocati
 	var unknown map[string]bool
 	listed := map[types.UID]bool{}
 	read := map[string]bool{}
-	mark := func(ns, model string, uids []types.UID, w kueue.PreemptedWorkload) {
+	mark := func(ns, model string, uids []types.UID, w kueue.PreemptedWorkload, key string) {
 		fresh := false
 		for _, uid := range uids {
 			listed[uid] = true
-			if _, ok := st.preemptSeen[uid]; !ok {
+			_, watched := st.watchSeen[uid]
+			if _, ok := st.preemptSeen[uid]; !ok && !watched {
 				fresh = true
 				st.preemptSeen[uid] = ns
 			}
@@ -256,9 +268,28 @@ func (e *Engine) observePreemptions(ctx context.Context, constraints []*allocati
 			return // found again after a restart: its cooldown is over
 		}
 		st.governor.MarkPreempted(model, at)
-		e.recordReclaim(model, w, now)
+		e.recordReclaim(model, w, now, key)
 		logger.Info("Kueue preempted a pod of a borrowing model; it borrows nothing new for the cooldown",
 			"modelID", model, "uid", string(uids[0]), "preemptedAt", at)
+	}
+	observed, dropped := e.Preemptions.drain()
+	if dropped > 0 {
+		logger.Info("The preemption watch dropped preemptions past its bound between two cycles; the Workload and pod reads still see what remains",
+			"dropped", dropped)
+	}
+	for _, o := range observed {
+		if !namespaces[o.Namespace] {
+			continue // not a borrowing namespace: no model of it can borrow
+		}
+		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: o.Namespace, Name: o.Name, UID: o.UID,
+			Labels: o.Labels, OwnerReferences: o.OwnerRefs}}
+		model := modelOfPod(requests, scaleTargets, o.Namespace, p)
+		mark(o.Namespace, model, []types.UID{o.UID},
+			kueue.PreemptedWorkload{UID: o.UID, Owners: []string{o.Name}, At: o.At},
+			preemptionKey(o.Namespace, o.UID, o.Labels))
+		if _, ok := st.watchSeen[o.UID]; !ok {
+			st.watchSeen[o.UID] = now
+		}
 	}
 	for ns := range namespaces {
 		wls, err := kueue.PreemptedWorkloads(ctx, e.client, ns)
@@ -280,7 +311,7 @@ func (e *Engine) observePreemptions(ctx context.Context, constraints []*allocati
 			if len(uids) == 0 {
 				uids = []types.UID{w.UID}
 			}
-			mark(ns, model, uids, w)
+			mark(ns, model, uids, w, workloadPreemptionKey(ns, w))
 		}
 		// Pruning needs both lists: a UID seen only through its pod's
 		// TerminationTarget condition, pruned in a cycle whose pod list
@@ -297,7 +328,8 @@ func (e *Engine) observePreemptions(ctx context.Context, constraints []*allocati
 				continue
 			}
 			model := modelOfPod(requests, scaleTargets, ns, p)
-			mark(ns, model, []types.UID{p.UID}, kueue.PreemptedWorkload{UID: p.UID, Owners: []string{p.Name}, At: at})
+			mark(ns, model, []types.UID{p.UID}, kueue.PreemptedWorkload{UID: p.UID, Owners: []string{p.Name}, At: at},
+				preemptionKey(ns, p.UID, p.Labels))
 		}
 	}
 	for uid, ns := range st.preemptSeen {

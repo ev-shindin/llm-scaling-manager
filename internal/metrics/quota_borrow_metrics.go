@@ -50,8 +50,8 @@ func registerQuotaBorrowMetrics(registry prometheus.Registerer) error {
 	}, withInstance(constants.LabelNamespace, constants.LabelVariantName))
 	kueuePreemptedPods = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: constants.WVAKueuePreemptedPodsTotal,
-		Help: "Managed pods Kueue preempted (Workload evicted, reason Preempted) in a namespace that counts " +
-			"borrowing.",
+		Help: "Preempted Workloads of a model (a Workload evicted, reason Preempted) in a namespace that counts " +
+			"borrowing: one per Workload, so a LeaderWorkerSet or pod group counts once.",
 	}, withInstance(constants.LabelNamespace, constants.LabelModelName))
 	kueueLenderWaiting = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: constants.WVAKueueLenderWaitingSeconds,
@@ -217,7 +217,7 @@ func CountBorrowRelease(namespace, modelID, cause string) {
 	borrowReleases.With(l).Inc()
 }
 
-// CountKueuePreemptedPods counts n managed pods of a model Kueue preempted.
+// CountKueuePreemptedPods counts n preempted Workloads of a model.
 func CountKueuePreemptedPods(namespace, modelName string, n int) {
 	if kueuePreemptedPods == nil || n <= 0 {
 		return
