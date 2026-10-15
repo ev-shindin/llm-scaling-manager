@@ -287,6 +287,7 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 		frozen.pools = slices.Clone(q.borrow.pools)
 		for i := range frozen.pools {
 			frozen.pools[i].Free = 0
+			frozen.pools[i].Stale = true
 		}
 		view, effective = &frozen, q.borrow.effective
 	}
@@ -393,8 +394,13 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 		if p.Reason != "" || !inCohort[p.Cohort] {
 			continue
 		}
+		lenders := make([]kueue.LenderState, 0, len(p.Lenders))
+		for _, l := range p.Lenders {
+			lenders = append(lenders, kueue.LenderState{Queue: l.Queue, Waiting: l.Waiting, CanReclaim: l.CanReclaim, LentOut: l.LentOut})
+		}
 		view.pools = append(view.pools, SharedPoolChunk{
 			Cohort: p.Cohort, Flavor: p.Flavor, Resource: p.Resource, Free: p.Free,
+			Lenders: lenders, ReadAt: ext.ObservedAt,
 			FlavorPlacement: kueue.FlavorPlacement{
 				AcceleratorType: p.Accelerator, NodeLabels: maps.Clone(p.NodeLabels), Tolerations: slices.Clone(p.Tolerations),
 			},

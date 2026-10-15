@@ -303,6 +303,22 @@ var _ = Describe("KueueQuotaSource", func() {
 		Expect(withheld.Counted()).To(BeFalse())
 	})
 
+	It("reads the borrowing timings, at the proposal's defaults when unset", func() {
+		entry := QuotaLimiterConfig{Kueue: &KueueQuotaSource{Enabled: true}}
+		Expect(entry.BorrowTimings()).To(Equal(KueueBorrowTimings{
+			PlacementTimeout: 5 * time.Minute, Cooldown: 10 * time.Minute, LenderDebounce: time.Minute,
+		}))
+		entry.Kueue.PlacementTimeout, entry.Kueue.BorrowCooldown, entry.Kueue.LenderDebounce = "7m", "20m", "2m"
+		Expect(entry.BorrowTimings()).To(Equal(KueueBorrowTimings{
+			PlacementTimeout: 7 * time.Minute, PlacementTimeoutSet: true, Cooldown: 20 * time.Minute, LenderDebounce: 2 * time.Minute,
+		}))
+		bad := QuotaLimiterEntries{Limiters: []QuotaLimiterConfig{{Name: "ns", Type: "quota", Scope: QuotaScopeNamespace,
+			Kueue: &KueueQuotaSource{Enabled: true, PlacementTimeout: "soon", BorrowCooldown: "-1m"}}}}
+		_, err := bad.Validate()
+		Expect(err).To(MatchError(ContainSubstring("placementTimeout")))
+		Expect(err).To(MatchError(ContainSubstring("borrowCooldown")))
+	})
+
 	Context("validation", func() {
 		validate := func(k *KueueQuotaSource) error {
 			e := QuotaLimiterEntries{Limiters: []QuotaLimiterConfig{{

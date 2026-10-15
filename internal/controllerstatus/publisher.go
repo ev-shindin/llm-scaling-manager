@@ -94,7 +94,18 @@ const (
 	KeyUtilizationShareError = "utilizationShareError"
 	KeyLeader                = "leader"
 	KeyControllerInstance    = "controllerInstance"
+	// KeyBorrowReleaseLedger is the Kueue borrowing release ledger, JSON
+	// (allocation.BorrowLedger): which releases of borrowed capacity to
+	// waiting lenders are still in flight, so a restart does not release a
+	// second unit for a lender the first has not reached yet. The steady-state
+	// engine writes it and reads it back on start.
+	KeyBorrowReleaseLedger = "borrowReleaseLedger"
 )
+
+// persistedKeys are the keys a new term carries over from the ConfigMap it
+// finds, rather than overwriting with this process's empty start: state, not
+// status.
+var persistedKeys = []string{KeyBorrowReleaseLedger}
 
 // Labels on the controller-status ConfigMap.
 const (
@@ -226,6 +237,47 @@ func (p *Publisher) SetUtilizationShare(mode string, err error) {
 	})
 }
 
+// SetBorrowReleaseLedger records the borrowing release ledger (JSON).
+func (p *Publisher) SetBorrowReleaseLedger(ledger string) {
+	if p == nil {
+		return
+	}
+	p.update(func(d map[string]string) { d[KeyBorrowReleaseLedger] = ledger })
+}
+
+// ReadKey reads one key of the controller-status ConfigMap in namespace
+// through reader, which should bypass the manager's cache. found is false when
+// the ConfigMap or the key is absent; any other failure is returned.
+func ReadKey(ctx context.Context, reader client.Reader, namespace, key string) (value string, found bool, err error) {
+	var cm corev1.ConfigMap
+	err = reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ConfigMapName}, &cm)
+	if apierrors.IsNotFound(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	value, found = cm.Data[key]
+	return value, found, nil
+}
+
+// carryOver copies the persisted keys from the ConfigMap into the desired
+// status where this process has not set them yet, so the first write of a
+// term does not erase state another term persisted.
+func (p *Publisher) carryOver(ctx context.Context) {
+	for _, key := range persistedKeys {
+		v, found, err := ReadKey(ctx, p.reader, p.namespace, key)
+		if err != nil || !found {
+			continue
+		}
+		p.mu.Lock()
+		if _, set := p.desired[key]; !set {
+			p.desired[key] = v
+		}
+		p.mu.Unlock()
+	}
+}
+
 // Data returns a copy of the status as it will be written.
 func (p *Publisher) Data() map[string]string {
 	if p == nil {
@@ -254,6 +306,7 @@ func (p *Publisher) Start(ctx context.Context) error {
 	// reads the instance from the environment.
 	p.desired[KeyControllerInstance] = metrics.GetControllerInstance()
 	p.mu.Unlock()
+	p.carryOver(ctx)
 	p.signal() // the first write after election, whatever is pending
 	backoff := p.retryMin
 	// One timer for the whole term, armed only while a write is failing. retry

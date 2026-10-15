@@ -543,6 +543,20 @@ What the NetworkPolicy does not cover:
 - The client CA must be dedicated to KEDA: any certificate it signed is accepted.
   Pass `--external-scaler-client-san` to pin KEDA's identity.
 
+### Kueue borrowing timings
+
+Set on the quota entry's `kueue:` block in the scaling policy, beside
+`countBorrowable`. Each is a Go duration.
+
+| Key | What it does | Default |
+|---|---|---|
+| `placementTimeout` | A borrowed replica that stays unschedulable, or held at Kueue's admission gate, this long is released. The wait stretches up to three times while the cluster autoscaler reports `TriggeredScaleUp` on its pod. Also how long the utilization-share optimizer waits before it retries a receiver whose replica could not be placed. Unset, that wait is the timeout derived from the KEDA and pod settings, as before. | `5m` |
+| `borrowCooldown` | After a lender in a cohort waited for its capacity, or after Kueue preempted one of a model's borrowed pods, nothing new is borrowed there for this long. | `10m` |
+| `lenderDebounce` | A lender counts as waiting only after two fresh reads and this long. | `60s` |
+
+A release still in flight is recorded under `borrowReleaseLedger` in the
+`wva-controller-status` ConfigMap, so a restart does not release twice.
+
 ### Learned state across a restart
 
 Without `LEARNED_STATE_SNAPSHOT`, a restarted controller has forgotten every

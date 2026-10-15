@@ -132,6 +132,69 @@ type KueueQuotaSource struct {
 	// is on by default, and is counted only where it is safe (B1). false keeps
 	// exactly the nominal cap, as before borrowing was read.
 	CountBorrowable *bool `yaml:"countBorrowable,omitempty" json:"countBorrowable,omitempty"`
+
+	// PlacementTimeout is how long a borrowed replica may stay unplaced --
+	// unschedulable, or held at Kueue's admission gate -- before it is released
+	// (B5); a Go duration. Empty means DefaultPlacementTimeout. The same setting
+	// bounds how long the utilization-share optimizer holds a receiver whose
+	// replica could not be placed (HoldFill), so the two cannot drift apart.
+	PlacementTimeout string `yaml:"placementTimeout,omitempty" json:"placementTimeout,omitempty"`
+
+	// BorrowCooldown is how long nothing new is borrowed in a cohort after one
+	// of its lenders waited, and by a model after Kueue preempted one of its
+	// borrowed pods; a Go duration. Empty means DefaultBorrowCooldown.
+	BorrowCooldown string `yaml:"borrowCooldown,omitempty" json:"borrowCooldown,omitempty"`
+
+	// LenderDebounce is how long a lender must read as waiting, over at least
+	// two fresh reads, before it counts as waiting (B6); a Go duration. Empty
+	// means DefaultLenderDebounce.
+	LenderDebounce string `yaml:"lenderDebounce,omitempty" json:"lenderDebounce,omitempty"`
+}
+
+// Defaults of the borrowing timings (docs/proposals/kueue-borrowing-and-limiter-composition.md,
+// B5 and B6). The placement timeout and the cooldown are first guesses, to be
+// replaced by figures the live-Kueue e2e measures.
+const (
+	DefaultPlacementTimeout = 5 * time.Minute
+	DefaultBorrowCooldown   = 10 * time.Minute
+	DefaultLenderDebounce   = 60 * time.Second
+)
+
+// KueueBorrowTimings are the borrowing timings of one entry.
+type KueueBorrowTimings struct {
+	PlacementTimeout time.Duration
+	// PlacementTimeoutSet is true when the entry sets PlacementTimeout.
+	PlacementTimeoutSet bool
+	Cooldown            time.Duration
+	LenderDebounce      time.Duration
+}
+
+// BorrowTimings returns the entry's borrowing timings, each at its default
+// when unset or unparseable (Validate rejects the latter).
+func (q QuotaLimiterConfig) BorrowTimings() KueueBorrowTimings {
+	t := KueueBorrowTimings{PlacementTimeout: DefaultPlacementTimeout, Cooldown: DefaultBorrowCooldown, LenderDebounce: DefaultLenderDebounce}
+	if q.Kueue == nil {
+		return t
+	}
+	if d, ok := positiveDuration(q.Kueue.PlacementTimeout); ok {
+		t.PlacementTimeout, t.PlacementTimeoutSet = d, true
+	}
+	if d, ok := positiveDuration(q.Kueue.BorrowCooldown); ok {
+		t.Cooldown = d
+	}
+	if d, ok := positiveDuration(q.Kueue.LenderDebounce); ok {
+		t.LenderDebounce = d
+	}
+	return t
+}
+
+// positiveDuration parses s as a positive Go duration.
+func positiveDuration(s string) (time.Duration, bool) {
+	if s == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(s)
+	return d, err == nil && d > 0
 }
 
 // KueueCountsBorrowable reports whether this entry reads Kueue and would count
@@ -179,13 +242,21 @@ func (k *KueueQuotaSource) validate(location string) error {
 			errs = append(errs, fmt.Errorf("%s.kueue.resources[%d]: resource name must not be empty", location, i))
 		}
 	}
-	if k.RefreshInterval != "" {
-		d, err := time.ParseDuration(k.RefreshInterval)
+	for _, f := range []struct{ name, value string }{
+		{"refreshInterval", k.RefreshInterval},
+		{"placementTimeout", k.PlacementTimeout},
+		{"borrowCooldown", k.BorrowCooldown},
+		{"lenderDebounce", k.LenderDebounce},
+	} {
+		if f.value == "" {
+			continue
+		}
+		d, err := time.ParseDuration(f.value)
 		switch {
 		case err != nil:
-			errs = append(errs, fmt.Errorf("%s.kueue.refreshInterval: %q is not a duration: %w", location, k.RefreshInterval, err))
+			errs = append(errs, fmt.Errorf("%s.kueue.%s: %q is not a duration: %w", location, f.name, f.value, err))
 		case d <= 0:
-			errs = append(errs, fmt.Errorf("%s.kueue.refreshInterval: %q must be positive", location, k.RefreshInterval))
+			errs = append(errs, fmt.Errorf("%s.kueue.%s: %q must be positive", location, f.name, f.value))
 		}
 	}
 	return errors.Join(errs...)
@@ -283,6 +354,21 @@ type ExternalSharedPool struct {
 	// WaitingLenders are the member queues that, in this read, wait for
 	// capacity they lent (kueue.LenderWaiting). Not debounced.
 	WaitingLenders []string `json:"waitingLenders,omitempty"`
+	// Lenders is every active member declaring this key, for the release of
+	// borrowed capacity to a lender that waits (B6).
+	Lenders []ExternalLender `json:"lenders,omitempty"`
+}
+
+// ExternalLender is one cohort member as a lender of one flavor and resource.
+type ExternalLender struct {
+	Queue string `json:"queue"`
+	// Waiting is the raw per-read predicate: pending workloads while
+	// reserving less than nominal.
+	Waiting bool `json:"waiting,omitempty"`
+	// CanReclaim is whether Kueue preempts borrowers for it.
+	CanReclaim bool `json:"canReclaim,omitempty"`
+	// LentOut is the nominal it does not hold now.
+	LentOut int `json:"lentOut"`
 }
 
 // ExternalBorrow is one queue's borrowing figures for one flavor and GPU

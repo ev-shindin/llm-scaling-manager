@@ -202,6 +202,17 @@ var _ = Describe("ComputeBorrowing", func() {
 		Expect(p.Tolerations).To(HaveLen(1))
 	})
 
+	It("describes each lender of a pool: waiting, whether it can reclaim, and the nominal it does not hold", func() {
+		waiting := member("lender", QueueResource{Nominal: 8, Reserved: 3})
+		waiting.Pending = 2
+		b := ComputeBorrowing(topology(withReclaim(waiting, ReclaimAny), member("a", QueueResource{Nominal: 0, Reserved: 4})), false)
+		Expect(b.Pools).To(HaveLen(1))
+		Expect(b.Pools[0].Lenders).To(Equal([]LenderState{
+			{Queue: "a", LentOut: 0},
+			{Queue: "lender", Waiting: true, CanReclaim: true, LentOut: 5},
+		}))
+	})
+
 	It("a borrower's own usage past its kept part leaves the pool", func() {
 		t := topology(
 			member("lender", QueueResource{Nominal: 8}),

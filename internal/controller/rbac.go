@@ -83,6 +83,11 @@ package controller
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=cohorts;workloads,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get
+//
+// The placement timeout of a borrowed replica waits while the cluster
+// autoscaler reports TriggeredScaleUp on its pod (B5): Events are read, get and
+// list only, never watched.
+// +kubebuilder:rbac:groups="",resources=events,verbs=get;list
 
 // InferencePool discovery and controller-owned ServiceMonitor observation.
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch

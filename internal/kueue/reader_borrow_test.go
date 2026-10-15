@@ -124,6 +124,7 @@ var _ = Describe("Reader borrowing figures", func() {
 		Expect(snap.SharedPools).To(Equal([]config.ExternalSharedPool{{
 			Cohort: "c", Flavor: "h100", Resource: "nvidia.com/gpu", Accelerator: h100Product,
 			NodeLabels: map[string]string{"nvidia.com/gpu.product": h100Product}, Free: 21,
+			Lenders: []config.ExternalLender{{Queue: "team-a-cq", LentOut: 9}, {Queue: "team-b-cq", LentOut: 12}},
 		}}))
 	})
 

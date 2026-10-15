@@ -5,6 +5,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
@@ -43,6 +44,14 @@ type SharedPoolChunk struct {
 	kueue.FlavorPlacement
 	// Free is what the chunk still holds.
 	Free int
+	// Lenders are the cohort's members declaring this flavor and resource, as
+	// the read saw them; the release of borrowed capacity (B6) debounces them.
+	Lenders []kueue.LenderState
+	// ReadAt is when the Kueue snapshot behind the chunk was read.
+	ReadAt time.Time
+	// Stale marks a chunk frozen over a stale read: Free is 0, and nothing
+	// about its lenders may change what has been decided.
+	Stale bool
 }
 
 // key identifies a chunk across providers that read the same cohort.

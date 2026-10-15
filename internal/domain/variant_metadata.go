@@ -1,5 +1,7 @@
 package domain
 
+import "time"
+
 // DefaultVariantCost is the per-replica cost assumed when a variant declares no
 // cost (the llm-d.ai/variant-cost annotation is absent or unparseable). It lives
 // here, next to the variant metadata it belongs to, so every consumer
@@ -70,6 +72,18 @@ type VariantMetadata struct {
 	// MinReplicas/MaxReplicas are the scaling bounds; nil means unset.
 	MinReplicas *int
 	MaxReplicas *int
+	// UnplacedReplicas counts replicas that cannot place
+	// (docs/proposals/kueue-borrowing-and-limiter-composition.md, B5): a pod
+	// with PodScheduled=False reason Unschedulable, or held at Kueue's
+	// admission gate for longer than one cycle. Pulling an image or loading
+	// weights is not unplaced. In scale-target units: a LeaderWorkerSet group
+	// is unplaced while any of its pods is, so a hold on it lifts only once the
+	// whole group has placed. UnplacedSince is when the oldest unplaced pod
+	// became so, UnplacedPods their names. Same pod listing as PendingReplicas'
+	// ages.
+	UnplacedReplicas int
+	UnplacedSince    time.Time
+	UnplacedPods     []string
 }
 
 // ToReplicaState projects the metadata onto the VariantReplicaState the analyzers
@@ -83,21 +97,24 @@ type VariantMetadata struct {
 // optimizer switch to reading VariantMetadata.
 func (m VariantMetadata) ToReplicaState() VariantReplicaState {
 	return VariantReplicaState{
-		VariantName:     m.VariantName,
-		CurrentReplicas: m.CurrentReplicas,
-		DesiredReplicas: m.DesiredReplicas,
-		PendingReplicas: m.PendingReplicas,
-		PendingAges:     m.PendingAges,
-		StuckReplicas:   m.StuckReplicas,
-		HeldReplicas:    m.HeldReplicas,
-		HeldKnown:       m.HeldKnown,
-		FilledReplicas:  m.FilledReplicas,
-		PodGPUs:         m.PodGPUs,
-		GPUsPerReplica:  m.GPUsPerReplica,
-		Role:            m.Role,
-		AcceleratorName: m.AcceleratorName,
-		Engine:          m.Engine,
-		MinReplicas:     m.MinReplicas,
-		MaxReplicas:     m.MaxReplicas,
+		VariantName:      m.VariantName,
+		CurrentReplicas:  m.CurrentReplicas,
+		DesiredReplicas:  m.DesiredReplicas,
+		PendingReplicas:  m.PendingReplicas,
+		PendingAges:      m.PendingAges,
+		StuckReplicas:    m.StuckReplicas,
+		HeldReplicas:     m.HeldReplicas,
+		HeldKnown:        m.HeldKnown,
+		FilledReplicas:   m.FilledReplicas,
+		PodGPUs:          m.PodGPUs,
+		UnplacedReplicas: m.UnplacedReplicas,
+		UnplacedSince:    m.UnplacedSince,
+		UnplacedPods:     m.UnplacedPods,
+		GPUsPerReplica:   m.GPUsPerReplica,
+		Role:             m.Role,
+		AcceleratorName:  m.AcceleratorName,
+		Engine:           m.Engine,
+		MinReplicas:      m.MinReplicas,
+		MaxReplicas:      m.MaxReplicas,
 	}
 }

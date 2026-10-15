@@ -359,6 +359,18 @@ func (r *Reader) borrowCaps(queues []unstructured.Unstructured, flavorType map[s
 	return guaranteed, within, nil
 }
 
+// externalLenders converts a pool's lenders for the config snapshot.
+func externalLenders(ls []LenderState) []config.ExternalLender {
+	if len(ls) == 0 {
+		return nil
+	}
+	out := make([]config.ExternalLender, 0, len(ls))
+	for _, l := range ls {
+		out = append(out, config.ExternalLender{Queue: l.Queue, Waiting: l.Waiting, CanReclaim: l.CanReclaim, LentOut: l.LentOut})
+	}
+	return out
+}
+
 // sharedPools converts the cohorts' free pools for the config snapshot.
 func sharedPools(b Borrowing, flavorType map[string]string) []config.ExternalSharedPool {
 	out := make([]config.ExternalSharedPool, 0, len(b.Pools))
@@ -373,6 +385,7 @@ func sharedPools(b Borrowing, flavorType map[string]string) []config.ExternalSha
 			Free:           p.Free,
 			Reason:         string(p.Reason),
 			WaitingLenders: slices.Clone(p.WaitingLenders),
+			Lenders:        externalLenders(p.Lenders),
 		})
 	}
 	return out

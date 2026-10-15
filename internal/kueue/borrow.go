@@ -207,6 +207,21 @@ type SharedPool struct {
 	// workloads and reserve less than their nominal quota of this key. This is
 	// the raw per-read predicate; debouncing it is the caller's.
 	WaitingLenders []string
+	// Lenders is every active member queue that declares this key, with what
+	// the release of borrowed capacity (B6) needs about it.
+	Lenders []LenderState
+}
+
+// LenderState is one cohort member as a lender of one flavor and GPU resource.
+type LenderState struct {
+	Queue string
+	// Waiting is LenderWaiting in this read, not debounced.
+	Waiting bool
+	// CanReclaim is whether Kueue preempts borrowers for it.
+	CanReclaim bool
+	// LentOut is the nominal it does not hold now: max(0, N - U), what it may
+	// be waiting for.
+	LentOut int
 }
 
 // Borrowing is the result of ComputeBorrowing.
@@ -319,11 +334,19 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 				p.Free = cohortFree(qs, key)
 			}
 			for _, q := range qs {
-				if !q.Inactive && LenderWaiting(q, key) {
+				r, declares := q.Resources[key]
+				if q.Inactive || !declares {
+					continue
+				}
+				waiting := LenderWaiting(q, key)
+				if waiting {
 					p.WaitingLenders = append(p.WaitingLenders, q.Name)
 				}
+				p.Lenders = append(p.Lenders, LenderState{Queue: q.Name, Waiting: waiting,
+					CanReclaim: q.CanReclaim(), LentOut: max(0, r.Nominal-r.Reserved)})
 			}
 			slices.Sort(p.WaitingLenders)
+			slices.SortFunc(p.Lenders, func(a, b LenderState) int { return strings.Compare(a.Queue, b.Queue) })
 			out.Pools = append(out.Pools, p)
 		}
 	}

@@ -270,3 +270,44 @@ func (e *Eligibility) gpuQuota(ctx context.Context, ns string) (map[string]int, 
 	}
 	return out, nil
 }
+
+// PreemptedWorkload is a Workload Kueue evicted to preempt it: condition
+// Evicted=True with reason Preempted.
+type PreemptedWorkload struct {
+	UID types.UID
+	// Owners are the names of the objects the Workload is owned by: a pod for
+	// the pod integration, a LeaderWorkerSet or Job otherwise.
+	Owners []string
+	At     time.Time
+}
+
+// PreemptedWorkloads lists the Workloads in ns that Kueue preempted. Read
+// unstructured, so straight from the API server with get/list.
+func PreemptedWorkloads(ctx context.Context, c client.Client, ns string) ([]PreemptedWorkload, error) {
+	mapping, err := c.RESTMapper().RESTMapping(schema.GroupKind{Group: Group, Kind: KindWorkload})
+	if err != nil {
+		return nil, err
+	}
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(mapping.GroupVersionKind.GroupVersion().WithKind(KindWorkload + "List"))
+	if err := c.List(ctx, list, client.InNamespace(ns)); err != nil {
+		return nil, err
+	}
+	var out []PreemptedWorkload
+	for _, w := range list.Items {
+		conds, _, _ := unstructured.NestedSlice(w.Object, "status", "conditions")
+		for _, raw := range conds {
+			cond, _ := raw.(map[string]interface{})
+			if cond["type"] != "Evicted" || cond["status"] != "True" || cond["reason"] != "Preempted" {
+				continue
+			}
+			at, _ := time.Parse(time.RFC3339, fmt.Sprint(cond["lastTransitionTime"]))
+			pw := PreemptedWorkload{UID: w.GetUID(), At: at}
+			for _, ref := range w.GetOwnerReferences() {
+				pw.Owners = append(pw.Owners, ref.Name)
+			}
+			out = append(out, pw)
+		}
+	}
+	return out, nil
+}
