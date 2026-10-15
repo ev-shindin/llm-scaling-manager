@@ -178,7 +178,13 @@ func (s *HeadroomStore) Reading(namespace, acceleratorName string, poolsVersion 
 	}
 	perType, ok := s.last.Free[namespace]
 	if ok {
-		free := perType[acceleratorName]
+		// Matched by identity, as the cluster figure below is: an allowlist
+		// that spells "H100" names the pool's "NVIDIA-H100-80GB-HBM3". An
+		// accelerator the allowlist does not name stays 0.
+		free := 0
+		if key, listed := accelerator.FindKey(perType, acceleratorName); listed {
+			free = perType[key]
+		}
 		if free < 0 {
 			return 0, HeadroomUnbounded // listed as unlimited, and no cluster bound caps it
 		}
