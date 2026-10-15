@@ -1,4 +1,4 @@
-# Prometheus Integration
+# Prometheus integration
 
 The scaling manager integrates with Prometheus to collect metrics from different sources such as vLLM inference servers, and expose internal as well as custom autoscaling metrics. This guide covers Prometheus configuration, metric collection, and security best practices.
 
@@ -6,7 +6,7 @@ The scaling manager integrates with Prometheus to collect metrics from different
 
 The scaling manager supports two methods for configuring Prometheus connectivity:
 
-### 1. Environment Variables (Recommended)
+### 1. Environment variables (recommended)
 
 Set Prometheus configuration via environment variables in the scaling manager deployment:
 
@@ -64,7 +64,7 @@ spec:
 | `PROMETHEUS_SERVER_NAME` | No | Expected server name in TLS certificate | - |
 | `PROMETHEUS_BEARER_TOKEN` | No | Bearer token for Prometheus authentication | - |
 
-### 2. ConfigMap Configuration
+### 2. ConfigMap configuration
 
 Alternatively, configure Prometheus in the controller's ConfigMap. The settings
 sit inside its `config.yaml` key, which is mounted at `/etc/wva/config.yaml`.
@@ -92,14 +92,14 @@ Do not put a bearer token in the ConfigMap; use the Secret-backed env variable a
 2. ConfigMap values (fallback)
 3. Error if neither provides `PROMETHEUS_BASE_URL`
    
-### Metrics Endpoint
+### Metrics endpoint
 The metrics are served at `/metrics` on port 8443 over HTTPS (`--metrics-secure=true`),
 behind the Service `wva-controller-manager-metrics-service`. A caller needs a bearer
 token whose identity may `get` the non-resource URL `/metrics`; anything else gets
 `401`/`403`. To read them by hand, see
 [Monitoring](monitoring.md#the-metrics-that-answer-specific-questions).
 
-### ServiceMonitor Configuration
+### ServiceMonitor configuration
 
 The install ships the ServiceMonitor in
 [`config/base/monitoring/servicemonitor.yaml`](../../config/base/monitoring/servicemonitor.yaml),
@@ -141,9 +141,9 @@ binding as optional); pass
 
 
 
-## Security Considerations
+## Security considerations
 
-### TLS Configuration
+### TLS configuration
 
 **What ships:** the Kubernetes overlays set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "true"`
 in the manager ConfigMap. The installer has no CA to hand the controller there: the
@@ -210,7 +210,7 @@ Secret is gone. The controller re-reads the file on every EPP scrape, so it pick
 up the new token as soon as the kubelet updates the mounted volume (typically
 within a minute), without a restart.
 
-### PromQL Injection Prevention
+### PromQL injection prevention
 
 The scaling manager implements security measures to prevent PromQL injection attacks:
 
@@ -242,7 +242,7 @@ query := fmt.Sprintf(`vllm_kv_cache_usage{namespace="%s"}`, escapedNamespace)
 
 
 
-## llm-scaling-manager Metrics
+## llm-scaling-manager metrics
 
 The scaling manager exposes metrics providing insights into autoscaling behavior and optimization performance. These metrics are exposed via Prometheus at the `/metrics` endpoint.
 
@@ -267,7 +267,7 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
 }
 ```
 
-### Configuration Metrics
+### Configuration metrics
 
 ### `wva_config_info`
 - **Type**: Gauge
@@ -323,7 +323,7 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
     ]
   }
   ```
-### Metrics Collection Observability
+### Metrics collection observability
 
 ### `wva_metrics_collection_duration_seconds`
 - **Type**: Histogram
@@ -468,7 +468,7 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
   }
   ```
 
-### KEDA External Scaler Metrics
+### KEDA external scaler metrics
 
 ### `wva_scaler_undecided_answers_total`
 - **Type**: Counter
@@ -498,7 +498,7 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
   - `method`: the full gRPC method, for example `/externalscaler.ExternalScaler/GetMetrics`
 - **Use Case**: Alert on any increase.
 
-### Optimization Metrics
+### Optimization metrics
 
 ### `wva_optimization_duration_seconds`
 - **Type**: Histogram
@@ -554,7 +554,7 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
   }
   ```
 
-### Saturation and Capacity Metrics
+### Saturation and capacity metrics
 
 ### `wva_saturation_utilization`
 - **Type**: Gauge
@@ -685,7 +685,7 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
   }
   ```
 
-### Pipeline Stage Visibility Metrics
+### Pipeline stage visibility metrics
 
 ### `wva_decisions_limited_total`
 - **Type**: Counter
@@ -851,7 +851,7 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
   }
   ```
 
-### Ceilings, Wakes, Start Times and Warm Pool Metrics
+### Ceilings, wakes, start times and warm pool metrics
 
 Every series below also carries `controller_instance` when `CONTROLLER_INSTANCE`
 is set, and is scraped with the workload's namespace as `exported_namespace`.
@@ -873,7 +873,7 @@ is set, and is scraped with the workload's namespace as `exported_namespace`.
 | `wva_analyzer_target` | gauge | `analyzer_name`, `namespace`, `model_name`, `variant_name` | Per-replica target P, in the same unit as demand. | Same. |
 | `wva_analyzer_observed_replicas` | gauge | `analyzer_name`, `namespace`, `model_name`, `variant_name` | Replicas that reported metrics in the analyzer's last cycle. Compare with the target's **ready** replicas. | Lower than ready: a scrape gap. Higher: something the scale target does not own is serving the model. |
 
-### Utilization-Share Optimizer Metrics
+### Utilization-share optimizer metrics
 
 Published when the [utilization-share optimizer](scaling-policy.md#optimizer-cluster-default-only-live)
 is selected, except `wva_utilization_share_mode`, which the leader publishes
@@ -1098,7 +1098,7 @@ See [replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing
 | `borrow-unplaced` | A variant has replicas that did not place (Unschedulable, or held at Kueue's admission gate). It grows on no borrowed GPUs meanwhile, and borrowed replicas still unplaced after `placementTimeout` are given back. | `kubectl describe pod` for the scheduling message; see `wva_kueue_unplaced_pods`. |
 | `nominal-lent-out` | The limiter capped the model this cycle while part of its ClusterQueue's nominal quota is held by a peer it cannot reclaim from, so its guaranteed figure sits below nominal. | Set `reclaimWithinCohort` on the ClusterQueue if the model must reach its nominal quota. |
 
-### Kueue Borrowing Metrics
+### Kueue borrowing metrics
 
 Published only for a namespace-scope Kueue quota entry; the borrowing series
 only where it counts borrowing. Every other borrowing condition is a reason on
@@ -1113,13 +1113,14 @@ only where it counts borrowing. Every other borrowing condition is a reason on
 | `wva_kueue_preempted_pods_total` | counter | `namespace`, `model_name` | Pods Kueue preempted (a Workload evicted with reason `Preempted`): one per pod the Workload names as its owner, so a LeaderWorkerSet group counts once. |
 | `wva_borrow_releases_total` | counter | `namespace`, `model_name`, `cause` | Variant targets the scaling manager lowered to give borrowed capacity back: one per release record, so a P/D unit counts once per variant it lowers. `cause` is `lender-waiting` or `placement-timeout`. Use `increase()` over it to see release churn. |
 | `wva_kueue_lender_waiting_seconds` | gauge | `cohort`, `cluster_queue` | How long a lender ClusterQueue has waited for capacity it lent, published only while a namespace this controller governs still borrows in its cohort. |
+| `wva_borrow_releases_total` | counter | `namespace`, `model_name`, `cause` | Times a model lost borrowed capacity; `cause` says why. `WVAKueueBorrowThrashing` reads it. |
 
 The same budget, per entry, namespace and accelerator, with `used` and an
 `asOf` time, is in the `limiterBudgets` key of the `wva-controller-status`
 ConfigMap (at most 200 entries; `truncated` counts the rest). `asOf` moves only
 when a figure changes.
 
-### Replica Management Metrics
+### Replica management metrics
 
 ### `wva_current_replicas`
 - **Type**: Gauge
@@ -1240,7 +1241,7 @@ when a figure changes.
   }
   ```
 
-### Error Tracking
+### Error tracking
 
 ### `wva_errors_total`
 - **Type**: Counter
@@ -1271,9 +1272,9 @@ when a figure changes.
   }
   ```
 
-## Example Queries
+## Example queries
 
-### Basic Queries
+### Basic queries
 ```promql
 # Current replicas by variant
 wva_current_replicas
@@ -1285,7 +1286,7 @@ rate(wva_replica_scaling_total[5m])
 wva_desired_replicas
 ```
 
-### Advanced Queries
+### Advanced queries
 ```promql
 # Scale-up decisions per second
 rate(wva_replica_scaling_total{direction="scale-up"}[5m])
@@ -1395,7 +1396,7 @@ wva_optimizer_active
 wva_optimizer_active == 1
 ```
 
-## Alerting Rules
+## Alerting rules
 
 The scaling manager ships Prometheus alerting rules as a kustomize component,
 [`config/components/prometheus-alerts`](../../config/components/prometheus-alerts/prometheusrule.yaml):
@@ -1417,10 +1418,10 @@ T = troubleshooting runbook on [Troubleshooting](troubleshooting.md).
 | `WVAGPUResourceExhausted` | warning | 5m | GPU-labeled nodes report zero allocatable GPUs of a type. Only with a `gpu-inventory` limiter | check GPU node status and device-plugin pods. No alert does not mean GPUs are free: the metric exists only with that limiter | [T: GPUs held](troubleshooting.md#gpus-held-or-quota-spent) |
 | `WVAReplicaScalingThrashing` | warning | 10m | more than 2 cycles per minute for one variant whose decision was not `no-change`. The counter rises on every such cycle, so it fires on flapping **and** on a scale-up the workload never catches up with: actuation stuck, Pods Pending, slow replica starts | read the model's `scaling-decision` lines: `tgt` alternating is flapping; `tgt` steady above `curr` is actuation not landing | [T: flapping](troubleshooting.md#a-model-is-flapping), [T: actuation stuck](troubleshooting.md#desired-is-not-current-actuation-stuck) |
 | `WVAModelWillNotScaleToZero` | info | 15m | blocked reason `variant-floor` or `policy-forbids-zero`: the configuration asks to park and forbids it | make the two halves agree | [will not park](../guides/scale-to-zero/README.md#when-a-model-will-not-park) |
-| `WVAKueueReaderStale` | warning | 5m | `wva_quota_borrow_withheld{reason="stale"}` for a limiter: the Kueue read failed or is older than twice the refresh interval. Borrowing is frozen: nothing new is borrowed, nothing is given back | check the log for `external quota source unreadable` and the controller's Kueue RBAC; hand capacity back by hand meanwhile | [T: replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing) |
-| `WVAKueueLenderWaitingPastCooldown` | warning | 2m | `wva_kueue_lender_waiting_seconds` above 600 (the default `borrowCooldown`; change the threshold if you change it): a lender waits while a governed namespace still borrows in its cohort | read `borrowReleaseLedger` in `wva-controller-status`; `release-not-actuated` means the lowered target did not land | [T: replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing) |
+| `WVAKueueReaderStale` | warning | 5m | `wva_quota_borrow_withheld{reason="stale"}` for a limiter: the Kueue read failed or is older than twice the refresh interval. Borrowing is frozen: nothing new is borrowed, nothing is given back | check the log for `external quota source unreadable` and the controller's Kueue RBAC; to hand capacity back meanwhile, lower the borrowing model's `maxReplicaCount` on its ScaledObject | [T: replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing) |
+| `WVAKueueLenderWaitingPastCooldown` | warning | 2m | `wva_kueue_lender_waiting_seconds` above 600, the default `borrowCooldown`. No metric carries the configured value: if you change `borrowCooldown`, change this threshold to match. a lender waits while a governed namespace still borrows in its cohort | read `borrowReleaseLedger` in `wva-controller-status`; `release-not-actuated` means the lowered target did not land | [T: replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing) |
 | `WVAKueuePodsUnplaced` | warning | 5m | `wva_kueue_unplaced_pods` above 0: pods unplaced past `placementTimeout` | `kubectl describe pod` for the scheduling message, and the Workload's admission | [T: replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing) |
-| `WVAKueueBorrowThrashing` | warning | 1m | reason `borrow-released` or `lender-reclaimed` started more than 3 times in an hour for one model (counted at one-minute resolution) | raise the model's `nominalQuota`, lengthen `borrowCooldown`, or turn borrowing off for it | [T: replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing) |
+| `WVAKueueBorrowThrashing` | warning | 1m | `increase(wva_borrow_releases_total[1h])` above 3 for one model: it lost borrowed capacity more than 3 times in an hour, given back or preempted | raise the model's `nominalQuota`, lengthen `borrowCooldown`, or turn borrowing off for it | [T: replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing) |
 | `WVAOptimizationLoopStalled` | info | 15m | `wva_models_processed` is 0 or absent for 10 minutes | expected when no ScaledObject names this scaler. Otherwise check the controller pod, its log and Prometheus | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
 
 There is deliberately no alert on `engine-unsupported`: it is a standing property
@@ -1498,7 +1499,7 @@ wva_saturation_metrics_up == 0
 wva_desired_replicas != wva_current_replicas
 ```
 
-### Alerting Rules E2E Test
+### Alerting rules e2e test
 
 E2E tests for the rules are in `test/e2e/prometheus_alerts_test.go`. They check
 that the PrometheusRule is created, that every expected rule is defined and well

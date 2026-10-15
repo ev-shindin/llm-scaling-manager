@@ -3,11 +3,15 @@ package alerts
 import (
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/yaml"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 )
 
 // prometheusRule is the subset of the PrometheusRule this check reads.
@@ -143,4 +147,42 @@ func TestWVAMetricNamesComesFromTheConstants(t *testing.T) {
 	// Reason slugs and label names live in the same file and are not metrics.
 	assert.False(t, known["variant-floor"])
 	assert.False(t, known["namespace"])
+}
+
+// alertExpr returns the expression of the named alert, failing if it is absent.
+func alertExpr(t *testing.T, name string) string {
+	t.Helper()
+	for _, group := range loadRule(t).Spec.Groups {
+		for _, r := range group.Rules {
+			if r.Alert == name {
+				return r.Expr
+			}
+		}
+	}
+	require.Failf(t, "alert not found", "no alert %q in the PrometheusRule", name)
+	return ""
+}
+
+// No metric carries the configured borrowCooldown, so the lender alert
+// hardcodes the default. If the default moves, the threshold must move with it.
+func TestKueueLenderWaitingThresholdIsTheDefaultCooldown(t *testing.T) {
+	expr := alertExpr(t, "WVAKueueLenderWaitingPastCooldown")
+	m := regexp.MustCompile(`>\s*([0-9]+)\s*$`).FindStringSubmatch(expr)
+	require.Len(t, m, 2, "no trailing '> <seconds>' threshold in %q", expr)
+	got, err := strconv.Atoi(m[1])
+	require.NoError(t, err)
+	assert.Equal(t, int(config.DefaultBorrowCooldown.Seconds()), got,
+		"the threshold must equal the default borrowCooldown")
+}
+
+// The thrashing alert counts the release counter per model over an hour. Its
+// first form counted starts of a wva_model_scaling_blocked reason at one-minute
+// resolution, which misses a reason that sets and clears between two samples.
+func TestKueueBorrowThrashingCountsReleasesPerModel(t *testing.T) {
+	expr := alertExpr(t, "WVAKueueBorrowThrashing")
+	assert.Equal(t, []string{"wva_borrow_releases_total"}, ExtractMetricNames(expr))
+	assert.Contains(t, expr, "increase(wva_borrow_releases_total[1h])")
+	assert.Contains(t, expr, "by (exported_namespace, model_name)",
+		"group by the scraped model namespace, as the other per-model alerts do")
+	assert.Regexp(t, `>\s*3\s*$`, expr)
 }

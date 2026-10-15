@@ -398,8 +398,9 @@ What to do:
   read `borrowReleaseLedger` in the same ConfigMap. An entry with
   `release-not-actuated` means the lowered target did not land: see
   [actuation stuck](#desired-is-not-current-actuation-stuck).
-- **Pods refused by a ResourceQuota**: no shipped alert covers this, because
-  no metric carries the refusal. Check by hand:
+- **Pods refused by a ResourceQuota**: no shipped alert covers this. No
+  scaling-manager metric carries the refusal, and the shipped alerts depend on
+  no kube-state-metrics series (`kube_resourcequota` would). Check by hand:
   `kubectl get events -n <ns> --field-selector reason=FailedCreate | grep -i quota`.
 
 Timings are in [configuration](configuration.md#kueue-borrowing-timings); the

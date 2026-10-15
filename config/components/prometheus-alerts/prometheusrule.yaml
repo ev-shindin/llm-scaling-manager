@@ -125,8 +125,11 @@ spec:
         severity: warning
       annotations:
         summary: "Kueue reads for limiter {{ $labels.limiter_name }} have been stale for 5 minutes"
-        description: "The last Kueue read failed, or is older than twice the refresh interval. Borrowing is frozen at the last figures: nothing new is borrowed and nothing is given back, so a lender that waits now waits until reads recover. Check the controller log for 'external quota source unreadable' and the controller's RBAC on the Kueue API. To hand capacity back by hand meanwhile, lower the borrowing model's replicas (or set countBorrowable: false on the quota entry) -- see the 'replicas dropped' runbook."
+        description: "The last Kueue read failed, or is older than twice the refresh interval. Borrowing is frozen at the last figures: nothing new is borrowed and nothing is given back, so a lender that waits now waits until reads recover. Check the controller log for 'external quota source unreadable' and the controller's RBAC on the Kueue API. To hand capacity back by hand meanwhile, lower the borrowing model's maxReplicaCount on its ScaledObject, or set countBorrowable: false on the quota entry, which caps every namespace at nominal -- see the 'replicas dropped' runbook."
 
+    # 600 is the default borrowCooldown (10m). No metric carries the configured
+    # value, so a policy that changes borrowCooldown must change this threshold
+    # to match: a longer cooldown makes the alert fire early, a shorter one late.
     - alert: WVAKueueLenderWaitingPastCooldown
       expr: max by (cohort, cluster_queue) (wva_kueue_lender_waiting_seconds) > 600
       for: 2m
@@ -134,7 +137,7 @@ spec:
         severity: warning
       annotations:
         summary: "ClusterQueue {{ $labels.cluster_queue }} has waited over 10 minutes for capacity it lent in cohort {{ $labels.cohort }}"
-        description: "A lender has waited longer than the default borrow cooldown (10 minutes; raise this threshold with borrowCooldown) while a namespace this controller governs still borrows in its cohort. Neither Kueue preempted for it nor did the scaling manager release borrowed replicas to it. Read the controller log for 'Releasing borrowed capacity', the controller-status key borrowReleaseLedger (an entry marked release-not-actuated means the lowered target did not land: check KEDA and the scale target), and wva_model_scaling_blocked{reason=\"borrow-released\"}."
+        description: "A lender has waited longer than the default borrow cooldown (10 minutes; no metric carries the configured value, so if you change borrowCooldown, change this threshold to match) while a namespace this controller governs still borrows in its cohort. Neither Kueue preempted for it nor did the scaling manager release borrowed replicas to it. Read the controller log for 'Releasing borrowed capacity', the controller-status key borrowReleaseLedger (an entry marked release-not-actuated means the lowered target did not land: check KEDA and the scale target), and wva_model_scaling_blocked{reason=\"borrow-released\"}."
 
     - alert: WVAKueuePodsUnplaced
       expr: max by (exported_namespace, variant_name) (wva_kueue_unplaced_pods) > 0
@@ -146,10 +149,10 @@ spec:
         description: "Grouped by exported_namespace: the series carries the model's namespace. These pods have been Unschedulable, or held at Kueue's admission gate, for longer than the placement timeout (default 5 minutes), and stayed so for 5 more minutes. Borrowed replicas are released at the timeout, so what stays is usually within guaranteed quota: no node fits the pod, Kueue has not admitted it, or the cluster autoscaler is still adding a node. Check 'kubectl describe pod' for the scheduling message and the Workload's admission status."
 
     - alert: WVAKueueBorrowThrashing
-      expr: sum by (exported_namespace, model_name) (count_over_time((wva_model_scaling_blocked{reason=~"borrow-released|lender-reclaimed"} unless wva_model_scaling_blocked{reason=~"borrow-released|lender-reclaimed"} offset 1m)[1h:1m])) > 3
+      expr: sum by (exported_namespace, model_name) (increase(wva_borrow_releases_total[1h])) > 3
       for: 1m
       labels:
         severity: warning
       annotations:
         summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} lost borrowed capacity more than 3 times in an hour"
-        description: "Counts each time reason borrow-released (the scaling manager gave borrowed replicas back to a waiting lender) or lender-reclaimed (Kueue preempted a borrowed pod) started, over the last hour. The model keeps growing onto capacity its cohort's lenders keep taking back: every cycle costs a cold start. Raise the model's guaranteed quota (nominalQuota), lengthen borrowCooldown, or set countBorrowable: false for it."
+        description: "Counts wva_borrow_releases_total over the last hour, every cause together: each time the model lost borrowed capacity, given back to a waiting lender or taken by Kueue (the cause label says which). The model keeps growing onto capacity its cohort's lenders keep taking back: every cycle costs a cold start. Raise the model's guaranteed quota (nominalQuota), lengthen borrowCooldown, or set countBorrowable: false for it."
