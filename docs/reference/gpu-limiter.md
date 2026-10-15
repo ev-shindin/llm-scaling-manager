@@ -56,8 +56,8 @@ INFO  GPU limiter constructed  {"type": "none", "limiters": "none", "name": "no-
 > **Upgrading from a release that built only one.** There, a quota entry made
 > the physical one inert. Now both apply, which can hold a model lower when
 > other workloads (training jobs included) hold GPUs. For one release the
-> controller logs `Upgrade note (transitional)` with every target the quota
-> alone would have set differently.
+> controller logs `Upgrade note (transitional)` naming every variant whose
+> target the quota alone would have set differently, checked every tenth cycle.
 >
 > If one limiter cannot be consulted in a cycle (its usage is not observed yet,
 > or it errors), it is skipped and named in the log; the others still bound.

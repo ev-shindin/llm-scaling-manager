@@ -125,6 +125,10 @@ type Engine struct {
 	// upgrade log prints when the difference changes, not every cycle. Written
 	// only from the optimize goroutine.
 	lastQuotaAloneDiff string
+	// quotaAloneCycles counts the cycles reportQuotaAloneAllocation was
+	// eligible to run in, so its shadow pass runs once per
+	// quotaAloneReportEvery of them. TRANSITIONAL, with it.
+	quotaAloneCycles int
 
 	// metricsRegistry is used to access metrics sources for request count queries
 	metricsRegistry *source.SourceRegistry

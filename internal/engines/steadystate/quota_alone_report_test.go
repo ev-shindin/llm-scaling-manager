@@ -25,7 +25,7 @@ func TestQuotaAloneDiff(t *testing.T) {
 		{Namespace: "ns", VariantName: "d", TargetReplicas: 2},
 	}
 	got := quotaAloneDiff(composed, alone)
-	want := "ns/a: 4 -> 2, ns/c: - -> 1, ns/d: 2 -> -"
+	want := "ns/a, ns/c, ns/d"
 	if got != want {
 		t.Fatalf("quotaAloneDiff = %q, want %q", got, want)
 	}
@@ -65,7 +65,7 @@ func TestReportQuotaAloneAllocation(t *testing.T) {
 
 	// No requests: the shadow decides nothing, so "v" differs only by absence.
 	e.reportQuotaAloneAllocation(ctx, opt, nil, []*allocation.ResourceConstraints{physical, qc}, composed)
-	if len(logged) != 1 || !strings.Contains(logged[0], "Upgrade note") || !strings.Contains(logged[0], "tenant/v: - -> 2") {
+	if len(logged) != 1 || !strings.Contains(logged[0], "Upgrade note") || !strings.Contains(logged[0], "tenant/v") {
 		t.Fatalf("logged %q, want one upgrade note naming the difference", logged)
 	}
 	// Unchanged difference: not logged again.

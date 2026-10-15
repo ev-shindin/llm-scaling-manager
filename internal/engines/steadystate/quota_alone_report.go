@@ -2,9 +2,7 @@ package steadystate
 
 import (
 	"context"
-	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -24,8 +22,11 @@ import (
 // GPU-holding pod, training included. So that the change is visible before an
 // operator meets it as a model that stopped growing, each cycle runs the
 // optimizer a second time, as a shadow that publishes nothing, over the quota
-// constraints alone, and logs every variant whose target differs from the
-// composed one. Logged when the set of differences changes, not every cycle.
+// constraints alone, and logs the variants whose target differs from the
+// composed one. The pass runs once per quotaAloneReportEvery eligible cycles,
+// not every cycle, and logs only when the SET of differing variants changes:
+// the targets themselves move with load almost every cycle, and logging them
+// made the "on change" log fire nearly every cycle under load.
 //
 // composed is the real pass's decisions, before any utilization-share override;
 // constraints are the ones it was given.
@@ -49,6 +50,11 @@ func (e *Engine) reportQuotaAloneAllocation(
 		// the two passes would bound the same way, or not at all.
 		return
 	}
+	run := e.quotaAloneCycles%quotaAloneReportEvery == 0
+	e.quotaAloneCycles++
+	if !run {
+		return
+	}
 	diff := quotaAloneDiff(composed, greedy.ShadowOptimize(ctx, requests, quotaAlone))
 	if diff == e.lastQuotaAloneDiff {
 		return
@@ -62,9 +68,15 @@ func (e *Engine) reportQuotaAloneAllocation(
 	}
 	ctrl.LoggerFrom(ctx).Info("Upgrade note (transitional): this policy declares a physical GPU limiter and "+
 		"quotas, and both now bound scaling. Until this release the physical limiter was not built and the "+
-		"quotas alone applied. Targets that differ, as namespace/variant: quota-alone -> composed",
+		"quotas alone applied. Variants whose target differs (namespace/variant)",
 		"limiters", e.Config.EffectiveLimiterSummary(), "differences", diff)
 }
+
+// quotaAloneReportEvery is how many eligible cycles pass between two shadow
+// passes of reportQuotaAloneAllocation. The pass is a second optimizer run, and
+// the note it feeds is an upgrade hint, not a signal anyone acts on within a
+// cycle. TRANSITIONAL: removed with reportQuotaAloneAllocation.
+const quotaAloneReportEvery = 10
 
 // quotaConstraints returns the constraints of the quota providers (those fed the
 // managed usage basis), matched to providers by name.
@@ -84,10 +96,10 @@ func quotaConstraints(providers []allocation.ConstraintProvider, constraints []*
 	return out
 }
 
-// quotaAloneDiff lists, sorted, every variant whose target differs between the
-// two passes as "namespace/variant: alone -> composed", or "" when none does. A
-// variant only one pass decided is listed with "-" on the missing side, since
-// reading the absence as 0 replicas would mislead.
+// quotaAloneDiff lists, sorted, every variant ("namespace/variant") whose
+// target differs between the two passes, or "" when none does. A variant only
+// one pass decided differs. The targets are left out: they change with load,
+// and the set of variants the physical limiter bounds is what the note is for.
 func quotaAloneDiff(composed, alone []domain.VariantDecision) string {
 	targets := func(ds []domain.VariantDecision) map[string]int {
 		m := make(map[string]int, len(ds))
@@ -111,13 +123,7 @@ func quotaAloneDiff(composed, alone []domain.VariantDecision) string {
 		if inC && inA && ct == at {
 			continue
 		}
-		side := func(v int, ok bool) string {
-			if !ok {
-				return "-"
-			}
-			return strconv.Itoa(v)
-		}
-		lines = append(lines, fmt.Sprintf("%s: %s -> %s", k, side(at, inA), side(ct, inC)))
+		lines = append(lines, k)
 	}
 	sort.Strings(lines)
 	return strings.Join(lines, ", ")
