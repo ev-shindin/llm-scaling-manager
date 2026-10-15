@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 )
@@ -39,6 +40,35 @@ func TestGPUConstraintsSnapshotAgeBound(t *testing.T) {
 				t.Fatalf("snapshot %s old: gpuConstraints = %+v, want used=%t", tc.age, got, tc.want)
 			}
 		})
+	}
+}
+
+// Review finding: lastGood kept one entry per namespace forever and survived
+// a limiter rebuild. An expired entry is dropped when read or when another is
+// remembered, and a rebuild forgets them all.
+func TestGPUConstraintsSnapshotsAreEvicted(t *testing.T) {
+	last := []*allocation.ResourceConstraints{{ProviderName: "gpu-limiter"}}
+	now := time.Now()
+	e := &Engine{}
+	e.rememberConstraints("old", last, now.Add(-2*lastConstraintsMaxAge))
+	e.rememberConstraints("read", last, now.Add(-2*lastConstraintsMaxAge))
+	if _, _, ok := e.lastConstraints("read", now); ok {
+		t.Fatal("an expired snapshot was used")
+	}
+	if _, kept := e.lastGood["read"]; kept {
+		t.Error("an expired snapshot was kept after it was read")
+	}
+	e.rememberConstraints("fresh", last, now)
+	if _, kept := e.lastGood["old"]; kept {
+		t.Error("an expired snapshot of a namespace never read again was kept")
+	}
+
+	e.config = config.NewTestConfig()
+	e.limiterBuilder = func() (allocation.Limiter, error) { return failingProvider{name: "gpu-limiter"}, nil }
+	e.limiterSig = "an older configuration"
+	e.refreshLimiter(context.Background())
+	if len(e.lastGood) != 0 {
+		t.Errorf("snapshots of the replaced limiter survived the rebuild: %v", e.lastGood)
 	}
 }
 

@@ -221,6 +221,7 @@ func (e *Engine) refreshLimiter(ctx context.Context) {
 	}
 	e.gpuLimiter = limiter
 	e.limiterSig = sig
+	e.forgetConstraints()
 	log.FromContext(ctx).Info("Scale-from-zero: GPU limiter (re)built from config",
 		"type", e.config.LimiterKinds(), "limiters", e.config.EffectiveLimiterSummary(), "name", limiter.Name())
 }

@@ -274,7 +274,23 @@ func (e *Engine) rememberConstraints(namespace string, constraints []*allocation
 	if e.lastGood == nil {
 		e.lastGood = make(map[string]constraintSnapshot)
 	}
+	// Entries past the age bound are never used again: drop them, so a
+	// namespace that stopped waking leaves nothing behind.
+	for ns, s := range e.lastGood {
+		if now.Sub(s.takenAt) >= lastConstraintsMaxAge {
+			delete(e.lastGood, ns)
+		}
+	}
 	e.lastGood[namespace] = constraintSnapshot{constraints: constraints, takenAt: now}
+}
+
+// forgetConstraints drops every remembered snapshot: they were computed by a
+// limiter that has just been replaced, and must not check a wake against a
+// bound the new configuration no longer declares.
+func (e *Engine) forgetConstraints() {
+	e.snapshotMu.Lock()
+	defer e.snapshotMu.Unlock()
+	clear(e.lastGood)
 }
 
 // lastConstraints returns namespace's last successful constraints and their age,
@@ -288,6 +304,7 @@ func (e *Engine) lastConstraints(namespace string, now time.Time) ([]*allocation
 	}
 	age := now.Sub(s.takenAt)
 	if age >= lastConstraintsMaxAge {
+		delete(e.lastGood, namespace)
 		return nil, 0, false
 	}
 	return s.constraints, age, true
