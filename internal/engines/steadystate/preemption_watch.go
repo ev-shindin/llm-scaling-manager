@@ -17,6 +17,9 @@ import (
 // oldest are dropped and counted.
 const DefaultPreemptionWatchCapacity = 1024
 
+// kindPod is the Pod kind, as owner references and Events name it.
+const kindPod = "Pod"
+
 // observedPreemption is one Kueue-managed pod seen carrying Kueue's
 // TerminationTarget condition for a preemption, as the pod informer delivered
 // it: on an update, or in its final state on delete.
@@ -139,7 +142,7 @@ func preemptionKey(ns string, uid types.UID, labels map[string]string) string {
 func workloadPreemptionKey(ns string, w kueue.PreemptedWorkload) string {
 	var pods []types.UID
 	for _, o := range w.OwnerRefs {
-		if o.Kind == "Pod" {
+		if o.Kind == kindPod {
 			pods = append(pods, o.UID)
 		}
 	}

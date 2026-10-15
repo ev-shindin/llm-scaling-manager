@@ -367,7 +367,7 @@ func modelOfOwners(requests []allocation.ModelScalingRequest, scaleTargets map[s
 	model := ""
 	var pods []types.UID
 	for _, o := range owners {
-		if o.Kind == "Pod" {
+		if o.Kind == kindPod {
 			pods = append(pods, o.UID)
 			if m := modelByPodName(requests, scaleTargets, ns, o.Name); m != "" {
 				model = m
@@ -475,14 +475,14 @@ func (e *Engine) scaleUpPending(ctx context.Context, requests []allocation.Model
 		var failed error
 		for _, reason := range []string{eventTriggeredScaleUp, eventNotTriggerScaleUp} {
 			var list corev1.EventList
-			if err := reader.List(ctx, &list, client.InNamespace(ns), client.MatchingFields{"reason": reason, "involvedObject.kind": "Pod"}); err != nil {
+			if err := reader.List(ctx, &list, client.InNamespace(ns), client.MatchingFields{"reason": reason, "involvedObject.kind": kindPod}); err != nil {
 				failed = err
 				break
 			}
 			latest[reason] = map[string]time.Time{}
 			for i := range list.Items {
 				ev := &list.Items[i]
-				if ev.InvolvedObject.Kind != "Pod" || !fromClusterAutoscaler(ev) {
+				if ev.InvolvedObject.Kind != kindPod || !fromClusterAutoscaler(ev) {
 					continue
 				}
 				if _, ok := pods[ev.InvolvedObject.Name]; !ok {
