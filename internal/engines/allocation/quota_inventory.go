@@ -408,6 +408,12 @@ func (q *QuotaInventory) snapshotStale(ext config.ExternalQuotas, readErr error)
 // stale. Every other namespace borrows and is released as usual, so one
 // tenant's failing ResourceQuota reads starve no one else. The eligibility
 // check turns a failure that persists into resourcequota-unreadable.
+//
+// Withholding stops new borrowing only. A withheld namespace that Kueue reads
+// as borrowing now (a counted queue past its nominal) is kept in the view,
+// Frozen and carrying its reason (NamespaceBorrow.Withheld), so its cohort's
+// pool and lenders are still read and its borrowed replicas can still be
+// handed back to a waiting lender that cannot reclaim.
 func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.ExternalQuotas, last *borrowView) (view *borrowView) {
 	candidates := make([]string, 0, len(ext.Borrow))
 	for ns, rows := range ext.Borrow {
@@ -420,7 +426,7 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 	elig := q.borrowOpts.Eligibility.Evaluate(ctx, candidates)
 
 	view = &borrowView{withheld: map[string]string{}, cohorts: map[string][]string{}}
-	counted, frozen := map[string]bool{}, map[string]bool{}
+	counted, frozen, heldWithheld := map[string]bool{}, map[string]bool{}, map[string]string{}
 	for _, ns := range candidates {
 		e := elig[ns]
 		reason := string(e.Reason)
@@ -432,7 +438,15 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 		}
 		if reason != "" {
 			view.withheld[ns] = reason
-			continue
+			if !holdsBorrowed(ext.Borrow[ns]) {
+				continue
+			}
+			// Withholding stops new borrowing only. A withheld namespace that
+			// holds borrowed GPUs stays in the view, frozen at nothing new, so
+			// its cohort's pool and lenders are still read and a waiting lender
+			// that cannot reclaim is still handed them back: were it the
+			// cohort's only borrower, the pool would vanish otherwise.
+			frozen[ns], heldWithheld[ns] = true, reason
 		}
 		counted[ns] = true
 	}
@@ -464,7 +478,7 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 			if key, found := accelerator.FindKey(within.NamespaceQuotas[ns], accType); found {
 				b.WithinNominal = within.NamespaceQuotas[ns][key]
 			}
-			b.Frozen = frozen[ns]
+			b.Frozen, b.Withheld = frozen[ns], heldWithheld[ns]
 			perType[accType] = b
 		}
 		view.byNS[ns] = perType
@@ -498,6 +512,12 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 		})
 	}
 	return view
+}
+
+// holdsBorrowed reports whether Kueue reads one of a namespace's counted queues
+// as borrowing now: usage past its nominal quota.
+func holdsBorrowed(rows []config.ExternalBorrow) bool {
+	return slices.ContainsFunc(rows, func(r config.ExternalBorrow) bool { return r.Counted() && r.SourceBorrowed > 0 })
 }
 
 // namespaceBorrow derives one namespace's borrowing figures for one type from

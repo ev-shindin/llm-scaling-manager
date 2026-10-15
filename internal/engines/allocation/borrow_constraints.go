@@ -42,6 +42,11 @@ type NamespaceBorrow struct {
 	// borrowed for it (its draw allowance is 0) until a read passes. What it
 	// holds stays, and releases to a waiting lender still apply to it.
 	Frozen bool
+	// Withheld is, on a Frozen namespace whose borrowing is withheld (say
+	// not-kueue-managed) while it still holds borrowed GPUs, why: it borrows
+	// nothing new, and what it holds can still be released to a waiting lender.
+	// Empty otherwise.
+	Withheld string
 }
 
 // SharedPoolChunk is one cohort's free GPUs of one flavor and GPU resource. A

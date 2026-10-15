@@ -109,6 +109,9 @@ func LimiterBudgets(constraints []*ResourceConstraints, blocked map[string]bool)
 // why it is 0 when it is.
 func borrowableNow(c *ResourceConstraints, ns, acc string, nb NamespaceBorrow, blocked map[string]bool) (int, string) {
 	if nb.Frozen {
+		if nb.Withheld != "" {
+			return 0, nb.Withheld
+		}
 		return 0, string(kueue.ReasonStale)
 	}
 	if nb.Cap == 0 {
