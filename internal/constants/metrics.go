@@ -851,6 +851,13 @@ const (
 	// borrowing. Labels: namespace, model_name.
 	WVAKueuePreemptedPodsTotal = "wva_kueue_preempted_pods_total"
 
+	// WVABorrowReleasesTotal is a counter of the variant targets the scaling
+	// manager lowered to give borrowed Kueue capacity back, one per release
+	// record (a P/D unit counts once per variant it lowers). The namespace is
+	// the model's, scraped as exported_namespace. Labels: namespace,
+	// model_name, cause (lender-waiting or placement-timeout).
+	WVABorrowReleasesTotal = "wva_borrow_releases_total"
+
 	// WVAKueueLenderWaitingSeconds is a gauge: how long a lender ClusterQueue
 	// has waited for capacity it lent (debounced), published only while some
 	// namespace this controller governs still borrows in the lender's cohort.
@@ -861,6 +868,9 @@ const (
 
 	// LabelTier is the tier of WVAQuotaLimitGPUs: guaranteed or borrowable.
 	LabelTier = "tier"
+	// LabelCause is why borrowed capacity was released, on
+	// WVABorrowReleasesTotal.
+	LabelCause = "cause"
 	// LabelCohort is a Kueue cohort name.
 	LabelCohort = "cohort"
 	// LabelClusterQueue is a Kueue ClusterQueue name.

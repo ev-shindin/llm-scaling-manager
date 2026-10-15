@@ -90,6 +90,14 @@ var _ = Describe("Kueue borrowing series", func() {
 		Expect(rows(constants.WVAKueuePreemptedPodsTotal, constants.LabelNamespace, constants.LabelModelName)).To(Equal(map[string]float64{"a,m": 3}))
 	})
 
+	It("counts borrow releases per model and cause", func() {
+		CountBorrowRelease("a", "m", "lender-waiting")
+		CountBorrowRelease("a", "m", "lender-waiting")
+		CountBorrowRelease("a", "m", "placement-timeout")
+		Expect(rows(constants.WVABorrowReleasesTotal, constants.LabelNamespace, constants.LabelModelName, constants.LabelCause)).To(
+			Equal(map[string]float64{"a,m,lender-waiting": 2, "a,m,placement-timeout": 1}))
+	})
+
 	It("registers the borrowing reasons as one producer's set", func() {
 		Expect(constants.ScalingBlockedReasonsBorrowing).To(ConsistOf(
 			"borrow-released", "lender-reclaimed", "borrow-unplaced", "nominal-lent-out"))

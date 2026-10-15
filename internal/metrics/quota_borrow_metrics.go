@@ -18,6 +18,7 @@ var (
 	kueueUnplacedPods   *prometheus.GaugeVec
 	kueuePreemptedPods  *prometheus.CounterVec
 	kueueLenderWaiting  *prometheus.GaugeVec
+	borrowReleases      *prometheus.CounterVec
 )
 
 // registerQuotaBorrowMetrics creates and registers the borrowing series.
@@ -58,12 +59,19 @@ func registerQuotaBorrowMetrics(registry prometheus.Registerer) error {
 			"namespace this controller governs still borrows in its cohort. Above the borrow cooldown, " +
 			"borrowed capacity is not being given back.",
 	}, withInstance(constants.LabelCohort, constants.LabelClusterQueue))
+	borrowReleases = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: constants.WVABorrowReleasesTotal,
+		Help: "Variant targets lowered to give borrowed Kueue capacity back, one per release record, by cause: " +
+			"lender-waiting (a lender that cannot reclaim waits for what it lent) or placement-timeout " +
+			"(a borrowed replica did not place in time).",
+	}, withInstance(constants.LabelNamespace, constants.LabelModelName, constants.LabelCause))
 	for name, c := range map[string]prometheus.Collector{
 		constants.WVAQuotaLimitGPUs:            quotaLimitGPUs,
 		constants.WVAQuotaBorrowWithheld:       quotaBorrowWithheld,
 		constants.WVAKueueUnplacedPods:         kueueUnplacedPods,
 		constants.WVAKueuePreemptedPodsTotal:   kueuePreemptedPods,
 		constants.WVAKueueLenderWaitingSeconds: kueueLenderWaiting,
+		constants.WVABorrowReleasesTotal:       borrowReleases,
 	} {
 		if err := registry.Register(c); err != nil {
 			return fmt.Errorf("failed to register %s: %w", name, err)
@@ -195,6 +203,18 @@ func PublishKueueLenderWaiting(lenders []WaitingLender) {
 					constants.LabelClusterQueue: l.ClusterQueue}, l.Seconds)
 			}
 		})
+}
+
+// CountBorrowRelease counts one release record of borrowed capacity.
+func CountBorrowRelease(namespace, modelName, cause string) {
+	if borrowReleases == nil {
+		return
+	}
+	l := prometheus.Labels{constants.LabelNamespace: namespace, constants.LabelModelName: modelName, constants.LabelCause: cause}
+	if controllerInstance != "" {
+		l[constants.LabelControllerInstance] = controllerInstance
+	}
+	borrowReleases.With(l).Inc()
 }
 
 // CountKueuePreemptedPods counts n managed pods of a model Kueue preempted.
