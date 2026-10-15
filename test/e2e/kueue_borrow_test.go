@@ -331,7 +331,7 @@ var _ = Describe("Kueue cohort borrowing - applied against a live Kueue", Label(
 			g.Expect(a.Borrowed).To(Equal(reach - nominal))
 		}, scaleSettle, poll).Should(Succeed())
 		measure("borrowed replicas ordered to all Ready", time.Since(ordered))
-		measureReplicaStart(nsA, depA, ordered, measure)
+		measureReplicaStart(nsA, depA, removed, measure)
 
 		Eventually(func(g Gomega) {
 			r := borrowRowA(g)
@@ -375,7 +375,12 @@ var _ = Describe("Kueue cohort borrowing - applied against a live Kueue", Label(
 		measure("lender waiting to lender admitted (release cycle)", time.Since(created))
 
 		Expect(controllerLogsSince(releaseLogged)).To(MatchRegexp(
-			`Releasing borrowed capacity.*"cause": "lender-waiting".*"lenderClusterQueue": "`+queueB+`"`))
+			`Releasing borrowed capacity.*"cause": "lender-waiting".*"lenderClusterQueue": "` + queueB + `"`))
+		Eventually(func(g Gomega) {
+			g.Expect(releaseEvents(g, nsA, depA, corev1.EventTypeNormal)).To(
+				ContainElement(ContainSubstring("ClusterQueue "+queueB)),
+				"the Deployment carries a Normal %s Event naming the lender", borrowReleasedReason)
+		}, time.Minute, 2*time.Second).Should(Succeed())
 
 		By("One unit only: A neither drops further nor grows back")
 		Consistently(func(g Gomega) {
@@ -401,11 +406,16 @@ var _ = Describe("Kueue cohort borrowing - applied against a live Kueue", Label(
 
 		var lowered time.Time
 		Eventually(func(g Gomega) {
-			g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(Equal(int32(nominal)))
+			g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(Equal(int32(nominal)),
+				"gated pods of A now: %v", gatedPods(g))
 			g.Expect(gatedPods(g)).To(BeEmpty(), "no gated replacement lingers")
 			lowered = time.Now()
 		}, placementTimeout+scaleSettle, poll).Should(Succeed(),
 			"the gated replacement outlived placementTimeout %s and the KEDA window", placementTimeout)
+		Eventually(func(g Gomega) {
+			g.Expect(releaseEvents(g, nsA, depA, corev1.EventTypeWarning)).To(
+				ContainElement(ContainSubstring("cause placement-timeout")))
+		}, time.Minute, 2*time.Second).Should(Succeed())
 		measure("reclaim: preemption to A's target lowered with no gated pod", lowered.Sub(preempted))
 		measure("reclaim cycle: lender's request to A settled", lowered.Sub(triggered))
 		Eventually(func(g Gomega) {
@@ -436,8 +446,9 @@ var _ = Describe("Kueue cohort borrowing - applied against a live Kueue", Label(
 })
 
 // borrowLogMessage opens the borrowing line the quota limiter logs on every
-// change while borrowing is counted (internal/engines/allocation/quota_inventory.go).
-const borrowLogMessage = "Kueue borrowing counted where every condition holds"
+// change (allocation.BorrowAppliedLogMessage), restated so the suite reads the
+// log as an operator would.
+const borrowLogMessage = "Kueue borrowing applied where every condition holds and withheld elsewhere"
 
 // borrowRow mirrors config.ExternalBorrow's JSON, restated so the suite reads
 // the log as an operator would rather than through the controller's types.
@@ -538,6 +549,27 @@ func measureReplicaStart(ns, app string, since time.Time, measure func(string, t
 			}
 		}
 	}
+}
+
+// borrowReleasedReason is the Event reason the scaling manager records on a
+// scale target it lowered to give borrowed capacity back
+// (constants.K8SEventBorrowedCapacityReleased).
+const borrowReleasedReason = "BorrowedCapacityReleased"
+
+// releaseEvents are the messages of the release Events of eventType on the
+// Deployment ns/name.
+func releaseEvents(g Gomega, ns, name, eventType string) []string {
+	events, err := k8sClient.CoreV1().Events(ns).List(ctx, metav1.ListOptions{
+		FieldSelector: "involvedObject.kind=Deployment,involvedObject.name=" + name + ",reason=" + borrowReleasedReason,
+	})
+	g.Expect(err).NotTo(HaveOccurred())
+	var msgs []string
+	for _, e := range events.Items {
+		if e.Type == eventType {
+			msgs = append(msgs, e.Message)
+		}
+	}
+	return msgs
 }
 
 func podReady(p corev1.Pod) bool {
