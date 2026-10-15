@@ -273,6 +273,35 @@ var _ = Describe("BorrowGovernor release units", func() {
 			Expect(g.Ledger().Entries[0].Units).To(HaveLen(1))
 		})
 
+		It("refuses a corrupt ledger, reads an empty one as empty, and ignores fields it does not know", func() {
+			for _, corrupt := range []string{`{`, `not json`, `{"entries":{}}`, `{"timeoutHeld":{"b/x":"two"}}`} {
+				l, err := UnmarshalBorrowLedger(corrupt)
+				Expect(err).To(HaveOccurred(), corrupt)
+				Expect(l).To(Equal(BorrowLedger{}), "nothing half-parsed is restored")
+			}
+			l, err := UnmarshalBorrowLedger("")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(l).To(Equal(BorrowLedger{}))
+			l, err = UnmarshalBorrowLedger(`{"entries":[],"timeoutHeld":{"b/x-v":1},"fromANewerVersion":{"x":1}}`)
+			Expect(err).NotTo(HaveOccurred(), "a ledger written by a newer version still loads")
+			Expect(l.TimeoutHeld).To(Equal(map[string]int{"b/x-v": 1}))
+		})
+
+		It("applies changed timings from the next cycle (SetSettings)", func() {
+			g := NewBorrowGovernor(settings)
+			x := unplacedVariant(govModel("x", 3, 8), "x-v", t0)
+			at := t0.Add(2 * time.Minute)
+			c := BorrowCycle{Now: at, Constraints: govWorld{used: 24}.constraints(), Requests: []ModelScalingRequest{x}}
+			g.Observe(c)
+			Expect(g.Releases(c, decisionsOf(c.Requests))).To(BeEmpty(), "inside the default placement timeout")
+			shorter := settings
+			shorter.PlacementTimeout = time.Minute
+			g.SetSettings(shorter)
+			c.Now = at.Add(time.Second)
+			g.Observe(c)
+			Expect(g.Releases(c, decisionsOf(c.Requests))).To(HaveLen(1), "past the new, shorter timeout")
+		})
+
 		It("drops what a restored ledger cannot use", func() {
 			g := NewBorrowGovernor(settings)
 			l, err := UnmarshalBorrowLedger(`{"entries":[` +
