@@ -355,12 +355,22 @@ controller. No such line means its own ConfigMap does.
   Workload with quota reserved that requests a GPU and is owned by a kind a
   Kueue integration owns Workloads by (Pod, Job, JobSet, LeaderWorkerSet,
   StatefulSet), so a tenant's own small Workload owned by its Deployment or
-  ReplicaSet does not pass; per owner, the reserved Workloads must also cover
-  the GPUs its running pods request, so a 1-GPU Workload owned by a 16-GPU
-  LeaderWorkerSet does not pass either. That keeps the figures honest; it does
+  ReplicaSet does not pass; the reserved Workloads must also cover the GPUs
+  the running pods of their owners request, each Workload counted once, so a
+  1-GPU Workload owned by a 16-GPU LeaderWorkerSet, or one 8-GPU Workload
+  naming ten 8-GPU pods, does not pass either. That keeps the figures honest; it does
   not stop a tenant from running GPU work outside Kueue. A `ResourceQuota`
   does. Do not grant tenants write on Kueue `Workloads` in namespaces that
   count borrowing, or set `countBorrowable: false` there.
+- **Kueue's pod condition is trusted.** A terminating pod carrying Kueue's
+  `TerminationTarget` condition is skipped by the managed check, and the
+  preemption watch reads a preemption from it. Writing that condition needs
+  `pods/status`, which the built-in `edit` and `admin` roles do not grant. Do
+  not grant tenants `pods/status` write in namespaces that count borrowing.
+- **An evicted pod keeps its GPUs until it is gone.** A pod Kueue evicted
+  with a long `terminationGracePeriodSeconds` still holds its GPUs while the
+  managed check skips it. A replica ordered into those GPUs waits unplaced
+  until they free; the placement timeout gives it back if that takes too long.
 - **A `Never` lender depends on the borrower.** With `reclaimWithinCohort:
   Never`, Kueue never takes capacity back; the lender gets it only because
   the borrowing namespace's scaling manager releases it. A tenant who owns

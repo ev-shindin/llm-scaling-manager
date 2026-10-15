@@ -388,6 +388,12 @@ What to do:
   long while the autoscaler reports `TriggeredScaleUp` on the pod. If new nodes
   take longer than that on your cluster, raise `placementTimeout`, or borrowed
   replicas are given back while their node is still coming.
+- **A prefill stays unplaced after a partner was released**: when a P/D
+  model's last prefill does not place, the scaling manager releases a decode
+  to free GPUs for it. The freed GPUs may sit on nodes the prefill cannot use,
+  for example a prefill pinned to RDMA nodes. It then stays `Pending`, and
+  `WVAKueuePodsUnplaced` fires. Check the pod's scheduling message with
+  `kubectl describe pod`; free or add a node it can use.
 - **The Kueue reader is stale** (`WVAKueueReaderStale`, reason `stale` on
   `wva_quota_borrow_withheld`): borrowing is frozen at the last figures, so
   nothing new is borrowed and nothing is given back. To hand capacity back by

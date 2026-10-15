@@ -307,11 +307,14 @@ and leaves the cluster total as it is.
 
 **When it is counted.** Per namespace, only where every condition holds.
 Otherwise the namespace caps at nominal, and the reason is logged and
-published (`wva_quota_borrow_withheld`):
+published (`wva_quota_borrow_withheld`). Withholding stops new borrowing
+only: a withheld namespace that Kueue still reads as borrowing borrows
+nothing new, and its borrowed replicas can still be given back to a waiting
+lender.
 
 | Condition | Reason when it fails |
 |---|---|
-| Kueue charges every GPU pod in the namespace: a Workload owned by the pod, or by an owner up its chain, has quota reserved (for a pod at Kueue's admission gate, the Workload exists). The Workload must request a GPU and be owned by a kind a Kueue integration owns Workloads by: Pod, batch Job, JobSet, LeaderWorkerSet or StatefulSet; per owner, its reserved Workloads must request at least the GPUs its running pods do. GPU work of other integrations (Kubeflow, Ray, AppWrapper) reads as not managed, which withholds borrowing (fail safe), as do GPUs asked for only through pod-level resources or DRA claims. Kueue's labels and gate alone are not enough, since a tenant can write them | `not-kueue-managed` |
+| Kueue charges every GPU pod in the namespace: a Workload owned by the pod, or by an owner up its chain, has quota reserved (for a pod at Kueue's admission gate, the Workload exists). The Workload must request a GPU and be owned by a kind a Kueue integration owns Workloads by: Pod, batch Job, JobSet, LeaderWorkerSet or StatefulSet; the reserved Workloads must request at least the GPUs their owners' running pods do, each Workload counted once and at the pod count Kueue admitted. GPU work of other integrations (Kubeflow, Ray, AppWrapper) reads as not managed, which withholds borrowing (fail safe), as do GPUs asked for only through pod-level resources or DRA claims. Kueue's labels and gate alone are not enough, since a tenant can write them | `not-kueue-managed` |
 | Something checks that borrowed GPUs exist: a `gpu-inventory` limiter, or a GPU `ResourceQuota` at most nominal plus `borrowingLimit` | `no-gpu-bound` |
 | The namespace's ResourceQuotas are readable (Forbidden at once; any other failure after five refresh intervals of failing) | `resourcequota-unreadable` |
 | The Kueue read is fresh (not failed, not older than twice `refreshInterval`; a Cohort list that fails for a reason other than Forbidden also reads as stale; one namespace's ResourceQuota read failing, other than Forbidden, for up to five refresh intervals) and Kueue has written queue status | `stale`, `no-status` |
