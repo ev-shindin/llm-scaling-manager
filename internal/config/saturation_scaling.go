@@ -73,12 +73,13 @@ type ScalingPolicy struct {
 	//
 	// It does not govern the k2 borrow (P2-borrow, saturation/k2_borrow.go),
 	// which uses a compatible sibling's measured k2 only where that is LOWER
-	// than the variant's own capacity, and relaxes back to it over 6.5 hours.
-	// That runs whatever this says, by the rule below: a figure that can only
-	// lower a capacity orders more replicas, never fewer. Its cost is in the
-	// other direction -- a false match, such as two configurations whose
-	// unread flags both fell back to defaults, holds extra replicas for up to
-	// the 6.5 hours -- and there is no switch for it.
+	// than the variant's own capacity, and relaxes back to it over 6.5 hours
+	// of serving. That runs whatever this says, by the rule below: a figure
+	// that can only lower a capacity orders more replicas, never fewer. Its
+	// cost is in the other direction -- a false match, such as two
+	// configurations whose unread flags both fell back to defaults, holds
+	// extra replicas for up to the 6.5 hours -- and DisableK2Borrow is its
+	// switch.
 	//
 	// OFF BY DEFAULT, and that is the whole of this setting's story. Reuse is
 	// decided by an equality over a digest of 14 parsed engine flags, and that
@@ -128,6 +129,24 @@ type ScalingPolicy struct {
 	// ever have switched reuse back on; as an enable defaulting to false, the
 	// same idiom turns it on exactly where someone asks.
 	EnableLearnedStateReuse bool `yaml:"enableLearnedStateReuse,omitempty"`
+
+	// DisableK2Borrow stops the k2 borrow (P2-borrow) for the model: a
+	// variant with no saturated reading of its own prices from its own
+	// derived figure or k1, never from a sibling's measurement. A clock
+	// already running is left where it stands, and resumes if the borrow is
+	// switched back on.
+	//
+	// ON BY DEFAULT, because the borrow is lower-only: it can order more
+	// replicas, never fewer. This is the switch for its cost -- an incident
+	// where a false match holds a fleet on a sibling's figure, which before
+	// this needed a new image or a flush of every model's learned state.
+	//
+	// A DISABLE, unlike EnableLearnedStateReuse, because the default is on
+	// and Merge is one-way for a plain bool: a true in a per-model override
+	// turns the borrow off for that model, which is the scope it is for. The
+	// limitation is the mirror of reuse's: a model cannot turn the borrow back
+	// on where a `default:` entry turned it off.
+	DisableK2Borrow bool `yaml:"disableK2Borrow,omitempty"`
 
 	// ShapeChangeHoldSeconds overrides how long the fleet is withheld from
 	// release after its shape changes, when nothing settles the hold sooner.
@@ -577,6 +596,10 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	// on the current scope.
 	if override.EnableLearnedStateReuse {
 		c.EnableLearnedStateReuse = true
+	}
+	// One-way like the rest: a true turns the borrow off for the model.
+	if override.DisableK2Borrow {
+		c.DisableK2Borrow = true
 	}
 	// The weight is one choice expressed one of two ways, so an override that
 	// states either replaces both: a model that names a class must not inherit a

@@ -195,7 +195,7 @@ var _ = Describe("learned-state horizons", func() {
 			nil,     // engineParams
 			2000000, // k1
 			2000000, // kvCeiling, at or above tokensInUse or the read is refused
-			domain.RoleDecode, false, true, logr.Discard())
+			domain.RoleDecode, false, true, false, logr.Discard())
 
 		Expect(src).To(Equal(capacity.K2SrcObserved))
 		Expect(k2).To(Equal(int64(900000)),

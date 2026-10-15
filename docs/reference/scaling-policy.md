@@ -1043,12 +1043,16 @@ this variant's answer, never where it only limits it. There are two such places:
   lower than the variant's own capacity. After 30 minutes it relaxes back to the
   variant's own figure over 6 hours, because a k2 that is too low never corrects
   itself: lightly loaded replicas never saturate, and saturation is the only time
-  k2 is measured.
+  k2 is measured. The hours count only while the variant is serving, so a parked
+  variant keeps its borrow for when it wakes. Once relaxed, it does not start
+  again unless the sibling's figure moves by more than 20% or the variant's
+  engine configuration changes.
 
-Neither can be turned off. What they cost is in the other direction: a sibling
-that only *looks* compatible — two configurations whose unread flags both fell
-back to the defaults, for example — can hold extra replicas, for up to the
-6.5 hours of a borrow.
+What they cost is in the other direction: a sibling that only *looks*
+compatible — two configurations whose unread flags both fell back to the
+defaults, for example — can hold extra replicas, for up to the 6.5 serving hours
+of a borrow. The k2 borrow can be turned off per model with
+[`disableK2Borrow`](#disablek2borrow); the ceiling cannot.
 
 #### Why it is off
 
@@ -1101,6 +1105,29 @@ Read `wva_engine_config` to tell the cases apart:
 Joining two variants on the fingerprint takes all four of `model_name`,
 `accelerator`, `gpus` and `fingerprint` — the sharing key is the tuple, not the
 digest alone — and, for the ITL line, `unresolved` empty on both sides.
+
+### `disableK2Borrow`
+
+Stops the k2 borrow (`P2-borrow`) for a model. Its variants price from their
+own figures only: their own measured k2, or the deployment-derived figure and
+k1 until they measure one. **The borrow is on by default**, because it can only
+order more replicas, never fewer. Turn it off when it costs you: a sibling that
+looks compatible but is not, holding a fleet larger than its load needs.
+
+```yaml
+llama-8b-prod:
+  model_id: meta-llama/Llama-3.1-8B
+  namespace: prod
+  disableK2Borrow: true
+```
+
+- It takes effect on the next cycle. The `Effective scaling policy` log line
+  shows what the model resolved `disableK2Borrow` to.
+- A borrow already running is paused, not reset. If you turn the borrow back
+  on, it resumes where it stood.
+- One direction only, like `enableLearnedStateReuse`: a per-model entry can turn
+  the borrow **off** where the default leaves it on, but not back on where the
+  `default:` entry turned it off.
 
 ### Default Configuration
 

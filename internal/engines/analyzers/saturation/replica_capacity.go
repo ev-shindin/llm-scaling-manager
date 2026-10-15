@@ -104,6 +104,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		role,
 		downstreamSaturated,
 		serving,
+		config.DisableK2Borrow,
 		logger,
 	)
 	// The same saturated moment that yields a k2 observation yields the
@@ -413,6 +414,8 @@ func (a *SaturationAnalyzer) computeK2(
 	// serving is a Ready replica of the variant's own: only it starts or
 	// advances a borrow's clock (borrowedK2).
 	serving bool,
+	// borrowDisabled is the model's disableK2Borrow: no P2-borrow at all.
+	borrowDisabled bool,
 	logger logr.Logger,
 ) (int64, capacity.K2Source) {
 	// Priority 1: Observed (queue saturated)
@@ -643,10 +646,18 @@ func (a *SaturationAnalyzer) computeK2(
 	// would have. 95,000 measured against 64,000 derived at max_num_seqs=16.
 	// An earlier version of this comment claimed the general rule and a
 	// reviewer built the counterexample. k1 is the bound that always holds.
+	// borrow is P2-borrow, or nothing where the model switched it off. Not
+	// consulted at all then, so a running clock is not moved.
+	borrow := func(own int64) (k2Borrow, bool) {
+		if borrowDisabled {
+			return k2Borrow{}, false
+		}
+		return a.borrowedK2(historyKey, modelID, own, engineParams, serving)
+	}
 	isPrefill := canonicalRole(role) == domain.RolePrefill
 	if !isPrefill {
 		if k2Derived := estimateCapacityFromParams(engineParams, avgInput, avgOutput); k2Derived > 0 {
-			if b, ok := a.borrowedK2(historyKey, modelID, min(k1, k2Derived), engineParams, serving); ok {
+			if b, ok := borrow(min(k1, k2Derived)); ok {
 				logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, min(k1, k2Derived), capacity.K2SrcDerived)
 				return b.k2, capacity.K2SrcBorrowed
 			}
@@ -660,7 +671,7 @@ func (a *SaturationAnalyzer) computeK2(
 	}
 
 	// Priority 4: Fallback to k1
-	if b, ok := a.borrowedK2(historyKey, modelID, k1, engineParams, serving); ok {
+	if b, ok := borrow(k1); ok {
 		logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, k1, capacity.K2SrcFallback)
 		return b.k2, capacity.K2SrcBorrowed
 	}

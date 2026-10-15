@@ -64,3 +64,23 @@ func TestMergeCarriesEnableLearnedStateReuse(t *testing.T) {
 		}
 	})
 }
+
+// TestMergeCarriesDisableK2Borrow: the k2 borrow's switch is for one model in
+// an incident, so it must survive Merge from a per-model override -- the same
+// trap TestMergeCarriesEnableLearnedStateReuse records -- and the borrow is on
+// when nobody says otherwise.
+func TestMergeCarriesDisableK2Borrow(t *testing.T) {
+	t.Run("a per-model override turns the borrow off", func(t *testing.T) {
+		base := ScalingPolicy{}
+		base.Merge(ScalingPolicy{DisableK2Borrow: true})
+		if !base.DisableK2Borrow {
+			t.Error("an override that disables the borrow must survive Merge")
+		}
+	})
+	t.Run("the zero value leaves the borrow on", func(t *testing.T) {
+		var p ScalingPolicy
+		if p.DisableK2Borrow {
+			t.Error("the borrow is lower-only and on by default")
+		}
+	})
+}

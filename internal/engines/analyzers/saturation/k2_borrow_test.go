@@ -7,6 +7,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
@@ -359,6 +360,30 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			ownPod.Ready = true
 			Expect(capacityOf(cycleWith(ownPod), "variant-b")).To(Equal(float64(4000)))
 			Expect(a.k2BorrowedSince).To(HaveKey(own), "a Ready own replica did not start the clock")
+		})
+	})
+
+	Describe("the model's switch", func() {
+		It("prices a variant on its own figure, and leaves a running clock where it stands", func() {
+			own := keyOf("variant-b")
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
+			ra.Add(4000)
+			a.computeCapacityHistory[keyOf("variant-a")] = ra
+			_, ok := a.borrowedK2(own, "test-model", 12800, params(256), true)
+			Expect(ok).To(BeTrue())
+			started := a.k2BorrowedSince[own]
+
+			ownPod := makeReplicaMetrics("pod-b", "variant-b", 1000, 16000, 0, 100, 50)
+			ownPod.Ready = true
+			input := makeAnalyzerInput([]domain.ReplicaMetrics{ownPod}, states[1:])
+			input.Config.(*config.ScalingPolicy).DisableK2Borrow = true
+			clock = clock.Add(time.Minute)
+			result, err := a.Analyze(ctx, input)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(capacityOf(result, "variant-b")).To(Equal(float64(12800)),
+				"disableK2Borrow still priced the variant from its sibling")
+			Expect(result.VariantCapacities[0].Reason).NotTo(Equal("P2-borrow"))
+			Expect(a.k2BorrowedSince[own]).To(Equal(started), "the switch moved the clock it stopped")
 		})
 	})
 
