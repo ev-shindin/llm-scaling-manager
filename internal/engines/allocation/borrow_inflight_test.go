@@ -79,7 +79,7 @@ func TestBlockCohorts(t *testing.T) {
 // order must not depend on map iteration, including between draws that share
 // every key field but one.
 func TestBorrowInFlightEntriesOrderIsStable(t *testing.T) {
-	var draws []BorrowDraw
+	draws := make([]BorrowDraw, 0, 32)
 	for _, ns := range []string{"b", "a"} {
 		for _, v := range []string{"v2", "v1"} {
 			for _, cohort := range []string{"d", "c"} {
@@ -99,8 +99,9 @@ func TestBorrowInFlightEntriesOrderIsStable(t *testing.T) {
 		b := NewBorrowInFlight()
 		// Insert in a rotated order each time.
 		b.Record(append(append([]BorrowDraw{}, draws[i%len(draws):]...), draws[:i%len(draws)]...))
-		var got []string
-		for _, d := range b.Entries() {
+		entries := b.Entries()
+		got := make([]string, 0, len(entries))
+		for _, d := range entries {
 			got = append(got, key(d))
 		}
 		if len(got) != len(draws) {

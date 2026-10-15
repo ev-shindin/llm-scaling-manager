@@ -16,6 +16,7 @@ import (
 // presence as the GPU bound. What the factory decided is then visible in what
 // the inventory counts: Borrowing() and the effective entry.
 func TestLimiterFactoryCountBorrowable(t *testing.T) {
+	const entryName = "tenant-quota"
 	ctx := context.Background()
 	observed := time.Unix(1000, 0)
 	on, off := true, false
@@ -48,7 +49,7 @@ func TestLimiterFactoryCountBorrowable(t *testing.T) {
 			cfg.UpdateScalingPolicyConfig(map[string]config.ScalingPolicy{"default": {Limiters: []config.QuotaLimiterConfig{
 				{Type: "gpu-inventory", Name: "gpu"},
 				{
-					Name: "tenant-quota", Type: "quota", Scope: config.QuotaScopeNamespace,
+					Name: entryName, Type: "quota", Scope: config.QuotaScopeNamespace,
 					NamespaceQuotas: map[string]map[string]int{"default": {"H100": -1}},
 					Kueue:           &config.KueueQuotaSource{Enabled: true, CountBorrowable: tc.count},
 				},
@@ -59,12 +60,12 @@ func TestLimiterFactoryCountBorrowable(t *testing.T) {
 			}
 			var inv *QuotaInventory
 			for _, cp := range ConstraintProvidersFrom(l) {
-				if d, ok := cp.(*DefaultLimiter); ok && cp.Name() == "tenant-quota" {
+				if d, ok := cp.(*DefaultLimiter); ok && cp.Name() == entryName {
 					inv, _ = d.inventory.(*QuotaInventory)
 				}
 			}
 			if inv == nil {
-				t.Fatal("the factory built no QuotaInventory for tenant-quota")
+				t.Fatalf("the factory built no QuotaInventory for %s", entryName)
 			}
 			enabled := inv.borrowOpts.Eligibility != nil
 			if enabled != tc.wantBorrowing {
