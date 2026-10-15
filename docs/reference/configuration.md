@@ -548,7 +548,11 @@ What is restored, and what is not:
   nothing, because a changed value would look identical;
 - the ages travel with the figures, so a restore never makes a figure younger,
   and one past its horizon above is not restored;
-- a figure the new controller has already measured is never replaced.
+- a figure the new controller has already measured is never replaced;
+- a k2 borrow keeps its place across the restart: a borrow that has worn off
+  stays off, and the time the controller was down is not counted;
+- a variant forgotten on request (the `llm-d.ai/forget-learned-state`
+  annotation) stays forgotten, and the annotation is not acted on again.
 
 The log line `Learned state: snapshot restored` says how many variants are
 pending their first cycle; `learned state restored` or `learned state not
