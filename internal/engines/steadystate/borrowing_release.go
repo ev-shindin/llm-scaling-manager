@@ -110,6 +110,11 @@ func (e *Engine) releaseBorrowed(ctx context.Context, requests []allocation.Mode
 			"namespace", r.Namespace, "modelID", r.ModelID, "variant", r.Variant,
 			"from", r.From, "to", r.To, "cause", string(r.Cause),
 			"lenderClusterQueue", r.Lender.Lender, "cohort", r.Lender.Cohort, "flavor", r.Lender.Flavor)
+		if r.GuaranteedGPUs > 0 {
+			logger.Info("A borrowed-capacity release goes below the namespace's guaranteed figure: "+
+				"the smallest unit that keeps the model serviceable is larger than what it borrows",
+				"namespace", r.Namespace, "modelID", r.ModelID, "cause", string(r.Cause), "guaranteedGPUs", r.GuaranteedGPUs)
+		}
 		metrics.CountBorrowRelease(r.Namespace, r.ModelID, string(r.Cause))
 		acc := scaleTargets[r.Namespace+"/"+r.Variant]
 		e.borrowReleasedEvent(r, acc)

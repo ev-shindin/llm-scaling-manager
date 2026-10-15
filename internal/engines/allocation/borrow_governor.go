@@ -129,6 +129,10 @@ type BorrowRelease struct {
 	Cause     ReleaseCause
 	// Lender is the waiting lender (ReleaseLenderWaiting), else empty.
 	Lender LenderKey
+	// GuaranteedGPUs is, on the first record of a placement-timeout release,
+	// the GPUs it takes below the namespace's guaranteed figure: the smallest
+	// serviceable unit is larger than what the namespace borrows. 0 otherwise.
+	GuaranteedGPUs int
 }
 
 // BorrowCycle is what the governor is told about one cycle.
@@ -724,13 +728,15 @@ func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]varian
 			if unit == nil || !unitFits(unit, req.Namespace, states) {
 				continue
 			}
+			below := max(0, gpus-borrowed)
 			for _, v := range slices.Sorted(maps.Keys(unit)) {
 				k := req.Namespace + "/" + v
 				s := states[k].state
 				to := s.CurrentReplicas - unit[v]
 				g.timeoutHeld[k] = stickyRelease{to: to}
 				out = append(out, BorrowRelease{Namespace: req.Namespace, ModelID: req.ModelID, Variant: v,
-					From: s.CurrentReplicas, To: to, Cause: ReleasePlacementTimeout})
+					From: s.CurrentReplicas, To: to, Cause: ReleasePlacementTimeout, GuaranteedGPUs: below})
+				below = 0
 			}
 			heldPast[req.Namespace][typeKey] -= gpus
 			g.modelCooldown[req.Namespace+"/"+req.ModelID] = c.Now.Add(g.settings.Cooldown)
@@ -915,8 +921,13 @@ func (g *BorrowGovernor) releaseCandidates(c BorrowCycle, states map[string]vari
 // role split over several variants counts all of them, and its part is taken
 // from the variants with the most replicas above minReplicas first. k shrinks
 // until the unit's GPUs fit capGPUs (negative: no cap), but never below one
-// replica: a unit larger than what is borrowed is still released. Nil when no
-// unit releases a replica of variant within minReplicas.
+// replica. At one replica whose pair is larger than capGPUs, the partners are
+// cut to what capGPUs covers when the variant's role keeps a replica (the pair
+// stays serviceable: 2P:4D releasing a prefill with 8 GPUs borrowed releases
+// that prefill alone, not 24 GPUs); when the variant's role would reach 0, the
+// whole pair goes, as no role may be left without its partner. A unit larger
+// than what is borrowed is still released then. Nil when no unit releases a
+// replica of variant within minReplicas.
 func releaseUnit(req ModelScalingRequest, variant string, k, capGPUs int, states map[string]variantRef) (map[string]int, int) {
 	if k <= 0 {
 		return nil, 0
@@ -961,11 +972,53 @@ func releaseUnit(req ModelScalingRequest, variant string, k, capGPUs int, states
 			}
 			fits = fits && n == 0
 		}
-		if fits && (capGPUs < 0 || gpus <= capGPUs || k == 1) {
+		if fits && (capGPUs < 0 || gpus <= capGPUs) {
 			return unit, gpus
+		}
+		if fits && k == 1 {
+			if totals[role]-1 <= 0 {
+				return unit, gpus // the role would be orphaned: the whole pair goes
+			}
+			return trimmedUnit(req.Namespace, variant, role, capGPUs, byRole, states)
 		}
 	}
 	return nil, 0
+}
+
+// trimmedUnit is one replica of variant plus as many partner replicas, from
+// the variants with the most above minReplicas first, as fit capGPUs beside
+// it and never more than the pair's ratio: a release past what is borrowed
+// takes no more guaranteed capacity than the replica itself needs.
+func trimmedUnit(ns, variant, role string, capGPUs int, byRole map[string][]domain.VariantReplicaState,
+	states map[string]variantRef) (map[string]int, int) {
+	gprOf := func(v string) int { return max(states[ns+"/"+v].state.GPUsPerReplica, 1) }
+	total := func(r string) int {
+		n := 0
+		for _, st := range byRole[r] {
+			n += st.CurrentReplicas
+		}
+		return n
+	}
+	unit := map[string]int{variant: 1}
+	gpus := gprOf(variant)
+	for _, r := range slices.Sorted(maps.Keys(byRole)) {
+		if r == role {
+			continue
+		}
+		ratio := total(r) / total(role)
+		sts := slices.Clone(byRole[r])
+		slices.SortStableFunc(sts, func(a, b domain.VariantReplicaState) int {
+			return cmp.Or(cmp.Compare(b.CurrentReplicas-minOf(b), a.CurrentReplicas-minOf(a)), strings.Compare(a.VariantName, b.VariantName))
+		})
+		for _, st := range sts {
+			for n := max(0, st.CurrentReplicas-minOf(st)); n > 0 && ratio > 0 && gpus+gprOf(st.VariantName) <= capGPUs; n-- {
+				unit[st.VariantName]++
+				gpus += gprOf(st.VariantName)
+				ratio--
+			}
+		}
+	}
+	return unit, gpus
 }
 
 // unitFits reports whether every variant of a unit releases at least one

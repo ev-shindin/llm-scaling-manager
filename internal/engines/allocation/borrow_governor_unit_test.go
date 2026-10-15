@@ -167,6 +167,29 @@ var _ = Describe("BorrowGovernor release units", func() {
 			Expect(tg["d"]).To(BeNumerically(">=", 1))
 		})
 
+		// Review finding (whole-node): the borrowed prefill of a 2P:4D model
+		// does not place, 8 GPUs borrowed. The ratio unit is {p:1, d:2}, 24
+		// GPUs: two guaranteed decodes went with it.
+		It("2P:4D, 8 GPUs borrowed, a prefill unplaced: releases that prefill alone, not two guaranteed decodes", func() {
+			pd := unplacedVariant(pdFleet(pdRole{"p", "prefill", 2}, pdRole{"d", "decode", 4}), "p", t0)
+			rel, tg := timeout(40, 48, pd)
+			Expect(tg).To(Equal(map[string]int{"p": 1, "d": 4}), "1P:4D still serves")
+			Expect(releasedGPUs(rel)).To(Equal(8))
+			Expect(rel).To(HaveLen(1))
+			Expect(rel[0].GuaranteedGPUs).To(BeZero())
+		})
+
+		It("1P:2D, 8 GPUs borrowed, its only prefill unplaced: the whole pair goes, and says it went below guaranteed", func() {
+			pd := unplacedVariant(pdFleet(pdRole{"p", "prefill", 1}, pdRole{"d", "decode", 2}), "p", t0)
+			rel, tg := timeout(16, 24, pd)
+			Expect(tg).To(Equal(map[string]int{"p": 0, "d": 0}), "no decode is left without its prefill")
+			below := 0
+			for _, r := range rel {
+				below += r.GuaranteedGPUs
+			}
+			Expect(below).To(Equal(16))
+		})
+
 		It("counts a role split over two variants, and leaves no prefill without a decode", func() {
 			pd := unplacedVariant(pdFleet(pdRole{"p1", "prefill", 1}, pdRole{"p2", "prefill", 1}, pdRole{"d", "decode", 1}), "d", t0)
 			_, tg := timeout(0, 24, pd)
