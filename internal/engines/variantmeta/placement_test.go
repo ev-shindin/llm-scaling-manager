@@ -75,3 +75,40 @@ func TestCountUnplacedCountsLWSGroups(t *testing.T) {
 		t.Fatalf("unplaced groups = %d, want 2: the hold lifts only when the whole group placed", n)
 	}
 }
+
+// Review finding (whole-node): the placement timeout counted the pods of a
+// LeaderWorkerSet as replicas, so two unplaced pods of one 2x8 group released
+// two groups, one of them only a minute unplaced. Each group is one entry,
+// timed from when its newest unplaced pod became so.
+func TestCountUnplacedTimesLWSGroups(t *testing.T) {
+	now := time.Unix(10000, 0)
+	mk := func(name, group string, unplacedFor time.Duration) corev1.Pod {
+		p := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{lwsv1.GroupIndexLabelKey: group}},
+			Status: corev1.PodStatus{Phase: corev1.PodPending}}
+		if unplacedFor == 0 {
+			p.Spec.NodeName = "n"
+			return p
+		}
+		p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodScheduled, Status: corev1.ConditionFalse,
+			Reason: corev1.PodReasonUnschedulable, LastTransitionTime: metav1.NewTime(now.Add(-unplacedFor))}}
+		return p
+	}
+	n, _, pods, at := countUnplaced([]corev1.Pod{
+		mk("g0-a", "0", 0), mk("g0-b", "0", 0), // placed
+		mk("g1-a", "1", 10*time.Minute), mk("g1-b", "1", 8*time.Minute), // past the timeout
+		mk("g2-a", "2", time.Minute), mk("g2-b", "2", time.Minute), // fresh
+		mk("g3-a", "3", 0), mk("g3-b", "3", 10*time.Minute), // leader placed, worker past the timeout
+	}, true, now)
+	if n != 3 || len(pods) != 5 {
+		t.Fatalf("unplaced = %d groups, %d pods, want 3 groups of 5 pods", n, len(pods))
+	}
+	want := map[string]time.Time{"1": now.Add(-8 * time.Minute), "2": now.Add(-time.Minute), "3": now.Add(-10 * time.Minute)}
+	if len(at) != len(want) {
+		t.Fatalf("at = %v, want one entry per unplaced group: %v", at, want)
+	}
+	for g, w := range want {
+		if !at[g].Equal(w) {
+			t.Fatalf("group %s unplaced at %v, want %v: the newest unplaced pod of the group", g, at[g], w)
+		}
+	}
+}

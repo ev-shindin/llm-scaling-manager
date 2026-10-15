@@ -53,7 +53,7 @@ func unplacedPods(r ModelScalingRequest, pods map[string]time.Time) ModelScaling
 			continue
 		}
 		s.UnplacedReplicas = len(pods)
-		s.UnplacedPodSince = pods
+		s.UnplacedAt = pods
 		for name, at := range pods {
 			s.UnplacedPods = append(s.UnplacedPods, name)
 			if at.After(s.UnplacedSince) {
@@ -110,6 +110,19 @@ var _ = Describe("BorrowGovernor release units", func() {
 			rel := run(g, now, world, unplacedPods(govModel("x", 6, 8), maps.Clone(pods)))
 			Expect(rel).To(HaveLen(1), "pod a has been unplaced past the timeout, however many came after it")
 			Expect(rel[0].From-rel[0].To).To(Equal(1), "one pod past the timeout: one replica")
+		})
+
+		// Review finding (whole-node): a 2x8 LeaderWorkerSet, 3 groups,
+		// guaranteed 16, holding 48. Group 1 is past the timeout, group 2
+		// unplaced a minute. Discovery reports one entry per group, so exactly
+		// one group goes; counting pods, 2 expired pods released two groups.
+		It("releases one LeaderWorkerSet group when one group is past the timeout and another is fresh", func() {
+			g := NewBorrowGovernor(settings)
+			now := t0.Add(settings.PlacementTimeout + time.Minute)
+			groups := map[string]time.Time{"1": t0, "2": now.Add(-time.Minute)}
+			rel := run(g, now, govWorld{g: 16, used: 48}, unplacedPods(govModel("x", 3, 16), groups))
+			Expect(rel).To(HaveLen(1))
+			Expect(rel[0].From - rel[0].To).To(Equal(1), "one group past the timeout: one group released")
 		})
 
 		// The round-1 finding stays fixed: a pod stuck since before the

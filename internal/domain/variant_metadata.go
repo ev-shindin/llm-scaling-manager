@@ -85,13 +85,15 @@ type VariantMetadata struct {
 	// weights is not unplaced. In scale-target units: a LeaderWorkerSet group
 	// is unplaced while any of its pods is, so a hold on it lifts only once the
 	// whole group has placed. UnplacedSince is when the newest unplaced pod
-	// became so, UnplacedPods their names, UnplacedPodSince when each did
-	// (the placement timeout reads it per pod). Same pod listing as
+	// became so, and UnplacedPods their names. UnplacedAt is, per unplaced
+	// replica, when it became unplaced, for the placement timeout: keyed by
+	// pod name, or for a LeaderWorkerSet by group index, a group counting from
+	// when its newest unplaced pod became so. Same pod listing as
 	// PendingReplicas' ages.
 	UnplacedReplicas int
 	UnplacedSince    time.Time
 	UnplacedPods     []string
-	UnplacedPodSince map[string]time.Time
+	UnplacedAt       map[string]time.Time
 }
 
 // ToReplicaState projects the metadata onto the VariantReplicaState the analyzers
@@ -119,7 +121,7 @@ func (m VariantMetadata) ToReplicaState() VariantReplicaState {
 		UnplacedReplicas: m.UnplacedReplicas,
 		UnplacedSince:    m.UnplacedSince,
 		UnplacedPods:     m.UnplacedPods,
-		UnplacedPodSince: m.UnplacedPodSince,
+		UnplacedAt:       m.UnplacedAt,
 		GPUsPerReplica:   m.GPUsPerReplica,
 		Role:             m.Role,
 		AcceleratorName:  m.AcceleratorName,

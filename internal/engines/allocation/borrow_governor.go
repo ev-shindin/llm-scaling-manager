@@ -688,13 +688,15 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 // heldPast, so two models of one namespace never both release the same
 // borrowed GPUs; one release per model per cycle. The model's cooldown starts.
 //
-// The clock is per pod (expiredUnplaced): each unplaced pod counts from when
-// it became unplaced, or from when its namespace went past guaranteed if that
-// is later. A pod stuck since before the namespace borrowed therefore does not
-// time out a replica borrowed a minute ago, and a variant that keeps adding
-// unplaced pods does not reset the clock of its oldest one. The release takes
-// as many replicas as there are pods past the timeout (a LeaderWorkerSet: at
-// most its unplaced groups).
+// The clock is per replica (expiredUnplaced): each unplaced replica counts
+// from when it became unplaced, or from when its namespace went past
+// guaranteed if that is later. A replica stuck since before the namespace
+// borrowed therefore does not time out one borrowed a minute ago, and a
+// variant that keeps adding unplaced replicas does not reset the clock of its
+// oldest one. A LeaderWorkerSet replica is a group: its clock is when its
+// newest unplaced pod became so, and the group counts once however many of
+// its pods are unplaced. The release takes as many replicas as are past the
+// timeout.
 func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]variantRef, heldPast map[string]map[string]int) []BorrowRelease {
 	var out []BorrowRelease
 	for _, req := range c.Requests {
@@ -746,10 +748,11 @@ func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]varian
 	return out
 }
 
-// expiredUnplaced is how many of a variant's unplaced pods have been unplaced
-// for at least timeout, each counted from when it became unplaced or from
-// pastSince (when its namespace went past guaranteed), whichever is later. A
-// state without per-pod times counts its UnplacedReplicas at UnplacedSince.
+// expiredUnplaced is how many of a variant's unplaced replicas (UnplacedAt:
+// pods, or LeaderWorkerSet groups) have been unplaced for at least timeout,
+// each counted from when it became unplaced or from pastSince (when its
+// namespace went past guaranteed), whichever is later. A state without
+// per-replica times counts its UnplacedReplicas at UnplacedSince.
 func expiredUnplaced(st domain.VariantReplicaState, pastSince time.Time, timeout time.Duration, now time.Time) int {
 	expired := func(at time.Time) bool {
 		if at.IsZero() {
@@ -760,14 +763,14 @@ func expiredUnplaced(st domain.VariantReplicaState, pastSince time.Time, timeout
 		}
 		return now.Sub(at) >= timeout
 	}
-	if len(st.UnplacedPodSince) == 0 {
+	if len(st.UnplacedAt) == 0 {
 		if expired(st.UnplacedSince) {
 			return st.UnplacedReplicas
 		}
 		return 0
 	}
 	n := 0
-	for _, at := range st.UnplacedPodSince {
+	for _, at := range st.UnplacedAt {
 		if expired(at) {
 			n++
 		}

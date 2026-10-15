@@ -111,7 +111,7 @@ func Discover(
 
 		pendingAges, stuckReplicas := pendingAgeSeconds(ctx, k8sClient, va.Namespace, scaleTarget, time.Now())
 		heldReplicas, filledReplicas, heldKnown := heldReplicaCount(ctx, k8sClient, va.Namespace, scaleTarget)
-		unplaced, unplacedSince, unplacedPods, unplacedByPod := placement(ctx, k8sClient, va.Namespace, scaleTarget, time.Now())
+		unplaced, unplacedSince, unplacedPods, unplacedAt := placement(ctx, k8sClient, va.Namespace, scaleTarget, time.Now())
 		metas = append(metas, domain.VariantMetadata{
 			VariantName:     va.Name,
 			ModelID:         va.Spec.ModelID,
@@ -138,7 +138,7 @@ func Discover(
 			UnplacedReplicas: unplaced,
 			UnplacedSince:    unplacedSince,
 			UnplacedPods:     unplacedPods,
-			UnplacedPodSince: unplacedByPod,
+			UnplacedAt:       unplacedAt,
 		})
 	}
 

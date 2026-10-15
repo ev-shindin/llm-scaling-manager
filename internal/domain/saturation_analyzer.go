@@ -270,12 +270,12 @@ type VariantReplicaState struct {
 	// Placements is each pod template's node placement; see
 	// VariantMetadata.Placements.
 	Placements []PodPlacement
-	// UnplacedReplicas, UnplacedSince, UnplacedPods and UnplacedPodSince: see
+	// UnplacedReplicas, UnplacedSince, UnplacedPods and UnplacedAt: see
 	// VariantMetadata.UnplacedReplicas.
 	UnplacedReplicas int
 	UnplacedSince    time.Time
 	UnplacedPods     []string
-	UnplacedPodSince map[string]time.Time
+	UnplacedAt       map[string]time.Time
 	// GPUsPerReplica is the number of GPUs required per replica, extracted from
 	// the deployment's container resource requests (nvidia.com/gpu, amd.com/gpu, etc.).
 	// Defaults to 1 if no GPU requests are found.
