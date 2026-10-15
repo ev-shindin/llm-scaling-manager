@@ -355,8 +355,12 @@ controller. No such line means its own ConfigMap does.
   Workload with quota reserved that requests a GPU and is owned by a kind a
   Kueue integration owns Workloads by (Pod, Job, JobSet, LeaderWorkerSet,
   StatefulSet), so a tenant's own small Workload owned by its Deployment or
-  ReplicaSet does not pass. That keeps the figures honest; it does not stop a
-  tenant from running GPU work outside Kueue. A `ResourceQuota` does.
+  ReplicaSet does not pass; per owner, the reserved Workloads must also cover
+  the GPUs its running pods request, so a 1-GPU Workload owned by a 16-GPU
+  LeaderWorkerSet does not pass either. That keeps the figures honest; it does
+  not stop a tenant from running GPU work outside Kueue. A `ResourceQuota`
+  does. Do not grant tenants write on Kueue `Workloads` in namespaces that
+  count borrowing, or set `countBorrowable: false` there.
 - **A `Never` lender depends on the borrower.** With `reclaimWithinCohort:
   Never`, Kueue never takes capacity back; the lender gets it only because
   the borrowing namespace's scaling manager releases it. A tenant who owns
