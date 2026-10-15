@@ -72,8 +72,8 @@ func (d *K8sWithGpuOperator) WithPodReader(r client.Reader) *K8sWithGpuOperator 
 // limiter is in force, and returns d. The limiter list is live, so inForce is
 // asked on every Forbidden list.
 //
-// Only a physical limiter reads the per-node usage the walk produces. With a
-// quota limiter, or none, the undercount a Forbidden list causes bounds
+// Only a physical limiter reads the per-node usage the walk produces, alone or
+// beside quota limiters. With quota limiters alone, or none, the undercount a Forbidden list causes bounds
 // nothing, so it is not reported as a failure: no error log, and
 // wva_pod_access_denied stays 0.
 func (d *K8sWithGpuOperator) WithPhysicalLimiterCheck(inForce func() bool) *K8sWithGpuOperator {
@@ -411,7 +411,8 @@ func (d *K8sWithGpuOperator) reportPodsDenied(ctx context.Context, err error) {
 		logger.Error(err, "Cannot list Pods cluster-wide. GPU usage counts only the Pods in "+
 			"this controller's own namespace, so GPUs other namespaces hold on the same nodes read as FREE "+
 			"and the physical limiter can admit scale-ups onto full nodes. Grant list on pods cluster-wide, "+
-			"or bound with a quota limiter instead.",
+			"or drop gpu-inventory from the limiters and bound with a quota limiter alone: a quota "+
+			"beside gpu-inventory leaves the physical limiter reading this count.",
 			"metric", constants.WVAPodAccessDenied)
 		return
 	}

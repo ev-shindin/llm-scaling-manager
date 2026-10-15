@@ -58,7 +58,17 @@ spec:
       annotations:
         runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#the-controller-is-not-ready-or-crash-looping"
         summary: "llm-scaling-manager has a GPU limiter configured but cannot read nodes"
-        description: "A gpu-inventory limiter is declared in the scaling-policy ConfigMap, and this controller's ServiceAccount is denied list on nodes. Every variant is therefore charged to no accelerator pool, receives no GPU budget, and HAS STOPPED SCALING UP — with no other error, because an unresolved accelerator is a normal state when no limiter is configured. This usually follows an admin adding a limiters: entry to a controller that was installed without node permission. Either grant the node read to the controller's ServiceAccount, or remove the limiters: entry."
+        description: "A gpu-inventory limiter is declared ALONE in the scaling-policy ConfigMap, and this controller's ServiceAccount is denied list on nodes. Every variant is therefore charged to no accelerator pool, receives no GPU budget, and HAS STOPPED SCALING UP — with no other error, because an unresolved accelerator is a normal state when no limiter is configured. This usually follows an admin adding a limiters: entry to a controller that was installed without node permission. Either grant the node read to the controller's ServiceAccount, or remove the limiters: entry. A gpu-inventory entry beside a quota does not raise this: the quota still bounds, and WVAConstraintProviderSkipped reports the skipped physical limiter instead."
+
+    - alert: WVAConstraintProviderSkipped
+      expr: wva_constraint_provider_skipped == 1
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#gpus-held-or-quota-spent"
+        summary: "llm-scaling-manager is deciding without the {{ $labels.provider }} limiter ({{ $labels.reason }})"
+        description: "The declared limiter {{ $labels.provider }} has been left out of scaling decisions for 10 minutes, reason {{ $labels.reason }}. The other declared limiters still bound every decision, so models keep scaling, but nothing checks what this one would deny. node_read_denied: gpu-inventory is declared beside a quota and this controller may not list nodes; a cluster admin grants it with 'make setup-prereqs', or remove gpu-inventory from the limiters: list. failed: the controller log line 'GPU constraint provider skipped' says why (a Kueue read or a node list failed). unobserved: its GPU usage has not been observed yet. no_constraints: it returned none."
 
     - alert: WVAGPUResourceExhausted
       expr: wva_available_gpus == 0

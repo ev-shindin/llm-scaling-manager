@@ -347,6 +347,30 @@ const (
 	// admin believes is in force.
 	WVAPolicyNamespaceUnverified = "wva_policy_namespace_unverified"
 
+	// WVAConstraintProviderSkipped is 1 while a declared GPU constraint provider
+	// -- the physical limiter or a quota entry -- is left out of scaling
+	// decisions, by provider and reason (ProviderSkip*). The series is removed
+	// when the provider bounds again, so absence means every declared limiter is
+	// in force.
+	//
+	// A skipped provider lifts its bound: the others still apply, because the
+	// constraints are intersected, but nothing checks what the skipped one
+	// would have denied. Without the series that was one Info line per cycle.
+	WVAConstraintProviderSkipped = "wva_constraint_provider_skipped"
+
+	// ProviderSkipUnobserved: the usage the provider is measured against (all
+	// GPUs on the nodes, or WVA's own) has not been observed.
+	ProviderSkipUnobserved = "unobserved"
+	// ProviderSkipFailed: the provider could not compute its constraints (a
+	// Kueue read failed, nodes could not be listed, ...).
+	ProviderSkipFailed = "failed"
+	// ProviderSkipNoConstraints: the provider returned none.
+	ProviderSkipNoConstraints = "no_constraints"
+	// ProviderSkipNodeReadDenied: a physical limiter declared beside quota
+	// entries, on a controller that may not list nodes. The quota entries still
+	// bound; a physical-only policy takes the controller NotReady instead.
+	ProviderSkipNodeReadDenied = "node_read_denied"
+
 	// WVAScaleFromZeroQueueFallbackActive is 1 while the scale-from-zero engine is
 	// reading the EPP flow-control queue from Prometheus because the direct EPP
 	// scrape is failing, and 0 while the direct scrape works. A sustained 1 means
@@ -899,6 +923,7 @@ const (
 	LabelAcceleratorModel   = "accelerator_model"
 	LabelAcceleratorType    = "accelerator_type"
 	LabelControllerInstance = "controller_instance"
+	LabelProvider           = "provider"
 	LabelRole               = "role"
 	LabelStatus             = "status"
 	LabelLimiterName        = "limiter_name"

@@ -34,6 +34,11 @@ type TypeInventory struct {
 	name           string
 	discovery      gpunodes.CapacityDiscovery
 	usageDiscovery gpunodes.UsageDiscovery // Optional: if set, RefreshAll will auto-discover usage
+	// besideQuota is set when quota limiters are built beside this inventory
+	// (SetBesideQuota). A node-read denial then skips this provider while the
+	// quotas still bound, so it is not the "nothing scales up" condition
+	// wva_node_access_denied pages on.
+	besideQuota bool
 
 	mu sync.RWMutex
 	// limitByType maps accelerator type (e.g., "H100", "A100") to total GPU capacity
@@ -85,6 +90,13 @@ func (i *TypeInventory) Name() string {
 	return i.name
 }
 
+// SetBesideQuota records that quota limiters bound decisions beside this
+// inventory. Call it before the first Refresh; NewLimiterFromConfig does, and
+// rebuilds the limiter whenever the declared set changes.
+func (i *TypeInventory) SetBesideQuota(beside bool) {
+	i.besideQuota = beside
+}
+
 // RefreshAll updates both limits (capacity) and usage in a single operation.
 //
 // This is the preferred method when using NewTypeInventoryWithUsage.
@@ -134,6 +146,17 @@ func (i *TypeInventory) Refresh(ctx context.Context) error {
 		// a cluster admin can do long after the install, by editing the ConfigMap.
 		// So say it loudly and publish it, rather than returning an error that the
 		// caller logs at DEBUG once a cycle.
+		//
+		// Beside quota limiters it is not that condition: this provider is
+		// skipped (ComputeAvailableConstraints), the quotas still bound every
+		// decision, and the readiness gate publishes the skip as
+		// wva_constraint_provider_skipped{reason="node_read_denied"} and logs it
+		// on change. Raising wva_node_access_denied there would page the critical
+		// "nothing scales up" alert for a controller that is scaling.
+		if apierrors.IsForbidden(err) && i.besideQuota {
+			metrics.SetNodeAccessDenied(false)
+			return fmt.Errorf("failed to discover accelerator capacity: %w", err)
+		}
 		if apierrors.IsForbidden(err) {
 			metrics.SetNodeAccessDenied(true)
 			log.FromContext(ctx).Error(err, "A GPU limiter is configured but this controller cannot read nodes. "+

@@ -589,14 +589,14 @@ func (e *Engine) recordDefaultConfigMetrics() {
 	// the operational dashboard and the zero-allocatable-GPU alert, which both
 	// reference it.
 	if cfg, ok := globalSatCfgMap["default"]; ok {
-		limiterEnabled := e.Config.EffectiveLimiterMode() != config.LimiterTypeNone
+		limiterEnabled := e.Config.EffectiveLimiterTypes().Declared()
 		metrics.SetConfigInfo(cfg.GetAnalyzerName(), limiterEnabled, e.Config.ScaleToZeroEnabled())
 	}
 }
 
 // SetLimiterBuilder installs a builder that rebuilds the GPU limiter from the
 // current effective config. The engine calls it at the top of each optimize
-// cycle and swaps the limiter when the effective limiter mode / quota entries
+// cycle and swaps the limiter when the declared limiters (types, quota entries)
 // change — so switching the ConfigMap's limiters: list takes effect without a
 // restart. Call before StartOptimizeLoop. Passing nil disables live rebuilds
 // (the injected GPULimiter is used as-is, e.g. in tests).
@@ -625,13 +625,14 @@ func (e *Engine) refreshLimiter(ctx context.Context) {
 	limiter, err := e.limiterBuilder()
 	if err != nil {
 		ctrl.LoggerFrom(ctx).Error(err, "failed to rebuild GPU limiter from config; keeping the previous limiter",
-			"effectiveMode", e.Config.EffectiveLimiterMode())
+			"limiters", e.Config.EffectiveLimiterSummary())
 		return
 	}
 	e.GPULimiter = limiter
 	e.limiterSig = sig
 	ctrl.LoggerFrom(ctx).Info("GPU limiter (re)built from config",
-		"type", e.Config.EffectiveLimiterMode(), "name", limiter.Name())
+		"limiterTypes", e.Config.EffectiveLimiterTypes().String(), "limiters", e.Config.EffectiveLimiterSummary(),
+		"name", limiter.Name())
 }
 
 // limiterSignature detects when the limiter config changed. Delegates to the
@@ -739,9 +740,9 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 		defer e.ReplicaMetricsCollector.EndCycle()
 	}
 
-	// Collect accelerator inventory (only in limited mode AND only when the
-	// inventory-based limiter is active). In quota mode (an inline limiters: quota
-	// entry), the controller deliberately runs without consulting physical capacity —
+	// Collect accelerator inventory (only in limited mode AND only when a physical
+	// limiter is declared). With quota entries alone, the controller deliberately
+	// runs without consulting physical capacity —
 	// listing Nodes here would defeat that contract (and trigger a
 	// controller-runtime Node informer for the lifetime of the process). The
 	// collected inventory is currently only logged anyway (see comment at
@@ -791,9 +792,8 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	// silently not enforced, which is what that flag allowed. V2
 	// (saturation-token-based) is the sole analysis path and always uses the
 	// optimizer pipeline.
-	limiterMode := e.Config.EffectiveLimiterMode()
 	savedOptimizer := e.optimizer
-	if limiterMode == config.LimiterTypeNone {
+	if !e.Config.EffectiveLimiterTypes().Declared() {
 		e.optimizer = allocation.NewCostAwareOptimizer()
 	} else {
 		e.optimizer = allocation.NewGreedyByScoreOptimizer()
@@ -802,7 +802,7 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 		e.recordActiveOptimizer() // optimizer has changed, record active optimizer
 	}
 	logger.V(logging.DEBUG).Info("Optimizer selected", "analyzer", analyzerName,
-		"optimizer", e.optimizer.Name(), "limiter", limiterMode)
+		"optimizer", e.optimizer.Name(), "limiter", e.Config.EffectiveLimiterSummary())
 
 	// V2 (saturation): saturation.Analyzer → AnalyzerResult → Optimizer.Optimize → Enforcer bridge.
 	mode := modeLabelForAnalyzer(analyzerName)
@@ -1986,7 +1986,7 @@ func (e *Engine) applySaturationDecisions(
 		// cycle.
 		if !constants.IsAcceleratorResolved(acceleratorName) {
 			e.emitAcceleratorNotResolvedEvent(&updateVa)
-			e.policies.ReportUnresolvedAccelerator(ctx, va.Namespace, vaName, string(e.Config.EffectiveLimiterMode()))
+			e.policies.ReportUnresolvedAccelerator(ctx, va.Namespace, vaName, e.Config.EffectiveLimiterSummary())
 		}
 
 		// Stage the just-computed decision on the in-memory VA so that

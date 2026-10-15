@@ -280,7 +280,7 @@ func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, 
 				// error. This line only says what stays in force.
 				logger.Info("Keeping the cluster policy already in force",
 					"policyNamespace", cm.GetNamespace(), "configMap", cm.GetName(),
-					"limiters", len(previous.Limiters), "limiterMode", r.Config.EffectiveLimiterMode())
+					"limiters", len(previous.Limiters), "limiterTypes", r.Config.EffectiveLimiterTypes().String())
 				return nil
 			}
 			if !r.Config.ConfigMapsBootstrapComplete() {
@@ -311,7 +311,7 @@ func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, 
 	r.Status.RecordPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(), nil)
 	logger.Info("Loaded cluster policy from the policy namespace",
 		"policyNamespace", cm.GetNamespace(), "configMap", cm.GetName(),
-		"limiters", len(policy.Limiters), "limiterMode", r.Config.EffectiveLimiterMode())
+		"limiters", len(policy.Limiters), "limiterTypes", r.Config.EffectiveLimiterTypes().String())
 	return nil
 }
 
@@ -489,7 +489,7 @@ func (r *ConfigMapReconciler) handleScalingPolicyConfigMap(ctx context.Context, 
 		logger.Info("Updated global scaling policy from ConfigMap", "entries", count)
 		r.warnIfThroughputRegistrationDiverged(logger, cm)
 	} else {
-		// Limiters and quotas are CLUSTER-scope: EffectiveLimiterMode reads them only
+		// Limiters and quotas are CLUSTER-scope: EffectiveLimiterTypes reads them only
 		// from the system namespace's ConfigMap, so a tenant cannot grant themselves
 		// capacity by declaring a limiter — or raise a quota by declaring a looser
 		// one — in their own namespace. That is the point, but silently dropping the

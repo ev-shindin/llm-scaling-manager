@@ -1,0 +1,26 @@
+# The scaling-policy ConfigMap as a main-era install left it: both limiter
+# kinds declared on the default entry. Main read this as quota-only (the
+# physical entry was never built); after the upgrade both must be built.
+# Used by TestMainEraComposedPolicyBuildsBothLimiters.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wva-scaling-policy-config
+  labels:
+    app.kubernetes.io/name: workload-variant-autoscaler
+data:
+  default: |
+    analyzers:
+      - name: saturation
+        score: 1.0
+    scaleUpThreshold: 0.85
+    scaleDownBoundary: 0.70
+    kvCacheThreshold: 0.80
+    queueLengthThreshold: 5
+    enableRescale: false
+    limiters:
+      - type: gpu-inventory
+      - type: quota
+        name: tenant-quota
+        scope: cluster
+        quotas: { H100: 32 }

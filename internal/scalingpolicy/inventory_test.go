@@ -37,4 +37,16 @@ var _ = Describe("ShouldCollectClusterInventory", func() {
 		})
 		Expect(ShouldCollectClusterInventory(cfg)).To(BeFalse())
 	})
+
+	// A quota entry beside the physical one used to collapse the policy to
+	// quota mode and suppress the collection; both are built now.
+	It("collects inventory when a gpu-inventory limiter is declared beside a quota", func() {
+		cfg := withLimiters(
+			config.QuotaLimiterConfig{Type: "gpu-inventory", Name: "gpu"},
+			config.QuotaLimiterConfig{
+				Type: "quota", Name: "cluster", Scope: config.QuotaScopeCluster,
+				ClusterQuotas: map[string]int{"H100": 8},
+			})
+		Expect(ShouldCollectClusterInventory(cfg)).To(BeTrue())
+	})
 })

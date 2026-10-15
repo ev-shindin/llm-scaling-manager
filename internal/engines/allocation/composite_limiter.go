@@ -1,8 +1,8 @@
 package allocation
 
 // CompositeLimiter groups a slice of Limiter instances under one name so that a
-// quota config declaring several entries presents as a single limiter to the
-// engine.
+// policy declaring several limiters -- the physical one and every quota entry --
+// presents as a single limiter to the engine.
 //
 // It carries no logic of its own: the constituents are constraint providers, and
 // the engine reaches them through Constituents() (see gpuConstraintProviders),

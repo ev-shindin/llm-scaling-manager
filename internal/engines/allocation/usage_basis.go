@@ -65,25 +65,17 @@ func UsageBasisOf(v any) UsageBasis {
 	return PhysicalUsage
 }
 
-// PhysicalUsageConfigured reports whether the limiter cfg selects contains any
-// provider that consumes the physical view.
+// PhysicalUsageConfigured reports whether the limiters cfg declares contain any
+// provider that consumes the physical view: true whenever a physical entry is
+// declared, alone or beside quota entries, since every declared limiter is built.
 //
-// It answers from the mode rather than from a built limiter because callers need
-// it before (and independently of) constructing one — notably the usage observer,
-// which starts before either engine. The two must agree, which
+// It answers from the declared types rather than from a built limiter because
+// callers need it before (and independently of) constructing one — notably the
+// usage observer, which starts before either engine. The two must agree, which
 // TestPhysicalUsageConfiguredMatchesTheBuiltLimiter checks by building the
-// limiter for each mode and comparing the bases its providers declare.
-//
-// Unknown modes answer true: observing when nothing needs it costs a walk of the
-// pod cache, while not observing when something does turns the capacity check off
-// silently.
+// limiter for each declaration and comparing the bases its providers declare.
 func PhysicalUsageConfigured(cfg *config.Config) bool {
-	switch cfg.EffectiveLimiterMode() {
-	case config.LimiterTypeNone, config.LimiterTypeQuota:
-		return false
-	default:
-		return true
-	}
+	return cfg.HasPhysicalLimiter()
 }
 
 // NodeUsageWanted reports whether the GPU usage refresher should walk the

@@ -96,6 +96,12 @@ func (f *rejectsFixture) events() []string {
 	}
 }
 
+// limiterSet is the declared limiter set of cfg as the logs and the controller
+// status render it: "quota", "inventory+quota", or "none".
+func limiterSet(cfg *config.Config) string {
+	return cfg.EffectiveLimiterTypes().String()
+}
+
 // TestRejectedDefaultKeepsTheLimiterInForce: a scaling-policy edit whose
 // "default" entry fails validation used to drop the entry, and the surviving
 // entries replaced the live set, so one bad value removed every limiter.
@@ -107,12 +113,12 @@ func TestRejectedDefaultKeepsTheLimiterInForce(t *testing.T) {
 	f := newRejectsFixture(t)
 
 	f.apply(rejectsSystemNS, map[string]string{config.GlobalDefaultsKey: quotaDefault})
-	if got := f.cfg.EffectiveLimiterMode(); got != config.LimiterTypeQuota {
+	if got := limiterSet(f.cfg); got != string(config.LimiterTypeQuota) {
 		t.Fatalf("setup: limiter mode %q, want quota", got)
 	}
 
 	f.apply(rejectsSystemNS, map[string]string{config.GlobalDefaultsKey: invalidQuotaDefault})
-	if got := f.cfg.EffectiveLimiterMode(); got != config.LimiterTypeQuota {
+	if got := limiterSet(f.cfg); got != string(config.LimiterTypeQuota) {
 		t.Errorf("an invalid default entry removed the limiter: mode %q, want quota still in force", got)
 	}
 	evs := f.events()
@@ -212,7 +218,7 @@ func TestUnknownKeyIsAppliedAndReported(t *testing.T) {
 	f := newRejectsFixture(t)
 	f.apply(rejectsSystemNS, map[string]string{config.GlobalDefaultsKey: typoQuotaDefault})
 
-	if got := f.cfg.EffectiveLimiterMode(); got != config.LimiterTypeQuota {
+	if got := limiterSet(f.cfg); got != string(config.LimiterTypeQuota) {
 		t.Errorf("an unknown key cost the entry its limiter: mode %q, want quota", got)
 	}
 	evs := f.events()
@@ -276,7 +282,7 @@ func TestStartupNotStoppedByEntriesThatCarryNoBound(t *testing.T) {
 	); err != nil {
 		t.Fatalf("startup stopped: %v", err)
 	}
-	if got := f.cfg.EffectiveLimiterMode(); got != config.LimiterTypeQuota {
+	if got := limiterSet(f.cfg); got != string(config.LimiterTypeQuota) {
 		t.Errorf("limiter mode %q, want the cluster policy's quota", got)
 	}
 }
@@ -290,8 +296,8 @@ func TestInvalidClusterPolicyKeepsTheBound(t *testing.T) {
 	f.cfg.SetPolicyNamespace(rejectsPolicyNS, config.PolicySourceWellKnown)
 
 	f.apply(rejectsPolicyNS, map[string]string{config.GlobalDefaultsKey: quotaDefault})
-	if f.cfg.EffectiveLimiterMode() != config.LimiterTypeQuota {
-		t.Fatalf("setup: limiter mode %q, want quota", f.cfg.EffectiveLimiterMode())
+	if limiterSet(f.cfg) != string(config.LimiterTypeQuota) {
+		t.Fatalf("setup: limiter mode %q, want quota", limiterSet(f.cfg))
 	}
 
 	_ = f.events()
@@ -302,7 +308,7 @@ func TestInvalidClusterPolicyKeepsTheBound(t *testing.T) {
 	if !f.cfg.ClusterPolicyIsSeparate() {
 		t.Error("an invalid cluster policy handed limiter authority back to the controller's own ConfigMap")
 	}
-	if got := f.cfg.EffectiveLimiterMode(); got != config.LimiterTypeQuota {
+	if got := limiterSet(f.cfg); got != string(config.LimiterTypeQuota) {
 		t.Errorf("an invalid cluster policy lifted the quota: mode %q", got)
 	}
 }
@@ -321,7 +327,7 @@ func TestClusterPolicyWithoutDefaultStaysSeparate(t *testing.T) {
 	if !f.cfg.ClusterPolicyIsSeparate() {
 		t.Error("a policy ConfigMap without a default entry handed authority back to the controller's own ConfigMap")
 	}
-	if got := f.cfg.EffectiveLimiterMode(); got != config.LimiterTypeNone {
+	if got := limiterSet(f.cfg); got != string(config.LimiterTypeNone) {
 		t.Errorf("limiter mode %q, want none: the controller's own limiters carry no authority", got)
 	}
 }

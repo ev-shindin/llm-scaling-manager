@@ -187,7 +187,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 
 	weightErrs := map[string]string{}
 	groups := allocation.BuildShareGroups(requests, constraints, allocation.ShareGroupOptions{
-		ClusterIsQuota:   e.Config.EffectiveLimiterMode() == config.LimiterTypeQuota,
+		ClusterIsQuota:   e.Config.ClusterBudgetIsQuota(),
 		PhysicalGroups:   us.PhysicalGroups,
 		ReserveGPUs:      us.ReserveGPUs,
 		PoolUnheld:       decision.DefaultWarmPoolUnheld.Latest(decision.WarmPoolUnheldMaxAge, now),

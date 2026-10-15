@@ -36,12 +36,12 @@ func TestUsageBasisOfLimiters(t *testing.T) {
 	}
 }
 
-// PhysicalUsageConfigured answers from the limiter MODE, because the usage
-// observer needs the answer before any limiter is built. This checks that shortcut
-// against the real thing: build the limiter each mode selects, and compare what
-// its providers actually declare. A new limiter mode, or a mode that starts mixing
-// physical and quota providers, fails here rather than by silently turning the
-// cluster observation off.
+// PhysicalUsageConfigured answers from the declared limiter TYPES, because the
+// usage observer needs the answer before any limiter is built. This checks that
+// shortcut against the real thing: build the limiter each declaration selects,
+// and compare what its providers actually declare. A new limiter kind, or a set
+// that mixes physical and quota providers, fails here rather than by silently
+// turning the cluster observation off.
 func TestPhysicalUsageConfiguredMatchesTheBuiltLimiter(t *testing.T) {
 	withLimiters := func(limiters ...config.QuotaLimiterConfig) *config.Config {
 		cfg := config.NewTestConfig()
@@ -55,12 +55,20 @@ func TestPhysicalUsageConfiguredMatchesTheBuiltLimiter(t *testing.T) {
 		name string
 		cfg  *config.Config
 	}{
-		{"inventory (the default, no limiters declared)", withLimiters()},
+		{"none (no limiters declared)", withLimiters()},
 		{"inventory (explicit gpu-inventory entry)", withLimiters(
 			config.QuotaLimiterConfig{Type: "gpu-inventory"})},
 		{"quota", withLimiters(config.QuotaLimiterConfig{
 			Name: "q", Type: "quota", Scope: config.QuotaScopeCluster,
 			ClusterQuotas: map[string]int{"A100": 4}})},
+		// A quota beside the physical entry used to collapse the set to quota
+		// mode, so the observer was not started for a physical limiter that is
+		// now built.
+		{"gpu-inventory + quota", withLimiters(
+			config.QuotaLimiterConfig{Type: "gpu-inventory", Name: "gpu"},
+			config.QuotaLimiterConfig{
+				Name: "q", Type: "quota", Scope: config.QuotaScopeCluster,
+				ClusterQuotas: map[string]int{"A100": 4}})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			limiter, err := NewLimiterFromConfig(tc.cfg, nil)
@@ -79,6 +87,25 @@ func TestPhysicalUsageConfiguredMatchesTheBuiltLimiter(t *testing.T) {
 					map[bool]string{true: "observe for nothing", false: "stop observing for a consumer that needs it"}[got])
 			}
 		})
+	}
+}
+
+// Matching the built limiter is not enough on its own: while a quota entry
+// collapsed the set to quota mode, both answered "no physical provider" for a
+// policy that declared one. A declared physical entry must be observed for.
+func TestPhysicalUsageConfiguredForAComposedSet(t *testing.T) {
+	cfg := config.NewTestConfig()
+	cfg.UpdateScalingPolicyConfig(map[string]config.ScalingPolicy{
+		"default": {Limiters: []config.QuotaLimiterConfig{
+			{Type: "gpu-inventory", Name: "gpu"},
+			{Name: "q", Type: "quota", Scope: config.QuotaScopeCluster, ClusterQuotas: map[string]int{"A100": 4}},
+		}},
+	})
+	if !PhysicalUsageConfigured(cfg) {
+		t.Fatal("a physical entry declared beside a quota must turn the node observation on")
+	}
+	if !NodeUsageWanted(cfg, false) {
+		t.Fatal("NodeUsageWanted must follow PhysicalUsageConfigured")
 	}
 }
 

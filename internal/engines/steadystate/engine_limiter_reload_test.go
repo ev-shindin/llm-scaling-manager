@@ -20,8 +20,8 @@ var _ = Describe("live GPU limiter rebuild", func() {
 		builds := 0
 		e.SetLimiterBuilder(func() (allocation.Limiter, error) {
 			builds++
-			// Name the rebuilt limiter after the mode so we can observe the swap.
-			return allocation.NewNoOpLimiter(string(cfg.EffectiveLimiterMode())), nil
+			// Name the rebuilt limiter after the declared set so we can observe the swap.
+			return allocation.NewNoOpLimiter(cfg.EffectiveLimiterSummary()), nil
 		})
 
 		// No config change since SetLimiterBuilder seeded the signature: no rebuild.
@@ -38,7 +38,7 @@ var _ = Describe("live GPU limiter rebuild", func() {
 		})
 		e.refreshLimiter(ctx)
 		Expect(builds).To(Equal(1))
-		Expect(e.GPULimiter.Name()).To(Equal("quota"))
+		Expect(e.GPULimiter.Name()).To(Equal("quota/cluster"))
 
 		// No further change: no rebuild.
 		e.refreshLimiter(ctx)
@@ -74,6 +74,41 @@ var _ = Describe("live GPU limiter rebuild", func() {
 		e.refreshLimiter(ctx)
 		Expect(builds).To(Equal(1))
 		Expect(e.GPULimiter.Name()).To(Equal("9"))
+	})
+
+	// The signature used to encode the mode and the quota entries only. Adding a
+	// physical entry beside a quota left both unchanged -- the mode stayed quota
+	// -- so the engine kept a limiter without the physical bound the edit asked
+	// for, until a restart.
+	It("rebuilds when a physical entry is added beside a quota, and when it is removed", func() {
+		cfg := config.NewTestConfig()
+		quota := config.QuotaLimiterConfig{
+			Type: "quota", Name: "cluster", Scope: config.QuotaScopeCluster,
+			ClusterQuotas: map[string]int{"H100": 8},
+		}
+		cfg.UpdateScalingPolicyConfig(map[string]config.ScalingPolicy{
+			"default": {Limiters: []config.QuotaLimiterConfig{quota}},
+		})
+		e := &Engine{Config: cfg, GPULimiter: allocation.NewNoOpLimiter("initial")}
+		builds := 0
+		e.SetLimiterBuilder(func() (allocation.Limiter, error) {
+			builds++
+			return allocation.NewNoOpLimiter(cfg.EffectiveLimiterSummary()), nil
+		})
+
+		cfg.UpdateScalingPolicyConfig(map[string]config.ScalingPolicy{
+			"default": {Limiters: []config.QuotaLimiterConfig{{Type: "gpu-inventory", Name: "gpu"}, quota}},
+		})
+		e.refreshLimiter(ctx)
+		Expect(builds).To(Equal(1))
+		Expect(e.GPULimiter.Name()).To(Equal("inventory+quota/gpu,cluster"))
+
+		cfg.UpdateScalingPolicyConfig(map[string]config.ScalingPolicy{
+			"default": {Limiters: []config.QuotaLimiterConfig{quota}},
+		})
+		e.refreshLimiter(ctx)
+		Expect(builds).To(Equal(2))
+		Expect(e.GPULimiter.Name()).To(Equal("quota/cluster"))
 	})
 
 	It("keeps the previous limiter when a rebuild fails", func() {

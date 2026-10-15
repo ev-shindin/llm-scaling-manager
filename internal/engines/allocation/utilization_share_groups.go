@@ -142,9 +142,11 @@ type ShareGroup struct {
 
 // ShareGroupOptions controls which groups BuildShareGroups returns.
 type ShareGroupOptions struct {
-	// ClusterIsQuota reports whether the cluster-scope budget is a quota. When
-	// it is not, it is the physical inventory, and the cluster group is built
-	// only with PhysicalGroups.
+	// ClusterIsQuota reports whether the cluster-scope budget is a quota: a
+	// cluster-scope quota entry is declared, alone or beside a physical
+	// limiter. When it is not, the cluster budget is the physical inventory (or
+	// a namespace-scope quota's aggregate), and the cluster group is built only
+	// with PhysicalGroups.
 	ClusterIsQuota bool
 	PhysicalGroups bool
 	// NamespaceEnabled reports whether a namespace-quota group takes part. Nil

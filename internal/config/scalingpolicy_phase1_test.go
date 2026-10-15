@@ -259,7 +259,7 @@ var _ = Describe("ScaleToZero merge", func() {
 	})
 })
 
-var _ = Describe("Config.EffectiveLimiterMode / EffectiveQuotaEntries", func() {
+var _ = Describe("Config.EffectiveLimiterTypes / EffectiveQuotaEntries", func() {
 	It("selects quota when the default entry declares an inline quota limiter", func() {
 		c := &Config{}
 		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{
@@ -268,7 +268,8 @@ var _ = Describe("Config.EffectiveLimiterMode / EffectiveQuotaEntries", func() {
 				ClusterQuotas: map[string]int{"H100": 32},
 			}}},
 		})
-		Expect(c.EffectiveLimiterMode()).To(Equal(LimiterTypeQuota))
+		Expect(c.EffectiveLimiterTypes()).To(Equal(LimiterTypes{LimiterTypeQuota}))
+		Expect(c.HasPhysicalLimiter()).To(BeFalse())
 		entries := c.EffectiveQuotaEntries()
 		Expect(entries).To(HaveLen(1))
 		Expect(entries[0].Name).To(Equal("cluster-h100"))
@@ -279,7 +280,9 @@ var _ = Describe("Config.EffectiveLimiterMode / EffectiveQuotaEntries", func() {
 		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{
 			"default": {Limiters: []QuotaLimiterConfig{{Type: "gpu-inventory"}}},
 		})
-		Expect(c.EffectiveLimiterMode()).To(Equal(LimiterTypeInventory))
+		Expect(c.EffectiveLimiterTypes()).To(Equal(LimiterTypes{LimiterTypeInventory}))
+		Expect(c.HasPhysicalLimiter()).To(BeTrue())
+		Expect(c.EffectiveLimiterTypes().HasQuota()).To(BeFalse())
 	})
 
 	// "Zero or more" is the ScalingPolicy schema's own wording for this list, and
@@ -290,7 +293,10 @@ var _ = Describe("Config.EffectiveLimiterMode / EffectiveQuotaEntries", func() {
 	It("selects no limiter at all when none is declared", func() {
 		c := &Config{}
 		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{"default": {}})
-		Expect(c.EffectiveLimiterMode()).To(Equal(LimiterTypeNone))
+		Expect(c.EffectiveLimiterTypes()).To(BeEmpty())
+		Expect(c.EffectiveLimiterTypes().Declared()).To(BeFalse())
+		Expect(c.EffectiveLimiterTypes().String()).To(Equal("none"), "the empty set is spelled none in logs")
+		Expect(c.EffectiveLimiterSummary()).To(Equal("none"))
 		Expect(c.EffectiveQuotaEntries()).To(BeEmpty())
 	})
 
@@ -299,68 +305,85 @@ var _ = Describe("Config.EffectiveLimiterMode / EffectiveQuotaEntries", func() {
 		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{
 			"default": {Limiters: []QuotaLimiterConfig{}},
 		})
-		Expect(c.EffectiveLimiterMode()).To(Equal(LimiterTypeNone))
+		Expect(c.EffectiveLimiterTypes()).To(BeEmpty())
+		Expect(c.EffectiveLimiterTypes().Declared()).To(BeFalse())
 	})
 
-	// A mixed list is not a chain. Quota wins and the physical limiter is never
-	// built, so a policy that reads as "bounded by real GPUs as well" consults no
-	// physical capacity at all. Bounding by min(physical, quota) is #1003; until
-	// then the only defence is that the drop is reported rather than silent.
-	Describe("a mixed limiters list", func() {
-		mixed := func() *Config {
-			c := &Config{}
-			c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{
-				"default": {Limiters: []QuotaLimiterConfig{
-					{Type: "gpu-inventory"},
-					{Type: "quota", Name: "cluster-h100", Scope: QuotaScopeCluster,
-						ClusterQuotas: map[string]int{"H100": 32}},
-				}},
-			})
-			return c
+	// A mixed list used to collapse to one mode: quota won and the physical
+	// limiter was never built, so a policy that read as "bounded by real GPUs as
+	// well" consulted no physical capacity at all. Every declared limiter is
+	// built now, and the set says so.
+	Describe("a list declaring a physical limiter and quotas", func() {
+		quota := QuotaLimiterConfig{
+			Type: "quota", Name: "tenant-quota", Scope: QuotaScopeCluster,
+			ClusterQuotas: map[string]int{"H100": 32},
 		}
 
-		It("builds the quota limiter only", func() {
-			Expect(mixed().EffectiveLimiterMode()).To(Equal(LimiterTypeQuota))
+		It("selects both, physical first, regardless of declared order", func() {
+			for _, inv := range []QuotaLimiterConfig{{Type: "gpu-inventory", Name: "gpu"}, {Type: "inventory", Name: "gpu"}} {
+				for _, limiters := range [][]QuotaLimiterConfig{{inv, quota}, {quota, inv}} {
+					c := &Config{}
+					c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{
+						"default": {Limiters: limiters},
+					})
+					Expect(c.EffectiveLimiterTypes()).To(Equal(LimiterTypes{LimiterTypeInventory, LimiterTypeQuota}))
+					types := c.EffectiveLimiterTypes()
+					Expect(types.HasPhysical()).To(BeTrue())
+					Expect(types.HasQuota()).To(BeTrue())
+					Expect(c.EffectiveQuotaEntries()).To(HaveLen(1))
+				}
+			}
 		})
 
-		It("reports the physical limiter as not enforced", func() {
-			Expect(mixed().UnenforcedLimiterTypes()).To(Equal([]string{"gpu-inventory"}))
-		})
-
-		It("reports nothing when every declared limiter is enforced", func() {
+		It("names every entry in the summary, in declared order", func() {
 			c := &Config{}
 			c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{
-				"default": {Limiters: []QuotaLimiterConfig{{Type: "gpu-inventory"}}},
+				"default": {Limiters: []QuotaLimiterConfig{{Type: "gpu-inventory", Name: "gpu"}, quota}},
 			})
-			Expect(c.UnenforcedLimiterTypes()).To(BeEmpty())
+			Expect(c.EffectiveLimiterSummary()).To(Equal("inventory+quota/gpu,tenant-quota"))
+			Expect(c.EffectiveLimiterTypes().String()).To(Equal("inventory+quota"))
 
 			c = &Config{}
 			c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{
-				"default": {Limiters: []QuotaLimiterConfig{
-					{Type: "quota", Name: "a", Scope: QuotaScopeCluster,
-						ClusterQuotas: map[string]int{"H100": 1}},
-					{Type: "quota", Name: "b", Scope: QuotaScopeCluster,
-						ClusterQuotas: map[string]int{"A100": 1}},
-				}},
+				"default": {Limiters: []QuotaLimiterConfig{quota, {Type: "gpu-inventory"}}},
 			})
-			Expect(c.UnenforcedLimiterTypes()).To(BeEmpty(),
-				"two quota entries are both built — a CompositeLimiter — so neither is dropped")
+			Expect(c.EffectiveLimiterSummary()).To(Equal("inventory+quota/tenant-quota,gpu-inventory"),
+				"an unnamed physical entry is named by its type")
 		})
 
-		It("de-duplicates and keeps declaration order", func() {
-			p := ScalingPolicy{Limiters: []QuotaLimiterConfig{
-				{Type: "inventory"},
-				{Type: "gpu-inventory"},
-				{Type: "inventory"},
-				{Type: "quota", Name: "a", Scope: QuotaScopeCluster},
-			}}
-			Expect(p.UnenforcedLimiterTypes()).To(Equal([]string{"inventory", "gpu-inventory"}))
-		})
+		It("keeps the quota-only and inventory-only summaries", func() {
+			c := &Config{}
+			c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{
+				"default": {Limiters: []QuotaLimiterConfig{quota}},
+			})
+			Expect(c.EffectiveLimiterSummary()).To(Equal("quota/tenant-quota"))
 
-		It("reports nothing for a policy with no limiters at all", func() {
-			Expect(ScalingPolicy{}.UnenforcedLimiterTypes()).To(BeEmpty())
+			c = &Config{}
+			c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{
+				"default": {Limiters: []QuotaLimiterConfig{{Type: "gpu-inventory", Name: "gpu"}}},
+			})
+			Expect(c.EffectiveLimiterSummary()).To(Equal("inventory/gpu"))
 		})
 	})
+
+	// The cluster-scope budget the utilization-share optimizer plans the cluster
+	// group against: a quota alone keeps its old answer; beside a physical
+	// limiter only a cluster-scope quota makes it a quota.
+	DescribeTable("ClusterBudgetIsQuota",
+		func(limiters []QuotaLimiterConfig, want bool) {
+			c := &Config{}
+			c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{"default": {Limiters: limiters}})
+			Expect(c.ClusterBudgetIsQuota()).To(Equal(want))
+		},
+		Entry("none", nil, false),
+		Entry("physical only", []QuotaLimiterConfig{{Type: "gpu-inventory"}}, false),
+		Entry("cluster quota only", []QuotaLimiterConfig{{Type: "quota", Name: "q", Scope: QuotaScopeCluster}}, true),
+		Entry("namespace quota only", []QuotaLimiterConfig{{Type: "quota", Name: "q", Scope: QuotaScopeNamespace}}, true),
+		Entry("physical + cluster quota", []QuotaLimiterConfig{
+			{Type: "gpu-inventory"}, {Type: "quota", Name: "q", Scope: QuotaScopeCluster}}, true),
+		Entry("physical + namespace quota", []QuotaLimiterConfig{
+			{Type: "gpu-inventory"}, {Type: "quota", Name: "q", Scope: QuotaScopeNamespace}}, false),
+	)
 
 	It("ignores limiters declared on a non-default (per-model) entry", func() {
 		c := &Config{}
@@ -371,23 +394,35 @@ var _ = Describe("Config.EffectiveLimiterMode / EffectiveQuotaEntries", func() {
 				ClusterQuotas: map[string]int{"H100": 999},
 			}}},
 		})
-		Expect(c.EffectiveLimiterMode()).To(Equal(LimiterTypeInventory), "only the default entry selects the limiter")
+		Expect(c.EffectiveLimiterTypes()).To(Equal(LimiterTypes{LimiterTypeInventory}), "only the default entry selects the limiter")
 		Expect(c.EffectiveQuotaEntries()).To(BeEmpty())
 	})
+})
 
-	It("quota wins over a co-present gpu-inventory entry, regardless of order", func() {
-		quota := QuotaLimiterConfig{
-			Type: "quota", Name: "cluster-h100", Scope: QuotaScopeCluster,
-			ClusterQuotas: map[string]int{"H100": 32},
-		}
-		inv := QuotaLimiterConfig{Type: "gpu-inventory"}
-		for _, limiters := range [][]QuotaLimiterConfig{{inv, quota}, {quota, inv}} {
+// One physical cluster, one physical limiter. A second physical entry is
+// ignored, not rejected: a rejection discards the whole default policy, and
+// such a list installed before the limiters composed.
+var _ = Describe("ScalingPolicy limiters validation", func() {
+	validate := func(limiters ...QuotaLimiterConfig) error {
+		p := ScalingPolicy{Limiters: limiters}
+		return p.validateLimiters()
+	}
+	quota := QuotaLimiterConfig{Type: "quota", Name: "q", Scope: QuotaScopeCluster, ClusterQuotas: map[string]int{"H100": 8}}
+
+	It("accepts one physical entry beside quota entries", func() {
+		Expect(validate(QuotaLimiterConfig{Type: "gpu-inventory", Name: "gpu"}, quota)).To(Succeed())
+	})
+
+	It("accepts two physical entries under either spelling and reports the duplicate", func() {
+		for _, pair := range [][2]string{{"gpu-inventory", "gpu-inventory"}, {"inventory", "gpu-inventory"}, {"gpu-inventory", "inventory"}} {
+			limiters := []QuotaLimiterConfig{{Type: pair[0]}, quota, {Type: pair[1]}}
+			Expect(validate(limiters...)).To(Succeed(), "%v", pair)
+			Expect(ScalingPolicy{Limiters: limiters}.IgnoredPhysicalLimiters()).To(Equal([]int{2}), "%v", pair)
+
 			c := &Config{}
-			c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{
-				"default": {Limiters: limiters},
-			})
-			Expect(c.EffectiveLimiterMode()).To(Equal(LimiterTypeQuota))
-			Expect(c.EffectiveQuotaEntries()).To(HaveLen(1))
+			c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{"default": {Limiters: limiters}})
+			Expect(c.EffectiveLimiterTypes()).To(Equal(LimiterTypes{LimiterTypeInventory, LimiterTypeQuota}))
+			Expect(c.IgnoredPhysicalLimiters()).To(Equal([]int{2}))
 		}
 	})
 })
