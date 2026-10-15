@@ -226,13 +226,40 @@ var _ = Describe("ComputeBorrowing", func() {
 		Expect(a.KueueBorrowed).To(Equal(3))
 	})
 
-	It("leaves an inactive queue out of the pool", func() {
+	// Kueue's cache puts every ClusterQueue into its cohort and the snapshot
+	// clones the cohort's figures before dropping inactive queues, so a held
+	// queue's usage and lending still count; it only stops being a borrower.
+	It("counts a held queue's borrowed usage against the pool", func() {
+		held := member("held", QueueResource{Nominal: 0, Reserved: 8, Borrowed: 8})
+		held.Inactive = true
+		t := topology(held, member("lender", QueueResource{Nominal: 8}), member("a", QueueResource{Nominal: 0}))
+		b := ComputeBorrowing(t, false)
+		a := figures(b, "a")
+		Expect(a.CohortFree).To(Equal(0), "the held queue's 8 running borrowed GPUs are not free")
+		Expect(a.Borrowable).To(Equal(0))
+		Expect(b.Pools).To(HaveLen(1))
+		Expect(b.Pools[0].Free).To(Equal(0))
+		Expect(figures(b, "held").Reason).To(Equal(ReasonInactive))
+	})
+
+	It("counts a held queue's lending, and leaves it out as a borrower and as a waiting lender", func() {
 		held := member("held", QueueResource{Nominal: 8})
 		held.Inactive = true
+		held.Pending = 3
 		t := topology(held, member("a", QueueResource{Nominal: 0}))
 		b := ComputeBorrowing(t, false)
-		Expect(figures(b, "a").Borrowable).To(Equal(0))
+		Expect(figures(b, "a").Borrowable).To(Equal(8))
 		Expect(figures(b, "held").Reason).To(Equal(ReasonInactive))
+		Expect(b.Pools).To(HaveLen(1))
+		Expect(b.Pools[0].WaitingLenders).To(BeEmpty())
+		Expect(b.Pools[0].Lenders).To(Equal([]LenderState{{Queue: "a"}}))
+	})
+
+	It("withholds borrowing when a held member has no status: its usage is unknown", func() {
+		held := member("held", QueueResource{Nominal: 8})
+		held.Inactive, held.HasStatus = true, false
+		t := topology(held, member("a", QueueResource{Nominal: 0}))
+		Expect(figures(ComputeBorrowing(t, false), "a").Reason).To(Equal(ReasonNoStatus))
 	})
 
 	Describe("reasons borrowing is not counted", func() {

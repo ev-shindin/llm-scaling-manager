@@ -251,8 +251,8 @@ func (r QueueResource) lent() (lent, kept int) {
 }
 
 // ComputeBorrowing derives, from one read, what each ClusterQueue could reach
-// in its cohort. Per cohort, flavor and GPU resource, over the active members m
-// that declare it:
+// in its cohort. Per cohort, flavor and GPU resource, over every member m that
+// declares it, inactive ones included (see cohortFree):
 //
 //	L_m = min(lendingLimit, N_m)   (unset: N_m)
 //	G_m = N_m - L_m                kept by m, never lent
@@ -363,7 +363,8 @@ func withheldReason(t Topology, cohort string, qs []QueueState, stale bool) Reas
 		return ReasonStale
 	}
 	for _, q := range qs {
-		if !q.Inactive && !q.HasStatus {
+		// Inactive members too: their usage counts in the free pool.
+		if !q.HasStatus {
 			return ReasonNoStatus
 		}
 	}
@@ -397,14 +398,18 @@ func withheldReason(t Topology, cohort string, qs []QueueState, stale bool) Reas
 	return ""
 }
 
-// cohortFree is max(0, Σ L_m − Σ max(0, U_m − G_m)) over the active members
-// that declare key. An inactive queue is left out: Kueue admits nothing
-// through it, and leaving its lent quota out errs toward less free capacity.
+// cohortFree is max(0, Σ L_m − Σ max(0, U_m − G_m)) over every member that
+// declares key, inactive ones included. Kueue's cache accumulates every
+// ClusterQueue into its cohort, and the scheduling snapshot clones the cohort's
+// figures before it drops the inactive queues, so an inactive queue's lending
+// and its usage both still count: a held queue keeps its admitted workloads
+// running, and what they borrowed is not free. An inactive queue is left out
+// only as a borrower (ReasonInactive) and as a lender that waits.
 func cohortFree(qs []QueueState, key ResourceKey) int {
 	var lent, used int64
 	for _, q := range qs {
 		r, ok := q.Resources[key]
-		if !ok || q.Inactive {
+		if !ok {
 			continue
 		}
 		l, g := r.lent()
