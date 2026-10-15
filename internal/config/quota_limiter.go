@@ -161,12 +161,30 @@ type KueueQuotaSource struct {
 	// (kueue-controller-manager), whose image tag tells the Kueue version
 	// borrowing is checked against. Empty means kueue-system.
 	ControllerNamespace string `yaml:"controllerNamespace,omitempty" json:"controllerNamespace,omitempty"`
+
+	// ReleaseToNonReclaimingLenders lets the scaling manager hand borrowed
+	// replicas back to a lender that waits for capacity it lent and that Kueue
+	// does not reclaim for (reclaimWithinCohort: Never, or LowerPriority when
+	// the lender does not outrank the borrower). Off by default: a lender that
+	// can reclaim gets its capacity back from Kueue's preemption, and for one
+	// that cannot the scaling manager only stops new borrowing in the cohort
+	// and reports the wait (reason lender-waiting, wva_kueue_lender_waiting_seconds).
+	// The placement-timeout release of borrowed replicas that never placed is
+	// not affected by this setting.
+	ReleaseToNonReclaimingLenders bool `yaml:"releaseToNonReclaimingLenders,omitempty" json:"releaseToNonReclaimingLenders,omitempty"`
 }
 
 // KueueBorrowSelected reports whether the entry's borrowNamespaces selects ns:
 // true when the list is empty or names ns.
 func (q QuotaLimiterConfig) KueueBorrowSelected(ns string) bool {
 	return q.Kueue == nil || len(q.Kueue.BorrowNamespaces) == 0 || slices.Contains(q.Kueue.BorrowNamespaces, ns)
+}
+
+// KueueReleasesToNonReclaiming reports whether this entry hands borrowed
+// replicas back to waiting lenders that cannot reclaim
+// (releaseToNonReclaimingLenders, off by default).
+func (q QuotaLimiterConfig) KueueReleasesToNonReclaiming() bool {
+	return q.KueueCountsBorrowable() && q.Kueue.ReleaseToNonReclaimingLenders
 }
 
 // Defaults of the borrowing timings (the Kueue borrowing proposal, PR #161,
@@ -290,6 +308,10 @@ func (k *KueueQuotaSource) validate(location string) error {
 			errs = append(errs, fmt.Errorf("%s.kueue.%s: %q must be positive", location, f.name, f.value))
 		}
 	}
+	if k.ReleaseToNonReclaimingLenders && k.CountBorrowable != nil && !*k.CountBorrowable {
+		errs = append(errs, fmt.Errorf("%s.kueue.releaseToNonReclaimingLenders: true has no effect with countBorrowable: false "+
+			"(nothing is borrowed, so nothing is handed back)", location))
+	}
 	return errors.Join(errs...)
 }
 
@@ -374,6 +396,12 @@ type ExternalQuotas struct {
 	// borrowing row then carries the stale reason, and a quota entry that counts
 	// borrowing treats the snapshot as stale -- it freezes, never shrinks.
 	BorrowStale bool
+	// KueueControllerDown is set when the Kueue controller's Deployment reports
+	// no ready replica, or is gone, while Kueue's API still answers: the
+	// figures are readable but stop moving. A quota entry that counts
+	// borrowing freezes, as on a stale snapshot, and reports every governed
+	// namespace withheld with reason kueue-controller-down.
+	KueueControllerDown bool
 }
 
 // ExternalSharedPool is one cohort's free capacity of one flavor and GPU
@@ -401,13 +429,17 @@ type ExternalSharedPool struct {
 // ExternalLender is one cohort member as a lender of one flavor and resource.
 type ExternalLender struct {
 	Queue string `json:"queue"`
-	// Waiting is the raw per-read predicate: pending workloads while
-	// reserving less than nominal.
+	// Waiting is the raw per-read predicate: a pending Workload that asks for
+	// this GPU resource and fits within the nominal it does not hold.
 	Waiting bool `json:"waiting,omitempty"`
-	// CanReclaim is whether Kueue preempts borrowers for it.
+	// CanReclaim is whether Kueue preempts borrowers for it (Any, or
+	// LowerPriority while its pending Workload outranks the borrowers).
 	CanReclaim bool `json:"canReclaim,omitempty"`
 	// LentOut is the nominal it does not hold now.
 	LentOut int `json:"lentOut"`
+	// PendingGPUs is the GPU request of the pending Workload it waits for; 0
+	// when it does not wait. What is released to it is bounded by this.
+	PendingGPUs int `json:"pendingGPUs,omitempty"`
 }
 
 // ExternalBorrow is one queue's borrowing figures for one flavor and GPU

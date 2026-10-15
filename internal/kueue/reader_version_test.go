@@ -24,6 +24,7 @@ func kueueController(ns, image string) *unstructured.Unstructured {
 		map[string]interface{}{"name": "manager", "image": image},
 		map[string]interface{}{"name": "kube-rbac-proxy", "image": "quay.io/brancz/kube-rbac-proxy:v0.18.0"},
 	}, "spec", "template", "spec", "containers")).To(Succeed())
+	Expect(unstructured.SetNestedField(d.Object, int64(1), "status", "readyReplicas")).To(Succeed())
 	return d
 }
 
@@ -91,6 +92,50 @@ var _ = Describe("Reader checks the Kueue controller version", func() {
 		}}
 		objs := append(docsExample(v, "cohortName"), kueueController("kueue-system", "registry.k8s.io/kueue/kueue:v0.21.0"))
 		Expect(reasonsOf(versionClient(denied, objs...), Options{})).To(Equal(counted))
+	})
+
+	It("reports the controller down when it has no ready replica, or is gone after it was seen; the rows are unchanged", func() {
+		down := func(r *Reader) bool {
+			snap, err := r.Quotas(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			return snap.KueueControllerDown
+		}
+		ctrl := kueueController("kueue-system", "registry.k8s.io/kueue/kueue:v0.20.0")
+		c := versionClient(nil, append(docsExample(v, "cohortName"), ctrl)...)
+		r := NewReader(c, Options{})
+		Expect(down(r)).To(BeFalse(), "one ready replica")
+
+		Expect(c.Get(context.Background(), client.ObjectKeyFromObject(ctrl), ctrl)).To(Succeed())
+		Expect(unstructured.SetNestedField(ctrl.Object, int64(0), "status", "readyReplicas")).To(Succeed())
+		Expect(c.Status().Update(context.Background(), ctrl)).To(Succeed())
+		Expect(down(r)).To(BeTrue(), "scaled to 0: no ready replica")
+		Expect(reasonsOf(c, Options{})).To(Equal(counted), "the rows keep their reasons; the engine side withholds")
+
+		Expect(unstructured.SetNestedField(ctrl.Object, int64(1), "status", "readyReplicas")).To(Succeed())
+		Expect(c.Status().Update(context.Background(), ctrl)).To(Succeed())
+		Expect(down(r)).To(BeFalse(), "ready again, read on the next refresh")
+
+		Expect(c.Delete(context.Background(), ctrl)).To(Succeed())
+		Expect(down(r)).To(BeTrue(), "gone while the Kueue CRDs are served")
+	})
+
+	It("does not report the controller down when it cannot read it, or never found it", func() {
+		down := func(c client.Client) bool {
+			snap, err := NewReader(c, Options{}).Quotas(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			return snap.KueueControllerDown
+		}
+		denied := &interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
+			if o.GetObjectKind().GroupVersionKind().Kind == "Deployment" {
+				return forbidden("deployments")
+			}
+			return c.Get(ctx, key, o, opts...)
+		}}
+		stopped := kueueController("kueue-system", "registry.k8s.io/kueue/kueue:v0.20.0")
+		Expect(unstructured.SetNestedField(stopped.Object, int64(0), "status", "readyReplicas")).To(Succeed())
+		Expect(down(versionClient(denied, append(docsExample(v, "cohortName"), stopped)...))).To(BeFalse(), "Forbidden is unknown")
+		Expect(down(versionClient(nil, docsExample(v, "cohortName")...))).To(BeFalse(),
+			"never found (Kueue in another namespace without controllerNamespace) is unknown")
 	})
 })
 

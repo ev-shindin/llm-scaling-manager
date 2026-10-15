@@ -12,6 +12,12 @@ var gpuKey = ResourceKey{Flavor: "h100", Resource: "nvidia.com/gpu"}
 
 func ptr(n int) *int { return &n }
 
+// pendingGPU is a pending Workload requesting gpus of the GPU resource of
+// gpuKey, at priority.
+func pendingGPU(gpus int64, priority int32) PendingWorkload {
+	return PendingWorkload{Priority: priority, GPUs: map[string]int64{gpuKey.Resource: gpus}}
+}
+
 // member is a ClusterQueue in cohort "c" with status written, holding one
 // GPU resource of the h100 flavor.
 func member(name string, r QueueResource) QueueState {
@@ -102,10 +108,11 @@ var _ = Describe("ComputeBorrowing", func() {
 
 		It("LowerPriority: a lender is not one that can reclaim", func() {
 			lender := withReclaim(member("lender", QueueResource{Nominal: 8, Reserved: 3}), ReclaimLowerPriority)
-			lender.Pending = 2
+			lender.PendingWorkloads = []PendingWorkload{pendingGPU(2, 0)}
 			b := ComputeBorrowing(topology(lender, member("a", QueueResource{Nominal: 0, Reserved: 4})), false)
 			Expect(b.Pools).To(HaveLen(1))
-			Expect(b.Pools[0].Lenders).To(ContainElement(LenderState{Queue: "lender", Waiting: true, CanReclaim: false, LentOut: 5}))
+			Expect(b.Pools[0].Lenders).To(ContainElement(LenderState{Queue: "lender", Waiting: true, CanReclaim: false, LentOut: 5, PendingGPUs: 2}),
+				"no borrower priority read: treated as one that cannot reclaim")
 		})
 
 		It("Never: what the queue already uses is guaranteed", func() {
@@ -222,12 +229,12 @@ var _ = Describe("ComputeBorrowing", func() {
 
 	It("describes each lender of a pool: waiting, whether it can reclaim, and the nominal it does not hold", func() {
 		waiting := member("lender", QueueResource{Nominal: 8, Reserved: 3})
-		waiting.Pending = 2
+		waiting.PendingWorkloads = []PendingWorkload{pendingGPU(2, 0)}
 		b := ComputeBorrowing(topology(withReclaim(waiting, ReclaimAny), member("a", QueueResource{Nominal: 0, Reserved: 4})), false)
 		Expect(b.Pools).To(HaveLen(1))
 		Expect(b.Pools[0].Lenders).To(Equal([]LenderState{
 			{Queue: "a", LentOut: 0},
-			{Queue: "lender", Waiting: true, CanReclaim: true, LentOut: 5},
+			{Queue: "lender", Waiting: true, CanReclaim: true, LentOut: 5, PendingGPUs: 2},
 		}))
 	})
 
@@ -378,20 +385,22 @@ var _ = Describe("ComputeBorrowing", func() {
 	})
 
 	Describe("lender waiting, per read", func() {
-		It("holds with pending workloads below nominal, and only then", func() {
+		It("holds with a pending GPU Workload that fits below nominal, and only then", func() {
 			q := member("lender", QueueResource{Nominal: 8, Reserved: 4})
 			Expect(LenderWaiting(q, gpuKey)).To(BeFalse(), "nothing pending")
-			q.Pending = 2
+			q.Pending = 3
+			Expect(LenderWaiting(q, gpuKey)).To(BeFalse(), "Kueue's pending count alone is not a GPU waiting")
+			q.PendingWorkloads = []PendingWorkload{pendingGPU(2, 0)}
 			Expect(LenderWaiting(q, gpuKey)).To(BeTrue())
 			Expect(LenderWaiting(q, ResourceKey{Flavor: "a100", Resource: "nvidia.com/gpu"})).To(BeFalse(), "another flavor")
 			full := member("lender", QueueResource{Nominal: 8, Reserved: 8})
-			full.Pending = 2
+			full.PendingWorkloads = []PendingWorkload{pendingGPU(2, 0)}
 			Expect(LenderWaiting(full, gpuKey)).To(BeFalse(), "at nominal: its own quota is not what holds it")
 		})
 
 		It("is listed on the pool", func() {
 			lender := member("lender", QueueResource{Nominal: 8, Reserved: 0})
-			lender.Pending = 1
+			lender.PendingWorkloads = []PendingWorkload{pendingGPU(1, 0)}
 			b := ComputeBorrowing(topology(lender, member("a", QueueResource{Nominal: 0, Reserved: 8, Borrowed: 8})), false)
 			Expect(b.Pools).To(HaveLen(1))
 			Expect(b.Pools[0].WaitingLenders).To(Equal([]string{"lender"}))

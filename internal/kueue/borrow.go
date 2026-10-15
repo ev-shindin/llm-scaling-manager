@@ -55,6 +55,13 @@ const (
 	// (kueue_constants.go) are not known to hold. The nominal quotas still
 	// apply.
 	ReasonKueueVersionUntested Reason = "kueue-version-untested"
+	// ReasonKueueControllerDown: the Kueue controller's Deployment reports no
+	// ready replica, or is gone, while Kueue's API still answers
+	// (ControllerVersion.Down). Nothing admits or preempts, and queue status
+	// stops moving, so no new borrowing is counted; what is borrowed is frozen,
+	// not shrunk. Decided on the engine side from
+	// config.ExternalQuotas.KueueControllerDown, not carried on the rows.
+	ReasonKueueControllerDown Reason = "kueue-controller-down"
 	// ReasonNominalLentOut qualifies a guaranteed figure below nominal: the
 	// queue cannot reclaim, and a peer holds the rest of its nominal quota.
 	ReasonNominalLentOut Reason = "nominal-lent-out"
@@ -108,8 +115,15 @@ type QueueState struct {
 	Cohort string
 	// Reclaim is spec.preemption.reclaimWithinCohort; ReclaimNever when absent.
 	Reclaim string
-	// Pending is status.pendingWorkloads.
+	// Pending is status.pendingWorkloads: every pending Workload, whatever it
+	// asks for. Kept for the log; the lender signal reads PendingWorkloads.
 	Pending int
+	// PendingWorkloads are the queue's pending Workloads that request a GPU
+	// resource, read from the Workloads themselves (readPending).
+	PendingWorkloads []PendingWorkload
+	// ReservedPriority is the highest spec.priority of a Workload Kueue has
+	// reserved quota for in the queue; nil when none was read.
+	ReservedPriority *int32
 	// HasStatus is false when Kueue never wrote status.flavorsReservation.
 	HasStatus bool
 	// FairSharing is true when status.fairSharing is present.
@@ -130,13 +144,13 @@ type QueueState struct {
 // CanReclaim reports whether the queue may preempt borrowers to get its
 // nominal quota back, whatever they run: only under ReclaimAny.
 //
-// ReclaimLowerPriority is read as ReclaimNever. Kueue then preempts only
-// borrowed workloads of lower priority than the one it admits, and with serving
-// above batch (the documented setup) a batch lender never reclaims from
-// serving. Telling the cases apart needs the WorkloadPriorityClass values of
-// both sides, which this read does not take; that is a follow-up. Until then
-// the guaranteed figure, the within-nominal figure and the lender release rule
-// all treat such a queue as one that cannot reclaim, which errs toward less.
+// ReclaimLowerPriority is read as ReclaimNever for the guaranteed and
+// within-nominal figures: Kueue then preempts only borrowed workloads of lower
+// priority than the one it admits, and with serving above batch (the
+// documented setup) a batch lender never reclaims from serving. As a lender
+// that waits, a LowerPriority queue whose pending Workload outranks every
+// borrower's reserved Workload is one Kueue reclaims for
+// (LenderState.CanReclaim; ComputeBorrowing).
 func (q QueueState) CanReclaim() bool {
 	return q.Reclaim == ReclaimAny
 }
@@ -216,9 +230,9 @@ type SharedPool struct {
 	// Free is the cohort's free pool; 0 when Reason is set.
 	Free   int
 	Reason Reason
-	// WaitingLenders are the member queues that, in this read, have pending
-	// workloads and reserve less than their nominal quota of this key. This is
-	// the raw per-read predicate; debouncing it is the caller's.
+	// WaitingLenders are the member queues that, in this read, wait for this
+	// key (LenderWaiting). This is the raw per-read predicate; debouncing it
+	// is the caller's.
 	WaitingLenders []string
 	// Lenders is every active member queue that declares this key, with what
 	// the release of borrowed capacity (B6) needs about it.
@@ -230,11 +244,20 @@ type LenderState struct {
 	Queue string
 	// Waiting is LenderWaiting in this read, not debounced.
 	Waiting bool
-	// CanReclaim is whether Kueue preempts borrowers for it.
+	// CanReclaim is whether Kueue preempts borrowers for it: reclaimWithinCohort
+	// Any, or LowerPriority while its pending Workload outranks the highest
+	// priority Kueue reserved quota for in a queue of the cohort that borrows
+	// this key. A LowerPriority lender is read as one that cannot reclaim
+	// otherwise, also when no borrower's priority could be read.
 	CanReclaim bool
-	// LentOut is the nominal it does not hold now: max(0, N - U), what it may
-	// be waiting for.
+	// LentOut is the nominal it does not hold now: max(0, N - U), the most it
+	// may be waiting for.
 	LentOut int
+	// PendingGPUs is what it waits for now: the GPU request of its largest
+	// pending Workload that asks for this resource and fits within LentOut
+	// (lenderPending); 0 when it does not wait. It bounds what is released to
+	// it, which the caller rounds up to whole replicas.
+	PendingGPUs int
 }
 
 // Borrowing is the result of ComputeBorrowing.
@@ -246,11 +269,33 @@ type Borrowing struct {
 	Pools []SharedPool
 }
 
-// LenderWaiting reports whether q, in this read, has pending workloads while
-// reserving less than its nominal quota of key.
+// LenderWaiting reports whether q, in this read, waits for capacity of key it
+// lent: a pending Workload of it requests the key's GPU resource and fits
+// within its unused nominal quota of key (lenderPending). A pending count
+// alone is not enough: anyone who may create a Workload in a lender's
+// namespace -- a CPU job, or one too large to admit -- would otherwise make
+// the borrowers give capacity back for nothing.
 func LenderWaiting(q QueueState, key ResourceKey) bool {
-	r, ok := q.Resources[key]
-	return ok && q.Pending > 0 && r.Reserved < r.Nominal
+	gpus, _ := lenderPending(q, key)
+	return gpus > 0
+}
+
+// borrowerPriority is the highest priority Kueue reserved quota for in a
+// member of qs other than lender that borrows key now (usage past nominal, or
+// Kueue's own borrowed figure). known is false when no such queue's priority
+// was read.
+func borrowerPriority(qs []QueueState, lender string, key ResourceKey) (priority int32, known bool) {
+	for _, q := range qs {
+		r, ok := q.Resources[key]
+		if q.Name == lender || !ok || (r.Reserved <= r.Nominal && r.Borrowed <= 0) || q.ReservedPriority == nil {
+			continue
+		}
+		if !known || *q.ReservedPriority > priority {
+			priority = *q.ReservedPriority
+		}
+		known = true
+	}
+	return priority, known
 }
 
 // lent returns L = min(lendingLimit, nominal), nominal when unset, and the kept
@@ -351,12 +396,21 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 				if q.Inactive || !declares {
 					continue
 				}
-				waiting := LenderWaiting(q, key)
+				pending, priority := lenderPending(q, key)
+				waiting := pending > 0
 				if waiting {
 					p.WaitingLenders = append(p.WaitingLenders, q.Name)
 				}
+				canReclaim := q.CanReclaim()
+				if q.Reclaim == ReclaimLowerPriority && waiting {
+					// Kueue preempts borrowed work of lower priority than the
+					// Workload it admits: when the lender's outranks every
+					// borrower's, Kueue takes the capacity back itself.
+					borrower, known := borrowerPriority(qs, q.Name, key)
+					canReclaim = known && priority > borrower
+				}
 				p.Lenders = append(p.Lenders, LenderState{Queue: q.Name, Waiting: waiting,
-					CanReclaim: q.CanReclaim(), LentOut: max(0, r.Nominal-r.Reserved)})
+					CanReclaim: canReclaim, LentOut: max(0, r.Nominal-r.Reserved), PendingGPUs: pending})
 			}
 			slices.Sort(p.WaitingLenders)
 			slices.SortFunc(p.Lenders, func(a, b LenderState) int { return strings.Compare(a.Queue, b.Queue) })

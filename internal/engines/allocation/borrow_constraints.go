@@ -67,6 +67,11 @@ type SharedPoolChunk struct {
 	// Stale marks a chunk frozen over a stale read: Free is 0, and nothing
 	// about its lenders may change what has been decided.
 	Stale bool
+	// ReleaseToNonReclaiming is set when the entry that read the chunk opts in
+	// to handing borrowed replicas back to a waiting lender Kueue does not
+	// reclaim for (kueue.releaseToNonReclaimingLenders). Off, such a lender
+	// only closes the cohort to new borrowing and is reported as waiting.
+	ReleaseToNonReclaiming bool
 }
 
 // key identifies a chunk across providers that read the same cohort.
@@ -195,7 +200,12 @@ func reachConstraints(constraints []*ResourceConstraints) []*ResourceConstraints
 // mergeSharedPools collects every provider's chunks, one per cohort, flavor and
 // resource at the smallest figure any provider gives, in a stable order, and the
 // namespaces' cohorts. Two Kueue-backed entries read the same cohorts; their
-// chunks are one pool, not two.
+// chunks are one pool, not two. The merge takes the cautious side of every
+// field: stale when either read is, the older read time (a lender's read is
+// new only once both entries read past it), the union of the lenders -- a
+// lender seen by both waits when either saw it wait, counts as reclaiming
+// when either says so, and has lent out the smaller figure -- and a release
+// to a non-reclaiming lender only when every entry opts in.
 func mergeSharedPools(constraints []*ResourceConstraints) ([]*SharedPoolChunk, map[string][]string) {
 	byKey := map[string]*SharedPoolChunk{}
 	cohorts := map[string][]string{}
@@ -205,10 +215,11 @@ func mergeSharedPools(constraints []*ResourceConstraints) ([]*SharedPoolChunk, m
 		}
 		for _, p := range c.SharedPools {
 			if prev, ok := byKey[p.key()]; ok {
-				prev.Free = min(prev.Free, p.Free)
+				mergeChunk(prev, p)
 				continue
 			}
 			chunk := p
+			chunk.Lenders = slices.Clone(p.Lenders)
 			byKey[p.key()] = &chunk
 		}
 		for ns, cs := range c.NamespaceCohorts {
@@ -224,4 +235,35 @@ func mergeSharedPools(constraints []*ResourceConstraints) ([]*SharedPoolChunk, m
 		return cmp.Or(strings.Compare(a.Cohort, b.Cohort), strings.Compare(a.Flavor, b.Flavor), strings.Compare(a.Resource, b.Resource))
 	})
 	return chunks, cohorts
+}
+
+// mergeChunk folds p, another provider's read of the same chunk, into prev
+// (mergeSharedPools).
+func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
+	prev.Free = min(prev.Free, p.Free)
+	prev.Stale = prev.Stale || p.Stale
+	prev.ReleaseToNonReclaiming = prev.ReleaseToNonReclaiming && p.ReleaseToNonReclaiming
+	if !p.ReadAt.IsZero() && (prev.ReadAt.IsZero() || p.ReadAt.Before(prev.ReadAt)) {
+		prev.ReadAt = p.ReadAt
+	}
+	for _, l := range p.Lenders {
+		i := slices.IndexFunc(prev.Lenders, func(o kueue.LenderState) bool { return o.Queue == l.Queue })
+		if i < 0 {
+			prev.Lenders = append(prev.Lenders, l)
+			continue
+		}
+		o := &prev.Lenders[i]
+		o.Waiting = o.Waiting || l.Waiting
+		o.CanReclaim = o.CanReclaim || l.CanReclaim
+		o.LentOut = min(o.LentOut, l.LentOut)
+		o.PendingGPUs = min(o.PendingGPUs, l.PendingGPUs)
+	}
+	slices.SortFunc(prev.Lenders, func(a, b kueue.LenderState) int { return strings.Compare(a.Queue, b.Queue) })
+}
+
+// releaseBound is the GPUs a waiting lender may be handed back: the request of
+// the pending Workload it waits for, at most what it lent out. The release
+// loop (lenderReleases) rounds it up to whole units.
+func releaseBound(l kueue.LenderState) int {
+	return max(0, min(l.PendingGPUs, l.LentOut))
 }

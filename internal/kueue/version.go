@@ -28,12 +28,20 @@ type ControllerVersion struct {
 	// (Forbidden, absent, another namespace) or its image names no version, as
 	// with a digest-only reference.
 	Known bool
+	// Down is true when the controller's Deployment reports no ready replica,
+	// or is gone after a read found it: Kueue's API still answers, but nothing
+	// admits, preempts or writes queue status, so the figures stop moving.
+	// New borrowing is withheld (ReasonKueueControllerDown) and what is
+	// borrowed is frozen. A Deployment that cannot be read (Forbidden), or was
+	// never found, is not Down.
+	Down bool
 }
 
-// versionTTL is how long a version read is kept: the Kueue controller is
-// upgraded rarely, and reading its Deployment every refresh is a call for
-// nothing.
-const versionTTL = 10 * time.Minute
+// forbiddenTTL is how long a Forbidden read of the controller's Deployment is
+// kept: RBAC changes rarely, and asking again every refresh is a call for
+// nothing. Every other answer is read again next refresh, since the
+// controller's readiness can change at any time.
+const forbiddenTTL = 10 * time.Minute
 
 // semverTag matches the release a Kueue image tag names: v0.20.0, 0.20.1,
 // v0.21.0-rc.1.
@@ -70,12 +78,14 @@ func VersionTested(version string) bool {
 }
 
 // controllerVersion reads the Kueue controller's version from its Deployment's
-// image, at most once per versionTTL. Any failure reads as unknown: Forbidden
-// and absent are kept for the TTL, anything else is asked again next read.
-// Callers must hold r.mu.
+// image, and whether it is down, on every read (a Forbidden answer is kept for
+// forbiddenTTL). Forbidden, a Deployment never found and a kind the cluster
+// does not serve read as unknown and not down. A Deployment with no ready
+// replica, or one gone after a read found it, is down. Any other failure keeps
+// the last answer and is asked again next read. Callers must hold r.mu.
 func (r *Reader) controllerVersion(ctx context.Context) ControllerVersion {
 	now := r.opts.now()
-	if !r.versionAt.IsZero() && now.Sub(r.versionAt) < versionTTL {
+	if r.versionForbidden && now.Sub(r.versionAt) < forbiddenTTL {
 		return r.version
 	}
 	ns := r.opts.ControllerNamespace
@@ -89,12 +99,31 @@ func (r *Reader) controllerVersion(ctx context.Context) ControllerVersion {
 	switch {
 	case err == nil:
 		v = versionOf(d)
+		ready, _, _ := unstructured.NestedInt64(d.Object, "status", "readyReplicas")
+		v.Down = ready < 1
+		r.controllerSeen = true
+	case apierrors.IsNotFound(err) && r.controllerSeen:
+		// Gone while the Kueue CRDs are still served: nothing admits. The
+		// version last read stays what it was.
+		v = r.version
+		v.Down = true
 	case apierrors.IsForbidden(err), apierrors.IsNotFound(err), meta.IsNoMatchError(err):
-		// Unknown until someone acts; not asked again for the TTL.
+		// Unknown until someone acts.
 	default:
-		return ControllerVersion{} // may pass: asked again next read
+		return r.version // may pass: asked again next read
 	}
-	if v != r.version || r.versionAt.IsZero() {
+	if v.Down != r.version.Down {
+		logger := kueueLogger(ctx)
+		if v.Down {
+			logger.Info("The Kueue controller has no ready replica; new cohort borrowing is withheld (reason kueue-controller-down) and what is borrowed is frozen until it is back",
+				"deployment", ns+"/"+ControllerDeployment)
+		} else {
+			logger.Info("The Kueue controller is ready again; cohort borrowing is counted as before",
+				"deployment", ns+"/"+ControllerDeployment)
+		}
+	}
+	vers := func(c ControllerVersion) ControllerVersion { c.Down = false; return c }
+	if vers(v) != vers(r.version) || r.versionAt.IsZero() {
 		logger := kueueLogger(ctx)
 		switch {
 		case !v.Known:
@@ -111,7 +140,7 @@ func (r *Reader) controllerVersion(ctx context.Context) ControllerVersion {
 			logger.V(1).Info("Kueue controller version", "version", v.Version)
 		}
 	}
-	r.version, r.versionAt = v, now
+	r.version, r.versionAt, r.versionForbidden = v, now, apierrors.IsForbidden(err)
 	return v
 }
 

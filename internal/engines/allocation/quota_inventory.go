@@ -274,13 +274,18 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 	}
 	// Borrowing is computed outside the lock: the eligibility check may read
 	// the API server. A namespace whose ResourceQuota read may pass by the
-	// next cycle freezes alone (computeBorrowing); only a stale Kueue read
-	// freezes the whole entry.
+	// next cycle freezes alone (computeBorrowing); only a stale Kueue read, or
+	// a Kueue controller that is down, freezes the whole entry.
 	var view *borrowView
-	stale := false
+	var frozenWhy kueue.Reason
 	if q.countsBorrowing() && !ext.ObservedAt.IsZero() {
-		stale = q.snapshotStale(ext, err)
-		if !stale {
+		switch {
+		case q.snapshotStale(ext, err):
+			frozenWhy = kueue.ReasonStale
+		case ext.KueueControllerDown:
+			frozenWhy = kueue.ReasonKueueControllerDown
+		}
+		if frozenWhy == "" {
 			q.mu.RLock()
 			last, managed := q.borrow, q.managedNS
 			q.mu.RUnlock()
@@ -328,16 +333,18 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 	// built by a limiter rebuild while the source was stale, the last one the
 	// shared memory holds for the same entry.
 	last := q.borrow
-	if stale && last == nil {
+	if frozenWhy != "" && last == nil {
 		last = q.borrowOpts.Memory.load(q.memoryKey())
 	}
 	switch {
 	case view != nil && len(view.byNS) > 0:
 		effective = view.effective
-	case stale && last != nil:
+	case frozenWhy != "" && last != nil:
 		// Stale reads freeze, never shrink (B6): every figure stays where it
 		// was, and nothing new is borrowed. An API blip must not cause a
-		// reclaim the cluster did not ask for.
+		// reclaim the cluster did not ask for. A Kueue controller that is down
+		// freezes the same way: its figures stop moving, and nothing it would
+		// admit or preempt happens until it is back.
 		frozen := *last
 		frozen.frozen = true
 		frozen.pools = slices.Clone(last.pools)
@@ -347,14 +354,14 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 		}
 		view, effective = &frozen, last.effective
 	}
-	q.withheld = q.withheldReasons(ext, view, stale)
-	q.logBorrowing(logger, ext, view, stale)
+	q.withheld = q.withheldReasons(ext, view, frozenWhy)
+	q.logBorrowing(logger, ext, view, frozenWhy)
 	if view != nil && len(view.byNS) == 0 {
 		// Nothing counted: the entry caps at nominal, exactly as with
 		// countBorrowable: false. The view only carried the reasons to log.
 		view = nil
 	}
-	if !stale && q.countsBorrowing() && !ext.ObservedAt.IsZero() {
+	if frozenWhy == "" && q.countsBorrowing() && !ext.ObservedAt.IsZero() {
 		q.borrowOpts.Memory.store(q.memoryKey(), view)
 	}
 	q.cfg = effective
@@ -544,11 +551,12 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 		}
 		lenders := make([]kueue.LenderState, 0, len(p.Lenders))
 		for _, l := range p.Lenders {
-			lenders = append(lenders, kueue.LenderState{Queue: l.Queue, Waiting: l.Waiting, CanReclaim: l.CanReclaim, LentOut: l.LentOut})
+			lenders = append(lenders, kueue.LenderState{Queue: l.Queue, Waiting: l.Waiting, CanReclaim: l.CanReclaim, LentOut: l.LentOut,
+				PendingGPUs: l.PendingGPUs})
 		}
 		view.pools = append(view.pools, SharedPoolChunk{
 			Cohort: p.Cohort, Flavor: p.Flavor, Resource: p.Resource, Free: p.Free,
-			Lenders: lenders, ReadAt: ext.ObservedAt,
+			Lenders: lenders, ReadAt: ext.ObservedAt, ReleaseToNonReclaiming: q.static.KueueReleasesToNonReclaiming(),
 			FlavorPlacement: kueue.FlavorPlacement{
 				AcceleratorType: p.Accelerator, NodeLabels: maps.Clone(p.NodeLabels), Tolerations: slices.Clone(p.Tolerations),
 			},
@@ -683,10 +691,12 @@ func (q *QuotaInventory) Borrowing(activeNamespaces []string) (map[string]map[st
 // and why borrowable is 0 where it is -- the source's reason, or the
 // engine-side one (not-kueue-managed, no-gpu-bound, resourcequota-unreadable).
 // A cluster-scope entry logs nothing, since borrowing moves capacity between
-// queues and leaves the cluster figure as it is. stale marks a snapshot served
-// after a failed read or past twice the refresh interval: figures freeze and
-// nothing new is borrowed. Callers must hold q.mu.
-func (q *QuotaInventory) logBorrowing(logger logr.Logger, ext config.ExternalQuotas, view *borrowView, stale bool) {
+// queues and leaves the cluster figure as it is. frozenWhy is set when figures
+// freeze and nothing new is borrowed: kueue.ReasonStale for a snapshot served
+// after a failed read or past twice the refresh interval,
+// kueue.ReasonKueueControllerDown while the Kueue controller is down. Callers
+// must hold q.mu.
+func (q *QuotaInventory) logBorrowing(logger logr.Logger, ext config.ExternalQuotas, view *borrowView, frozenWhy kueue.Reason) {
 	if !q.countsBorrowing() || ext.ObservedAt.IsZero() {
 		return
 	}
@@ -697,8 +707,8 @@ func (q *QuotaInventory) logBorrowing(logger logr.Logger, ext config.ExternalQuo
 		}
 		reason := ""
 		switch {
-		case stale && (view == nil || view.byNS[ns] == nil):
-			reason = string(kueue.ReasonStale)
+		case frozenWhy != "" && (view == nil || view.byNS[ns] == nil):
+			reason = string(frozenWhy)
 		case view != nil && view.withheld[ns] != "":
 			reason = view.withheld[ns]
 		}
@@ -736,7 +746,10 @@ func (q *QuotaInventory) logBorrowing(logger logr.Logger, ext config.ExternalQuo
 	}
 	q.lastBorrow = string(fp)
 	msg := BorrowAppliedLogMessage
-	if view != nil && view.frozen {
+	switch {
+	case view != nil && view.frozen && frozenWhy == kueue.ReasonKueueControllerDown:
+		msg = BorrowControllerDownLogMessage
+	case view != nil && view.frozen:
 		msg = BorrowFrozenLogMessage
 	}
 	logger.Info(msg, "borrowByNamespace", rowsByNS, "appliedByNamespace", applied, "withheldByNamespace", q.withheld)
@@ -751,6 +764,9 @@ const (
 		"guaranteed is the namespace cap, borrowable is drawn from the cohort's free pool"
 	// BorrowFrozenLogMessage: the snapshot is stale; the last figures stay.
 	BorrowFrozenLogMessage = "Kueue snapshot stale: borrowing frozen at the last figures, nothing new is borrowed"
+	// BorrowControllerDownLogMessage: the Kueue controller is down; the last
+	// figures stay.
+	BorrowControllerDownLogMessage = "Kueue controller down: borrowing frozen at the last figures, nothing new is borrowed"
 )
 
 // appliedBorrow is one namespace's applied borrowing figures for one type, as
@@ -773,9 +789,11 @@ func (q *QuotaInventory) governsBorrowRows(ns string, rows []config.ExternalBorr
 
 // withheldReasons is, per namespace the read granted borrowing rows for and
 // whose borrowing is not counted, why: stale, the engine-side reason, or --
-// when the source withheld every row -- the source's. Nil when the entry
-// counts no borrowing.
-func (q *QuotaInventory) withheldReasons(ext config.ExternalQuotas, view *borrowView, stale bool) map[string]string {
+// when the source withheld every row -- the source's. While the Kueue
+// controller is down (frozenWhy kueue.ReasonKueueControllerDown) every
+// governed namespace reads kueue-controller-down, the frozen ones included:
+// none borrows anything new. Nil when the entry counts no borrowing.
+func (q *QuotaInventory) withheldReasons(ext config.ExternalQuotas, view *borrowView, frozenWhy kueue.Reason) map[string]string {
 	if !q.countsBorrowing() || ext.ObservedAt.IsZero() {
 		return nil
 	}
@@ -785,8 +803,10 @@ func (q *QuotaInventory) withheldReasons(ext config.ExternalQuotas, view *borrow
 			continue
 		}
 		switch {
-		case stale && (view == nil || view.byNS[ns] == nil):
-			out[ns] = string(kueue.ReasonStale)
+		case frozenWhy == kueue.ReasonKueueControllerDown:
+			out[ns] = string(frozenWhy)
+		case frozenWhy != "" && (view == nil || view.byNS[ns] == nil):
+			out[ns] = string(frozenWhy)
 		case view != nil && view.withheld[ns] != "":
 			out[ns] = view.withheld[ns]
 		case view != nil && view.byNS[ns] != nil:

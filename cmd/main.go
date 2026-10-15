@@ -709,6 +709,17 @@ func main() {
 		// this design exists to remove.
 		engine.Variants = registry.Default
 		engine.Status = controllerStatus
+		// Kueue's preemptions of managed pods, recorded from the pod informer
+		// the engine already reads pods through: a preempted pod and its
+		// Workload are gone within seconds, faster than a cycle's list.
+		preemptions := steadystate.NewPreemptionWatch(0)
+		if podInformer, err := mgr.GetCache().GetInformer(ctx, &corev1.Pod{}); err != nil {
+			setupLog.Error(err, "Cannot watch pods for Kueue preemptions; they are read by listing once per cycle only")
+		} else if _, err := podInformer.AddEventHandler(preemptions.Handler()); err != nil {
+			setupLog.Error(err, "Cannot watch pods for Kueue preemptions; they are read by listing once per cycle only")
+		} else {
+			engine.Preemptions = preemptions
+		}
 		engine.VariantEnricher = registry.NewEnricher(mgr.GetAPIReader(), registry.Default, registry.DefaultTargetMaxAge)
 		engine.VariantEnricher.Recorder = mgr.GetEventRecorderFor("workload-variant-autoscaler-registry")
 		// The registry is also what tells the datastore which namespaces to load

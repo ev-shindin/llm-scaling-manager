@@ -109,9 +109,17 @@ type Reader struct {
 	nsListDenied bool
 	// warnedNoStatus holds the cohort members logged as having no status.
 	warnedNoStatus map[string]bool
-	// version is the Kueue controller's version as last read, at versionAt.
-	version   ControllerVersion
-	versionAt time.Time
+	// warnedPending is set once a failed Workload read for the lender signal
+	// has been logged.
+	warnedPending bool
+	// version is the Kueue controller's version as last read, at versionAt;
+	// versionForbidden is set when that read was Forbidden.
+	version          ControllerVersion
+	versionAt        time.Time
+	versionForbidden bool
+	// controllerSeen is set once a read found the controller's Deployment, so
+	// a later NotFound reads as a controller gone, not as one never there.
+	controllerSeen bool
 }
 
 // NewReader constructs a Reader over the given client. Reads of unstructured
@@ -286,11 +294,22 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 	}
 	cohorts, unreadable, cohortsStale := r.cohorts(ctx)
 	topo.Cohorts, topo.CohortsUnreadable = cohorts, unreadable || cohortsStale
+	controllerDown := false
 	if slices.ContainsFunc(slices.Collect(maps.Values(topo.Queues)), func(q QueueState) bool { return q.Cohort != "" }) {
-		// Only borrowing depends on the version, and only a queue in a cohort
-		// can borrow: a cluster without cohorts costs no read.
+		// Only borrowing depends on the controller (its version, whether it
+		// runs) and on the Workloads, and only a queue in a cohort can borrow
+		// or lend: a cluster without cohorts costs neither read.
 		version := r.controllerVersion(ctx)
 		topo.VersionUntested = version.Known && !version.Tested
+		controllerDown = version.Down
+		pending := r.readPending(ctx, localQueues)
+		for name, q := range topo.Queues {
+			q.PendingWorkloads = pending.byQueue[name]
+			if p, ok := pending.reservedPriority[name]; ok {
+				q.ReservedPriority = &p
+			}
+			topo.Queues[name] = q
+		}
 	}
 	// A read cut short by the caller is not a snapshot, even when every call
 	// it made happened to return: a client that ignores ctx (or one that turned
@@ -322,6 +341,7 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		NamespaceWithinNominal: within,
 		SharedPools:            sharedPools(borrowing, flavorType),
 		BorrowStale:            cohortsStale,
+		KueueControllerDown:    controllerDown,
 	}, nil
 }
 
@@ -412,7 +432,8 @@ func externalLenders(ls []LenderState) []config.ExternalLender {
 	}
 	out := make([]config.ExternalLender, 0, len(ls))
 	for _, l := range ls {
-		out = append(out, config.ExternalLender{Queue: l.Queue, Waiting: l.Waiting, CanReclaim: l.CanReclaim, LentOut: l.LentOut})
+		out = append(out, config.ExternalLender{Queue: l.Queue, Waiting: l.Waiting, CanReclaim: l.CanReclaim, LentOut: l.LentOut,
+			PendingGPUs: l.PendingGPUs})
 	}
 	return out
 }

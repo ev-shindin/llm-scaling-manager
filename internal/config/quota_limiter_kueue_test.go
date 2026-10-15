@@ -292,6 +292,36 @@ var _ = Describe("KueueQuotaSource", func() {
 		Expect(QuotaLimiterConfig{Kueue: &KueueQuotaSource{Enabled: true}}.KueueBorrowSelected("any")).To(BeTrue(), "empty selects all")
 	})
 
+	It("hands borrowed replicas to non-reclaiming lenders only when the entry opts in", func() {
+		parse := func(doc string) QuotaLimiterConfig {
+			var e QuotaLimiterEntries
+			Expect(yaml.Unmarshal([]byte(doc), &e)).To(Succeed())
+			Expect(e.Limiters).To(HaveLen(1))
+			return e.Limiters[0]
+		}
+		head := "limiters:\n- name: q\n  type: quota\n  scope: namespace\n  kueue:\n    enabled: true\n"
+		Expect(parse(head).KueueReleasesToNonReclaiming()).To(BeFalse(), "absent means off")
+		Expect(parse(head + "    releaseToNonReclaimingLenders: false\n").KueueReleasesToNonReclaiming()).To(BeFalse())
+		on := parse(head + "    releaseToNonReclaimingLenders: true\n")
+		Expect(on.KueueReleasesToNonReclaiming()).To(BeTrue())
+		out := on.clone()
+		out.Kueue.ReleaseToNonReclaimingLenders = false
+		Expect(on.Kueue.ReleaseToNonReclaimingLenders).To(BeTrue(), "clone shares nothing")
+
+		disabled := parse("limiters:\n- name: q\n  type: quota\n  scope: namespace\n  kueue:\n    enabled: false\n    releaseToNonReclaimingLenders: true\n")
+		Expect(disabled.KueueReleasesToNonReclaiming()).To(BeFalse(), "nothing is borrowed without the reader")
+
+		off := false
+		bad := QuotaLimiterEntries{Limiters: []QuotaLimiterConfig{{Name: "ns", Type: "quota", Scope: QuotaScopeNamespace,
+			Kueue: &KueueQuotaSource{Enabled: true, CountBorrowable: &off, ReleaseToNonReclaimingLenders: true}}}}
+		_, err := bad.Validate()
+		Expect(err).To(MatchError(ContainSubstring("releaseToNonReclaimingLenders")))
+		good := QuotaLimiterEntries{Limiters: []QuotaLimiterConfig{{Name: "ns", Type: "quota", Scope: QuotaScopeNamespace,
+			Kueue: &KueueQuotaSource{Enabled: true, ReleaseToNonReclaimingLenders: true}}}}
+		_, err = good.Validate()
+		Expect(err).NotTo(HaveOccurred())
+	})
+
 	It("does not let borrowing figures change a bound", func() {
 		entry := QuotaLimiterConfig{
 			Name: "q", Type: "quota", Scope: QuotaScopeNamespace,
