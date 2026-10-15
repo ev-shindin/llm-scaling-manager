@@ -9,8 +9,11 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -88,6 +91,27 @@ var _ = Describe("what on-call sees of borrowing, engine side", func() {
 	}
 	targets := map[string]scaletarget.ScaleTargetAccessor{"a/v": scaletarget.NewDeploymentAccessor(
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "v", Namespace: "a"}})}
+
+	// Review finding (SRE): borrowing blocked because Kueue's preemptions
+	// could not be read showed borrowable 8 and no reason.
+	It("says borrowing is blocked because Kueue's preemptions could not be read", func() {
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		// No Workload kind served: the preemption read fails.
+		e := &Engine{Config: config.NewTestConfig(), Recorder: record.NewFakeRecorder(10),
+			client: fake.NewClientBuilder().WithScheme(scheme).Build()}
+		reqs := model(time.Time{})
+		cs := e.prepareBorrowing(ctx, world(16, t0), reqs, targets, t0)
+		ds := decisionsFor()
+		e.releaseBorrowed(ctx, reqs, ds, targets, t0)
+		e.publishBorrowSignals(cs, reqs, ds, t0)
+		Expect(series(constants.WVAQuotaBorrowWithheld, constants.LabelNamespace, constants.LabelReason)).To(
+			Equal(map[string]float64{"a," + allocation.BorrowReasonPreemptionsUnreadable: 1}))
+		Expect(series(constants.WVAQuotaLimitGPUs, constants.LabelNamespace, constants.LabelTier)).To(
+			HaveKeyWithValue("a,borrowable", 0.0))
+		Expect(e.borrowing.budgets.Entries).To(HaveLen(1))
+		Expect(e.borrowing.budgets.Entries[0].Reason).To(Equal(allocation.BorrowReasonPreemptionsUnreadable))
+	})
 
 	It("on a placement-timeout release: an Event on the scale target, borrow-unplaced, the unplaced gauge, the budget", func() {
 		rec := record.NewFakeRecorder(10)

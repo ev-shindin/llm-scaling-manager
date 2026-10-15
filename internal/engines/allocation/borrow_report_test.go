@@ -107,6 +107,24 @@ var _ = Describe("what on-call sees of borrowing", func() {
 		})
 	})
 
+	It("marks the budgets of a namespace whose preemptions could not be read, keeping a reason that holds anyway", func() {
+		budgets := []LimiterBudget{
+			{Namespace: "a", Borrowable: 8},
+			{Namespace: "a", Accelerator: "A100", Reason: BorrowReasonPoolEmpty},
+			{Namespace: "a", Accelerator: "L4", Reason: BorrowReasonNoBorrowCap},
+			{Namespace: "a", Accelerator: "T4", Reason: string(kueue.ReasonNotKueueManaged)},
+			{Namespace: "b", Borrowable: 4},
+		}
+		MarkPreemptionsUnreadable(budgets, map[string]bool{"a": true})
+		Expect(budgets).To(Equal([]LimiterBudget{
+			{Namespace: "a", Reason: BorrowReasonPreemptionsUnreadable},
+			{Namespace: "a", Accelerator: "A100", Reason: BorrowReasonPreemptionsUnreadable},
+			{Namespace: "a", Accelerator: "L4", Reason: BorrowReasonNoBorrowCap},
+			{Namespace: "a", Accelerator: "T4", Reason: string(kueue.ReasonNotKueueManaged)},
+			{Namespace: "b", Borrowable: 4},
+		}))
+	})
+
 	It("finds the cohorts a governed namespace borrows in now", func() {
 		Expect(BorrowingCohorts(govWorld{used: 32}.constraints(), nil)).To(Equal(map[string]bool{"c": true}))
 		Expect(BorrowingCohorts(govWorld{used: 32}.constraints(), map[string]map[string]int{"b": {"": 32}})).To(BeEmpty(),

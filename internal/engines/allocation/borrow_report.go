@@ -29,7 +29,30 @@ const (
 	// figure: its queues' borrowingLimit, the static entry or its
 	// ResourceQuota stops it there.
 	BorrowReasonNoBorrowCap = "no-borrow-cap"
+	// BorrowReasonPreemptionsUnreadable: Kueue's preemptions in the namespace
+	// could not be read this cycle, so none of its models grows on borrowed
+	// capacity (a preemption may have gone unseen).
+	BorrowReasonPreemptionsUnreadable = "preemptions-unreadable"
 )
+
+// MarkPreemptionsUnreadable reports, on every budget of a namespace whose
+// Kueue preemptions could not be read this cycle, a borrowable figure of 0
+// with reason preemptions-unreadable: the governor blocks every borrowed
+// growth there (BorrowGovernor.BorrowBlocked). A budget that already reads 0
+// for a reason that holds whatever preemptions say -- borrowing withheld, or
+// no borrow cap -- keeps that reason.
+func MarkPreemptionsUnreadable(budgets []LimiterBudget, unknown map[string]bool) {
+	for i := range budgets {
+		b := &budgets[i]
+		if !unknown[b.Namespace] {
+			continue
+		}
+		switch b.Reason {
+		case "", BorrowReasonPoolEmpty, BorrowReasonLenderWaiting:
+			b.Borrowable, b.Reason = 0, BorrowReasonPreemptionsUnreadable
+		}
+	}
+}
 
 // LimiterBudget is one namespace-scope limiter entry's figures for one
 // namespace and accelerator type, as a cycle used them.

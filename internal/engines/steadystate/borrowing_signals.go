@@ -38,6 +38,9 @@ func (e *Engine) publishBorrowSignals(constraints []*allocation.ResourceConstrai
 	}
 
 	budgets := allocation.LimiterBudgets(constraints, blocked)
+	if borrowing {
+		allocation.MarkPreemptionsUnreadable(budgets, st.cycle.PreemptionUnknown)
+	}
 	qb := make([]metrics.QuotaBudget, 0, len(budgets))
 	sb := make([]controllerstatus.LimiterBudget, 0, len(budgets))
 	for _, b := range budgets {
