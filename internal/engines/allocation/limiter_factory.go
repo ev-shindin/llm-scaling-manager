@@ -83,6 +83,10 @@ type sharedReader struct {
 	// entry, shared for the same reason as the reader: one check per namespace
 	// and interval, not one per engine.
 	eligibility *kueue.Eligibility
+	// memory keeps the entry's last counted borrowing view, so a limiter
+	// rebuilt while the reader is stale freezes at it instead of starting from
+	// the nominal cap.
+	memory *BorrowMemory
 }
 
 // sharedKueue returns the Reader and Eligibility for entry, creating or
@@ -100,7 +104,8 @@ func sharedKueue(entry config.QuotaLimiterConfig, kubeClient client.Client, name
 	if s, ok := kueueReaders.byEntry[entry.Name]; ok && s.key == string(key) {
 		return s
 	}
-	s := &sharedReader{key: string(key), reader: kueue.NewReader(kubeClient, opts), eligibility: kueue.NewEligibility(kubeClient, opts)}
+	s := &sharedReader{key: string(key), reader: kueue.NewReader(kubeClient, opts), eligibility: kueue.NewEligibility(kubeClient, opts),
+		memory: &BorrowMemory{}}
 	kueueReaders.byEntry[entry.Name] = s
 	return s
 }
@@ -168,7 +173,7 @@ func newQuotaLimiters(cfg *config.Config, kubeClient client.Client) ([]Limiter, 
 		if shared != nil && entry.KueueCountsBorrowable() {
 			// Counted only where every B1 condition holds; a physical limiter
 			// declared beside the entry is the GPU bound for every namespace.
-			inv.EnableBorrowing(BorrowOptions{Physical: cfg.HasPhysicalLimiter(), Eligibility: shared.eligibility})
+			inv.EnableBorrowing(BorrowOptions{Physical: cfg.HasPhysicalLimiter(), Eligibility: shared.eligibility, Memory: shared.memory})
 		}
 		constituents = append(constituents, NewDefaultLimiter(entry.Name, inv))
 	}

@@ -40,6 +40,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -106,6 +107,8 @@ type Reader struct {
 	warnedLabels bool
 	// warnedCohorts is set once a failed Cohort list has been logged.
 	warnedCohorts bool
+	// warnedNoStatus holds the cohort members logged as having no status.
+	warnedNoStatus map[string]bool
 }
 
 // NewReader constructs a Reader over the given client. Reads of unstructured
@@ -265,7 +268,7 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 			withheld[ns] = true
 			if !r.warnedLabels {
 				r.warnedLabels = true
-				ctrl.LoggerFrom(ctx).WithName("kueue").Error(err,
+				kueueLogger(ctx).Error(err,
 					"Cannot read a Namespace to evaluate a ClusterQueue namespaceSelector; withholding that queue's grant from the namespace, which is bounded at nothing until the read succeeds. Logged once until a later read succeeds.",
 					"namespace", ns, "clusterQueue", cqName,
 					"remedy", w.remedy())
@@ -278,7 +281,8 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		byNamespace[ns] = addCaps(byNamespace[ns], caps)
 		nsQueues[ns] = append(nsQueues[ns], cqName)
 	}
-	topo.Cohorts, topo.CohortsUnreadable = r.cohorts(ctx)
+	cohorts, unreadable, cohortsStale := r.cohorts(ctx)
+	topo.Cohorts, topo.CohortsUnreadable = cohorts, unreadable || cohortsStale
 	// A read cut short by the caller is not a snapshot, even when every call
 	// it made happened to return: a client that ignores ctx (or one that turned
 	// the cancellation into some other error) must not cache what it saw.
@@ -295,7 +299,8 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		// the grant is news again and is logged again.
 		r.warnedLabels = false
 	}
-	borrowing := ComputeBorrowing(topo, false)
+	r.warnNoStatus(ctx, topo)
+	borrowing := ComputeBorrowing(topo, cohortsStale)
 	guaranteed, within, err := r.borrowCaps(queues, flavorType, borrowing, nsQueues, byNamespace)
 	if err != nil {
 		return config.ExternalQuotas{}, err
@@ -307,7 +312,39 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		NamespaceGuaranteed:    guaranteed,
 		NamespaceWithinNominal: within,
 		SharedPools:            sharedPools(borrowing, flavorType),
+		BorrowStale:            cohortsStale,
 	}, nil
+}
+
+// kueueLogger is the logger every message of this package goes through.
+func kueueLogger(ctx context.Context) logr.Logger {
+	return ctrl.LoggerFrom(ctx).WithName("kueue")
+}
+
+// warnNoStatus logs, once per queue, each cohort member Kueue has written no
+// reservation status for: it withholds borrowing for its whole cohort
+// (no-status), and the borrowing line names only the reason. A queue that
+// gains status is forgotten, so losing it again is logged again. Callers must
+// hold r.mu.
+func (r *Reader) warnNoStatus(ctx context.Context, t Topology) {
+	for name, q := range t.Queues {
+		switch {
+		case q.Cohort == "" || q.HasStatus:
+			delete(r.warnedNoStatus, name)
+		case !r.warnedNoStatus[name]:
+			if r.warnedNoStatus == nil {
+				r.warnedNoStatus = map[string]bool{}
+			}
+			r.warnedNoStatus[name] = true
+			kueueLogger(ctx).Info("A ClusterQueue in a cohort has no status.flavorsReservation; borrowing is not counted in its cohort (reason no-status). Is the Kueue controller running? Logged once per queue.",
+				"clusterQueue", name, "cohort", q.Cohort)
+		}
+	}
+	for name := range r.warnedNoStatus {
+		if _, ok := t.Queues[name]; !ok {
+			delete(r.warnedNoStatus, name)
+		}
+	}
 }
 
 // borrowCaps builds, per namespace, the grant at each queue's guaranteed figure
@@ -431,40 +468,53 @@ func borrowRows(b Borrowing, t Topology, flavorType map[string]string, nsQueues 
 	return out
 }
 
-// cohorts lists the Cohort objects. Any failure — Forbidden, a Kueue that does
-// not serve the kind, a transient error — reports the hierarchy as unknown,
-// never as "no Cohort objects": that would call every cohort flat. It never
-// fails the read; the nominal figures do not depend on it. The failure is
-// logged once, until a later list succeeds; an unserved kind only at V(1).
-func (r *Reader) cohorts(ctx context.Context) (map[string]CohortState, bool) {
+// cohorts lists the Cohort objects. A failed list never reports "no Cohort
+// objects", which would call every cohort flat, and never fails the read; the
+// nominal figures do not depend on it.
+//
+//   - A Kueue that does not serve the kind, or a Forbidden list, reports the
+//     hierarchy as unknown (unreadable): it lasts until someone acts, and
+//     borrowing is withheld with reason hierarchy-unknown.
+//   - Any other failure may pass by the next read. It reports the borrowing
+//     figures of this read as stale (transient), so an entry that counts
+//     borrowing freezes rather than dropping to nominal over a blip.
+//
+// The failure is logged once, until a later list succeeds; an unserved kind
+// only at V(1). Callers must hold r.mu (warnedCohorts).
+func (r *Reader) cohorts(ctx context.Context) (out map[string]CohortState, unreadable, transient bool) {
 	items, err := r.list(ctx, KindCohort)
 	if err != nil {
+		noMatch := meta.IsNoMatchError(err)
+		persistent := noMatch || apierrors.IsForbidden(err)
 		if !r.warnedCohorts && ctx.Err() == nil {
 			r.warnedCohorts = true
-			logger := ctrl.LoggerFrom(ctx).WithName("kueue")
-			if meta.IsNoMatchError(err) {
+			logger := kueueLogger(ctx)
+			msg := "Cannot list Kueue Cohort objects; borrowing is not counted (reason hierarchy-unknown). Logged once until a later list succeeds."
+			if !persistent {
+				msg = "Cannot list Kueue Cohort objects; borrowing figures are stale and frozen until a list succeeds. Logged once until a later list succeeds."
+			}
+			if noMatch {
 				// A Kueue that serves no Cohort kind: no grant can fix it, and
 				// the reason on the borrowing line already says it.
-				logger = logger.V(1)
+				logger.V(1).Info(msg, "error", err.Error())
+			} else {
+				logger.Error(err, msg,
+					"remedy", "grant get and list on cohorts.kueue.x-k8s.io (config/components/kueue-reader)")
 			}
-			logger.Info(
-				"Cannot list Kueue Cohort objects; borrowing is not counted (reason hierarchy-unknown). Logged once until a later list succeeds.",
-				"error", err.Error(),
-				"remedy", "grant get and list on cohorts.kueue.x-k8s.io (config/components/kueue-reader)")
 		}
-		return nil, true
+		return nil, persistent, !persistent
 	}
 	r.warnedCohorts = false
-	out := make(map[string]CohortState, len(items))
+	out = make(map[string]CohortState, len(items))
 	for i := range items {
 		out[items[i].GetName()] = cohortState(&items[i])
 	}
-	return out, false
+	return out, false, false
 }
 
 // cohortState reads a Cohort's parent and whether it declares quota of its
 // own. The parent is spec.parentName; spec.parent is read too, for the older
-// alpha API.
+// v1alpha1 Cohort API, which named the field so.
 func cohortState(u *unstructured.Unstructured) CohortState {
 	parent, _, _ := unstructured.NestedString(u.Object, "spec", "parentName")
 	if parent == "" {

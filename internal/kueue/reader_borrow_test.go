@@ -3,7 +3,10 @@ package kueue
 import (
 	"context"
 	"errors"
+	"strings"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -179,6 +182,59 @@ var _ = Describe("Reader borrowing figures", func() {
 		snap := readBorrow(c)
 		Expect(snap.Borrow["team-a"][0].Reason).To(Equal(string(ReasonHierarchyUnknown)))
 		Expect(snap.Namespace["team-a"]).To(Equal(typedCaps(map[string]int{h100Product: 9})))
+		Expect(snap.BorrowStale).To(BeFalse(), "Forbidden lasts until someone grants the read")
+	})
+
+	// A failed Cohort list that may pass by the next read must freeze, not
+	// read as a fresh snapshot that withholds everything (hierarchy-unknown)
+	// and drops every counted namespace to nominal.
+	It("marks the borrowing figures stale on a transient Cohort list failure, and the read still succeeds", func() {
+		const v = "v1beta2"
+		c := fake.NewClientBuilder().
+			WithScheme(runtime.NewScheme()).
+			WithRESTMapper(cohortMapper(v)).
+			WithObjects(docsExample(v, "cohortName")...).
+			WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == KindCohort+"List" {
+						return apierrors.NewServiceUnavailable("etcd blip")
+					}
+					return cl.List(ctx, list, opts...)
+				},
+			}).
+			Build()
+		snap := readBorrow(c)
+		Expect(snap.BorrowStale).To(BeTrue())
+		Expect(snap.Borrow["team-a"][0].Reason).To(Equal(string(ReasonStale)))
+		Expect(snap.SharedPools[0].Free).To(Equal(0))
+		Expect(snap.Namespace["team-a"]).To(Equal(typedCaps(map[string]int{h100Product: 9})), "the nominal figures do not depend on it")
+	})
+
+	It("keeps an unserved Cohort kind out of the stale path", func() {
+		const v = "v1beta2"
+		snap := readBorrow(newFakeClient(v, docsExample(v, "cohortName")...))
+		Expect(snap.BorrowStale).To(BeFalse())
+	})
+
+	It("names a cohort member without status in the log, once", func() {
+		const v = "v1beta2"
+		objs := docsExample(v, "cohortName")
+		delete(objs[2].(*unstructured.Unstructured).Object, "status")
+		var lines []string
+		ctx := logr.NewContext(context.Background(), funcr.NewJSON(func(obj string) { lines = append(lines, obj) }, funcr.Options{}))
+		r := NewReader(newCohortClient(v, objs...), Options{})
+		for range 2 {
+			_, err := r.Quotas(ctx)
+			Expect(err).NotTo(HaveOccurred())
+		}
+		n := 0
+		for _, l := range lines {
+			if strings.Contains(l, "no status.flavorsReservation") {
+				n++
+				Expect(l).To(ContainSubstring(`"clusterQueue":"team-b-cq"`))
+			}
+		}
+		Expect(n).To(Equal(1))
 	})
 
 	It("reads no-status when Kueue never wrote a queue's status", func() {

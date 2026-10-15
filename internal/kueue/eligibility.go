@@ -36,8 +36,10 @@ const ownerDepth = 4
 // rather than from Kueue's queues.
 type NamespaceEligibility struct {
 	// Reason is why borrowing must not be counted in the namespace
-	// (ReasonNotKueueManaged, ReasonResourceQuotaUnreadable), or empty. The GPU
-	// bound condition needs the queue figures and is the caller's.
+	// (ReasonNotKueueManaged, ReasonResourceQuotaUnreadable), ReasonStale when
+	// a ResourceQuota read failed for a reason that may pass (the caller then
+	// freezes, as for a stale snapshot), or empty. The GPU bound condition needs
+	// the queue figures and is the caller's.
 	Reason Reason
 	// GPUQuota is, per GPU resource name, the tightest hard limit any of the
 	// namespace's ResourceQuotas sets on it (requests.<name> or <name>). Absent
@@ -48,6 +50,9 @@ type NamespaceEligibility struct {
 	// managed is the last answer of the managed check, kept for a later
 	// evaluation that finds no GPU pod.
 	managed bool
+	// askedAt is when the namespace was last asked about; Evaluate forgets
+	// one not asked about for long.
+	askedAt time.Time
 }
 
 // Eligibility evaluates the engine-side B1 conditions per namespace, at most
@@ -91,7 +96,14 @@ func NewEligibility(c client.Client, opts Options) *Eligibility {
 }
 
 // Evaluate returns the answer for each namespace, re-evaluating the ones whose
-// answer is older than the refresh interval.
+// answer is older than the refresh interval. An answer of ReasonStale (a read
+// that may pass) is re-evaluated on the next call. A namespace not asked about
+// for forgetAfter is forgotten, so a deleted namespace leaves nothing behind;
+// one that drops out of the candidates only briefly keeps its last answer.
+//
+// e.mu is held across the API reads on purpose: both engines share one
+// Eligibility, and the second caller in an interval must wait for the first
+// one's answers rather than read the same namespaces again (single flight).
 func (e *Eligibility) Evaluate(ctx context.Context, namespaces []string) map[string]NamespaceEligibility {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -99,17 +111,32 @@ func (e *Eligibility) Evaluate(ctx context.Context, namespaces []string) map[str
 	out := make(map[string]NamespaceEligibility, len(namespaces))
 	for _, ns := range namespaces {
 		prev, seen := e.byNS[ns]
-		if seen && e.interval > 0 && now.Sub(prev.EvaluatedAt) < e.interval {
+		if seen && e.interval > 0 && !prev.EvaluatedAt.IsZero() && now.Sub(prev.EvaluatedAt) < e.interval {
+			prev.askedAt = now
+			e.byNS[ns] = prev
 			out[ns] = prev
 			continue
 		}
 		got := e.evaluate(ctx, ns, prev, seen)
-		got.EvaluatedAt = now
+		if got.Reason != ReasonStale {
+			got.EvaluatedAt = now
+		}
+		got.askedAt = now
 		e.byNS[ns] = got
 		out[ns] = got
 	}
+	forget := max(forgetAfter, 10*e.interval)
+	for ns, el := range e.byNS {
+		if now.Sub(el.askedAt) > forget {
+			delete(e.byNS, ns)
+		}
+	}
 	return out
 }
+
+// forgetAfter is the least time an answer is kept for a namespace no longer
+// asked about; at least ten refresh intervals.
+const forgetAfter = time.Hour
 
 // evaluate runs both checks for one namespace.
 func (e *Eligibility) evaluate(ctx context.Context, ns string, prev NamespaceEligibility, seen bool) NamespaceEligibility {
@@ -128,10 +155,18 @@ func (e *Eligibility) evaluate(ctx context.Context, ns string, prev NamespaceEli
 	switch {
 	case !got.managed:
 		got.Reason = ReasonNotKueueManaged
-	case err != nil:
+	case apierrors.IsForbidden(err):
 		// Never "no ResourceQuota": a ResourceQuota that could not be read may
-		// be the very bound borrowing relies on.
+		// be the very bound borrowing relies on. Forbidden lasts until someone
+		// grants the read, so the answer is kept for the interval.
 		got.Reason = ReasonResourceQuotaUnreadable
+	case err != nil:
+		// A read that may pass by the next cycle: stale, which freezes the
+		// entry's borrowing rather than dropping it to nominal, and is not
+		// kept for the interval (Evaluate asks again next call). The last
+		// figures read stand in meanwhile.
+		got.Reason = ReasonStale
+		quota = prev.GPUQuota
 	}
 	got.GPUQuota = quota
 	return got

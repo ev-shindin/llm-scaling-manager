@@ -335,6 +335,11 @@ type ExternalQuotas struct {
 	// SharedPools are the cohorts' free pools, one per cohort, flavor and GPU
 	// resource, each spent once across every namespace in the cohort.
 	SharedPools []ExternalSharedPool
+	// BorrowStale is set when the read succeeded for the nominal figures but
+	// not for borrowing: a transient failure to list the Cohort objects. Every
+	// borrowing row then carries the stale reason, and a quota entry that counts
+	// borrowing treats the snapshot as stale -- it freezes, never shrinks.
+	BorrowStale bool
 }
 
 // ExternalSharedPool is one cohort's free capacity of one flavor and GPU

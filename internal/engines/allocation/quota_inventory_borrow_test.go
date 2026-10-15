@@ -180,6 +180,66 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 		Expect(c.SharedPools[0].Free).To(Equal(0), "no new borrowing while stale")
 	})
 
+	frozenAtGuaranteed := func(inv *QuotaInventory, c *ResourceConstraints) {
+		ExpectWithOffset(1, inv.EffectiveConfig().NamespaceQuotas["team-a"]).To(Equal(map[string]int{"H100": 0}), "frozen, never shrunk back to nominal")
+		ExpectWithOffset(1, c.NamespaceBorrow["team-a"]["H100"].Cap).To(Equal(16))
+		ExpectWithOffset(1, c.SharedPools[0].Free).To(Equal(0), "no new borrowing while stale")
+	}
+
+	It("freezes when a read succeeded but its borrowing half is stale (a transient Cohort list error)", func() {
+		borrowStale := snapshot
+		borrowStale.BorrowStale = true
+		b := build(entry(nil), &fakeEligibility{}, true, snapshot, borrowStale)
+		constraintsOf(b)
+		frozenAtGuaranteed(b.inv, constraintsOf(b))
+	})
+
+	It("freezes when a namespace's ResourceQuota read may pass (eligibility stale)", func() {
+		elig := &fakeEligibility{}
+		b := build(entry(nil), elig, true, snapshot)
+		constraintsOf(b)
+		elig.byNS = map[string]kueue.NamespaceEligibility{"team-a": {Reason: kueue.ReasonStale}}
+		frozenAtGuaranteed(b.inv, constraintsOf(b))
+	})
+
+	It("keeps the frozen view across a limiter rebuild while the source is stale", func() {
+		mem := &BorrowMemory{}
+		src := &fakeQuotaSource{}
+		src.push(snapshot, nil)
+		first := NewQuotaInventoryWithSource(entry(nil), src)
+		first.now = fresh
+		first.EnableBorrowing(BorrowOptions{Physical: true, Eligibility: &fakeEligibility{}, Memory: mem})
+		Expect(first.Refresh(ctx)).To(Succeed())
+
+		// The rebuild: a new inventory for the same entry, sharing the memory
+		// the way it shares the reader, built while every read fails.
+		down := &fakeQuotaSource{}
+		down.push(snapshot, errors.New("api down"))
+		rebuilt := NewQuotaInventoryWithSource(entry(nil), down)
+		rebuilt.now = fresh
+		rebuilt.EnableBorrowing(BorrowOptions{Physical: true, Eligibility: &fakeEligibility{}, Memory: mem})
+		c, err := NewDefaultLimiter("namespace-quota", rebuilt).ComputeConstraints(ctx, nil, map[string]map[string]int{"team-a": {}})
+		Expect(err).NotTo(HaveOccurred())
+		frozenAtGuaranteed(rebuilt, c)
+
+		// A rebuild that changed the entry does not freeze at the old figures.
+		changed := entry(nil)
+		changed.NamespaceQuotas = map[string]map[string]int{"default": {"H100": 12}}
+		other := NewQuotaInventoryWithSource(changed, down)
+		other.now = fresh
+		other.EnableBorrowing(BorrowOptions{Physical: true, Eligibility: &fakeEligibility{}, Memory: mem})
+		Expect(other.Refresh(ctx)).To(Succeed())
+		Expect(other.EffectiveConfig().NamespaceQuotas["team-a"]).To(Equal(map[string]int{"H100": 8}))
+	})
+
+	It("shares one borrowing memory per entry, beside its reader, across rebuilds", func() {
+		e := entry(nil)
+		e.Name = "memory-share-test"
+		a, b := sharedKueue(e, nil, ""), sharedKueue(e, nil, "")
+		Expect(a.memory).NotTo(BeNil())
+		Expect(b.memory).To(BeIdenticalTo(a.memory))
+	})
+
 	It("reads a snapshot older than twice the refresh interval as stale", func() {
 		src := &fakeQuotaSource{}
 		src.push(snapshot, nil)

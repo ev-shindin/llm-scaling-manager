@@ -90,6 +90,10 @@ type BorrowOptions struct {
 	// Eligibility evaluates whether Kueue manages a namespace's GPU pods and
 	// reads its ResourceQuotas. Nil counts no borrowing.
 	Eligibility BorrowEligibility
+	// Memory, when set, keeps the last counted borrowing view across a limiter
+	// rebuild, so a stale read after one still freezes. Shared per entry with
+	// its Kueue reader (limiter_factory.go); nil keeps none.
+	Memory *BorrowMemory
 }
 
 // borrowView is the borrowing an entry counts after one Refresh.
@@ -241,11 +245,17 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 		effective = q.static.BoundBy(ext)
 	}
 	// Borrowing is computed outside the lock: the eligibility check may read
-	// the API server.
+	// the API server. A namespace whose ResourceQuota read may pass by the
+	// next cycle makes the whole read stale: it freezes like a failed read.
 	var view *borrowView
+	stale := false
 	if q.countsBorrowing() && !ext.ObservedAt.IsZero() {
-		if !q.snapshotStale(ext, err) {
-			view = q.computeBorrowing(ctx, ext)
+		stale = q.snapshotStale(ext, err)
+		if !stale {
+			view, stale = q.computeBorrowing(ctx, ext)
+			if stale {
+				view = nil
+			}
 		}
 	}
 	// Maps marshal with sorted keys, so equal snapshots fingerprint equal.
@@ -282,22 +292,28 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 			}
 		}
 	}
-	stale := q.countsBorrowing() && !ext.ObservedAt.IsZero() && q.snapshotStale(ext, err)
+	// The view to freeze from: this inventory's own, or, for an inventory
+	// built by a limiter rebuild while the source was stale, the last one the
+	// shared memory holds for the same entry.
+	last := q.borrow
+	if stale && last == nil {
+		last = q.borrowOpts.Memory.load(q.memoryKey())
+	}
 	switch {
 	case view != nil && len(view.byNS) > 0:
 		effective = view.effective
-	case stale && q.borrow != nil:
+	case stale && last != nil:
 		// Stale reads freeze, never shrink (B6): every figure stays where it
 		// was, and nothing new is borrowed. An API blip must not cause a
 		// reclaim the cluster did not ask for.
-		frozen := *q.borrow
+		frozen := *last
 		frozen.frozen = true
-		frozen.pools = slices.Clone(q.borrow.pools)
+		frozen.pools = slices.Clone(last.pools)
 		for i := range frozen.pools {
 			frozen.pools[i].Free = 0
 			frozen.pools[i].Stale = true
 		}
-		view, effective = &frozen, q.borrow.effective
+		view, effective = &frozen, last.effective
 	}
 	q.withheld = q.withheldReasons(ext, view, stale)
 	q.logBorrowing(logger, ext, view, stale)
@@ -306,15 +322,65 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 		// countBorrowable: false. The view only carried the reasons to log.
 		view = nil
 	}
+	if !stale && q.countsBorrowing() && !ext.ObservedAt.IsZero() {
+		q.borrowOpts.Memory.store(q.memoryKey(), view)
+	}
 	q.cfg = effective
 	q.borrow = view
 	return nil
 }
 
+// memoryKey identifies what a remembered borrowing view was computed for: the
+// static entry and whether a physical limiter is the GPU bound. A rebuild that
+// changed either does not freeze at the old figures.
+func (q *QuotaInventory) memoryKey() string {
+	key, _ := json.Marshal(struct {
+		Entry    config.QuotaLimiterConfig
+		Physical bool
+	}{q.static, q.borrowOpts.Physical})
+	return string(key)
+}
+
+// BorrowMemory keeps the last borrowing view an entry counted from a fresh
+// read, beside the entry's shared Kueue reader, so it outlives the
+// QuotaInventory that computed it. A limiter rebuilt while the source is stale
+// starts with no view of its own; without the memory it would fall to the
+// nominal cap, the shrink a stale read must never cause. The zero value and a
+// nil *BorrowMemory remember nothing.
+type BorrowMemory struct {
+	mu   sync.Mutex
+	key  string
+	view *borrowView
+}
+
+// store remembers view (nil: nothing counted) for key.
+func (m *BorrowMemory) store(key string, view *borrowView) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.key, m.view = key, view
+}
+
+// load returns the view remembered for key, or nil.
+func (m *BorrowMemory) load(key string) *borrowView {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.key != key {
+		return nil
+	}
+	return m.view
+}
+
 // snapshotStale reports whether a Kueue snapshot is stale (B1): the last read
-// failed, or the snapshot is older than twice the refresh interval.
+// failed, its borrowing half failed (a transient Cohort list error), or the
+// snapshot is older than twice the refresh interval.
 func (q *QuotaInventory) snapshotStale(ext config.ExternalQuotas, readErr error) bool {
-	return readErr != nil || q.clock().Sub(ext.ObservedAt) > 2*q.static.KueueRefreshInterval()
+	return readErr != nil || ext.BorrowStale || q.clock().Sub(ext.ObservedAt) > 2*q.static.KueueRefreshInterval()
 }
 
 // computeBorrowing derives the borrowing this entry counts from a fresh
@@ -330,7 +396,10 @@ func (q *QuotaInventory) snapshotStale(ext config.ExternalQuotas, readErr error)
 // force). A counted namespace's cap becomes its guaranteed figure, bounded by
 // the static entry as the nominal figure is; every other namespace keeps the
 // nominal figure.
-func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.ExternalQuotas) *borrowView {
+//
+// stale reports that a namespace's engine-side answer was kueue.ReasonStale (a
+// read that may pass): the caller then treats the whole read as stale.
+func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.ExternalQuotas) (view *borrowView, stale bool) {
 	candidates := make([]string, 0, len(ext.Borrow))
 	for ns, rows := range ext.Borrow {
 		if ns == config.QuotaLimiterReservedNamespaceKey || q.static.IsExcluded(ns) || !slices.ContainsFunc(rows, config.ExternalBorrow.Counted) {
@@ -341,10 +410,11 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 	slices.Sort(candidates)
 	elig := q.borrowOpts.Eligibility.Evaluate(ctx, candidates)
 
-	view := &borrowView{withheld: map[string]string{}, cohorts: map[string][]string{}}
+	view = &borrowView{withheld: map[string]string{}, cohorts: map[string][]string{}}
 	counted := map[string]bool{}
 	for _, ns := range candidates {
 		e := elig[ns]
+		stale = stale || e.Reason == kueue.ReasonStale
 		reason := string(e.Reason)
 		if reason == "" && !q.borrowOpts.Physical && !resourceQuotaBounds(ext.Borrow[ns], e.GPUQuota) {
 			reason = string(kueue.ReasonNoGPUBound)
@@ -355,8 +425,8 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 		}
 		counted[ns] = true
 	}
-	if len(counted) == 0 {
-		return view
+	if len(counted) == 0 || stale {
+		return view, stale
 	}
 
 	at := func(figures map[string]config.ExternalCaps) config.ExternalQuotas {
@@ -415,7 +485,7 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 			},
 		})
 	}
-	return view
+	return view, false
 }
 
 // namespaceBorrow derives one namespace's borrowing figures for one type from
