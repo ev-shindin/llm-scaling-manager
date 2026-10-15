@@ -29,7 +29,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | cluster policy not applied | `WVAPolicyNamespaceUnverified`; `wva_policy_namespace_unverified == 1` | the controller may not read Namespaces, so it runs on its own ConfigMap | [policy namespace unverified](#cluster-policy-is-not-applied-policy-namespace-unverified) |
 | ScaledObject `READY False` or `TARGETS <unknown>` | `kubectl get scaledobject,hpa -n <ns>` | `scalerAddress` names a namespace with no scaler, `modelID` missing, the controller not Ready, KEDA backing off after a reinstall | [ScaledObject](#scaledobject-ready-false-or-targets-unknown) |
 | capacity priced high after a restart | TTFT worse after an upgrade or leader change; `P3-k2`/`P4-k1` in `k2-decision` where `P1-obs` was before | `LEARNED_STATE_SNAPSHOT` off, the Role missing, an engine configuration that changed or could not be read | [after a restart](#capacity-priced-high-after-a-restart) |
-| one variant held larger than its load needs | `k2-decision` keeps `P2-hist` or `P2-borrow` for one variant while its replicas run light | a k2 learned from a bad reading, or a sibling's figure that does not fit this variant | [reset one variant](#reset-one-variants-learned-state) |
+| one variant held larger than its load needs | `k2-decision` keeps `P2-hist` or `P2-borrow` for one variant while its replicas run light | `P2-hist`: a k2 learned from a bad reading. `P2-borrow`: a sibling's figure that does not fit this variant | `P2-hist`: [reset one variant](#reset-one-variants-learned-state). `P2-borrow`: [`disableK2Borrow`](scaling-policy.md#disablek2borrow) |
 | utilization-share optimizer does nothing | `wva_utilization_share_mode`, `wva_utilization_share_actionable` | shadow mode, not planned, held, swinging | [optimizer](#the-optimizer-evaluates-but-never-moves-anything) |
 
 Alerts that point here are listed in [Prometheus: the shipped alerts](prometheus.md#the-shipped-alerts).
@@ -424,10 +424,12 @@ with no store. To forget one variant instead, see the next section.
 
 ## Reset one variant's learned state
 
-Use this when one variant is priced from a figure you no longer trust: it holds
-more replicas than its load needs, and `k2-decision` shows `P2-hist` (its own
-history) or `P2-borrow` (a sibling's figure) for it. It forgets that variant
-only; every other variant keeps what it has learned.
+Use this when one variant is priced from its own history you no longer trust:
+it holds more replicas than its load needs, and `k2-decision` shows `P2-hist`
+for it. It forgets that variant only; every other variant keeps what it has
+learned. If `k2-decision` shows `P2-borrow` (a sibling's figure), set
+[`disableK2Borrow`](scaling-policy.md#disablek2borrow) for the model instead:
+forgetting does not stop a borrow.
 
 1. Annotate the variant's scale target -- the Deployment or LeaderWorkerSet
    itself, not its pod template, so nothing restarts. The value is any string;
@@ -442,11 +444,17 @@ only; every other variant keeps what it has learned.
    `Learned state forgotten for one variant, on request`, with the variant and
    the number of `entries` dropped.
 
-What is forgotten: the variant's measured k2 and throughput, its k2 borrows,
-its ITL line (including one it lent to siblings), its replica start estimate,
-and its capacity record. The variant then prices from its deployment-derived
-figure, as a new variant would, until it saturates again. Expect more replicas
-or a higher price for a while, depending on which figure was wrong.
+What is forgotten: the variant's measured k2 and throughput, its ITL line
+(including one it lent to siblings), its replica start estimate, and its
+capacity record. The variant then prices as a new variant would until it
+saturates again: from its deployment-derived figure, or from a lower measured
+k2 of a compatible sibling where one exists (the k2 borrow), which orders more
+replicas, not fewer. Expect more replicas or a higher price for a while,
+depending on which figure was wrong.
+
+A k2 borrow the variant was running is ended, not dropped: it does not start
+again unless the sibling's figure or the variant's configuration changes. A
+dropped one would have started again at full strength on the next cycle.
 
 - **Acted on once per value.** Leaving the annotation in place does nothing
   more, across controller restarts too when `LEARNED_STATE_SNAPSHOT` is on.

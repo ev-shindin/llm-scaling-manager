@@ -60,13 +60,18 @@ import (
 // ended: that drop used to re-arm the borrow at full strength once a week, for
 // a variant that had already lived on its own figure for days -- a periodic
 // cost with no new evidence behind it, about 42 GPU-hours per replica per
-// bucket on whole 8-GPU nodes. The clock now keeps what it was armed on, the
-// donor's figure and the borrower's engine configuration, and re-arms only
-// when one of them has changed (borrowState.rearms): a donor that has measured
-// something materially different, or a borrower redeployed with other flags,
-// is a new question; the passage of time is not. The clock goes when its
-// variant does (EvictStaleHistory, on the variant's liveness). A controller
-// restart keeps it through the learned-state snapshot, if that is on.
+// bucket on whole 8-GPU nodes. The clock now keeps what the borrow last ran
+// on -- the donor's figure and the borrower's engine configuration on its
+// last serving cycle -- and re-arms only when one of them has changed since
+// it was spent (borrowState.rearms): a donor that has measured something
+// materially different, or a borrower redeployed with other flags, is a new
+// question; the passage of time is not. Compared with what the borrow was
+// ARMED on instead, a donor still filling its window when the borrow started,
+// or a flag changed in its third hour, re-armed it at full strength on the
+// cycle it ended. The clock goes when its variant does (EvictStaleHistory, on
+// the variant's liveness). A controller restart keeps it through the
+// learned-state snapshot, if that is on; so does forgetting the variant on
+// request (ForgetVariant), which ends a running borrow instead of dropping it.
 
 const (
 	// BorrowedK2Hold is how long a borrowed k2 is used at full strength
@@ -78,13 +83,16 @@ const (
 	// fraction of the gap per cycle, so the fleet thins a replica at a time
 	// and the first saturation is a short, measured one rather than a cliff.
 	BorrowedK2Relax = 6 * time.Hour
-	// BorrowedK2TickGap is the longest gap between two serving cycles that
-	// the clock counts as serving time. Longer than any reconcile interval
-	// with room for a missed cycle or two; a longer gap -- the variant parked,
-	// or serving another bucket -- is paused time and is not counted.
+	// BorrowedK2TickGap is the least the longest gap between two serving
+	// cycles the clock counts as serving time can be; the analyzer uses three
+	// optimisation intervals when that is longer (WithOptimizationInterval).
+	// Room for a missed cycle or two. A longer gap -- the variant parked, or
+	// serving another bucket -- is paused time, except for the allowance
+	// itself: the clock counts up to this much of any gap, so each pause adds
+	// at most one allowance of serving time to the borrow.
 	BorrowedK2TickGap = 5 * time.Minute
 	// BorrowedK2RearmChange is how far a donor's figure must have moved, as a
-	// fraction of the figure the borrow was armed on, before a spent borrow
+	// fraction of the figure the borrow last ran on, before a spent borrow
 	// re-arms. Well above a window's cycle-to-cycle drift, so a donor that is
 	// merely still measuring does not restart a borrow.
 	BorrowedK2RearmChange = 0.2
@@ -92,8 +100,8 @@ const (
 
 // borrowState is what a borrow's clock keeps beside its start
 // (k2BorrowedSince): when the variant last served the bucket, when anything
-// last read the clock or found the variant present, and what the borrow was
-// armed on.
+// last read the clock or found the variant present, and what the borrow last
+// ran on.
 type borrowState struct {
 	// tick is the last serving cycle; the start is moved forward by any gap
 	// past BorrowedK2TickGap, so start-to-tick is serving time only.
@@ -101,15 +109,16 @@ type borrowState struct {
 	// seen is when the clock was last read, ticked or its variant noted
 	// present. The clock is swept on it, with the variant's other state.
 	seen time.Time
-	// donorK2 and args are the evidence the borrow was armed on: the donor's
-	// figure and the borrower's engine configuration (Fingerprint).
+	// donorK2 and args are the evidence the borrow last ran on: the donor's
+	// figure and the borrower's engine configuration (Fingerprint), set when
+	// it is armed and refreshed on every serving cycle while it runs.
 	donorK2 int64
 	args    string
 }
 
 // rearms says whether a spent borrow may start again: the donor's figure has
 // moved by more than BorrowedK2RearmChange, or the borrower's engine
-// configuration is not the one the borrow was armed under.
+// configuration is not the one the borrow last ran under.
 func (st *borrowState) rearms(donorK2 int64, args string) bool {
 	if args != st.args {
 		return true
@@ -146,6 +155,27 @@ func splitVariantKey(key string) (namespace, variant, rest string, ok bool) {
 	return parts[0], parts[1], parts[2], true
 }
 
+// WithOptimizationInterval sizes the longest gap between two serving cycles
+// the borrow clock counts as serving time to the controller's optimisation
+// interval: three intervals, never less than BorrowedK2TickGap. With the
+// constant alone, an interval above it read every gap between two cycles as a
+// pause, counted only five minutes of each, and stretched a 6.5-hour borrow
+// over many more hours of wall time.
+func (a *SaturationAnalyzer) WithOptimizationInterval(interval time.Duration) *SaturationAnalyzer {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.borrowTickGap = max(BorrowedK2TickGap, 3*interval)
+	return a
+}
+
+// BorrowTickGap reports the longest gap between two serving cycles a borrow
+// clock counts as serving time, for the caller that logs it.
+func (a *SaturationAnalyzer) BorrowTickGap() time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return max(a.borrowTickGap, BorrowedK2TickGap)
+}
+
 // noteBorrowServing advances the borrow clock of a history key on a cycle
 // where a Ready replica of the variant's own serves it. A key with no clock is
 // left alone: serving does not start a borrow, borrowing does.
@@ -168,8 +198,9 @@ func (a *SaturationAnalyzer) noteBorrowServingLocked(key string, now time.Time) 
 		st = &borrowState{tick: now}
 		a.k2BorrowState[key] = st
 	}
-	if gap := now.Sub(st.tick); !st.tick.IsZero() && gap > BorrowedK2TickGap {
-		a.k2BorrowedSince[key] = since.Add(gap - BorrowedK2TickGap)
+	tickGap := max(a.borrowTickGap, BorrowedK2TickGap)
+	if gap := now.Sub(st.tick); !st.tick.IsZero() && gap > tickGap {
+		a.k2BorrowedSince[key] = since.Add(gap - tickGap)
 	}
 	st.tick = now
 	st.seen = now
@@ -286,12 +317,43 @@ func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownPa
 	}
 	age := end.Sub(since)
 	if relaxedAt(age) < 1 {
+		if serving {
+			// What a spent borrow is later judged against is what it last
+			// ran on, not what it was armed on: a change that happened while
+			// it ran is not new evidence once it ends.
+			st.donorK2, st.args = best.k2, args
+		}
 		return at(age), true
 	}
 	if serving && st.rearms(best.k2, args) {
 		return arm()
 	}
 	return k2Borrow{}, false
+}
+
+// spendBorrowsLocked ends every borrow clock whose key starts with prefix, as
+// if its relaxation had run its course, and keeps what it last ran on. A
+// spent clock re-arms only on new evidence (borrowState.rearms), where a
+// dropped one re-armed at full strength on the variant's next serving cycle.
+// Callers hold a.mu.
+func (a *SaturationAnalyzer) spendBorrowsLocked(prefix string, now time.Time) {
+	spent := now.Add(-(BorrowedK2Hold + BorrowedK2Relax))
+	for key, since := range a.k2BorrowedSince {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if since.After(spent) {
+			a.k2BorrowedSince[key] = spent
+		}
+		st := a.k2BorrowState[key]
+		if st == nil {
+			// No record of what it ran on: borrowedK2 takes the next
+			// cycle's figures as the evidence from there.
+			st = &borrowState{}
+			a.k2BorrowState[key] = st
+		}
+		st.tick, st.seen = now, now
+	}
 }
 
 // logBorrowedK2 is the k2-decision line for a borrowed figure. It names the

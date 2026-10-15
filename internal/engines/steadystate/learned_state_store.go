@@ -210,7 +210,8 @@ func (e *Engine) restoreLearnedState(ctx context.Context, now time.Time) {
 	logger.Info("Learned state: snapshot restored",
 		"writtenAt", doc.WrittenAt, "writer", doc.Writer.Identity,
 		"pendingVariants", rep.PendingVariants, "itlLines", rep.ITLLines,
-		"aged", rep.Aged, "unusable", rep.Unusable, "unattributable", rep.Unattributable)
+		"aged", rep.Aged, "unusable", rep.Unusable, "unattributable", rep.Unattributable,
+		"borrowClocks", rep.BorrowClocks, "forgotten", rep.Forgotten)
 }
 
 // rejected says why a document will not be restored, or "".
@@ -337,6 +338,21 @@ func learnedStateDigest(s saturation.LearnedState) string {
 	for k := range s.VariantSeenAt {
 		s.VariantSeenAt[k] = time.Time{}
 	}
+	// A borrow clock's tick moves on every serving cycle and its seen on
+	// every cycle its variant exists, as a forget mark's seen does: kept in,
+	// they changed the digest every interval and rewrote the document every
+	// minute for as long as any borrow or forget existed. Left out, a running
+	// borrow's tick is written at least every learnedStateRefresh; a restart
+	// reads the part since then as a pause, which keeps the borrow slightly
+	// longer, never shorter. The start, which a pause moves, stays in.
+	for k, st := range s.K2BorrowState {
+		st.Tick, st.Seen = time.Time{}, time.Time{}
+		s.K2BorrowState[k] = st
+	}
+	for k, m := range s.Forgotten {
+		m.Seen = time.Time{}
+		s.Forgotten[k] = m
+	}
 	raw, err := json.Marshal(s)
 	if err != nil {
 		return ""
@@ -393,6 +409,8 @@ func cloneLearnedState(s saturation.LearnedState) saturation.LearnedState {
 	s.Accelerators = maps.Clone(s.Accelerators)
 	s.ITLLines = maps.Clone(s.ITLLines)
 	s.K2BorrowedSince = maps.Clone(s.K2BorrowedSince)
+	s.K2BorrowState = maps.Clone(s.K2BorrowState)
+	s.Forgotten = maps.Clone(s.Forgotten)
 	s.Config = maps.Clone(s.Config)
 	return s
 }
@@ -407,7 +425,7 @@ type learnedStateEntry struct {
 // learnedStateEntries lists the state's entries, least recently used first.
 func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 	out := make([]learnedStateEntry, 0, len(s.K2)+len(s.Throughput)+len(s.VariantSeenAt)+
-		len(s.ITLLines)+len(s.Accelerators)+len(s.K2BorrowedSince))
+		len(s.ITLLines)+len(s.Accelerators)+len(s.K2BorrowedSince)+len(s.Forgotten))
 	for k, w := range s.K2 {
 		out = append(out, learnedStateEntry{w.LastUsed, func() { delete(s.K2, k) }})
 	}
@@ -427,8 +445,22 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 	for k, m := range s.Accelerators {
 		out = append(out, learnedStateEntry{m.LastUsed, func() { delete(s.Accelerators, k) }})
 	}
+	// A borrow clock is ordered by when its variant was last seen, not by its
+	// start: a spent clock is kept for its variant's life, so its start is
+	// the oldest time in the document and would go first. It goes with its
+	// state; an orphaned state restores no clock, and the variant re-armed.
 	for k, since := range s.K2BorrowedSince {
-		out = append(out, learnedStateEntry{since, func() { delete(s.K2BorrowedSince, k) }})
+		at := since
+		if st, ok := s.K2BorrowState[k]; ok && st.Seen.After(at) {
+			at = st.Seen
+		}
+		out = append(out, learnedStateEntry{at, func() {
+			delete(s.K2BorrowedSince, k)
+			delete(s.K2BorrowState, k)
+		}})
+	}
+	for k, m := range s.Forgotten {
+		out = append(out, learnedStateEntry{m.Seen, func() { delete(s.Forgotten, k) }})
 	}
 	slices.SortStableFunc(out, func(a, b learnedStateEntry) int { return cmp.Compare(a.at.UnixNano(), b.at.UnixNano()) })
 	return out

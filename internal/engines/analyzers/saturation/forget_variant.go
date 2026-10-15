@@ -44,11 +44,22 @@ func dropPrefix[V any](m map[string]V, prefix string) int {
 }
 
 // ForgetVariant drops everything learned for one variant -- its k2 and
-// throughput windows, its borrow clocks, its ITL window, baseline and the
-// line it published, its start estimate, its accelerator memo, anything
-// pending from a restore, and its capacity record -- and records token as
-// acted on. Other variants, including ones that borrowed from it, keep what
-// they have. It returns how many entries it dropped.
+// throughput windows, its ITL window, baseline and the line it published, its
+// start estimate, its accelerator memo, anything pending from a restore, and
+// its capacity record -- and records token as acted on. It returns how many
+// entries it dropped.
+//
+// Its borrow clocks are ENDED, not dropped (spendBorrowsLocked). The windows
+// it drops are what the borrow falls back on, so a dropped clock re-armed a
+// sibling's figure at full strength on the variant's next serving cycle: an
+// operator forgetting a variant held large by a borrow got the borrow back
+// for another 6.5 serving hours. An ended one re-arms only on new evidence,
+// as any spent borrow does. A bucket it never borrowed in can still borrow a
+// lower compatible sibling's figure; disableK2Borrow stops that.
+//
+// Siblings keep their own windows, and what they borrowed from it they read
+// again from its window each cycle, which is gone. The ITL line it published
+// is dropped too, so a sibling that read that line has none next cycle.
 func (a *SaturationAnalyzer) ForgetVariant(namespace, modelID, variant, token string) int {
 	// The two key shapes a variant's state is filed under (variantOfKey).
 	// The trailing separator keeps "v" from matching "v2".
@@ -59,13 +70,12 @@ func (a *SaturationAnalyzer) ForgetVariant(namespace, modelID, variant, token st
 	a.mu.Lock()
 	n := dropPrefix(a.computeCapacityHistory, k2Prefix) +
 		dropPrefix(a.saturatedThroughput, k2Prefix) +
-		dropPrefix(a.k2BorrowedSince, k2Prefix) +
 		dropPrefix(a.itlWindows, itlPrefix) +
 		dropPrefix(a.itlBaseline, itlPrefix) +
 		dropPrefix(a.startSeconds, itlPrefix)
 	dropPrefix(a.throughputSampledAt, k2Prefix)
 	dropPrefix(a.throughputLastRead, k2Prefix)
-	dropPrefix(a.k2BorrowState, k2Prefix)
+	a.spendBorrowsLocked(k2Prefix, a.now())
 	dropPrefix(a.startOutliers, itlPrefix)
 	dropPrefix(a.startSeenPods, itlPrefix)
 	dropPrefix(a.variantSeenAt, itlPrefix)

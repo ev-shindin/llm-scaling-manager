@@ -90,8 +90,9 @@ hardware and capacity-relevant engine flags. Two rules keep that safe:
   never saturate, and saturation is the only time the ceiling is measured. So the borrowed
   figure is held for 30 minutes of serving, then eases to the variant's own estimate over
   6 hours of serving, which lets a replica saturate and measure for itself. Hours spent
-  parked at zero do not count, and once worn off it does not come back unless the sibling's
-  figure or the variant's configuration changes.
+  parked at zero do not count (beyond a few minutes per pause, for a missed cycle), and
+  once worn off it does not come back unless the sibling's figure or the variant's
+  configuration changes.
 
 Operators can turn this off per model (`disableK2Borrow`), or make the engine forget what one
 variant has learned; see [scaling policy](../reference/scaling-policy.md#disablek2borrow).

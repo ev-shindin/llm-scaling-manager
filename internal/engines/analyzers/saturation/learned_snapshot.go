@@ -114,6 +114,14 @@ type RestoreReport struct {
 	// future included -- or a variant that cannot be named or had no complete
 	// configuration recorded.
 	Aged, Unusable, Unattributable int
+	// BorrowClocks is how many k2 borrow clocks were installed now. A clock
+	// is not a figure and is not checked against a configuration: it can
+	// only end a borrow sooner than re-arming it would, never price a
+	// variant above its own figure (borrowedK2).
+	BorrowClocks int
+	// Forgotten is how many entries were left out because this process
+	// forgot their variant on request before the restore ran.
+	Forgotten int
 }
 
 // maxClockSkew is how far ahead of now a restored clock may be and still be
@@ -370,8 +378,8 @@ func dropVariant(s *LearnedState, v string) {
 	maps.DeleteFunc(s.VariantSeenAt, func(k string, _ time.Time) bool { return of(k) })
 	maps.DeleteFunc(s.ITLBaseline, func(k string, _ float64) bool { return of(k) })
 	maps.DeleteFunc(s.StartSeconds, func(k string, _ float64) bool { return of(k) })
-	maps.DeleteFunc(s.K2BorrowedSince, func(k string, _ time.Time) bool { return of(k) })
-	maps.DeleteFunc(s.K2BorrowState, func(k string, _ BorrowStateSnapshot) bool { return of(k) })
+	// Borrow clocks stay: they are not figures, and are restored without a
+	// configuration to check them against (RestoreLearnedState).
 	delete(s.Accelerators, v)
 }
 
@@ -396,11 +404,28 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 	defer a.mu.Unlock()
 	bucketRetention := a.horizons.BucketRetention
 
+	// A variant this process forgot on request before the restore ran -- the
+	// first read failed and the cycles went on -- has a forget mark the
+	// stored document does not: what the document holds for it is what the
+	// forget dropped, and installing it would undo the forget while its token
+	// stays consumed. A mark the document shares was acted on before it was
+	// written, so the document is already past it.
+	forgottenHere := func(v string) bool {
+		live, ok := a.forgotten[v]
+		return ok && s.Forgotten[v].Token != live.token
+	}
+	forgottenKey := func(key string) bool {
+		v, _, ok := variantOfKey(key)
+		return ok && forgottenHere(v)
+	}
+
 	for k, l := range s.ITLLines {
 		_, live := a.itlLines[k]
 		learnedAt, inTime := notFuture(l.LearnedAt, now)
 		switch {
 		case live:
+		case forgottenKey(l.FromVariant):
+			rep.Forgotten++
 		case l.LearnedAt.IsZero() || !inTime || !itl.ValidModel(l.A, l.B):
 			rep.Unusable++
 		case now.Sub(learnedAt) > bucketRetention:
@@ -427,6 +452,10 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 		a.pendingRestore = map[string]*pendingVariant{}
 	}
 	pendingFor := func(v string) *pendingVariant {
+		if forgottenHere(v) {
+			rep.Forgotten++
+			return nil
+		}
 		expect := s.Config[v]
 		if expect == "" {
 			rep.Unattributable++
@@ -490,17 +519,29 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 		}
 	}
 	for k, since := range s.K2BorrowedSince {
+		// A clock with its state is installed now, with no configuration
+		// check: it is not a figure, and a borrower whose configuration was
+		// not read completely still borrows, so held back it re-armed at full
+		// strength on every restart. A changed configuration is caught when
+		// the borrow is next read (borrowState.rearms). One from an older
+		// document, with no state, keeps the old rule and waits for its
+		// variant's configuration.
+		if st, ok := s.K2BorrowState[k]; ok {
+			switch {
+			case forgottenKey(k):
+				rep.Forgotten++
+			case a.installBorrowClockLocked(k, since, st, now):
+				rep.BorrowClocks++
+			default:
+				rep.Aged++
+			}
+			continue
+		}
 		if p := pending(k); p != nil {
 			if p.state.K2BorrowedSince == nil {
 				p.state.K2BorrowedSince = map[string]time.Time{}
 			}
 			p.state.K2BorrowedSince[k] = since
-			if st, ok := s.K2BorrowState[k]; ok {
-				if p.state.K2BorrowState == nil {
-					p.state.K2BorrowState = map[string]BorrowStateSnapshot{}
-				}
-				p.state.K2BorrowState[k] = st
-			}
 		}
 	}
 	for v, p := range a.pendingRestore {
@@ -628,16 +669,30 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState) int {
 			kept++
 			continue
 		}
-		seen, seenInTime := notFuture(st.Seen, now)
-		tick, tickInTime := notFuture(st.Tick, now)
-		if seen.IsZero() || !seenInTime || !tickInTime || now.Sub(seen) > h.VariantTimeout {
-			continue
+		if a.installBorrowClockLocked(k, since, st, now) {
+			kept++
 		}
-		a.k2BorrowedSince[k] = since
-		a.k2BorrowState[k] = &borrowState{tick: tick, seen: seen, donorK2: st.DonorK2, args: st.Args}
-		kept++
 	}
 	return kept
+}
+
+// installBorrowClockLocked installs one borrow clock with its state, unless
+// the process already runs one under the key or the stored clock is unusable
+// or its variant has not been seen within VariantTimeout. It reports whether
+// it installed it. The start is taken as stored: the tick it is paired with
+// carries the time the controller was down as a gap, which the next serving
+// cycle reads as paused time. Callers hold a.mu.
+func (a *SaturationAnalyzer) installBorrowClockLocked(k string, since time.Time, st BorrowStateSnapshot, now time.Time) bool {
+	since, inTime := notFuture(since, now)
+	seen, seenInTime := notFuture(st.Seen, now)
+	tick, tickInTime := notFuture(st.Tick, now)
+	if _, live := a.k2BorrowedSince[k]; live || since.IsZero() || !inTime ||
+		seen.IsZero() || !seenInTime || !tickInTime || now.Sub(seen) > a.horizons.VariantTimeout {
+		return false
+	}
+	a.k2BorrowedSince[k] = since
+	a.k2BorrowState[k] = &borrowState{tick: tick, seen: seen, donorK2: st.DonorK2, args: st.Args}
+	return true
 }
 
 // notePendingPresent keeps a parked variant's pending liveness and memo as

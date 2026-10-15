@@ -59,6 +59,14 @@ var _ = Describe("learned-state horizons reach the analyzer the engine builds", 
 		Expect(h.BucketRetention).To(Equal(240 * time.Hour))
 	})
 
+	It("sizes the borrow clock's tick gap to the optimisation interval", func() {
+		cfg := config.NewTestConfig()
+		config.SetOptimizationIntervalForTest(cfg, 10*time.Minute)
+		Expect(newEngineWith(cfg).BorrowTickGap()).To(Equal(30*time.Minute),
+			"a ten-minute loop read every gap between two cycles as a pause")
+		Expect(newEngineWith(config.NewTestConfig()).BorrowTickGap()).To(Equal(saturation.BorrowedK2TickGap))
+	})
+
 	It("does not need a nil-config branch, because NewEngine refuses one first", func() {
 		// The horizon block originally guarded cfg != nil. It was dead code:
 		// NewEngine panics on a nil config twenty-five lines earlier, so the

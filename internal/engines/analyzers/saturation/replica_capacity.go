@@ -89,7 +89,11 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// bridge is the pool's engine lent to the variant, and a Pod that is not
 	// Ready serves nothing.
 	serving := rm.Ready && !rm.FromWarmPool
-	if serving {
+	// With the borrow turned off for the model, the clock is not advanced
+	// either: the borrow is not in use, so its hold and relaxation wait, and
+	// turning it back on resumes it where it stood (the gap then reads as a
+	// pause).
+	if serving && !config.DisableK2Borrow {
 		a.noteBorrowServing(historyKey, a.now())
 	}
 	k2, k2Priority := a.computeK2(

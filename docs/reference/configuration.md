@@ -550,7 +550,10 @@ What is restored, and what is not:
   and one past its horizon above is not restored;
 - a figure the new controller has already measured is never replaced;
 - a k2 borrow keeps its place across the restart: a borrow that has worn off
-  stays off, and the time the controller was down is not counted;
+  stays off, and the time the controller was down is not counted beyond a
+  few minutes' allowance for a missed cycle. This holds for a variant whose
+  engine configuration was not read completely too: a borrow clock is not a
+  figure, so it is restored without the configuration check;
 - a variant forgotten on request (the `llm-d.ai/forget-learned-state`
   annotation) stays forgotten, and the annotation is not acted on again.
 

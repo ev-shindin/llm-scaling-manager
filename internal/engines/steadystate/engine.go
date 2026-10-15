@@ -271,11 +271,15 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 		EpisodeGap: gap, VariantTimeout: variant, BucketRetention: bucket,
 	}
 	satV2, replaced := satV2.WithHorizons(requested)
+	// A k2 borrow's clock counts serving cycles; how far apart two of them may
+	// be is the loop's cadence (k2_borrow.go).
+	satV2 = satV2.WithOptimizationInterval(cfg.OptimizationInterval())
 	h := satV2.Horizons()
 	ctrl.Log.Info("learned-state horizons",
 		"episodeGap", h.EpisodeGap,
 		"variantTimeout", h.VariantTimeout,
 		"bucketRetention", h.BucketRetention,
+		"borrowTickGap", satV2.BorrowTickGap(),
 		"note", "set LEARNED_STATE_EPISODE_GAP, LEARNED_STATE_VARIANT_TIMEOUT, LEARNED_STATE_BUCKET_RETENTION to change them")
 	// A replaced horizon has to say so, because the line above cannot. After
 	// flooring it prints the default, which is byte-identical to what an

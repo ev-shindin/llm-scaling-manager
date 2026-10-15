@@ -74,10 +74,14 @@ type SaturationAnalyzer struct {
 	// bucket, so start-to-now is serving time (noteBorrowServing).
 	k2BorrowedSince map[string]time.Time
 	// k2BorrowState is, per k2BorrowedSince key, the clock's last serving
-	// cycle, when it was last read, and what the borrow was armed on. A spent
+	// cycle, when it was last read, and what the borrow last ran on. A spent
 	// borrow re-arms only on new evidence (borrowState.rearms), so the clock
 	// is kept for as long as its variant exists and swept with it.
 	k2BorrowState map[string]*borrowState
+	// borrowTickGap is the longest gap between two serving cycles a borrow
+	// clock counts as serving time (WithOptimizationInterval); never below
+	// BorrowedK2TickGap.
+	borrowTickGap time.Duration
 	// forgotten is, per namespace/variant, the last forget token acted on
 	// (ForgetVariant), so an annotation left in place is not acted on again.
 	// Swept with the variant.
@@ -280,6 +284,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		saturatedThroughput:    make(map[string]*capacity.RollingAverage),
 		k2BorrowedSince:        make(map[string]time.Time),
 		k2BorrowState:          make(map[string]*borrowState),
+		borrowTickGap:          BorrowedK2TickGap,
 		forgotten:              make(map[string]forgetMark),
 		pendingRestore:         make(map[string]*pendingVariant),
 		throughputSampledAt:    make(map[string]time.Time),
