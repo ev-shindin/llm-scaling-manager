@@ -192,6 +192,11 @@ Before relying on it:
 - [ ] A drain hook on serving pods: Kueue deletes a preempted pod without the
   Eviction API, so a PodDisruptionBudget does not apply
   ([draining before scale-down](../../reference/workload-preparation.md#draining-before-scale-down)).
+- [ ] `terminationGracePeriodSeconds` of at least one engine cycle (30
+  seconds by default) on serving pods. The scaling manager sees a preemption
+  only while the preempted pod or its Workload exists; a pod gone between two
+  cycles is missed, and the model does not cool down before borrowing again
+  ([cooldowns](../../reference/quota-limiter.md#kueue-as-a-quota-source)).
 - [ ] A `WorkloadPriorityClass` above batch for models that must keep
   replicas: Kueue picks what to preempt by it.
 - [ ] Kueue's group integration for multi-pod replicas (LeaderWorkerSet, P/D),

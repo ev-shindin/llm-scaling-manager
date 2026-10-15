@@ -362,7 +362,10 @@ itself:
   grown.
 - **Cooldowns.** After a lender waited, its cohort borrows nothing new for
   `borrowCooldown`. After Kueue preempted one of a model's pods, that model
-  borrows nothing new for the same time.
+  borrows nothing new for the same time. A preemption is seen only while the
+  preempted pod (Kueue's `TerminationTarget` condition) or its Workload still
+  exists, so give serving pods a `terminationGracePeriodSeconds` of at least
+  one engine cycle; a pod gone between two cycles is missed.
 - **The ledger.** Releases in flight are kept under `borrowReleaseLedger` in
   the `wva-controller-status` ConfigMap, so a restart does not release twice.
 - **A stale Kueue read freezes everything**: nothing new is borrowed and
