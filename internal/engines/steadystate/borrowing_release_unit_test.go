@@ -38,11 +38,11 @@ func TestModelOfPodAndPreemptedPod(t *testing.T) {
 			Message: message, LastTransitionTime: at}}
 	}
 	for _, tc := range []struct {
-		name       string
-		pod        corev1.Pod
-		model      string
-		preempted  bool
-		preemptAt  time.Time
+		name      string
+		pod       corev1.Pod
+		model     string
+		preempted bool
+		preemptAt time.Time
 	}{
 		{name: "a Deployment's pod, matched by name prefix, preempted",
 			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-7d9f-abc"},
@@ -99,8 +99,8 @@ func TestEventTime(t *testing.T) {
 		ev   *corev1.Event
 		want time.Time
 	}{
-		"lastTimestamp only": {onlyLast, last},
-		"eventTime only":     {onlyEvent, event},
+		"lastTimestamp only":  {onlyLast, last},
+		"eventTime only":      {onlyEvent, event},
 		"both: lastTimestamp": {both, last},
 		"neither: creation":   {base(), created},
 	} {

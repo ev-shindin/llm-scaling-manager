@@ -185,8 +185,8 @@ type BorrowGovernor struct {
 	pastSince map[string]time.Time
 	// within is the "namespace/type" keys the last Observe saw within
 	// guaranteed.
-	within map[string]bool
-	started   bool
+	within  map[string]bool
+	started bool
 	// idleSince is when cycles stopped counting borrowing (HoldReleases
 	// without Observe); zero while they count it.
 	idleSince time.Time

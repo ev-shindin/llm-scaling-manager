@@ -23,6 +23,9 @@ import (
 
 const eligNS = "team-a"
 
+// resourceQuotaListKind is the list kind the ResourceQuota read uses.
+const resourceQuotaListKind = "ResourceQuotaList"
+
 func eligibilityMapper() meta.RESTMapper {
 	m := kueueMapper("v1beta2").(*meta.DefaultRESTMapper)
 	m.Add(schema.GroupVersionKind{Group: Group, Version: "v1beta2", Kind: KindWorkload}, meta.RESTScopeNamespace)
@@ -287,7 +290,7 @@ var _ = Describe("Eligibility: the engine-side borrowing conditions", func() {
 
 	It("reads a Forbidden ResourceQuota list as unreadable, never as absent", func() {
 		funcs := &interceptor.Funcs{List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == "ResourceQuotaList" {
+			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == resourceQuotaListKind {
 				return apierrors.NewForbidden(schema.GroupResource{Resource: "resourcequotas"}, "", errors.New("no RBAC"))
 			}
 			return cl.List(ctx, list, opts...)
@@ -301,7 +304,7 @@ var _ = Describe("Eligibility: the engine-side borrowing conditions", func() {
 	It("reads a transient ResourceQuota list error as stale and asks again next call", func() {
 		fail, rqLists := false, 0
 		funcs := &interceptor.Funcs{List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == "ResourceQuotaList" {
+			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == resourceQuotaListKind {
 				rqLists++
 				if fail {
 					return apierrors.NewServiceUnavailable("blip")
@@ -332,7 +335,7 @@ var _ = Describe("Eligibility: the engine-side borrowing conditions", func() {
 	It("turns a ResourceQuota read that keeps failing into unreadable after five intervals", func() {
 		fail := false
 		funcs := &interceptor.Funcs{List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == "ResourceQuotaList" && fail {
+			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == resourceQuotaListKind && fail {
 				return apierrors.NewInternalError(errors.New("etcd timeout"))
 			}
 			return cl.List(ctx, list, opts...)

@@ -44,12 +44,12 @@ func unplacedVariant(r ModelScalingRequest, variant string, t time.Time) ModelSc
 	return r
 }
 
-// unplacedPods marks the named variant's pods unplaced at the given times, as
+// unplacedPods marks the pods of variant "x-v" unplaced at the given times, as
 // discovery reports them: UnplacedSince is the newest.
-func unplacedPods(r ModelScalingRequest, variant string, pods map[string]time.Time) ModelScalingRequest {
+func unplacedPods(r ModelScalingRequest, pods map[string]time.Time) ModelScalingRequest {
 	for i := range r.VariantStates {
 		s := &r.VariantStates[i]
-		if s.VariantName != variant {
+		if s.VariantName != "x-v" {
 			continue
 		}
 		s.UnplacedReplicas = len(pods)
@@ -103,13 +103,13 @@ var _ = Describe("BorrowGovernor release units", func() {
 			pods := map[string]time.Time{}
 			for i, at := range []time.Duration{0, 2 * time.Minute, 4 * time.Minute} {
 				pods[string(rune('a'+i))] = t0.Add(at)
-				Expect(run(g, t0.Add(at), world, unplacedPods(govModel("x", 6, 8), "x-v", maps.Clone(pods)))).To(BeEmpty())
+				Expect(run(g, t0.Add(at), world, unplacedPods(govModel("x", 6, 8), maps.Clone(pods)))).To(BeEmpty())
 			}
 			now := t0.Add(settings.PlacementTimeout + 10*time.Second)
 			pods["d"] = t0.Add(settings.PlacementTimeout)
-			rel := run(g, now, world, unplacedPods(govModel("x", 6, 8), "x-v", maps.Clone(pods)))
+			rel := run(g, now, world, unplacedPods(govModel("x", 6, 8), maps.Clone(pods)))
 			Expect(rel).To(HaveLen(1), "pod a has been unplaced past the timeout, however many came after it")
-			Expect(rel[0].From - rel[0].To).To(Equal(1), "one pod past the timeout: one replica")
+			Expect(rel[0].From-rel[0].To).To(Equal(1), "one pod past the timeout: one replica")
 		})
 
 		// The round-1 finding stays fixed: a pod stuck since before the
@@ -117,19 +117,19 @@ var _ = Describe("BorrowGovernor release units", func() {
 		It("does not time out a fresh borrowed replica because of a pod stuck since before the namespace borrowed", func() {
 			g := NewBorrowGovernor(settings)
 			old := map[string]time.Time{"old": t0.Add(-20 * time.Minute)}
-			Expect(run(g, t0, govWorld{g: 16, used: 16}, unplacedPods(govModel("x", 2, 8), "x-v", maps.Clone(old)))).To(BeEmpty(),
+			Expect(run(g, t0, govWorld{g: 16, used: 16}, unplacedPods(govModel("x", 2, 8), maps.Clone(old)))).To(BeEmpty(),
 				"within guaranteed")
 
 			both := map[string]time.Time{"old": t0.Add(-20 * time.Minute), "new": t0.Add(30 * time.Second)}
 			borrowed := govWorld{g: 16, used: 24}
-			Expect(run(g, t0.Add(time.Minute), borrowed, unplacedPods(govModel("x", 3, 8), "x-v", maps.Clone(both)))).To(BeEmpty(),
+			Expect(run(g, t0.Add(time.Minute), borrowed, unplacedPods(govModel("x", 3, 8), maps.Clone(both)))).To(BeEmpty(),
 				"the namespace went past guaranteed a moment ago")
 			Expect(run(g, t0.Add(time.Minute+settings.PlacementTimeout-time.Second), borrowed,
-				unplacedPods(govModel("x", 3, 8), "x-v", maps.Clone(both)))).To(BeEmpty())
+				unplacedPods(govModel("x", 3, 8), maps.Clone(both)))).To(BeEmpty())
 			rel := run(g, t0.Add(time.Minute+settings.PlacementTimeout+time.Second), borrowed,
-				unplacedPods(govModel("x", 3, 8), "x-v", maps.Clone(both)))
+				unplacedPods(govModel("x", 3, 8), maps.Clone(both)))
 			Expect(rel).To(HaveLen(1), "a full timeout after the namespace borrowed")
-			Expect(rel[0].From - rel[0].To).To(Equal(1), "bounded by the 8 borrowed GPUs")
+			Expect(rel[0].From-rel[0].To).To(Equal(1), "bounded by the 8 borrowed GPUs")
 		})
 	})
 
