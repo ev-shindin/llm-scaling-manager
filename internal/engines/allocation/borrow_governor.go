@@ -617,7 +617,10 @@ func (g *BorrowGovernor) applyPins(decisions []domain.VariantDecision, byVariant
 // the variant holds no more than its target, as Observe drops it; a lender
 // release's unit stops pinning once its variant holds no more than the unit's
 // target, and the entry is marked PodsGoneAt when every unit has, so it
-// clears on the next fresh read once borrowing is counted again. Without
+// clears on the next fresh read once borrowing is counted again. A variant
+// missing from this cycle's requests -- dropped out of discovery for a cycle
+// -- has not landed: its pin stays until it is seen again, or until the
+// window above drops the release state. Without
 // this, growth the cycle allows within nominal -- borrowing is not counted,
 // so every target is -- stayed capped at a released figure for the whole
 // window after the replica it released was long gone.
@@ -638,7 +641,7 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 	}
 	states := indexStates(requests)
 	for k, r := range g.timeoutHeld {
-		if s, ok := states[k]; !ok || heldOf(s.state) <= r.to {
+		if s, ok := states[k]; ok && heldOf(s.state) <= r.to {
 			delete(g.timeoutHeld, k)
 		}
 	}
@@ -650,7 +653,12 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 		gone := true
 		for _, u := range e.Units {
 			k := u.Namespace + "/" + u.Variant
-			if s, ok := states[k]; ok && heldOf(s.state) > u.To {
+			s, ok := states[k]
+			if !ok {
+				gone = false // not seen this cycle: not known to have landed
+				continue
+			}
+			if heldOf(s.state) > u.To {
 				gone = false
 				lowerTo(decisions, byVariant, k, u.To, "borrow-released")
 			}

@@ -462,6 +462,27 @@ var _ = Describe("BorrowGovernor release units", func() {
 			Expect(g.Ledger().TimeoutHeld).To(BeEmpty())
 		})
 
+		// Review finding (bug hunter): a variant missing from the requests
+		// read as landed, so one that dropped out of discovery for a cycle
+		// lost its pin and came back at the demand floor's figure.
+		It("keeps the pins of a variant missing from a cycle's requests until it is seen to land", func() {
+			g := NewBorrowGovernor(settings)
+			l, err := UnmarshalBorrowLedger(`{"entries":[{"cohort":"c","lender":"l","flavor":"h100","resource":"nvidia.com/gpu",` +
+				`"releasedAt":"1970-01-01T05:33:20Z","units":[{"namespace":"b","variant":"m-v","to":3}]}],"timeoutHeld":{"b/x-v":1}}`)
+			Expect(err).NotTo(HaveOccurred())
+			g.Restore(l)
+			g.HoldReleases(t0, nil, nil) // neither variant discovered this cycle
+			Expect(g.Ledger().TimeoutHeld).To(HaveKeyWithValue("b/x-v", 1))
+			Expect(g.Ledger().Entries).To(HaveLen(1))
+			Expect(g.Ledger().Entries[0].PodsGoneAt).To(BeNil(), "not seen, so not known to have landed")
+
+			reqs := []ModelScalingRequest{govModel("m", 4, 8), govModel("x", 2, 8)}
+			ds := decisionsOf(reqs)
+			ds[0].TargetReplicas, ds[1].TargetReplicas = 6, 3
+			g.HoldReleases(t0.Add(30*time.Second), reqs, ds)
+			Expect(targets(ds)).To(Equal(map[string]int{"m-v": 3, "x-v": 1}), "seen again, not landed: still pinned")
+		})
+
 		It("stops pinning a lender release's unit once it landed, and marks its pods gone", func() {
 			g := NewBorrowGovernor(settings)
 			l, err := UnmarshalBorrowLedger(`{"entries":[{"cohort":"c","lender":"l","flavor":"h100","resource":"nvidia.com/gpu",` +
