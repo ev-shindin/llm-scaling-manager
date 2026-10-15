@@ -1128,6 +1128,8 @@ llama-8b-prod:
 - One direction only, like `enableLearnedStateReuse`: a per-model entry can turn
   the borrow **off** where the default leaves it on, but not back on where the
   `default:` entry turned it off.
+- To discard what one variant has learned, rather than stop it borrowing, see
+  [Reset one variant's learned state](troubleshooting.md#reset-one-variants-learned-state).
 
 ### Default Configuration
 

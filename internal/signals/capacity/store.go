@@ -198,6 +198,18 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 	s.records[key] = record
 }
 
+// Delete removes one variant's record, and reports whether there was one. It
+// is for an operator's request to forget what a variant has learned: the next
+// LoadFromScaleTarget files a fresh record from the scale target.
+func (s *Store) Delete(namespace, modelID, variantName string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := storeKey(namespace, modelID, variantName)
+	_, ok := s.records[key]
+	delete(s.records, key)
+	return ok
+}
+
 // EvictStale removes capacity records that have not been updated within the
 // given timeout. This prevents unbounded memory growth from deleted or
 // long-unused variants. Use a long timeout (EvictionTimeout, seven days)

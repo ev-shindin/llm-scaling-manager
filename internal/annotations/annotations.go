@@ -14,8 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package annotations defines the one annotation WVA still uses, on the
-// in-memory VariantAutoscaling objects it synthesizes.
+// Package annotations defines the annotations WVA reads or writes: one on the
+// in-memory VariantAutoscaling objects it synthesizes, and one an operator
+// sets on a scale target to ask for its learned state to be forgotten.
 //
 // It used to hold the discovery schema — llm-d.ai/managed, model-id and
 // variant-cost, read off ScaledObjects and HPAs. That is gone: WVA no longer
@@ -42,6 +43,13 @@ const (
 
 	// enabledValue is the annotation value that turns Synthetic on.
 	enabledValue = "true"
+
+	// ForgetLearnedState, set on a variant's scale target (the Deployment or
+	// LeaderWorkerSet itself, not its pod template, so nothing rolls), asks
+	// the scaling manager to forget what it has learned about that variant.
+	// The value is a token, acted on once: change it to ask again. Any
+	// non-empty value works; a timestamp is a convenient one.
+	ForgetLearnedState = "llm-d.ai/forget-learned-state"
 )
 
 // IsSynthetic reports whether va was synthesized by WVA rather than read from a

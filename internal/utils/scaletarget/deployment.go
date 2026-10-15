@@ -32,6 +32,19 @@ func LabelSelector(acc ScaleTargetAccessor) *v1.LabelSelector {
 	return nil
 }
 
+// Annotations is the scale target's own metadata annotations -- the
+// Deployment's or the LeaderWorkerSet's, not its pod template's, so setting
+// one rolls nothing. Nil for an unknown kind.
+func Annotations(acc ScaleTargetAccessor) map[string]string {
+	switch t := acc.(type) {
+	case *deploymentAccessor:
+		return t.deployment.GetAnnotations()
+	case *lwsAccessor:
+		return t.lws.GetAnnotations()
+	}
+	return nil
+}
+
 func (r *deploymentAccessor) GetReplicas() *int32 {
 	// r.deployment is always not nil
 	return r.deployment.Spec.Replicas

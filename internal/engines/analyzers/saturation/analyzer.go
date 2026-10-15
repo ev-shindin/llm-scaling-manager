@@ -78,6 +78,10 @@ type SaturationAnalyzer struct {
 	// borrow re-arms only on new evidence (borrowState.rearms), so the clock
 	// is kept for as long as its variant exists and swept with it.
 	k2BorrowState map[string]*borrowState
+	// forgotten is, per namespace/variant, the last forget token acted on
+	// (ForgetVariant), so an annotation left in place is not acted on again.
+	// Swept with the variant.
+	forgotten map[string]forgetMark
 	// pendingRestore is learned state restored after a controller restart and
 	// not yet installed, keyed namespace/variant: it waits for its variant's
 	// first cycle, when the engine configuration it runs is known, and is
@@ -235,6 +239,9 @@ type Evicted struct {
 	// a reader asking why a cold variant stopped finding a line to borrow
 	// needs to see it move.
 	ITLLines int
+	// ForgetMarks is the per-variant record of the last forget request
+	// acted on (ForgetVariant).
+	ForgetMarks int
 }
 
 // Any reports whether the sweep evicted anything at all.
@@ -242,7 +249,7 @@ func (e Evicted) Any() bool {
 	return e.K2History > 0 || e.MuWindows > 0 || e.K2Borrows > 0 || e.PendingRestores > 0 || e.ITLWindows > 0 ||
 		e.ITLBaselines > 0 || e.StartEstimates > 0 || e.StartOutliers > 0 ||
 		e.Pods > 0 || e.ITLLines > 0 || e.Accelerators > 0 || e.DecodeSaturation > 0 ||
-		e.FleetShapes > 0 || e.VariantStamps > 0
+		e.FleetShapes > 0 || e.VariantStamps > 0 || e.ForgetMarks > 0
 }
 
 // learnedLine is one measured ITL(k) line, with who measured it and when.
@@ -273,6 +280,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		saturatedThroughput:    make(map[string]*capacity.RollingAverage),
 		k2BorrowedSince:        make(map[string]time.Time),
 		k2BorrowState:          make(map[string]*borrowState),
+		forgotten:              make(map[string]forgetMark),
 		pendingRestore:         make(map[string]*pendingVariant),
 		throughputSampledAt:    make(map[string]time.Time),
 		throughputLastRead:     make(map[string]float64),
@@ -403,6 +411,12 @@ func (a *SaturationAnalyzer) NoteVariantsPresent(namespace, modelID string, vari
 				st.seen = now
 				break
 			}
+		}
+	}
+	for _, v := range variantNames {
+		if m, ok := a.forgotten[namespace+"/"+v]; ok {
+			m.seen = now
+			a.forgotten[namespace+"/"+v] = m
 		}
 	}
 	// The memo ages on the wall clock (stableAccelerator), so it is touched on
@@ -616,6 +630,15 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			delete(a.k2BorrowState, key)
 		}
 	}
+	// A forget mark goes with its variant. Kept past it, a variant deleted
+	// and re-created under the same name with the same token would not be
+	// forgotten; dropped sooner, a variant parked past the timeout would be
+	// forgotten again on waking -- which is why NoteVariantsPresent keeps it.
+	marks := len(a.forgotten)
+	maps.DeleteFunc(a.forgotten, func(_ string, m forgetMark) bool {
+		return a.now().Sub(m.seen) > variantTimeout
+	})
+	evicted.ForgetMarks = marks - len(a.forgotten)
 	// Restored entries for a variant that has not been analysed since the
 	// restore. A retention later, any entry in them is past its own horizon
 	// too, so none could have been installed.

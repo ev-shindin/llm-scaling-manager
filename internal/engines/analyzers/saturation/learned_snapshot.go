@@ -64,6 +64,10 @@ type LearnedState struct {
 	// its clocks are restored under the old rule and take today's figures as
 	// what they were armed on (borrowedK2).
 	K2BorrowState map[string]BorrowStateSnapshot `json:"k2BorrowState,omitempty"`
+	// Forgotten is the last forget token acted on per namespace/variant
+	// (ForgetVariant): the tombstone that keeps a restart from acting on an
+	// annotation that is still in place, and forgetting again.
+	Forgotten map[string]ForgetMarkSnapshot `json:"forgotten,omitempty"`
 	// Config is the engine-configuration fingerprint each variant ran when
 	// this was exported, keyed namespace/variant.
 	Config map[string]string `json:"config,omitempty"`
@@ -257,6 +261,7 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 		ITLLines:        make(map[string]LineSnapshot, len(a.itlLines)),
 		K2BorrowedSince: make(map[string]time.Time, len(a.k2BorrowedSince)),
 		K2BorrowState:   make(map[string]BorrowStateSnapshot, len(a.k2BorrowState)),
+		Forgotten:       make(map[string]ForgetMarkSnapshot, len(a.forgotten)),
 		Config:          map[string]string{},
 	}
 	for k, ra := range a.computeCapacityHistory {
@@ -289,6 +294,9 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 	}
 	for k, st := range a.k2BorrowState {
 		s.K2BorrowState[k] = BorrowStateSnapshot{Tick: st.tick, Seen: st.seen, DonorK2: st.donorK2, Args: st.args}
+	}
+	for k, m := range a.forgotten {
+		s.Forgotten[k] = ForgetMarkSnapshot{Token: m.token, Seen: m.seen}
 	}
 	a.mu.Unlock()
 
@@ -401,6 +409,18 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 			a.itlLines[k] = learnedLine{model: itl.Model{A: l.A, B: l.B}, fromVariant: l.FromVariant, learnedAt: learnedAt}
 			rep.ITLLines++
 		}
+	}
+
+	// Forget marks are installed now: a mark is not a figure, has nothing to
+	// check against a configuration, and must be in place before the
+	// engine's first cycle reads the annotation it answers.
+	for k, m := range s.Forgotten {
+		seen, inTime := notFuture(m.Seen, now)
+		if _, live := a.forgotten[k]; live || m.Token == "" || seen.IsZero() || !inTime ||
+			now.Sub(seen) > a.horizons.VariantTimeout {
+			continue
+		}
+		a.forgotten[k] = forgetMark{token: m.Token, seen: seen}
 	}
 
 	if a.pendingRestore == nil {
@@ -668,5 +688,6 @@ func (a *SaturationAnalyzer) ForgetLearnedState() {
 	clear(a.itlLines)
 	clear(a.k2BorrowedSince)
 	clear(a.k2BorrowState)
+	clear(a.forgotten)
 	clear(a.pendingRestore)
 }

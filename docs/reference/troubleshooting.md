@@ -29,6 +29,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | cluster policy not applied | `WVAPolicyNamespaceUnverified`; `wva_policy_namespace_unverified == 1` | the controller may not read Namespaces, so it runs on its own ConfigMap | [policy namespace unverified](#cluster-policy-is-not-applied-policy-namespace-unverified) |
 | ScaledObject `READY False` or `TARGETS <unknown>` | `kubectl get scaledobject,hpa -n <ns>` | `scalerAddress` names a namespace with no scaler, `modelID` missing, the controller not Ready, KEDA backing off after a reinstall | [ScaledObject](#scaledobject-ready-false-or-targets-unknown) |
 | capacity priced high after a restart | TTFT worse after an upgrade or leader change; `P3-k2`/`P4-k1` in `k2-decision` where `P1-obs` was before | `LEARNED_STATE_SNAPSHOT` off, the Role missing, an engine configuration that changed or could not be read | [after a restart](#capacity-priced-high-after-a-restart) |
+| one variant held larger than its load needs | `k2-decision` keeps `P2-hist` or `P2-borrow` for one variant while its replicas run light | a k2 learned from a bad reading, or a sibling's figure that does not fit this variant | [reset one variant](#reset-one-variants-learned-state) |
 | utilization-share optimizer does nothing | `wva_utilization_share_mode`, `wva_utilization_share_actionable` | shadow mode, not planned, held, swinging | [optimizer](#the-optimizer-evaluates-but-never-moves-anything) |
 
 Alerts that point here are listed in [Prometheus: the shipped alerts](prometheus.md#the-shipped-alerts).
@@ -419,7 +420,41 @@ The running controller notices within a minute or two and forgets everything
 it learned too, rather than writing it straight back (`Learned state: the
 snapshot was deleted; everything learned is forgotten`). Every model then
 prices from the derived capacity until it saturates again, as after a restart
-with no store.
+with no store. To forget one variant instead, see the next section.
+
+## Reset one variant's learned state
+
+Use this when one variant is priced from a figure you no longer trust: it holds
+more replicas than its load needs, and `k2-decision` shows `P2-hist` (its own
+history) or `P2-borrow` (a sibling's figure) for it. It forgets that variant
+only; every other variant keeps what it has learned.
+
+1. Annotate the variant's scale target -- the Deployment or LeaderWorkerSet
+   itself, not its pod template, so nothing restarts. The value is any string;
+   a timestamp is convenient:
+
+   ```bash
+   kubectl annotate deployment <name> -n <namespace> --overwrite \
+     llm-d.ai/forget-learned-state="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+   ```
+
+2. Check the controller log on the variant's next cycle:
+   `Learned state forgotten for one variant, on request`, with the variant and
+   the number of `entries` dropped.
+
+What is forgotten: the variant's measured k2 and throughput, its k2 borrows,
+its ITL line (including one it lent to siblings), its replica start estimate,
+and its capacity record. The variant then prices from its deployment-derived
+figure, as a new variant would, until it saturates again. Expect more replicas
+or a higher price for a while, depending on which figure was wrong.
+
+- **Acted on once per value.** Leaving the annotation in place does nothing
+  more, across controller restarts too when `LEARNED_STATE_SNAPSHOT` is on.
+  To forget again, set a new value.
+- **A variant parked at zero** is forgotten on the first cycle it is analysed
+  again, once it has a replica.
+- **To stop a variant borrowing** a sibling's figure rather than forget what it
+  has, set [`disableK2Borrow`](scaling-policy.md#disablek2borrow) for the model.
 
 ## The controller is not Ready or crash-looping
 
