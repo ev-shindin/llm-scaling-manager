@@ -23,6 +23,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | flapping, or a scale-up that never lands | `WVAReplicaScalingThrashing` (it counts every cycle that is not `no-change`); `tgt` alternating in `scaling-decision`, or `tgt` steady above `curr` | utilization crossing a narrow band, short stabilization windows, utilization-share swings; or actuation stuck, Pods Pending, slow replica starts | [flapping](#a-model-is-flapping); [actuation stuck](#desired-is-not-current-actuation-stuck) |
 | pinned at max | `wva_variant_at_max_replicas == 1`; `"atMax":true` in `scaling-decision` | `maxReplicaCount` too low for the load | [pinned at max](#a-model-is-pinned-at-max) |
 | desired is not current | `wva_desired_replicas != wva_current_replicas` for many cycles | HPA stabilization window, KEDA not reaching the scaler, Pods Pending (GPUs, ResourceQuota), slow starts | [actuation stuck](#desired-is-not-current-actuation-stuck) |
+| replicas dropped under Kueue borrowing | fewer replicas with no scale-down asked for; `wva_model_scaling_blocked{reason=~"lender-reclaimed\|borrow-released\|borrow-unplaced"}`; `BorrowedCapacityReleased` Event | Kueue preempted, the scaling manager gave borrowed GPUs back, a replica did not place, demand fell | [replicas dropped](#replicas-dropped-under-kueue-borrowing) |
 | GPUs held / quota spent | `ResourceConstrained` Event; `wva_decisions_limited_total` rising; `wva_model_scaling_blocked{reason="quota-short"}` | the quota or GPU inventory is used up, unresolved accelerators, a lowered quota (it does not evict) | [GPUs held](#gpus-held-or-quota-spent) |
 | metrics stale or missing | `MetricsUnavailable` Event; `wva_metrics_freshness_status{status!="fresh"} > 0`; `WVAMetricsCollectionFailing`; `wva_unmeasured_queue > 0` | ServiceMonitor or PodMonitor not selecting the pods, Prometheus unreachable, FMA launcher pods not scraped | [metrics](#metrics-stale-or-missing) |
 | controller not Ready or crash-looping | pod `0/1` or `CrashLoopBackOff`; log `refusing to start unbounded`; readiness check `gpu-policy` failing | cluster policy unreadable, a `gpu-inventory` limiter with no node read, a Prometheus setting it refuses, an image older than the manifests | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
@@ -343,6 +344,66 @@ What to do:
   for scheduling.
 
 See [the GPU limiter](gpu-limiter.md) and [the quota limiter](quota-limiter.md).
+
+## Replicas dropped under Kueue borrowing
+
+**Symptom**: a model on a Kueue quota that counts borrowing went from, say, 6
+to 4 replicas, and nobody lowered it.
+
+There are four causes. Check them in this order; the first that matches is the
+answer.
+
+| cause | how to tell |
+| --- | --- |
+| 1. Kueue preempted pods | `wva_model_scaling_blocked{reason="lender-reclaimed"}` for the model; `wva_kueue_preempted_pods_total` rising; a Workload evicted with reason `Preempted` |
+| 2. The scaling manager gave borrowed replicas back | `reason="borrow-released"`; a `BorrowedCapacityReleased` Event that names the lender ClusterQueue |
+| 3. A replica did not place | `reason="borrow-unplaced"`; `wva_kueue_unplaced_pods` for the variant; a `BorrowedCapacityReleased` Event with cause `placement-timeout` |
+| 4. Demand fell | none of the above; the model's `scaling-decision` line shows `tgt` below `curr` at low `util` ([cycle log](cycle-log.md)) |
+
+Commands, in the same order:
+
+```bash
+kubectl get workloads.kueue.x-k8s.io -n <ns> -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="Evicted")].reason}{"\n"}{end}'
+kubectl get events -n <ns> --field-selector reason=BorrowedCapacityReleased
+$LOGS | grep -E 'Releasing borrowed capacity|Kueue preempted a pod' | tail
+kubectl get pods -n <ns> --field-selector status.phase=Pending
+```
+
+To see the budget the controller used, per quota entry, namespace and
+accelerator (`guaranteed`, `borrowable`, `used`, and the `reason` borrowable is
+0):
+
+```bash
+kubectl get configmap wva-controller-status -n "$NS" -o jsonpath='{.data.limiterBudgets}'
+```
+
+What to do:
+
+- **Preempted or given back, often** (`WVAKueueBorrowThrashing`): the model
+  keeps growing onto capacity its lenders take back. Raise its ClusterQueue's
+  `nominalQuota`, lengthen `borrowCooldown`, or set `countBorrowable: false` on
+  the quota entry.
+- **Did not place**: a replica waiting for a node the cluster autoscaler is
+  adding counts as unplaced. The placement timeout waits up to three times as
+  long while the autoscaler reports `TriggeredScaleUp` on the pod. If new nodes
+  take longer than that on your cluster, raise `placementTimeout`, or borrowed
+  replicas are given back while their node is still coming.
+- **The Kueue reader is stale** (`WVAKueueReaderStale`, reason `stale` on
+  `wva_quota_borrow_withheld`): borrowing is frozen at the last figures, so
+  nothing new is borrowed and nothing is given back. To hand capacity back by
+  hand meanwhile, lower the borrowing model's `maxReplicaCount` on its
+  ScaledObject, or set `countBorrowable: false` on the quota entry, which caps
+  every namespace at nominal.
+- **A lender waits past the cooldown** (`WVAKueueLenderWaitingPastCooldown`):
+  read `borrowReleaseLedger` in the same ConfigMap. An entry with
+  `release-not-actuated` means the lowered target did not land: see
+  [actuation stuck](#desired-is-not-current-actuation-stuck).
+- **Pods refused by a ResourceQuota**: no shipped alert covers this, because
+  no metric carries the refusal. Check by hand:
+  `kubectl get events -n <ns> --field-selector reason=FailedCreate | grep -i quota`.
+
+Timings are in [configuration](configuration.md#kueue-borrowing-timings); the
+series in [Prometheus](prometheus.md#kueue-borrowing-metrics).
 
 ## Metrics stale or missing
 

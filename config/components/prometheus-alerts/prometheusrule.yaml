@@ -115,3 +115,41 @@ spec:
       annotations:
         summary: "{{ $value }} ScaledObject(s) in {{ $labels.exported_namespace }} have had no usable scaling decision for 10 minutes"
         description: "Grouped by exported_namespace, not namespace: the gauge carries the ScaledObject's namespace, which Prometheus renames to exported_namespace because the scrape job already has a namespace label (the controller's). The KEDA external scaler is answering these ScaledObjects with the target's current replica count because no engine has a usable decision for them, so their replica counts are frozen: they neither scale up under load nor down when idle. For a cycle or two after a controller restart or leader change this is expected; ten minutes is not. wva_scaler_undecided_answers_total says why: reason not-managed, or no-decision that never stops, means the model is never planned, usually a trigger metadata value that does not parse; stale means its decision stopped being republished, so read that model's scaling-decision lines. The controller log line 'external scaler has no decision for this target' names each ScaledObject."
+
+    # Kueue cohort borrowing (docs/proposals/kueue-borrowing-and-limiter-composition.md, Part C).
+    # Only a namespace-scope Kueue quota entry that counts borrowing publishes these series.
+    - alert: WVAKueueReaderStale
+      expr: max by (limiter_name) (wva_quota_borrow_withheld{reason="stale"}) == 1
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Kueue reads for limiter {{ $labels.limiter_name }} have been stale for 5 minutes"
+        description: "The last Kueue read failed, or is older than twice the refresh interval. Borrowing is frozen at the last figures: nothing new is borrowed and nothing is given back, so a lender that waits now waits until reads recover. Check the controller log for 'external quota source unreadable' and the controller's RBAC on the Kueue API. To hand capacity back by hand meanwhile, lower the borrowing model's replicas (or set countBorrowable: false on the quota entry) -- see the 'replicas dropped' runbook."
+
+    - alert: WVAKueueLenderWaitingPastCooldown
+      expr: max by (cohort, cluster_queue) (wva_kueue_lender_waiting_seconds) > 600
+      for: 2m
+      labels:
+        severity: warning
+      annotations:
+        summary: "ClusterQueue {{ $labels.cluster_queue }} has waited over 10 minutes for capacity it lent in cohort {{ $labels.cohort }}"
+        description: "A lender has waited longer than the default borrow cooldown (10 minutes; raise this threshold with borrowCooldown) while a namespace this controller governs still borrows in its cohort. Neither Kueue preempted for it nor did the scaling manager release borrowed replicas to it. Read the controller log for 'Releasing borrowed capacity', the controller-status key borrowReleaseLedger (an entry marked release-not-actuated means the lowered target did not land: check KEDA and the scale target), and wva_model_scaling_blocked{reason=\"borrow-released\"}."
+
+    - alert: WVAKueuePodsUnplaced
+      expr: max by (exported_namespace, variant_name) (wva_kueue_unplaced_pods) > 0
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "{{ $value }} pod(s) of {{ $labels.exported_namespace }}/{{ $labels.variant_name }} unplaced past the placement timeout"
+        description: "Grouped by exported_namespace: the series carries the model's namespace. These pods have been Unschedulable, or held at Kueue's admission gate, for longer than the placement timeout (default 5 minutes), and stayed so for 5 more minutes. Borrowed replicas are released at the timeout, so what stays is usually within guaranteed quota: no node fits the pod, Kueue has not admitted it, or the cluster autoscaler is still adding a node. Check 'kubectl describe pod' for the scheduling message and the Workload's admission status."
+
+    - alert: WVAKueueBorrowThrashing
+      expr: sum by (exported_namespace, model_name) (count_over_time((wva_model_scaling_blocked{reason=~"borrow-released|lender-reclaimed"} unless wva_model_scaling_blocked{reason=~"borrow-released|lender-reclaimed"} offset 1m)[1h:1m])) > 3
+      for: 1m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} lost borrowed capacity more than 3 times in an hour"
+        description: "Counts each time reason borrow-released (the scaling manager gave borrowed replicas back to a waiting lender) or lender-reclaimed (Kueue preempted a borrowed pod) started, over the last hour. The model keeps growing onto capacity its cohort's lenders keep taking back: every cycle costs a cold start. Raise the model's guaranteed quota (nominalQuota), lengthen borrowCooldown, or set countBorrowable: false for it."

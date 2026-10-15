@@ -555,7 +555,10 @@ Set on the quota entry's `kueue:` block in the scaling policy, beside
 | `lenderDebounce` | A lender counts as waiting only after two fresh reads and this long. | `60s` |
 
 A release still in flight is recorded under `borrowReleaseLedger` in the
-`wva-controller-status` ConfigMap, so a restart does not release twice.
+`wva-controller-status` ConfigMap, so a restart does not release twice. The
+budget the controller used last cycle, per quota entry, namespace and
+accelerator, is under `limiterBudgets` in the same ConfigMap
+([what it holds](prometheus.md#kueue-borrowing-metrics)).
 
 ### Learned state across a restart
 

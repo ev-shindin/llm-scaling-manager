@@ -1042,6 +1042,7 @@ Every reason the controller sets:
 | `activation-retention` | scale-to-zero policy | just woken from zero and held for its retention period | nothing; clears by itself |
 | `no-wake-signal` | scale-from-zero | EPP exports no flow-control queue metric at all, so a parked model cannot wake | enable the EPP `flowControl` feature gate and restart the EPP. Alert: `WVAModelHasNoWakeSignal` |
 | `quiet-period`, `marks-unreadable`, `whole-replica-short`, `awaiting-release`, `quota-short`, `floor-pinned`, `floors-exceed-quota`, `donors-at-floor`, `no-compatible-donor`, `release-timeout`, `release-taken`, `release-shape-mismatch`, `reversal-hold`, `swinging`, `transfer-limit`, `burst-ending`, `fast-swing-capped`, `donor-not-steerable` | utilization-share optimizer, only while it acts | see the table below | see the table below |
+| `borrow-released`, `lender-reclaimed`, `borrow-unplaced`, `nominal-lent-out` | Kueue borrowing | see [reasons set by Kueue borrowing](#wva_model_scaling_blocked-reasons-set-by-kueue-borrowing) | same |
 
 For the scale-to-zero reasons, see also
 [when a model will not park](../guides/scale-to-zero/README.md#when-a-model-will-not-park).
@@ -1082,6 +1083,40 @@ For the scale-to-zero reasons, see also
 | `fast-swing-capped` | The role's need swings faster than a move can follow (at least two completed bursts, all shorter than a move's latency, over a quarter of its peak) while another model of the group bursts for longer than a move and past its floor. Its headroom under the contended cap is set on its mean need over the swing window, below its current reading, so the idle GPUs it would take at each crest stay free for the long burst. | Nothing to tune: the model serves its crests from what it holds. If it must not lag at a crest, give it a floor or a higher weight. |
 | `release-taken` | The role's last transfer timed out filling, and the GPUs its donors released were taken by a pod the scaling manager did not place. Needs node information. Reported for one release timeout after the fill timed out, then cleared; it returns if the next fill fails the same way. | Look for other workloads scheduling onto the same accelerator type. |
 | `release-shape-mismatch` | The role's last transfer timed out filling: enough GPUs were free in total, but no node had enough for its largest pod. Needs node information. Reported for one release timeout after the fill timed out, then cleared. | GPUs are fragmented across nodes; the model needs a node with enough GPUs free at once. |
+
+### `wva_model_scaling_blocked` reasons set by Kueue borrowing
+
+Set every cycle by the steady-state engine, only for a namespace-scope Kueue
+quota entry that counts borrowing. Each answers "why did this model drop?"; a
+model that dropped with none of them present dropped because its demand fell.
+See [replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing).
+
+| reason | what it means | what you can do |
+| --- | --- | --- |
+| `borrow-released` | The scaling manager is giving borrowed replicas back to a lender ClusterQueue that waits for capacity it lent and cannot reclaim it itself (`reclaimWithinCohort: Never`). Present until the release lands. A `BorrowedCapacityReleased` Event on the scale target names the lender. | Nothing, normally. Often: see `WVAKueueBorrowThrashing`. |
+| `lender-reclaimed` | Kueue preempted a pod of the model for a lender reclaiming its nominal quota. Present for `borrowCooldown` after the preemption, while the model borrows nothing new. | Raise the model's guaranteed quota if it recurs. |
+| `borrow-unplaced` | A variant has replicas that did not place (Unschedulable, or held at Kueue's admission gate). It grows on no borrowed GPUs meanwhile, and borrowed replicas still unplaced after `placementTimeout` are given back. | `kubectl describe pod` for the scheduling message; see `wva_kueue_unplaced_pods`. |
+| `nominal-lent-out` | The limiter capped the model this cycle while part of its ClusterQueue's nominal quota is held by a peer it cannot reclaim from, so its guaranteed figure sits below nominal. | Set `reclaimWithinCohort` on the ClusterQueue if the model must reach its nominal quota. |
+
+### Kueue Borrowing Metrics
+
+Published only for a namespace-scope Kueue quota entry; the borrowing series
+only where it counts borrowing. Every other borrowing condition is a reason on
+`wva_model_scaling_blocked` (above). `namespace` is scraped as
+`exported_namespace`.
+
+| metric | type | labels | value |
+| --- | --- | --- | --- |
+| `wva_quota_limit_gpus` | gauge | `limiter_name`, `namespace`, `accelerator`, `tier` | A namespace-scope quota entry's cap per namespace and accelerator. `tier="guaranteed"`: the cap without borrowing. `tier="borrowable"`: what the namespace may draw past it now, were no other namespace to draw first -- the smaller of its borrow cap (the queues' `borrowingLimit`, bounded by the entry and the namespace ResourceQuota) and the free GPUs of its cohorts' shared pools for that accelerator, after what is in flight. `0` where borrowing is not counted. No series for an unlimited guaranteed figure. |
+| `wva_quota_borrow_withheld` | gauge | `limiter_name`, `namespace`, `accelerator`, `reason` | `1` for the reason borrowable is 0; deleted when the reason changes or clears. Reasons: `stale`, `no-status`, `hierarchical-cohort`, `hierarchy-unknown`, `effective-quotas`, `fair-sharing`, `no-cohort`, `inactive`, `malformed`, `not-kueue-managed`, `no-gpu-bound`, `resourcequota-unreadable` (borrowing not counted), and `no-borrow-cap`, `lender-waiting`, `cohort-pool-empty` (counted, nothing to draw now). |
+| `wva_kueue_unplaced_pods` | gauge | `namespace`, `variant_name` | Pods of a variant unplaced for longer than `placementTimeout`. Absent otherwise. |
+| `wva_kueue_preempted_pods_total` | counter | `namespace`, `model_name` | Pods Kueue preempted (a Workload evicted with reason `Preempted`): one per pod the Workload names as its owner, so a LeaderWorkerSet group counts once. |
+| `wva_kueue_lender_waiting_seconds` | gauge | `cohort`, `cluster_queue` | How long a lender ClusterQueue has waited for capacity it lent, published only while a namespace this controller governs still borrows in its cohort. |
+
+The same budget, per entry, namespace and accelerator, with `used` and an
+`asOf` time, is in the `limiterBudgets` key of the `wva-controller-status`
+ConfigMap (at most 200 entries; `truncated` counts the rest). `asOf` moves only
+when a figure changes.
 
 ### Replica Management Metrics
 
@@ -1381,6 +1416,10 @@ T = troubleshooting runbook on [Troubleshooting](troubleshooting.md).
 | `WVAGPUResourceExhausted` | warning | 5m | GPU-labeled nodes report zero allocatable GPUs of a type. Only with a `gpu-inventory` limiter | check GPU node status and device-plugin pods. No alert does not mean GPUs are free: the metric exists only with that limiter | [T: GPUs held](troubleshooting.md#gpus-held-or-quota-spent) |
 | `WVAReplicaScalingThrashing` | warning | 10m | more than 2 cycles per minute for one variant whose decision was not `no-change`. The counter rises on every such cycle, so it fires on flapping **and** on a scale-up the workload never catches up with: actuation stuck, Pods Pending, slow replica starts | read the model's `scaling-decision` lines: `tgt` alternating is flapping; `tgt` steady above `curr` is actuation not landing | [T: flapping](troubleshooting.md#a-model-is-flapping), [T: actuation stuck](troubleshooting.md#desired-is-not-current-actuation-stuck) |
 | `WVAModelWillNotScaleToZero` | info | 15m | blocked reason `variant-floor` or `policy-forbids-zero`: the configuration asks to park and forbids it | make the two halves agree | [will not park](../guides/scale-to-zero/README.md#when-a-model-will-not-park) |
+| `WVAKueueReaderStale` | warning | 5m | `wva_quota_borrow_withheld{reason="stale"}` for a limiter: the Kueue read failed or is older than twice the refresh interval. Borrowing is frozen: nothing new is borrowed, nothing is given back | check the log for `external quota source unreadable` and the controller's Kueue RBAC; hand capacity back by hand meanwhile | [T: replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing) |
+| `WVAKueueLenderWaitingPastCooldown` | warning | 2m | `wva_kueue_lender_waiting_seconds` above 600 (the default `borrowCooldown`; change the threshold if you change it): a lender waits while a governed namespace still borrows in its cohort | read `borrowReleaseLedger` in `wva-controller-status`; `release-not-actuated` means the lowered target did not land | [T: replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing) |
+| `WVAKueuePodsUnplaced` | warning | 5m | `wva_kueue_unplaced_pods` above 0: pods unplaced past `placementTimeout` | `kubectl describe pod` for the scheduling message, and the Workload's admission | [T: replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing) |
+| `WVAKueueBorrowThrashing` | warning | 1m | reason `borrow-released` or `lender-reclaimed` started more than 3 times in an hour for one model (counted at one-minute resolution) | raise the model's `nominalQuota`, lengthen `borrowCooldown`, or turn borrowing off for it | [T: replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing) |
 | `WVAOptimizationLoopStalled` | info | 15m | `wva_models_processed` is 0 or absent for 10 minutes | expected when no ScaledObject names this scaler. Otherwise check the controller pod, its log and Prometheus | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
 
 There is deliberately no alert on `engine-unsupported`: it is a standing property
