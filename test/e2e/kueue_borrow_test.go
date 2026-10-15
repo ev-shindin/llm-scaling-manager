@@ -293,6 +293,10 @@ var _ = Describe("Kueue cohort borrowing - applied against a live Kueue", Label(
 		Expect(fixtures.EnsureScaledObject(ctx, crClient, nsA, soA, depA, depA, 1, maxA, cfg.MonitoringNS,
 			fixtures.WithWVATriggerMetadata(modelA, "10.0"),
 			fixtures.WithScaledObjectScaleDownStabilizationWindow(window))).To(Succeed())
+		// BeforeSuite restarts the controller seconds before this; a
+		// ScaledObject registered while KEDA cannot reach the scaler stays on
+		// the HPA's CPU default and A never moves past one replica.
+		waitForKEDAExternalMetricWired(nsA, depA, soA)
 
 		By("Loading A far past what four replicas serve")
 		job := buildThroughputSustainedLoadJob(nsA, loadJob, fmt.Sprintf("http://%s-service:8000/v1/completions", msA),
