@@ -267,6 +267,9 @@ type VariantReplicaState struct {
 	FilledReplicas int
 	// PodGPUs is each pod's GPUs in one replica; see VariantMetadata.PodGPUs.
 	PodGPUs []int
+	// Placements is each pod template's node placement; see
+	// VariantMetadata.Placements.
+	Placements []PodPlacement
 	// UnplacedReplicas, UnplacedSince and UnplacedPods: see
 	// VariantMetadata.UnplacedReplicas.
 	UnplacedReplicas int

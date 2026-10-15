@@ -69,6 +69,12 @@ type VariantMetadata struct {
 	// no pod requests a GPU explicitly, where GPUsPerReplica's default of 1
 	// says nothing about shape.
 	PodGPUs []int
+	// Placements is the node placement each distinct pod template of one
+	// replica asks for, leader first: one entry for a Deployment, two for a
+	// LeaderWorkerSet with its own leader template. A node fits a pod of the
+	// replica only if it satisfies every entry. Nil when no template
+	// constrains its nodes.
+	Placements []PodPlacement
 	// MinReplicas/MaxReplicas are the scaling bounds; nil means unset.
 	MinReplicas *int
 	MaxReplicas *int
@@ -108,6 +114,7 @@ func (m VariantMetadata) ToReplicaState() VariantReplicaState {
 		HeldKnown:        m.HeldKnown,
 		FilledReplicas:   m.FilledReplicas,
 		PodGPUs:          m.PodGPUs,
+		Placements:       m.Placements,
 		UnplacedReplicas: m.UnplacedReplicas,
 		UnplacedSince:    m.UnplacedSince,
 		UnplacedPods:     m.UnplacedPods,

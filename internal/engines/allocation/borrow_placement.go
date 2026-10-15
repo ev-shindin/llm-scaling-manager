@@ -229,9 +229,10 @@ func (p *modelPlacer) tryUnit(picked []string, kByRole map[string]int, variantBy
 		v := variantByRole[role]
 		acc := accFromVCs(variants, v)
 		g := gpusPerReplicaFromState(stateMap, v)
-		pods := replicaPods(stateMap[v].PodGPUs, g)
+		st := stateMap[v]
+		pods := replicaPods(p.namespace+"/"+v, st.PodGPUs, g)
 		for i := 0; i < kByRole[role]; i++ {
-			if !p.placeReplica(v, acc, g, pods, p.targets[v]+kByRole[role]) {
+			if !p.placeReplica(v, acc, g, pods, st.Placements, p.targets[v]+kByRole[role]) {
 				return false
 			}
 		}
@@ -244,8 +245,9 @@ func (p *modelPlacer) tryUnit(picked []string, kByRole map[string]int, variantBy
 // fits none (it stays Pending and is reported as unplaced, B5), and growth into
 // lent-out nominal debits the pool, clamped. Past it the borrowed part must fit
 // the namespace's cap, one chunk of its cohorts, and -- with a node view -- a
-// node of that chunk's flavor, whole replica at once.
-func (p *modelPlacer) placeReplica(variant, acc string, g int, pods []int, target int) bool {
+// node of that chunk's flavor, whole replica at once. Every node must also
+// satisfy the replica's pod templates (templates).
+func (p *modelPlacer) placeReplica(variant, acc string, g int, pods []int, templates []domain.PodPlacement, target int) bool {
 	bs := p.bs
 	left := -1 // unbounded: an open namespace, or an unlimited allowance
 	key := ""
@@ -268,7 +270,7 @@ func (p *modelPlacer) placeReplica(variant, acc string, g int, pods []int, targe
 			borrow.lentOut -= n
 			bs.debitPool(p.namespace, acc, n)
 		}
-		bs.nodes.place(acc, pods, nil, true)
+		bs.nodes.place(acc, pods, templates, nil, true)
 		return true
 	}
 	if borrow == nil || (bs.blocked != nil && bs.blocked(p.namespace, p.modelID, variant)) {
@@ -279,10 +281,10 @@ func (p *modelPlacer) placeReplica(variant, acc string, g int, pods []int, targe
 		return false
 	}
 	for _, c := range bs.cohortChunks(p.namespace, acc) {
-		if c.Free < need || !bs.nodes.place(acc, pods, &c.FlavorPlacement, false) {
+		if c.Free < need || !bs.nodes.place(acc, pods, templates, &c.FlavorPlacement, false) {
 			continue
 		}
-		bs.nodes.place(acc, pods, &c.FlavorPlacement, true)
+		bs.nodes.place(acc, pods, templates, &c.FlavorPlacement, true)
 		c.Free -= need
 		if borrow.cap >= 0 {
 			borrow.cap -= need
