@@ -75,8 +75,14 @@ func (e *Engine) shareNodeInputs(ctx context.Context, logger logr.Logger, g allo
 	return nodes, units, domains
 }
 
-// shareNodes is the fresh per-node GPU picture, or nil.
+// shareNodes is the fresh per-node GPU picture, or nil. When the cycle counts
+// cohort borrowing it is the cycle's node view, with every replica the greedy
+// optimizer ordered already debited, so the idle fill cannot place into a hole
+// greedy took (one node view per cycle, used in order).
 func (e *Engine) shareNodes(now time.Time) map[string]decision.NodeGPU {
+	if e.borrowing.nodes != nil {
+		return e.borrowing.nodes.Snapshot()
+	}
 	store := e.utilizationShare.nodes
 	if store == nil {
 		store = decision.DefaultNodeGPUs

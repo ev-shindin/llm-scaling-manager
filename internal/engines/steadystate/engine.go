@@ -190,6 +190,11 @@ type Engine struct {
 	// policy is in shadow mode; see evaluateUtilizationShare.
 	utilizationShare utilizationShareState
 
+	// borrowing is the engine's cohort-borrowing state across cycles: growth
+	// ordered on borrowed capacity that Kueue has not reserved yet, and this
+	// cycle's node view (borrowing.go).
+	borrowing borrowingState
+
 	// learnedState is the learned-state snapshot store's between-cycle state
 	// (learned_state_store.go).
 	learnedState learnedStateStoreState
@@ -1334,12 +1339,18 @@ func (e *Engine) optimizeV2(
 
 	// Stage 2: Compute GPU constraints and call optimizer
 	optimizer, constraints := e.selectV2Optimizer(ctx, requests)
+	// Cohort borrowing: what Kueue has not reserved yet leaves the shared
+	// pools, and the cycle's node view is built (borrowing.go). A no-op
+	// without borrowing.
+	constraints = e.prepareBorrowing(ctx, constraints, requests, time.Now())
 	// Scope-coupled rescale enablement (cluster + per-namespace) is resolved from
 	// config and handed to the GPU-aware optimizer for this cycle.
 	if g, ok := optimizer.(*allocation.GreedyByScoreOptimizer); ok {
 		g.Rescale = e.resolveRescaleFlags(requests)
+		g.Nodes = e.borrowing.nodes
 	}
 	allDecisions := e.decideV2(ctx, optimizer, requests, constraints, variantScaleTargets)
+	e.recordBorrowDraws(optimizer)
 	logScalingDecisions(ctx, requests, allDecisions)
 
 	logger.Info("V2 optimizer produced decisions",

@@ -98,4 +98,10 @@ func TestDiscoverUsageWithNodesMarksCordonedNodes(t *testing.T) {
 	assert.False(t, nodes["preferred"].Unschedulable, "PreferNoSchedule does not")
 	assert.True(t, nodes["not-ready"].Unschedulable)
 	assert.False(t, nodes["ready"].Unschedulable)
+
+	// The scheduling taints ride along, for matching a Kueue flavor's
+	// tolerations; PreferNoSchedule keeps no pod off a node.
+	assert.Equal(t, []corev1.Taint{{Key: "nvidia.com/gpu", Effect: corev1.TaintEffectNoSchedule}}, nodes["gpu-pool"].Taints)
+	assert.Empty(t, nodes["preferred"].Taints)
+	assert.Empty(t, nodes["open"].Taints)
 }

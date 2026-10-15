@@ -558,6 +558,29 @@ func allocateForModelPaired(
 	pickerState RolePairedState,
 	roles []string,
 ) {
+	allocateForModelPairedPlaced(ctx, e, variants, stateMap, available, targets, pick, pickerState, roles, nil)
+}
+
+// allocateForModelPairedPlaced is allocateForModelPaired with a placer that
+// places each iteration's commit replica by replica before it is committed:
+// against the namespace's guaranteed budget, then the cohort's shared pools and
+// the node view (modelPlacer.placeUnit). The flat budget alone cannot say that
+// two 4-GPU holes do not hold one 8-GPU replica, or that a borrowed replica must
+// land whole in one flavor. A unit that does not place is trimmed at its shape;
+// one that cannot place one replica of each role ends the pass, as scarcity
+// does. A nil placer is allocateForModelPaired exactly.
+func allocateForModelPairedPlaced(
+	ctx context.Context,
+	e *NamedAnalyzerResult,
+	variants []variantRecord,
+	stateMap map[string]domain.VariantReplicaState,
+	available map[string]int,
+	targets map[string]int,
+	pick RolePickFn,
+	pickerState RolePairedState,
+	roles []string,
+	placer *modelPlacer,
+) {
 	logger := ctrl.LoggerFrom(ctx)
 	for anyRoleNeedsScaleUp(pickerState, roles) {
 		variantByRole := make(map[string]string, len(roles))
@@ -657,6 +680,9 @@ func allocateForModelPaired(
 		// must fit it together. Not even one replica of each fitting together
 		// is SCARCITY, and ends the pass the same way.
 		if !fitPairToBudget(picked, kByRole, variantByRole, variants, stateMap, available) {
+			break
+		}
+		if placer != nil && !placer.placeUnit(picked, kByRole, variantByRole, variants, stateMap) {
 			break
 		}
 

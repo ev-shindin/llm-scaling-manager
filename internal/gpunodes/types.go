@@ -1,5 +1,7 @@
 package gpunodes
 
+import corev1 "k8s.io/api/core/v1"
+
 // AcceleratorModelInfo contains details about a discovered accelerator model on a node.
 type AcceleratorModelInfo struct {
 	Count  int
@@ -21,4 +23,7 @@ type NodeInfo struct {
 	// Unschedulable is set on a node nothing new lands on: cordoned, not Ready,
 	// or tainted NoSchedule or NoExecute. Tolerations are not matched.
 	Unschedulable bool
+	// Taints are the node's NoSchedule and NoExecute taints, for matching a
+	// Kueue flavor's tolerations when placing a borrowed replica.
+	Taints []corev1.Taint
 }

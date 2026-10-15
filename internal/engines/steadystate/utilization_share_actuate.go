@@ -723,7 +723,10 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 	promised := decision.LatestSharePromised(e.utilizationShare.clock())
 	decisions := optimizer.Optimize(ctx, requests, allocation.WithholdPromised(constraints, promised))
 	e.reportQuotaAloneAllocation(ctx, optimizer, requests, allocation.WithholdPromised(constraints, promised), decisions)
-	if overrides := e.evaluateUtilizationShare(ctx, requests, constraints, scaleTargets); len(overrides) > 0 {
+	// The share budgets guaranteed plus the borrowed GPUs a group holds now,
+	// and starts no new borrowing (B4): it reads the constraints without the
+	// borrowing figures.
+	if overrides := e.evaluateUtilizationShare(ctx, requests, allocation.GuaranteedOnly(constraints), scaleTargets); len(overrides) > 0 {
 		applied := applyUtilizationShareOverrides(decisions, overrides)
 		ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("Utilization share: set planned targets", "variants", applied)
 	}

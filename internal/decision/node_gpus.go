@@ -2,19 +2,25 @@ package decision
 
 import (
 	"maps"
+	"slices"
 	"sync"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 // NodeGPU is one GPU node as the usage refresher last saw it: its accelerator,
-// capacity, the GPUs requested by pods scheduled to it, its labels, and
-// whether it is cordoned.
+// capacity, the GPUs requested by pods scheduled to it, its labels, whether it
+// is cordoned, and its NoSchedule and NoExecute taints.
 type NodeGPU struct {
 	Accelerator   string
 	Capacity      int
 	Used          int
 	Labels        map[string]string
 	Unschedulable bool
+	// Taints are matched against a Kueue flavor's tolerations when a borrowed
+	// replica is placed on the flavor's nodes.
+	Taints []corev1.Taint
 }
 
 // Free is the node's GPUs no scheduled pod requests.
@@ -36,6 +42,7 @@ func (s *NodeGPUStore) Publish(nodes map[string]NodeGPU, now time.Time) {
 	c := make(map[string]NodeGPU, len(nodes))
 	for k, n := range nodes {
 		n.Labels = maps.Clone(n.Labels)
+		n.Taints = slices.Clone(n.Taints)
 		c[k] = n
 	}
 	s.mu.Lock()
@@ -54,6 +61,7 @@ func (s *NodeGPUStore) Latest(maxAge time.Duration, now time.Time) map[string]No
 	c := make(map[string]NodeGPU, len(s.nodes))
 	for k, n := range s.nodes {
 		n.Labels = maps.Clone(n.Labels)
+		n.Taints = slices.Clone(n.Taints)
 		c[k] = n
 	}
 	return c

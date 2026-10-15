@@ -126,6 +126,7 @@ func (d *K8sWithGpuOperator) listGPUNodes(ctx context.Context) (map[string]NodeI
 					Labels:        copyStringMap(node.Labels),
 					Accelerators:  make(map[string]AcceleratorModelInfo),
 					Unschedulable: refusesNewPods(&node),
+					Taints:        schedulingTaints(&node),
 				}
 			}
 			// i915 and xe resources use the same gpu.intel.com/product label, so
@@ -253,6 +254,7 @@ func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[st
 			Used:          byNode[name],
 			Labels:        nodes[name].Labels,
 			Unschedulable: nodes[name].Unschedulable,
+			Taints:        nodes[name].Taints,
 		}
 	}
 	return byType, byNamespace, out, nil
@@ -372,6 +374,18 @@ var nodeRemovalTaints = map[string]bool{
 // that counted on its free GPUs would open a hole nobody can use. Other taints
 // are not read: a GPU pool's own taint is tolerated by the pods it exists for,
 // and matching a receiver's tolerations is not built.
+// schedulingTaints is the node's taints that keep a pod off it unless the pod
+// tolerates them: NoSchedule and NoExecute.
+func schedulingTaints(node *corev1.Node) []corev1.Taint {
+	var out []corev1.Taint
+	for _, t := range node.Spec.Taints {
+		if t.Effect == corev1.TaintEffectNoSchedule || t.Effect == corev1.TaintEffectNoExecute {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 func refusesNewPods(node *corev1.Node) bool {
 	if node.Spec.Unschedulable {
 		return true

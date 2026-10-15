@@ -142,50 +142,68 @@ func clusterHeadroom(constraints []*ResourceConstraints) map[string]int {
 // constraints: each capped namespace's allowance and the closed cluster-scope
 // bound.
 func publishHeadroom(constraints []*ResourceConstraints, now time.Time) {
+	// The warm pool spends capacity within nominal only, never borrowed
+	// capacity (B7): a pool Pod on borrowed GPUs is the first thing a reclaim
+	// takes.
+	constraints = WithinNominal(constraints)
 	decision.PublishHeadroomBounds(namespaceHeadroom(constraints), clusterHeadroom(constraints),
 		poolsVersionOf(constraints), now)
 }
 
 // namespaceAllowance is the free GPUs per (namespace, accelerator) under the
-// namespace pools alone, tightest provider winning.
+// namespace pools alone, intersected across the providers that hold the
+// namespace as mergeNamespaceConstraints intersects them: a type is allowed only
+// if every provider holding the namespace lists it (by accelerator identity), at
+// the tightest figure among them, and is 0 otherwise. Taking the tightest only
+// over the providers that listed a type let a second entry re-open, for the
+// warm pool, a type the first denies -- the optimizer already refused it.
+// A provider that does not hold the namespace adds no rule for it.
 func namespaceAllowance(constraints []*ResourceConstraints) map[string]map[string]int {
-	out := map[string]map[string]int{}
+	holders := map[string][]map[string]ResourcePool{}
 	for _, c := range constraints {
 		if c == nil {
 			continue
 		}
 		for ns, perType := range c.NamespacePools {
-			free, ok := out[ns]
-			if !ok {
-				free = map[string]int{}
-				out[ns] = free
-			}
-			for accType, rp := range perType {
-				if rp.Limit < 0 {
-					// Unlimited for this (namespace, type): carried as the
-					// decision.HeadroomUnlimited sentinel. Skipping it left the
-					// type absent from a present namespace, which a reader takes
-					// as DENIED -- a warm pool under an unlimited allowance was
-					// held at zero. A finite bound from another provider wins.
-					if _, seen := free[accType]; !seen {
-						free[accType] = decision.HeadroomUnlimited
-					}
-					continue
-				}
-				avail := rp.Limit - rp.Used
-				if avail < 0 {
-					// Over-committed already. Zero, not negative: the answer a
-					// caller needs is "nothing more", and a negative number
-					// invites arithmetic that accidentally grants some back.
-					avail = 0
-				}
-				if prev, seen := free[accType]; !seen || prev < 0 || avail < prev {
-					free[accType] = avail
-				}
-			}
+			holders[ns] = append(holders[ns], perType)
 		}
 	}
+	out := make(map[string]map[string]int, len(holders))
+	for ns, pools := range holders {
+		free := map[string]int{}
+		for _, perType := range pools {
+			for accType := range perType {
+				free[accType] = headroomOf(pools, accType)
+			}
+		}
+		out[ns] = free
+	}
 	return out
+}
+
+// headroomOf is one type's allowance over every provider holding a namespace:
+// 0 when one does not list it, decision.HeadroomUnlimited when every one lists
+// it as unlimited (skipping it would leave the type absent from a present
+// namespace, which a reader takes as DENIED), else the tightest free figure.
+// Over-committed reads 0, not negative: the answer a caller needs is "nothing
+// more", and a negative number invites arithmetic that grants some back.
+func headroomOf(pools []map[string]ResourcePool, accType string) int {
+	free := decision.HeadroomUnlimited
+	for _, perType := range pools {
+		key, listed := accelerator.FindKey(perType, accType)
+		if !listed {
+			return 0
+		}
+		rp := perType[key]
+		if rp.Limit < 0 {
+			continue
+		}
+		avail := max(0, rp.Limit-rp.Used)
+		if free < 0 || avail < free {
+			free = avail
+		}
+	}
+	return free
 }
 
 // bindingProvider names the constraint provider whose pool most tightly bounds
