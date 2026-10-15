@@ -7,6 +7,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/gpunodes"
 )
@@ -214,6 +215,29 @@ func TestProductsOfOneFamilyDoNotEachSeeTheWholeFamily(t *testing.T) {
 				groups[0].ClusterFree, groups[1].ClusterFree, sum)
 		}
 	})
+}
+
+// The warm pool's headroom takes the bounds the placement check takes: a
+// physical pool of {H100: 8} leaves a namespace allowance of A100s nothing,
+// whether the allowance is finite or unlimited.
+func TestWarmPoolHeadroomDeniesATypeTheClusterBoundsLack(t *testing.T) {
+	for _, allowance := range []int{config.QuotaUnlimited, 4} {
+		decision.DefaultHeadroom.Reset()
+		now := time.Now()
+		c := []*ResourceConstraints{
+			famPhysical(t, map[string]int{famHBM3: 8}),
+			famNamespaceQuota(t, map[string]map[string]int{"tenant": {"A100": allowance}}),
+		}
+		if FitsGPUBudget(c, "tenant", map[string]int{"A100": 1}) {
+			t.Fatalf("setup: the placement check must deny A100 (allowance %d)", allowance)
+		}
+		PublishNamespaceHeadroom(c, now)
+		free, state := decision.GPUHeadroomReading("tenant", "A100", 0, time.Minute, now)
+		if state != decision.HeadroomBounded || free != 0 {
+			t.Errorf("allowance %d: headroom (%d, %v), want (0, bounded): no node has an A100", allowance, free, state)
+		}
+	}
+	decision.DefaultHeadroom.Reset()
 }
 
 // A spend under a product also draws down the namespace's family key. Quota

@@ -109,3 +109,18 @@ func TestIdleFleetHeadroomSkipsAnUnobservedProviderOnly(t *testing.T) {
 		t.Fatalf("headroom (%d, %v), want (1, true): the quota still bounds the pool", free, known)
 	}
 }
+
+// With only a physical limiter, the warm pool read "unbounded": no provider
+// had namespace pools, and the cluster-scope bound was not published.
+func TestIdleFleetHeadroomIsBoundedByThePhysicalPool(t *testing.T) {
+	resetUsageAndHeadroom(t)
+	decision.PublishGPUUsage(map[string]int{}, map[string]map[string]int{})
+
+	e := &Engine{GPULimiter: physicalStub{pools: map[string]allocation.ResourcePool{"H100": {Limit: 8, Used: 7}}}}
+	e.publishHeadroomForIdleFleet(context.Background())
+
+	free, known := decision.GPUHeadroom("tenant", "H100", time.Minute, time.Now())
+	if !known || free != 1 {
+		t.Fatalf("headroom (%d, %v), want (1, true): one GPU is free on the nodes", free, known)
+	}
+}

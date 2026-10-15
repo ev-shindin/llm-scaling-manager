@@ -58,7 +58,7 @@ func applyGPULimitAttribution(
 	defer func() {
 		now := time.Now()
 		decision.PublishGPUContention(contended, now)
-		decision.PublishHeadroom(namespaceHeadroom(constraints), poolsVersionOf(constraints), now)
+		publishHeadroom(constraints, now)
 	}()
 
 	if len(limited) == 0 {
@@ -87,44 +87,75 @@ func applyGPULimitAttribution(
 }
 
 // namespaceHeadroom is how many GPUs of each accelerator each namespace may
-// still take, across every provider, tightest bound winning.
+// still take, across every provider, tightest bound winning -- the closed
+// cluster-scope bound (clusterHeadroom) included, as GPUBudgets bounds a
+// namespace's allowance by the cluster pools: a namespace may not be granted
+// more than the cluster has free.
 //
-// Only namespaces some provider actually CAPS appear. A namespace nobody bounds
+// Only namespaces some provider actually CAPS appear. A namespace nobody caps
 // is absent rather than present-with-a-large-number, because "unconstrained" and
 // "a lot left" are different answers and a caller has to be able to tell them
-// apart -- a warm pool must grow freely in the first case.
+// apart -- a warm pool must grow freely in the first case. It is still bounded
+// by the cluster figure, which is published beside this (Headroom.Cluster).
 //
-// Mirrors effectiveAvailable: a negative Limit is the unlimited sentinel and
-// imposes no bound, and an accelerator a namespace's allowlist does not name is
-// a hard deny, which is zero rather than absent.
+// Mirrors effectiveAvailable and GPUBudgets: a negative Limit is the unlimited
+// sentinel and imposes no namespace bound, an accelerator a namespace's
+// allowlist does not name is a hard deny, which is zero rather than absent, and
+// a type the cluster bounds do not list is zero too however the namespace lists
+// it (clusterBudgetFor) -- a physical pool of {H100: 8} leaves a namespace
+// allowance of {A100: 4}, or of unlimited A100s, nothing to place.
 func namespaceHeadroom(constraints []*ResourceConstraints) map[string]map[string]int {
-	out := map[string]map[string]int{}
-	for _, c := range constraints {
-		if c == nil {
-			continue
-		}
-		for ns, perType := range c.NamespacePools {
-			free, ok := out[ns]
-			if !ok {
-				free = map[string]int{}
-				out[ns] = free
+	out := namespaceAllowance(constraints)
+	cluster := clusterHeadroom(constraints)
+	for _, perType := range out {
+		for accType, free := range perType {
+			cv, bounded := clusterBudgetFor(cluster, accType)
+			if !bounded || cv == math.MaxInt {
+				continue
 			}
-			for accType, rp := range perType {
-				if rp.Limit < 0 {
-					continue // unlimited for this (namespace, type)
-				}
-				avail := rp.Limit - rp.Used
-				if avail < 0 {
-					// Over-committed already. Zero, not negative: the answer a
-					// caller needs is "nothing more", and a negative number
-					// invites arithmetic that accidentally grants some back.
-					avail = 0
-				}
-				if prev, seen := free[accType]; !seen || avail < prev {
-					free[accType] = avail
-				}
+			if free < 0 {
+				// Unlimited in the namespace: the cluster figure is the bound.
+				perType[accType] = cv
+			} else {
+				perType[accType] = min(free, cv)
 			}
 		}
+	}
+	return out
+}
+
+// clusterHeadroom is the free GPUs per accelerator under every cluster bound
+// (the physical inventory, a cluster-scope quota), merged as the optimizer
+// merges them, or nil when none is in force. A namespace-scope quota bounds a
+// namespace through that namespace's own allowance instead.
+func clusterHeadroom(constraints []*ResourceConstraints) map[string]int {
+	return mergeConstraints(constraints)
+}
+
+// publishHeadroom publishes the warm pool's headroom from one cycle's
+// constraints: each capped namespace's allowance and the closed cluster-scope
+// bound.
+func publishHeadroom(constraints []*ResourceConstraints, now time.Time) {
+	decision.PublishHeadroomBounds(namespaceHeadroom(constraints), clusterHeadroom(constraints),
+		poolsVersionOf(constraints), now)
+}
+
+// namespaceAllowance is the free GPUs per (namespace, accelerator) under the
+// namespace pools alone: mergeNamespaceConstraints, the optimizer's own merge,
+// so the warm pool cannot read a type the optimizer refuses. An unlimited type
+// is decision.HeadroomUnlimited -- skipping it would leave the type absent from
+// a present namespace, which a reader takes as DENIED.
+func namespaceAllowance(constraints []*ResourceConstraints) map[string]map[string]int {
+	out := mergeNamespaceConstraints(constraints)
+	for _, perType := range out {
+		for accType, free := range perType {
+			if free < 0 {
+				perType[accType] = decision.HeadroomUnlimited
+			}
+		}
+	}
+	if out == nil {
+		out = map[string]map[string]int{}
 	}
 	return out
 }
@@ -196,7 +227,7 @@ func bindingProvider(constraints []*ResourceConstraints, namespace, accType stri
 // constraints to headroom stays in one place and every publisher agrees about
 // what an absent namespace means.
 func PublishNamespaceHeadroom(constraints []*ResourceConstraints, now time.Time) {
-	decision.PublishHeadroom(namespaceHeadroom(constraints), poolsVersionOf(constraints), now)
+	publishHeadroom(constraints, now)
 }
 
 // PublishUnboundedHeadroom records that NO limiter bounds any namespace, as of
