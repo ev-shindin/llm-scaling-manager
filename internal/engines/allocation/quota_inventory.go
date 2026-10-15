@@ -93,7 +93,7 @@ type BorrowOptions struct {
 	// Memory, when set, keeps the last counted borrowing view across a limiter
 	// rebuild, so a stale read after one still freezes. Shared per entry with
 	// its Kueue reader (limiter_factory.go); nil keeps none.
-	Memory *BorrowMemory
+	Memory *borrowMemory
 }
 
 // borrowView is the borrowing an entry counts after one Refresh.
@@ -345,20 +345,20 @@ func (q *QuotaInventory) memoryKey() string {
 	return string(key)
 }
 
-// BorrowMemory keeps the last borrowing view an entry counted from a fresh
+// borrowMemory keeps the last borrowing view an entry counted from a fresh
 // read, beside the entry's shared Kueue reader, so it outlives the
 // QuotaInventory that computed it. A limiter rebuilt while the source is stale
 // starts with no view of its own; without the memory it would fall to the
 // nominal cap, the shrink a stale read must never cause. The zero value and a
-// nil *BorrowMemory remember nothing.
-type BorrowMemory struct {
+// nil *borrowMemory remember nothing.
+type borrowMemory struct {
 	mu   sync.Mutex
 	key  string
 	view *borrowView
 }
 
 // store remembers view (nil: nothing counted) for key.
-func (m *BorrowMemory) store(key string, view *borrowView) {
+func (m *borrowMemory) store(key string, view *borrowView) {
 	if m == nil {
 		return
 	}
@@ -368,7 +368,7 @@ func (m *BorrowMemory) store(key string, view *borrowView) {
 }
 
 // load returns the view remembered for key, or nil.
-func (m *BorrowMemory) load(key string) *borrowView {
+func (m *borrowMemory) load(key string) *borrowView {
 	if m == nil {
 		return nil
 	}

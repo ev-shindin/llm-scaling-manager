@@ -206,11 +206,11 @@ func PublishKueueLenderWaiting(lenders []WaitingLender) {
 }
 
 // CountBorrowRelease counts one release record of borrowed capacity.
-func CountBorrowRelease(namespace, modelName, cause string) {
+func CountBorrowRelease(namespace, modelID, cause string) {
 	if borrowReleases == nil {
 		return
 	}
-	l := prometheus.Labels{constants.LabelNamespace: namespace, constants.LabelModelName: modelName, constants.LabelCause: cause}
+	l := prometheus.Labels{constants.LabelNamespace: namespace, constants.LabelModelName: modelID, constants.LabelCause: cause}
 	if controllerInstance != "" {
 		l[constants.LabelControllerInstance] = controllerInstance
 	}

@@ -86,7 +86,7 @@ type sharedReader struct {
 	// memory keeps the entry's last counted borrowing view, so a limiter
 	// rebuilt while the reader is stale freezes at it instead of starting from
 	// the nominal cap.
-	memory *BorrowMemory
+	memory *borrowMemory
 }
 
 // sharedKueue returns the Reader and Eligibility for entry, creating or
@@ -105,7 +105,7 @@ func sharedKueue(entry config.QuotaLimiterConfig, kubeClient client.Client, name
 		return s
 	}
 	s := &sharedReader{key: string(key), reader: kueue.NewReader(kubeClient, opts), eligibility: kueue.NewEligibility(kubeClient, opts),
-		memory: &BorrowMemory{}}
+		memory: &borrowMemory{}}
 	kueueReaders.byEntry[entry.Name] = s
 	return s
 }

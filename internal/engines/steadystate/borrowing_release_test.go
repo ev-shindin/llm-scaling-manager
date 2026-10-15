@@ -66,6 +66,9 @@ var _ = Describe("giving borrowed capacity back, engine side", func() {
 			lists = nil
 			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
 				WithIndex(&corev1.Event{}, "reason", func(o client.Object) []string { return []string{o.(*corev1.Event).Reason} }).
+				WithIndex(&corev1.Event{}, "involvedObject.kind", func(o client.Object) []string {
+					return []string{o.(*corev1.Event).InvolvedObject.Kind}
+				}).
 				WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 					lo := &client.ListOptions{}
 					lo.ApplyOptions(opts)
@@ -94,6 +97,7 @@ var _ = Describe("giving borrowed capacity back, engine side", func() {
 			Expect(lists).NotTo(BeEmpty())
 			for _, lo := range lists {
 				Expect(lo.FieldSelector).NotTo(BeNil(), "every Event list is narrowed by a field selector")
+				Expect(lo.FieldSelector.String()).To(ContainSubstring("involvedObject.kind=Pod"), "and to Events on pods")
 			}
 		})
 

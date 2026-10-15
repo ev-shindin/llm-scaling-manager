@@ -251,7 +251,7 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 	})
 
 	It("keeps the frozen view across a limiter rebuild while the source is stale", func() {
-		mem := &BorrowMemory{}
+		mem := &borrowMemory{}
 		src := &fakeQuotaSource{}
 		src.push(snapshot, nil)
 		first := NewQuotaInventoryWithSource(entry(nil), src)

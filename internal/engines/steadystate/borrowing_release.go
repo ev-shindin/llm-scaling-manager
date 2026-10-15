@@ -443,7 +443,7 @@ func (e *Engine) scaleUpPending(ctx context.Context, requests []allocation.Model
 		var failed error
 		for _, reason := range []string{eventTriggeredScaleUp, eventNotTriggerScaleUp} {
 			var list corev1.EventList
-			if err := reader.List(ctx, &list, client.InNamespace(ns), client.MatchingFields{"reason": reason}); err != nil {
+			if err := reader.List(ctx, &list, client.InNamespace(ns), client.MatchingFields{"reason": reason, "involvedObject.kind": "Pod"}); err != nil {
 				failed = err
 				break
 			}
