@@ -700,12 +700,19 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]variantRef, heldPast map[string]map[string]int) []BorrowRelease {
 	var out []BorrowRelease
 	for _, req := range c.Requests {
+		// A release in flight for any variant of the model makes its counts
+		// stale until it lands: a partner released for an unplaced replica
+		// (partnerUnit) must not be released again, nor the pair, while it
+		// terminates.
+		if slices.ContainsFunc(req.VariantStates, func(st domain.VariantReplicaState) bool {
+			_, sticky := g.timeoutHeld[req.Namespace+"/"+st.VariantName]
+			return sticky
+		}) {
+			continue
+		}
 		for _, st := range req.VariantStates {
 			key := req.Namespace + "/" + st.VariantName
 			if st.UnplacedReplicas <= 0 {
-				continue
-			}
-			if _, sticky := g.timeoutHeld[key]; sticky {
 				continue
 			}
 			typeKey, ok := accelerator.FindKey(heldPast[req.Namespace], accOf(req, st.VariantName))
@@ -927,10 +934,12 @@ func (g *BorrowGovernor) releaseCandidates(c BorrowCycle, states map[string]vari
 // replica. At one replica whose pair is larger than capGPUs, the partners are
 // cut to what capGPUs covers when the variant's role keeps a replica (the pair
 // stays serviceable: 2P:4D releasing a prefill with 8 GPUs borrowed releases
-// that prefill alone, not 24 GPUs); when the variant's role would reach 0, the
-// whole pair goes, as no role may be left without its partner. A unit larger
-// than what is borrowed is still released then. Nil when no unit releases a
-// replica of variant within minReplicas.
+// that prefill alone, not 24 GPUs). When the variant's role would reach 0, no
+// role may be left without its partner: partner replicas that free the
+// variant's GPUs go instead, the variant's role keeping its replica
+// (partnerUnit), and only when the partners cannot spare one does the whole
+// pair go, a unit larger than what is borrowed. Nil when no unit releases a
+// replica within minReplicas.
 func releaseUnit(req ModelScalingRequest, variant string, k, capGPUs int, states map[string]variantRef) (map[string]int, int) {
 	if k <= 0 {
 		return nil, 0
@@ -979,10 +988,13 @@ func releaseUnit(req ModelScalingRequest, variant string, k, capGPUs int, states
 			return unit, gpus
 		}
 		if fits && k == 1 {
-			if totals[role]-1 <= 0 {
-				return unit, gpus // the role would be orphaned: the whole pair goes
+			if totals[role]-1 > 0 {
+				return trimmedUnit(req.Namespace, variant, role, capGPUs, byRole, states)
 			}
-			return trimmedUnit(req.Namespace, variant, role, capGPUs, byRole, states)
+			if spare, n := partnerUnit(req.Namespace, variant, role, capGPUs, byRole, states); spare != nil {
+				return spare, n
+			}
+			return unit, gpus // no partner can spare a replica: the whole pair goes
 		}
 	}
 	return nil, 0
@@ -1020,6 +1032,48 @@ func trimmedUnit(ns, variant, role string, capGPUs int, byRole map[string][]doma
 				ratio--
 			}
 		}
+	}
+	return unit, gpus
+}
+
+// partnerUnit is the release for an unplaced replica that is the last of its
+// role, when the pair it would take is larger than what is borrowed: partner
+// replicas of the other roles instead of the replica itself, the fewest whose
+// GPUs cover the unplaced replica's, within capGPUs, from the variants with
+// the most above minReplicas first, never a role's last replica. Kueue's
+// reservation within a queue is fungible, so the GPUs they hand back admit the
+// pending replica, and the model keeps serving: 1P:2D with its only prefill
+// unplaced releases one decode (1P:1D), not both decodes and the prefill. Nil
+// when the partners cannot spare that much (1P:1D): the whole pair goes then.
+func partnerUnit(ns, variant, role string, capGPUs int, byRole map[string][]domain.VariantReplicaState,
+	states map[string]variantRef) (map[string]int, int) {
+	gprOf := func(v string) int { return max(states[ns+"/"+v].state.GPUsPerReplica, 1) }
+	need := gprOf(variant)
+	unit := map[string]int{}
+	gpus := 0
+	for _, r := range slices.Sorted(maps.Keys(byRole)) {
+		if r == role || gpus >= need {
+			continue
+		}
+		spare := -1 // the role keeps one replica
+		for _, st := range byRole[r] {
+			spare += st.CurrentReplicas
+		}
+		sts := slices.Clone(byRole[r])
+		slices.SortStableFunc(sts, func(a, b domain.VariantReplicaState) int {
+			return cmp.Or(cmp.Compare(b.CurrentReplicas-minOf(b), a.CurrentReplicas-minOf(a)), strings.Compare(a.VariantName, b.VariantName))
+		})
+		for _, st := range sts {
+			g := gprOf(st.VariantName)
+			for n := max(0, st.CurrentReplicas-minOf(st)); n > 0 && spare > 0 && gpus < need && gpus+g <= capGPUs; n-- {
+				unit[st.VariantName]++
+				gpus += g
+				spare--
+			}
+		}
+	}
+	if gpus < need {
+		return nil, 0
 	}
 	return unit, gpus
 }

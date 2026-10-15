@@ -192,15 +192,53 @@ var _ = Describe("BorrowGovernor release units", func() {
 			Expect(rel[0].GuaranteedGPUs).To(BeZero())
 		})
 
-		It("1P:2D, 8 GPUs borrowed, its only prefill unplaced: the whole pair goes, and says it went below guaranteed", func() {
+		// Review finding (whole-node): 1P:2D, guaranteed 16, only the prefill
+		// unplaced. Releasing the pair deleted two guaranteed decodes that then
+		// cold-started. One decode hands back the 8 borrowed GPUs; Kueue's
+		// reservation within the queue is fungible, so the prefill is admitted
+		// in its place, and the model ends 1P:1D.
+		It("1P:2D, 8 GPUs borrowed, its only prefill unplaced: releases one decode, never the pair", func() {
 			pd := unplacedVariant(pdFleet(pdRole{"p", "prefill", 1}, pdRole{"d", "decode", 2}), "p", t0)
 			rel, tg := timeout(16, 24, pd)
+			Expect(tg).To(Equal(map[string]int{"p": 1, "d": 1}), "the prefill's role keeps its replica")
+			Expect(releasedGPUs(rel)).To(Equal(8))
+			Expect(rel).To(HaveLen(1))
+			Expect(rel[0].Variant).To(Equal("d"))
+			Expect(rel[0].GuaranteedGPUs).To(BeZero())
+		})
+
+		It("releases nothing more for the model while that decode terminates", func() {
+			pd := unplacedVariant(pdFleet(pdRole{"p", "prefill", 1}, pdRole{"d", "decode", 2}), "p", t0)
+			gov := NewBorrowGovernor(settings)
+			c := BorrowCycle{Now: t0.Add(settings.PlacementTimeout + time.Minute), Constraints: govWorld{g: 16, used: 24}.constraints(),
+				Requests: []ModelScalingRequest{pd}}
+			gov.Observe(c)
+			Expect(gov.Releases(c, decisionsOf(c.Requests))).To(HaveLen(1))
+
+			// Actuated, not landed: the decode's spec is 1, its pod still holds.
+			next := unplacedVariant(pdFleet(pdRole{"p", "prefill", 1}, pdRole{"d", "decode", 1}), "p", t0)
+			for i := range next.VariantStates {
+				if next.VariantStates[i].VariantName == "d" {
+					next.VariantStates[i].HeldKnown, next.VariantStates[i].HeldReplicas = true, 2
+				}
+			}
+			c = BorrowCycle{Now: c.Now.Add(30 * time.Second), Constraints: govWorld{g: 16, used: 24}.constraints(),
+				Requests: []ModelScalingRequest{next}}
+			gov.Observe(c)
+			ds := decisionsOf(c.Requests)
+			Expect(gov.Releases(c, ds)).To(BeEmpty(), "the pair is not taken while the decode terminates")
+			Expect(targets(ds)).To(Equal(map[string]int{"p": 1, "d": 1}))
+		})
+
+		It("1P:1D, its only prefill unplaced: no partner can spare a replica, so the pair goes and says it went below guaranteed", func() {
+			pd := unplacedVariant(pdFleet(pdRole{"p", "prefill", 1}, pdRole{"d", "decode", 1}), "p", t0)
+			rel, tg := timeout(8, 16, pd)
 			Expect(tg).To(Equal(map[string]int{"p": 0, "d": 0}), "no decode is left without its prefill")
 			below := 0
 			for _, r := range rel {
 				below += r.GuaranteedGPUs
 			}
-			Expect(below).To(Equal(16))
+			Expect(below).To(Equal(8))
 		})
 
 		It("counts a role split over two variants, and leaves no prefill without a decode", func() {
