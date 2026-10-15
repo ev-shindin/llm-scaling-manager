@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/controllerstatus"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
@@ -144,20 +144,8 @@ func (e *Engine) gatedGPUs(ctx context.Context, constraints []*allocation.Resour
 			if out[ns] == nil {
 				out[ns] = map[string]int{}
 			}
-			out[ns][podAccelerator(p)] += g
+			out[ns][accelerator.ProductFromNodeSelector(p.Spec.NodeSelector)] += g
 		}
 	}
 	return out
-}
-
-// podAccelerator is the GPU product a pod's node selector names, or "".
-func podAccelerator(p *corev1.Pod) string {
-	for _, v := range constants.VendorResources {
-		for _, k := range append([]string{v.ProductLabel}, v.ProductLabelAliases...) {
-			if product := p.Spec.NodeSelector[k]; product != "" {
-				return product
-			}
-		}
-	}
-	return ""
 }

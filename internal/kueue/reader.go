@@ -915,15 +915,7 @@ func (r *Reader) clusterQueueCapsAt(cq *unstructured.Unstructured, flavorType ma
 // equates two different long names.
 func flavorAcceleratorType(rf *unstructured.Unstructured) string {
 	labels, _, _ := unstructured.NestedStringMap(rf.Object, "spec", "nodeLabels")
-	for _, v := range constants.VendorResources {
-		keys := append([]string{v.ProductLabel}, v.ProductLabelAliases...)
-		for _, k := range keys {
-			if product := labels[k]; product != "" {
-				return product
-			}
-		}
-	}
-	return ""
+	return accelerator.ProductFromNodeSelector(labels)
 }
 
 // quantityField parses a resource.Quantity field of an unstructured map into a
