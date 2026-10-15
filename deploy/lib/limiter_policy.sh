@@ -65,7 +65,9 @@ limiter_entry_yaml() {
 
     local scope="${WVA_QUOTA_SCOPE:-namespace}"
     # Kueue bounds the entry when asked: per namespace and accelerator type the
-    # SMALLER of the Kueue nominal quota and the budget in WVA_QUOTAS applies.
+    # SMALLER of the Kueue grant (cohort borrowing included where it is safe;
+    # countBorrowable: false on the entry keeps nominal) and the budget in
+    # WVA_QUOTAS applies.
     # The budget is still required. Kueue's usual flavors carry no product
     # label, so its grant names no accelerator type; WVA_QUOTAS names the types
     # and -1 lets Kueue set the figure: WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true.

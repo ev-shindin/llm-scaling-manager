@@ -182,7 +182,7 @@ map — denies every type (see *Merge rules*, row 3).
 | Kueue object | Scope | Used for |
 |---|---|---|
 | `ResourceFlavor` | cluster | `spec.nodeLabels` names the accelerator behind a flavor — the vendor product label (`nvidia.com/gpu.product`, `amd.com/gpu.product-name`, …, or the GKE alias), kept **as written**: a flavor exists to tell one product from another (a 40GB PCIe A100 from an 80GB SXM one), so the grant is keyed by the full product and meets a static key at bound time (see below). A flavor **without** a product label is an **untyped grant** — see the list below the table. |
-| `ClusterQueue` | cluster | `spec.resourceGroups[].flavors[].resources[].nominalQuota` for each GPU resource, per flavor, summed per product (typed flavors) or into the untyped grant (unlabelled flavors). Two grants of the **same** product add up; two products of one family (SXM and PCIe H100) stay apart until the static key says they are one. **`borrowingLimit`, `lendingLimit` and cohorts are not counted** in the bound (they are read and logged, see *Cohort borrowing*); counting borrowable cohort capacity is tracked in [#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136). |
+| `ClusterQueue` | cluster | `spec.resourceGroups[].flavors[].resources[].nominalQuota` for each GPU resource, per flavor, summed per product (typed flavors) or into the untyped grant (unlabelled flavors). Two grants of the **same** product add up; two products of one family (SXM and PCIe H100) stay apart until the static key says they are one. At namespace scope, `borrowingLimit`, `lendingLimit`, cohorts and queue status add **cohort borrowing** on top of this grant where it is safe (see *Cohort borrowing*). |
 | `LocalQueue` | namespaced | `spec.clusterQueue` links a namespace to a ClusterQueue. A namespace is granted the caps of every ClusterQueue one of its LocalQueues points at **and whose `spec.namespaceSelector` admits it**; two LocalQueues on one ClusterQueue count it once. |
 | `Namespace` | cluster | Labels, read (`get`, one per namespace) only when a ClusterQueue has a non-empty `namespaceSelector`. |
 
@@ -272,7 +272,7 @@ static entry, let Kueue give the numbers:
 ```yaml
 kueue: { enabled: true }
 namespaceQuotas:
-  default: { H100: -1 }      # every Kueue-governed namespace: H100 ≤ its Kueue nominal quota
+  default: { H100: -1 }      # every Kueue-governed namespace: H100 ≤ its Kueue grant
 ```
 
 #### Failure posture
@@ -294,61 +294,116 @@ Changes to the effective caps are logged once, at `Info`, with both the Kueue
 figures and the merged result, so "what is bounding this namespace?" is
 answerable from the controller log.
 
-#### Cohort borrowing (logged only in this release)
+#### Cohort borrowing
 
 Kueue lets a ClusterQueue borrow unused quota from other queues in its cohort.
-This release **reads and logs** what borrowing would add. **It does not change
-any limit**: the cap is still the nominal quota.
+A namespace-scope entry with `kueue.enabled` **counts that borrowing by
+default**: a model may grow past its namespace's own quota into capacity its
+cohort lends, and the scaling manager gives it back when it must. Set
+`countBorrowable: false` on the entry to cap at nominal exactly as before.
+A cluster-scope entry is not affected: borrowing moves capacity between queues
+and leaves the cluster total as it is.
 
-- `countBorrowable` (default `true`) turns the log on for the entry. `false`
-  turns it off, and will keep exactly today's nominal cap once borrowing is
-  counted.
-- On each change, one `Info` line per entry, namespace-scope entries only:
+**When it is counted.** Per namespace, only where every condition holds.
+Otherwise the namespace caps at nominal, and the reason is logged and
+published (`wva_quota_borrow_withheld`):
 
-  ```
-  Kueue borrowing read and NOT applied; the quota entry still caps at nominal
-  ```
+| Condition | Reason when it fails |
+|---|---|
+| Kueue manages every GPU pod in the namespace (its `managed` label or admission gate, or an owner with a queue name and a Workload) | `not-kueue-managed` |
+| Something checks that borrowed GPUs exist: a `gpu-inventory` limiter, or a GPU `ResourceQuota` at most nominal plus `borrowingLimit` | `no-gpu-bound` |
+| The namespace's ResourceQuotas are readable | `resourcequota-unreadable` |
+| The Kueue read is fresh (not failed, not older than twice `refreshInterval`) and Kueue has written queue status | `stale`, `no-status` |
+| The cohort is flat, and its Cohort objects are readable | `hierarchical-cohort`, `hierarchy-unknown` |
+| No queue in the cohort uses `status.effectiveQuotas`, and Fair Sharing is off | `effective-quotas`, `fair-sharing` |
+| The queue is in a cohort, active, and its borrowing fields parse | `no-cohort`, `inactive`, `malformed` |
 
-  It lists, per namespace, each ClusterQueue flavor and GPU resource with:
+**The three figures.** Where borrowing is counted, a namespace has:
 
-  | Field | Meaning |
-  |---|---|
-  | `guaranteed` | GPUs the namespace keeps whatever its cohort does |
-  | `borrowable` | how many more it could reach by borrowing |
-  | `kueueBorrowed` | what Kueue says the queue borrows now, as a cross-check |
-  | `reason` | why `borrowable` is 0, or `nominal-lent-out` when a queue that cannot reclaim has lent part of its nominal quota |
+- **guaranteed**: what it keeps whatever the cohort does. That is the nominal
+  quota for a queue that can reclaim. For a queue with
+  `reclaimWithinCohort: Never` it is what the queue already uses or keeps
+  back from lending; nominal a peer holds stays with the peer (reason
+  `nominal-lent-out`).
+- **borrow cap**: how far past guaranteed it may go: nominal plus
+  `borrowingLimit` (no limit when unset), bounded by the static entry and the
+  namespace ResourceQuota.
+- **the shared pool**: the cohort's free GPUs, one pool per cohort, flavor and
+  GPU resource, spent once across every namespace in the cohort.
 
-- `borrowable` is 0, with a reason, when the figure cannot be trusted:
-  `stale` (the last read failed), `no-status` (Kueue has not written queue
-  status), `hierarchical-cohort`, `hierarchy-unknown` (Cohort objects not
-  readable), `effective-quotas`, `fair-sharing`, `no-cohort`, `inactive`,
-  `malformed`.
+The optimizer spends guaranteed first, then borrows replica by replica from
+one pool, within the cap. With a `gpu-inventory` limiter each borrowed replica
+must also fit a node of the pool's flavor. What Kueue has not reserved yet
+(growth ordered and not yet admitted, pods held at the admission gate) is taken
+out of the pool first.
 
-How the figures are computed is in the
-[design proposal](../proposals/kueue-borrowing-and-limiter-composition.md#b3-how-much-a-queue-can-reach).
+**Where borrowed capacity is never spent.** Scale-from-zero, the warm pool and
+rescale use the namespace's **within-nominal** figure, what Kueue would admit
+now without borrowing. The utilization-share optimizer uses guaranteed only.
+
+**Giving it back.** Kueue preempts borrowers for a lender that can reclaim. For
+the cases Kueue does not cover, the scaling manager lowers a borrowing model
+itself:
+
+- **Placement timeout.** A borrowed replica still unschedulable, or held at
+  Kueue's admission gate, after `placementTimeout` is released (with its P/D
+  partner). The wait stretches up to three times while the cluster autoscaler
+  reports `TriggeredScaleUp` on the pod. Until it places, the variant borrows
+  nothing new.
+- **A waiting lender.** A lender with `reclaimWithinCohort: Never` that waits
+  for capacity it lent gets one unit back at a time (a replica, a P/D pair, a
+  LeaderWorkerSet group), never below a namespace's guaranteed figure or a
+  variant's `minReplicaCount`. Lowest priority first, then the most recently
+  grown.
+- **Cooldowns.** After a lender waited, its cohort borrows nothing new for
+  `borrowCooldown`. After Kueue preempted one of a model's pods, that model
+  borrows nothing new for the same time.
+- **The ledger.** Releases in flight are kept under `borrowReleaseLedger` in
+  the `wva-controller-status` ConfigMap, so a restart does not release twice.
+- **A stale read freezes everything**: nothing new is borrowed and nothing is
+  given back until reads recover.
+
+**Settings**, on the entry's `kueue:` block:
+
+| Key | Default | What it does |
+|---|---|---|
+| `countBorrowable` | `true` | `false` caps every namespace at nominal, as before borrowing was counted |
+| `placementTimeout` | `5m` | how long a borrowed replica may stay unplaced |
+| `borrowCooldown` | `10m` | how long a cohort, or a preempted model, borrows nothing new |
+| `lenderDebounce` | `60s` | a lender counts as waiting after two fresh reads this far apart |
+
+**What you see.** On each change, one `Info` line per entry:
+
+```
+Kueue borrowing applied where every condition holds and withheld elsewhere; guaranteed is the namespace cap, borrowable is drawn from the cohort's free pool
+```
+
+It lists each queue row (`guaranteed`, `borrowable`, Kueue's own
+`kueueBorrowed` as a cross-check, `reason`), the applied figures per namespace,
+and the withheld reasons. The same figures are metrics and the `limiterBudgets`
+status key ([Prometheus](prometheus.md#kueue-borrowing-metrics)). When replicas
+drop, start at [replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing).
+The design, with the formulas: the
+[proposal](../proposals/kueue-borrowing-and-limiter-composition.md#part-b-count-kueue-borrowing).
 
 #### RBAC
 
-The manager ClusterRole carries `get`/`list` on `clusterqueues`, `localqueues`
-and `resourceflavors` in `kueue.x-k8s.io`. A namespace-scoped install lists
-LocalQueues only in the namespace it manages (the controller's Role,
-`wva-manager-role`, grants that) and gets the two cluster-scoped kinds, and `get`
-on namespaces, from `components/kueue-reader`. Both are applied by the prereqs
-phase like `node-reader`, so an install that predates these rules needs a cluster
-admin to re-run `make setup-prereqs`; the tenant's `make deploy-wva` does not
-apply Roles. A rule naming an API group the cluster does not serve
-is inert, so the grant is harmless without Kueue.
+The manager ClusterRole carries `get`/`list` on `clusterqueues`, `cohorts`,
+`localqueues`, `resourceflavors` and `workloads` in `kueue.x-k8s.io`. A
+namespace-scoped install reads `localqueues` and `workloads` in the namespace
+it manages through its Role (`wva-manager-role`), and the cluster-scoped kinds
+(`clusterqueues`, `cohorts`, `resourceflavors`), plus `get` on its managed
+Namespace, from `components/kueue-reader`. Both are applied by the prereqs
+phase, so an install that predates these rules needs a cluster admin to re-run
+`make setup-prereqs`; the tenant's `make deploy-wva` does not apply Roles. A
+rule naming an API group the cluster does not serve is inert, so the grant is
+harmless without Kueue.
 
-For cohort borrowing the controller also needs:
-
-- `get`/`list` on `cohorts` (cluster-scoped, from `components/kueue-reader`);
-- `get`/`list` on `workloads` and on `resourcequotas` in the managed namespace;
-- `get` on `jobs`, the owners of Kueue-managed GPU pods.
-
-The manager ClusterRole and the namespace-scoped Role carry the namespaced ones.
-Without the Cohort read, borrowing shows `hierarchy-unknown`; the nominal cap is
-unaffected. A namespace-scoped install needs a cluster admin to re-run
-`make setup-prereqs`.
+Borrowing also reads, in the managed namespace: `resourcequotas` (the GPU
+bound), `events` (the cluster autoscaler's `TriggeredScaleUp`), and the owners
+of GPU pods (`replicasets`, `statefulsets`, `jobs`, `leaderworkersets`) for the
+managed check. Without the Cohort read, borrowing shows `hierarchy-unknown`;
+the nominal cap is unaffected.
 
 ### Validation
 
@@ -689,9 +744,9 @@ because limiter mode is live-reloadable.
 
 ## Future work
 
-- **Kueue borrowing** — count capacity a Kueue-bounded quota can borrow from
-  its cohort, checked against the physical limiter. See the
-  [proposal](../proposals/kueue-borrowing-and-limiter-composition.md).
+- **Kueue borrowing follow-ups** — nested cohorts, Fair Sharing,
+  `effectiveQuotas`, and borrowing under the utilization-share optimizer. See
+  the [proposal](../proposals/kueue-borrowing-and-limiter-composition.md#order-of-work).
 - **Reservation-style limiters** — the `type: "quota"` discriminator leaves
   room for additional limiter types (e.g., `reservation`, `priority`) under
   the same ConfigMap schema.

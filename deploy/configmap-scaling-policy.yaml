@@ -109,7 +109,9 @@ data:
   #       quotas: { H100: 32 }
   #
   #   # (c) quota limiter bounded by Kueue: per namespace and accelerator type
-  #   #     the SMALLER of the Kueue nominal quota and the static cap applies.
+  #   #     the SMALLER of the Kueue grant and the static cap applies. At
+  #   #     namespace scope the grant counts cohort borrowing where it is safe
+  #   #     (default on; countBorrowable: false under kueue: keeps nominal).
   #   #     Kueue flavors without a product label (the usual install) grant no
   #   #     named type, so name the types here and -1 lets Kueue set the figure.
   #   limiters:

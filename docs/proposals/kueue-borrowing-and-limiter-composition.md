@@ -1,7 +1,7 @@
 # Kueue borrowing, and limiters that compose
 
-**Status:** approved after five review rounds (revision 5). Implementation in
-progress. Revision 5 folds in
+**Status:** implemented on branch feat/kueue-borrow-and-limiter-composition
+(steps 1-5); follow-ups in step 6 not built. Revision 5 folds in
 four review rounds by five reviewers (see [Review record](#review-record)).
 Fixes [#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136),
 and the in-repo part of upstream
@@ -784,3 +784,31 @@ are folded into this text. Implementation starts with step 1.
 Amended during implementation (step 4): B7 uses capacity within nominal, not
 the guaranteed figure, for scale-from-zero, the warm pool and rescale. B1 now
 defines "stale".
+
+## Implementation notes
+
+Where the code settled a detail this text leaves open, or differs from it:
+
+- **Spellings.** Two spellings of one GPU that agree on a budget fold to one
+  key, the most specific; no other product of that short name is admitted.
+- **Gate grace.** A pod at Kueue's admission gate counts as unplaced after a
+  fixed 30s, not a setting.
+- **Ledger.** The release ledger is the `borrowReleaseLedger` key of the
+  `wva-controller-status` ConfigMap, carried over by each new leader term.
+- **HoldFill.** With `placementTimeout` unset, the utilization-share
+  optimizer keeps its derived fill wait; set, the two share it.
+- **Events RBAC.** `get`/`list` on `events` was added for the cluster
+  autoscaler's `TriggeredScaleUp` wait.
+- **Preemption match.** A preempted Workload is matched to a model by its
+  owner pod's name prefix (`<deployment>-` or `<lws>-`), longest wins.
+- **Node view.** Built only in a cycle that counts borrowing and declares a
+  physical limiter.
+- **Aggregate.** A borrowing provider's open per-type aggregate is the reach
+  (guaranteed plus borrow cap), not the sum of guaranteed figures.
+- **ResourceQuota.** With several GPU ResourceQuotas, the tightest `hard`
+  bounds the reach.
+- **Thrash alert.** Counts starts of `borrow-released` and
+  `lender-reclaimed` at one-minute resolution; overlapping releases count
+  once.
+- **Opt-out.** `countBorrowable: false` on the entry; the installer has no
+  `WVA_QUOTA_KUEUE_BORROW` flag.

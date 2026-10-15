@@ -131,6 +131,41 @@ in order:
        -o jsonpath='{.data.policyNamespace} {.data.limiter} {.data.policyAccepted}{"\n"}'
      ```
 
+#### Limiters and Kueue borrowing
+
+What changes without a config change:
+
+- **A policy that declares both `gpu-inventory` and `quota` is bounded by
+  both.** Before, the quota alone applied and the physical entry was never
+  built. This can be tighter where other workloads hold GPUs; for one release
+  the log says `Upgrade note (transitional)` for each variant whose target it
+  changed.
+- **A type one limiter entry denies stays denied** when another entry lists
+  it. Before, entries listing different types allowed the union (bug fix).
+- **A P/D pair commits only what fits together.** Before, a budget of 8 with
+  two 8-GPU roles ordered 16 (bug fix).
+- **A Kueue-bounded namespace quota counts cohort borrowing**, on by default,
+  where it is safe; the scaling manager may then lower a borrowing model to
+  give capacity back. To keep the nominal cap, set `countBorrowable: false`
+  under the entry's `kueue:` block. See
+  [the Kueue path](../well-lit-paths/kueue-bounded-quotas/#borrowing).
+
+New reads, for borrowing: `cohorts` and `workloads` (Kueue), and in the
+managed namespace `resourcequotas`, `events`, and the owners of GPU pods
+(`replicasets`, `statefulsets`, `jobs`, `leaderworkersets`). A cluster-scoped
+install gets them with the new manager ClusterRole. **A namespace-scoped
+install needs a cluster admin to re-run `make setup-prereqs`** (step 1
+above); until then borrowing is withheld (`hierarchy-unknown`,
+`resourcequota-unreadable`) and the nominal cap applies.
+
+Installer:
+
+- `WVA_LIMITER` takes a list: `WVA_LIMITER=gpu-inventory,quota`.
+- With `WVA_QUOTA_KUEUE=true` on a cluster-scoped install, a `gpu-inventory`
+  entry is added beside the quota; `WVA_LIMITER_PHYSICAL=false` leaves it out.
+- `make disable-physical-limiter` removes one kind only: the physical
+  limiter, or the quota with `WVA_LIMITER_TYPE=quota`. The other stays.
+
 ### The external-scaler NetworkPolicy
 
 `wva-external-scaler` admits `:9090` only from KEDA's namespace. It is written in

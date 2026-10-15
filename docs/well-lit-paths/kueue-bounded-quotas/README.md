@@ -2,40 +2,43 @@
 
 ## Start here
 
-- **Status:** Experimental: no run yet against a live Kueue controller (below).
+- **Status:** Experimental. Cohort borrowing is **on by default** and changes what a model may reach ([Borrowing](#borrowing)). A live-Kueue end-to-end spec checks the borrowing figures; preemption and giving capacity back are unit-tested only, and the path stays Experimental until the live-Kueue suite runs in CI ([How it is tested](#how-it-is-tested)).
 - **You need:**
   - everything [the tenant-quotas path](../tenant-gpu-quotas/#start-here) needs, including its Namespace-read note for the cluster policy on Kubernetes.
   - Kueue's `ClusterQueue`, `LocalQueue` and `ResourceFlavor` served, with LocalQueues in the managed namespaces.
   - for a namespace-scoped install, the `kueue-reader` prerequisite that `make setup-prereqs` creates (cluster admin; [What it needs](#what-it-needs)), including `get` on the managed Namespace. A controller set up before that read existed needs the admin to re-run it once ([upgrading](../../reference/upgrade-and-uninstall.md#upgrading-to-this-release)); until then the tenant's `make deploy-wva` refuses with this block on.
   - ClusterQueues whose `namespaceSelector` admits only the namespaces meant to have them: the reader honours the selector as Kueue does, so a queue with `{}`, or one matching a label a tenant can set, grants its quota to any namespace that points a LocalQueue at it ([why](#what-it-is)).
   - **Not enforcement:** the limiter is advisory; back each tenant namespace with a GPU `ResourceQuota` ([bound at admission](../../guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission)).
+  - **For borrowing** (on by default): the checklist in [Borrowing](#borrowing): a drain hook on serving pods, a priority above batch for models that must keep replicas, the group integration for multi-pod replicas, no `borrowWithinCohort` on serving queues, and a GPU bound. Without the GPU bound or Kueue-managed pods, borrowing is simply not counted.
 - **Do this** (no guide covers this path yet; the steps are on this page):
   1. Check accelerators resolve: `kubectl get events -n <ns> --field-selector reason=AcceleratorNotResolved` (namespace owner; a cluster admin can use `-A`). No events is the healthy answer.
   2. Declare the quota once, with the types at `-1` so Kueue sets the numbers ([Declaring it](#declaring-it)), one of:
      - Namespace owner (advisory; you can edit it): `WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true make deploy-wva`.
      - Cluster admin (a budget the tenant cannot edit): `make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true`.
-- **Check it works:** `quota entry bounded by external caps` in the controller log, carrying the effective caps ([Verifying it](#verifying-it)). The two failure lines: `external quota source unreadable` is missing `kueue-reader` RBAC; `external quota source grants no GPUs` means no LocalQueue in the namespace reaches a ClusterQueue with a GPU resource.
+- **Check it works:** `quota entry bounded by external caps` in the controller log, carrying the effective caps, and the `Kueue borrowing applied` line, which says per namespace whether borrowing is counted and why not ([Verifying it](#verifying-it)). The two failure lines: `external quota source unreadable` is missing `kueue-reader` RBAC; `external quota source grants no GPUs` means no LocalQueue in the namespace reaches a ClusterQueue with a GPU resource.
+- **Turn borrowing off, keep the Kueue cap:** set `countBorrowable: false` under the entry's `kueue:` block in the policy ConfigMap ([Borrowing](#borrowing)). The installer has no flag for it.
 - **Undo** (no guide step). Left at `-1` without Kueue, the entry is no cap at all, so replace it rather than only dropping the flag:
   - One install (namespace owner): re-run `make deploy-wva` with `WVA_LIMITER=quota`, a finite `WVA_QUOTAS` and no `WVA_QUOTA_KUEUE`, or with no `WVA_LIMITER` to declare no limiter.
   - Cluster policy (cluster admin): re-run `make enable-physical-limiter WVA_LIMITER_TYPE=quota` with a finite `WVA_QUOTAS` and no `WVA_QUOTA_KUEUE`, or `make disable-physical-limiter`.
 
 ## What it is
 
-> **Experimental.** The merge rules, the reader and the installer knob are unit
-> tested, and an end-to-end suite proves the read-and-merge chain against a real
-> API server, up to the effective entry the limiter logs — but that suite
-> installs only Kueue's **CRDs**, not Kueue. **No run has yet been made against
-> a live Kueue controller**, so the two things only a live one shows — a queue
-> going inactive under it, and finalizers on its objects — are covered by tests
-> that imitate them. That is the short leg. Two defaults may still move: the
-> 30s `refreshInterval`, and how an untyped grant is applied (to each named type
-> separately, and the largest across vendors rather than the sum).
+> **Experimental.** The merge rules, the reader, borrowing and giving it back
+> are unit tested. One end-to-end spec proves the read-and-merge chain on
+> Kueue's CRDs alone; a second installs the Kueue controller and checks the
+> borrowing figures as Kueue admits, borrows and reclaims. Preemption of a
+> borrowed replica and the scaling manager giving capacity back are not yet
+> covered end to end. Defaults that may still move: the 30s `refreshInterval`,
+> how an untyped grant is applied, and the borrowing timings (`placementTimeout`
+> 5m, `borrowCooldown` 10m), which the live suite is meant to measure.
 
 If Kueue is already the place where GPU quotas are decided, a second copy of
 every number in the scaling manager's ConfigMap is a second thing to keep right. On
 this path the scaling manager reads Kueue's ClusterQueues and enforces, per namespace and accelerator type,
 **the smaller of Kueue's grant and the static cap** — so the autoscaler does not
-ask KEDA for a replica that Kueue would then hold pending.
+ask KEDA for a replica that Kueue would then hold pending. Where it is safe, the
+grant includes what the namespace's ClusterQueue can **borrow** from its cohort,
+and the scaling manager gives borrowed replicas back when a lender needs them.
 
 It is an extension of [capping what each tenant may take](../tenant-gpu-quotas/):
 everything there about scope, the reserved `default` key and what a quota does
@@ -160,10 +163,7 @@ total.
 namespace with a LocalQueue on it is capped at the queue's full grant, so three
 of them may in sum still ask for three times what the queue admits — Kueue holds
 the excess pending, as before. Give each tenant its own ClusterQueue, with a
-cohort for borrowing, where the shared total matters. Borrowing itself is not
-counted: only `nominalQuota` is read, so in a cohort that lends quota a model
-is held at its nominal share even when Kueue would admit more from borrowed
-capacity (tracked in [#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136)).
+cohort for borrowing, where the shared total matters.
 
 **A Kueue outage keeps the last grant; a Kueue that was never read leaves only
 the static entry.** A failed read keeps the last good snapshot in force, and the
@@ -174,6 +174,50 @@ read, put a finite number in the static entry; Kueue then only tightens it. A
 missing CRD or a Forbidden is reported as such every cycle, never folded into
 "Kueue grants nothing"; both engines treat a limiter error as "no constraint",
 so `Refresh` never surfaces one and the reader's errors go to the log.
+
+## Borrowing
+
+With `kueue.enabled` on a namespace-scope entry, a model may grow past its
+namespace's own quota into capacity its cohort lends. This is **on by
+default**. It is counted per namespace only where it is safe; elsewhere the
+namespace caps at nominal and the log and `wva_quota_borrow_withheld` say why
+([the conditions](../../reference/quota-limiter.md#cohort-borrowing)).
+
+**Take it when** serving shares a cohort with batch work that leaves GPUs idle,
+and a model can tolerate losing a borrowed replica when the lender wants it
+back. **Do not take it** for a model that must never lose a replica: give it
+the quota as nominal instead, or turn borrowing off.
+
+Before relying on it:
+
+- [ ] A drain hook on serving pods: Kueue deletes a preempted pod without the
+  Eviction API, so a PodDisruptionBudget does not apply
+  ([draining before scale-down](../../reference/workload-preparation.md#draining-before-scale-down)).
+- [ ] A `WorkloadPriorityClass` above batch for models that must keep
+  replicas: Kueue picks what to preempt by it.
+- [ ] Kueue's group integration for multi-pod replicas (LeaderWorkerSet, P/D),
+  so a replica is admitted, and preempted, whole.
+- [ ] No `borrowWithinCohort` preemption on serving queues, so serving never
+  preempts a lender's training.
+- [ ] A GPU bound: a `gpu-inventory` limiter (added by default on a
+  cluster-scoped install), or a GPU `ResourceQuota` at most nominal plus
+  `borrowingLimit`. A namespace-scoped install needs the ResourceQuota.
+
+**What it costs.** Borrowed replicas go back: Kueue preempts them for a
+lender that can reclaim, and the scaling manager lowers the model itself for
+a lender that cannot, or when a borrowed replica does not place within
+`placementTimeout`. Each loss is a cold start. Scale-from-zero, the warm pool
+and rescale never use borrowed capacity.
+
+**Turn it off** with `countBorrowable: false` under the entry's `kueue:`
+block; the cap is then nominal, exactly as before borrowing was counted.
+
+**On upgrade** a Kueue-bounded entry starts counting borrowing without a
+config change, where the conditions hold; a namespace-scoped install needs a
+cluster admin to re-run `make setup-prereqs` for the new reads
+([upgrading](../../reference/upgrade-and-uninstall.md#limiters-and-kueue-borrowing)).
+
+When replicas drop: [the runbook](../../reference/troubleshooting.md#replicas-dropped-under-kueue-borrowing).
 
 ## Verifying it
 
@@ -190,9 +234,14 @@ names an RBAC or CRD problem and says whether a stale snapshot or the static
 entry is in force. `grants GPUs of no named accelerator type` is the
 untyped-flavor case above.
 
-**The reader's state is visible only here.** No metric or condition reports a
-Forbidden or a missing CRD; the tenant path's `wva_model_scaling_blocked` still
-shows a model held at its cap, but not why the cap is what it is.
+**Borrowing** has its own line, `Kueue borrowing applied where every condition
+holds and withheld elsewhere`, per namespace with the guaranteed and borrowable
+figures and the reason borrowing is withheld. The same figures are metrics
+(`wva_quota_limit_gpus`, `wva_quota_borrow_withheld`) and the `limiterBudgets`
+key of `wva-controller-status` ([Prometheus](../../reference/prometheus.md#kueue-borrowing-metrics)).
+
+**The reader's own state is visible only in the log.** No metric reports a
+Forbidden or a missing CRD.
 
 A change in Kueue appears after at most `refreshInterval` plus one
 [optimize cycle](../../reference/cycle-log.md). The e2e runs with
@@ -224,8 +273,15 @@ it scales.
   wired into `test-e2e-full-with-setup` on kind); it fails, not skips, when
   they are absent there, and skips with a reason on a cluster that does not
   serve them.
-- **Not covered:** a live Kueue controller (inactive queues, finalizers,
-  `stopPolicy` transitions are imitated by fixtures); enforcement past the
+- End-to-end, live Kueue: `test/e2e/kueue_borrow_test.go` (label `kueue-borrow`)
+  installs the Kueue controller and checks the logged borrowing figures as
+  Kueue admits, borrows, holds a `Never` lender and reclaims for an `Any` one.
+  Borrowing, its conditions, node fit and giving back are unit-tested in
+  `internal/engines/allocation/` (`borrow_*_test.go`,
+  `quota_inventory_borrow_test.go`) and `internal/kueue/`.
+- **Not covered:** preemption of a borrowed replica and a release to a waiting
+  lender, end to end; inactive queues, finalizers and `stopPolicy` transitions
+  (imitated by fixtures); enforcement past the
   effective entry, which is the same optimizer path
   [tenant-gpu-quotas](../tenant-gpu-quotas/) relies on, with the same gap; and
   the reader's state, which has no metric.
@@ -235,7 +291,8 @@ it scales.
 Every field, the full merge table and what is not read:
 [the quota limiter reference, "Kueue as a quota source"](../../reference/quota-limiter.md#kueue-as-a-quota-source)
 — `resources` narrows which extended resources count as GPUs, `refreshInterval`
-how often Kueue is re-read. The installer variables:
+how often Kueue is re-read, and the borrowing settings (`countBorrowable`,
+`placementTimeout`, `borrowCooldown`, `lenderDebounce`). The installer variables:
 [configuration](../../reference/configuration.md). Why a quota counts only
 the scaling manager's own consumption:
 [GPU capacity accounting](../../concepts/gpu-capacity-accounting.md).

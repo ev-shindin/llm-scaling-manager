@@ -7,14 +7,11 @@ each with its issue, alongside the evidence work.
 
 ## GPU budgets
 
-- **Kueue borrowing.** The Kueue quota source bounds a namespace by its
-  ClusterQueue's nominal quota and does not count capacity the queue could
-  borrow from its cohort. In a cohort that lends quota, a model is held at its
-  nominal share even when Kueue would admit more from borrowed capacity.
-  Planned: count borrowable capacity, opt-in, and prefer releasing borrowed
-  replicas first.
+- **Kueue borrowing follow-ups.** Borrowing is counted today, on a flat
+  cohort. Planned: nested cohorts, Kueue Fair Sharing, `effectiveQuotas`, and
+  borrowing under the utilization-share optimizer.
   [#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136)
-  · today: [Kueue quotas](well-lit-paths/kueue-bounded-quotas/)
+  · today: [Kueue quotas](well-lit-paths/kueue-bounded-quotas/#borrowing)
 
 ## Scaling
 
