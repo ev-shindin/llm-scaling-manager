@@ -49,6 +49,8 @@ type borrowState struct {
 	cohorts map[string][]string
 	nodes   *NodeView
 	draws   []BorrowDraw
+	// blocked reports a variant that may not borrow this pass; nil blocks none.
+	blocked func(namespace, modelID, variant string) bool
 }
 
 // newBorrowState builds the pass's borrowing state, or nil when no constraint
@@ -269,7 +271,7 @@ func (p *modelPlacer) placeReplica(variant, acc string, g int, pods []int, targe
 		bs.nodes.place(acc, pods, nil, true)
 		return true
 	}
-	if borrow == nil {
+	if borrow == nil || (bs.blocked != nil && bs.blocked(p.namespace, p.modelID, variant)) {
 		return false
 	}
 	need := g - left

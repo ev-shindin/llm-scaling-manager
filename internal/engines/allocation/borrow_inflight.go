@@ -167,6 +167,31 @@ func DeductUnreserved(constraints []*ResourceConstraints, inFlight []BorrowDraw,
 	return out
 }
 
+// BlockCohorts returns copies of constraints whose shared pools in the given
+// cohorts read 0 free: nothing new is borrowed there this cycle (a lender is
+// waiting, or waited within the cooldown). Without such a cohort, the input.
+func BlockCohorts(constraints []*ResourceConstraints, cohorts map[string]bool) []*ResourceConstraints {
+	if len(cohorts) == 0 || !HasBorrowing(constraints) {
+		return constraints
+	}
+	out := make([]*ResourceConstraints, 0, len(constraints))
+	for _, c := range constraints {
+		if c == nil || len(c.SharedPools) == 0 {
+			out = append(out, c)
+			continue
+		}
+		cc := *c
+		cc.SharedPools = slices.Clone(c.SharedPools)
+		for i := range cc.SharedPools {
+			if cohorts[cc.SharedPools[i].Cohort] {
+				cc.SharedPools[i].Free = 0
+			}
+		}
+		out = append(out, &cc)
+	}
+	return out
+}
+
 func ceilDiv(a, b int) int {
 	if b <= 0 {
 		return a

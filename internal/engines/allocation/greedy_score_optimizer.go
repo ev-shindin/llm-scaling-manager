@@ -42,6 +42,11 @@ type GreedyByScoreOptimizer struct {
 	// copy.
 	Nodes *NodeView
 
+	// BorrowBlocked, when set, reports whether a variant may not grow on
+	// borrowed capacity this cycle (a placement hold, a model cooldown; see
+	// BorrowGovernor.BorrowBlocked). Its guaranteed growth is unaffected.
+	BorrowBlocked func(namespace, modelID, variant string) bool
+
 	// draws is what the last non-shadow pass borrowed (BorrowDraws).
 	draws []BorrowDraw
 }
@@ -144,6 +149,9 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	// still draw past its guaranteed figure, the shared pools, the node view.
 	// Nil otherwise, and every path below is then exactly as before.
 	bs := newBorrowState(constraints, o.Nodes)
+	if bs != nil {
+		bs.blocked = o.BorrowBlocked
+	}
 	if !o.quiet {
 		o.draws = nil
 		defer func() { o.draws = bs.drawsByVariant() }()

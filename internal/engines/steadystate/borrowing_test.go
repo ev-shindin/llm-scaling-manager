@@ -48,7 +48,7 @@ var _ = Describe("cohort borrowing in the steady-state cycle", func() {
 	It("builds one node view for the cycle, which the share idle fill then reads", func() {
 		e := &Engine{Config: physicalCfg()}
 		e.borrowing.nodeStore = nodeStore()
-		e.prepareBorrowing(ctx, borrowing(8), nil, now)
+		e.prepareBorrowing(ctx, borrowing(8), nil, nil, now)
 		Expect(e.borrowing.nodes).NotTo(BeNil())
 		Expect(e.shareNodes(now)).To(Equal(e.borrowing.nodes.Snapshot()))
 	})
@@ -57,7 +57,7 @@ var _ = Describe("cohort borrowing in the steady-state cycle", func() {
 		e := &Engine{Config: physicalCfg()}
 		e.borrowing.nodeStore = nodeStore()
 		plain := []*allocation.ResourceConstraints{{ProviderName: "gpu-limiter", PoolsClosed: true}}
-		Expect(e.prepareBorrowing(ctx, plain, nil, now)).To(Equal(plain))
+		Expect(e.prepareBorrowing(ctx, plain, nil, nil, now)).To(Equal(plain))
 		Expect(e.borrowing.nodes).To(BeNil())
 	})
 
@@ -73,7 +73,7 @@ var _ = Describe("cohort borrowing in the steady-state cycle", func() {
 			},
 		}
 		e := &Engine{Config: config.NewTestConfig(), client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(gated).Build()}
-		got := e.prepareBorrowing(ctx, borrowing(8), nil, now)
+		got := e.prepareBorrowing(ctx, borrowing(8), nil, nil, now)
 		Expect(got[0].SharedPools[0].Free).To(Equal(2))
 	})
 })

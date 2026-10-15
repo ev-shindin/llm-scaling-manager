@@ -12,6 +12,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -19,6 +20,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/resources"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
 // borrowingState is the steady-state engine's cohort-borrowing state.
@@ -33,6 +35,19 @@ type borrowingState struct {
 	// nodeStore is the node snapshot the view is built from; nil is
 	// decision.DefaultNodeGPUs.
 	nodeStore *decision.NodeGPUStore
+
+	// governor decides the placement hold, the cooldowns and the releases of
+	// borrowed capacity (borrowing_release.go); nil until a cycle borrows.
+	governor *allocation.BorrowGovernor
+	// ledgerLoaded is set once the persisted release ledger was read back.
+	ledgerLoaded bool
+	// lastLedger is the ledger last handed to the status publisher.
+	lastLedger string
+	// preemptSeen is the preempted Workloads already counted, by UID.
+	preemptSeen map[types.UID]bool
+	// cycle is this cycle's input to the governor, kept for the releases
+	// after the optimizer; zero when the cycle borrows nothing.
+	cycle allocation.BorrowCycle
 }
 
 // prepareBorrowing readies one cycle's borrowing: it drops the in-flight draws
@@ -41,9 +56,11 @@ type borrowingState struct {
 // Without borrowing in the constraints it returns them as they are and the
 // cycle has no node view, exactly as before borrowing was counted.
 func (e *Engine) prepareBorrowing(ctx context.Context, constraints []*allocation.ResourceConstraints,
-	requests []allocation.ModelScalingRequest, now time.Time) []*allocation.ResourceConstraints {
+	requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
+	now time.Time) []*allocation.ResourceConstraints {
 	st := &e.borrowing
 	st.nodes = nil
+	st.cycle = allocation.BorrowCycle{}
 	if st.inFlight == nil {
 		st.inFlight = allocation.NewBorrowInFlight()
 	}
@@ -58,7 +75,9 @@ func (e *Engine) prepareBorrowing(ctx context.Context, constraints []*allocation
 		}
 		st.nodes = allocation.NewNodeView(store.Latest(decision.NodeGPUsMaxAge, now))
 	}
-	return allocation.DeductUnreserved(constraints, st.inFlight.Entries(), e.gatedGPUs(ctx, constraints))
+	gated := e.gatedGPUs(ctx, constraints)
+	constraints = allocation.DeductUnreserved(constraints, st.inFlight.Entries(), gated)
+	return e.governBorrowing(ctx, constraints, requests, scaleTargets, gated, now)
 }
 
 // recordBorrowDraws keeps what the optimizer borrowed this cycle as in flight.
