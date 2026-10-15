@@ -17,13 +17,16 @@ type pdRole struct {
 	n          int
 }
 
-// pdFleet is a P/D model "pd" in ns "b" on H100, every replica of gpr GPUs.
-func pdFleet(gpr int, roles ...pdRole) ModelScalingRequest {
-	var vcs []vcFixture
-	var sts []domain.VariantReplicaState
+// pdGPUs is the GPUs of every replica of a pdFleet: whole-node replicas.
+const pdGPUs = 8
+
+// pdFleet is a P/D model "pd" in ns "b" on H100, every replica of pdGPUs.
+func pdFleet(roles ...pdRole) ModelScalingRequest {
+	vcs := make([]vcFixture, 0, len(roles))
+	sts := make([]domain.VariantReplicaState, 0, len(roles))
 	for _, r := range roles {
 		vcs = append(vcs, vcFixture{VariantName: r.name, AcceleratorName: "H100", Cost: 5, Role: r.role, ReplicaCount: r.n, PerReplicaCapacity: 10000})
-		sts = append(sts, domain.VariantReplicaState{VariantName: r.name, CurrentReplicas: r.n, GPUsPerReplica: gpr, Role: r.role, AcceleratorName: "H100"})
+		sts = append(sts, domain.VariantReplicaState{VariantName: r.name, CurrentReplicas: r.n, GPUsPerReplica: pdGPUs, Role: r.role, AcceleratorName: "H100"})
 	}
 	return withSatEntry(&satEntryFixture{VariantCapacities: vcs},
 		ModelScalingRequest{ModelID: "pd", Namespace: "b", Disaggregated: true, Priority: 1, VariantStates: sts})
@@ -40,10 +43,10 @@ func unplacedVariant(r ModelScalingRequest, variant string, t time.Time) ModelSc
 	return r
 }
 
-func releasedGPUs(rel []BorrowRelease, gpr int) int {
+func releasedGPUs(rel []BorrowRelease) int {
 	n := 0
 	for _, r := range rel {
-		n += (r.From - r.To) * gpr
+		n += (r.From - r.To) * pdGPUs
 	}
 	return n
 }
@@ -64,14 +67,14 @@ var _ = Describe("BorrowGovernor release units", func() {
 
 	Describe("placement timeout on a P/D model", func() {
 		It("1P:2D, 8 GPUs borrowed, a decode unplaced: releases that decode and keeps the pair (d:1, not 0/0)", func() {
-			pd := unplacedVariant(pdFleet(8, pdRole{"p", "prefill", 1}, pdRole{"d", "decode", 2}), "d", t0)
+			pd := unplacedVariant(pdFleet(pdRole{"p", "prefill", 1}, pdRole{"d", "decode", 2}), "d", t0)
 			rel, tg := timeout(16, 24, pd)
 			Expect(tg).To(Equal(map[string]int{"p": 1, "d": 1}))
-			Expect(releasedGPUs(rel, 8)).To(Equal(8))
+			Expect(releasedGPUs(rel)).To(Equal(8))
 		})
 
 		It("1P:2D with minReplicas 1 on both roles still releases the unplaced borrowed decode", func() {
-			pd := unplacedVariant(pdFleet(8, pdRole{"p", "prefill", 1}, pdRole{"d", "decode", 2}), "d", t0)
+			pd := unplacedVariant(pdFleet(pdRole{"p", "prefill", 1}, pdRole{"d", "decode", 2}), "d", t0)
 			one := 1
 			for i := range pd.VariantStates {
 				pd.VariantStates[i].MinReplicas = &one
@@ -81,23 +84,23 @@ var _ = Describe("BorrowGovernor release units", func() {
 		})
 
 		It("2P:3D, 8 GPUs borrowed: releases one decode, not the model", func() {
-			pd := unplacedVariant(pdFleet(8, pdRole{"p", "prefill", 2}, pdRole{"d", "decode", 3}), "d", t0)
+			pd := unplacedVariant(pdFleet(pdRole{"p", "prefill", 2}, pdRole{"d", "decode", 3}), "d", t0)
 			rel, tg := timeout(32, 40, pd)
 			Expect(tg).To(Equal(map[string]int{"p": 2, "d": 2}))
-			Expect(releasedGPUs(rel, 8)).To(Equal(8))
+			Expect(releasedGPUs(rel)).To(Equal(8))
 		})
 
 		It("2P:4D, 32 borrowed over 16 guaranteed: releases at most one pair", func() {
-			pd := unplacedVariant(pdFleet(8, pdRole{"p", "prefill", 2}, pdRole{"d", "decode", 4}), "d", t0)
+			pd := unplacedVariant(pdFleet(pdRole{"p", "prefill", 2}, pdRole{"d", "decode", 4}), "d", t0)
 			rel, tg := timeout(16, 48, pd)
-			Expect(releasedGPUs(rel, 8)).To(BeNumerically(">", 0))
-			Expect(releasedGPUs(rel, 8)).To(BeNumerically("<=", 16))
+			Expect(releasedGPUs(rel)).To(BeNumerically(">", 0))
+			Expect(releasedGPUs(rel)).To(BeNumerically("<=", 16))
 			Expect(tg["p"]).To(BeNumerically(">=", 1))
 			Expect(tg["d"]).To(BeNumerically(">=", 1))
 		})
 
 		It("counts a role split over two variants, and leaves no prefill without a decode", func() {
-			pd := unplacedVariant(pdFleet(8, pdRole{"p1", "prefill", 1}, pdRole{"p2", "prefill", 1}, pdRole{"d", "decode", 1}), "d", t0)
+			pd := unplacedVariant(pdFleet(pdRole{"p1", "prefill", 1}, pdRole{"p2", "prefill", 1}, pdRole{"d", "decode", 1}), "d", t0)
 			_, tg := timeout(0, 24, pd)
 			Expect(tg).To(Equal(map[string]int{"p1": 0, "p2": 0, "d": 0}))
 		})
@@ -117,7 +120,7 @@ var _ = Describe("BorrowGovernor release units", func() {
 		rel := gov.Releases(c, ds)
 		Expect(rel).To(HaveLen(1))
 		tg := targets(ds)
-		Expect(tg["m1-v"] + tg["m2-v"]).To(Equal(2), "the namespace keeps its guaranteed 2")
+		Expect(tg["m1-v"]+tg["m2-v"]).To(Equal(2), "the namespace keeps its guaranteed 2")
 	})
 
 	Describe("the ledger", func() {
@@ -273,7 +276,7 @@ var _ = Describe("BorrowGovernor release units", func() {
 
 		It("2P:3D, 8 borrowed: releases exactly one unit", func() {
 			rel := warm(govWorld{lenders: []kueue.LenderState{never(8)}, g: 32, used: 40},
-				[]ModelScalingRequest{pdFleet(8, pdRole{"p", "prefill", 2}, pdRole{"d", "decode", 3})})
+				[]ModelScalingRequest{pdFleet(pdRole{"p", "prefill", 2}, pdRole{"d", "decode", 3})})
 			Expect(rel).To(HaveLen(1))
 			Expect(rel[0].Variant).To(Equal("d"))
 			Expect(rel[0].To).To(Equal(2))
@@ -281,16 +284,16 @@ var _ = Describe("BorrowGovernor release units", func() {
 
 		It("1P:2D, 8 borrowed: releases one decode, not nothing", func() {
 			rel := warm(govWorld{lenders: []kueue.LenderState{never(8)}, g: 16, used: 24},
-				[]ModelScalingRequest{pdFleet(8, pdRole{"p", "prefill", 1}, pdRole{"d", "decode", 2})})
+				[]ModelScalingRequest{pdFleet(pdRole{"p", "prefill", 1}, pdRole{"d", "decode", 2})})
 			Expect(rel).To(HaveLen(1))
 			Expect(rel[0].Variant).To(Equal("d"))
 		})
 
 		It("2P:4D, 32 borrowed over 16 guaranteed: at most one pair", func() {
 			rel := warm(govWorld{lenders: []kueue.LenderState{never(32)}, g: 16, used: 48},
-				[]ModelScalingRequest{pdFleet(8, pdRole{"p", "prefill", 2}, pdRole{"d", "decode", 4})})
+				[]ModelScalingRequest{pdFleet(pdRole{"p", "prefill", 2}, pdRole{"d", "decode", 4})})
 			Expect(rel).NotTo(BeEmpty())
-			Expect(releasedGPUs(rel, 8)).To(BeNumerically("<=", 16))
+			Expect(releasedGPUs(rel)).To(BeNumerically("<=", 16))
 		})
 	})
 })
