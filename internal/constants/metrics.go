@@ -866,11 +866,6 @@ const (
 	// cohort, cluster_queue.
 	WVAKueueLenderWaitingSeconds = "wva_kueue_lender_waiting_seconds"
 
-	// WVABorrowReleasesTotal is a counter of times a model lost borrowed
-	// capacity: released to a waiting lender, or reclaimed by Kueue.
-	// Labels: namespace, model_name, cause.
-	WVABorrowReleasesTotal = "wva_borrow_releases_total"
-
 	// LabelTier is the tier of WVAQuotaLimitGPUs: guaranteed or borrowable.
 	LabelTier = "tier"
 	// LabelCause is why borrowed capacity was released, on
