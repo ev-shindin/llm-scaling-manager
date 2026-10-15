@@ -407,13 +407,15 @@ func (g *BorrowGovernor) Releases(c BorrowCycle, decisions []domain.VariantDecis
 
 // timeoutReleases releases borrowed units unplaced past the placement timeout
 // (B5): the unplaced replicas a borrowing namespace holds past its guaranteed
-// figure, a P/D unit at the pair's ratio with the partner that placed. Growth
-// within guaranteed -- a reclaiming queue's growth into nominal it lent out --
-// is exempt, since Kueue reclaims for it. "Past guaranteed" counts the
-// replicas the namespace holds, gated ones included (heldPast): a replica
-// Kueue gates while its queue already reserves its whole guaranteed figure --
-// the replacement of a preempted borrowed pod -- has nothing to reclaim and
-// would wait forever. The model's cooldown starts.
+// figure, for a P/D model with the partner replicas that keep the pair's ratio
+// (releaseUnit). Growth within guaranteed -- a reclaiming queue's growth into
+// nominal it lent out -- is exempt, since Kueue reclaims for it. "Past
+// guaranteed" counts the replicas the namespace holds, gated ones included
+// (heldPast): a replica Kueue gates while its queue already reserves its whole
+// guaranteed figure -- the replacement of a preempted borrowed pod -- has
+// nothing to reclaim and would wait forever. Each release is taken off
+// heldPast, so two models of one namespace never both release the same
+// borrowed GPUs; one release per model per cycle. The model's cooldown starts.
 func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]variantRef, heldPast map[string]map[string]int) []BorrowRelease {
 	var out []BorrowRelease
 	for _, req := range c.Requests {
@@ -432,30 +434,31 @@ func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]varian
 			if c.Now.Sub(st.UnplacedSince) < timeout {
 				continue
 			}
-			borrowed := borrowedFor(heldPast, req.Namespace, accOf(req, st.VariantName))
+			typeKey, ok := accelerator.FindKey(heldPast[req.Namespace], accOf(req, st.VariantName))
+			if !ok {
+				continue
+			}
+			borrowed := heldPast[req.Namespace][typeKey]
 			gpr := max(st.GPUsPerReplica, 1)
 			if borrowed < gpr {
 				continue // within guaranteed: Kueue reclaims for it
 			}
-			unit := releaseUnit(req, st.VariantName)
-			if unit == nil {
+			k := min(st.UnplacedReplicas, borrowed/gpr, st.CurrentReplicas-minOf(st))
+			unit, gpus := releaseUnit(req, st.VariantName, k, borrowed, states)
+			if unit == nil || !unitFits(unit, req.Namespace, states) {
 				continue
 			}
-			if !req.Disaggregated {
-				unit[st.VariantName] = min(st.UnplacedReplicas, borrowed/gpr, st.CurrentReplicas-minOf(st))
-			}
-			if !unitFits(unit, req.Namespace, states) {
-				continue
-			}
-			for v, n := range unit {
+			for _, v := range slices.Sorted(maps.Keys(unit)) {
 				k := req.Namespace + "/" + v
 				s := states[k].state
-				to := s.CurrentReplicas - n
+				to := s.CurrentReplicas - unit[v]
 				g.timeoutHeld[k] = stickyRelease{to: to}
 				out = append(out, BorrowRelease{Namespace: req.Namespace, ModelID: req.ModelID, Variant: v,
 					From: s.CurrentReplicas, To: to, Cause: ReleasePlacementTimeout})
 			}
+			heldPast[req.Namespace][typeKey] -= gpus
 			g.modelCooldown[req.Namespace+"/"+req.ModelID] = c.Now.Add(g.settings.Cooldown)
+			break // one release per model per cycle: the counts above are now stale
 		}
 	}
 	return out
@@ -506,10 +509,10 @@ func (g *BorrowGovernor) lenderReleases(c BorrowCycle, states map[string]variant
 		}
 		pick := cand[0]
 		entry := &ReleaseLedgerEntry{LenderKey: w.key, ReleasedAt: c.Now}
-		for v, n := range pick.unit {
+		for _, v := range slices.Sorted(maps.Keys(pick.unit)) {
 			k := pick.req.Namespace + "/" + v
 			s := states[k].state
-			to := s.CurrentReplicas - n
+			to := s.CurrentReplicas - pick.unit[v]
 			entry.Units = append(entry.Units, ReleasedReplicas{Namespace: pick.req.Namespace, Variant: v, To: to})
 			out = append(out, BorrowRelease{Namespace: pick.req.Namespace, ModelID: pick.req.ModelID, Variant: v,
 				From: s.CurrentReplicas, To: to, Cause: ReleaseLenderWaiting, Lender: w.key})
@@ -549,28 +552,33 @@ func (g *BorrowGovernor) releaseCandidates(c BorrowCycle, states map[string]vari
 			if !ok {
 				continue
 			}
-			unit := releaseUnit(req, st.VariantName)
+			unit, gpus := releaseUnit(req, st.VariantName, 1, -1, states)
 			if unit == nil || !unitFits(unit, req.Namespace, states) {
 				continue
 			}
-			gpus := 0
+			if gpus > nsBorrow[req.Namespace][typeKey] {
+				continue // never below the guaranteed figure
+			}
 			var grown time.Time
 			cost := 0.0
 			for v, n := range unit {
 				s := states[req.Namespace+"/"+v]
-				gpus += n * max(s.state.GPUsPerReplica, 1)
 				if t, ok := g.lastGrown[req.Namespace+"/"+v]; ok && t.After(grown) {
 					grown = t
 				}
 				cost += float64(n) * s.cost
 			}
-			if gpus > nsBorrow[req.Namespace][typeKey] {
-				continue // never below the guaranteed figure
+			cand := releaseCandidate{req: req, unit: unit, gpus: gpus, typeKey: typeKey, grown: grown, cost: cost}
+			// One candidate per model: its smallest unit. Releasing one decode
+			// of a 1P:2D model hands back what releasing the pair would, without
+			// taking the model down.
+			i := slices.IndexFunc(out, func(o releaseCandidate) bool { return modelKey(o.req) == modelKey(req) })
+			switch {
+			case i < 0:
+				out = append(out, cand)
+			case gpus < out[i].gpus:
+				out[i] = cand
 			}
-			if slices.ContainsFunc(out, func(o releaseCandidate) bool { return modelKey(o.req) == modelKey(req) && maps.Equal(o.unit, unit) }) {
-				continue
-			}
-			out = append(out, releaseCandidate{req: req, unit: unit, gpus: gpus, typeKey: typeKey, grown: grown, cost: cost})
 		}
 	}
 	slices.SortStableFunc(out, func(a, b releaseCandidate) int {
@@ -593,32 +601,66 @@ func (g *BorrowGovernor) releaseCandidates(c BorrowCycle, states map[string]vari
 	return out
 }
 
-// releaseUnit is the unit releasing variant takes: one replica of it, or for
-// a disaggregated model one replica-set of every role at the pair's ratio (the
-// current replica counts reduced by their greatest common divisor). Nil when a
-// role has nothing to release.
-func releaseUnit(req ModelScalingRequest, variant string) map[string]int {
+// releaseUnit is the unit that releases k replicas of variant, and its GPUs.
+// For a single-role model that is the k replicas. For a disaggregated model it
+// adds, per partner role, the replicas that keep the pair's ratio -- the
+// role's total times k over the variant's role total, rounded down -- so a
+// role reaches 0 only when every role does: 1P:2D releasing one decode keeps
+// its prefill (1P:1D), releasing its prefill takes both decodes with it. A
+// role split over several variants counts all of them, and its part is taken
+// from the variants with the most replicas above minReplicas first. k shrinks
+// until the unit's GPUs fit capGPUs (negative: no cap), but never below one
+// replica: a unit larger than what is borrowed is still released. Nil when no
+// unit releases a replica of variant within minReplicas.
+func releaseUnit(req ModelScalingRequest, variant string, k, capGPUs int, states map[string]variantRef) (map[string]int, int) {
+	if k <= 0 {
+		return nil, 0
+	}
+	gprOf := func(v string) int { return max(states[req.Namespace+"/"+v].state.GPUsPerReplica, 1) }
 	if !req.Disaggregated {
-		return map[string]int{variant: 1}
+		return map[string]int{variant: k}, k * gprOf(variant)
 	}
-	byRole := map[string]domain.VariantReplicaState{}
+	role := ""
+	totals := map[string]int{}
+	byRole := map[string][]domain.VariantReplicaState{}
 	for _, st := range req.VariantStates {
-		if prev, ok := byRole[st.Role]; !ok || st.CurrentReplicas > prev.CurrentReplicas {
-			byRole[st.Role] = st
+		if st.VariantName == variant {
+			role = st.Role
+		}
+		totals[st.Role] += st.CurrentReplicas
+		byRole[st.Role] = append(byRole[st.Role], st)
+	}
+	if totals[role] <= 0 {
+		return nil, 0
+	}
+	for ; k >= 1; k-- {
+		unit := map[string]int{variant: k}
+		gpus := k * gprOf(variant)
+		fits := true
+		for r, total := range totals {
+			if r == role {
+				continue
+			}
+			n := k * total / totals[role]
+			sts := slices.Clone(byRole[r])
+			slices.SortStableFunc(sts, func(a, b domain.VariantReplicaState) int {
+				return cmp.Or(cmp.Compare(b.CurrentReplicas-minOf(b), a.CurrentReplicas-minOf(a)), strings.Compare(a.VariantName, b.VariantName))
+			})
+			for _, st := range sts {
+				take := min(n, max(0, st.CurrentReplicas-minOf(st)))
+				if take > 0 {
+					unit[st.VariantName] += take
+					gpus += take * gprOf(st.VariantName)
+					n -= take
+				}
+			}
+			fits = fits && n == 0
+		}
+		if fits && (capGPUs < 0 || gpus <= capGPUs || k == 1) {
+			return unit, gpus
 		}
 	}
-	d := 0
-	for _, st := range byRole {
-		if st.CurrentReplicas <= 0 {
-			return nil
-		}
-		d = gcd(d, st.CurrentReplicas)
-	}
-	unit := map[string]int{}
-	for _, st := range byRole {
-		unit[st.VariantName] = st.CurrentReplicas / d
-	}
-	return unit
+	return nil, 0
 }
 
 // unitFits reports whether every variant of a unit releases at least one
@@ -738,21 +780,6 @@ func namespaceBorrowed(constraints []*ResourceConstraints, gated map[string]map[
 		}
 	}
 	return out
-}
-
-func borrowedFor(nsBorrow map[string]map[string]int, ns, acc string) int {
-	key, ok := accelerator.FindKey(nsBorrow[ns], acc)
-	if !ok {
-		return 0
-	}
-	return nsBorrow[ns][key]
-}
-
-func gcd(a, b int) int {
-	for b != 0 {
-		a, b = b, a%b
-	}
-	return a
 }
 
 func compareLenderKeys(a, b LenderKey) int {
