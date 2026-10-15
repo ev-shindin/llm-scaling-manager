@@ -290,6 +290,13 @@ func (e *Eligibility) podCharged(ctx context.Context, ns string, pod *corev1.Pod
 // false when the list failed for a reason that may pass; a Workload kind the
 // cluster does not serve, or a Forbidden list, is known and empty, which leaves
 // every GPU pod uncharged.
+//
+// Only a Workload Kueue itself would create counts: one that requests a GPU
+// in some pod set, and only for owners of a kind a Kueue integration owns a
+// Workload by (integratedOwner). A tenant allowed to create Workloads could
+// otherwise make a tiny CPU-only one owned by its own Deployment or
+// ReplicaSet, have Kueue admit it, and pass the check for GPU pods Kueue never
+// charged.
 func (e *Eligibility) workloadsByOwner(ctx context.Context, ns string) (map[types.UID]bool, bool) {
 	out := map[types.UID]bool{}
 	mapping, err := e.client.RESTMapper().RESTMapping(schema.GroupKind{Group: Group, Kind: KindWorkload})
@@ -302,12 +309,70 @@ func (e *Eligibility) workloadsByOwner(ctx context.Context, ns string) (map[type
 		return out, apierrors.IsForbidden(err) || meta.IsNoMatchError(err)
 	}
 	for i := range list.Items {
-		reserved := workloadReserved(&list.Items[i])
-		for _, ref := range list.Items[i].GetOwnerReferences() {
+		w := &list.Items[i]
+		if !workloadRequestsGPU(w, e.gpuNames) {
+			continue
+		}
+		reserved := workloadReserved(w)
+		for _, ref := range w.GetOwnerReferences() {
+			if !integratedOwner(ref) {
+				continue
+			}
 			out[ref.UID] = out[ref.UID] || reserved
 		}
 	}
 	return out, true
+}
+
+// integratedOwners are the owner kinds Kueue's integrations set on the
+// Workloads they create, by API group: the pod integration (a Deployment's
+// pods too) owns it by the Pod, batch/v1 and JobSet by the Job or JobSet, and
+// the LeaderWorkerSet and StatefulSet integrations by the set itself (checked
+// against Kueue v0.20.0's reconcilers).
+var integratedOwners = map[string]string{
+	"Pod":             "",
+	"Job":             "batch",
+	"JobSet":          "jobset.x-k8s.io",
+	"LeaderWorkerSet": "leaderworkerset.x-k8s.io",
+	"StatefulSet":     "apps",
+}
+
+// integratedOwner reports whether ref names a kind, in its API group, a Kueue
+// integration owns a Workload by.
+func integratedOwner(ref metav1.OwnerReference) bool {
+	group, ok := integratedOwners[ref.Kind]
+	if !ok {
+		return false
+	}
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	return err == nil && gv.Group == group
+}
+
+// workloadRequestsGPU reports whether some container of some pod set of the
+// Workload requests (or limits) one of the GPU resources.
+func workloadRequestsGPU(w *unstructured.Unstructured, gpuNames map[string]bool) bool {
+	podSets, _, _ := unstructured.NestedSlice(w.Object, "spec", "podSets")
+	for _, raw := range podSets {
+		ps, _ := raw.(map[string]interface{})
+		for _, field := range []string{"containers", "initContainers"} {
+			containers, _, _ := unstructured.NestedSlice(ps, "template", "spec", field)
+			for _, rc := range containers {
+				c, _ := rc.(map[string]interface{})
+				for _, kind := range []string{"requests", "limits"} {
+					res, _, _ := unstructured.NestedMap(c, "resources", kind)
+					for name, q := range res {
+						if !gpuNames[name] {
+							continue
+						}
+						if qty, err := resource.ParseQuantity(fmt.Sprint(q)); err == nil && qty.Sign() > 0 {
+							return true
+						}
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // workloadReserved reports whether Kueue has reserved quota for a Workload or

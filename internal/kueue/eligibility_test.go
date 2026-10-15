@@ -101,6 +101,24 @@ func pendingWorkloadFor(owner client.Object) *unstructured.Unstructured {
 		apiVersion, kind = "v1", "Pod"
 	}
 	w.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: apiVersion, Kind: kind, Name: owner.GetName(), UID: owner.GetUID(), Controller: &yes}})
+	w.Object["spec"] = podSetsRequesting(map[string]interface{}{"nvidia.com/gpu": "8"})
+	return w
+}
+
+// podSetsRequesting is a Workload spec with one pod set whose container
+// requests the given resources.
+func podSetsRequesting(requests map[string]interface{}) map[string]interface{} {
+	return map[string]interface{}{"podSets": []interface{}{map[string]interface{}{
+		"name": "main", "count": int64(1),
+		"template": map[string]interface{}{"spec": map[string]interface{}{"containers": []interface{}{
+			map[string]interface{}{"name": "c", "resources": map[string]interface{}{"requests": requests}},
+		}}},
+	}}}
+}
+
+// cpuOnly makes a Workload request no GPU, as a tenant's own would.
+func cpuOnly(w *unstructured.Unstructured) *unstructured.Unstructured {
+	w.Object["spec"] = podSetsRequesting(map[string]interface{}{"cpu": "100m"})
 	return w
 }
 
@@ -191,6 +209,15 @@ var _ = Describe("Eligibility: the engine-side borrowing conditions", func() {
 			[]client.Object{lws, sts, gpuPod("p", 8, sts, labelled)}),
 		Entry("one unmanaged GPU pod hides GPUs from Kueue for the whole namespace", ReasonNotKueueManaged,
 			append(chargedPod("a"), rs, gpuPod("b", 8, rs))),
+		// Review finding (security): a tenant allowed to create Workloads
+		// makes a tiny one owned by its own Deployment's ReplicaSet, or by the
+		// pod, and Kueue admits it.
+		Entry("a reserved Workload owned by the pod's ReplicaSet is not proof: no Kueue integration owns one by it", ReasonNotKueueManaged,
+			[]client.Object{rs, workloadFor(rs), gpuPod("b", 8, rs)}),
+		Entry("a reserved CPU-only Workload owned by the pod is not proof", ReasonNotKueueManaged,
+			[]client.Object{labelledPod, cpuOnly(workloadFor(labelledPod))}),
+		Entry("a reserved CPU-only Workload owned by the Job is not proof", ReasonNotKueueManaged,
+			[]client.Object{job, cpuOnly(workloadFor(job)), gpuPod("p", 8, job)}),
 		Entry("a pod without GPUs is not judged", Reason(""),
 			append(chargedPod("a"), gpuPod("cpu", 0, rs))),
 		Entry("no GPU pod on the first read: not managed", ReasonNotKueueManaged, []client.Object(nil)),

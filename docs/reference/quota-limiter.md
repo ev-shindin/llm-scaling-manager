@@ -311,7 +311,7 @@ published (`wva_quota_borrow_withheld`):
 
 | Condition | Reason when it fails |
 |---|---|
-| Kueue charges every GPU pod in the namespace: a Workload owned by the pod, or by an owner up its chain, has quota reserved (for a pod at Kueue's admission gate, the Workload exists). Kueue's labels and gate alone are not enough, since a tenant can write them | `not-kueue-managed` |
+| Kueue charges every GPU pod in the namespace: a Workload owned by the pod, or by an owner up its chain, has quota reserved (for a pod at Kueue's admission gate, the Workload exists). The Workload must request a GPU and be owned by a kind a Kueue integration owns Workloads by: Pod, Job, JobSet, LeaderWorkerSet or StatefulSet. Kueue's labels and gate alone are not enough, since a tenant can write them | `not-kueue-managed` |
 | Something checks that borrowed GPUs exist: a `gpu-inventory` limiter, or a GPU `ResourceQuota` at most nominal plus `borrowingLimit` | `no-gpu-bound` |
 | The namespace's ResourceQuotas are readable (Forbidden at once; any other failure after five refresh intervals of failing) | `resourcequota-unreadable` |
 | The Kueue read is fresh (not failed, not older than twice `refreshInterval`; a Cohort list that fails for a reason other than Forbidden also reads as stale) and Kueue has written queue status | `stale`, `no-status` |

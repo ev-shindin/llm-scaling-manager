@@ -352,8 +352,11 @@ controller. No such line means its own ConfigMap does.
 
 - **The managed check is a heuristic, not a boundary.** Borrowing is counted
   for a namespace only when its GPU pods are Kueue-managed, each backed by a
-  Workload with quota reserved. That keeps the figures honest; it does not
-  stop a tenant from running GPU work outside Kueue. A `ResourceQuota` does.
+  Workload with quota reserved that requests a GPU and is owned by a kind a
+  Kueue integration owns Workloads by (Pod, Job, JobSet, LeaderWorkerSet,
+  StatefulSet), so a tenant's own small Workload owned by its Deployment or
+  ReplicaSet does not pass. That keeps the figures honest; it does not stop a
+  tenant from running GPU work outside Kueue. A `ResourceQuota` does.
 - **A `Never` lender depends on the borrower.** With `reclaimWithinCohort:
   Never`, Kueue never takes capacity back; the lender gets it only because
   the borrowing namespace's scaling manager releases it. A tenant who owns

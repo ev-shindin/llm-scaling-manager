@@ -818,7 +818,9 @@ Where the code settled a detail this text leaves open, or differs from it:
   treated as `Never`: it reclaims only from lower-priority work, and
   serving runs above batch.
 - **Managed check.** A GPU pod counts as Kueue-managed only when a
-  Workload with quota reserved backs it.
+  Workload with quota reserved backs it, requests a GPU, and is owned by a
+  kind a Kueue integration owns Workloads by (Pod, Job, JobSet,
+  LeaderWorkerSet, StatefulSet).
 - **Opt-out.** `countBorrowable: false` on the entry, which the installer
   writes for `WVA_QUOTA_KUEUE_BORROW=false` (`make deploy-wva` and
   `make enable-physical-limiter`); ignored, with a warning, without
