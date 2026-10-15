@@ -174,7 +174,15 @@ type BorrowGovernor struct {
 	timeoutHeld    map[string]stickyRelease
 	held           map[string]bool
 	preemptUnknown map[string]bool
-	started        bool
+	// pastSince is, per "namespace/type", since when the namespace has held
+	// GPUs past its guaranteed figure, as Observe saw it: the earliest a pod
+	// of it can have been unplaced as a borrowed one. Zero when nothing was
+	// known of it the cycle before (observePast).
+	pastSince map[string]time.Time
+	// within is the "namespace/type" keys the last Observe saw within
+	// guaranteed.
+	within map[string]bool
+	started   bool
 	// idleSince is when cycles stopped counting borrowing (HoldReleases
 	// without Observe); zero while they count it.
 	idleSince time.Time
@@ -186,7 +194,7 @@ func NewBorrowGovernor(s BorrowSettings) *BorrowGovernor {
 		settings: s, watches: map[LenderKey]*lenderWatch{}, ledger: map[LenderKey]*ReleaseLedgerEntry{},
 		released: map[string]int{}, cohortCooldown: map[string]time.Time{}, modelCooldown: map[string]time.Time{},
 		lastGrown: map[string]time.Time{}, timeoutHeld: map[string]stickyRelease{}, held: map[string]bool{},
-		preemptUnknown: map[string]bool{},
+		preemptUnknown: map[string]bool{}, pastSince: map[string]time.Time{},
 	}
 }
 
@@ -388,6 +396,7 @@ func (g *BorrowGovernor) Observe(c BorrowCycle) {
 			delete(g.timeoutHeld, k)
 		}
 	}
+	g.observePast(c)
 	chunks, _ := mergeSharedPools(c.Constraints)
 	seen := map[LenderKey]bool{}
 	// listed is every pool of the cycle, fresh holds the value false for a
@@ -443,6 +452,40 @@ func (g *BorrowGovernor) Observe(c BorrowCycle) {
 		}
 	}
 	g.started = true
+}
+
+// observePast records when each borrowing namespace went past its guaranteed
+// figure, per type. The clock starts at this cycle only when the previous
+// cycle saw the namespace within guaranteed; one seen past guaranteed for the
+// first time with nothing known before -- after a start, or when borrowing
+// was not counted -- gets a zero time, so each unplaced pod counts from its
+// own time rather than having its clock restarted.
+func (g *BorrowGovernor) observePast(c BorrowCycle) {
+	within := map[string]bool{}
+	past := map[string]bool{}
+	for ns, perType := range namespaceHeldPast(c.Constraints) {
+		for t, n := range perType {
+			k := ns + "/" + t
+			if n <= 0 {
+				within[k] = true
+				continue
+			}
+			past[k] = true
+			if _, ok := g.pastSince[k]; !ok {
+				var since time.Time
+				if g.within[k] {
+					since = c.Now
+				}
+				g.pastSince[k] = since
+			}
+		}
+	}
+	for k := range g.pastSince {
+		if !past[k] {
+			delete(g.pastSince, k)
+		}
+	}
+	g.within = within
 }
 
 // pruneClocks drops expired cooldowns and clamps one further away than the
@@ -595,6 +638,8 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 		clear(g.watches)
 		clear(g.released)
 		clear(g.timeoutHeld)
+		clear(g.pastSince)
+		clear(g.within)
 		g.started = false
 		return
 	}
@@ -638,26 +683,35 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequ
 // nothing to reclaim and would wait forever. Each release is taken off
 // heldPast, so two models of one namespace never both release the same
 // borrowed GPUs; one release per model per cycle. The model's cooldown starts.
+//
+// The clock is per pod (expiredUnplaced): each unplaced pod counts from when
+// it became unplaced, or from when its namespace went past guaranteed if that
+// is later. A pod stuck since before the namespace borrowed therefore does not
+// time out a replica borrowed a minute ago, and a variant that keeps adding
+// unplaced pods does not reset the clock of its oldest one. The release takes
+// as many replicas as there are pods past the timeout (a LeaderWorkerSet: at
+// most its unplaced groups).
 func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]variantRef, heldPast map[string]map[string]int) []BorrowRelease {
 	var out []BorrowRelease
 	for _, req := range c.Requests {
 		for _, st := range req.VariantStates {
 			key := req.Namespace + "/" + st.VariantName
-			if st.UnplacedReplicas <= 0 || st.UnplacedSince.IsZero() {
+			if st.UnplacedReplicas <= 0 {
 				continue
 			}
 			if _, sticky := g.timeoutHeld[key]; sticky {
+				continue
+			}
+			typeKey, ok := accelerator.FindKey(heldPast[req.Namespace], accOf(req, st.VariantName))
+			if !ok {
 				continue
 			}
 			timeout := g.settings.PlacementTimeout
 			if c.ScaleUpPending[key] {
 				timeout *= 3
 			}
-			if c.Now.Sub(st.UnplacedSince) < timeout {
-				continue
-			}
-			typeKey, ok := accelerator.FindKey(heldPast[req.Namespace], accOf(req, st.VariantName))
-			if !ok {
+			expired := expiredUnplaced(st, g.pastSince[req.Namespace+"/"+typeKey], timeout, c.Now)
+			if expired == 0 {
 				continue
 			}
 			borrowed := heldPast[req.Namespace][typeKey]
@@ -665,7 +719,7 @@ func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]varian
 			if borrowed < gpr {
 				continue // within guaranteed: Kueue reclaims for it
 			}
-			k := min(st.UnplacedReplicas, borrowed/gpr, st.CurrentReplicas-minOf(st))
+			k := min(expired, st.UnplacedReplicas, borrowed/gpr, st.CurrentReplicas-minOf(st))
 			unit, gpus := releaseUnit(req, st.VariantName, k, borrowed, states)
 			if unit == nil || !unitFits(unit, req.Namespace, states) {
 				continue
@@ -684,6 +738,35 @@ func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]varian
 		}
 	}
 	return out
+}
+
+// expiredUnplaced is how many of a variant's unplaced pods have been unplaced
+// for at least timeout, each counted from when it became unplaced or from
+// pastSince (when its namespace went past guaranteed), whichever is later. A
+// state without per-pod times counts its UnplacedReplicas at UnplacedSince.
+func expiredUnplaced(st domain.VariantReplicaState, pastSince time.Time, timeout time.Duration, now time.Time) int {
+	expired := func(at time.Time) bool {
+		if at.IsZero() {
+			return false
+		}
+		if pastSince.After(at) {
+			at = pastSince
+		}
+		return now.Sub(at) >= timeout
+	}
+	if len(st.UnplacedPodSince) == 0 {
+		if expired(st.UnplacedSince) {
+			return st.UnplacedReplicas
+		}
+		return 0
+	}
+	n := 0
+	for _, at := range st.UnplacedPodSince {
+		if expired(at) {
+			n++
+		}
+	}
+	return n
 }
 
 // lenderReleases releases, for each waiting lender that cannot reclaim and has

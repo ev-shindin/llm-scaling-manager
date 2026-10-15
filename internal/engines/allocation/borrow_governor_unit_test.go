@@ -1,6 +1,7 @@
 package allocation
 
 import (
+	"maps"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -43,6 +44,26 @@ func unplacedVariant(r ModelScalingRequest, variant string, t time.Time) ModelSc
 	return r
 }
 
+// unplacedPods marks the named variant's pods unplaced at the given times, as
+// discovery reports them: UnplacedSince is the newest.
+func unplacedPods(r ModelScalingRequest, variant string, pods map[string]time.Time) ModelScalingRequest {
+	for i := range r.VariantStates {
+		s := &r.VariantStates[i]
+		if s.VariantName != variant {
+			continue
+		}
+		s.UnplacedReplicas = len(pods)
+		s.UnplacedPodSince = pods
+		for name, at := range pods {
+			s.UnplacedPods = append(s.UnplacedPods, name)
+			if at.After(s.UnplacedSince) {
+				s.UnplacedSince = at
+			}
+		}
+	}
+	return r
+}
+
 func releasedGPUs(rel []BorrowRelease) int {
 	n := 0
 	for _, r := range rel {
@@ -64,6 +85,53 @@ var _ = Describe("BorrowGovernor release units", func() {
 		rel := gov.Releases(c, ds)
 		return rel, targets(ds)
 	}
+
+	// The placement timeout's clock is per pod, from when it became unplaced
+	// or from when its namespace went past guaranteed, whichever is later.
+	Describe("placement timeout clock", func() {
+		run := func(g *BorrowGovernor, at time.Time, world govWorld, req ModelScalingRequest) []BorrowRelease {
+			c := BorrowCycle{Now: at, Constraints: world.constraints(), Requests: []ModelScalingRequest{req}}
+			g.Observe(c)
+			return g.Releases(c, decisionsOf(c.Requests))
+		}
+
+		// Review finding: with the newest unplaced pod as the clock, a variant
+		// that keeps adding unplaced pods never lets its oldest time out.
+		It("times out the oldest unplaced pod while the variant keeps adding new ones", func() {
+			g := NewBorrowGovernor(settings)
+			world := govWorld{used: 48}
+			pods := map[string]time.Time{}
+			for i, at := range []time.Duration{0, 2 * time.Minute, 4 * time.Minute} {
+				pods[string(rune('a'+i))] = t0.Add(at)
+				Expect(run(g, t0.Add(at), world, unplacedPods(govModel("x", 6, 8), "x-v", maps.Clone(pods)))).To(BeEmpty())
+			}
+			now := t0.Add(settings.PlacementTimeout + 10*time.Second)
+			pods["d"] = t0.Add(settings.PlacementTimeout)
+			rel := run(g, now, world, unplacedPods(govModel("x", 6, 8), "x-v", maps.Clone(pods)))
+			Expect(rel).To(HaveLen(1), "pod a has been unplaced past the timeout, however many came after it")
+			Expect(rel[0].From - rel[0].To).To(Equal(1), "one pod past the timeout: one replica")
+		})
+
+		// The round-1 finding stays fixed: a pod stuck since before the
+		// namespace borrowed does not time out a replica borrowed a minute ago.
+		It("does not time out a fresh borrowed replica because of a pod stuck since before the namespace borrowed", func() {
+			g := NewBorrowGovernor(settings)
+			old := map[string]time.Time{"old": t0.Add(-20 * time.Minute)}
+			Expect(run(g, t0, govWorld{g: 16, used: 16}, unplacedPods(govModel("x", 2, 8), "x-v", maps.Clone(old)))).To(BeEmpty(),
+				"within guaranteed")
+
+			both := map[string]time.Time{"old": t0.Add(-20 * time.Minute), "new": t0.Add(30 * time.Second)}
+			borrowed := govWorld{g: 16, used: 24}
+			Expect(run(g, t0.Add(time.Minute), borrowed, unplacedPods(govModel("x", 3, 8), "x-v", maps.Clone(both)))).To(BeEmpty(),
+				"the namespace went past guaranteed a moment ago")
+			Expect(run(g, t0.Add(time.Minute+settings.PlacementTimeout-time.Second), borrowed,
+				unplacedPods(govModel("x", 3, 8), "x-v", maps.Clone(both)))).To(BeEmpty())
+			rel := run(g, t0.Add(time.Minute+settings.PlacementTimeout+time.Second), borrowed,
+				unplacedPods(govModel("x", 3, 8), "x-v", maps.Clone(both)))
+			Expect(rel).To(HaveLen(1), "a full timeout after the namespace borrowed")
+			Expect(rel[0].From - rel[0].To).To(Equal(1), "bounded by the 8 borrowed GPUs")
+		})
+	})
 
 	Describe("placement timeout on a P/D model", func() {
 		It("1P:2D, 8 GPUs borrowed, a decode unplaced: releases that decode and keeps the pair (d:1, not 0/0)", func() {

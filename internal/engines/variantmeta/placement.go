@@ -26,24 +26,23 @@ var GateGrace = 30 * time.Second
 // it has a node. On a LeaderWorkerSet a replica is a group, unplaced while any
 // of its pods is. since is when the newest unplaced pod became so (the
 // Unschedulable condition's transition, or the gated pod's creation), pods
-// their names, sorted. The newest, not the oldest: the placement timeout
-// releases borrowed replicas once since is older than the timeout, and an old
-// pod that never placed for its own reason must not make a replica ordered a
-// minute ago look timed out.
+// their names, sorted, and byPod when each became unplaced. since is the
+// newest, for the signals that ask whether anything is newly unplaced; the
+// placement timeout reads byPod (BorrowGovernor.timeoutReleases).
 func placement(ctx context.Context, k8sClient client.Client, namespace string,
-	scaleTarget scaletarget.ScaleTargetAccessor, now time.Time) (unplaced int, since time.Time, pods []string) {
+	scaleTarget scaletarget.ScaleTargetAccessor, now time.Time) (unplaced int, since time.Time, pods []string, byPod map[string]time.Time) {
 	if k8sClient == nil || scaleTarget == nil {
-		return 0, time.Time{}, nil
+		return 0, time.Time{}, nil, nil
 	}
 	list, err := ListVariantPods(ctx, k8sClient, namespace, scaleTarget)
 	if err != nil {
-		return 0, time.Time{}, nil
+		return 0, time.Time{}, nil, nil
 	}
 	return countUnplaced(list, scaletarget.IsLeaderWorkerSet(scaleTarget), now)
 }
 
 // countUnplaced is placement over listed pods.
-func countUnplaced(list []corev1.Pod, group bool, now time.Time) (unplaced int, since time.Time, pods []string) {
+func countUnplaced(list []corev1.Pod, group bool, now time.Time) (unplaced int, since time.Time, pods []string, byPod map[string]time.Time) {
 	groups := map[string]bool{}
 	for i := range list {
 		p := &list[i]
@@ -52,6 +51,10 @@ func countUnplaced(list []corev1.Pod, group bool, now time.Time) (unplaced int, 
 			continue
 		}
 		pods = append(pods, p.Name)
+		if byPod == nil {
+			byPod = map[string]time.Time{}
+		}
+		byPod[p.Name] = at
 		if at.After(since) {
 			since = at
 		}
@@ -65,7 +68,7 @@ func countUnplaced(list []corev1.Pod, group bool, now time.Time) (unplaced int, 
 		unplaced = len(groups)
 	}
 	slices.Sort(pods)
-	return unplaced, since, pods
+	return unplaced, since, pods, byPod
 }
 
 // unplacedSince reports whether a pod is unplaced, and since when.

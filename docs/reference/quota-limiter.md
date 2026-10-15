@@ -350,7 +350,10 @@ itself:
   Kueue's admission gate, after `placementTimeout` is released (with its P/D
   partner). The wait stretches up to three times while the cluster autoscaler
   reports `TriggeredScaleUp` on the pod. Until it places, the variant borrows
-  nothing new.
+  nothing new. Each unplaced pod is timed on its own, from when it became
+  unplaced or from when its namespace began borrowing, whichever is later: a
+  pod stuck before the namespace borrowed does not time out a fresh borrowed
+  replica, and new unplaced pods do not reset the oldest one's clock.
 - **A waiting lender.** A lender with `reclaimWithinCohort: Never` or
   `LowerPriority` (Kueue then preempts only lower priorities) that waits
   for capacity it lent gets one unit back at a time (a replica, a P/D pair, a

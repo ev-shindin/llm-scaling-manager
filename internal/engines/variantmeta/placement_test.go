@@ -38,7 +38,7 @@ func TestCountUnplacedIsNarrow(t *testing.T) {
 			Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}}}
 	}
 
-	n, since, pods := countUnplaced([]corev1.Pod{
+	n, since, pods, byPod := countUnplaced([]corev1.Pod{
 		pod("a", unschedulable),
 		pod("b", gated(5*time.Minute)),
 		pod("c", gated(5*time.Second)),
@@ -50,6 +50,9 @@ func TestCountUnplacedIsNarrow(t *testing.T) {
 	}
 	if !since.Equal(now.Add(-5 * time.Minute)) {
 		t.Fatalf("since = %v, want the newest unplaced pod (b, gated 5m), not the oldest (a, unschedulable 10m)", since)
+	}
+	if len(byPod) != 2 || !byPod["b"].Equal(now.Add(-5*time.Minute)) || byPod["a"].IsZero() {
+		t.Fatalf("byPod = %v, want each unplaced pod with its own time", byPod)
 	}
 }
 
@@ -66,7 +69,7 @@ func TestCountUnplacedCountsLWSGroups(t *testing.T) {
 		}
 		return p
 	}
-	n, _, _ := countUnplaced([]corev1.Pod{mk("g0-a", "0", true), mk("g0-b", "0", true), mk("g1-a", "1", true), mk("g1-b", "1", false),
+	n, _, _, _ := countUnplaced([]corev1.Pod{mk("g0-a", "0", true), mk("g0-b", "0", true), mk("g1-a", "1", true), mk("g1-b", "1", false),
 		mk("g2-a", "2", false), mk("g2-b", "2", false)}, true, now)
 	if n != 2 {
 		t.Fatalf("unplaced groups = %d, want 2: the hold lifts only when the whole group placed", n)
