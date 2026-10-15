@@ -214,13 +214,18 @@ func (e *Eligibility) evaluate(ctx context.Context, ns string, prev NamespaceEli
 // and in a namespace Kueue's webhook does not cover the pod then runs uncharged
 // while borrowing is unlocked.
 //
-// The charge must also cover the GPUs: per charging owner, the reserved
-// Workloads' GPUs in all must be at least what its running pods request. A
-// tenant allowed to create Workloads could otherwise make a 1-GPU one owned by
-// its own LeaderWorkerSet, have Kueue admit it, and pass the check for every
-// pod of a 16-GPU-per-group set. For the pod integration the owner is the pod
-// itself, so the check is exact per pod. A pod at the admission gate or being
-// deleted holds no GPU of its own, so it adds nothing to its owner's figure.
+// The charge must also cover the GPUs, each Workload counted once: owners
+// linked by a Workload that names them all form one charge group, and the
+// reserved Workloads of a group must request at least what the running pods of
+// all its owners request. A tenant allowed to create Workloads could otherwise
+// make a 1-GPU one owned by its own LeaderWorkerSet, have Kueue admit it, and
+// pass the check for every pod of a 16-GPU-per-group set; or make one 8-GPU
+// Workload naming ten 8-GPU pods, or several sets, as owners and have it
+// credited in full to each. A genuine pod group names every pod of the group
+// and its pod sets cover them all; a LeaderWorkerSet's Workloads, one per
+// group, are all owned by the set. For a single pod the group is the pod, so
+// the check is exact per pod. A pod at the admission gate or being deleted
+// holds no GPU of its own, so it adds nothing to its group's figure.
 //
 // One Workload list per evaluation, taken only when the namespace has a GPU
 // pod; an owner is read only when no Workload matched below it.
@@ -230,8 +235,8 @@ func (e *Eligibility) managed(ctx context.Context, ns string) (bool, bool) {
 		return false, false
 	}
 	owners := map[types.UID]*unstructured.Unstructured{}
-	var workloads map[types.UID]ownerCharge
-	used := map[types.UID]int64{}
+	var workloads *workloadCharges
+	used := map[types.UID]int64{} // per charge group
 	found := false
 	for i := range pods.Items {
 		pod := &pods.Items[i]
@@ -251,16 +256,16 @@ func (e *Eligibility) managed(ctx context.Context, ns string) (bool, bool) {
 				return false, false
 			}
 		}
-		owner, ok := e.chargingOwner(ctx, ns, pod, owners, workloads)
+		owner, ok := e.chargingOwner(ctx, ns, pod, owners, workloads.owners)
 		if !ok {
 			return false, true
 		}
 		if !PodGated(pod) && pod.DeletionTimestamp == nil {
-			used[owner] += podGPUs(&pod.Spec, e.gpuNames)
+			used[workloads.owners[owner].group] += podGPUs(&pod.Spec, e.gpuNames)
 		}
 	}
-	for owner, n := range used {
-		if n > workloads[owner].gpus {
+	for group, n := range used {
+		if n > workloads.groupGPUs[group] {
 			return false, true // the reserved Workloads cover fewer GPUs than the pods hold
 		}
 	}
@@ -331,16 +336,25 @@ func (e *Eligibility) chargingOwner(ctx context.Context, ns string, pod *corev1.
 }
 
 // ownerCharge is what the Workloads owned by one object charge: whether one of
-// them is reserved or admitted, and the GPUs the reserved ones request in all.
+// them is reserved or admitted, and the charge group the object belongs to.
 type ownerCharge struct {
 	reserved bool
-	gpus     int64
+	group    types.UID
 }
 
-// workloadsByOwner maps the UID of every object a Workload in ns names as an
-// owner to what its Workloads charge. known is false when the list failed for
-// a reason that may pass; a Workload kind the cluster does not serve, or a
-// Forbidden list, is known and empty, which leaves every GPU pod uncharged.
+// workloadCharges is the Workloads of one namespace, by owner: what each
+// owner's Workloads charge, and per charge group -- the owners one or more
+// Workloads link by naming them together -- the GPUs its reserved Workloads
+// request in all, each Workload once.
+type workloadCharges struct {
+	owners    map[types.UID]ownerCharge
+	groupGPUs map[types.UID]int64
+}
+
+// workloadsByOwner reads the Workloads in ns by owner. known is false when the
+// list failed for a reason that may pass; a Workload kind the cluster does not
+// serve, or a Forbidden list, is known and empty, which leaves every GPU pod
+// uncharged.
 //
 // Only a Workload Kueue itself would create counts: one that requests a GPU
 // in some pod set, and only for owners of a kind a Kueue integration owns a
@@ -348,8 +362,8 @@ type ownerCharge struct {
 // otherwise make a tiny CPU-only one owned by its own Deployment or
 // ReplicaSet, have Kueue admit it, and pass the check for GPU pods Kueue never
 // charged; a GPU one too small for the pods is caught by managed.
-func (e *Eligibility) workloadsByOwner(ctx context.Context, ns string) (map[types.UID]ownerCharge, bool) {
-	out := map[types.UID]ownerCharge{}
+func (e *Eligibility) workloadsByOwner(ctx context.Context, ns string) (*workloadCharges, bool) {
+	out := &workloadCharges{owners: map[types.UID]ownerCharge{}, groupGPUs: map[types.UID]int64{}}
 	mapping, err := e.client.RESTMapper().RESTMapping(schema.GroupKind{Group: Group, Kind: KindWorkload})
 	if err != nil {
 		return out, meta.IsNoMatchError(err)
@@ -359,6 +373,24 @@ func (e *Eligibility) workloadsByOwner(ctx context.Context, ns string) (map[type
 	if err := e.client.List(ctx, list, client.InNamespace(ns)); err != nil {
 		return out, apierrors.IsForbidden(err) || meta.IsNoMatchError(err)
 	}
+	// Union-find over owners: a Workload naming several owners joins them.
+	parent := map[types.UID]types.UID{}
+	var find func(types.UID) types.UID
+	find = func(u types.UID) types.UID {
+		p, ok := parent[u]
+		if !ok || p == u {
+			parent[u] = u
+			return u
+		}
+		root := find(p)
+		parent[u] = root
+		return root
+	}
+	type charge struct {
+		owner types.UID
+		gpus  int64
+	}
+	var charges []charge
 	for i := range list.Items {
 		w := &list.Items[i]
 		gpus := workloadGPUs(w, e.gpuNames)
@@ -366,17 +398,32 @@ func (e *Eligibility) workloadsByOwner(ctx context.Context, ns string) (map[type
 			continue
 		}
 		reserved := workloadReserved(w)
+		var first types.UID
 		for _, ref := range w.GetOwnerReferences() {
 			if !integratedOwner(ref) {
 				continue
 			}
-			c := out[ref.UID]
-			if reserved {
-				c.reserved = true
-				c.gpus += gpus
+			c := out.owners[ref.UID]
+			c.reserved = c.reserved || reserved
+			out.owners[ref.UID] = c
+			if first == "" {
+				first = find(ref.UID)
+				continue
 			}
-			out[ref.UID] = c
+			if r := find(ref.UID); r != first {
+				parent[r] = first
+			}
 		}
+		if first != "" && reserved {
+			charges = append(charges, charge{first, gpus})
+		}
+	}
+	for _, c := range charges {
+		out.groupGPUs[find(c.owner)] += c.gpus
+	}
+	for uid, c := range out.owners {
+		c.group = find(uid)
+		out.owners[uid] = c
 	}
 	return out, true
 }
@@ -406,14 +453,26 @@ func integratedOwner(ref metav1.OwnerReference) bool {
 }
 
 // workloadGPUs is the GPUs a Workload requests in all: per pod set, its count
-// times what one of its pods requests (podGPUs). A pod set whose template
-// does not parse counts nothing.
+// times what one of its pods requests (podGPUs). The count is the admitted
+// one, status.admission.podSetAssignments[].count for the pod set of that
+// name, when Kueue wrote it -- with partial admission (minCount) Kueue admits,
+// and charges, fewer pods than the spec asks for -- else spec.podSets[].count,
+// 1 when unset. A pod set whose template does not parse counts nothing.
 //
 // Pod-level resources (spec.resources, PodLevelResources) and GPUs claimed
 // through DRA are not seen, here or in the pods: a Workload or pod that asks
 // for its GPUs only that way counts none, so its pods read as not charged
 // (fail safe), never as charged.
 func workloadGPUs(w *unstructured.Unstructured, gpuNames map[string]bool) int64 {
+	admitted := map[string]int64{}
+	assignments, _, _ := unstructured.NestedSlice(w.Object, "status", "admission", "podSetAssignments")
+	for _, raw := range assignments {
+		a, _ := raw.(map[string]interface{})
+		name, _, _ := unstructured.NestedString(a, "name")
+		if count, found, err := unstructured.NestedInt64(a, "count"); found && err == nil {
+			admitted[name] = count
+		}
+	}
 	podSets, _, _ := unstructured.NestedSlice(w.Object, "spec", "podSets")
 	var total int64
 	for _, raw := range podSets {
@@ -423,9 +482,14 @@ func workloadGPUs(w *unstructured.Unstructured, gpuNames map[string]bool) int64 
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(spec, &pod); err != nil {
 			continue
 		}
-		count, found, err := unstructured.NestedInt64(ps, "count")
-		if !found || err != nil {
-			count = 1
+		name, _, _ := unstructured.NestedString(ps, "name")
+		count, ok := admitted[name]
+		if !ok {
+			var found bool
+			var err error
+			if count, found, err = unstructured.NestedInt64(ps, "count"); !found || err != nil {
+				count = 1
+			}
 		}
 		total += max(count, 0) * podGPUs(&pod, gpuNames)
 	}
