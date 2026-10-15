@@ -5,6 +5,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"gopkg.in/yaml.v3"
 )
 
 // typed builds a namespace snapshot of purely typed grants.
@@ -249,6 +250,73 @@ var _ = Describe("KueueQuotaSource", func() {
 		out.Kueue.Enabled = false
 		Expect(entry.Kueue.Resources).To(Equal([]string{"nvidia.com/gpu"}))
 		Expect(entry.Kueue.Enabled).To(BeTrue())
+	})
+
+	It("counts borrowable capacity by default, and not when countBorrowable is false", func() {
+		parse := func(doc string) QuotaLimiterConfig {
+			var e QuotaLimiterEntries
+			Expect(yaml.Unmarshal([]byte(doc), &e)).To(Succeed())
+			Expect(e.Limiters).To(HaveLen(1))
+			return e.Limiters[0]
+		}
+		absent := parse("limiters:\n- name: q\n  type: quota\n  scope: namespace\n  kueue:\n    enabled: true\n")
+		Expect(absent.Kueue.CountBorrowable).To(BeNil())
+		Expect(absent.KueueCountsBorrowable()).To(BeTrue(), "absent means on")
+
+		off := parse("limiters:\n- name: q\n  type: quota\n  scope: namespace\n  kueue:\n    enabled: true\n    countBorrowable: false\n")
+		Expect(off.KueueCountsBorrowable()).To(BeFalse())
+
+		on := parse("limiters:\n- name: q\n  type: quota\n  scope: namespace\n  kueue:\n    enabled: true\n    countBorrowable: true\n")
+		Expect(on.KueueCountsBorrowable()).To(BeTrue())
+
+		disabled := parse("limiters:\n- name: q\n  type: quota\n  scope: namespace\n  kueue:\n    enabled: false\n    countBorrowable: true\n")
+		Expect(disabled.KueueCountsBorrowable()).To(BeFalse(), "nothing is read without the reader")
+		Expect(QuotaLimiterConfig{}.KueueCountsBorrowable()).To(BeFalse())
+	})
+
+	It("deep-copies countBorrowable", func() {
+		off := false
+		entry := QuotaLimiterConfig{Kueue: &KueueQuotaSource{Enabled: true, CountBorrowable: &off}}
+		out := entry.clone()
+		*out.Kueue.CountBorrowable = true
+		Expect(*entry.Kueue.CountBorrowable).To(BeFalse())
+	})
+
+	It("does not let borrowing figures change a bound", func() {
+		entry := QuotaLimiterConfig{
+			Name: "q", Type: "quota", Scope: QuotaScopeNamespace,
+			NamespaceQuotas: map[string]map[string]int{"default": {"H100": -1}},
+			Kueue:           &KueueQuotaSource{Enabled: true},
+		}
+		ext := typed(map[string]map[string]int{"team-a": {"H100": 9}})
+		without := entry.BoundBy(ext)
+		ext.Borrow = map[string][]ExternalBorrow{"team-a": {{Queue: "cq", Nominal: 9, Guaranteed: 0, Borrowable: 10}}}
+		Expect(entry.BoundBy(ext)).To(Equal(without))
+		Expect(without.NamespaceQuotas["team-a"]).To(Equal(map[string]int{"H100": 9}))
+	})
+
+	It("withholds a row back to nominal", func() {
+		row := ExternalBorrow{Nominal: 9, Guaranteed: 0, WithinNominal: 5, LentOut: 2, Borrowable: 10, Reason: "nominal-lent-out"}
+		Expect(row.Counted()).To(BeTrue(), "nominal-lent-out qualifies the guaranteed figure; it does not withhold")
+		withheld := row.Withheld("stale")
+		Expect(withheld).To(Equal(ExternalBorrow{Nominal: 9, Guaranteed: 9, WithinNominal: 9, Reason: "stale"}))
+		Expect(withheld.Counted()).To(BeFalse())
+	})
+
+	It("reads the borrowing timings, at the proposal's defaults when unset", func() {
+		entry := QuotaLimiterConfig{Kueue: &KueueQuotaSource{Enabled: true}}
+		Expect(entry.BorrowTimings()).To(Equal(KueueBorrowTimings{
+			PlacementTimeout: 5 * time.Minute, Cooldown: 10 * time.Minute, LenderDebounce: time.Minute,
+		}))
+		entry.Kueue.PlacementTimeout, entry.Kueue.BorrowCooldown, entry.Kueue.LenderDebounce = "7m", "20m", "2m"
+		Expect(entry.BorrowTimings()).To(Equal(KueueBorrowTimings{
+			PlacementTimeout: 7 * time.Minute, PlacementTimeoutSet: true, Cooldown: 20 * time.Minute, LenderDebounce: 2 * time.Minute,
+		}))
+		bad := QuotaLimiterEntries{Limiters: []QuotaLimiterConfig{{Name: "ns", Type: "quota", Scope: QuotaScopeNamespace,
+			Kueue: &KueueQuotaSource{Enabled: true, PlacementTimeout: "soon", BorrowCooldown: "-1m"}}}}
+		_, err := bad.Validate()
+		Expect(err).To(MatchError(ContainSubstring("placementTimeout")))
+		Expect(err).To(MatchError(ContainSubstring("borrowCooldown")))
 	})
 
 	Context("validation", func() {

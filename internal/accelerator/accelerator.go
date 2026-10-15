@@ -84,6 +84,26 @@ func GetProductKeys() []string {
 	return slices.Sorted(maps.Keys(labels))
 }
 
+// ProductFromNodeSelector returns the GPU product a node selector, or any node
+// label set such as a Kueue ResourceFlavor's nodeLabels, names: the value of the
+// first vendor product label that is set and non-empty, in
+// constants.VendorResources order, each vendor's product label before its
+// aliases. Empty when none is. The product is returned as written, not
+// normalized.
+func ProductFromNodeSelector(sel map[string]string) string {
+	for _, v := range constants.VendorResources {
+		if product := sel[v.ProductLabel]; product != "" {
+			return product
+		}
+		for _, k := range v.ProductLabelAliases {
+			if product := sel[k]; product != "" {
+				return product
+			}
+		}
+	}
+	return ""
+}
+
 // GetAcceleratorNameFromScaleTarget extracts GPU product information from a scale
 // target's nodeSelector or nodeAffinity, checked against the keys listed in
 // constants.VendorResources. Returns the first matching value, or

@@ -4,7 +4,9 @@
 //
 // It reads three kinds through the API server, unstructured, so the project
 // carries no Kueue module dependency and follows whichever API version the
-// cluster serves (the fields used are identical across v1beta1 and v1beta2):
+// cluster serves (the quota fields used are identical across v1beta1 and
+// v1beta2; the cohort is spec.cohort in v1beta1 and spec.cohortName in v1beta2,
+// and both are read):
 //
 //   - ResourceFlavor (cluster-scoped): spec.nodeLabels names the accelerator
 //     product, e.g. nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3.
@@ -15,6 +17,15 @@
 //     spec.namespaceSelector admits that namespace, which may need a get of
 //     the Namespace for its labels.
 //
+// The same read also takes what cohort borrowing depends on (borrow.go): each
+// ClusterQueue's cohort, lending and borrowing limits, reclaim policy and
+// reservation status, each ResourceFlavor's tolerations, and the Cohort
+// objects, listed to tell a flat cohort from a nested one. From them it
+// publishes each namespace's grant at the guaranteed and within-nominal figures
+// and the cohorts' free pools, which a quota entry that counts borrowing applies
+// where the engine-side conditions hold (eligibility.go). A failure to read the
+// Cohort objects never fails the read.
+//
 // Nothing here is watched. Reads happen on demand, at most once per refresh
 // interval, and the last snapshot is kept so a failed read leaves the previous
 // figures in force rather than none.
@@ -24,9 +35,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -52,6 +67,7 @@ const (
 	KindClusterQueue   = "ClusterQueue"
 	KindLocalQueue     = "LocalQueue"
 	KindResourceFlavor = "ResourceFlavor"
+	KindCohort         = "Cohort"
 )
 
 // Options configures a Reader.
@@ -89,6 +105,10 @@ type Reader struct {
 	// warnedLabels is set once an unreadable Namespace has been logged, so a
 	// missing grant is reported once rather than every refresh.
 	warnedLabels bool
+	// warnedCohorts is set once a failed Cohort list has been logged.
+	warnedCohorts bool
+	// warnedNoStatus holds the cohort members logged as having no status.
+	warnedNoStatus map[string]bool
 }
 
 // NewReader constructs a Reader over the given client. Reads of unstructured
@@ -150,8 +170,13 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		return config.ExternalQuotas{}, err
 	}
 	flavorType := make(map[string]string, len(flavors))
+	topo := Topology{
+		Queues:  make(map[string]QueueState),
+		Flavors: make(map[string]FlavorPlacement, len(flavors)),
+	}
 	for i := range flavors {
 		flavorType[flavors[i].GetName()] = flavorAcceleratorType(&flavors[i])
+		topo.Flavors[flavors[i].GetName()] = flavorPlacement(&flavors[i])
 	}
 
 	queues, err := r.list(ctx, KindClusterQueue)
@@ -162,6 +187,9 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 	admits := make(map[string]namespaceAdmission, len(queues))
 	var cluster config.ExternalCaps
 	for i := range queues {
+		// Every queue, GPU or not: a cohort member without status, or with Fair
+		// Sharing on, withholds borrowing for the whole cohort.
+		topo.Queues[queues[i].GetName()] = r.queueState(&queues[i], flavorType)
 		caps, err := r.clusterQueueCaps(&queues[i], flavorType)
 		if err != nil {
 			return config.ExternalQuotas{}, err
@@ -186,6 +214,9 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 	// budget once, not twice: the budget belongs to the ClusterQueue.
 	seen := make(map[string]map[string]bool)
 	byNamespace := make(map[string]config.ExternalCaps)
+	// The GPU-declaring queues each namespace is granted, for the borrowing
+	// figures.
+	nsQueues := make(map[string][]string)
 	// Namespaces whose labels could not be read, so a selector-bearing queue's
 	// grant to them could be neither confirmed nor ruled out.
 	withheld := make(map[string]bool)
@@ -237,7 +268,7 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 			withheld[ns] = true
 			if !r.warnedLabels {
 				r.warnedLabels = true
-				ctrl.LoggerFrom(ctx).WithName("kueue").Error(err,
+				kueueLogger(ctx).Error(err,
 					"Cannot read a Namespace to evaluate a ClusterQueue namespaceSelector; withholding that queue's grant from the namespace, which is bounded at nothing until the read succeeds. Logged once until a later read succeeds.",
 					"namespace", ns, "clusterQueue", cqName,
 					"remedy", w.remedy())
@@ -248,7 +279,10 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 			continue
 		}
 		byNamespace[ns] = addCaps(byNamespace[ns], caps)
+		nsQueues[ns] = append(nsQueues[ns], cqName)
 	}
+	cohorts, unreadable, cohortsStale := r.cohorts(ctx)
+	topo.Cohorts, topo.CohortsUnreadable = cohorts, unreadable || cohortsStale
 	// A read cut short by the caller is not a snapshot, even when every call
 	// it made happened to return: a client that ignores ctx (or one that turned
 	// the cancellation into some other error) must not cache what it saw.
@@ -265,7 +299,381 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		// the grant is news again and is logged again.
 		r.warnedLabels = false
 	}
-	return config.ExternalQuotas{Namespace: byNamespace, Cluster: cluster}, nil
+	r.warnNoStatus(ctx, topo)
+	borrowing := ComputeBorrowing(topo, cohortsStale)
+	guaranteed, within, err := r.borrowCaps(queues, flavorType, borrowing, nsQueues, byNamespace)
+	if err != nil {
+		return config.ExternalQuotas{}, err
+	}
+	return config.ExternalQuotas{
+		Namespace:              byNamespace,
+		Cluster:                cluster,
+		Borrow:                 borrowRows(borrowing, topo, flavorType, nsQueues),
+		NamespaceGuaranteed:    guaranteed,
+		NamespaceWithinNominal: within,
+		SharedPools:            sharedPools(borrowing, flavorType),
+		BorrowStale:            cohortsStale,
+	}, nil
+}
+
+// kueueLogger is the logger every message of this package goes through.
+func kueueLogger(ctx context.Context) logr.Logger {
+	return ctrl.LoggerFrom(ctx).WithName("kueue")
+}
+
+// warnNoStatus logs, once per queue, each cohort member Kueue has written no
+// reservation status for: it withholds borrowing for its whole cohort
+// (no-status), and the borrowing line names only the reason. A queue that
+// gains status is forgotten, so losing it again is logged again. Callers must
+// hold r.mu.
+func (r *Reader) warnNoStatus(ctx context.Context, t Topology) {
+	for name, q := range t.Queues {
+		switch {
+		case q.Cohort == "" || q.HasStatus:
+			delete(r.warnedNoStatus, name)
+		case !r.warnedNoStatus[name]:
+			if r.warnedNoStatus == nil {
+				r.warnedNoStatus = map[string]bool{}
+			}
+			r.warnedNoStatus[name] = true
+			kueueLogger(ctx).Info("A ClusterQueue in a cohort has no status.flavorsReservation; borrowing is not counted in its cohort (reason no-status). Is the Kueue controller running? Logged once per queue.",
+				"clusterQueue", name, "cohort", q.Cohort)
+		}
+	}
+	for name := range r.warnedNoStatus {
+		if _, ok := t.Queues[name]; !ok {
+			delete(r.warnedNoStatus, name)
+		}
+	}
+}
+
+// borrowCaps builds, per namespace, the grant at each queue's guaranteed figure
+// and at its within-nominal figure, by exactly the rules the nominal grant is
+// built by (clusterQueueCaps): a namespace gets the sum over the queues it is
+// granted, and one whose grant was withheld keeps its grant of nothing. A queue
+// whose borrowing is withheld has both figures at nominal, so for it the three
+// grants agree.
+func (r *Reader) borrowCaps(queues []unstructured.Unstructured, flavorType map[string]string, b Borrowing,
+	nsQueues map[string][]string, nominal map[string]config.ExternalCaps) (guaranteed, within map[string]config.ExternalCaps, err error) {
+	byQueueG := make(map[string]config.ExternalCaps, len(queues))
+	byQueueW := make(map[string]config.ExternalCaps, len(queues))
+	for i := range queues {
+		name := queues[i].GetName()
+		figs := make(map[ResourceKey]QueueFigures, len(b.Queues[name]))
+		for _, f := range b.Queues[name] {
+			figs[f.ResourceKey] = f
+		}
+		at := func(pick func(QueueFigures) int) func(ResourceKey, int) int {
+			return func(key ResourceKey, nominal int) int {
+				if f, ok := figs[key]; ok {
+					return pick(f)
+				}
+				return nominal
+			}
+		}
+		if byQueueG[name], err = r.clusterQueueCapsAt(&queues[i], flavorType, at(func(f QueueFigures) int { return f.Guaranteed })); err != nil {
+			return nil, nil, err
+		}
+		if byQueueW[name], err = r.clusterQueueCapsAt(&queues[i], flavorType, at(func(f QueueFigures) int { return f.WithinNominal })); err != nil {
+			return nil, nil, err
+		}
+	}
+	guaranteed = make(map[string]config.ExternalCaps, len(nominal))
+	within = make(map[string]config.ExternalCaps, len(nominal))
+	for ns := range nominal {
+		var g, w config.ExternalCaps
+		names := nsQueues[ns]
+		if len(names) == 0 {
+			// Governed but granted nothing (a withheld grant): the same nothing.
+			g, w = nominal[ns], nominal[ns]
+		}
+		for _, name := range names {
+			g = addCaps(g, byQueueG[name])
+			w = addCaps(w, byQueueW[name])
+		}
+		guaranteed[ns], within[ns] = g, w
+	}
+	return guaranteed, within, nil
+}
+
+// externalLenders converts a pool's lenders for the config snapshot.
+func externalLenders(ls []LenderState) []config.ExternalLender {
+	if len(ls) == 0 {
+		return nil
+	}
+	out := make([]config.ExternalLender, 0, len(ls))
+	for _, l := range ls {
+		out = append(out, config.ExternalLender{Queue: l.Queue, Waiting: l.Waiting, CanReclaim: l.CanReclaim, LentOut: l.LentOut})
+	}
+	return out
+}
+
+// sharedPools converts the cohorts' free pools for the config snapshot.
+func sharedPools(b Borrowing, flavorType map[string]string) []config.ExternalSharedPool {
+	out := make([]config.ExternalSharedPool, 0, len(b.Pools))
+	for _, p := range b.Pools {
+		out = append(out, config.ExternalSharedPool{
+			Cohort:         p.Cohort,
+			Flavor:         p.Flavor,
+			Resource:       p.Resource,
+			Accelerator:    flavorType[p.Flavor],
+			NodeLabels:     maps.Clone(p.NodeLabels),
+			Tolerations:    slices.Clone(p.Tolerations),
+			Free:           p.Free,
+			Reason:         string(p.Reason),
+			WaitingLenders: slices.Clone(p.WaitingLenders),
+			Lenders:        externalLenders(p.Lenders),
+		})
+	}
+	return out
+}
+
+// borrowRows attributes each queue's borrowing figures to the namespaces it is
+// granted to, in a stable order so equal reads log equal.
+func borrowRows(b Borrowing, t Topology, flavorType map[string]string, nsQueues map[string][]string) map[string][]config.ExternalBorrow {
+	out := make(map[string][]config.ExternalBorrow, len(nsQueues))
+	for ns, names := range nsQueues {
+		names = slices.Clone(names)
+		slices.Sort(names)
+		n := 0
+		for _, name := range names {
+			n += len(b.Queues[name])
+		}
+		rows := make([]config.ExternalBorrow, 0, n)
+		for _, name := range names {
+			for _, f := range b.Queues[name] {
+				reason := f.Reason
+				if reason == "" {
+					reason = f.GuaranteedReason
+				}
+				rows = append(rows, config.ExternalBorrow{
+					Queue:          name,
+					Cohort:         t.Queues[name].Cohort,
+					Flavor:         f.Flavor,
+					Resource:       f.Resource,
+					Accelerator:    flavorType[f.Flavor],
+					Nominal:        f.Nominal,
+					Guaranteed:     f.Guaranteed,
+					Borrowable:     f.Borrowable,
+					BorrowCap:      f.BorrowCap,
+					WithinNominal:  f.WithinNominal,
+					LentOut:        f.LentOut,
+					SourceBorrowed: f.KueueBorrowed,
+					Reason:         string(reason),
+				})
+			}
+		}
+		out[ns] = rows
+	}
+	return out
+}
+
+// cohorts lists the Cohort objects. A failed list never reports "no Cohort
+// objects", which would call every cohort flat, and never fails the read; the
+// nominal figures do not depend on it.
+//
+//   - A Kueue that does not serve the kind, or a Forbidden list, reports the
+//     hierarchy as unknown (unreadable): it lasts until someone acts, and
+//     borrowing is withheld with reason hierarchy-unknown.
+//   - Any other failure may pass by the next read. It reports the borrowing
+//     figures of this read as stale (transient), so an entry that counts
+//     borrowing freezes rather than dropping to nominal over a blip.
+//
+// The failure is logged once, until a later list succeeds; an unserved kind
+// only at V(1). Callers must hold r.mu (warnedCohorts).
+func (r *Reader) cohorts(ctx context.Context) (out map[string]CohortState, unreadable, transient bool) {
+	items, err := r.list(ctx, KindCohort)
+	if err != nil {
+		noMatch := meta.IsNoMatchError(err)
+		persistent := noMatch || apierrors.IsForbidden(err)
+		if !r.warnedCohorts && ctx.Err() == nil {
+			r.warnedCohorts = true
+			logger := kueueLogger(ctx)
+			msg := "Cannot list Kueue Cohort objects; borrowing is not counted (reason hierarchy-unknown). Logged once until a later list succeeds."
+			if !persistent {
+				msg = "Cannot list Kueue Cohort objects; borrowing figures are stale and frozen until a list succeeds. Logged once until a later list succeeds."
+			}
+			if noMatch {
+				// A Kueue that serves no Cohort kind: no grant can fix it, and
+				// the reason on the borrowing line already says it.
+				logger.V(1).Info(msg, "error", err.Error())
+			} else {
+				logger.Error(err, msg,
+					"remedy", "grant get and list on cohorts.kueue.x-k8s.io (config/components/kueue-reader)")
+			}
+		}
+		return nil, persistent, !persistent
+	}
+	r.warnedCohorts = false
+	out = make(map[string]CohortState, len(items))
+	for i := range items {
+		out[items[i].GetName()] = cohortState(&items[i])
+	}
+	return out, false, false
+}
+
+// cohortState reads a Cohort's parent and whether it declares quota of its
+// own. The parent is spec.parentName; spec.parent is read too, for the older
+// v1alpha1 Cohort API, which named the field so.
+func cohortState(u *unstructured.Unstructured) CohortState {
+	parent, _, _ := unstructured.NestedString(u.Object, "spec", "parentName")
+	if parent == "" {
+		parent, _, _ = unstructured.NestedString(u.Object, "spec", "parent")
+	}
+	groups, _, _ := unstructured.NestedSlice(u.Object, "spec", "resourceGroups")
+	return CohortState{Name: u.GetName(), Parent: parent, HasResourceGroups: len(groups) > 0}
+}
+
+// queueState reads what borrowing depends on from a ClusterQueue. It never
+// fails: a borrowing field that does not parse marks the queue Malformed,
+// which withholds borrowing in its cohort and leaves the nominal figures,
+// read by clusterQueueCaps, as they were.
+func (r *Reader) queueState(cq *unstructured.Unstructured, flavorType map[string]string) QueueState {
+	q := QueueState{Name: cq.GetName(), Reclaim: ReclaimNever, Resources: map[ResourceKey]QueueResource{}}
+	q.Cohort, _, _ = unstructured.NestedString(cq.Object, "spec", "cohortName")
+	if q.Cohort == "" {
+		q.Cohort, _, _ = unstructured.NestedString(cq.Object, "spec", "cohort") // v1beta1
+	}
+	if reclaim, _, _ := unstructured.NestedString(cq.Object, "spec", "preemption", "reclaimWithinCohort"); reclaim != "" {
+		q.Reclaim = reclaim
+	}
+	if policy, _, _ := unstructured.NestedString(cq.Object, "spec", "stopPolicy"); policy == "Hold" || policy == "HoldAndDrain" {
+		q.Inactive = true
+	}
+	q.AdmissionChecks = hasAdmissionChecks(cq)
+	groups, _, _ := unstructured.NestedSlice(cq.Object, "spec", "resourceGroups")
+	for _, g := range groups {
+		group, _ := g.(map[string]interface{})
+		flavors, _, _ := unstructured.NestedSlice(group, "flavors")
+		for _, f := range flavors {
+			flavor, _ := f.(map[string]interface{})
+			name, _, _ := unstructured.NestedString(flavor, "name")
+			if _, known := flavorType[name]; !known {
+				q.Inactive = true
+			}
+			resources, _, _ := unstructured.NestedSlice(flavor, "resources")
+			for _, res := range resources {
+				rq, _ := res.(map[string]interface{})
+				resName, _, _ := unstructured.NestedString(rq, "name")
+				if !r.gpuNames[resName] {
+					continue
+				}
+				var qr QueueResource
+				var errs [3]error
+				qr.Nominal, errs[0] = quantityField(rq, "nominalQuota")
+				qr.LendingLimit, errs[1] = optionalQuantity(rq, "lendingLimit")
+				qr.BorrowingLimit, errs[2] = optionalQuantity(rq, "borrowingLimit")
+				if errors.Join(errs[:]...) != nil {
+					q.Malformed = true
+				}
+				q.Resources[ResourceKey{Flavor: name, Resource: resName}] = qr
+			}
+		}
+	}
+
+	status, found, _ := unstructured.NestedMap(cq.Object, "status")
+	if !found {
+		return q
+	}
+	q.FairSharing = status["fairSharing"] != nil
+	if eq, ok := status["effectiveQuotas"]; ok && eq != nil {
+		q.EffectiveQuotas = true
+	}
+	if n, ok := intField(status, "pendingWorkloads"); ok {
+		q.Pending = n
+	}
+	reservations, found, _ := unstructured.NestedSlice(status, "flavorsReservation")
+	q.HasStatus = found
+	for _, fr := range reservations {
+		flavor, _ := fr.(map[string]interface{})
+		name, _, _ := unstructured.NestedString(flavor, "name")
+		resources, _, _ := unstructured.NestedSlice(flavor, "resources")
+		for _, res := range resources {
+			rq, _ := res.(map[string]interface{})
+			resName, _, _ := unstructured.NestedString(rq, "name")
+			key := ResourceKey{Flavor: name, Resource: resName}
+			qr, declared := q.Resources[key]
+			if !declared {
+				continue
+			}
+			total, errT := optionalQuantity(rq, "total")
+			borrowed, errB := optionalQuantity(rq, "borrowed")
+			if errT != nil || errB != nil {
+				q.Malformed = true
+			}
+			if total != nil {
+				qr.Reserved = *total
+			}
+			if borrowed != nil {
+				qr.Borrowed = *borrowed
+			}
+			q.Resources[key] = qr
+		}
+	}
+	return q
+}
+
+// hasAdmissionChecks reports whether a ClusterQueue names any admission check:
+// spec.admissionChecks, or spec.admissionChecksStrategy.admissionChecks (the
+// field MultiKueue is configured through as well). A field of an unexpected
+// shape counts as set, which withholds borrowing (fail safe).
+func hasAdmissionChecks(cq *unstructured.Unstructured) bool {
+	set := func(fields ...string) bool {
+		raw, found, _ := unstructured.NestedFieldNoCopy(cq.Object, fields...)
+		if !found || raw == nil {
+			return false
+		}
+		list, ok := raw.([]interface{})
+		return !ok || len(list) > 0
+	}
+	return set("spec", CQFieldAdmissionChecks) || set("spec", CQFieldAdmissionChecksStrategy, CQFieldAdmissionChecks)
+}
+
+// optionalQuantity is quantityField for a field that may be absent: nil then.
+func optionalQuantity(m map[string]interface{}, field string) (*int, error) {
+	if raw, ok := m[field]; !ok || raw == nil {
+		return nil, nil
+	}
+	n, err := quantityField(m, field)
+	if err != nil {
+		return nil, err
+	}
+	return &n, nil
+}
+
+// intField reads an integer status field, which decodes from JSON as int64 and
+// may be float64 in a hand-built object.
+func intField(m map[string]interface{}, field string) (int, bool) {
+	switch v := m[field].(type) {
+	case int64:
+		return int(v), true
+	case int:
+		return v, true
+	case float64:
+		return int(v), true
+	}
+	return 0, false
+}
+
+// flavorPlacement reads a ResourceFlavor's node labels and tolerations, which
+// Kueue pins every pod of the flavor to.
+func flavorPlacement(rf *unstructured.Unstructured) FlavorPlacement {
+	p := FlavorPlacement{AcceleratorType: flavorAcceleratorType(rf)}
+	p.NodeLabels, _, _ = unstructured.NestedStringMap(rf.Object, "spec", "nodeLabels")
+	p.TopologyName, _, _ = unstructured.NestedString(rf.Object, "spec", RFFieldTopologyName)
+	if raw, found, _ := unstructured.NestedSlice(rf.Object, "spec", "tolerations"); found {
+		for _, t := range raw {
+			m, ok := t.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			var tol corev1.Toleration
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(m, &tol); err == nil {
+				p.Tolerations = append(p.Tolerations, tol)
+			}
+		}
+	}
+	return p
 }
 
 // nsRead is one Namespace read within a single Kueue read: its labels, or the
@@ -446,6 +854,14 @@ func (r *Reader) list(ctx context.Context, kind string, opts ...client.ListOptio
 // single resource is the loosest bound no one resource contradicts. A cluster
 // that needs the distinction pins `kueue.resources` to one vendor.
 func (r *Reader) clusterQueueCaps(cq *unstructured.Unstructured, flavorType map[string]string) (config.ExternalCaps, error) {
+	return r.clusterQueueCapsAt(cq, flavorType, nil)
+}
+
+// clusterQueueCapsAt is clusterQueueCaps with each GPU line's figure taken from
+// figure(key, nominal) instead of its nominalQuota; nil takes the nominal
+// figure. The borrowing grants (guaranteed, within nominal) go through it so they
+// follow every rule the nominal grant does.
+func (r *Reader) clusterQueueCapsAt(cq *unstructured.Unstructured, flavorType map[string]string, figure func(ResourceKey, int) int) (config.ExternalCaps, error) {
 	var caps config.ExternalCaps
 	groups, _, err := unstructured.NestedSlice(cq.Object, "spec", "resourceGroups")
 	if err != nil {
@@ -479,6 +895,9 @@ func (r *Reader) clusterQueueCaps(cq *unstructured.Unstructured, flavorType map[
 				n, err := quantityField(rq, "nominalQuota")
 				if err != nil {
 					return caps, fmt.Errorf("kueue: ClusterQueue %q flavor %q resource %q: %w", cq.GetName(), name, resName, err)
+				}
+				if figure != nil {
+					n = figure(ResourceKey{Flavor: name, Resource: resName}, n)
 				}
 				accType, known := flavorType[name]
 				switch {
@@ -514,15 +933,7 @@ func (r *Reader) clusterQueueCaps(cq *unstructured.Unstructured, flavorType map[
 // equates two different long names.
 func flavorAcceleratorType(rf *unstructured.Unstructured) string {
 	labels, _, _ := unstructured.NestedStringMap(rf.Object, "spec", "nodeLabels")
-	for _, v := range constants.VendorResources {
-		keys := append([]string{v.ProductLabel}, v.ProductLabelAliases...)
-		for _, k := range keys {
-			if product := labels[k]; product != "" {
-				return product
-			}
-		}
-	}
-	return ""
+	return accelerator.ProductFromNodeSelector(labels)
 }
 
 // quantityField parses a resource.Quantity field of an unstructured map into a

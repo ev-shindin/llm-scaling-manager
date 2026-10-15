@@ -6,9 +6,10 @@ kind: Component
 # ClusterQueue namespaceSelector can be evaluated before its grant is counted.
 #
 # ClusterQueues carry the nominal quotas and ResourceFlavors name the
-# accelerator behind each flavor; both are cluster-scoped, so no Role can reach
-# them. LocalQueues are namespaced and come with the tenant Role instead. The
-# reader gets and lists on demand — no watch, no write.
+# accelerator behind each flavor; Cohorts tell a flat cohort from a nested one
+# for borrowing. All three are cluster-scoped, so no Role can reach them.
+# LocalQueues and Workloads are namespaced and come with the tenant Role
+# instead. The reader gets and lists on demand — no watch, no write.
 #
 # Part of the namespace-scoped overlays and, like node-reader, created by the
 # PREREQS phase: it is cluster-scoped RBAC, an admin's to grant. Harmless on a

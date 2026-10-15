@@ -74,6 +74,21 @@ package controller
 // ClusterQueue namespaceSelector; the namespaces rule above already covers that.
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=clusterqueues;localqueues;resourceflavors,verbs=get;list
 
+// Kueue cohort borrowing (the Kueue borrowing proposal, PR #161,
+// B2). Cohorts are listed to tell a flat cohort from a nested one; a Forbidden
+// list reads as "hierarchy unknown", never as flat. Workloads, the namespace's
+// own ResourceQuotas and the owners of GPU pods (Jobs; the apps kinds and
+// LeaderWorkerSets are granted above) back the checks that decide whether
+// borrowing may be counted. get and list only, never watch; nothing is written.
+// +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=cohorts;workloads,verbs=get;list
+// +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get
+//
+// The placement timeout of a borrowed replica waits while the cluster
+// autoscaler reports TriggeredScaleUp on its pod (B5): Events are read, get and
+// list only, never watched.
+// +kubebuilder:rbac:groups="",resources=events,verbs=get;list
+
 // InferencePool discovery and controller-owned ServiceMonitor observation.
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch
 // +kubebuilder:rbac:groups=inference.networking.x-k8s.io;inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch
