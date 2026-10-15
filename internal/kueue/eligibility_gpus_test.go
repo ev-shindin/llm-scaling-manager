@@ -76,11 +76,10 @@ var _ = Describe("Eligibility: the charge covers the pods' GPUs", func() {
 		ownedByAll := func(w client.Object, owners ...client.Object) client.Object {
 			refs := make([]metav1.OwnerReference, 0, len(owners))
 			for _, o := range owners {
-				apiVersion, kind := "v1", "Pod"
-				if u, ok := o.(*unstructured.Unstructured); ok {
-					apiVersion, kind = u.GetAPIVersion(), u.GetKind()
-				}
-				refs = append(refs, metav1.OwnerReference{APIVersion: apiVersion, Kind: kind, Name: o.GetName(), UID: o.GetUID()})
+				refs = append(refs, pendingWorkloadFor(o).GetOwnerReferences()...)
+			}
+			for i := range refs {
+				refs[i].Controller = nil // one Workload, many owners: none controls it
 			}
 			w.SetOwnerReferences(refs)
 			return w

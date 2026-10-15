@@ -305,7 +305,7 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 	// back. Withholding stops new borrowing only.
 	It("releases to a waiting lender the GPUs a withheld namespace still borrows", func() {
 		rowB := row
-		rowB.Queue, rowB.SourceBorrowed = "team-b-cq", 8
+		rowB.Queue, rowB.SourceBorrowed = "sole-borrower-cq", 8
 		snap := snapshot
 		snap.Namespace = map[string]config.ExternalCaps{"team-b": {ByType: map[string]int{"H100": 8}}}
 		snap.NamespaceGuaranteed = map[string]config.ExternalCaps{"team-b": {ByType: map[string]int{"H100": 0}}}
@@ -326,8 +326,8 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 
 		g := NewBorrowGovernor(DefaultBorrowSettings())
 		reqs := []ModelScalingRequest{borrowModel("team-b", "m", 8, 2, 0, nil)}
-		reqs[0].VariantStates[0].AcceleratorName = "H100"
-		var rel []BorrowRelease
+		reqs[0].VariantStates[0].AcceleratorName = rowB.Accelerator
+		rel := make([]BorrowRelease, 0, 1)
 		for _, d := range []time.Duration{0, 30 * time.Second, 61 * time.Second} {
 			cycle := *c
 			cycle.SharedPools = []SharedPoolChunk{c.SharedPools[0]}
