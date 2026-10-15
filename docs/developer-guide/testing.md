@@ -238,15 +238,22 @@ When `ENABLE_SCALE_TO_ZERO=true` (set by `make deploy-e2e-infra` when `SCALE_TO_
   (ClusterQueue, LocalQueue, ResourceFlavor): the reader lists objects and
   never talks to Kueue.
 - `kueue_borrow_test.go` (label `kueue-borrow`) needs Kueue's **controller**.
-  It builds a two-queue cohort and lets Kueue admit, borrow and reclaim, then
-  checks the scaling manager's read-only borrowing line ("Kueue borrowing read
-  and NOT applied") against the ClusterQueue status at each step:
-  - queue a borrows 4 GPUs past its nominal 8;
-  - a `Never` lender waits with work pending;
-  - the lender is switched to `Any`, Kueue deletes one of a's pods, and the
-    replacement waits at the admission gate.
+  It runs a managed, loaded simulator model on one queue of a two-queue cohort
+  (2 GPUs each) and checks borrowing as the scaling manager applies it:
+  - a GPU pod in the namespace that Kueue does not manage withholds
+    borrowing: the model holds at its nominal 2;
+  - with that pod gone the model grows to 4, every pod placed, and no further;
+  - a `Never` lender with a pending workload gets exactly one replica back,
+    and its workload is admitted;
+  - the lender, switched to `Any`, asks for more: Kueue preempts a borrowed
+    pod, the scaling manager lowers the target so no gated replacement
+    lingers, and the model borrows nothing until `borrowCooldown` ends.
 
-  It takes about 2 minutes once Kueue is up.
+  The policy sets short timings on the Kueue block (`placementTimeout: 30s`,
+  `borrowCooldown: 4m`, `lenderDebounce: 10s`) and declares the physical
+  limiter, which borrowing needs as its GPU bound. The spec needs 6 free GPUs
+  of the suite's GPU product and prints `MEASURE` lines: replica start, the
+  release cycle and the reclaim cycle.
 
 `make test-e2e-full-with-setup` installs Kueue on kind through
 `make install-kueue-e2e`. By default (`KUEUE_CONTROLLER=true`) that runs
@@ -277,10 +284,7 @@ make install-kueue-e2e
 make test-e2e-kueue-borrow
 ```
 
-Check the summary says `Ran 4 of ... Specs` with no skips. The spec pins its pods
-to a GPU product no node carries (`NVIDIA-KUEUEBORROW-80GB`), so Kueue admits
-them and they stay `Pending` unscheduled. That is expected: Kueue charges quota
-at admission, not placement.
+Check the summary says `Ran 4 of ... Specs` with no skips.
 
 **Utilization-share optimizer (full suite).** `utilization_share_test.go`
 (label `utilization-share`) runs the optimizer of

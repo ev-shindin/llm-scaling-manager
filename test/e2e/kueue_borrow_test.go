@@ -10,125 +10,160 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
+	promoperator "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
-	testutils "github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 )
 
-// Cohort borrowing as the scaling manager READS it, checked against a live
-// Kueue controller. Kueue admits, borrows and reclaims; the spec asserts each
-// state through ClusterQueue status, then asserts that the figures the
-// controller logs for it -- the read-only borrowing line, "Kueue borrowing read
-// and NOT applied" -- agree. Nothing here is applied: the quota entry still
-// caps at nominal, so no model is involved.
+// Cohort borrowing APPLIED, against a live Kueue controller: the scaling
+// manager orders a managed model's replicas into capacity its ClusterQueue
+// borrows from the cohort, and gives it back when a lender needs it.
 //
-// Two ClusterQueues of 8 GPUs share a flat cohort. Queue a reclaims (Any);
-// queue b starts as a lender that cannot (Never). Each figure below is
-// ComputeBorrowing (internal/kueue/borrow.go) evaluated by hand on the
-// reservation Kueue reports, with no lending or borrowing limits:
+// Two ClusterQueues of 2 GPUs share a flat cohort. Queue a (reclaimWithinCohort
+// Any) admits model A in namespace a, one GPU per replica, on the GPU product
+// the suite pins every workload to, so its pods really schedule. Queue b starts
+// as a lender that cannot reclaim (Never); its workload is a Deployment of
+// 1-GPU pause pods. A is loaded far past what four replicas serve and its
+// ScaledObject allows six, so demand is never what stops it.
 //
-//	state               a: res/borrowed  b: res/pending  a: G/B/kueueBorrowed  b: G/B, reason
-//	a borrows 4          12 / 4           0 / 0           8 / 8 / 4             0 / 4, nominal-lent-out
-//	b waits (Never)      12 / 4           4 / 1           8 / 4 / 4             4 / 0, nominal-lent-out
-//	b reclaims (Any)      8 / 0           8 / 0           8 / 0 / 0             8 / 0
+// The policy declares the physical limiter and a namespace quota bounded by
+// Kueue, with countBorrowable left unset (on by default) and short borrowing
+// timings. In order:
 //
-// The pods pin to a GPU product no node carries, so they are admitted but never
-// scheduled. Kueue's quota accounting does not depend on placement, and the
-// spec takes no emulated GPU another spec might be waiting for.
+//  1. A GPU pod in namespace a that Kueue does not manage withholds borrowing
+//     (B1, not-kueue-managed): A holds at queue a's nominal 2.
+//  2. That pod goes: A grows to 4 -- 2 borrowed, every pod placed -- and no
+//     further, because the cohort has no more.
+//  3. Queue b's workload waits (Never): after the debounce the scaling manager
+//     releases exactly one replica of A, and Kueue admits b's pod into it.
+//  4. Queue b may reclaim (Any) and asks for its second GPU: Kueue preempts A's
+//     borrowed pod, the scaling manager lowers A's target so the gated
+//     replacement goes, and A borrows nothing during the cooldown even after
+//     b's GPUs are free again -- then grows back once it ends.
 //
-// Needs Kueue's controller, not only its CRDs: on kind,
-// `make test-e2e-full-with-setup` installs it (KUEUE_CONTROLLER=true, the
-// default) through deploy/ci-pr-checks/install-kueue.sh, and its absence there
-// FAILS the spec. On any other cluster the spec runs where a Kueue controller is
-// available and skips, saying so, where it is not.
-var _ = Describe("Kueue cohort borrowing - read against a live Kueue", Label("full"), Label("kueue-borrow"), Ordered, Serial, func() {
+// Every step logs measured timings (MEASURE lines), for the borrowCooldown and
+// placementTimeout defaults.
+//
+// Needs Kueue's controller and an emulated GPU product with at least 6 free
+// GPUs. On kind, `make test-e2e-full-with-setup` installs Kueue
+// (KUEUE_CONTROLLER=true, the default, via deploy/ci-pr-checks/install-kueue.sh)
+// and its absence FAILS the spec. On any other cluster the spec skips, saying
+// why, where Kueue or the GPUs are not there.
+var _ = Describe("Kueue cohort borrowing - applied against a live Kueue", Label("full"), Label("kueue-borrow"), Ordered, Serial, func() {
 	const (
-		cohortName  = "e2e-kueue-borrow"
-		flavorName  = "e2e-kueue-borrow"
-		heldAccel   = "KUEUEBORROW"
-		product     = "NVIDIA-" + heldAccel + "-80GB"
-		gpuResource = "nvidia.com/gpu"
-		queueA      = "e2e-kueue-borrow-a"
-		queueB      = "e2e-kueue-borrow-b"
-		nsA         = "e2e-kueue-borrow-a"
-		nsB         = "e2e-kueue-borrow-b"
-		deployA     = "kueue-borrow-a"
-		deployB     = "kueue-borrow-b"
-		nominal     = 8
-		gpusPerPod  = 4
-		refresh     = "5s"
+		cohortName = "e2e-kueue-borrow"
+		flavorName = "e2e-kueue-borrow"
+		queueA     = "e2e-kueue-borrow-a"
+		queueB     = "e2e-kueue-borrow-b"
+		nsA        = "e2e-kueue-borrow-a"
+		nsB        = "e2e-kueue-borrow-b"
+		msA        = "kb-model-a"
+		modelA     = "kb-model-a"
+		soA        = msA + "-so"
+		depA       = msA + "-decode"
+		loadJob    = "kb-model-a-load"
+		lender     = "kb-lender-b"
+		outsider   = "kb-not-kueue-managed"
+		nominal    = 2 // each ClusterQueue's nominal GPUs
+		reach      = 2 * nominal
+		maxA       = 6 // the ScaledObject allows more than the cohort has
+		window     = int32(30)
+
+		refresh          = "5s"
+		placementTimeout = 30 * time.Second
+		borrowCooldown   = 4 * time.Minute
+		lenderDebounce   = 10 * time.Second
+
 		// Kueue settles in under a second on an idle machine; a CI runner
 		// running the rest of the suite is not idle.
 		kueueSettle = 2 * time.Minute
-		// The controller re-reads Kueue every refresh and logs on the next
-		// engine cycle that sees a change.
-		logSettle = 3 * time.Minute
+		// A replica decision: a few 15s engine cycles, the KEDA window, a
+		// simulator pod starting.
+		scaleSettle = 6 * time.Minute
+		poll        = time.Second
 	)
 
 	var (
-		ctx     context.Context
-		started time.Time
-		cohort  fixtures.KueueCohort
+		started             time.Time
+		key, product, gpuRN string
+		cohort              fixtures.KueueCohort
 	)
 
 	queueStatus := func(g Gomega, cq string) fixtures.KueueQueueStatus {
-		st, err := fixtures.ReadKueueQueueStatus(ctx, crClient, cq, flavorName, gpuResource)
+		st, err := fixtures.ReadKueueQueueStatus(ctx, crClient, cq, flavorName, gpuRN)
 		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(st.HasStatus).To(BeTrue(), "ClusterQueue %s has no reservation status for %s; is Kueue running?", cq, gpuResource)
+		g.Expect(st.HasStatus).To(BeTrue(), "ClusterQueue %s has no reservation status for %s; is Kueue running?", cq, gpuRN)
 		return st
 	}
 
-	// borrowView is the newest read-only borrowing line logged since the spec
-	// started, keyed by namespace.
-	borrowView := func(g Gomega) map[string][]borrowRow {
-		since := int64(time.Since(started).Seconds()) + 60
-		_, logs, err := testutils.PodLogsLabelSelectorContain(ctx, k8sClient, cfg.WVANamespace,
-			"control-plane=controller-manager", "", since)
+	deployment := func(g Gomega, ns, name string) *appsv1.Deployment {
+		d, err := k8sClient.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
 		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(logs).NotTo(ContainSubstring("external quota source unreadable"),
-			"the reader must be able to list the Kueue objects -- a Forbidden here is an RBAC defect")
-		view, found, err := latestBorrowView(logs)
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(found).To(BeTrue(), "no %q line yet; countBorrowable is left unset, which must mean on", borrowLogMessage)
-		return view
+		return d
 	}
 
-	// rowFor is the one row of a namespace for the cohort's GPU resource.
-	rowFor := func(g Gomega, view map[string][]borrowRow, ns string) borrowRow {
-		var rows []borrowRow
-		for _, r := range view[ns] {
-			if r.Flavor == flavorName && r.Resource == gpuResource {
-				rows = append(rows, r)
-			}
-		}
-		g.Expect(rows).To(HaveLen(1), "namespace %s rows: %+v", ns, view[ns])
-		return rows[0]
-	}
-
-	expectRow := func(g Gomega, r borrowRow, queue string, guaranteed, borrowable, kueueBorrowed int, reason string) {
-		g.Expect(r.Queue).To(Equal(queue))
-		g.Expect(r.Cohort).To(Equal(cohortName))
-		// The reader passes the flavor's product label through as the accelerator.
-		g.Expect(r.Accelerator).To(Equal(product))
-		g.Expect(r.Nominal).To(Equal(nominal))
-		g.Expect(r.Guaranteed).To(Equal(guaranteed), "guaranteed of %s", queue)
-		g.Expect(r.Borrowable).To(Equal(borrowable), "borrowable of %s", queue)
-		g.Expect(r.KueueBorrowed).To(Equal(kueueBorrowed), "kueueBorrowed of %s", queue)
-		g.Expect(r.Reason).To(Equal(reason), "reason of %s", queue)
-	}
-
-	podsIn := func(g Gomega, ns, app string) []corev1.Pod {
+	podsOf := func(g Gomega, ns, app string) []corev1.Pod {
 		pods, err := k8sClient.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: "app=" + app})
 		g.Expect(err).NotTo(HaveOccurred())
 		return pods.Items
 	}
 
+	// gatedPods are A's live pods held at Kueue's admission gate.
+	gatedPods := func(g Gomega) []string {
+		var gated []string
+		for _, p := range podsOf(g, nsA, depA) {
+			if p.DeletionTimestamp == nil && slices.Contains(gateNames(p), fixtures.KueueAdmissionGate) {
+				gated = append(gated, p.Name)
+			}
+		}
+		return gated
+	}
+
+	// expectAllPlaced: A has want live pods, every one Kueue-managed, ungated,
+	// on a node, Ready.
+	expectAllPlaced := func(g Gomega, want int) {
+		var live []corev1.Pod
+		for _, p := range podsOf(g, nsA, depA) {
+			if p.DeletionTimestamp == nil {
+				live = append(live, p)
+			}
+		}
+		g.Expect(live).To(HaveLen(want), "live pods of A: %v", podNames(live))
+		for _, p := range live {
+			g.Expect(p.Labels).To(HaveKeyWithValue(fixtures.KueueManagedLabel, "true"), "pod %s", p.Name)
+			g.Expect(gateNames(p)).To(BeEmpty(), "pod %s", p.Name)
+			g.Expect(p.Spec.NodeName).NotTo(BeEmpty(), "pod %s is not placed", p.Name)
+			g.Expect(podReady(p)).To(BeTrue(), "pod %s is not Ready", p.Name)
+		}
+	}
+
+	// borrowRowA is namespace a's row in the newest borrowing line logged
+	// since the spec started.
+	borrowRowA := func(g Gomega) borrowRow {
+		view, found, err := latestBorrowView(controllerLogsSince(started))
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(found).To(BeTrue(), "no %q line yet; countBorrowable is left unset, which must mean on", borrowLogMessage)
+		var rows []borrowRow
+		for _, r := range view[nsA] {
+			if r.Flavor == flavorName && r.Resource == gpuRN {
+				rows = append(rows, r)
+			}
+		}
+		g.Expect(rows).To(HaveLen(1), "namespace %s rows: %+v", nsA, view[nsA])
+		return rows[0]
+	}
+
+	measure := func(name string, d time.Duration) {
+		GinkgoWriter.Printf("MEASURE %s: %s\n", name, d.Round(100*time.Millisecond))
+		AddReportEntry("MEASURE "+name, d.Round(100*time.Millisecond).String())
+	}
+
 	BeforeAll(func() {
-		ctx = context.Background()
 		started = time.Now()
 
 		if !fixtures.KueueInstalled(crClient) {
@@ -136,7 +171,7 @@ var _ = Describe("Kueue cohort borrowing - read against a live Kueue", Label("fu
 				Fail("the Kueue CRDs are not installed on this kind cluster; test-e2e-full-with-setup installs " +
 					"Kueue via deploy/ci-pr-checks/install-kueue.sh (KUEUE_CONTROLLER=true)")
 			}
-			Skip("Kueue is not installed on this cluster; the live-Kueue borrowing spec needs it and does not install it outside kind")
+			Skip("Kueue is not installed on this cluster; the borrowing spec needs it and does not install it outside kind")
 		}
 		running, what, err := fixtures.KueueControllerRunning(ctx, k8sClient)
 		Expect(err).NotTo(HaveOccurred())
@@ -144,44 +179,53 @@ var _ = Describe("Kueue cohort borrowing - read against a live Kueue", Label("fu
 			if cfg.Environment == envKindEmulator {
 				Fail("the Kueue CRDs are served but no Kueue controller is running (" + what + "); " +
 					"install-kueue-crds.sh installs only the CRDs -- run test-e2e-full-with-setup with " +
-					"KUEUE_CONTROLLER=true (the default) or deploy/ci-pr-checks/install-kueue.sh")
+					"KUEUE_CONTROLLER=true (the default) or make install-kueue-e2e")
 			}
 			Skip("no Kueue controller is running on this cluster (" + what + "); the borrowing spec needs one")
 		}
 		GinkgoWriter.Printf("Kueue controller: %s\n", what)
 
+		var ok bool
+		key, product, gpuRN, ok = fixtures.DiscoverAccelerator(ctx, k8sClient)
+		if !ok {
+			if cfg.Environment == envKindEmulator {
+				Fail("no GPU product label on any schedulable kind node; deploy/kind-emulator/setup.sh labels them")
+			}
+			Skip("no GPU product label on any schedulable node")
+		}
+		By(fmt.Sprintf("Using %s=%s (%s)", key, product, gpuRN))
+
 		By("Creating the two namespaces, labelled for Kueue's webhooks")
 		for _, ns := range []string{nsA, nsB} {
-			// A namespace from an earlier run may still be terminating; nothing
-			// can be created in it until it is gone.
-			Eventually(func(g Gomega) {
-				_, err := k8sClient.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-					Name: ns, Labels: map[string]string{fixtures.KueueE2ENamespaceLabel: "true"},
-				}}, metav1.CreateOptions{})
-				if apierrors.IsAlreadyExists(err) {
-					existing, getErr := k8sClient.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
-					g.Expect(getErr).NotTo(HaveOccurred())
-					g.Expect(existing.DeletionTimestamp).To(BeNil(), "namespace %s is still terminating", ns)
-					g.Expect(existing.Labels).To(HaveKey(fixtures.KueueE2ENamespaceLabel),
-						"namespace %s exists without the Kueue webhook label", ns)
-					return
-				}
-				g.Expect(err).NotTo(HaveOccurred())
-			}, 2*time.Minute, 2*time.Second).Should(Succeed())
+			createKueueNamespace(ns)
+			name := ns
+			DeferCleanup(func() {
+				_ = k8sClient.CoreV1().Namespaces().Delete(context.Background(), name, metav1.DeleteOptions{})
+			})
 		}
-		DeferCleanup(func() {
-			for _, ns := range []string{nsA, nsB} {
-				_ = k8sClient.CoreV1().Namespaces().Delete(context.Background(), ns, metav1.DeleteOptions{})
+
+		By(fmt.Sprintf("Checking the product's nodes have %d GPUs free", reach+2))
+		Eventually(func(g Gomega) {
+			n, err := fixtures.TerminatingPodsOnNodes(ctx, k8sClient, key, product)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(n).To(BeZero(), "%d pods still terminating on the product's nodes", n)
+		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+		free := freeGPUsOfProduct(key, product, gpuRN)
+		if free < reach+2 {
+			msg := fmt.Sprintf("the %s nodes have %d free GPUs; the spec needs %d", product, free, reach+2)
+			if cfg.Environment == envKindEmulator {
+				Fail(msg)
 			}
-		})
+			Skip(msg)
+		}
 
 		By("Creating a flat cohort: queue a reclaims, queue b lends and cannot reclaim")
 		cohort = fixtures.KueueCohort{
 			Cohort:       cohortName,
 			Flavor:       flavorName,
-			ProductLabel: "nvidia.com/gpu.product",
+			ProductLabel: key,
 			Product:      product,
-			Resource:     gpuResource,
+			Resource:     gpuRN,
 			Queues: []fixtures.KueueCohortQueue{
 				{Name: queueA, Namespace: nsA, GPUs: nominal, Reclaim: fixtures.KueueReclaimAny},
 				{Name: queueB, Namespace: nsB, GPUs: nominal, Reclaim: fixtures.KueueReclaimNever},
@@ -189,148 +233,211 @@ var _ = Describe("Kueue cohort borrowing - read against a live Kueue", Label("fu
 		}
 		Expect(fixtures.CreateKueueCohort(ctx, crClient, cohort)).To(Succeed())
 		DeferCleanup(func() {
-			// Workloads first: Kueue holds a ClusterQueue while anything
+			// The ScaledObject first, so KEDA stops scaling A up again; then
+			// every workload, because Kueue holds a ClusterQueue while anything
 			// reserves in it.
 			bg := context.Background()
-			Expect(fixtures.WaitDeploymentGone(bg, k8sClient, nsA, deployA, "app="+deployA, 2*time.Minute)).To(Succeed())
-			Expect(fixtures.WaitDeploymentGone(bg, k8sClient, nsB, deployB, "app="+deployB, 2*time.Minute)).To(Succeed())
+			_ = fixtures.DeleteScaledObject(bg, crClient, nsA, soA)
+			_ = k8sClient.BatchV1().Jobs(nsA).Delete(bg, loadJob, metav1.DeleteOptions{
+				PropagationPolicy: ptr.To(metav1.DeletePropagationBackground),
+			})
+			Expect(fixtures.WaitDeploymentGone(bg, k8sClient, nsA, depA, "app="+depA, 3*time.Minute)).To(Succeed())
+			Expect(fixtures.WaitDeploymentGone(bg, k8sClient, nsA, outsider, "app="+outsider, 2*time.Minute)).To(Succeed())
+			Expect(fixtures.WaitDeploymentGone(bg, k8sClient, nsB, lender, "app="+lender, 2*time.Minute)).To(Succeed())
 			Expect(fixtures.DeleteKueueCohort(bg, crClient, cohort)).To(Succeed())
 		})
 
-		By("Bounding namespace a by Kueue, with countBorrowable left unset")
-		// The static figure is above anything Kueue grants, so the effective
-		// entry is Kueue's nominal; the borrowing figures are logged beside it.
-		restoreConfig, err := fixtures.SetNamespaceQuota(ctx, k8sClient, cfg.WVANamespace,
-			scalingPolicyConfigMapName(), nsA, heldAccel, 4*nominal, fixtures.WithKueue(refresh))
+		By("Declaring the physical limiter and a namespace quota bounded by Kueue, countBorrowable unset")
+		// -1: the static entry names the type and lets Kueue supply the figure.
+		restore, err := fixtures.SetNamespaceQuota(ctx, k8sClient, cfg.WVANamespace, scalingPolicyConfigMapName(),
+			nsA, product, -1,
+			fixtures.WithKueue(refresh),
+			fixtures.WithKueueTimings(placementTimeout.String(), borrowCooldown.String(), lenderDebounce.String()),
+			fixtures.WithPhysicalLimiter())
 		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func() { _ = restoreConfig(context.Background()) })
+		DeferCleanup(func() { _ = restore(context.Background()) })
+
+		By("Placing a 1-GPU pod in namespace a that Kueue does not manage")
+		Expect(fixtures.CreateKueueGPUDeployment(ctx, k8sClient, nsA, outsider, "", gpuRN, 1, 1)).To(Succeed())
+
+		By("Creating model A on queue a: one GPU per replica, one replica")
+		Expect(fixtures.EnsureModelService(ctx, k8sClient, nsA, msA, msA+"-pool", modelA, cfg.UseSimulator, 2,
+			func(d *appsv1.Deployment) {
+				d.Spec.Replicas = ptr.To(int32(1))
+				if d.Labels == nil {
+					d.Labels = map[string]string{}
+				}
+				d.Labels[fixtures.KueueQueueNameLabel] = queueA
+			},
+			fixtures.WithGPUs(gpuRN, 1))).To(Succeed())
+		Expect(fixtures.EnsureService(ctx, k8sClient, nsA, msA, depA, 8000)).To(Succeed())
+		Expect(fixtures.EnsureServiceMonitor(ctx, crClient, cfg.MonitoringNS, nsA, msA, depA)).To(Succeed())
+		DeferCleanup(func() {
+			_ = crClient.Delete(context.Background(), &promoperator.ServiceMonitor{
+				ObjectMeta: metav1.ObjectMeta{Name: msA + "-monitor", Namespace: cfg.MonitoringNS},
+			})
+		})
+		Eventually(func(g Gomega) {
+			g.Expect(deployment(g, nsA, depA).Status.ReadyReplicas).To(Equal(int32(1)), unreadyPods(nsA))
+		}, time.Duration(cfg.PodReadyTimeout)*time.Second, 2*time.Second).Should(Succeed())
+
+		By("Registering A with the scaling manager, minReplicas 1, maxReplicas 6")
+		Expect(fixtures.EnsureScaledObject(ctx, crClient, nsA, soA, depA, depA, 1, maxA, cfg.MonitoringNS,
+			fixtures.WithWVATriggerMetadata(modelA, "10.0"),
+			fixtures.WithScaledObjectScaleDownStabilizationWindow(window))).To(Succeed())
+
+		By("Loading A far past what four replicas serve")
+		job := buildThroughputSustainedLoadJob(nsA, loadJob, fmt.Sprintf("http://%s-service:8000/v1/completions", msA),
+			modelA, 32, int64(3600))
+		_, err = k8sClient.BatchV1().Jobs(nsA).Create(ctx, job, metav1.CreateOptions{})
+		Expect(err).NotTo(HaveOccurred())
 	})
 
-	It("Kueue admits queue a past its nominal quota, borrowing 4 from b", func() {
-		Expect(fixtures.CreateKueueGPUDeployment(ctx, k8sClient, nsA, deployA, queueA, gpuResource, 3, gpusPerPod)).To(Succeed())
+	It("withholds borrowing while a GPU pod in the namespace is not Kueue-managed (B1)", func() {
+		Eventually(func(g Gomega) {
+			g.Expect(deployment(g, nsA, depA).Status.ReadyReplicas).To(Equal(int32(nominal)), unreadyPods(nsA))
+		}, scaleSettle, 5*time.Second).Should(Succeed(), "A never reached its nominal %d under load", nominal)
 
 		Eventually(func(g Gomega) {
-			a := queueStatus(g, queueA)
-			g.Expect(a.Reserved).To(Equal(3*gpusPerPod), "queue a reserves all three pods")
-			g.Expect(a.Borrowed).To(Equal(3*gpusPerPod-nominal), "the part past nominal is borrowed")
-			g.Expect(a.Pending).To(BeZero())
-			b := queueStatus(g, queueB)
-			g.Expect(b.Reserved).To(BeZero())
-		}, kueueSettle, time.Second).Should(Succeed())
+			g.Expect(borrowRowA(g).Reason).To(Equal("not-kueue-managed"))
+		}, 3*time.Minute, 5*time.Second).Should(Succeed())
 
-		By("Every pod is Kueue-managed and admitted")
-		Eventually(func(g Gomega) {
-			pods := podsIn(g, nsA, deployA)
-			g.Expect(pods).To(HaveLen(3))
-			for _, p := range pods {
-				g.Expect(p.Labels).To(HaveKeyWithValue(fixtures.KueueManagedLabel, "true"), "pod %s", p.Name)
-				g.Expect(gateNames(p)).NotTo(ContainElement(fixtures.KueueAdmissionGate), "pod %s", p.Name)
-			}
-		}, kueueSettle, time.Second).Should(Succeed())
-	})
-
-	It("logs figures for both namespaces that agree with Kueue's status", func() {
-		Eventually(func(g Gomega) {
-			a := queueStatus(g, queueA)
-			view := borrowView(g)
-			ra := rowFor(g, view, nsA)
-			g.Expect(ra.KueueBorrowed).To(Equal(a.Borrowed), "the logged cross-check is Kueue's own figure")
-			// Free in the cohort: 16 lent - 12 used = 4. Queue a reclaims, so
-			// it is guaranteed its nominal and could reach 12 + 4 = 16.
-			expectRow(g, ra, queueA, nominal, nominal, 4, "")
-			// Queue b cannot reclaim and holds nothing: its whole nominal is
-			// lent out, and what it could still take is the cohort's free 4.
-			expectRow(g, rowFor(g, view, nsB), queueB, 0, 4, 0, "nominal-lent-out")
-		}, logSettle, 5*time.Second).Should(Succeed())
-	})
-
-	It("a Never lender with work pending waits, and the figures shrink to what is left", func() {
-		Expect(fixtures.CreateKueueGPUDeployment(ctx, k8sClient, nsB, deployB, queueB, gpuResource, 2, gpusPerPod)).To(Succeed())
-
-		Eventually(func(g Gomega) {
-			b := queueStatus(g, queueB)
-			g.Expect(b.Reserved).To(Equal(gpusPerPod), "the first pod fits in the cohort's free 4")
-			g.Expect(b.Pending).To(Equal(1), "the second has no quota left and cannot reclaim")
-		}, kueueSettle, time.Second).Should(Succeed())
-
-		By("Kueue does not reclaim for a Never queue: a keeps what it borrowed")
+		By("A holds at nominal; queue a borrows nothing")
 		Consistently(func(g Gomega) {
-			a := queueStatus(g, queueA)
-			g.Expect(a.Borrowed).To(Equal(3*gpusPerPod - nominal))
-			g.Expect(queueStatus(g, queueB).Pending).To(Equal(1))
-		}, 15*time.Second, time.Second).Should(Succeed())
-
-		By("The lender-waiting predicate holds on the status the reader reads: pending, below nominal")
-		Eventually(func(g Gomega) {
-			b := queueStatus(g, queueB)
-			g.Expect(b.Pending).To(BeNumerically(">", 0))
-			g.Expect(b.Reserved).To(BeNumerically("<", nominal))
-		}, kueueSettle, time.Second).Should(Succeed())
-
-		Eventually(func(g Gomega) {
-			view := borrowView(g)
-			// The cohort is full (12 + 4 = 16): a can reach only what it holds.
-			expectRow(g, rowFor(g, view, nsA), queueA, nominal, 4, 4, "")
-			// b is guaranteed only what it reserves and can borrow nothing.
-			expectRow(g, rowFor(g, view, nsB), queueB, gpusPerPod, 0, 0, "nominal-lent-out")
-		}, logSettle, 5*time.Second).Should(Succeed())
+			g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(BeNumerically("<=", nominal))
+			g.Expect(queueStatus(g, queueA).Borrowed).To(BeZero())
+		}, 75*time.Second, 5*time.Second).Should(Succeed())
 	})
 
-	It("once b may reclaim, Kueue preempts a borrowed pod of a and gates its replacement", func() {
-		var before []string
+	It("orders A into borrowed capacity once every condition holds, and every pod is placed", func() {
+		By("Removing the pod Kueue does not manage")
+		Expect(fixtures.WaitDeploymentGone(ctx, k8sClient, nsA, outsider, "app="+outsider, 2*time.Minute)).To(Succeed())
+		removed := time.Now()
+
+		var ordered time.Time
 		Eventually(func(g Gomega) {
-			before = podNames(podsIn(g, nsA, deployA))
-			g.Expect(before).To(HaveLen(3))
-		}, kueueSettle, time.Second).Should(Succeed())
+			replicas := *deployment(g, nsA, depA).Spec.Replicas
+			if ordered.IsZero() && replicas > nominal {
+				ordered = time.Now()
+			}
+			g.Expect(replicas).To(Equal(int32(reach)))
+		}, scaleSettle, poll).Should(Succeed(), "A was never ordered into the cohort's free %d", nominal)
+		measure("first borrowed replica ordered after the B1 condition cleared", ordered.Sub(removed))
 
-		By("Switching queue b to reclaimWithinCohort: Any")
+		Eventually(func(g Gomega) {
+			expectAllPlaced(g, reach)
+			a := queueStatus(g, queueA)
+			g.Expect(a.Reserved).To(Equal(reach))
+			g.Expect(a.Borrowed).To(Equal(reach - nominal))
+		}, scaleSettle, poll).Should(Succeed())
+		measure("borrowed replicas ordered to all Ready", time.Since(ordered))
+		measureReplicaStart(nsA, depA, ordered, measure)
+
+		Eventually(func(g Gomega) {
+			r := borrowRowA(g)
+			g.Expect(r.Reason).To(BeEmpty())
+			g.Expect(r.Guaranteed).To(Equal(nominal))
+			g.Expect(r.KueueBorrowed).To(Equal(reach - nominal))
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("The cohort has no more: A stays at 4 although its ScaledObject allows 6")
+		Consistently(func(g Gomega) {
+			g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(BeNumerically("<=", reach))
+			g.Expect(gatedPods(g)).To(BeEmpty())
+		}, 45*time.Second, 5*time.Second).Should(Succeed())
+	})
+
+	It("releases exactly one replica to a lender that waits and cannot reclaim", func() {
+		releaseLogged := time.Now()
+		Expect(fixtures.CreateKueueGPUDeployment(ctx, k8sClient, nsB, lender, queueB, gpuRN, 1, 1)).To(Succeed())
+		created := time.Now()
+
+		Eventually(func(g Gomega) {
+			b := queueStatus(g, queueB)
+			g.Expect(b.Pending).To(Equal(1), "the cohort is full and b cannot reclaim")
+		}, kueueSettle, poll).Should(Succeed())
+
+		var lowered time.Time
+		Eventually(func(g Gomega) {
+			g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(Equal(int32(reach - 1)))
+			lowered = time.Now()
+		}, scaleSettle, poll).Should(Succeed(), "the scaling manager never released a replica to the waiting lender")
+		measure("lender waiting to A's target lowered", lowered.Sub(created))
+
+		Eventually(func(g Gomega) {
+			b := queueStatus(g, queueB)
+			g.Expect(b.Reserved).To(Equal(1), "the lender's own workload is admitted")
+			g.Expect(b.Pending).To(BeZero())
+			a := queueStatus(g, queueA)
+			g.Expect(a.Reserved).To(Equal(reach - 1))
+			g.Expect(gatedPods(g)).To(BeEmpty())
+		}, scaleSettle, poll).Should(Succeed())
+		measure("lender waiting to lender admitted (release cycle)", time.Since(created))
+
+		Expect(controllerLogsSince(releaseLogged)).To(MatchRegexp(
+			`Releasing borrowed capacity.*"cause": "lender-waiting".*"lenderClusterQueue": "`+queueB+`"`))
+
+		By("One unit only: A neither drops further nor grows back")
+		Consistently(func(g Gomega) {
+			g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(Equal(int32(reach - 1)))
+			g.Expect(gatedPods(g)).To(BeEmpty())
+		}, 45*time.Second, 5*time.Second).Should(Succeed())
+	})
+
+	It("lowers A's target after Kueue preempts a borrowed pod, and borrows nothing during the cooldown", func() {
+		By("Letting queue b reclaim, then asking for its second GPU")
 		Expect(fixtures.SetKueueReclaim(ctx, crClient, queueB, fixtures.KueueReclaimAny)).To(Succeed())
+		scaleDeployment(nsB, lender, nominal)
+		triggered := time.Now()
 
+		var preempted time.Time
 		Eventually(func(g Gomega) {
 			a := queueStatus(g, queueA)
-			g.Expect(a.Borrowed).To(BeZero(), "queue a no longer borrows")
-			g.Expect(a.Reserved).To(Equal(nominal))
-			g.Expect(a.Pending).To(Equal(1), "the preempted pod's replacement waits")
-			b := queueStatus(g, queueB)
-			g.Expect(b.Reserved).To(Equal(nominal))
-			g.Expect(b.Pending).To(BeZero())
-		}, kueueSettle, time.Second).Should(Succeed())
+			g.Expect(a.Borrowed).To(BeZero(), "Kueue preempts A's borrowed pod")
+			g.Expect(queueStatus(g, queueB).Reserved).To(Equal(nominal))
+			preempted = time.Now()
+		}, kueueSettle, poll).Should(Succeed())
+		measure("reclaim: lender's request to Kueue preempting", preempted.Sub(triggered))
 
-		By("Exactly one of a's pods was deleted, and its replacement is gated")
+		var lowered time.Time
 		Eventually(func(g Gomega) {
-			pods := podsIn(g, nsA, deployA)
-			live := map[string]bool{}
-			var gated []string
-			for _, p := range pods {
-				if p.DeletionTimestamp == nil {
-					live[p.Name] = true
-				}
-				if slices.Contains(gateNames(p), fixtures.KueueAdmissionGate) {
-					gated = append(gated, p.Name)
-				}
-			}
-			var gone []string
-			for _, name := range before {
-				if !live[name] {
-					gone = append(gone, name)
-				}
-			}
-			g.Expect(gone).To(HaveLen(1), "one borrowed pod is preempted; pods now: %v", podNames(pods))
-			g.Expect(gated).To(HaveLen(1), "the ReplicaSet's replacement waits at Kueue's admission gate")
-			g.Expect(before).NotTo(ContainElement(gated[0]), "the gated pod is the new one")
-		}, kueueSettle, time.Second).Should(Succeed())
+			g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(Equal(int32(nominal)))
+			g.Expect(gatedPods(g)).To(BeEmpty(), "no gated replacement lingers")
+			lowered = time.Now()
+		}, placementTimeout+scaleSettle, poll).Should(Succeed(),
+			"the gated replacement outlived placementTimeout %s and the KEDA window", placementTimeout)
+		measure("reclaim: preemption to A's target lowered with no gated pod", lowered.Sub(preempted))
+		measure("reclaim cycle: lender's request to A settled", lowered.Sub(triggered))
+		Eventually(func(g Gomega) {
+			expectAllPlaced(g, nominal)
+		}, scaleSettle, poll).Should(Succeed())
 
+		By("Freeing b's GPUs: A must still borrow nothing until the cooldown ends")
+		scaleDeployment(nsB, lender, 0)
 		Eventually(func(g Gomega) {
-			view := borrowView(g)
-			expectRow(g, rowFor(g, view, nsA), queueA, nominal, 0, 0, "")
-			expectRow(g, rowFor(g, view, nsB), queueB, nominal, 0, 0, "")
-		}, logSettle, 5*time.Second).Should(Succeed())
+			g.Expect(queueStatus(g, queueB).Reserved).To(BeZero())
+		}, kueueSettle, poll).Should(Succeed())
+		// The cooldown runs from the preemption the engine saw and from the
+		// release; hold the check until a margin before the earlier one ends.
+		quiet := time.Until(preempted.Add(borrowCooldown - 20*time.Second))
+		Expect(quiet).To(BeNumerically(">", 20*time.Second), "too little cooldown left to check")
+		Consistently(func(g Gomega) {
+			g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(BeNumerically("<=", nominal))
+		}, quiet, 5*time.Second).Should(Succeed(), "A borrowed again inside the cooldown")
+
+		By("After the cooldown A borrows again")
+		var regrown time.Time
+		Eventually(func(g Gomega) {
+			g.Expect(*deployment(g, nsA, depA).Spec.Replicas).To(BeNumerically(">", nominal))
+			regrown = time.Now()
+		}, borrowCooldown+scaleSettle, poll).Should(Succeed())
+		measure("preemption to A borrowing again (cooldown "+borrowCooldown.String()+")", regrown.Sub(preempted))
 	})
 })
 
-// borrowLogMessage is the read-only borrowing line the quota limiter logs on
-// every change (internal/engines/allocation/quota_inventory.go).
-const borrowLogMessage = "Kueue borrowing read and NOT applied; the quota entry still caps at nominal"
+// borrowLogMessage opens the borrowing line the quota limiter logs on every
+// change while borrowing is counted (internal/engines/allocation/quota_inventory.go).
+const borrowLogMessage = "Kueue borrowing counted where every condition holds"
 
 // borrowRow mirrors config.ExternalBorrow's JSON, restated so the suite reads
 // the log as an operator would rather than through the controller's types.
@@ -375,6 +482,71 @@ func latestBorrowView(logs string) (map[string][]borrowRow, bool, error) {
 		return parsed.BorrowByNamespace, true, nil
 	}
 	return nil, false, nil
+}
+
+// createKueueNamespace creates ns with the label Kueue's narrowed webhooks
+// select, waiting out a namespace of the same name still terminating from an
+// earlier run.
+func createKueueNamespace(ns string) {
+	Eventually(func(g Gomega) {
+		_, err := k8sClient.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+			Name: ns, Labels: map[string]string{fixtures.KueueE2ENamespaceLabel: "true"},
+		}}, metav1.CreateOptions{})
+		if apierrors.IsAlreadyExists(err) {
+			existing, getErr := k8sClient.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
+			g.Expect(getErr).NotTo(HaveOccurred())
+			g.Expect(existing.DeletionTimestamp).To(BeNil(), "namespace %s is still terminating", ns)
+			g.Expect(existing.Labels).To(HaveKey(fixtures.KueueE2ENamespaceLabel),
+				"namespace %s exists without the Kueue webhook label", ns)
+			return
+		}
+		g.Expect(err).NotTo(HaveOccurred())
+	}, 3*time.Minute, 2*time.Second).Should(Succeed())
+}
+
+// freeGPUsOfProduct sums the free GPUs on the schedulable nodes labelled
+// key=product.
+func freeGPUsOfProduct(key, product, resourceName string) int {
+	nodes, err := k8sClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: key + "=" + product})
+	Expect(err).NotTo(HaveOccurred())
+	total := 0
+	for i := range nodes.Items {
+		n := &nodes.Items[i]
+		if n.Spec.Unschedulable {
+			continue
+		}
+		free, err := fixtures.FreeGPUsOnNode(ctx, k8sClient, n, resourceName)
+		Expect(err).NotTo(HaveOccurred())
+		total += max(free, 0)
+	}
+	return total
+}
+
+// measureReplicaStart reports, for each pod of the Deployment created at or
+// after since, how long it took from creation to Ready.
+func measureReplicaStart(ns, app string, since time.Time, measure func(string, time.Duration)) {
+	pods, err := k8sClient.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: "app=" + app})
+	Expect(err).NotTo(HaveOccurred())
+	for _, p := range pods.Items {
+		created := p.CreationTimestamp.Time
+		if created.Before(since.Add(-time.Second)) {
+			continue
+		}
+		for _, c := range p.Status.Conditions {
+			if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
+				measure("replica start (created to Ready) "+p.Name, c.LastTransitionTime.Sub(created))
+			}
+		}
+	}
+}
+
+func podReady(p corev1.Pod) bool {
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 func gateNames(p corev1.Pod) []string {

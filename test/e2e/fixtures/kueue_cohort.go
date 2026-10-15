@@ -206,7 +206,8 @@ func ReadKueueQueueStatus(ctx context.Context, c client.Client, clusterQueue, fl
 
 // CreateKueueGPUDeployment creates a Deployment of pause pods, each requesting
 // gpusPerPod of resourceName, labelled for LocalQueue queue so Kueue admits
-// each pod as its own workload. Requests equal limits, as an extended resource
+// each pod as its own workload. An empty queue leaves the label off: the pods
+// are then GPU pods Kueue does not manage. Requests equal limits, as an extended resource
 // requires; the small cpu and memory requests are covered by the queue.
 func CreateKueueGPUDeployment(
 	ctx context.Context, k8s kubernetes.Interface,
@@ -214,11 +215,15 @@ func CreateKueueGPUDeployment(
 ) error {
 	gpus := *resource.NewQuantity(int64(gpusPerPod), resource.DecimalSI)
 	mem := resource.MustParse("16Mi")
+	labels := map[string]string{}
+	if queue != "" {
+		labels[KueueQueueNameLabel] = queue
+	}
 	d := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
-			Labels:    map[string]string{KueueQueueNameLabel: queue},
+			Labels:    labels,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptr.To(int32(replicas)),

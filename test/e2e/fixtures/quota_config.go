@@ -29,6 +29,15 @@ const (
 // tell the suite's own entry from one an operator declared.
 const quotaLimiterName = "e2e-warm-pool-quota"
 
+// physicalLimiterName names the physical limiter WithPhysicalLimiter declares
+// beside the quota entry, so ClearLeftoverQuota can remove it too.
+const physicalLimiterName = quotaLimiterName + "-physical"
+
+// leadingLimitersKey carries, through the policy document the options edit,
+// the limiters an option declares ahead of the quota entry. SetNamespaceQuota
+// removes it before the document is written.
+const leadingLimitersKey = "__e2eLeadingLimiters"
+
 // QuotaOption adjusts the quota entry SetNamespaceQuota writes, and the default
 // policy document it is written into.
 type QuotaOption func(entry, doc map[string]any)
@@ -38,6 +47,36 @@ type QuotaOption func(entry, doc map[string]any)
 func WithKueue(refreshInterval string) QuotaOption {
 	return func(entry, _ map[string]any) {
 		entry["kueue"] = map[string]any{"enabled": true, "refreshInterval": refreshInterval}
+	}
+}
+
+// WithKueueTimings sets the Kueue block's borrowing timings: placementTimeout,
+// borrowCooldown and lenderDebounce, as Go durations. An empty value leaves
+// that timing at its default. Apply it after WithKueue.
+func WithKueueTimings(placementTimeout, borrowCooldown, lenderDebounce string) QuotaOption {
+	return func(entry, _ map[string]any) {
+		block, _ := entry["kueue"].(map[string]any)
+		if block == nil {
+			return
+		}
+		for k, v := range map[string]string{
+			"placementTimeout": placementTimeout,
+			"borrowCooldown":   borrowCooldown,
+			"lenderDebounce":   lenderDebounce,
+		} {
+			if v != "" {
+				block[k] = v
+			}
+		}
+	}
+}
+
+// WithPhysicalLimiter declares the physical GPU limiter (gpu-inventory) beside
+// the quota entry, so a decision must fit the GPUs the nodes have as well. A
+// Kueue quota entry counts cohort borrowing only where such a GPU bound exists.
+func WithPhysicalLimiter() QuotaOption {
+	return func(_, doc map[string]any) {
+		doc[leadingLimitersKey] = []any{map[string]any{"name": physicalLimiterName, "type": "gpu-inventory"}}
 	}
 }
 
@@ -112,10 +151,13 @@ func SetNamespaceQuota(
 			targetNamespace: map[string]any{accelerator: gpus},
 		},
 	}
+	delete(doc, leadingLimitersKey)
 	for _, opt := range opts {
 		opt(entry, doc)
 	}
-	doc["limiters"] = []any{entry}
+	leading, _ := doc[leadingLimitersKey].([]any)
+	delete(doc, leadingLimitersKey)
+	doc["limiters"] = append(leading, entry)
 	merged, err := yaml.Marshal(doc)
 	if err != nil {
 		return nil, fmt.Errorf("marshal %s entry: %w", defaultEntryKey, err)
@@ -216,7 +258,7 @@ func ClearLeftoverQuota(ctx context.Context, clientset kubernetes.Interface, con
 	limiters, _ := doc["limiters"].([]any)
 	kept := make([]any, 0, len(limiters))
 	for _, l := range limiters {
-		if m, ok := l.(map[string]any); ok && m["name"] == quotaLimiterName {
+		if m, ok := l.(map[string]any); ok && (m["name"] == quotaLimiterName || m["name"] == physicalLimiterName) {
 			continue
 		}
 		kept = append(kept, l)
