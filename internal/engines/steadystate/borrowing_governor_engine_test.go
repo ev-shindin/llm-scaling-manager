@@ -106,6 +106,35 @@ var _ = Describe("borrowing governor, engine side", func() {
 			Expect(e.borrowing.reclaimedUntil).To(HaveKey("b/m"), "lender-reclaimed holds")
 		})
 
+		// Review finding: the namespace counted as read before its pod list,
+		// so a failed pod list pruned a preemption seen only through its pod,
+		// and the next cycle counted it again.
+		It("keeps a preemption seen only through its pod when a later pod list fails", func() {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "v-abc-1", Namespace: "b", UID: "pod-1"},
+				Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: "TerminationTarget", Status: corev1.ConditionTrue,
+					Reason: "WorkloadEvictedDueToPreempted", LastTransitionTime: metav1.NewTime(now.Add(-time.Minute))}}}}
+			failPods := false
+			scheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{{Group: kueue.Group, Version: "v1beta2"}, {Version: "v1"}})
+			mapper.Add(schema.GroupVersionKind{Group: kueue.Group, Version: "v1beta2", Kind: kueue.KindWorkload}, meta.RESTScopeNamespace)
+			mapper.Add(schema.GroupVersionKind{Version: "v1", Kind: "Pod"}, meta.RESTScopeNamespace)
+			c := fake.NewClientBuilder().WithScheme(scheme).WithRESTMapper(mapper).WithObjects(pod).
+				WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if _, ok := list.(*corev1.PodList); ok && failPods {
+						return errors.New("pod cache not synced")
+					}
+					return cl.List(ctx, list, opts...)
+				}}).Build()
+			e := cycle(c, deployment)
+			Expect(e.borrowing.preemptSeen).To(HaveKey(types.UID("pod-1")))
+
+			failPods = true
+			e.prepareBorrowing(ctx, borrowing(), reqs, deployment, now.Add(30*time.Second))
+			Expect(e.borrowing.preemptSeen).To(HaveKey(types.UID("pod-1")),
+				"not pruned on a cycle that could not list the pods: the next one would count it again")
+		})
+
 		It("cools down from when Kueue preempted, not from when the scaling manager noticed", func() {
 			e := cycle(newClient(false, workload("w1", now.Add(-9*time.Minute),
 				metav1.OwnerReference{APIVersion: "v1", Kind: "Pod", Name: "v-abc-1", UID: "pod-1"})), deployment)

@@ -203,7 +203,8 @@ func (e *Engine) persistBorrowLedger(ctx context.Context) {
 //     pod's Workload goes with the pod, often between two cycles.
 //
 // A preemption older than the cooldown starts nothing; the UIDs counted are
-// kept only while still listed.
+// kept only while still listed, judged only in a namespace where both lists
+// succeeded.
 func (e *Engine) observePreemptions(ctx context.Context, constraints []*allocation.ResourceConstraints,
 	requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) map[string]bool {
 	st := &e.borrowing
@@ -269,7 +270,6 @@ func (e *Engine) observePreemptions(ctx context.Context, constraints []*allocati
 			continue
 		}
 		delete(st.preemptErrLogged, ns)
-		read[ns] = true
 		for _, w := range wls {
 			model, uids := modelOfOwners(requests, scaleTargets, ns, w.OwnerRefs)
 			if len(uids) == 0 {
@@ -277,10 +277,14 @@ func (e *Engine) observePreemptions(ctx context.Context, constraints []*allocati
 			}
 			mark(ns, model, uids, w)
 		}
+		// Pruning needs both lists: a UID seen only through its pod's
+		// TerminationTarget condition, pruned in a cycle whose pod list
+		// failed, would be counted again the next cycle.
 		var pods corev1.PodList
 		if err := e.client.List(ctx, &pods, client.InNamespace(ns)); err != nil {
 			continue
 		}
+		read[ns] = true
 		for i := range pods.Items {
 			p := &pods.Items[i]
 			at, ok := preemptedPod(p)
