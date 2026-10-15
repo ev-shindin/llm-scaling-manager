@@ -1,7 +1,7 @@
 # Kueue borrowing, and limiters that compose
 
-**Status:** implemented on branch feat/kueue-borrow-and-limiter-composition
-(steps 1-5); follow-ups in step 6 not built. Revision 5 folds in
+**Status:** implemented (steps 1-5); step 6 follow-ups not built.
+Revision 5 folds in
 four review rounds by five reviewers (see [Review record](#review-record)).
 Fixes [#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136),
 and the in-repo part of upstream
@@ -807,9 +807,16 @@ Where the code settled a detail this text leaves open, or differs from it:
   (guaranteed plus borrow cap), not the sum of guaranteed figures.
 - **ResourceQuota.** With several GPU ResourceQuotas, the tightest `hard`
   bounds the reach.
-- **Thrash alert.** Counts starts of `borrow-released` and
-  `lender-reclaimed` at one-minute resolution; overlapping releases count
-  once.
+- **Thrash alert.** Counts `increase(wva_borrow_releases_total[1h])` per
+  model, every cause together.
+- **Wakes stay within nominal.** Scale-from-zero, the warm pool and
+  rescale use the within-nominal figure (what Kueue admits now without
+  borrowing), not a guaranteed one.
+- **LowerPriority.** A lender with `reclaimWithinCohort: LowerPriority` is
+  treated as `Never`: it reclaims only from lower-priority work, and
+  serving runs above batch.
+- **Managed check.** A GPU pod counts as Kueue-managed only when a
+  Workload with quota reserved backs it.
 - **Opt-out.** `countBorrowable: false` on the entry, which the installer
   writes for `WVA_QUOTA_KUEUE_BORROW=false` (`make deploy-wva` and
   `make enable-physical-limiter`); ignored, with a warning, without

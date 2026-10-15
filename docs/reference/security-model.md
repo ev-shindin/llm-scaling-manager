@@ -95,7 +95,7 @@ Role and its binding in the managed namespace).
 | get, list, watch | configmaps, services | managed namespace (`manager-role`) | the scaling-policy and manager ConfigMaps; resolving Services. The grant is not narrowed by name: it reads **every** ConfigMap in the managed namespace |
 | get | configmaps/status | managed namespace | |
 | get, list, watch, **patch** | pods | managed namespace | reading replicas and their node; patching annotations and warm-pool labels — see [What it writes](#what-it-writes) |
-| create, patch | events | managed namespace | decisions and warnings on ScaledObjects |
+| create, patch, get, list | events | managed namespace | decisions and warnings on ScaledObjects; reading the cluster autoscaler's `TriggeredScaleUp` for borrowing |
 | get, list, watch | deployments, replicasets, statefulsets (apps) | managed namespace | scale targets and their pods |
 | get | deployments/scale | managed namespace | current replica count |
 | get, list | resourcequotas | managed namespace | a GPU ResourceQuota as the bound for cohort borrowing |
@@ -158,11 +158,12 @@ cluster-wide. The differences that matter for review:
 | get, list, watch | **configmaps** | **every namespace** | the controller's cache filters ConfigMaps by label, but the grant does not: it can read any ConfigMap in the cluster |
 | get, list, watch, **patch** | **pods** | **every namespace** | the code patches only pods of workloads it manages and warm-pool pods, but the grant reaches every pod, `kube-system` included |
 | get, list, watch | namespaces, nodes, nodes/status | cluster | |
-| get, list | clusterqueues, cohorts, localqueues, resourceflavors, workloads | cluster | |
+| get, list | clusterqueues, cohorts, localqueues, resourceflavors, workloads | cluster | `workloads` reaches **every namespace's** Kueue Workloads: their pod sets, priority and admission, not only the managed models' |
+| get, list | **events** | **every namespace** | read for the cluster autoscaler's `TriggeredScaleUp` on a borrowed pod; the grant reaches every Event in the cluster, whose messages can name objects and carry error text |
 
 `node-reader` and `kueue-reader` are not rendered at this scope; `manager-role`
-already covers them. Leases, Events and the history ConfigMap stay namespaced in
-the controller's own namespace. On OpenShift the `cluster-monitoring-view`
+already covers them. Leases, the leader-election Events and the history
+ConfigMap stay namespaced in the controller's own namespace. On OpenShift the `cluster-monitoring-view`
 binding and the `metrics-reader` repoint are added as above.
 
 ### Grants made after install
@@ -346,6 +347,20 @@ controller. No such line means its own ConfigMap does.
 | An InferencePool selector | decides which labels the controller writes onto warm-pool pods in that namespace | by design, minus the guarded identity labels |
 | A Deployment labelled `app.kubernetes.io/name=workload-variant-autoscaler` | `make enable-physical-limiter` treats it as a controller only if it runs as the controller ServiceAccount (`WVA_CONTROLLER_SA`) and has a `manager` container from a controller image repository (`WVA_CONTROLLER_IMAGE_REPOS`; a namespace named in `WVA_LIMITER_TARGETS` relaxes the image check). Anything else is `SKIPPED`, granted nothing, and listed as NOT bound under the banner. A verified one gets its ServiceAccount node read (and Kueue read), a `kubectl rollout restart` of that named Deployment when it must re-resolve its policy namespace (it could not read its Namespace, or started before the policy namespace existed), and `limiters` in the ConfigMap its policy resolves to, the `wva.llmd.ai/policy-namespace` label honoured | signals, not proof: any tenant can satisfy them. Where tenants are not trusted, run their controllers out of reach and name exactly those namespaces in `WVA_LIMITER_TARGETS` |
 | Reaching `:9090` | register or overwrite trigger metadata; read decisions | closed by the shipped NetworkPolicy, above, where it was applied and the network plugin enforces it. Scaler mutual TLS closes it on any network only with `--external-scaler-client-san` pinning KEDA's identity, and only where an admin owns the controller's Deployment: in the tenant-owned shape the tenant owns its args, and so the TLS flags |
+
+### Kueue borrowing
+
+- **The managed check is a heuristic, not a boundary.** Borrowing is counted
+  for a namespace only when its GPU pods are Kueue-managed, each backed by a
+  Workload with quota reserved. That keeps the figures honest; it does not
+  stop a tenant from running GPU work outside Kueue. A `ResourceQuota` does.
+- **A `Never` lender depends on the borrower.** With `reclaimWithinCohort:
+  Never`, Kueue never takes capacity back; the lender gets it only because
+  the borrowing namespace's scaling manager releases it. A tenant who owns
+  that controller can stop doing so. `LowerPriority` is treated the same way:
+  it reclaims only from lower-priority work, and serving runs above batch.
+- **In a cohort shared between tenants**, give every lender that must get
+  capacity back from serving `reclaimWithinCohort: Any`.
 
 **For a tenant you do not trust, bound the namespace at admission**: a
 `ResourceQuota` on `requests.nvidia.com/gpu`. The limiter bounds what the

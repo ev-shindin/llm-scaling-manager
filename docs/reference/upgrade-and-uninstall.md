@@ -167,7 +167,25 @@ Installer:
 - With `WVA_QUOTA_KUEUE=true` on a cluster-scoped install, a `gpu-inventory`
   entry is added beside the quota; `WVA_LIMITER_PHYSICAL=false` leaves it out.
 - `make disable-physical-limiter` removes one kind only: the physical
-  limiter, or the quota with `WVA_LIMITER_TYPE=quota`. The other stays.
+  limiter, or the quota with `WVA_LIMITER_TYPE=quota`. The other stays. Run
+  without `WVA_LIMITER_TYPE=quota` on a policy that holds only a quota, it
+  removes nothing and exits non-zero.
+
+What it costs to run:
+
+- **A cluster-scoped Kueue install gets `gpu-inventory` too.** The physical
+  limiter is added beside the quota by default, so the cluster-wide node read
+  and the pod walk below come with it. `WVA_LIMITER_PHYSICAL=false` leaves it
+  out.
+- **The physical limiter walks pods.** Each refresh counts GPUs in use from
+  the controller's pod cache; on a cluster-scoped install that cache holds
+  every pod in the cluster.
+- **The transitional comparison.** Where both kinds are declared, the
+  controller also computes what the quota alone would have decided, at most
+  once every 10 cycles, and logs `Upgrade note (transitional)` with the set
+  of variants that differ. It goes in the next release.
+- **Borrowing state survives a restart.** Borrowing state is kept in
+  `wva-controller-status` across restarts.
 
 ### The external-scaler NetworkPolicy
 

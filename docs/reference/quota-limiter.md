@@ -372,7 +372,7 @@ itself:
 | `countBorrowable` | `true` | `false` caps every namespace at nominal, as before borrowing was counted |
 | `placementTimeout` | `5m` | how long a borrowed replica may stay unplaced |
 | `borrowCooldown` | `10m` | how long a cohort, or a preempted model, borrows nothing new |
-| `lenderDebounce` | `60s` | a lender counts as waiting after two fresh reads this far apart |
+| `lenderDebounce` | `60s` | a lender counts as waiting once it has read as waiting for this long, over at least two fresh reads |
 
 **What you see.** On each change, one `Info` line per entry:
 
@@ -645,17 +645,8 @@ Every entry in it is built:
 One physical limiter is built. A second `gpu-inventory` (or `inventory`) entry
 is ignored and logged as a warning; it does not reject the policy.
 
-The set is exposed on `*config.Config` as `EffectiveLimiterTypes()`,
-`HasPhysicalLimiter()`, `HasQuotaLimiter()` and `EffectiveQuotaEntries()`, all
-reading the live ConfigMap. Both engines rebuild the limiter when any entry
-changes (`allocation.LimiterSignature`), so edits apply without a restart. The
-factory in `internal/engines/allocation/limiter_factory.go` builds:
-
-- **Physical** — `DefaultLimiter` wrapping `TypeInventoryWithUsage`.
-- **Each quota entry** — `DefaultLimiter` wrapping one `QuotaInventory`.
-- **More than one** — a `CompositeLimiter` holding them, physical first. The
-  engine computes constraints from each, on the usage basis each asks for, and
-  the optimizer intersects them.
+Both engines rebuild the limiters when any entry changes, so edits apply
+without a restart ([how the set is built](#details-how-the-limiter-set-is-built)).
 
 ### Per-namespace usage feeding
 
@@ -752,3 +743,17 @@ because limiter mode is live-reloadable.
 - **Reservation-style limiters** — the `type: "quota"` discriminator leaves
   room for additional limiter types (e.g., `reservation`, `priority`) under
   the same ConfigMap schema.
+
+## Details: how the limiter set is built
+
+The set is exposed on `*config.Config` as `EffectiveLimiterTypes()`,
+`HasPhysicalLimiter()`, `HasQuotaLimiter()` and `EffectiveQuotaEntries()`, all
+reading the live ConfigMap. Both engines rebuild the limiter when
+`allocation.LimiterSignature` changes. The factory in
+`internal/engines/allocation/limiter_factory.go` builds:
+
+- **Physical** — `DefaultLimiter` wrapping `TypeInventoryWithUsage`.
+- **Each quota entry** — `DefaultLimiter` wrapping one `QuotaInventory`.
+- **More than one** — a `CompositeLimiter` holding them, physical first. The
+  engine computes constraints from each, on the usage basis each asks for, and
+  the optimizer intersects them.
