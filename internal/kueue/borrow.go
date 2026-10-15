@@ -129,9 +129,17 @@ type QueueState struct {
 }
 
 // CanReclaim reports whether the queue may preempt borrowers to get its
-// nominal quota back.
+// nominal quota back, whatever they run: only under ReclaimAny.
+//
+// ReclaimLowerPriority is read as ReclaimNever. Kueue then preempts only
+// borrowed workloads of lower priority than the one it admits, and with serving
+// above batch (the documented setup) a batch lender never reclaims from
+// serving. Telling the cases apart needs the WorkloadPriorityClass values of
+// both sides, which this read does not take; that is a follow-up. Until then
+// the guaranteed figure, the within-nominal figure and the lender release rule
+// all treat such a queue as one that cannot reclaim, which errs toward less.
 func (q QueueState) CanReclaim() bool {
-	return q.Reclaim == ReclaimLowerPriority || q.Reclaim == ReclaimAny
+	return q.Reclaim == ReclaimAny
 }
 
 // CohortState is one Cohort object. A cohort named by a ClusterQueue with no
@@ -260,8 +268,8 @@ func (r QueueResource) lent() (lent, kept int) {
 //
 // and for a queue Q, with base = max(U_Q, G_Q):
 //
-//	reach = min(N_Q + B_Q, base + cohortFree)        reclaimWithinCohort Never
-//	reach = max(N_Q, min(N_Q + B_Q, base + cohortFree))  otherwise
+//	reach = min(N_Q + B_Q, base + cohortFree)        reclaimWithinCohort Never or LowerPriority
+//	reach = max(N_Q, min(N_Q + B_Q, base + cohortFree))  reclaimWithinCohort Any
 //
 // Guaranteed is N_Q for a queue that can reclaim, min(N_Q, base) for one that
 // cannot; Borrowable is reach minus guaranteed. Where borrowing cannot be

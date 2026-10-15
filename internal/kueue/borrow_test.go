@@ -81,13 +81,31 @@ var _ = Describe("ComputeBorrowing", func() {
 			Expect(lentOut("")).To(Equal(lentOut(ReclaimNever)))
 		})
 
-		It("Any and LowerPriority: nominal is guaranteed, Kueue preempts the peer", func() {
-			for _, p := range []string{ReclaimAny, ReclaimLowerPriority} {
-				f := lentOut(p)
-				Expect(f.Guaranteed).To(Equal(8), p)
-				Expect(f.Borrowable).To(Equal(0), p)
-				Expect(f.GuaranteedReason).To(BeEmpty(), p)
-			}
+		It("Any: nominal is guaranteed, Kueue preempts the peer", func() {
+			f := lentOut(ReclaimAny)
+			Expect(f.Guaranteed).To(Equal(8))
+			Expect(f.Borrowable).To(Equal(0))
+			Expect(f.GuaranteedReason).To(BeEmpty())
+		})
+
+		// Kueue's LowerPriority preempts only lower-priority borrowers; with
+		// serving above batch a batch lender never reclaims from serving, so
+		// without workload priorities it is read as Never.
+		It("LowerPriority: guaranteed and within nominal as under Never", func() {
+			f := lentOut(ReclaimLowerPriority)
+			Expect(f).To(Equal(lentOut(ReclaimNever)))
+			Expect(f.Guaranteed).To(Equal(0))
+			Expect(f.WithinNominal).To(Equal(0), "the peer holds all 8 and the pool is empty")
+			Expect(f.LentOut).To(Equal(0))
+			Expect(f.GuaranteedReason).To(Equal(ReasonNominalLentOut))
+		})
+
+		It("LowerPriority: a lender is not one that can reclaim", func() {
+			lender := withReclaim(member("lender", QueueResource{Nominal: 8, Reserved: 3}), ReclaimLowerPriority)
+			lender.Pending = 2
+			b := ComputeBorrowing(topology(lender, member("a", QueueResource{Nominal: 0, Reserved: 4})), false)
+			Expect(b.Pools).To(HaveLen(1))
+			Expect(b.Pools[0].Lenders).To(ContainElement(LenderState{Queue: "lender", Waiting: true, CanReclaim: false, LentOut: 5}))
 		})
 
 		It("Never: what the queue already uses is guaranteed", func() {

@@ -221,7 +221,7 @@ var _ = Describe("Reader borrowing figures", func() {
 				},
 			},
 		}))
-		Expect(q.CanReclaim()).To(BeTrue())
+		Expect(q.CanReclaim()).To(BeFalse(), "LowerPriority reclaims only from lower priorities: read as Never")
 
 		unset := r.queueState(clusterQueue(v, "bare", flavorQuotas("h100", quota("nvidia.com/gpu", "8"))), map[string]string{"h100": ""})
 		Expect(unset.Reclaim).To(Equal(ReclaimNever), "absent reclaimWithinCohort is Never")
