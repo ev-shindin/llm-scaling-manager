@@ -695,11 +695,19 @@ pl_grant_published_policy_read() {
     log_success "  ${ns}/${sa} may read cluster policy in $target (Role wva-policy-reader, RoleBinding wva-policy-reader-$(wva_ns_suffix "$ns"))"
 }
 
-# pl_set_limiter writes the limiters list into the policy ConfigMap's default
-# entry, preserving every other setting in it.
+# pl_set_limiter writes the limiter into the policy ConfigMap's default entry,
+# preserving every other setting in it.
 #
-# It REPLACES rather than appends: two limiter kinds in one list is not a chain,
-# a quota entry wins over a gpu-inventory one, and the loser is built as nothing.
+# It COMPOSES: an entry of the kind it declares (the physical limiter, or the
+# quota) replaces the existing entries of that kind, and an entry of the other
+# kind is kept. Every declared limiter is built and a decision must fit all of
+# them, so enabling the physical limiter on a policy that already carries a
+# quota bounds by both rather than dropping the quota. `none` still removes
+# every limiter.
+#
+# `remove-<kind>` removes that kind only. When the policy declares no entry of
+# that kind it writes nothing, warns, and returns 3; PL_OTHER_KEPT is set to the
+# number of entries of the other kind that stay.
 pl_set_limiter() {
     local policy_ns="$1" limiter="$2" current updated exists=0
     # ABSENT and FAILED are different answers, and folding them together
@@ -749,6 +757,44 @@ pl_set_limiter() {
         # "Removed the limiter".
         updated="$(printf '%s\n' "$current" | yq 'del(.limiters)')" \
             || log_error "could not remove the limiter from ${policy_ns}/wva-scaling-policy-config: yq del(.limiters) failed on its default entry. Nothing was written."
+    elif [ "$limiter" = "remove-gpu-inventory" ] || [ "$limiter" = "remove-quota" ]; then
+        # Remove ONE kind and keep the other, mirroring the composing enable:
+        # disabling the physical limiter must not take a quota with it. When
+        # nothing is left the list goes, exactly as `none` does.
+        local keep kind="${limiter#remove-}" other n_kind n_all
+        if [ "$limiter" = "remove-gpu-inventory" ]; then
+            keep='(.limiters // []) | map(select(.type != "gpu-inventory" and .type != "inventory"))'
+            other="quota"
+        else
+            keep='(.limiters // []) | map(select(.type != "quota"))'
+            other="gpu-inventory"
+        fi
+        # Nothing of this kind declared: write nothing and say so, returning 3
+        # ("nothing removed") for the caller to count. Reporting "Removed the
+        # gpu-inventory limiter" over a policy holding only a quota is how the
+        # documented undo of a quota left the quota in force.
+        n_all="$(printf '%s\n' "$current" | yq '(.limiters // []) | length')" \
+            || log_error "could not read the limiters declared in ${policy_ns}/wva-scaling-policy-config."
+        n_kind="$(printf '%s\n' "$current" | yq "($keep) | length")" \
+            || log_error "could not read the limiters declared in ${policy_ns}/wva-scaling-policy-config."
+        n_kind=$((n_all - n_kind))
+        # How many entries of the other kind stay, for the caller's summary.
+        PL_OTHER_KEPT=$((n_all - n_kind))
+        if [ "$n_kind" = "0" ]; then
+            if [ "$n_all" = "0" ]; then
+                log_warning "no ${kind} entry in ${policy_ns}/wva-scaling-policy-config; nothing removed; it declares no limiter."
+            else
+                log_warning "no ${kind} entry in ${policy_ns}/wva-scaling-policy-config; nothing removed; the ${other} limiter stays. To remove it: WVA_LIMITER_TYPE=${other}."
+            fi
+            return 3
+        fi
+        updated="$(printf '%s\n' "$current" | yq ".limiters = ($keep)")" \
+            || log_error "could not remove the ${limiter#remove-} limiter from the policy in ${policy_ns}."
+        if [ "$(printf '%s\n' "$updated" | yq '.limiters | length')" = "0" ]; then
+            # Checked, as `none` is: an unchecked failure wrote an empty entry.
+            updated="$(printf '%s\n' "$updated" | yq 'del(.limiters)')" \
+                || log_error "could not remove the ${kind} limiter from ${policy_ns}/wva-scaling-policy-config: yq del(.limiters) failed on its default entry. Nothing was written."
+        fi
     else
         # Through limiter_entry_yaml, the same builder the installer uses.
         #
@@ -773,14 +819,15 @@ pl_set_limiter() {
         # installer's own rule would pick -- that namespace gets the budget and
         # every other one gets ZERO, so this command would stop scaling
         # everywhere it was meant to bound it.
-        policy_declared_limiters "$limiter" "$current" default
+        policy_declared_limiters "$limiter" "$current" default compose
         updated="$POLICY_DECLARED"
     fi
     # An entry that is now empty is removed, not written as "{}". A ConfigMap
     # whose default entry is an empty object is a policy that says nothing while
     # looking like one that says something, and the next reader has to open it to
     # find out which.
-    if [ "$limiter" = "none" ] && [ "$(printf '%s' "$updated" | tr -d '[:space:]')" = "{}" ]; then
+    if { [ "$limiter" = "none" ] || [ "${limiter#remove-}" != "$limiter" ]; } \
+        && [ "$(printf '%s' "$updated" | tr -d '[:space:]')" = "{}" ]; then
         # The `default` ENTRY, not the ConfigMap. Deleting the object took every
         # other entry in it -- the per-model and named-tier policies an operator
         # added -- which is the same data loss this file was just fixed for, on
@@ -1139,9 +1186,29 @@ disable_physical_limiter() {
     # The same tools enable asks for: this path rewrites the policy with yq and
     # builds the patch with jq, and without them it wrote an empty entry.
     pl_require_tools
+    # The kind to remove: the one enable published (WVA_LIMITER_TYPE). Only
+    # that kind goes; a limiter of the other kind in the same policy stays.
+    # `all` removes every limiter, whatever its kind: the uninstall form, and
+    # the one a script that must not care what was declared should use.
+    #
+    # Exit status: 0 when something was removed, and 0 -- with a warning --
+    # when no policy this command reads declares any limiter. Non-zero only
+    # when nothing was removed while a limiter of the OTHER kind stays, the
+    # "undo my quota without WVA_LIMITER_TYPE=quota" mistake. Through make that
+    # reads `make: *** [...] Error 1`, and make itself exits 2.
+    local limiter="${WVA_LIMITER_TYPE:-gpu-inventory}"
+    case "$limiter" in
+        gpu-inventory|quota|all) ;;
+        *) log_error "WVA_LIMITER_TYPE must be gpu-inventory, quota or all (got '$limiter')" ;;
+    esac
+    local other="quota"
+    case "$limiter" in
+        quota) other="gpu-inventory" ;;
+        all) other="" ;;
+    esac
     pl_refuse_policy_ns_override
     local policy_ns; policy_ns="$(pl_policy_ns)"
-    local ns cm_ns res targets="" cleared=0 cleared_ns=" " to_restart=""
+    local ns cm_ns res targets="" cleared=0 cleared_ns=" " to_restart="" set_rc other_left=""
 
     # The SAME per-controller resolution enable uses. Looking only at the
     # well-known namespace left the limiter in force everywhere it had actually
@@ -1200,8 +1267,31 @@ disable_physical_limiter() {
             log_info "No limiter declared in ${cm_ns}/wva-scaling-policy-config; nothing to remove."
             continue
         fi
-        pl_set_limiter "$cm_ns" none
-        log_success "Removed the limiter from ${cm_ns}/wva-scaling-policy-config"
+        if [ "$limiter" = "all" ]; then
+            # Every kind: the same removal as WVA_LIMITER=none at install.
+            pl_set_limiter "$cm_ns" none
+            log_success "Removed every limiter from ${cm_ns}/wva-scaling-policy-config"
+            cleared=$((cleared + 1))
+            cleared_ns="$cleared_ns$cm_ns "
+            continue
+        fi
+        set_rc=0
+        PL_OTHER_KEPT=0
+        pl_set_limiter "$cm_ns" "remove-$limiter" || set_rc=$?
+        if [ "$set_rc" -eq 3 ]; then
+            # Nothing of this kind there (pl_set_limiter said so). Note a policy
+            # still bounded by the other kind: that decides the exit status below.
+            [ "$PL_OTHER_KEPT" -gt 0 ] && other_left="$other_left $cm_ns"
+            continue
+        elif [ "$set_rc" -ne 0 ]; then
+            log_error "could not remove the $limiter limiter from ${cm_ns}/wva-scaling-policy-config."
+        fi
+        if [ "$PL_OTHER_KEPT" -gt 0 ]; then
+            log_success "Removed the $limiter limiter from ${cm_ns}/wva-scaling-policy-config; the $other limiter declared there stays"
+            other_left="$other_left $cm_ns"
+        else
+            log_success "Removed the $limiter limiter from ${cm_ns}/wva-scaling-policy-config"
+        fi
         cleared=$((cleared + 1))
         cleared_ns="$cleared_ns$cm_ns "
     done
@@ -1251,14 +1341,26 @@ disable_physical_limiter() {
     fi
 
     if [ "$cleared" -eq 0 ]; then
+        # Non-zero, not a warning: the command removed nothing while a limiter
+        # of the other kind still bounds these controllers. That is the shape
+        # of "undo my quota" run without WVA_LIMITER_TYPE=quota, and a script
+        # or runbook that goes on after exit 0 believes the bound is gone. A
+        # policy with no limiter at all stays exit 0: nothing to do is done.
+        if [ -n "$other_left" ]; then
+            log_error "nothing removed: no $limiter entry in any policy this command reads. The $other limiter stays in:${other_left}. To remove it: make disable-limiter WVA_LIMITER_TYPE=${other}, or WVA_LIMITER_TYPE=all for every limiter"
+        fi
         if [ "$left" -gt 0 ]; then
             log_warning "No verified controller policy declared a limiter, but $left skipped controller(s) above still do."
         else
-            log_info "No scaling-policy ConfigMap declared a limiter — nothing to disable."
+            log_warning "Nothing removed: no scaling-policy ConfigMap this command reads declares a limiter. Nothing was bounded, so there is nothing to disable (exit 0)."
         fi
         return 0
     fi
-    log_warning "Scaling is now bounded by nothing WVA knows about for the controllers that read the policies above: the optimizer allocates without a GPU budget, and a scale-from-zero wake is published without a capacity check."
+    if [ -n "$other_left" ]; then
+        log_info "The $other limiter still bounds the controllers that read the policy in:${other_left}."
+    else
+        log_warning "Scaling is now bounded by nothing WVA knows about for the controllers that read the policies above: the optimizer allocates without a GPU budget, and a scale-from-zero wake is published without a capacity check."
+    fi
     [ "$left" -eq 0 ] || log_warning "$left skipped controller(s) above still declare a limiter in their own policy."
     log_info "The RBAC is left in place — it grants reads only, and removing it would break the next enable."
 }

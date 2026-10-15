@@ -1167,7 +1167,14 @@ wva_reconcile_prometheus_scheme() {
     #
     # Patches the "default" entry rather than shipping a second copy of it: the
     # entry carries every other default too, and a duplicate would drift.
-    case "${WVA_LIMITER:-}" in
+    #
+    # WVA_LIMITER is a SET (gpu-inventory,quota): every limiter in it is built
+    # and a decision must fit all of them.
+    local limiter_set=""
+    if [ -n "${WVA_LIMITER:-}" ]; then
+        limiter_set="$(wva_limiter_set)" || exit 1
+    fi
+    case "$limiter_set" in
         '')
             # Not given: keep what the live policy declared before the apply reset
             # it. An upgrade is not a decision to unbound a controller -- least of
@@ -1199,8 +1206,8 @@ wva_reconcile_prometheus_scheme() {
             # declare NO limiter), wrote `default: "{}"`, and aborted the install
             # on a policy it could not parse.
             ;;
-        gpu-inventory|quota)
-            log_info "Declaring the ${WVA_LIMITER} limiter in the scaling-policy ConfigMap ..."
+        *)
+            log_info "Declaring the limiters '${limiter_set}' in the scaling-policy ConfigMap ..."
             local policy_cm current_default updated_default
             # The budget is validated in the PREREQS phase, before any of this
             # ran -- see check_permissions. This is the second line of defence,
@@ -1217,17 +1224,17 @@ wva_reconcile_prometheus_scheme() {
             if [ -z "$current_default" ]; then
                 log_error "ConfigMap $policy_cm has no data['default'] entry"
             fi
-            # Idempotent, and it REPLACES rather than appends: re-running with a
-            # different WVA_LIMITER must not leave both declared, since a quota
-            # entry would then win over the gpu-inventory one by mode precedence.
+            # Idempotent, and it REPLACES the whole list: WVA_LIMITER is this
+            # install's full limiter set, so a re-run with a different set must
+            # not leave an entry from the old one behind.
             # One call, no status for a caller to forget: policy_declared_limiters
             # composes in THIS shell, so a refusal ends the install rather than
             # handing back an empty string to patch over the policy.
-            policy_declared_limiters "$WVA_LIMITER" "$current_default"
+            policy_declared_limiters "$limiter_set" "$current_default"
             updated_default="$POLICY_DECLARED"
             kubectl patch configmap "$policy_cm" -n "$WVA_NS" --type=merge \
                 -p "$(jq -n --arg d "$updated_default" '{data:{"default":$d}}')"
-            log_warning "Scaling is now bounded by the ${WVA_LIMITER} limiter (declared in ${WVA_NS}/${policy_cm}):"
+            log_warning "Scaling is now bounded by every limiter in '${limiter_set}' (declared in ${WVA_NS}/${policy_cm}):"
             printf '%s\n' "$LIMITER_ENTRY_DECLARED" | sed 's/^/    /' >&2
             # The controller is the only thing that can confirm it. It validates
             # the entry on read and, when it rejects one, discards the ENTIRE
@@ -1251,10 +1258,10 @@ wva_reconcile_prometheus_scheme() {
             # Shared with the cluster-policy path -- see
             # warn_unadvertised_accelerators. That path publishes to every
             # controller on the cluster and had no such check at all.
-            if [ "$WVA_LIMITER" = "quota" ]; then
+            if limiter_set_has "$limiter_set" quota; then
                 warn_unadvertised_accelerators
             fi
-            if [ "$WVA_LIMITER" = "gpu-inventory" ]; then
+            if limiter_set_has "$limiter_set" physical; then
                 local gpu_products
                 # Space-separated on one line, then split — a {"\n"} inside the
                 # jsonpath is fragile to quote through the layers this runs under.
@@ -1269,9 +1276,6 @@ wva_reconcile_prometheus_scheme() {
                     log_info "Single GPU product detected: an unpinned workload is deduced onto it, so no nodeSelector is required."
                 fi
             fi
-            ;;
-        *)
-            log_error "WVA_LIMITER must be 'none', 'gpu-inventory' or 'quota', got '${WVA_LIMITER}'"
             ;;
     esac
 

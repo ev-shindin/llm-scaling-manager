@@ -58,7 +58,13 @@ expect() { # expect <name> <want> <got>
 expect "kind: quota" quota "$(printf '%s\n' "$QUOTA_POLICY" | us_limiter_kind)"
 expect "kind: gpu-inventory" inventory "$(printf '%s\n' "$INV_POLICY" | us_limiter_kind)"
 expect "kind: the inventory alias" inventory "$(printf 'limiters:\n  - name: p\n    type: inventory\n' | us_limiter_kind)"
-expect "kind: quota and inventory is quota" quota "$(printf '%s\n  - name: p\n    type: gpu-inventory\n' "$QUOTA_POLICY" | us_limiter_kind)"
+expect "kind: quota and inventory is both" inventory+quota "$(printf '%s\n  - name: p\n    type: gpu-inventory\n' "$QUOTA_POLICY" | us_limiter_kind)"
+expect "kind: inventory first, then quota, is both" inventory+quota "$(printf 'limiters:\n  - type: inventory\n  - name: q\n    type: quota\n    scope: cluster\n    quotas: {H100: 8}\n' | us_limiter_kind)"
+expect "share budget: quota alone" quota "$(printf '%s\n' "$QUOTA_POLICY" | us_share_cluster_budget)"
+expect "share budget: inventory alone" physical "$(printf '%s\n' "$INV_POLICY" | us_share_cluster_budget)"
+expect "share budget: inventory beside a namespace quota is physical" physical "$(printf '%s\n  - name: p\n    type: gpu-inventory\n' "$QUOTA_POLICY" | us_share_cluster_budget)"
+expect "share budget: inventory beside a cluster quota is the quota" quota "$(printf 'limiters:\n  - type: gpu-inventory\n  - name: q\n    type: quota\n    scope: cluster\n    quotas: {H100: 8}\n' | us_share_cluster_budget)"
+expect "share budget: no limiters" none "$(printf 'scaleUpThreshold: 0.85\n' | us_share_cluster_budget)"
 expect "kind: no limiters" none "$(printf 'scaleUpThreshold: 0.85\n' | us_limiter_kind)"
 expect "quota keys" "NVIDIA-H200" "$(printf '%s\n' "$QUOTA_POLICY" | us_quota_keys)"
 expect "state: no block" "off plain" "$(printf '%s\n' "$QUOTA_POLICY" | us_block_state)"
@@ -280,7 +286,7 @@ vcase "off: marks that do not clear keep the block in shadow" \
 fresh "$QUOTA_POLICY"; run off
 vcase "off: nothing to remove is not an error" eval '[ $RC -eq 0 ] && [ "$(patches)" = 0 ]'
 
-fresh "$QUOTA_POLICY"; echo 'INFO GPU limiter (re)built from config {"type": "quota"} {"accelerator": "NVIDIA-H200"}' > "$STATE/logs"; run check
+fresh "$QUOTA_POLICY"; echo 'INFO GPU limiter (re)built from config {"limiterTypes": "quota", "limiters": "quota/install-quota"} {"accelerator": "NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: a resolving quota passes" eval '[ $RC -eq 0 ] && says "no AcceleratorNotResolved"'
 
 # H200 is a substring of the quota's NVIDIA-H200 key; a substring match passed it.
@@ -301,6 +307,19 @@ vcase "check: no limiters fails" eval '[ $RC -ne 0 ] && says "no limiters: list"
 
 fresh "$INV_POLICY"; run check
 vcase "check: inventory without physical groups says how to plan it" eval '[ $RC -eq 0 ] && says "--physical-groups"'
+
+# A composed set: both kinds bound, and check says which is the share's cluster
+# budget. It used to read the list as a quota alone, as the controller did.
+COMPOSED_POLICY="$QUOTA_POLICY
+  - name: gpu
+    type: gpu-inventory"
+fresh "$COMPOSED_POLICY"; echo 'INFO GPU limiter constructed {"limiterTypes": "inventory+quota", "limiters": "inventory+quota/install-quota,gpu"} {"accelerator": "NVIDIA-H200"}' > "$STATE/logs"; run check
+vcase "check: a composed set names both limiters and the physical cluster budget" \
+    eval '[ $RC -eq 0 ] && says "gpu-inventory and quota, both in force" && says "budget is the GPUs that exist" && ! says "--physical-groups"'
+
+fresh "$COMPOSED_POLICY"; printf '{"policyNamespace":"team-a","policyResourceVersion":"1","utilizationShare":"off","policyAccepted":"true","limiter":"inventory+quota/install-quota,gpu"}' > "$STATE/status.json"; run status
+vcase "status: a composed set's limiter reads types/names from the controller status" \
+    eval 'says "limiter inventory+quota/install-quota,gpu"'
 
 fresh "$TUNED_POLICY"; printf '%s' "$MARKED_PODS" > "$STATE/pods.json"; echo 'LAST SEEN TYPE REASON
 1m Warning UtilizationShareCancelled deploy/a' > "$STATE/events.warning"; run status
@@ -411,7 +430,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=67
+CASES_EXPECTED=75
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

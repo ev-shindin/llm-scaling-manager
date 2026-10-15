@@ -44,9 +44,10 @@ NAMESPACE           ?= llm-d-optimized-baseline
 # Install scope: cluster | namespace. Empty means the historical default —
 # namespace on OpenShift, cluster elsewhere. See deploy/lib/common.sh.
 WVA_SCOPE           ?=
-# Declare a GPU limiter at install: none | gpu-inventory | quota. Unset keeps the
-# limiter the live policy already declares (a first install has none, matching the
-# shipped config); none removes it -- the default was none before, so every
+# Declare GPU limiters at install: none | gpu-inventory | quota, or a list such as
+# gpu-inventory,quota -- every limiter in it bounds scaling. Unset keeps the
+# limiters the live policy already declares (a first install has none, matching the
+# shipped config); none removes them -- the default was none before, so every
 # re-install silently unbounded a bounded controller.
 # See docs/reference/gpu-limiter.md.
 # `quota` additionally REQUIRES WVA_QUOTAS, the per-accelerator budget
@@ -484,11 +485,19 @@ enable-physical-limiter: ## CLUSTER ADMIN: bound every WVA by real GPUs. Publish
 		WVA_QUOTAS='$(WVA_QUOTAS)' WVA_QUOTA_SCOPE=$(WVA_QUOTA_SCOPE) WVA_QUOTA_KUEUE=$(WVA_QUOTA_KUEUE) \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/limiter_policy.sh; source deploy/lib/physical_limiter.sh; enable_physical_limiter'
 
+# Exit status: 0 when the kind was removed, or when no policy it reads declares
+# any limiter; non-zero (make prints "Error 1" and exits 2) when nothing was
+# removed while a limiter of the other kind stays -- the "undo my quota without
+# WVA_LIMITER_TYPE=quota" mistake. WVA_LIMITER_TYPE=all removes every limiter
+# and is the one to use when uninstalling.
 .PHONY: disable-physical-limiter
-disable-physical-limiter: ## CLUSTER ADMIN: remove the limiter from cluster policy. Scaling becomes unbounded for every WVA that reads it.
-	@WVA_LIMITER_TARGETS="$(WVA_LIMITER_TARGETS)" \
+disable-physical-limiter: ## CLUSTER ADMIN: remove the WVA_LIMITER_TYPE limiter (gpu-inventory by default, quota, or all) from cluster policy; a limiter of another kind stays.
+	@WVA_LIMITER_TYPE=$(WVA_LIMITER_TYPE) WVA_LIMITER_TARGETS="$(WVA_LIMITER_TARGETS)" \
 		WVA_CONTROLLER_SA='$(WVA_CONTROLLER_SA)' WVA_CONTROLLER_IMAGE_REPOS='$(WVA_CONTROLLER_IMAGE_REPOS)' \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/limiter_policy.sh; source deploy/lib/physical_limiter.sh; disable_physical_limiter'
+
+.PHONY: disable-limiter
+disable-limiter: disable-physical-limiter ## CLUSTER ADMIN: the same as disable-physical-limiter, under a name that fits WVA_LIMITER_TYPE=quota|all.
 
 ##@ Utilization share
 
@@ -606,7 +615,7 @@ setup-prereqs: manifests kustomize ## Phase 2 (CLUSTER ADMIN). ENVIRONMENT=kuber
 	$(call wva_phase,prereqs,$(ENVIRONMENT_INSTALL))
 
 .PHONY: deploy-wva
-deploy-wva: manifests kustomize ## Install WVA. ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota (quota needs WVA_QUOTAS).
+deploy-wva: manifests kustomize ## Install WVA. ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota|gpu-inventory,quota (quota needs WVA_QUOTAS).
 	$(call wva_phase,$(INSTALL_PHASE_ARG),$(ENVIRONMENT_INSTALL))
 
 .PHONY: undeploy-wva
@@ -618,7 +627,7 @@ deploy-wva-on-k8s: manifests kustomize ## Install WVA on Kubernetes. SCOPE=names
 	$(call wva_phase,$(INSTALL_PHASE_ARG),kubernetes)
 
 .PHONY: deploy-wva-on-openshift
-deploy-wva-on-openshift: manifests kustomize ## Install WVA on OpenShift. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota (quota needs WVA_QUOTAS).
+deploy-wva-on-openshift: manifests kustomize ## Install WVA on OpenShift. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota|gpu-inventory,quota (quota needs WVA_QUOTAS).
 	$(call wva_phase,$(INSTALL_PHASE_ARG),openshift)
 
 ## Removing. Pass the SAME SCOPE and namespace you installed with — an uninstall
