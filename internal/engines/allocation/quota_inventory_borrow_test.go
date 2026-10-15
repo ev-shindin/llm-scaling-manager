@@ -250,6 +250,53 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 		Expect(b.inv.EffectiveConfig().NamespaceQuotas["team-a"]).To(Equal(map[string]int{"H100": 8}))
 	})
 
+	// Review finding (bug hunter): after a restart there is no last view, so
+	// a namespace whose ResourceQuota read fails is withheld as stale rather
+	// than frozen. Withholding it must not mark the cohort's pool stale nor
+	// stop the cohort's lender releases.
+	It("keeps releasing to a waiting lender after a restart while one namespace's ResourceQuota read fails", func() {
+		rowB := row
+		rowB.Queue = "team-b-cq"
+		two := snapshot
+		two.Namespace = map[string]config.ExternalCaps{
+			"team-a": {ByType: map[string]int{"H100": 8}}, "team-b": {ByType: map[string]int{"H100": 8}}}
+		two.NamespaceGuaranteed = map[string]config.ExternalCaps{
+			"team-a": {ByType: map[string]int{"H100": 0}}, "team-b": {ByType: map[string]int{"H100": 0}}}
+		two.NamespaceWithinNominal = map[string]config.ExternalCaps{
+			"team-a": {ByType: map[string]int{"H100": 8}}, "team-b": {ByType: map[string]int{"H100": 8}}}
+		two.Borrow = map[string][]config.ExternalBorrow{"team-a": {row}, "team-b": {rowB}}
+		two.SharedPools = []config.ExternalSharedPool{{Cohort: "c", Flavor: "h100", Resource: "nvidia.com/gpu",
+			Accelerator: "H100", Free: 0, Lenders: []config.ExternalLender{{Queue: "lender-cq", Waiting: true, LentOut: 16}}}}
+
+		// A fresh inventory and no borrowing memory: the first read after a
+		// restart, team-b's ResourceQuota list failing from the start.
+		elig := &fakeEligibility{byNS: map[string]kueue.NamespaceEligibility{"team-b": {Reason: kueue.ReasonStale}}}
+		b := build(entry(nil), elig, true, two)
+		c, err := b.lim.ComputeConstraints(ctx, nil, map[string]map[string]int{"team-a": {"H100": 8}, "team-b": {"H100": 8}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(c.BorrowWithheld).To(HaveKeyWithValue("team-b", string(kueue.ReasonStale)))
+		Expect(c.NamespaceBorrow).To(HaveKey("team-a"))
+		Expect(c.SharedPools).To(HaveLen(1))
+		Expect(c.SharedPools[0].Stale).To(BeFalse(), "withholding one namespace leaves the cohort's pool fresh")
+		Expect(c.SharedPools[0].Lenders).To(HaveLen(1))
+
+		g := NewBorrowGovernor(DefaultBorrowSettings())
+		reqs := []ModelScalingRequest{borrowModel("team-a", "m", 8, 1, 0, nil)}
+		reqs[0].VariantStates[0].AcceleratorName = "H100"
+		var rel []BorrowRelease
+		for _, d := range []time.Duration{0, 30 * time.Second, 61 * time.Second} {
+			cycle := *c
+			cycle.SharedPools = []SharedPoolChunk{c.SharedPools[0]}
+			cycle.SharedPools[0].ReadAt = observed.Add(d)
+			bc := BorrowCycle{Now: observed.Add(d), Constraints: []*ResourceConstraints{&cycle}, Requests: reqs}
+			g.Observe(bc)
+			rel = append(rel, g.Releases(bc, decisionsOf(reqs))...)
+		}
+		Expect(rel).To(HaveLen(1), "team-a's borrowed replica goes back to the waiting lender")
+		Expect(rel[0].Namespace).To(Equal("team-a"))
+		Expect(rel[0].Cause).To(Equal(ReleaseLenderWaiting))
+	})
+
 	It("keeps the frozen view across a limiter rebuild while the source is stale", func() {
 		mem := &borrowMemory{}
 		src := &fakeQuotaSource{}
