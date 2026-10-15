@@ -205,12 +205,12 @@ var _ = Describe("BorrowGovernor release units", func() {
 			reqs := []ModelScalingRequest{govModel("m", 4, 8), govModel("x", 2, 8)}
 			ds := decisionsOf(reqs)
 			ds[0].TargetReplicas, ds[1].TargetReplicas = 6, 3 // the demand floor asks for more
-			g.HoldReleases(t0, ds)
+			g.HoldReleases(t0, reqs, ds)
 			Expect(targets(ds)).To(Equal(map[string]int{"m-v": 3, "x-v": 1}))
 
 			later := t0.Add(settings.Cooldown + settings.ReleaseActuation + time.Minute)
 			ds = decisionsOf(reqs)
-			g.HoldReleases(later, ds)
+			g.HoldReleases(later, reqs, ds)
 			Expect(targets(ds)).To(Equal(map[string]int{"m-v": 4, "x-v": 2}), "borrowing has stayed off: nothing is pinned")
 			Expect(g.Ledger().Entries).To(BeEmpty())
 		})
@@ -235,9 +235,72 @@ var _ = Describe("BorrowGovernor release units", func() {
 			restarted.Restore(l)
 			now := t0.Add(7 * time.Minute)
 			Expect(restarted.BorrowBlocked("b", "m", "m-v", now)).To(BeTrue(), "the preemption cooldown survives the restart")
-			ds := decisionsOf([]ModelScalingRequest{govModel("x", 2, 8)})
-			restarted.HoldReleases(now, ds)
+			held := []ModelScalingRequest{govModel("x", 2, 8)}
+			ds := decisionsOf(held)
+			restarted.HoldReleases(now, held, ds)
 			Expect(targets(ds)["x-v"]).To(Equal(1))
+		})
+
+		// Review finding: a placement-timeout release 3 -> 2, then borrowing
+		// switched off. The unplaced pod is gone, and demand asks 3 again,
+		// within nominal now that borrowing is not counted. The hold must not
+		// cap it at 2 for the cooldown plus the actuation window.
+		It("drops a placement-timeout hold once it landed, in cycles that count no borrowing", func() {
+			g := NewBorrowGovernor(settings)
+			x := unplacedVariant(govModel("x", 3, 8), "x-v", t0)
+			c := BorrowCycle{Now: t0.Add(settings.PlacementTimeout + time.Minute), Constraints: govWorld{used: 24}.constraints(),
+				Requests: []ModelScalingRequest{x}}
+			g.Observe(c)
+			Expect(g.Releases(c, decisionsOf(c.Requests))).To(HaveLen(1))
+			Expect(g.Ledger().TimeoutHeld).To(HaveKeyWithValue("b/x-v", 2))
+
+			now := c.Now.Add(time.Minute)
+			still := []ModelScalingRequest{govModel("x", 3, 8)}
+			ds := decisionsOf(still)
+			g.HoldReleases(now, still, ds)
+			Expect(targets(ds)["x-v"]).To(Equal(2), "not landed yet: still pinned")
+
+			landed := []ModelScalingRequest{govModel("x", 2, 8)}
+			ds = decisionsOf(landed)
+			ds[0].TargetReplicas = 3 // demand asks for 3, within nominal
+			g.HoldReleases(now.Add(time.Minute), landed, ds)
+			Expect(targets(ds)["x-v"]).To(Equal(3), "landed: the hold no longer caps growth")
+			Expect(g.Ledger().TimeoutHeld).To(BeEmpty())
+		})
+
+		It("stops pinning a lender release's unit once it landed, and marks its pods gone", func() {
+			g := NewBorrowGovernor(settings)
+			l, err := UnmarshalBorrowLedger(`{"entries":[{"cohort":"c","lender":"l","flavor":"h100","resource":"nvidia.com/gpu",` +
+				`"releasedAt":"1970-01-01T05:33:20Z","units":[{"namespace":"b","variant":"m-v","to":3}]}]}`)
+			Expect(err).NotTo(HaveOccurred())
+			g.Restore(l)
+			landed := []ModelScalingRequest{govModel("m", 3, 8)}
+			ds := decisionsOf(landed)
+			ds[0].TargetReplicas = 5
+			g.HoldReleases(t0, landed, ds)
+			Expect(targets(ds)["m-v"]).To(Equal(5))
+			Expect(g.Ledger().Entries).To(HaveLen(1), "kept until a fresh read, once borrowing is counted again")
+			Expect(g.Ledger().Entries[0].PodsGoneAt).NotTo(BeNil())
+		})
+
+		It("persists when cycles stopped counting borrowing, so a restart does not restart the window", func() {
+			g := NewBorrowGovernor(settings)
+			g.Restore(BorrowLedger{TimeoutHeld: map[string]int{"b/x-v": 1}})
+			held := []ModelScalingRequest{govModel("x", 2, 8)}
+			g.HoldReleases(t0, held, decisionsOf(held))
+			raw, err := g.MarshalLedger()
+			Expect(err).NotTo(HaveOccurred())
+			l, err := UnmarshalBorrowLedger(raw)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(l.IdleSince).NotTo(BeNil())
+			Expect(l.IdleSince.Equal(t0)).To(BeTrue())
+
+			restarted := NewBorrowGovernor(settings)
+			restarted.Restore(l)
+			ds := decisionsOf(held)
+			ds[0].TargetReplicas = 3
+			restarted.HoldReleases(t0.Add(settings.Cooldown+settings.ReleaseActuation+time.Minute), held, ds)
+			Expect(targets(ds)["x-v"]).To(Equal(3), "the window ran out across the restart: nothing pinned")
 		})
 
 		It("prunes expired cooldowns and clamps one past the setting", func() {

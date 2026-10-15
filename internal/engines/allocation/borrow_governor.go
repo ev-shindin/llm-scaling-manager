@@ -108,13 +108,16 @@ type ReleaseLedgerEntry struct {
 // a cooldown extended every cycle rewrites the ledger once a minute); and the
 // placement-timeout releases still in force, per "namespace/variant", their
 // target. All of it is bounded by the cohorts, models and variants the
-// controller governs, and pruned as it expires.
+// controller governs, and pruned as it expires. IdleSince is when cycles
+// stopped counting borrowing, so a restart does not restart the window after
+// which the release state is dropped.
 type BorrowLedger struct {
 	Entries        []ReleaseLedgerEntry `json:"entries"`
 	Released       map[string]int       `json:"released,omitempty"`
 	CohortCooldown map[string]time.Time `json:"cohortCooldown,omitempty"`
 	ModelCooldown  map[string]time.Time `json:"modelCooldown,omitempty"`
 	TimeoutHeld    map[string]int       `json:"timeoutHeld,omitempty"`
+	IdleSince      *time.Time           `json:"idleSince,omitempty"`
 }
 
 // BorrowRelease is one release, for logs now and for events and metrics later.
@@ -233,6 +236,9 @@ func (g *BorrowGovernor) Restore(l BorrowLedger) {
 			g.timeoutHeld[k] = stickyRelease{to: to}
 		}
 	}
+	if l.IdleSince != nil && g.idleSince.IsZero() && !g.started {
+		g.idleSince = *l.IdleSince
+	}
 }
 
 // restoreClocks adds the persisted untils dst does not hold.
@@ -267,6 +273,10 @@ func (g *BorrowGovernor) ledgerLocked() BorrowLedger {
 		for k, r := range g.timeoutHeld {
 			out.TimeoutHeld[k] = r.to
 		}
+	}
+	if !g.idleSince.IsZero() {
+		at := g.idleSince.UTC()
+		out.IdleSince = &at
 	}
 	return out
 }
@@ -559,13 +569,22 @@ func (g *BorrowGovernor) applyPins(decisions []domain.VariantDecision, byVariant
 
 // HoldReleases keeps the releases in flight in force in a cycle that counts
 // no borrowing, so neither the demand floor nor the hold raises a released
-// variant again while, say, a Kueue read failed; nothing new is decided and
-// nothing advances. Once cycles have counted no borrowing for the cooldown
-// plus the actuation window, borrowing is taken to be off: the release state
-// is dropped, and the next cycle that counts borrowing starts as after a
-// restart, assuming a release in flight for every waiting lender until its
-// next fresh read.
-func (g *BorrowGovernor) HoldReleases(now time.Time, decisions []domain.VariantDecision) {
+// variant again while, say, a Kueue read failed; nothing new is decided.
+// Once cycles have counted no borrowing for the cooldown plus the actuation
+// window, borrowing is taken to be off: the release state is dropped, and the
+// next cycle that counts borrowing starts as after a restart, assuming a
+// release in flight for every waiting lender until its next fresh read. The
+// start of that window is persisted, so a restart does not restart it.
+//
+// A pin holds only until it has landed. A placement-timeout hold goes once
+// the variant holds no more than its target, as Observe drops it; a lender
+// release's unit stops pinning once its variant holds no more than the unit's
+// target, and the entry is marked PodsGoneAt when every unit has, so it
+// clears on the next fresh read once borrowing is counted again. Without
+// this, growth the cycle allows within nominal -- borrowing is not counted,
+// so every target is -- stayed capped at a released figure for the whole
+// window after the replica it released was long gone.
+func (g *BorrowGovernor) HoldReleases(now time.Time, requests []ModelScalingRequest, decisions []domain.VariantDecision) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.idleSince.IsZero() {
@@ -579,11 +598,33 @@ func (g *BorrowGovernor) HoldReleases(now time.Time, decisions []domain.VariantD
 		g.started = false
 		return
 	}
+	states := indexStates(requests)
+	for k, r := range g.timeoutHeld {
+		if s, ok := states[k]; !ok || heldOf(s.state) <= r.to {
+			delete(g.timeoutHeld, k)
+		}
+	}
 	byVariant := map[string]int{}
 	for i := range decisions {
 		byVariant[decisions[i].Namespace+"/"+decisions[i].VariantName] = i
 	}
-	g.applyPins(decisions, byVariant)
+	for _, e := range g.ledger {
+		gone := true
+		for _, u := range e.Units {
+			k := u.Namespace + "/" + u.Variant
+			if s, ok := states[k]; ok && heldOf(s.state) > u.To {
+				gone = false
+				lowerTo(decisions, byVariant, k, u.To, "borrow-released")
+			}
+		}
+		if gone && !e.Unknown && e.PodsGoneAt == nil {
+			at := now
+			e.PodsGoneAt = &at
+		}
+	}
+	for k, r := range g.timeoutHeld {
+		lowerTo(decisions, byVariant, k, r.to, "borrow-unplaced")
+	}
 }
 
 // timeoutReleases releases borrowed units unplaced past the placement timeout

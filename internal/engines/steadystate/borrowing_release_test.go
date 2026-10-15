@@ -124,4 +124,45 @@ var _ = Describe("giving borrowed capacity back, engine side", func() {
 		restarted.loadBorrowLedger(ctx)
 		Expect(restarted.borrowing.governor.Ledger().Entries).To(HaveLen(1))
 	})
+
+	// A restart while borrowing is not counted: the persisted pins hold, and
+	// the persisted start of the no-borrowing window is not restarted.
+	It("restores persisted pins in a first cycle that counts no borrowing, and only when there are some", func() {
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		reqs := []allocation.ModelScalingRequest{{ModelID: "m", Namespace: "b", VariantStates: []domain.VariantReplicaState{
+			{VariantName: "v", CurrentReplicas: 3, GPUsPerReplica: 8, AcceleratorName: "H100"}}}}
+		decisions := func() []domain.VariantDecision {
+			return []domain.VariantDecision{{Namespace: "b", ModelID: "m", VariantName: "v", AcceleratorName: "H100",
+				CurrentReplicas: 3, TargetReplicas: 4, GPUsPerReplica: 8}}
+		}
+		start := func(ledger string) *Engine {
+			b := fake.NewClientBuilder().WithScheme(scheme)
+			if ledger != "" {
+				b = b.WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: controllerstatus.ConfigMapName, Namespace: config.SystemNamespace()},
+					Data: map[string]string{controllerstatus.KeyBorrowReleaseLedger: ledger}})
+			}
+			c := b.Build()
+			return &Engine{Config: config.NewTestConfig(), client: c, Status: controllerstatus.New(c, c, config.SystemNamespace())}
+		}
+
+		e := start(`{"entries":[],"timeoutHeld":{"b/v":2},"idleSince":"` + now.Add(-5*time.Minute).UTC().Format(time.RFC3339) + `"}`)
+		e.prepareBorrowing(ctx, nil, reqs, nil, now)
+		ds := decisions()
+		e.releaseBorrowed(ctx, reqs, ds, nil, now)
+		Expect(ds[0].TargetReplicas).To(Equal(2), "the persisted placement-timeout hold survives the restart")
+
+		window := allocation.DefaultBorrowSettings().Cooldown + allocation.DefaultBorrowSettings().ReleaseActuation
+		later := now.Add(window - 4*time.Minute)
+		ds = decisions()
+		e.releaseBorrowed(ctx, reqs, ds, nil, later)
+		Expect(ds[0].TargetReplicas).To(Equal(4), "the window counts from before the restart")
+
+		none := start("")
+		ds = decisions()
+		none.releaseBorrowed(ctx, reqs, ds, nil, now)
+		Expect(ds[0].TargetReplicas).To(Equal(4))
+		Expect(none.borrowing.governor).To(BeNil(), "nothing persisted: no governor, the ledger left for the first borrowing cycle")
+		Expect(none.borrowing.ledgerLoaded).To(BeFalse())
+	})
 })

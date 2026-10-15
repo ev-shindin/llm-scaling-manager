@@ -42,6 +42,9 @@ type borrowingState struct {
 	governor *allocation.BorrowGovernor
 	// ledgerLoaded is set once the persisted release ledger was read back.
 	ledgerLoaded bool
+	// holdChecked is set once a cycle that counts no borrowing, before any
+	// that does, looked for persisted pins (restoreHeldReleases).
+	holdChecked bool
 	// lastLedger is the ledger last handed to the status publisher.
 	lastLedger string
 	// preemptSeen is the preemptions already counted -- the preempted pods'

@@ -1378,7 +1378,7 @@ func (e *Engine) optimizeV2(
 	// Stage 3b: release borrowed capacity a waiting lender or an unplaced
 	// replica asks back, last, so nothing above raises it again
 	// (borrowing_release.go). A no-op without borrowing.
-	e.releaseBorrowed(ctx, allDecisions, variantScaleTargets, borrowNow)
+	e.releaseBorrowed(ctx, requests, allDecisions, variantScaleTargets, borrowNow)
 	// What on-call sees: the budgets the cycle used, the borrowing reasons,
 	// unplaced pods and waiting lenders (borrowing_signals.go). Every cycle,
 	// so a cleared condition clears its series.

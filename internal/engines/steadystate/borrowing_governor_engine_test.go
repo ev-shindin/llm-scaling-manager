@@ -131,13 +131,13 @@ var _ = Describe("borrowing governor, engine side", func() {
 		}
 		e.prepareBorrowing(ctx, borrowing(), unplaced, deployment, now)
 		ds := decisions(2)
-		e.releaseBorrowed(ctx, ds, deployment, now)
+		e.releaseBorrowed(ctx, unplaced, ds, deployment, now)
 		Expect(ds[0].TargetReplicas).To(Equal(1), "released after the placement timeout")
 
 		later := now.Add(30 * time.Second)
 		e.prepareBorrowing(ctx, nil, unplaced, deployment, later) // a Kueue read failed: no borrowing this cycle
 		ds = decisions(3)                                         // the demand floor asks for more
-		e.releaseBorrowed(ctx, ds, deployment, later)
+		e.releaseBorrowed(ctx, unplaced, ds, deployment, later)
 		Expect(ds[0].TargetReplicas).To(Equal(1), "the release stays in force")
 	})
 })

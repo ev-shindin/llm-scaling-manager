@@ -93,14 +93,14 @@ func (e *Engine) borrowBlocked() func(namespace, modelID, variant string) bool {
 // changed. In a cycle that counts no borrowing nothing new is decided, but the
 // releases already in flight still hold (BorrowGovernor.HoldReleases): a
 // transient read failure must not let the demand floor raise them again.
-func (e *Engine) releaseBorrowed(ctx context.Context, decisions []domain.VariantDecision,
-	scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) {
+func (e *Engine) releaseBorrowed(ctx context.Context, requests []allocation.ModelScalingRequest,
+	decisions []domain.VariantDecision, scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) {
 	st := &e.borrowing
-	if st.governor == nil {
+	if st.governor == nil && !e.restoreHeldReleases(ctx) {
 		return
 	}
 	if st.cycle.Now.IsZero() {
-		st.governor.HoldReleases(now, decisions)
+		st.governor.HoldReleases(now, requests, decisions)
 		e.persistBorrowLedger(ctx)
 		return
 	}
@@ -118,6 +118,27 @@ func (e *Engine) releaseBorrowed(ctx context.Context, decisions []domain.Variant
 		}
 	}
 	e.persistBorrowLedger(ctx)
+}
+
+// restoreHeldReleases is for a process whose first cycles count no borrowing:
+// once, it reads the persisted ledger, and keeps a governor only when that
+// ledger pins something (a release in flight or a placement-timeout hold), so
+// those pins, and the window after which they are dropped, survive a restart.
+// Otherwise it leaves no governor and the ledger unloaded, for the first cycle
+// that counts borrowing to load. Reports whether a governor now exists.
+func (e *Engine) restoreHeldReleases(ctx context.Context) bool {
+	st := &e.borrowing
+	if st.holdChecked {
+		return false
+	}
+	st.holdChecked = true
+	st.governor = allocation.NewBorrowGovernor(e.borrowSettings())
+	e.loadBorrowLedger(ctx)
+	if l := st.governor.Ledger(); len(l.Entries) > 0 || len(l.TimeoutHeld) > 0 {
+		return true
+	}
+	st.governor, st.ledgerLoaded, st.lastLedger = nil, false, ""
+	return false
 }
 
 // loadBorrowLedger reads the persisted ledger back, once. Until it succeeds
