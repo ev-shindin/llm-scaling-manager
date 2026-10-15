@@ -238,6 +238,12 @@ func (e *Eligibility) managed(ctx context.Context, ns string) (bool, bool) {
 		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed || resources.PodGPURequests(pod) <= 0 {
 			continue
 		}
+		if StoppedByKueue(pod) {
+			// Kueue is deleting it (a preemption) and has usually removed its
+			// Workload already: judged as unmanaged, it withheld the whole
+			// namespace for the pod's grace period, measured at ~30s live.
+			continue
+		}
 		found = true
 		if workloads == nil {
 			var known bool
@@ -259,6 +265,24 @@ func (e *Eligibility) managed(ctx context.Context, ns string) (bool, bool) {
 		}
 	}
 	return found, found
+}
+
+// TerminationTargetCondition is the pod condition Kueue sets on a pod it is
+// about to delete, for example on a preemption.
+const TerminationTargetCondition = "TerminationTarget"
+
+// StoppedByKueue reports whether Kueue is deleting pod: it is terminating and
+// carries Kueue's TerminationTarget condition. A terminating pod without that
+// condition still counts, so a tenant cannot hide a GPU pod from the managed
+// check by holding it in termination with a finalizer; pod conditions sit in
+// the status subresource, which tenants do not write.
+func StoppedByKueue(pod *corev1.Pod) bool {
+	if pod.DeletionTimestamp == nil {
+		return false
+	}
+	return slices.ContainsFunc(pod.Status.Conditions, func(c corev1.PodCondition) bool {
+		return string(c.Type) == TerminationTargetCondition && c.Status == corev1.ConditionTrue
+	})
 }
 
 // PodGated reports whether a pod is held behind Kueue's admission gate.

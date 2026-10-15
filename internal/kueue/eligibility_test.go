@@ -152,6 +152,21 @@ func labelled(p *corev1.Pod) { p.Labels = map[string]string{ManagedLabel: "true"
 // gated puts a pod behind Kueue's admission gate.
 func gated(p *corev1.Pod) { p.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: AdmissionGate}} }
 
+// terminating marks a pod as being deleted; the fake client needs a finalizer
+// to hold an object with a deletion timestamp.
+func terminating(p *corev1.Pod) {
+	now := metav1.Now()
+	p.DeletionTimestamp = &now
+	p.Finalizers = []string{"test/hold"}
+}
+
+// stoppedByKueue adds the condition Kueue sets on a pod it is deleting.
+func stoppedByKueue(p *corev1.Pod) {
+	p.Status.Conditions = append(p.Status.Conditions, corev1.PodCondition{
+		Type: TerminationTargetCondition, Status: corev1.ConditionTrue, Reason: "WorkloadEvictedDueToPreempted",
+	})
+}
+
 // chargedPod is a labelled GPU pod and the reserved Workload Kueue's pod
 // integration owns it by.
 func chargedPod(name string) []client.Object {
@@ -224,6 +239,12 @@ var _ = Describe("Eligibility: the engine-side borrowing conditions", func() {
 		Entry("a pod without GPUs is not judged", Reason(""),
 			append(chargedPod("a"), gpuPod("cpu", 0, rs))),
 		Entry("no GPU pod on the first read: not managed", ReasonNotKueueManaged, []client.Object(nil)),
+		// Found live (e2e): a preempted pod outlives its Workload by its grace
+		// period, and judged unmanaged it withheld the namespace for ~30s.
+		Entry("a pod Kueue is deleting after its Workload is gone is not judged", Reason(""),
+			append(chargedPod("a"), gpuPod("preempted", 8, nil, labelled, terminating, stoppedByKueue))),
+		Entry("a terminating pod without Kueue's TerminationTarget still is", ReasonNotKueueManaged,
+			append(chargedPod("a"), gpuPod("held", 8, nil, labelled, terminating))),
 	)
 
 	It("keeps the previous answer when the Workloads cannot be listed for a reason that may pass", func() {
