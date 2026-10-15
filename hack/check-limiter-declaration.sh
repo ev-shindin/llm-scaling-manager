@@ -52,7 +52,7 @@ BLUE=''; GREEN=''; YELLOW=''; RED=''; NC=''
 # exported, and with `WVA_QUOTA_SCOPE=cluster` in the environment this check
 # produced six FAILs all blaming the code. A check that depends on the caller's
 # shell reports on the shell.
-unset WVA_QUOTAS WVA_QUOTA_SCOPE WVA_QUOTA_KUEUE WVA_SCOPE WVA_WATCH_NS WVA_LIMITER WVA_LIMITER_TYPE
+unset WVA_QUOTAS WVA_QUOTA_SCOPE WVA_QUOTA_KUEUE WVA_QUOTA_KUEUE_BORROW WVA_SCOPE WVA_WATCH_NS WVA_LIMITER WVA_LIMITER_TYPE
 WVA_NS="wva-system"
 # shellcheck disable=SC1090
 . "$WORK/limiter_policy.sh"
@@ -283,6 +283,55 @@ elif [ -n "$OUT" ]; then
     fail "WVA_QUOTA_KUEUE=yes was refused but a partial entry was printed first: $OUT"
 else
     ok "WVA_QUOTA_KUEUE takes only true or false"
+fi
+
+# WVA_QUOTA_KUEUE_BORROW=false opts the entry out of counting cohort borrowing:
+# the kueue block carries countBorrowable: false (config.KueueQuotaSource).
+WVA_SCOPE=namespace WVA_WATCH_NS=tenant-a WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=false emit quota
+if [ "$RC" -ne 0 ]; then
+    fail "WVA_QUOTA_KUEUE_BORROW=false refused a valid entry: $ERR"
+else
+    got="$(printf '%s\n' "$OUT" | yq -o=json '.' 2>/dev/null)"
+    [ "$(printf '%s' "$got" | jq -r '.[0].kueue.countBorrowable')" = "false" ] \
+        || fail "WVA_QUOTA_KUEUE_BORROW=false did not emit kueue.countBorrowable: false: $got"
+    [ "$(printf '%s' "$got" | jq -r '.[0].kueue.enabled')" = "true" ] \
+        || fail "WVA_QUOTA_KUEUE_BORROW=false lost kueue.enabled: $got"
+    ok "WVA_QUOTA_KUEUE_BORROW=false emits countBorrowable: false in the kueue block"
+fi
+
+# true (the default) writes nothing: the controller default counts borrowing.
+WVA_SCOPE=namespace WVA_WATCH_NS=tenant-a WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=true emit quota
+if [ "$RC" -ne 0 ]; then
+    fail "WVA_QUOTA_KUEUE_BORROW=true refused a valid entry: $ERR"
+else
+    got="$(printf '%s\n' "$OUT" | yq -o=json '.' 2>/dev/null)"
+    [ "$(printf '%s' "$got" | jq -r '.[0].kueue.countBorrowable // "absent"')" != "false" ] \
+        || fail "WVA_QUOTA_KUEUE_BORROW=true emitted countBorrowable: false: $got"
+    ok "WVA_QUOTA_KUEUE_BORROW=true leaves countBorrowable to its default"
+fi
+
+WVA_SCOPE=namespace WVA_WATCH_NS=tenant-a WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=no emit quota
+if [ "$RC" -eq 0 ]; then
+    fail "WVA_QUOTA_KUEUE_BORROW=no was accepted; emitted: $OUT"
+elif [ -n "$OUT" ]; then
+    fail "WVA_QUOTA_KUEUE_BORROW=no was refused but a partial entry was printed first: $OUT"
+else
+    ok "WVA_QUOTA_KUEUE_BORROW takes only true or false"
+fi
+
+# Without the Kueue block there is nothing to put it on: ignored, and said so.
+WVA_SCOPE=namespace WVA_WATCH_NS=tenant-a WVA_QUOTAS='H100=8' WVA_QUOTA_KUEUE_BORROW=false emit quota
+if [ "$RC" -ne 0 ]; then
+    fail "WVA_QUOTA_KUEUE_BORROW=false without WVA_QUOTA_KUEUE refused a valid entry: $ERR"
+else
+    got="$(printf '%s\n' "$OUT" | yq -o=json '.' 2>/dev/null)"
+    [ "$(printf '%s' "$got" | jq -r '.[0] | has("kueue")')" = "false" ] \
+        || fail "WVA_QUOTA_KUEUE_BORROW without WVA_QUOTA_KUEUE emitted a kueue block: $got"
+    case "$ERR" in
+        *WVA_QUOTA_KUEUE_BORROW*IGNORED*) ;;
+        *) fail "WVA_QUOTA_KUEUE_BORROW without WVA_QUOTA_KUEUE was dropped silently: $ERR" ;;
+    esac
+    ok "WVA_QUOTA_KUEUE_BORROW without WVA_QUOTA_KUEUE is ignored, with a warning"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1193,7 +1242,7 @@ fi
 # and the check still prints OK -- and the ok() suppression means the count of
 # ok lines is not comparable against a known-good run either.
 case_begin
-CASES_EXPECTED=69
+CASES_EXPECTED=73
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

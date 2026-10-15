@@ -810,5 +810,7 @@ Where the code settled a detail this text leaves open, or differs from it:
 - **Thrash alert.** Counts starts of `borrow-released` and
   `lender-reclaimed` at one-minute resolution; overlapping releases count
   once.
-- **Opt-out.** `countBorrowable: false` on the entry; the installer has no
-  `WVA_QUOTA_KUEUE_BORROW` flag.
+- **Opt-out.** `countBorrowable: false` on the entry, which the installer
+  writes for `WVA_QUOTA_KUEUE_BORROW=false` (`make deploy-wva` and
+  `make enable-physical-limiter`); ignored, with a warning, without
+  `WVA_QUOTA_KUEUE=true`.

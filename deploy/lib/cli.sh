@@ -67,8 +67,13 @@ Environment Variables:
                                The TYPE is the name WVA resolves, which it logs per variant.
   WVA_QUOTA_KUEUE              true | false (default). With a quota limiter, also read Kueue: per
                                namespace and accelerator type the SMALLER of the Kueue grant
-                               (with cohort borrowing where it is safe) and WVA_QUOTAS applies. Name the types in WVA_QUOTAS with -1
-                               to let Kueue set the figure: WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true.
+                               (with cohort borrowing where it is safe) and WVA_QUOTAS applies.
+                               Name the types in WVA_QUOTAS with -1 to let Kueue set the figure:
+                               WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true.
+  WVA_QUOTA_KUEUE_BORROW       true (default) | false. With WVA_QUOTA_KUEUE=true, false writes
+                               countBorrowable: false on the entry, so the Kueue cap stays at
+                               nominal and no cohort borrowing is counted. Ignored, with a warning,
+                               without WVA_QUOTA_KUEUE=true.
   WVA_QUOTA_SCOPE              namespace (default) | cluster. namespace caps each managed namespace
                                separately; cluster caps the sum across all of them -- but only
                                within ONE controller's policy. Published to several controllers

@@ -300,7 +300,8 @@ Kueue lets a ClusterQueue borrow unused quota from other queues in its cohort.
 A namespace-scope entry with `kueue.enabled` **counts that borrowing by
 default**: a model may grow past its namespace's own quota into capacity its
 cohort lends, and the scaling manager gives it back when it must. Set
-`countBorrowable: false` on the entry to cap at nominal exactly as before.
+`countBorrowable: false` on the entry (the installer writes it for
+`WVA_QUOTA_KUEUE_BORROW=false`) to cap at nominal exactly as before.
 A cluster-scope entry is not affected: borrowing moves capacity between queues
 and leaves the cluster total as it is.
 

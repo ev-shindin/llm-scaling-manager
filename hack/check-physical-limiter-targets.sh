@@ -34,7 +34,7 @@ for lib in common.sh limiter_policy.sh physical_limiter.sh; do
     tr -d '\r' < "$ROOT/deploy/lib/$lib" > "$WORK/$lib"
 done
 BLUE=''; GREEN=''; YELLOW=''; RED=''; NC=''
-unset WVA_QUOTAS WVA_QUOTA_SCOPE WVA_QUOTA_KUEUE WVA_SCOPE WVA_WATCH_NS WVA_LIMITER WVA_LIMITER_TYPE \
+unset WVA_QUOTAS WVA_QUOTA_SCOPE WVA_QUOTA_KUEUE WVA_QUOTA_KUEUE_BORROW WVA_SCOPE WVA_WATCH_NS WVA_LIMITER WVA_LIMITER_TYPE \
     WVA_LIMITER_TARGETS WVA_CONTROLLER_SA WVA_CONTROLLER_IMAGE_REPOS WVA_IMAGE_REPO
 WVA_NS="wva-system"
 WVA_POLICY_NS="wva-policy"
@@ -433,6 +433,33 @@ else
     ok "the Kueue reader's get namespaces names the managed namespace (namespace scope) and nothing else"
 fi
 
+# WVA_QUOTA_KUEUE_BORROW=false reaches the published policy as
+# countBorrowable: false; unset, the field is not written. The patch payload is
+# pretty-printed JSON over several lines, so the call is read up to the next one.
+wva_policy_patch() { sed -n '/CALL.patch configmap wva-scaling-policy-config -n wva-policy/,/^CALL.auth/p' "$CALLS"; }
+case_begin
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=false WVA_QUOTAS=H200=-1
+if [ "$RC" -ne 0 ]; then
+    fail "enable with WVA_QUOTA_KUEUE_BORROW=false failed: $(tail -15 "$WORK/out")"
+elif ! wva_policy_patch | grep -q 'countBorrowable: false'; then
+    fail "WVA_QUOTA_KUEUE_BORROW=false did not reach the cluster policy: $(wva_policy_patch | head -12)"
+else
+    ok "WVA_QUOTA_KUEUE_BORROW=false writes countBorrowable: false into the cluster policy"
+fi
+case_begin
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=-1
+if [ "$RC" -ne 0 ]; then
+    fail "enable with a Kueue quota failed: $(tail -15 "$WORK/out")"
+elif ! grep -q 'CALL\[patch configmap wva-scaling-policy-config -n wva-policy' "$CALLS"; then
+    fail "enable wrote no cluster policy: $(tail -15 "$WORK/out")"
+elif ! wva_policy_patch | grep -q 'kueue'; then
+    fail "the cluster policy carries no kueue block, so the absence below proves nothing: $(wva_policy_patch | head -12)"
+elif wva_policy_patch | grep -q 'countBorrowable'; then
+    fail "an unset WVA_QUOTA_KUEUE_BORROW wrote countBorrowable: $(wva_policy_patch | head -12)"
+else
+    ok "an unset WVA_QUOTA_KUEUE_BORROW leaves countBorrowable out of the cluster policy"
+fi
+
 # A namespace-scoped controller does not watch a policy namespace outside the
 # one it manages, so it sees the new policy only after a restart -- which
 # enable must do, after the write. A cluster-scoped one reloads live.
@@ -543,7 +570,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=30
+CASES_EXPECTED=32
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately."
 else

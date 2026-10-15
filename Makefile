@@ -51,8 +51,10 @@ WVA_SCOPE           ?=
 # (WVA_QUOTAS='H200=8 A100=4'); there is no default, and an empty quota entry is
 # a budget of zero rather than unlimited. WVA_QUOTA_SCOPE is namespace|cluster.
 # WVA_QUOTA_KUEUE=true also reads Kueue: per namespace and accelerator type the
-# smaller of the Kueue nominal quota and WVA_QUOTAS applies (name the types with
-# -1 to let Kueue set the figure) -- docs/well-lit-paths/kueue-bounded-quotas/.
+# smaller of the Kueue grant and WVA_QUOTAS applies (name the types with -1 to
+# let Kueue set the figure) -- docs/well-lit-paths/kueue-bounded-quotas/. The
+# grant counts cohort borrowing where it is safe; WVA_QUOTA_KUEUE_BORROW=false
+# keeps it at nominal.
 # On a cluster-scoped install it also adds gpu-inventory beside the quota, unless
 # WVA_LIMITER_PHYSICAL=false.
 WVA_LIMITER         ?= none
@@ -479,6 +481,7 @@ enable-physical-limiter: ## CLUSTER ADMIN: bound every WVA by real GPUs. Publish
 		WVA_LIMITER_TARGETS="$(WVA_LIMITER_TARGETS)" \
 		WVA_CONTROLLER_SA='$(WVA_CONTROLLER_SA)' WVA_CONTROLLER_IMAGE_REPOS='$(WVA_CONTROLLER_IMAGE_REPOS)' \
 		WVA_QUOTAS='$(WVA_QUOTAS)' WVA_QUOTA_SCOPE=$(WVA_QUOTA_SCOPE) WVA_QUOTA_KUEUE=$(WVA_QUOTA_KUEUE) \
+		$(if $(WVA_QUOTA_KUEUE_BORROW),WVA_QUOTA_KUEUE_BORROW=$(WVA_QUOTA_KUEUE_BORROW),) \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/limiter_policy.sh; source deploy/lib/physical_limiter.sh; enable_physical_limiter'
 
 .PHONY: disable-physical-limiter
@@ -567,7 +570,7 @@ SCOPE ?= $(if $(WVA_SCOPE),$(WVA_SCOPE),namespace)
 define wva_phase
 	@echo "Phase '$(if $(1),$(1),auto)', $(SCOPE)-scoped$(if $(2), on $(2),)"
 	$(if $(filter prereqs,$(1)),,@echo "Image: $(IMG)")
-	$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) IMG=$(IMG) WVA_SCOPE=$(SCOPE) WVA_LIMITER=$(WVA_LIMITER) $(if $(WVA_QUOTAS),WVA_QUOTAS='$(WVA_QUOTAS)',) $(if $(WVA_QUOTA_SCOPE),WVA_QUOTA_SCOPE=$(WVA_QUOTA_SCOPE),) $(if $(WVA_QUOTA_KUEUE),WVA_QUOTA_KUEUE=$(WVA_QUOTA_KUEUE),) $(if $(WVA_LIMITER_PHYSICAL),WVA_LIMITER_PHYSICAL=$(WVA_LIMITER_PHYSICAL),) $(if $(1),INSTALL_PHASE=$(1),) $(if $(2),ENVIRONMENT=$(2),) WVA_DEFAULT_SO=$(WVA_DEFAULT_SO) $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) $(if $(PROMETHEUS_URL),PROMETHEUS_URL=$(PROMETHEUS_URL),) ./deploy/install.sh
+	$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) IMG=$(IMG) WVA_SCOPE=$(SCOPE) WVA_LIMITER=$(WVA_LIMITER) $(if $(WVA_QUOTAS),WVA_QUOTAS='$(WVA_QUOTAS)',) $(if $(WVA_QUOTA_SCOPE),WVA_QUOTA_SCOPE=$(WVA_QUOTA_SCOPE),) $(if $(WVA_QUOTA_KUEUE),WVA_QUOTA_KUEUE=$(WVA_QUOTA_KUEUE),) $(if $(WVA_QUOTA_KUEUE_BORROW),WVA_QUOTA_KUEUE_BORROW=$(WVA_QUOTA_KUEUE_BORROW),) $(if $(WVA_LIMITER_PHYSICAL),WVA_LIMITER_PHYSICAL=$(WVA_LIMITER_PHYSICAL),) $(if $(1),INSTALL_PHASE=$(1),) $(if $(2),ENVIRONMENT=$(2),) WVA_DEFAULT_SO=$(WVA_DEFAULT_SO) $(if $(WVA_DEFAULT_SO_NS),WVA_DEFAULT_SO_NS=$(WVA_DEFAULT_SO_NS),) $(if $(PROMETHEUS_URL),PROMETHEUS_URL=$(PROMETHEUS_URL),) ./deploy/install.sh
 endef
 
 # wva_check: $(1)=ENVIRONMENT

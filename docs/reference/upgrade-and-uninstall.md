@@ -146,8 +146,9 @@ What changes without a config change:
   two 8-GPU roles ordered 16 (bug fix).
 - **A Kueue-bounded namespace quota counts cohort borrowing**, on by default,
   where it is safe; the scaling manager may then lower a borrowing model to
-  give capacity back. To keep the nominal cap, set `countBorrowable: false`
-  under the entry's `kueue:` block. See
+  give capacity back. To keep the nominal cap, re-run the install with
+  `WVA_QUOTA_KUEUE_BORROW=false`, or set `countBorrowable: false` under the
+  entry's `kueue:` block. See
   [the Kueue path](../well-lit-paths/kueue-bounded-quotas/#borrowing).
 
 New reads, for borrowing: `cohorts` and `workloads` (Kueue), and in the
@@ -161,6 +162,8 @@ above); until then borrowing is withheld (`hierarchy-unknown`,
 Installer:
 
 - `WVA_LIMITER` takes a list: `WVA_LIMITER=gpu-inventory,quota`.
+- `WVA_QUOTA_KUEUE_BORROW=false`, beside `WVA_QUOTA_KUEUE=true`, keeps the
+  Kueue cap at nominal (`countBorrowable: false`).
 - With `WVA_QUOTA_KUEUE=true` on a cluster-scoped install, a `gpu-inventory`
   entry is added beside the quota; `WVA_LIMITER_PHYSICAL=false` leaves it out.
 - `make disable-physical-limiter` removes one kind only: the physical

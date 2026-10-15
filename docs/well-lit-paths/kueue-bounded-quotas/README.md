@@ -16,7 +16,7 @@
      - Namespace owner (advisory; you can edit it): `WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true make deploy-wva`.
      - Cluster admin (a budget the tenant cannot edit): `make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true`.
 - **Check it works:** `quota entry bounded by external caps` in the controller log, carrying the effective caps, and the `Kueue borrowing applied` line, which says per namespace whether borrowing is counted and why not ([Verifying it](#verifying-it)). The two failure lines: `external quota source unreadable` is missing `kueue-reader` RBAC; `external quota source grants no GPUs` means no LocalQueue in the namespace reaches a ClusterQueue with a GPU resource.
-- **Turn borrowing off, keep the Kueue cap:** set `countBorrowable: false` under the entry's `kueue:` block in the policy ConfigMap ([Borrowing](#borrowing)). The installer has no flag for it.
+- **Turn borrowing off, keep the Kueue cap:** add `WVA_QUOTA_KUEUE_BORROW=false` to the same command as `WVA_QUOTA_KUEUE=true`. It writes `countBorrowable: false` on the entry ([Borrowing](#borrowing)).
 - **Undo** (no guide step). Left at `-1` without Kueue, the entry is no cap at all, so replace it rather than only dropping the flag:
   - One install (namespace owner): re-run `make deploy-wva` with `WVA_LIMITER=quota`, a finite `WVA_QUOTAS` and no `WVA_QUOTA_KUEUE`, or with no `WVA_LIMITER` to declare no limiter.
   - Cluster policy (cluster admin): re-run `make enable-physical-limiter WVA_LIMITER_TYPE=quota` with a finite `WVA_QUOTAS` and no `WVA_QUOTA_KUEUE`, or `make disable-physical-limiter`.
@@ -209,8 +209,10 @@ a lender that cannot, or when a borrowed replica does not place within
 `placementTimeout`. Each loss is a cold start. Scale-from-zero, the warm pool
 and rescale never use borrowed capacity.
 
-**Turn it off** with `countBorrowable: false` under the entry's `kueue:`
-block; the cap is then nominal, exactly as before borrowing was counted.
+**Turn it off** with `WVA_QUOTA_KUEUE_BORROW=false` beside
+`WVA_QUOTA_KUEUE=true` on `make deploy-wva` or `make enable-physical-limiter`,
+or by hand with `countBorrowable: false` under the entry's `kueue:` block. The
+cap is then nominal, exactly as before borrowing was counted.
 
 **On upgrade** a Kueue-bounded entry starts counting borrowing without a
 config change, where the conditions hold; a namespace-scoped install needs a
