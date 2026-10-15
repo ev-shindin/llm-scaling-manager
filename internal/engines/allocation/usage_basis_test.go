@@ -134,42 +134,6 @@ func TestGPUUsageViewsRouting(t *testing.T) {
 	}
 }
 
-// MissingBasis must be consulted BEFORE any provider is called. A nil view is
-// indistinguishable at the provider from a confident "nothing is in use", and a
-// provider told nothing is in use reports its entire capacity free — the opposite
-// of the "unknown" the caller meant.
-func TestGPUUsageViewsMissingBasis(t *testing.T) {
-	quota := NewDefaultLimiter("quota", NewQuotaInventory(config.QuotaLimiterConfig{
-		Name: "quota", Type: "quota", Scope: config.QuotaScopeCluster,
-		ClusterQuotas: map[string]int{"A100": 4},
-	}))
-	physical := NewDefaultLimiter("gpu", NewTypeInventory("gpu", nil))
-	both := []ConstraintProvider{physical, quota}
-
-	physicalOnly := GPUUsageViews{PhysicalByType: map[string]int{}}
-	if basis, missing := physicalOnly.MissingBasis(both); !missing || basis != ManagedUsage {
-		t.Errorf("MissingBasis = (%v, %t), want (%v, true)", basis, missing, ManagedUsage)
-	}
-	if _, missing := physicalOnly.MissingBasis([]ConstraintProvider{physical}); missing {
-		t.Error("a physical-only deployment must not wait on a managed view nothing reads")
-	}
-
-	managedOnly := GPUUsageViews{ManagedByType: map[string]int{}}
-	if _, missing := managedOnly.MissingBasis([]ConstraintProvider{quota}); missing {
-		t.Error("a quota-only deployment must not wait on a physical view nothing reads")
-	}
-	if basis, missing := managedOnly.MissingBasis(both); !missing || basis != PhysicalUsage {
-		t.Errorf("MissingBasis = (%v, %t), want (%v, true)", basis, missing, PhysicalUsage)
-	}
-
-	// An observed-but-empty view is an answer, not an absence: it says nothing is
-	// in use, which is exactly what a parked fleet's managed view reports.
-	full := GPUUsageViews{PhysicalByType: map[string]int{}, ManagedByType: map[string]int{}}
-	if _, missing := full.MissingBasis(both); missing {
-		t.Error("both views were observed; empty is a measurement, not a gap")
-	}
-}
-
 // The refresher walks nodes for a physical limiter always, and for an active
 // utilization-share optimizer only on a cluster-scoped install: a
 // namespace-scoped one may not list nodes.

@@ -92,6 +92,10 @@ type SelectionInput struct {
 	// Constraints are the GPU/quota constraints to place within. Empty means
 	// unknown, which FitsGPUBudget treats as permissive.
 	Constraints []*allocation.ResourceConstraints
+	// Admitted is what earlier wakes already took against Constraints, by
+	// accelerator name, when Constraints are a remembered snapshot rather than
+	// this tick's: every fit check adds it to the set's own demand.
+	Admitted map[string]int
 	// RequirePrefill refuses a decode-only wake for a disaggregated model.
 	RequirePrefill bool
 }
@@ -228,7 +232,11 @@ func cheapestFeasiblePair(in SelectionInput, decodes, prefills []Candidate) ([]C
 // fits reports whether the set can be placed within the GPU budget, testing the
 // combined demand rather than each member alone.
 func fits(in SelectionInput, set []Candidate) bool {
-	return allocation.FitsGPUBudget(in.Constraints, in.Namespace, demandOf(set))
+	demand := demandOf(set)
+	for accelerator, gpus := range in.Admitted {
+		demand[accelerator] += gpus
+	}
+	return allocation.FitsGPUBudget(in.Constraints, in.Namespace, demand)
 }
 
 // demandOf sums one replica of each candidate, keyed by accelerator type. Two

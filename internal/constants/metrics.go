@@ -358,6 +358,11 @@ const (
 	// would have denied. Without the series that was one Info line per cycle.
 	WVAConstraintProviderSkipped = "wva_constraint_provider_skipped"
 
+	// WVAScaleFromZeroWakeUnchecked counts scale-from-zero wakes published
+	// without any GPU capacity check: limiters are declared, every provider is
+	// unavailable, and no recent snapshot of their constraints exists.
+	WVAScaleFromZeroWakeUnchecked = "wva_scale_from_zero_wake_unchecked_total"
+
 	// ProviderSkipUnobserved: the usage the provider is measured against (all
 	// GPUs on the nodes, or WVA's own) has not been observed.
 	ProviderSkipUnobserved = "unobserved"

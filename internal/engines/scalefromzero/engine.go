@@ -155,6 +155,11 @@ type Engine struct {
 	// the same loop, and a second mutex would only invite them to be taken in
 	// different orders.
 	lastBudgets map[string]string
+	// lastGood is each namespace's last successful constraints, used to check a
+	// wake when every provider is unavailable (see gpuConstraints). Guarded by
+	// snapshotMu: it is placement state, not logging state.
+	snapshotMu sync.Mutex
+	lastGood   map[string]constraintSnapshot
 	// QueueFallback reads the flow-control queue from Prometheus when the direct
 	// EPP scrape fails. Nil disables it — every method guards its receiver — and
 	// the engine then behaves exactly as it did before the fallback existed. See
@@ -216,6 +221,7 @@ func (e *Engine) refreshLimiter(ctx context.Context) {
 	}
 	e.gpuLimiter = limiter
 	e.limiterSig = sig
+	e.forgetConstraints()
 	log.FromContext(ctx).Info("Scale-from-zero: GPU limiter (re)built from config",
 		"limiterTypes", e.config.EffectiveLimiterTypes().String(), "limiters", e.config.EffectiveLimiterSummary(),
 		"name", limiter.Name())
@@ -507,8 +513,9 @@ func (e *Engine) processInactiveModel(
 			"metric", pending.Labels, "value", pending.Value)
 	}
 
-	constraints := e.gpuConstraints(ctx, group.namespace)
-	selected, outcome := e.selectOrClaim(ctx, group, candidates, covered, constraints)
+	place := e.placementFor(ctx, group.namespace)
+	constraints := place.constraints
+	selected, outcome := e.selectOrClaim(ctx, group, candidates, covered, place)
 	if len(selected) == 0 {
 		if outcome == OutcomeAlreadyServing {
 			// The steady state for every serving model with a queue. Not a
@@ -549,6 +556,7 @@ func (e *Engine) processInactiveModel(
 		return nil
 	}
 	e.clearRefusal(group.key())
+	e.recordWake(ctx, group, place, selected)
 
 	// Publishing cannot fail — see publishActivation, which deliberately has no
 	// error path so that a wake can never be left half-applied. That matters most
@@ -733,22 +741,41 @@ func observeCompletedWakes(
 	}
 }
 
+// recordWake accounts for a wake about to be published against place.
+//
+// Admitted against a snapshot nothing refreshes, it is charged to the snapshot,
+// so the next wake in its lifetime does not pass on the GPUs this one takes.
+// Admitted with no check at all although limiters are declared -- every
+// provider unavailable, no young snapshot -- it is counted and logged, one per
+// wake, so an uncapped wake is never silent.
+func (e *Engine) recordWake(ctx context.Context, group modelGroup, place placement, selected []Candidate) {
+	if !place.snapshotTakenAt.IsZero() {
+		e.debitSnapshot(group.namespace, place.snapshotTakenAt, demandOf(selected))
+	}
+	if place.unchecked {
+		metrics.CountScaleFromZeroWakeUnchecked(group.namespace)
+		log.FromContext(ctx).Info("Scale-from-zero: woke WITHOUT a GPU capacity check; every declared limiter is unavailable and no recent snapshot exists",
+			"namespace", group.namespace, "modelID", group.modelID, "metric", constants.WVAScaleFromZeroWakeUnchecked)
+	}
+}
+
 // selectOrClaim selects the variants a wake starts. When no idle GPU and no
 // reserve can host them, a transfer still releasing for another receiver may
 // be claimed instead (utilization-share optimizer, section 6.3); outcome is
 // the selection's either way.
 func (e *Engine) selectOrClaim(ctx context.Context, group modelGroup, candidates []Candidate, covered coverage,
-	constraints []*allocation.ResourceConstraints) ([]Candidate, SelectionOutcome) {
+	place placement) ([]Candidate, SelectionOutcome) {
 	selected, outcome := selectServingSet(SelectionInput{
 		Namespace:      group.namespace,
 		Candidates:     candidates,
 		DecodeCovered:  covered.decode,
 		PrefillCovered: covered.prefill,
-		Constraints:    constraints,
+		Constraints:    place.constraints,
+		Admitted:       place.admitted,
 		RequirePrefill: e.requirePrefill(group.modelID, group.namespace),
 	})
 	if len(selected) == 0 && outcome == OutcomeNoCapacity {
-		if set, ok := e.claimShareTransfer(ctx, group, candidates, constraints, covered); ok {
+		if set, ok := e.claimShareTransfer(ctx, group, candidates, place.constraints, covered); ok {
 			selected = set
 		}
 	}

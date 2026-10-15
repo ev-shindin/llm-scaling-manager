@@ -120,6 +120,10 @@ type Engine struct {
 	limiterSig     string
 	limiterMu      sync.Mutex
 
+	// providerSkips publishes the constraint providers left out of the last
+	// decision (wva_constraint_provider_skipped) and logs when that set changes.
+	providerSkips providerSkipReport
+
 	// metricsRegistry is used to access metrics sources for request count queries
 	metricsRegistry *source.SourceRegistry
 	// Variants is the set of workloads KEDA has called WVA about — discovery. Nil
@@ -1027,14 +1031,16 @@ func modelPolicy(vas []llmdVariantAutoscalingV1alpha1.VariantAutoscaling) (strin
 // available capacity (deny-all), NOT as unlimited — so if it were run with
 // empty constraints it would silently suppress all scale-up.
 //
-// Therefore, whenever real constraints cannot be obtained — the limiter does
-// not provide constraints (no ConstraintProvider), no usage has been observed on
-// a basis some provider needs, or computing them failed because, e.g., node
-// objects are not readable on this cluster — we fall back to the cost-aware
-// optimizer, which is the engine's unlimited path (the same optimizer used when
-// no limiter is declared), so scale-up proceeds unconstrained instead of being
-// blocked. A constraint that is present but reports zero GPUs is left intact:
-// that is a genuine "no capacity" signal and should still block scale-up.
+// A provider whose usage basis has not been observed, or whose constraints
+// cannot be computed (e.g. node objects are not readable on this cluster), is
+// SKIPPED and named in the log; the other providers still bound the cycle (see
+// allocation.ComputeAvailableConstraints). Only when no provider can supply
+// constraints -- the limiter provides none, or every one is unavailable -- do we
+// fall back to the cost-aware optimizer, which is the engine's unlimited path
+// (the same optimizer used when no limiter is declared), so scale-up proceeds
+// unconstrained instead of being blocked. A constraint that is present but
+// reports zero GPUs is left intact: that is a genuine "no capacity" signal and
+// should still block scale-up.
 //
 // Providers do not all consume the same usage figure. A physical inventory is fed
 // every GPU held on the cluster's nodes; a quota is fed only what WVA's own
@@ -1062,6 +1068,7 @@ func (e *Engine) selectV2Optimizer(
 		// Nothing bounds anything -- said out loud, because the warm pool waits
 		// for a headroom snapshot before it grows and nothing else here would
 		// publish one on a cluster with no limiter.
+		e.providerSkips.report(ctx, nil)
 		allocation.PublishUnboundedHeadroom(decision.WarmPoolGPUsVersion(), time.Now())
 		return allocation.NewCostAwareOptimizer(), nil
 	}
@@ -1082,61 +1089,46 @@ func (e *Engine) selectV2Optimizer(
 	// hold. One figure broadcast to both answers the wrong question for one of
 	// them — see allocation.UsageBasis.
 	views := gpuUsageViews(requests)
-	if basis, missing := views.MissingBasis(providers); missing {
-		// No observation on a basis some provider needs. Constraints built on an
-		// absent usage figure would not be "unknown", they would be a confident
-		// claim that nothing is running — and GreedyByScore would allocate the
-		// whole cluster against it. Fall back to the unlimited optimizer, the same
-		// posture this function already takes when no provider can supply
-		// constraints.
-		logger.V(logging.DEBUG).Info("No GPU usage observation yet on a basis some provider needs; "+
-			"using the unlimited optimizer for this cycle", "basis", basis.String())
-		// The models scale unbounded this cycle; the pool follows the same
-		// posture rather than being held against a limit nobody could compute.
-		allocation.PublishUnboundedHeadroom(views.PoolsVersion, time.Now())
-		return allocation.NewCostAwareOptimizer(), nil
-	}
-
-	var constraints []*allocation.ResourceConstraints
-	for _, cp := range providers {
-		usageByType, usageByNS := views.For(cp)
-		constraint, err := cp.ComputeConstraints(ctx, usageByType, usageByNS)
-		if err != nil {
-			logger.Error(err, "Failed to compute GPU constraints, skipping provider", "provider", cp.Name())
-			continue
-		}
-		constraints = append(constraints, views.Stamp(constraint))
-
-		// What the limiter decided this cycle, as numbers.
-		//
-		// Nothing reported this, and the gap is expensive: a quota that fails to
-		// bind and a quota that was never declared look identical from outside,
-		// and the three things that could be wrong -- the cap, the usage charged
-		// against it, and whether the namespace was materialized at all -- are
-		// each invisible. Chasing one cost a day of fifteen-minute cluster runs
-		// that this line would have answered on the first.
-		logger.V(logging.DEBUG).Info("GPU constraints computed",
-			"provider", cp.Name(),
-			"basis", allocation.UsageBasisOf(cp).String(),
-			"usageByType", usageByType,
-			"usageByNamespace", usageByNS,
-			"pools", constraint.Pools,
-			"namespacePools", constraint.NamespacePools,
-			"totalLimit", constraint.TotalLimit,
-			"totalUsed", constraint.TotalUsed,
-			"totalAvail", constraint.TotalAvail)
-	}
+	constraints, skipped := allocation.ComputeAvailableConstraints(ctx, providers, views,
+		func(cp allocation.ConstraintProvider, constraint *allocation.ResourceConstraints,
+			usageByType map[string]int, usageByNS map[string]map[string]int) {
+			// What the limiter decided this cycle, as numbers.
+			//
+			// Nothing reported this, and the gap is expensive: a quota that fails
+			// to bind and a quota that was never declared look identical from
+			// outside, and the three things that could be wrong -- the cap, the
+			// usage charged against it, and whether the namespace was
+			// materialized at all -- are each invisible. Chasing one cost a day
+			// of fifteen-minute cluster runs that this line would have answered
+			// on the first.
+			logger.V(logging.DEBUG).Info("GPU constraints computed",
+				"provider", cp.Name(),
+				"basis", allocation.UsageBasisOf(cp).String(),
+				"usageByType", usageByType,
+				"usageByNamespace", usageByNS,
+				"pools", constraint.Pools,
+				"namespacePools", constraint.NamespacePools,
+				"totalLimit", constraint.TotalLimit,
+				"totalUsed", constraint.TotalUsed,
+				"totalAvail", constraint.TotalAvail)
+		})
+	// Published as wva_constraint_provider_skipped and logged when the set
+	// changes, so a bound that stopped applying is visible without a log line
+	// every cycle.
+	e.providerSkips.report(ctx, skipped)
 
 	// GreedyByScore treats absent constraints as zero available capacity
 	// (deny-all), not as unlimited. When no provider could supply constraints
-	// (limiter is not constraint-backed, or every provider failed — e.g. GPU
-	// capacity cannot be discovered), fall back to the cost-aware optimizer, the
-	// engine's unlimited path, so scale-up proceeds instead of being silently
-	// blocked.
+	// -- every one's usage view is unobserved, or every one failed (the usual
+	// cause is the Node API, for an inventory limiter without node read) --
+	// fall back to the cost-aware optimizer, the engine's unlimited path, so
+	// scale-up proceeds instead of being silently blocked. Constraints built on
+	// an absent usage figure would not be "unknown", they would be a confident
+	// claim that nothing is running, which is why an unobserved basis skips its
+	// provider instead of feeding it nothing.
 	if len(constraints) == 0 {
-		// Same posture as above: every provider failed (the usual cause is the
-		// Node API, for an inventory limiter without node read), the models
-		// scale unbounded, and so may the pool.
+		// The models scale unbounded this cycle; the pool follows the same
+		// posture rather than being held against a limit nobody could compute.
 		allocation.PublishUnboundedHeadroom(views.PoolsVersion, time.Now())
 		return allocation.NewCostAwareOptimizer(), nil
 	}

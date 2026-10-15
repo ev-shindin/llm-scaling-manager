@@ -20,7 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
+	"strings"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -178,26 +180,31 @@ func resolveVariantCost(ctx context.Context, va wvav1alpha1.VariantAutoscaling) 
 // tick after a restart has no usage snapshot yet, and that is exactly when a
 // queued request is waiting to be served.
 //
-// Three things make this nil, and each means the wake is published without a
-// capacity check:
+// A provider that cannot be consulted is SKIPPED and the others still bound the
+// wake (allocation.ComputeAvailableConstraints): its usage view has not been
+// published on the basis it needs, the one that has is too old, or it could not
+// compute constraints. Skipping is safe because constraints intersect -- the
+// survivors deny only what the full set would deny too. This used to drop
+// everything: a quota whose Kueue read failed lifted the physical bound beside
+// it, and a physical view not yet observed lifted every quota.
 //
-//   - No limiter was injected. In production SetGPULimiter is always called, so
-//     this only happens when NewLimiterFromConfig itself failed at startup.
-//     Declaring no limiters: list does NOT land here: EffectiveLimiterMode then
-//     returns the inventory mode, which builds a DefaultLimiter — and that IS a
-//     ConstraintProvider, so the physical check still runs.
-//
-//   - No usage snapshot has been published on a basis some provider needs, or the
-//     one that has is too old. Note this is independent of enableLimiter — the
-//     snapshots are published outside the optimizer guard precisely so that a
-//     default (CostAware) deployment still feeds this path.
-//
-//   - A provider could not compute constraints (see below): a partial view would
-//     deny types the surviving providers happen not to mention.
+// When EVERY provider is unavailable, the wake is checked against this
+// namespace's last successful constraints if they are less than
+// lastConstraintsMaxAge old: an API blip of a few seconds must not turn a
+// placement decision into none at all. A snapshot is a picture of free GPUs
+// that nothing refreshes, so every wake admitted against it is debited from it
+// (placement.admitted) for the rest of its life: a second wake must not pass on
+// the GPUs the first one took. Older than that, or with no limiter
+// injected -- in production only when NewLimiterFromConfig itself failed, since
+// declaring no limiters builds a NoOpLimiter, which provides no constraints --
+// the wake is published without a capacity check.
 //
 // The check is therefore best-effort by construction: it prevents waking onto an
 // accelerator that is known to be full, and stays out of the way when placement
-// cannot be reasoned about.
+// cannot be reasoned about. The snapshot debit is best-effort too: it is kept
+// per namespace, so wakes in two namespaces can still both pass on cluster GPUs
+// one snapshot each counted free, and per accelerator name as each wake
+// declared it, so two spellings of one GPU are debited apart.
 //
 // Every one of those exits is REPORTED (see reportUnchecked). "This wake was not
 // capacity-checked" is not a detail: it is the difference between a placement
@@ -205,54 +212,170 @@ func resolveVariantCost(ctx context.Context, va wvav1alpha1.VariantAutoscaling) 
 // looks identical either way. These used to be V(4) lines, which the shipped
 // verbosity discards, so the permissive path left no trace whatsoever.
 func (e *Engine) gpuConstraints(ctx context.Context, namespace string) []*allocation.ResourceConstraints {
+	return e.placementFor(ctx, namespace).constraints
+}
+
+// placement is what one namespace's wakes are judged against this tick.
+type placement struct {
+	// constraints are the GPU/quota constraints; nil means unchecked.
+	constraints []*allocation.ResourceConstraints
+	// snapshotTakenAt is set when constraints are the namespace's last
+	// successful ones rather than this tick's, and admitted is then what
+	// earlier wakes took against that snapshot, by accelerator name.
+	snapshotTakenAt time.Time
+	admitted        map[string]int
+	// unchecked is true when limiters are declared but every provider was
+	// unavailable and no young snapshot existed: a wake goes uncapped although
+	// the operator asked for a bound.
+	unchecked bool
+}
+
+// placementFor computes the placement basis for namespace; see gpuConstraints.
+func (e *Engine) placementFor(ctx context.Context, namespace string) placement {
 	providers := allocation.ConstraintProvidersFrom(e.currentGPULimiter())
 	if len(providers) == 0 {
 		e.reportUnchecked(ctx, namespace, "no constraint provider is configured")
-		return nil
+		return placement{}
 	}
 
-	views, ok := e.gpuUsageViews(ctx, namespace, providers)
-	if !ok {
-		return nil // gpuUsageViews reported why
-	}
-
-	var constraints []*allocation.ResourceConstraints
-	for _, cp := range providers {
-		usageByType, usageByNamespace := views.For(cp)
-		c, err := cp.ComputeConstraints(ctx, usageByType, usageByNamespace)
-		if err != nil {
-			// A partial view is worse than none. FitsGPUBudget denies any
-			// accelerator type its constraints do not mention, so proceeding with
-			// the survivors would turn "this provider could not be reached" into
-			// "this variant cannot be placed" — refusing a wake with requests
-			// already queued, on the strength of a failed lookup. Fall back to
-			// unknown, matching the saturation engine, which drops to its
-			// unlimited optimizer rather than let scale-up be silently blocked.
-			//
-			// The usual cause is the Node API: an inventory limiter's Refresh
-			// lists nodes, so losing that permission (or the API) turns the whole
-			// check off. Note a SUCCESSFUL discovery that finds no GPU nodes does
-			// the opposite — empty pools mean every demanded type is unknown, and
-			// FitsGPUBudget denies unknown types outright. Only an error is
-			// permissive.
-			e.reportUnchecked(ctx, namespace, fmt.Sprintf(
-				"provider %q could not compute constraints: %v", cp.Name(), err))
-			return nil
+	views, missing := e.gpuUsageViews(ctx, namespace, providers)
+	constraints, skipped := allocation.ComputeAvailableConstraints(ctx, providers, views, nil)
+	// Say WHY a view is missing, not merely that it is: "no snapshot yet" and
+	// "a snapshot 6m old" call for different fixes.
+	for i, s := range skipped {
+		if reason, ok := missing[s.Basis]; ok && s.Unobserved {
+			skipped[i].Reason = reason
 		}
-		constraints = append(constraints, c)
+	}
+	now := time.Now()
+	var (
+		snapshotAge time.Duration
+		p           placement
+	)
+	if len(constraints) == 0 {
+		// Every provider unavailable. The usual cause of a failure is the Node
+		// API: an inventory limiter's Refresh lists nodes, so losing that
+		// permission (or the API) takes the physical check out. Note a
+		// SUCCESSFUL discovery that finds no GPU nodes does the opposite —
+		// empty pools mean every demanded type is unknown, and FitsGPUBudget
+		// denies unknown types outright. Only an error is permissive.
+		last, ok := e.lastConstraints(namespace, now)
+		if !ok {
+			e.reportUnchecked(ctx, namespace, describeSkipped(skipped))
+			return placement{unchecked: true}
+		}
+		constraints, snapshotAge = last.constraints, now.Sub(last.takenAt)
+		p.snapshotTakenAt, p.admitted = last.takenAt, last.admitted
+	} else {
+		e.rememberConstraints(namespace, constraints, now)
 	}
 	// A wake may not take GPUs the utilization-share optimizer has promised
 	// to a receiver: they are released but not yet held, and taking them would
 	// leave the receiver Pending until its fill timeout. Claiming them by
 	// score (section 6.3 of that proposal) is not built; a wake waits for idle
 	// GPUs instead.
-	constraints = allocation.WithholdPromised(constraints, decision.LatestSharePromised(time.Now()))
-	e.logBudgets(ctx, namespace, constraints, views)
-	return constraints
+	constraints = allocation.WithholdPromised(constraints, decision.LatestSharePromised(now))
+	e.logBudgets(ctx, namespace, constraints, views, skipped, snapshotAge)
+	p.constraints = constraints
+	return p
 }
 
-// gpuUsageViews assembles the usage measures this namespace's providers need,
-// reporting and returning false if one of them has not been observed.
+// lastConstraintsMaxAge bounds how old the last successful constraints may be
+// and still check a wake when every provider is unavailable. Past it the wake
+// goes unchecked, as it always did: a stale bound refuses wakes for a reason
+// that may no longer hold, and an API outage that long is not a blip.
+const lastConstraintsMaxAge = 5 * time.Minute
+
+// constraintSnapshot is one namespace's last successful constraints, before
+// promised GPUs are withheld (those are re-read at every use).
+type constraintSnapshot struct {
+	constraints []*allocation.ResourceConstraints
+	takenAt     time.Time
+	// admitted is what wakes checked against this snapshot took, by
+	// accelerator name as each declared it (debitSnapshot).
+	admitted map[string]int
+}
+
+// rememberConstraints records namespace's constraints as its last successful
+// ones.
+func (e *Engine) rememberConstraints(namespace string, constraints []*allocation.ResourceConstraints, now time.Time) {
+	e.snapshotMu.Lock()
+	defer e.snapshotMu.Unlock()
+	if e.lastGood == nil {
+		e.lastGood = make(map[string]constraintSnapshot)
+	}
+	// Entries past the age bound are never used again: drop them, so a
+	// namespace that stopped waking leaves nothing behind.
+	for ns, s := range e.lastGood {
+		if now.Sub(s.takenAt) >= lastConstraintsMaxAge {
+			delete(e.lastGood, ns)
+		}
+	}
+	e.lastGood[namespace] = constraintSnapshot{constraints: constraints, takenAt: now}
+}
+
+// forgetConstraints drops every remembered snapshot: they were computed by a
+// limiter that has just been replaced, and must not check a wake against a
+// bound the new configuration no longer declares.
+func (e *Engine) forgetConstraints() {
+	e.snapshotMu.Lock()
+	defer e.snapshotMu.Unlock()
+	clear(e.lastGood)
+}
+
+// lastConstraints returns namespace's last successful constraints, when they are
+// younger than lastConstraintsMaxAge, with a copy of what has been admitted
+// against them.
+func (e *Engine) lastConstraints(namespace string, now time.Time) (constraintSnapshot, bool) {
+	e.snapshotMu.Lock()
+	defer e.snapshotMu.Unlock()
+	s, ok := e.lastGood[namespace]
+	if !ok {
+		return constraintSnapshot{}, false
+	}
+	if now.Sub(s.takenAt) >= lastConstraintsMaxAge {
+		delete(e.lastGood, namespace)
+		return constraintSnapshot{}, false
+	}
+	s.admitted = maps.Clone(s.admitted)
+	return s, true
+}
+
+// debitSnapshot charges a wake's demand to the snapshot it was admitted
+// against. The snapshot is a picture of free GPUs that nothing refreshes while
+// every provider is unavailable; without the debit, each wake in its lifetime
+// passed on the same free GPUs. Only the snapshot taken at takenAt is debited:
+// one replaced since is fresher, and a removed one is no longer used.
+func (e *Engine) debitSnapshot(namespace string, takenAt time.Time, demand map[string]int) {
+	e.snapshotMu.Lock()
+	defer e.snapshotMu.Unlock()
+	s, ok := e.lastGood[namespace]
+	if !ok || !s.takenAt.Equal(takenAt) {
+		return
+	}
+	if s.admitted == nil {
+		s.admitted = make(map[string]int, len(demand))
+	}
+	for accelerator, gpus := range demand {
+		s.admitted[accelerator] += gpus
+	}
+	e.lastGood[namespace] = s
+}
+
+// describeSkipped joins why each provider was skipped, for the unchecked report.
+func describeSkipped(skipped []allocation.SkippedProvider) string {
+	reasons := make([]string, 0, len(skipped))
+	for _, s := range skipped {
+		reasons = append(reasons, fmt.Sprintf("provider %q: %s", s.Name, s.Reason))
+	}
+	return "every constraint provider is unavailable and no constraints younger than " +
+		lastConstraintsMaxAge.String() + " are on hand: " + strings.Join(reasons, "; ")
+}
+
+// gpuUsageViews assembles the usage measures this namespace's providers need.
+// A measure that has not been observed, or is too old, is left out of the views
+// and its reason returned under its basis; the providers that need it are then
+// skipped, and the rest still bound the wake.
 //
 // Only the measures some provider actually asks for are gathered. A quota-only
 // deployment must not be held up waiting for a physical observation it never
@@ -267,8 +390,9 @@ func (e *Engine) gpuUsageViews(
 	ctx context.Context,
 	namespace string,
 	providers []allocation.ConstraintProvider,
-) (allocation.GPUUsageViews, bool) {
+) (allocation.GPUUsageViews, map[allocation.UsageBasis]string) {
 	var views allocation.GPUUsageViews
+	missing := map[allocation.UsageBasis]string{}
 	needed := make(map[allocation.UsageBasis]bool, 2)
 	for _, cp := range providers {
 		needed[allocation.UsageBasisOf(cp)] = true
@@ -282,13 +406,13 @@ func (e *Engine) gpuUsageViews(
 		// precisely what a placement must not miss.
 		e.UsageRefresher.EnsureFresh(ctx, gpuusage.DecisionMaxAge)
 
-		usage, ok := e.freshUsage(ctx, namespace, decision.LatestGPUUsage,
-			"no cluster GPU-usage snapshot has been published yet")
-		if !ok {
-			return views, false
+		if usage, reason := freshUsage(decision.LatestGPUUsage,
+			"no cluster GPU-usage snapshot has been published yet"); reason != "" {
+			missing[allocation.PhysicalUsage] = reason
+		} else {
+			views.PhysicalByType = usage.ByType
+			views.PhysicalByNamespace = withNamespace(usage.ByNamespace, namespace)
 		}
-		views.PhysicalByType = usage.ByType
-		views.PhysicalByNamespace = withNamespace(usage.ByNamespace, namespace)
 	}
 
 	if needed[allocation.ManagedUsage] {
@@ -296,42 +420,38 @@ func (e *Engine) gpuUsageViews(
 		// population exists — including as an explicit zero when its fleet is
 		// entirely parked, so a quota can still be evaluated for the very workloads
 		// this engine wakes.
-		usage, ok := e.freshUsage(ctx, namespace, decision.LatestManagedGPUUsage,
-			"the saturation engine has published no WVA-managed GPU-usage snapshot yet (no completed cycle)")
-		if !ok {
-			return views, false
+		if usage, reason := freshUsage(decision.LatestManagedGPUUsage,
+			"the saturation engine has published no WVA-managed GPU-usage snapshot yet (no completed cycle)"); reason != "" {
+			missing[allocation.ManagedUsage] = reason
+		} else {
+			views.ManagedByType = usage.ByType
+			views.ManagedByNamespace = withNamespace(usage.ByNamespace, namespace)
 		}
-		views.ManagedByType = usage.ByType
-		views.ManagedByNamespace = withNamespace(usage.ByNamespace, namespace)
 	}
 
-	return views, true
+	return views, missing
 }
 
-// freshUsage reads a snapshot and bounds how old it may be, reporting the wake as
-// unchecked and returning false when it is missing or stale.
+// freshUsage reads a snapshot and bounds how old it may be, returning why it is
+// unusable ("" when it is usable).
 //
 // The bound matters because a producer publishes only measured passes, deliberately
 // leaving the last snapshot alone when one fails. That is right for a blip, but an
 // unbounded one would have this engine placing wakes against an arbitrarily old
 // picture of the cluster, at 10Hz, for as long as the outage lasts.
-func (e *Engine) freshUsage(
-	ctx context.Context,
-	namespace string,
+func freshUsage(
 	read func() (*decision.GPUUsage, bool),
 	missingReason string,
-) (*decision.GPUUsage, bool) {
+) (*decision.GPUUsage, string) {
 	usage, ok := read()
 	if !ok {
-		e.reportUnchecked(ctx, namespace, missingReason)
-		return nil, false
+		return nil, missingReason
 	}
 	if age := time.Since(usage.TakenAt); age > gpuUsageMaxAge {
-		e.reportUnchecked(ctx, namespace, fmt.Sprintf(
-			"a GPU-usage snapshot is %s old, past the %s bound", age.Truncate(time.Second), gpuUsageMaxAge))
-		return nil, false
+		return nil, fmt.Sprintf(
+			"a GPU-usage snapshot is %s old, past the %s bound", age.Truncate(time.Second), gpuUsageMaxAge)
 	}
-	return usage, true
+	return usage, ""
 }
 
 // withNamespace returns byNamespace with an entry for namespace, adding an empty
@@ -368,16 +488,37 @@ func withNamespace(byNamespace map[string]map[string]int, namespace string) map[
 // Both usage measures are reported when both were consulted: a budget that looks
 // wrong is almost always one of the two being fed where the other belongs, and
 // that is only visible if the line says which is which.
-func (e *Engine) logBudgets(ctx context.Context, namespace string, constraints []*allocation.ResourceConstraints, views allocation.GPUUsageViews) {
+//
+// A provider left out (skipped) is named, and a check against the last
+// successful constraints says how old they are: a bound that stopped applying,
+// or that is being read from memory, must not look like one that was consulted.
+func (e *Engine) logBudgets(ctx context.Context, namespace string, constraints []*allocation.ResourceConstraints,
+	views allocation.GPUUsageViews, skipped []allocation.SkippedProvider, snapshotAge time.Duration) {
 	budgets, nsScoped := allocation.GPUBudgets(constraints, namespace)
-	if !e.placementBasisChanged(namespace, fmt.Sprintf("ok|%v|%t|%v|%v",
-		budgets, nsScoped, views.PhysicalByType, views.ManagedByType)) {
+	skippedNames := make([]string, 0, len(skipped))
+	for _, s := range skipped {
+		skippedNames = append(skippedNames, s.Name)
+	}
+	// The snapshot's age is not part of the change key -- it moves every tick --
+	// only whether one is in use.
+	if !e.placementBasisChanged(namespace, fmt.Sprintf("ok|%v|%t|%v|%v|%v|%t",
+		budgets, nsScoped, views.PhysicalByType, views.ManagedByType, skippedNames, snapshotAge > 0)) {
 		return
 	}
 	kv := []any{
 		"namespace", namespace,
 		"gpuBudgets", budgets,
 		"namespaceScoped", nsScoped,
+	}
+	if len(skipped) > 0 {
+		reasons := make([]string, 0, len(skipped))
+		for _, s := range skipped {
+			reasons = append(reasons, s.String())
+		}
+		kv = append(kv, "providersSkipped", reasons)
+	}
+	if snapshotAge > 0 {
+		kv = append(kv, "fromLastConstraintsAge", snapshotAge.Truncate(time.Second).String())
 	}
 	if views.Has(allocation.PhysicalUsage) {
 		kv = append(kv, "gpusInUse", views.PhysicalByType)

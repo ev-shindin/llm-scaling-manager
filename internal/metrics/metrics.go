@@ -68,6 +68,7 @@ var (
 	gpuDiscoveryUp                      *prometheus.GaugeVec
 	sfzQueueFallbackActive              *prometheus.GaugeVec
 	constraintProviderSkipped           *prometheus.GaugeVec
+	sfzWakeUnchecked                    *prometheus.CounterVec
 	nodeAccessDenied                    *prometheus.GaugeVec
 	policyNamespaceUnverified           *prometheus.GaugeVec
 	configRejectedEntries               *prometheus.GaugeVec
@@ -570,8 +571,10 @@ func InitMetrics(registry prometheus.Registerer) error {
 	)
 
 	constraintProviderSkippedLabels := []string{constants.LabelProvider, constants.LabelReason}
+	sfzWakeUncheckedLabels := []string{constants.LabelNamespace}
 	if controllerInstance != "" {
 		constraintProviderSkippedLabels = append(constraintProviderSkippedLabels, constants.LabelControllerInstance)
+		sfzWakeUncheckedLabels = append(sfzWakeUncheckedLabels, constants.LabelControllerInstance)
 	}
 	constraintProviderSkipped = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -579,6 +582,13 @@ func InitMetrics(registry prometheus.Registerer) error {
 			Help: "1 while a declared GPU limiter is left out of scaling decisions, by provider and reason; the others still bound",
 		},
 		constraintProviderSkippedLabels,
+	)
+	sfzWakeUnchecked = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: constants.WVAScaleFromZeroWakeUnchecked,
+			Help: "Scale-from-zero wakes published without a GPU capacity check: every declared limiter unavailable and no recent snapshot",
+		},
+		sfzWakeUncheckedLabels,
 	)
 
 	enforcerModificationsLabels := []string{constants.LabelPolicyType}
@@ -794,6 +804,9 @@ func InitMetrics(registry prometheus.Registerer) error {
 	}
 	if err := registry.Register(constraintProviderSkipped); err != nil {
 		return fmt.Errorf("failed to register constraintProviderSkipped metric: %w", err)
+	}
+	if err := registry.Register(sfzWakeUnchecked); err != nil {
+		return fmt.Errorf("failed to register sfzWakeUnchecked metric: %w", err)
 	}
 	if err := registry.Register(sfzQueueFallbackActive); err != nil {
 		return fmt.Errorf("failed to register sfzQueueFallbackActive metric: %w", err)
@@ -1483,6 +1496,20 @@ func SetConstraintProvidersSkipped(owned []string, active map[string]string) {
 		}
 		constraintProviderSkipped.With(labels).Set(1)
 	}
+}
+
+// CountScaleFromZeroWakeUnchecked counts one scale-from-zero wake published
+// without a GPU capacity check in namespace: limiters are declared, but every
+// provider was unavailable and no recent snapshot of their constraints existed.
+func CountScaleFromZeroWakeUnchecked(namespace string) {
+	if sfzWakeUnchecked == nil {
+		return
+	}
+	labels := prometheus.Labels{constants.LabelNamespace: namespace}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	sfzWakeUnchecked.With(labels).Inc()
 }
 
 // SetScaleFromZeroQueueFallbackActive records whether scale-from-zero is reading

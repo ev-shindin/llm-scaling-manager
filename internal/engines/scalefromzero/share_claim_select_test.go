@@ -56,7 +56,7 @@ func TestSelectOrClaimClaimsOnlyWithoutCapacity(t *testing.T) {
 
 	publishClaimable(t, "")
 	set, outcome := e.selectOrClaim(context.Background(), modelGroup{namespace: selNS, modelID: "roomy"},
-		wakeCandidates(), coverage{}, quotaConstraints(4, -1))
+		wakeCandidates(), coverage{}, placement{constraints: quotaConstraints(4, -1)})
 	if len(set) != 1 || outcome == OutcomeNoCapacity {
 		t.Fatalf("setup: with room the wake selects directly, got %v %v", set, outcome)
 	}
@@ -66,7 +66,7 @@ func TestSelectOrClaimClaimsOnlyWithoutCapacity(t *testing.T) {
 
 	publishClaimable(t, "")
 	set, outcome = e.selectOrClaim(context.Background(), modelGroup{namespace: selNS, modelID: "full"},
-		wakeCandidates(), coverage{}, quotaConstraints(0, -1))
+		wakeCandidates(), coverage{}, placement{constraints: quotaConstraints(0, -1)})
 	if outcome != OutcomeNoCapacity || len(set) != 1 {
 		t.Fatalf("with no capacity the wake should start by a claim, got %v %v", set, outcome)
 	}

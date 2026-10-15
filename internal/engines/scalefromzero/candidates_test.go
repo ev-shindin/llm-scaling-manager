@@ -117,12 +117,24 @@ func (o okProvider) ComputeConstraints(_ context.Context, usageByType map[string
 	return &allocation.ResourceConstraints{ProviderName: o.name, Pools: o.pools}, nil
 }
 
-// TestGPUConstraintsPosture pins "unknown must not become denied".
-//
-// FitsGPUBudget denies any accelerator type its constraints do not mention, so
-// returning the surviving subset when a provider fails turns "could not reach
-// this provider" into "this variant cannot be placed" — refusing a wake with
-// requests already queued, on the strength of a failed lookup.
+// flakyProvider answers like okProvider until *fail is set, then errors.
+type flakyProvider struct {
+	name  string
+	fail  *bool
+	pools map[string]allocation.ResourcePool
+}
+
+func (f flakyProvider) Name() string { return f.name }
+func (f flakyProvider) ComputeConstraints(context.Context, map[string]int, map[string]map[string]int) (*allocation.ResourceConstraints, error) {
+	if *f.fail {
+		return nil, errors.New("node API unreachable")
+	}
+	return &allocation.ResourceConstraints{ProviderName: f.name, Pools: f.pools}, nil
+}
+
+// TestGPUConstraintsPosture pins what a wake is checked against when inputs go
+// missing: the providers that can answer, then the recent last constraints, and
+// only then nothing at all. "Unknown" must still not become "denied".
 func TestGPUConstraintsPosture(t *testing.T) {
 	ctx := context.Background()
 	healthy := okProvider{name: "gpu-limiter", pools: map[string]allocation.ResourcePool{"H100": {Limit: 8}}}
@@ -142,16 +154,60 @@ func TestGPUConstraintsPosture(t *testing.T) {
 		}
 	})
 
-	t.Run("a failing provider makes the whole verdict unknown", func(t *testing.T) {
+	// One missing input never lifts the others. This used to return nil -- a
+	// quota whose read failed lifted the physical bound beside it. Constraints
+	// intersect, so the survivor denies only what the full set would deny too.
+	t.Run("a failing provider is skipped and the healthy one still bounds", func(t *testing.T) {
 		decision.DefaultGPUUsage.Reset()
 		decision.PublishGPUUsage(map[string]int{"H100": 1}, nil)
 
 		e := &Engine{gpuLimiter: allocation.NewCompositeLimiter("composite",
 			[]allocation.Limiter{healthy, failingProvider{name: "quota-limiter"}})}
 
-		if got := e.gpuConstraints(ctx, "chat"); got != nil {
-			t.Fatalf("gpuConstraints returned %d constraint(s); a partial view must degrade to "+
-				"unknown, or types the survivors omit are silently denied", len(got))
+		got := e.gpuConstraints(ctx, "chat")
+		if len(got) != 1 || got[0].ProviderName != "gpu-limiter" {
+			t.Fatalf("gpuConstraints = %+v, want the healthy provider to still bound the wake", got)
+		}
+	})
+
+	t.Run("an unobserved view skips only the provider that needs it", func(t *testing.T) {
+		decision.DefaultGPUUsage.Reset() // no physical view
+		decision.DefaultManagedGPUUsage.Reset()
+		defer decision.DefaultManagedGPUUsage.Reset()
+		decision.PublishManagedGPUUsage(map[string]int{"H100": 1}, nil)
+
+		e := &Engine{gpuLimiter: allocation.NewCompositeLimiter("composite", []allocation.Limiter{
+			healthy, // physical basis, unobserved
+			okProvider{name: "tenant-quota", basis: allocation.ManagedUsage,
+				pools: map[string]allocation.ResourcePool{"H100": {Limit: 4}}},
+		})}
+
+		got := e.gpuConstraints(ctx, "chat")
+		if len(got) != 1 || got[0].ProviderName != "tenant-quota" {
+			t.Fatalf("gpuConstraints = %+v, want the quota to bound while the physical view is missing", got)
+		}
+	})
+
+	// Every provider unavailable: the last successful constraints, while young,
+	// still check the wake. An API blip of a few seconds must not turn a
+	// placement decision into none at all.
+	t.Run("every provider unavailable falls back to the recent last constraints", func(t *testing.T) {
+		decision.DefaultGPUUsage.Reset()
+		decision.PublishGPUUsage(map[string]int{"H100": 1}, nil)
+
+		fail := false
+		e := &Engine{gpuLimiter: flakyProvider{name: "gpu-limiter", fail: &fail,
+			pools: map[string]allocation.ResourcePool{"H100": {Limit: 8}}}}
+		if got := e.gpuConstraints(ctx, "chat"); len(got) != 1 {
+			t.Fatalf("setup: gpuConstraints = %+v, want one constraint while healthy", got)
+		}
+		fail = true
+		got := e.gpuConstraints(ctx, "chat")
+		if len(got) != 1 || got[0].Pools["H100"].Limit != 8 {
+			t.Fatalf("gpuConstraints = %+v, want the last successful constraints (< 5m old)", got)
+		}
+		if other := e.gpuConstraints(ctx, "other-ns"); other != nil {
+			t.Fatalf("gpuConstraints(other-ns) = %+v; the snapshot is per namespace and other-ns has none", other)
 		}
 	})
 

@@ -1561,8 +1561,10 @@ func unattributedGPUs(byType map[string]int) (total int, keys []string) {
 // allowance, so a pool at its quota must read as no headroom left rather than as
 // a namespace nobody bounds.
 //
-// Where constraints cannot be had -- no limiter, no usage observation on a
-// basis a provider needs, every provider failed -- it publishes UNBOUNDED, the
+// A provider whose usage basis is unobserved, or that fails, is skipped and the
+// others still bound the pool (allocation.ComputeAvailableConstraints). Where
+// no constraints can be had at all -- no limiter, or every provider
+// unavailable -- it publishes UNBOUNDED, the
 // same posture the optimizing path takes for the models in those states, rather
 // than a fabricated figure or nothing: a fabricated one would cap a pool for a
 // reason nobody could find, and nothing would now hold it, since a pool grows
@@ -1575,28 +1577,20 @@ func (e *Engine) publishHeadroomForIdleFleet(ctx context.Context) {
 		// Nothing bounds anything. Published, not merely implied by silence:
 		// the pool grows only on a snapshot, and this is the only place one
 		// would come from on a limiter-less cluster with nothing to optimize.
+		e.providerSkips.report(ctx, nil)
 		allocation.PublishUnboundedHeadroom(decision.WarmPoolGPUsVersion(), time.Now())
 		return
 	}
 	views := gpuUsageViews(nil)
-	if _, missing := views.MissingBasis(providers); missing {
-		// No observation on a basis some provider needs. The optimizing path
-		// runs the models unbounded in this state; the pool is told the same,
-		// rather than held against a limit nobody could compute.
-		allocation.PublishUnboundedHeadroom(views.PoolsVersion, time.Now())
-		return
-	}
-	var constraints []*allocation.ResourceConstraints
-	for _, cp := range providers {
-		usageByType, usageByNS := views.For(cp)
-		constraint, err := cp.ComputeConstraints(ctx, usageByType, usageByNS)
-		if err != nil {
-			continue
-		}
-		constraints = append(constraints, views.Stamp(constraint))
-	}
+	constraints, skipped := allocation.ComputeAvailableConstraints(ctx, providers, views, nil)
+	// The optimizing path does not run on an idle fleet, so this is the cycle's
+	// one report of which providers bound.
+	e.providerSkips.report(ctx, skipped)
 	if len(constraints) == 0 {
-		allocation.PublishUnboundedHeadroom(views.PoolsVersion, time.Now()) // every provider failed: same posture
+		// Every provider unavailable. The optimizing path runs the models
+		// unbounded in this state; the pool is told the same, rather than held
+		// against a limit nobody could compute.
+		allocation.PublishUnboundedHeadroom(views.PoolsVersion, time.Now())
 		return
 	}
 	allocation.PublishNamespaceHeadroom(constraints, time.Now())
