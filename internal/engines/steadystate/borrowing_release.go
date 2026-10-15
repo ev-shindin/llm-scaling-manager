@@ -97,7 +97,9 @@ func (e *Engine) releaseBorrowed(ctx context.Context, decisions []domain.Variant
 			"namespace", r.Namespace, "model", r.ModelID, "variant", r.Variant,
 			"from", r.From, "to", r.To, "cause", string(r.Cause),
 			"lenderClusterQueue", r.Lender.Lender, "cohort", r.Lender.Cohort, "flavor", r.Lender.Flavor)
-		if acc := scaleTargets[r.Namespace+"/"+r.Variant]; acc != nil && scaletarget.IsLeaderWorkerSet(acc) {
+		acc := scaleTargets[r.Namespace+"/"+r.Variant]
+		e.borrowReleasedEvent(r, acc)
+		if acc != nil && scaletarget.IsLeaderWorkerSet(acc) {
 			e.checkLWSScaleDown(ctx, r, acc)
 		}
 	}
@@ -183,6 +185,7 @@ func (e *Engine) observePreemptions(ctx context.Context, constraints []*allocati
 			st.preemptSeen[w.UID] = true
 			if model := modelOfPods(requests, scaleTargets, ns, w.Owners); model != "" {
 				st.governor.MarkPreempted(model, now)
+				e.recordReclaim(model, w, now)
 				ctrl.LoggerFrom(ctx).Info("Kueue preempted a pod of a borrowing model; it borrows nothing new for the cooldown",
 					"model", model, "workload", string(w.UID))
 			}

@@ -132,6 +132,11 @@ type ResourceConstraints struct {
 	// granted, for every namespace the provider read -- not only those it counts
 	// borrowing for -- so the engine can charge a gated pod to its cohort.
 	NamespaceCohorts map[string][]string
+	// BorrowWithheld is, per active namespace a borrowing-capable provider
+	// reads cohort borrowing for and does not count it, why (a kueue.Reason).
+	// Set even when no namespace counts borrowing; read only to report
+	// (LimiterBudgets), never to decide.
+	BorrowWithheld map[string]string
 }
 
 // ConstraintProvider exposes hard constraints for the optimizer.

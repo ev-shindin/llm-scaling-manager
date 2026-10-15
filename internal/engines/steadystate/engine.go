@@ -1373,6 +1373,10 @@ func (e *Engine) optimizeV2(
 	// replica asks back, last, so nothing above raises it again
 	// (borrowing_release.go). A no-op without borrowing.
 	e.releaseBorrowed(ctx, allDecisions, variantScaleTargets)
+	// What on-call sees: the budgets the cycle used, the borrowing reasons,
+	// unplaced pods and waiting lenders (borrowing_signals.go). Every cycle,
+	// so a cleared condition clears its series.
+	e.publishBorrowSignals(constraints, requests, allDecisions, time.Now())
 
 	// Stage 4: Enrich decisions with KV cache token data from replicaMetrics.
 	// Utilization, RequiredCapacity, and SpareCapacity are already set by

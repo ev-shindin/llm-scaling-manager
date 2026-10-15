@@ -186,6 +186,9 @@ const (
 	K8SEventUtilizationShareCancelled         = "UtilizationShareCancelled"
 	K8SEventUtilizationShareRedirected        = "UtilizationShareRedirected"
 	K8SEventUtilizationShareDonorNotSteerable = "UtilizationShareDonorNotSteerable"
+	// K8SEventBorrowedCapacityReleased is recorded on a scale target when the
+	// scaling manager lowers it to give borrowed Kueue capacity back.
+	K8SEventBorrowedCapacityReleased = "BorrowedCapacityReleased"
 
 	// Enforcer policy types.
 	EnforcerPolicyTypeScaleToZero     = "scale_to_zero"

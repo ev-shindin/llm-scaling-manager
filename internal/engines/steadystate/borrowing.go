@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/controllerstatus"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
@@ -48,6 +49,13 @@ type borrowingState struct {
 	// cycle is this cycle's input to the governor, kept for the releases
 	// after the optimizer; zero when the cycle borrows nothing.
 	cycle allocation.BorrowCycle
+	// reclaimedUntil is, per "namespace/model", until when the
+	// lender-reclaimed reason holds: a recent Kueue preemption plus the
+	// cooldown.
+	reclaimedUntil map[string]time.Time
+	// budgets is the limiterBudgets value last handed to the status
+	// publisher, whose asOf stamps the next one keeps.
+	budgets controllerstatus.LimiterBudgets
 }
 
 // prepareBorrowing readies one cycle's borrowing: it drops the in-flight draws

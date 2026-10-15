@@ -92,7 +92,7 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 		Expect(b.inv.EffectiveConfig().NamespaceQuotas["team-a"]).To(Equal(map[string]int{"H100": 0}))
 		Expect(c.NamespacePools["team-a"]["H100"].Limit).To(Equal(0))
 		Expect(c.NamespaceBorrow).To(Equal(map[string]map[string]NamespaceBorrow{
-			"team-a": {"H100": {Cap: 16, WithinNominal: 8}},
+			"team-a": {"H100": {Cap: 16, WithinNominal: 8, NominalLentOut: 8}},
 		}))
 		Expect(c.SharedPools).To(HaveLen(1))
 		Expect(c.SharedPools[0].Free).To(Equal(16))
@@ -117,6 +117,8 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 			b := build(entry(nil), &fakeEligibility{byNS: map[string]kueue.NamespaceEligibility{"team-a": elig}}, physical, snap)
 			got := constraintsOf(b)
 			Expect(got.NamespaceBorrow).To(BeNil())
+			Expect(got.BorrowWithheld).To(HaveKeyWithValue("team-a", Not(BeEmpty())), "the reason is reported")
+			got.BorrowWithheld = nil // reported only, never decided on
 			Expect(got).To(Equal(headOf(entry(nil), snap)))
 			Expect(b.inv.EffectiveConfig().NamespaceQuotas["team-a"]).To(Equal(map[string]int{"H100": 8}))
 		},
@@ -195,7 +197,7 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 		count := func() int {
 			n := 0
 			for _, l := range lines {
-				if strings.Contains(l, "Kueue borrowing counted") {
+				if strings.Contains(l, BorrowAppliedLogMessage) {
 					n++
 				}
 			}
@@ -207,6 +209,21 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 		Expect(b.inv.Refresh(lctx)).To(Succeed())
 		Expect(count()).To(Equal(1))
 		Expect(strings.Join(lines, "\n")).To(ContainSubstring(`"reason":"not-kueue-managed"`))
+		Expect(strings.Join(lines, "\n")).To(ContainSubstring(`"withheldByNamespace":{"team-a":"not-kueue-managed"}`))
+	})
+
+	It("logs the applied figures beside the rows: guaranteed, borrow cap, Kueue's own borrowed", func() {
+		var lines []string
+		lctx := logr.NewContext(ctx, funcr.NewJSON(func(obj string) { lines = append(lines, obj) }, funcr.Options{}))
+		r := row
+		r.SourceBorrowed = 3
+		b := build(entry(nil), &fakeEligibility{}, true, snapshotOf(r))
+		Expect(b.inv.Refresh(lctx)).To(Succeed())
+		all := strings.Join(lines, "\n")
+		Expect(all).To(ContainSubstring(BorrowAppliedLogMessage))
+		Expect(all).NotTo(ContainSubstring("NOT applied"))
+		Expect(all).To(ContainSubstring(`"appliedByNamespace":{"team-a":{"H100":{"guaranteed":0,"borrowCap":16,"withinNominal":8,"nominalLentOut":8}}}`))
+		Expect(all).To(ContainSubstring(`"kueueBorrowed":3`))
 	})
 
 	It("lets an idle Never namespace wake within nominal on a default setup", func() {

@@ -65,6 +65,11 @@ type QuotaInventory struct {
 	// when no namespace's borrowing is counted. cfg then holds every counted
 	// namespace at its guaranteed figure.
 	borrow *borrowView
+	// withheld is, per namespace the last read granted borrowing rows for and
+	// whose borrowing is not counted, why (a kueue.Reason): the source's, the
+	// engine-side one, or stale. Kept beside borrow, which is nil when no
+	// namespace is counted.
+	withheld map[string]string
 	// now is the clock the staleness of a snapshot is judged by; nil is
 	// time.Now.
 	now func() time.Time
@@ -170,6 +175,9 @@ type BorrowingInventory interface {
 	// their figures per accelerator type, the shared pools of their cohorts,
 	// and every namespace's cohorts. All nil when it counts none.
 	Borrowing(activeNamespaces []string) (map[string]map[string]NamespaceBorrow, []SharedPoolChunk, map[string][]string)
+	// BorrowWithheld returns, for the active namespaces whose borrowing it
+	// reads and does not count, why; nil when it counts none.
+	BorrowWithheld(activeNamespaces []string) map[string]string
 }
 
 // PoolsClosed reports true for a cluster-scope quota, which denies every type
@@ -291,6 +299,7 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 		}
 		view, effective = &frozen, q.borrow.effective
 	}
+	q.withheld = q.withheldReasons(ext, view, stale)
 	q.logBorrowing(logger, ext, view, stale)
 	if view != nil && len(view.byNS) == 0 {
 		// Nothing counted: the entry caps at nominal, exactly as with
@@ -446,6 +455,9 @@ func (q *QuotaInventory) namespaceBorrow(ns, accType string, guaranteed int, row
 		if r.Counted() {
 			b.LentOut += r.LentOut
 		}
+		if r.Reason == config.BorrowReasonNominalLentOut && r.Nominal > r.Guaranteed {
+			b.NominalLentOut += r.Nominal - r.Guaranteed
+		}
 	}
 	bound := func(c int) {
 		if c < 0 {
@@ -535,7 +547,7 @@ func (q *QuotaInventory) logBorrowing(logger logr.Logger, ext config.ExternalQuo
 	}
 	rowsByNS := make(map[string][]config.ExternalBorrow, len(ext.Borrow))
 	for ns, rows := range ext.Borrow {
-		if ns == config.QuotaLimiterReservedNamespaceKey || q.static.IsExcluded(ns) || len(rows) == 0 {
+		if !q.governsBorrowRows(ns, rows) {
 			continue
 		}
 		reason := ""
@@ -555,19 +567,106 @@ func (q *QuotaInventory) logBorrowing(logger logr.Logger, ext config.ExternalQuo
 		}
 		rowsByNS[ns] = rows
 	}
+	// The applied figures per namespace and type: the guaranteed cap and how
+	// far past it the namespace may borrow, after the static entry and the
+	// ResourceQuota bound it -- what the optimizer spends, beside the
+	// per-queue rows the reader computed.
+	applied := map[string]map[string]appliedBorrow{}
+	if view != nil {
+		for ns, perType := range view.byNS {
+			applied[ns] = map[string]appliedBorrow{}
+			for t, b := range perType {
+				applied[ns][t] = appliedBorrow{Guaranteed: view.effective.NamespaceQuotas[ns][t], BorrowCap: b.Cap,
+					WithinNominal: b.WithinNominal, NominalLentOut: b.NominalLentOut}
+			}
+		}
+	}
 	fp, _ := json.Marshal(struct {
-		Rows   map[string][]config.ExternalBorrow
-		Frozen bool
-	}{rowsByNS, view != nil && view.frozen})
+		Rows    map[string][]config.ExternalBorrow
+		Applied map[string]map[string]appliedBorrow
+		Frozen  bool
+	}{rowsByNS, applied, view != nil && view.frozen})
 	if string(fp) == q.lastBorrow {
 		return
 	}
 	q.lastBorrow = string(fp)
-	msg := "Kueue borrowing counted where every condition holds; guaranteed is the namespace cap, borrowable is drawn from the cohort's free pool"
+	msg := BorrowAppliedLogMessage
 	if view != nil && view.frozen {
-		msg = "Kueue snapshot stale: borrowing frozen at the last figures, nothing new is borrowed"
+		msg = BorrowFrozenLogMessage
 	}
-	logger.Info(msg, "borrowByNamespace", rowsByNS)
+	logger.Info(msg, "borrowByNamespace", rowsByNS, "appliedByNamespace", applied, "withheldByNamespace", q.withheld)
+}
+
+// The borrowing log line, on change only. The e2e suite and operators search
+// for these.
+const (
+	// BorrowAppliedLogMessage: borrowing is applied for the namespaces whose
+	// every condition holds, and withheld, with the reason, for the others.
+	BorrowAppliedLogMessage = "Kueue borrowing applied where every condition holds and withheld elsewhere; " +
+		"guaranteed is the namespace cap, borrowable is drawn from the cohort's free pool"
+	// BorrowFrozenLogMessage: the snapshot is stale; the last figures stay.
+	BorrowFrozenLogMessage = "Kueue snapshot stale: borrowing frozen at the last figures, nothing new is borrowed"
+)
+
+// appliedBorrow is one namespace's applied borrowing figures for one type, as
+// logged.
+type appliedBorrow struct {
+	Guaranteed     int `json:"guaranteed"`
+	BorrowCap      int `json:"borrowCap"`
+	WithinNominal  int `json:"withinNominal"`
+	NominalLentOut int `json:"nominalLentOut,omitempty"`
+}
+
+// governsBorrowRows reports whether ns's borrowing rows are this entry's to
+// count: not the reserved key, not excluded, and some row read.
+func (q *QuotaInventory) governsBorrowRows(ns string, rows []config.ExternalBorrow) bool {
+	return ns != config.QuotaLimiterReservedNamespaceKey && !q.static.IsExcluded(ns) && len(rows) > 0
+}
+
+// withheldReasons is, per namespace the read granted borrowing rows for and
+// whose borrowing is not counted, why: stale, the engine-side reason, or --
+// when the source withheld every row -- the source's. Nil when the entry
+// counts no borrowing.
+func (q *QuotaInventory) withheldReasons(ext config.ExternalQuotas, view *borrowView, stale bool) map[string]string {
+	if !q.countsBorrowing() || ext.ObservedAt.IsZero() {
+		return nil
+	}
+	out := map[string]string{}
+	for ns, rows := range ext.Borrow {
+		if !q.governsBorrowRows(ns, rows) {
+			continue
+		}
+		switch {
+		case stale && (view == nil || view.byNS[ns] == nil):
+			out[ns] = string(kueue.ReasonStale)
+		case view != nil && view.withheld[ns] != "":
+			out[ns] = view.withheld[ns]
+		case view != nil && view.byNS[ns] != nil:
+			// Counted.
+		default:
+			if i := slices.IndexFunc(rows, func(r config.ExternalBorrow) bool { return !r.Counted() }); i >= 0 {
+				out[ns] = rows[i].Reason
+			}
+		}
+	}
+	return out
+}
+
+// BorrowWithheld returns, for the active namespaces this entry reads borrowing
+// for and does not count it, why. Nil when the entry counts no borrowing.
+func (q *QuotaInventory) BorrowWithheld(activeNamespaces []string) map[string]string {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	if len(q.withheld) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for _, ns := range activeNamespaces {
+		if r, ok := q.withheld[ns]; ok {
+			out[ns] = r
+		}
+	}
+	return out
 }
 
 // EffectiveConfig returns the entry currently enforced: the static entry bounded

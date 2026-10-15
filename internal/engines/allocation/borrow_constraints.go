@@ -32,6 +32,11 @@ type NamespaceBorrow struct {
 	// Kueue preempts the borrower, but debits the shared pool in the same cycle,
 	// clamped at 0, so no other queue borrows the same GPUs.
 	LentOut int
+	// NominalLentOut is the part of the namespace's nominal quota it cannot
+	// reach: a queue that cannot reclaim lent it to a peer, so its guaranteed
+	// figure is below nominal (kueue.ReasonNominalLentOut). Reported, not
+	// spent: it is why a capped model of the namespace sits below nominal.
+	NominalLentOut int
 }
 
 // SharedPoolChunk is one cohort's free GPUs of one flavor and GPU resource. A

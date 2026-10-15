@@ -38,6 +38,9 @@
 //	leader                 the pod that wrote this: POD_NAME, else the
 //	                       hostname.
 //	controllerInstance     the controller_instance metrics label, when set.
+//	limiterBudgets         the GPU budget the steady-state engine used in its
+//	                       last cycle, JSON (LimiterBudgets); absent until a
+//	                       cycle with a limiter. See KeyLimiterBudgets.
 //
 // limiter and utilizationShare are recomputed from the applied configuration
 // in the same update that records policyResourceVersion, so they never lag
@@ -48,7 +51,8 @@
 //
 // Only the elected leader writes: Publisher is a manager Runnable that needs
 // leader election, so a standby keeps the state in memory and writes it the
-// moment it is elected. Content carries no timestamps, and a write happens only
+// moment it is elected. Content carries no timestamp that moves on its own
+// (limiterBudgets' asOf moves only with its figures), and a write happens only
 // when the content differs from what this process last wrote, so a quiet
 // controller does not write at all. A failed write -- Forbidden included -- is
 // logged and retried with backoff; it never stops the controller.

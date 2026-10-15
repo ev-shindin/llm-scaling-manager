@@ -137,6 +137,7 @@ func (l *DefaultLimiter) ComputeConstraints(ctx context.Context, usageByType map
 // reach (guaranteed plus cap), since a sum of guaranteed figures would bound the
 // borrowing namespaces at exactly what borrowing exists to exceed.
 func addBorrowing(rc *ResourceConstraints, bi BorrowingInventory, activeNamespaces []string) {
+	rc.BorrowWithheld = bi.BorrowWithheld(activeNamespaces)
 	byNS, pools, cohorts := bi.Borrowing(activeNamespaces)
 	if len(byNS) == 0 {
 		return

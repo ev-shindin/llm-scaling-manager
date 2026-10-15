@@ -806,6 +806,9 @@ func InitMetrics(registry prometheus.Registerer) error {
 	if err := registerUtilizationShareMetrics(registry); err != nil {
 		return err
 	}
+	if err := registerQuotaBorrowMetrics(registry); err != nil {
+		return err
+	}
 
 	return nil
 }
