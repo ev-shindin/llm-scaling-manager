@@ -220,16 +220,86 @@ tests do. The controller goes into `CONTROLLER_NAMESPACE`, which defaults to
   enables the EPP flowControl feature gate, so it exposes
   `inference_extension_flow_control_queue_size`. The scale-from-zero tests
   create the `e2e-default` InferenceObjective themselves.
-- **Kueue CRDs (full tier).** `kueue_quota_test.go` (label `kueue-quota`)
-  needs the three Kueue CRDs (ClusterQueue, LocalQueue, ResourceFlavor), not
-  Kueue's controller. `make test-e2e-full-with-setup` installs them on Kind
-  with `deploy/ci-pr-checks/install-kueue-crds.sh` (pinned `KUEUE_VERSION`).
-  On Kind the spec **fails** when the CRDs are absent, so run that script by
-  hand before a bare `make test-e2e-full`. On other clusters the spec skips
-  (and says so in `-v` output) when the kinds are not served. The script
-  leaves existing CRDs alone and exits 0.
+- **Kueue.** Two specs, see [Kueue specs](#kueue-specs): the quota spec in
+  the full tier, the borrowing spec in a CI job of its own.
 - **Helm repo updates.** `SKIP_HELM_REPO_UPDATE=true` skips `helm repo update`
   during the install. It is faster, but the repo indexes must already exist.
+
+### Kueue specs
+
+- **`kueue_quota_test.go`** (label `kueue-quota`) checks a quota entry bounded
+  by Kueue against a real API server. It needs only the three Kueue CRDs
+  (ClusterQueue, LocalQueue, ResourceFlavor), not Kueue's controller.
+- **`kueue_borrow_test.go`** (label `kueue-borrow`) needs Kueue's controller.
+  It is excluded from the full tier's label filter and runs in its own CI job,
+  `e2e-tests-kueue-borrow`. A loaded simulator model runs on one queue of a
+  two-queue cohort (2 GPUs each):
+  - a GPU pod in the namespace that Kueue does not manage withholds
+    borrowing, so the model holds at its nominal 2;
+  - chaos: the Kueue controller is scaled to 0 for 60 seconds while that pod
+    goes; the model must not be ordered past its nominal 2 meanwhile. Kueue is
+    restored on every exit path;
+  - with that pod gone the model grows to 4, every pod placed, and no further;
+  - a `Never` lender with a pending workload gets nothing back while
+    `releaseToNonReclaimingLenders` is unset (the default); once the spec sets
+    it, the lender gets exactly one replica back and its workload is admitted;
+  - the lender, switched to `Any`, asks for more: Kueue preempts a borrowed
+    pod, the scaling manager lowers the target so no gated replacement
+    lingers, and the model borrows nothing until `borrowCooldown` ends.
+
+  The policy sets short Kueue timings (`placementTimeout: 30s`,
+  `borrowCooldown: 4m`, `lenderDebounce: 10s`) and declares `gpu-inventory`,
+  which borrowing needs as its GPU bound. It needs 6 free GPUs of the suite's
+  GPU product and prints `MEASURE` lines for replica start, the release cycle
+  and the reclaim cycle.
+
+`make test-e2e-full-with-setup` installs Kueue on Kind with
+`make install-kueue-e2e`; CI's full job sets `KUEUE_CONTROLLER=false`, the CRDs
+alone, since only the quota spec runs there. `make
+test-e2e-kueue-borrow-with-setup` installs the controller
+(`KUEUE_CONTROLLER=true`, the default), which runs
+`deploy/ci-pr-checks/install-kueue.sh`. That script refuses a kubectl context
+not named `kind-*` unless `KUEUE_ALLOW_NON_KIND=true`, and:
+
+- downloads the pinned release manifest (`KUEUE_VERSION`, default `v0.20.0`,
+  image from `registry.k8s.io`), checks its sha256, and applies it. Another
+  version needs `KUEUE_MANIFEST_SHA256` too;
+- waits for the rollout, then for the webhook to answer;
+- narrows Kueue's job webhooks to namespaces labelled `llm-d.ai/kueue-e2e`
+  (`KUEUE_WEBHOOK_NAMESPACE_LABEL`). Upstream they cover every namespace with
+  `failurePolicy: Fail`, so a restarting Kueue would fail pod creation for the
+  whole suite. A queue-labelled pod in an unlabelled namespace then runs
+  unmanaged: fine on a throwaway Kind cluster, never on one whose quotas
+  matter.
+
+`KUEUE_CONTROLLER=false` runs `install-kueue-crds.sh` instead, which installs
+the CRDs alone; the quota spec passes, the borrowing spec fails.
+
+On Kind both specs **fail** when what they need is missing, so a missing setup
+step is never read as coverage. On other clusters nothing installs Kueue, and
+each spec skips (and says so in `-v` output) when the cluster lacks what it
+needs; `REQUIRE_KUEUE_E2E=true` turns the borrowing spec's skips into failures
+anywhere, and its CI job sets it. Both scripts refuse to change a Kueue
+somebody else installed.
+
+The CI job `e2e-tests-kueue-borrow` runs on a PR that touches
+`internal/kueue/`, `internal/engines/allocation/borrow*`,
+`internal/engines/steadystate/borrowing*`, `test/e2e/kueue*`,
+`test/e2e/fixtures/kueue*`, `deploy/ci-pr-checks/install-kueue.sh` or the
+workflow; on a PR labelled `ok-to-test-kueue` (add the label, then push); every
+night; and on a manual dispatch with `run_kueue_tests`. Its budget is
+`E2E_TIMEOUT=45m` (ginkgo), `E2E_GO_TIMEOUT=50m` and an 80-minute job.
+
+To run the borrowing spec alone on Kind:
+
+```bash
+make test-e2e-kueue-borrow-with-setup REQUIRE_KUEUE_E2E=true
+# or, on a cluster from make deploy-e2e-infra:
+make install-kueue-e2e
+make test-e2e-kueue-borrow REQUIRE_KUEUE_E2E=true
+```
+
+Check the summary says `Ran 5 of ... Specs` with no skips.
 
 ### Utilization-share specs (full tier)
 

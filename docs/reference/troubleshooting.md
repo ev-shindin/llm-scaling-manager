@@ -25,6 +25,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | desired is not current | `wva_desired_replicas != wva_current_replicas` for many cycles | HPA stabilization window, KEDA not reaching the scaler, Pods Pending (GPUs, ResourceQuota), slow starts | [actuation stuck](#desired-is-not-current-actuation-stuck) |
 | replicas dropped under Kueue borrowing | fewer replicas with no scale-down asked for; `wva_model_scaling_blocked{reason=~"lender-reclaimed\|borrow-released\|borrow-unplaced"}`; `BorrowedCapacityReleased` Event | Kueue preempted, the scaling manager gave borrowed GPUs back, a replica did not place, demand fell | [replicas dropped](#replicas-dropped-under-kueue-borrowing) |
 | a Kueue-backed quota was never read | `WVAKueueNeverRead`; `wva_kueue_never_read == 1`; log `external quota source unreadable and never read` | Kueue CRDs absent, the controller may not list ClusterQueues, Kueue down at start | [never read](#a-kueue-backed-quota-was-never-read) |
+| Kueue borrowing withheld | `wva_quota_borrow_withheld == 1`; its `reason` names the condition; `withheldByNamespace` in the borrowing log line | a borrowing condition does not hold: `kueue-controller-down`, `kueue-version-untested`, `not-selected`, `topology-aware`, `admission-checks`, `lender-waiting`, and the rest in the [conditions table](quota-limiter.md#cohort-borrowing) | [replicas dropped](#replicas-dropped-under-kueue-borrowing) |
 | GPUs held / quota spent | `ResourceConstrained` Event; `wva_decisions_limited_total` rising; `wva_model_scaling_blocked{reason="quota-short"}` | the quota or GPU inventory is used up, unresolved accelerators, a lowered quota (it does not evict) | [GPUs held](#gpus-held-or-quota-spent) |
 | metrics stale or missing | `MetricsUnavailable` Event; `wva_metrics_freshness_status{status!="fresh"} > 0`; `WVAMetricsCollectionFailing`; `wva_unmeasured_queue > 0` | ServiceMonitor or PodMonitor not selecting the pods, Prometheus unreachable, FMA launcher pods not scraped | [metrics](#metrics-stale-or-missing) |
 | controller not Ready or crash-looping | pod `0/1` or `CrashLoopBackOff`; log `refusing to start unbounded`; readiness check `gpu-policy` failing | cluster policy unreadable, an invalid `default` entry in the ConfigMap the limiters come from, a `gpu-inventory` limiter declared alone with no node read, a Prometheus setting it refuses, an image older than the manifests | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
@@ -412,6 +413,16 @@ What to do:
   hand meanwhile, lower the borrowing model's `maxReplicaCount` on its
   ScaledObject, or set `countBorrowable: false` on the quota entry, which caps
   every namespace at nominal.
+- **The Kueue controller is down** (reason `kueue-controller-down` on
+  `wva_quota_borrow_withheld`; log `The Kueue controller has no ready
+  replica`): `kueue-controller-manager` has no ready replica, or is gone.
+  Nothing admits or preempts meanwhile, so borrowing freezes as for a stale
+  read: nothing new is borrowed, nothing is given back, and nothing borrowed
+  is taken away. It clears on the first Kueue read after the controller is
+  Ready again. Check it with
+  `kubectl get deploy kueue-controller-manager -n kueue-system`. A controller
+  in another namespace is never read as down: set `kueue.controllerNamespace`
+  on the quota entry so it is checked.
 - **A lender waits past the cooldown** (`WVAKueueLenderWaitingPastCooldown`):
   Kueue does not reclaim for this lender (`reclaimWithinCohort: Never`, or
   `LowerPriority` below the borrower). By default the scaling manager does not

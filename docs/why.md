@@ -172,9 +172,10 @@ runs per arm on one cluster type (the P/D pair repeated once).
   ([#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
 - The scaler port is plaintext by default; a NetworkPolicy is shipped and
   mutual TLS is opt-in and manual
-  ([#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138)).
-- The Kueue quota source counts nominal quota only, not capacity a queue could
-  borrow from its cohort
+  ([#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138) makes
+  it the default).
+- The Kueue quota source counts cohort borrowing only on a flat cohort
+  without Fair Sharing or `effectiveQuotas`; elsewhere it caps at nominal
   ([#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136)).
 
 Planned work, with its issues, is on the [roadmap](roadmap.md).

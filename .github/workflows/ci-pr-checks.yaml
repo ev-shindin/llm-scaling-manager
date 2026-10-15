@@ -26,10 +26,21 @@ on:
   push:
     branches:
       - main
+  # Nightly, for the live-Kueue borrowing e2e (e2e-tests-kueue-borrow): it runs
+  # on a PR only when the PR touches borrowing, so main is checked every night
+  # whatever merged. The other e2e jobs exclude this event at their own `if`;
+  # the cheap checks (lint-and-test, docs-check, ...) run with it.
+  schedule:
+    - cron: '17 3 * * *'
   workflow_dispatch:
     inputs:
       run_full_tests:
         description: 'Run full e2e test suite on Kind (check to run full; unchecked runs no e2e)'
+        required: false
+        default: false
+        type: boolean
+      run_kueue_tests:
+        description: 'Run the live-Kueue borrowing e2e on Kind'
         required: false
         default: false
         type: boolean
@@ -321,10 +332,11 @@ jobs:
             exit 0
           fi
           echo "$changed" | sed 's/^/  /'
-          # The compiled surface, plus the two things that DRIVE this suite:
-          # test-e2e-full-with-setup lives in the Makefile and the job in the
-          # workflow, so a change to either can break the run it would skip.
-          if echo "$changed" | grep -qE '(\.go|go\.mod|go\.sum|Dockerfile|Makefile)$|^(config|test)/|^\.github/workflows/'; then
+          # The compiled surface, plus the things that DRIVE this suite:
+          # test-e2e-full-with-setup lives in the Makefile, the job in the
+          # workflow, and the Kueue and kind installs it runs in
+          # deploy/ci-pr-checks, so a change to any can break the run it would skip.
+          if echo "$changed" | grep -qE '(\.go|go\.mod|go\.sum|Dockerfile|Makefile)$|^(config|test)/|^\.github/workflows/|^deploy/ci-pr-checks/'; then
             echo 'Compiled surface touched -- running the full suite.'
             echo 'run=true' >> $GITHUB_OUTPUT
           else
@@ -379,6 +391,122 @@ jobs:
           IMG: ${{ steps.build-image.outputs.image }}
           SKIP_BUILD: "true"
           DELETE_CLUSTER: "false"
+          # The live-Kueue borrowing spec (kueue_borrow_test.go) runs in its own
+          # job, e2e-tests-kueue-borrow, and the full suite's label filter
+          # excludes it. What is left here of Kueue is the quota-reader spec
+          # (kueue_quota_test.go), which needs only the CRDs: no Kueue
+          # controller, so no Kueue webhook the rest of the suite could trip on.
+          KUEUE_CONTROLLER: "false"
           # Same simulator saturation tuning as smoke — defaults are too high for reliable scale-up signals.
         run: |
           make test-e2e-full-with-setup
+
+  # The live-Kueue cohort borrowing e2e, alone on its own kind cluster. Runs on
+  # a PR that touches borrowing (the paths below), on a PR labelled
+  # ok-to-test-kueue (add the label, then push: a re-run reuses the event the
+  # run started from, which had no label), nightly, and on a manual dispatch
+  # that asks for it. Like e2e-tests-full it decides inside the job, so it always
+  # reports a conclusion.
+  #
+  # Budget: setup (kind, image, infra, Kueue) takes about 20 minutes; the spec
+  # takes about 25 and is bounded at E2E_TIMEOUT 45m (ginkgo) and
+  # E2E_GO_TIMEOUT 50m (go test, which must exceed ginkgo's). The job timeout,
+  # 80m, is above both, so a slow run fails with ginkgo's report, not a kill.
+  # REQUIRE_KUEUE_E2E=true turns the spec's runtime skips into failures: this
+  # job exists to run it, and a run that checked nothing must not go green.
+  e2e-tests-kueue-borrow:
+    runs-on: ubuntu-latest
+    needs: [lint-and-test]
+    if: >-
+      github.event_name == 'pull_request'
+      || github.event_name == 'schedule'
+      || (github.event_name == 'workflow_dispatch' && inputs.run_kueue_tests)
+    timeout-minutes: 80
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether the borrowing e2e is needed
+        id: decide
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          LABELLED: ${{ contains(github.event.pull_request.labels.*.name, 'ok-to-test-kueue') }}
+        run: |
+          set -u
+          if [ "${{ github.event_name }}" != 'pull_request' ]; then
+            echo "${{ github.event_name }}: running the borrowing e2e."
+            echo 'run=true' >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          if [ "$LABELLED" = 'true' ]; then
+            echo 'Labelled ok-to-test-kueue: running the borrowing e2e.'
+            echo 'run=true' >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null)"
+          if [ -z "$changed" ]; then
+            echo 'Could not read the changed-file list; running the borrowing e2e.'
+            echo 'run=true' >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          if echo "$changed" | grep -qE '^internal/kueue/|^internal/engines/allocation/borrow|^internal/engines/steadystate/borrowing|^test/e2e/kueue|^test/e2e/fixtures/kueue|^deploy/ci-pr-checks/install-kueue\.sh$|^\.github/workflows/ci-pr-checks\.yaml$'; then
+            echo 'Borrowing code, its e2e or its install touched: running the borrowing e2e.'
+            echo 'run=true' >> $GITHUB_OUTPUT
+          else
+            echo 'Nothing on the borrowing path changed; skipping (label ok-to-test-kueue to force it).'
+            echo 'run=false' >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract Go version from go.mod
+        if: steps.decide.outputs.run == 'true'
+        run: sed -En 's/^go (.*)$/GO_VERSION=\1/p' go.mod >> $GITHUB_ENV
+
+      - name: Set up Go with cache
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version: "${{ env.GO_VERSION }}"
+          cache-dependency-path: ./go.sum
+
+      - name: Install dependencies
+        if: steps.decide.outputs.run == 'true'
+        run: go mod download
+
+      - name: Install Kind
+        if: steps.decide.outputs.run == 'true'
+        run: deploy/ci-pr-checks/install-kind.sh
+
+      - name: Set up Docker Buildx
+        if: steps.decide.outputs.run == 'true'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build WVA image locally
+        if: steps.decide.outputs.run == 'true'
+        id: build-image
+        env:
+          CHECKOUT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: deploy/ci-pr-checks/build-wva-image-local.sh
+
+      - name: Run the live-Kueue borrowing e2e
+        if: steps.decide.outputs.run == 'true'
+        shell: bash
+        env:
+          ENVIRONMENT: kind-emulator
+          USE_SIMULATOR: "true"
+          SCALE_TO_ZERO_ENABLED: "false"
+          CREATE_CLUSTER: "true"
+          SCALER_BACKEND: keda
+          LLM_D_ROUTER_VERSION: "v0.9.0"
+          IMG: ${{ steps.build-image.outputs.image }}
+          SKIP_BUILD: "true"
+          DELETE_CLUSTER: "false"
+          REQUIRE_KUEUE_E2E: "true"
+          E2E_TIMEOUT: 45m
+          E2E_GO_TIMEOUT: 50m
+        run: |
+          make test-e2e-kueue-borrow-with-setup

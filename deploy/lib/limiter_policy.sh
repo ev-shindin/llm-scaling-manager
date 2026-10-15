@@ -12,7 +12,7 @@
 #
 # Requires funcs: log_error.
 # Requires vars: none unconditionally; the quota path reads WVA_QUOTAS,
-# WVA_QUOTA_SCOPE, WVA_QUOTA_KUEUE, WVA_SCOPE, WVA_WATCH_NS and WVA_NS. The namespace a
+# WVA_QUOTA_SCOPE, WVA_QUOTA_KUEUE, WVA_QUOTA_KUEUE_BORROW, WVA_SCOPE, WVA_WATCH_NS and WVA_NS. The namespace a
 # namespace-scoped budget is keyed on is an ARGUMENT, never an environment
 # variable -- it is the highest-precedence input to the document, and one that
 # could arrive from an operator's exported shell would be unvalidatable.
@@ -65,7 +65,9 @@ limiter_entry_yaml() {
 
     local scope="${WVA_QUOTA_SCOPE:-namespace}"
     # Kueue bounds the entry when asked: per namespace and accelerator type the
-    # SMALLER of the Kueue nominal quota and the budget in WVA_QUOTAS applies.
+    # SMALLER of the Kueue grant (cohort borrowing included where it is safe;
+    # countBorrowable: false on the entry keeps nominal) and the budget in
+    # WVA_QUOTAS applies.
     # The budget is still required. Kueue's usual flavors carry no product
     # label, so its grant names no accelerator type; WVA_QUOTAS names the types
     # and -1 lets Kueue set the figure: WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true.
@@ -75,6 +77,19 @@ limiter_entry_yaml() {
         true|false) ;;
         *) log_error "WVA_QUOTA_KUEUE must be 'true' or 'false', got '$kueue'" ;;
     esac
+    # WVA_QUOTA_KUEUE_BORROW=false keeps the Kueue cap at nominal: the entry
+    # then carries countBorrowable: false. Unset or true writes nothing, so the
+    # controller default (borrowing counted where it is safe) applies. It is a
+    # property of the kueue block, so without WVA_QUOTA_KUEUE=true it is
+    # ignored, with a warning.
+    local borrow="${WVA_QUOTA_KUEUE_BORROW:-true}"
+    case "$borrow" in
+        true|false) ;;
+        *) log_error "WVA_QUOTA_KUEUE_BORROW must be 'true' or 'false', got '$borrow'" ;;
+    esac
+    if [ -n "${WVA_QUOTA_KUEUE_BORROW:-}" ] && [ "$kueue" != "true" ]; then
+        log_warning "WVA_QUOTA_KUEUE_BORROW=${WVA_QUOTA_KUEUE_BORROW} is set, but WVA_QUOTA_KUEUE is not true, so there is no Kueue block to put it on -- it is being IGNORED."
+    fi
     case "$scope" in
         namespace|cluster) ;;
         *) log_error "WVA_QUOTA_SCOPE must be 'namespace' or 'cluster', got '$scope'" ;;
@@ -264,6 +279,9 @@ $types" in
     printf '%s\n' '- name: install-quota' '  type: quota' "  scope: ${scope}"
     if [ "$kueue" = "true" ]; then
         printf '%s\n' '  kueue:' '    enabled: true'
+        if [ "$borrow" = "false" ]; then
+            printf '%s\n' '    countBorrowable: false'
+        fi
     fi
     if [ "$scope" = "cluster" ]; then
         # Cluster scope caps the SUM across every namespace, so it is keyed by
