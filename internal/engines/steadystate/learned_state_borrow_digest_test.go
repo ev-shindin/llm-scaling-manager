@@ -10,9 +10,9 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 )
 
-// borrowingState is a state holding one running lower bound and one forget
+// lowerBoundDigestState is a state holding one running lower bound and one forget
 // mark, the two entries whose clocks move every cycle.
-func borrowingState(now time.Time) saturation.LearnedState {
+func lowerBoundDigestState(now time.Time) saturation.LearnedState {
 	return saturation.LearnedState{
 		LowerBounds: map[string]saturation.LowerBoundSnapshot{
 			"ns|v|m|H100|1|both|b0|q5": {
@@ -31,28 +31,28 @@ func borrowingState(now time.Time) saturation.LearnedState {
 func TestABorrowsTickAndAForgetMarksSeenDoNotChangeTheDigest(t *testing.T) {
 	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 	const key = "ns|v|m|H100|1|both|b0|q5"
-	before := learnedStateDigest(borrowingState(now))
+	before := learnedStateDigest(lowerBoundDigestState(now))
 	require.NotEmpty(t, before)
 
-	later := borrowingState(now)
+	later := lowerBoundDigestState(now)
 	lb := later.LowerBounds[key]
 	lb.Tick, lb.Seen = now.Add(time.Minute), now.Add(time.Minute)
 	later.LowerBounds[key] = lb
 	later.Forgotten["ns/w"] = saturation.ForgetMarkSnapshot{Token: "t1", Seen: now.Add(time.Minute)}
 	assert.Equal(t, before, learnedStateDigest(later), "a cycle's clocks changed the digest")
 
-	paused := borrowingState(now)
+	paused := lowerBoundDigestState(now)
 	lb = paused.LowerBounds[key]
 	lb.Since = now.Add(-30 * time.Minute)
 	paused.LowerBounds[key] = lb
 	assert.NotEqual(t, before, learnedStateDigest(paused), "a pause moves the start, which is learned")
 
-	reforgot := borrowingState(now)
+	reforgot := lowerBoundDigestState(now)
 	reforgot.Forgotten["ns/w"] = saturation.ForgetMarkSnapshot{Token: "t2", Seen: now}
 	assert.NotEqual(t, before, learnedStateDigest(reforgot), "a new token is learned")
 
 	// The digest works on a copy: the caller's clocks are untouched.
-	s := borrowingState(now)
+	s := lowerBoundDigestState(now)
 	learnedStateDigest(s)
 	assert.Equal(t, now, s.LowerBounds[key].Tick)
 	assert.Equal(t, now, s.Forgotten["ns/w"].Seen)
