@@ -55,7 +55,8 @@ const (
 
 	// WVAUtilizationShareWithheldTotal is a counter: transfers not planned, by
 	// reason (reversal-hold, not-actionable, return-not-calm, return-pod-busy,
-	// return-role-short, donor-peak, awaiting-return, scale-down-band).
+	// return-role-short, return-receiver-unplaceable, donor-peak,
+	// awaiting-return, scale-down-band).
 	WVAUtilizationShareWithheldTotal = "wva_utilization_share_withheld_total"
 
 	// WVAUtilizationShareActual is a gauge: u_r, a role's utilization at the

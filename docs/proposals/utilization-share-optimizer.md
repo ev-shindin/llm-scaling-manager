@@ -1283,16 +1283,29 @@ When the group acts:
     of its headroom does not block, nor does one held from filling, nor one the
     planner found unfundable this cycle (no compatible donor): the first
     version blocked on the first two, so one tenant could pin everyone's spare;
+  - **not for a receiver no node can hold**: while every role below its
+    whole-replica target that could take the GPUs is one the planner found
+    unfundable with the nodes and its pods known -- no node-aware set, donor
+    pods and free GPUs on one node, opens a hole for it -- nothing is returned
+    (counted `return-receiver-unplaceable`). A return frees no more than such
+    a set would, so the GPUs would sit unassigned while the donors lose their
+    headroom; in the whole-node kind run, small models returned 8 replicas
+    for a large model no node could hold. Judged every cycle, and never
+    without node information, where the idle fill places blind and a return
+    may still serve the receiver;
   - the role is not held from giving (`GivingHeld`: backing off after an
     aborted release, all it can give already in flight, or it received within
     the reversal hold). The band no longer gates a return: the idle-floor rule
     kept the idlest whole-node donors in band, so they never returned anything;
   - it never takes the role below its target, its floor or its keep;
-  - **the role stays calm on what it keeps, less its headroom**: its need is at
-    most the return load (`stabilization.returnSpareWhenLoadAtMost`, default
-    0.6) times what it would hold after the return less its headroom,
-    `N_r ≤ ρ × (Ḡ_r − g_r − g_r·h_r)` with `Ḡ_r` before the return and
-    `h_r` its headroom replicas (counted `return-not-calm` when it holds back).
+  - **the role stays calm on what it keeps, less its headroom**: what its need
+    serves is at most the return load (`stabilization.returnSpareWhenLoadAtMost`,
+    default 0.6) times what it would hold after the return less its headroom
+    serves, `s_r(N_r) ≤ ρ × s_r(Ḡ_r − g_r − g_r·h_r)` with `Ḡ_r` before the
+    return, `h_r` its headroom replicas and `s_r` its capacity curve (the
+    identity when every GPU serves alike; counted `return-not-calm` when it
+    holds back). Read in GPUs, a role whose sparse replicas sit at the end of
+    its curve returned GPUs at a served load of up to 0.76.
 
   Once due, everything above the target that passes the calm rule goes in one
   cycle, as a scale-down would: returns are unpaced and outside the
@@ -2234,7 +2247,7 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_utilization_share_target_gpus` | `model_name`, `role`, `exported_namespace` | `Ĝ_r`, the continuous target the band is judged against, in GPUs |
 | `wva_utilization_share_actionable` | `model_name`, `role`, `exported_namespace` | 1 when the role is out of band and off its integer target — a move could fix it (§6.1) |
 | `wva_utilization_share_replicas_to_move` | `accelerator_type`, `scope` | replicas the integer target would move; in shadow mode, what would be planned |
-| `wva_utilization_share_withheld_total` | `accelerator_type`, `scope`, `reason` | transfers not planned: `reversal-hold` (every move a hold withheld: the reversal hold, §6.7 rule 4; a cancelled pair, §6.3; an aborted donor's back-off; an exhausted donor) / `not-actionable` (§6.1 step 4) / `return-not-calm` / `return-role-short` / `donor-peak` / `awaiting-return` / `scale-down-band` (§6.2). The swing rule withholds nothing; it changes the need a role is planned on, reported by `wva_utilization_share_swinging` |
+| `wva_utilization_share_withheld_total` | `accelerator_type`, `scope`, `reason` | transfers not planned: `reversal-hold` (every move a hold withheld: the reversal hold, §6.7 rule 4; a cancelled pair, §6.3; an aborted donor's back-off; an exhausted donor) / `not-actionable` (§6.1 step 4) / `return-not-calm` / `return-role-short` / `return-receiver-unplaceable` / `donor-peak` / `awaiting-return` / `scale-down-band` (§6.2). The swing rule withholds nothing; it changes the need a role is planned on, reported by `wva_utilization_share_swinging` |
 | `wva_utilization_share_swinging` | `model_name`, `role`, `exported_namespace` | 1 while a role is planned on its mean need (§6.7 rule 5) |
 | `wva_utilization_share_actual` | `model_name`, `role`, `exported_namespace` | `u_r` |
 | `wva_utilization_share_spare_gpus` | `accelerator_type`, `scope` | `S`; negative when the quota is short |

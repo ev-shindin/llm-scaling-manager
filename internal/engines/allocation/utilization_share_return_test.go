@@ -1,7 +1,9 @@
 package allocation
 
 import (
+	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -566,5 +568,216 @@ func TestShareHeadroomScalesByWeight(t *testing.T) {
 	}
 	if integ["L"] != 4 || integ["Q"] != 3 {
 		t.Fatalf("targets %v, want L=4 (need 2 + 2 for weight 2), Q=3 (need 2 + 1)", integ)
+	}
+}
+
+// curvedQ is spareRun's two roles with Q on a capacity curve: its first 2
+// GPUs serve as its best variant does, the next 12 a third as much -- dense
+// replicas first, sparse ones at the end, where it gives from. Q holds 14 in
+// 2-GPU replicas and needs qNeed. The ledger knows both peaks, L's at 16 and
+// Q's at 18, a scale-down window ago: the quota of 20 is contended, and Q's
+// spare is capped at one replica above its claim.
+func curvedQ(qNeed float64) (SharePlanInput, *ShareLedger) {
+	in := spareRun(2, qNeed, 14)
+	in.Budget = 20
+	in.Held = map[string]int{"L": 4, "Q": 14}
+	in.Headroom.ReturnLoad = 0.6
+	in.Roles = []ShareRole{
+		{Key: "L", Weight: 1, Need: 2, Floor: 1, Ceiling: 16, ReplicaGPUs: 1},
+		{Key: "Q", Weight: 1, Need: qNeed, Floor: 2, Ceiling: 14, ReplicaGPUs: 2,
+			Capacity: []ShareCapacityStep{{GPUs: 2, PerGPU: 1}, {GPUs: 12, PerGPU: 0.312}}},
+	}
+	in.Give = map[string]ShareVariant{"L": {Name: "l", GPUs: 1}, "Q": {Name: "q", GPUs: 2}}
+	l := NewShareLedger()
+	knownFor(l, time.Unix(1000, 0), "L", "Q")
+	for _, at := range []int64{900, 915} {
+		l.RecordNeeds(map[string]float64{"L": 16, "Q": 18}, time.Unix(at, 0), spareTimings())
+	}
+	return in, l
+}
+
+// A return is judged calm on what the GPUs serve, not on their count (#233).
+// Q needs 1.639 and keeps 2 GPUs of headroom. Kept at 6, the 4 below its
+// headroom serve 2.624: a load of 0.625, above the 0.6 return load, though
+// 1.639 / 4 reads 0.41 in GPUs. Kept at 8 they serve 3.248, a load of 0.50.
+func TestShareReturnJudgesLoadOnWhatTheGPUsServe(t *testing.T) {
+	in, l := curvedQ(1.639)
+	for i := range 4 {
+		PlanShareTransfers(l, in, time.Unix(int64(1000+15*i), 0), spareTimings())
+	}
+	kept := l.Committed(in.Held)["Q"]
+	q := in.Roles[1]
+	if load := q.serves(q.Need) / q.serves(float64(kept-2)); kept != 8 || load > 0.6 {
+		t.Fatalf("Q kept %d, a load of %.3f on what its GPUs serve; want 8, at most 0.6", kept, load)
+	}
+	// Control: without the curve, every GPU serves alike and 6 is calm
+	// (1.639 <= 0.6 x 4).
+	in, l = curvedQ(1.639)
+	in.Roles[1].Capacity = nil
+	for i := range 4 {
+		PlanShareTransfers(l, in, time.Unix(int64(1000+15*i), 0), spareTimings())
+	}
+	if kept := l.Committed(in.Held)["Q"]; kept != 6 {
+		t.Fatalf("control, no curve: Q kept %d, want 6", kept)
+	}
+}
+
+// A return is called off on what the GPUs serve too (#233): Q returned three
+// replicas, keeping 8, and its need rose to 3.5. One replica above the bar
+// the return went under, 8 GPUs, serve 3.872; 3.5 serves 2.468, above 0.6 of
+// it, though 3.5 is below 0.6 x 8 in GPUs.
+func TestShareCancelsAReturnOnWhatTheGPUsServe(t *testing.T) {
+	cancelled := func(qNeed float64) int {
+		in, l := curvedQ(qNeed)
+		for range 3 {
+			l.Start(ShareTransfer{Donor: "Q", DonorGPUs: 2, Entitled: true, Returned: true}, in.Held, time.Unix(1000, 0), spareTimings())
+		}
+		return len(PlanShareTransfers(l, in, time.Unix(1015, 0), spareTimings()).Cancelled)
+	}
+	if n := cancelled(3.5); n != 1 {
+		t.Errorf("busy on what its GPUs serve: cancelled %d, want 1", n)
+	}
+	if n := cancelled(2.9); n != 0 {
+		t.Errorf("control, calm (2.9 serves 2.281 <= 0.6 x 3.872): cancelled %d, want 0", n)
+	}
+}
+
+// A transfer is not called off as a reversal while its receiver is still
+// below its whole-replica target, whatever the continuous split says (#233):
+// that split shares the spare by need in GPUs, the whole-replica targets and
+// admission by what the GPUs serve, and judged on the first a move the second
+// just started was cancelled the next cycle, and started again. R's sparse
+// GPUs come last, so its need of 8 GPUs serves 5: the continuous split gives
+// it 22 of 44, the whole-replica targets 28.
+func TestShareKeepsATransferItsReceiverTargetStillWants(t *testing.T) {
+	in := SharePlanInput{
+		Roles: []ShareRole{
+			{Key: "D", Weight: 1, Need: 8, Ceiling: 44, ReplicaGPUs: 1},
+			{Key: "R", Weight: 1, Need: 8, Ceiling: 44, ReplicaGPUs: 1,
+				Capacity: []ShareCapacityStep{{GPUs: 4, PerGPU: 1}, {GPUs: 40, PerGPU: 0.25}}},
+		},
+		Held:       map[string]int{"D": 18, "R": 26},
+		Thresholds: map[string]float64{"D": 0.8, "R": 0.8}, Budget: 44, Tolerance: 0.15,
+		PhysicalFree: math.MaxInt,
+	}
+	l := NewShareLedger()
+	knownFor(l, time.Unix(1000, 0), "D", "R")
+	started, cancelled := 0, 0
+	for i := range 6 {
+		p := PlanShareTransfers(l, in, time.Unix(int64(1000+15*i), 0), spareTimings())
+		started += len(p.Started)
+		cancelled += len(p.Cancelled)
+	}
+	if started == 0 || cancelled != 0 {
+		t.Fatalf("D -> R: started %d, cancelled %d under unchanged demand; want started, none cancelled", started, cancelled)
+	}
+}
+
+// A role the idle fill raises this cycle returns nothing: A holds 5 of a
+// target of 7, and the fill's credit of one 8-GPU replica takes it to 13, past
+// its target. Judged on that, it returned a 2-GPU replica of the 5 it holds,
+// and the return was called off the next cycle, as A was still below its
+// target -- every cycle.
+func TestShareFillCreditIsNotSpare(t *testing.T) {
+	in := SharePlanInput{
+		Roles: []ShareRole{
+			{Key: "A", Weight: 1, Need: 5.9, Floor: 1, Ceiling: 20, ReplicaGPUs: 1},
+			{Key: "B", Weight: 1, Need: 2, Floor: 1, Ceiling: 20, ReplicaGPUs: 1},
+		},
+		Held:       map[string]int{"A": 5, "B": 3},
+		Thresholds: map[string]float64{"A": 0.8, "B": 0.8}, Budget: 20, Tolerance: 0.15,
+		Give:         map[string]ShareVariant{"A": {Name: "a2", GPUs: 2}},
+		Grow:         map[string]ShareVariant{"A": {Name: "a8", GPUs: 8}},
+		PhysicalFree: math.MaxInt, Headroom: ShareHeadroom{Capped: true, Replicas: 1},
+	}
+	l := NewShareLedger()
+	for i := range 5 {
+		p := PlanShareTransfers(l, in, time.Unix(int64(1000+15*i), 0), spareTimings())
+		for _, tr := range p.Started {
+			if tr.Returned && tr.Donor == "A" {
+				t.Fatalf("cycle %d: A, below its target, returned %+v", i+1, tr)
+			}
+		}
+	}
+}
+
+// fragmented is the whole-node e2e's fragmented cluster (#235): G holds one
+// 8-GPU replica and needs two; S1 and S2, idle, hold five 1-GPU replicas each,
+// spread over nodes n2, n3 and n4 beside GPUs no model holds, so no node can
+// be emptied for G. The quota of 18 is spent. nodes says whether the planner
+// knows the nodes.
+func fragmented(nodes bool) SharePlanInput {
+	in := SharePlanInput{
+		Roles: []ShareRole{
+			{Key: "G", Weight: 1, Need: 16, Floor: 8, Ceiling: 16, ReplicaGPUs: 8},
+			{Key: "S1", Weight: 1, Need: 0.2, Floor: 1, Ceiling: 5, ReplicaGPUs: 1},
+			{Key: "S2", Weight: 1, Need: 0.2, Floor: 1, Ceiling: 5, ReplicaGPUs: 1},
+		},
+		Held:       map[string]int{"G": 8, "S1": 5, "S2": 5},
+		Thresholds: map[string]float64{"G": 0.8, "S1": 0.8, "S2": 0.8}, Budget: 18, Tolerance: 0.15,
+		Give: map[string]ShareVariant{
+			"S1": {Name: "s1", GPUs: 1, PodGPUs: []int{1}},
+			"S2": {Name: "s2", GPUs: 1, PodGPUs: []int{1}},
+		},
+		Grow:         map[string]ShareVariant{"G": {Name: "g", GPUs: 8, PodGPUs: []int{8}}},
+		PhysicalFree: math.MaxInt, Headroom: ShareHeadroom{Capped: true, Replicas: 1},
+	}
+	if !nodes {
+		return in
+	}
+	in.Nodes = map[string]ShareNode{"n1": {}, "n2": {}, "n3": {}, "n4": {}}
+	in.DonorUnits = map[string][]ShareUnit{}
+	for _, s := range []string{"S1", "S2"} {
+		for i, n := range []string{"n2", "n2", "n3", "n3", "n4"} {
+			name := fmt.Sprintf("ns/%s-%d", strings.ToLower(s), i)
+			in.DonorUnits[s] = append(in.DonorUnits[s], ShareUnit{Pods: []SharePod{{Name: name, Node: n, GPUs: 1}}})
+		}
+	}
+	return in
+}
+
+// While the only role short of its target is one no node can hold a replica
+// of, nothing is returned for it (#235): the GPUs would sit unassigned, and
+// the small models would lose their headroom for nothing. Without node
+// information the idle fill places blind and a return may still serve G, so
+// returns go on as before. Re-judged every cycle: once a node can be emptied
+// G is funded, and the spare above the targets is returned again.
+func TestShareReturnsNothingForAnUnplaceableReceiver(t *testing.T) {
+	l := NewShareLedger()
+	in := fragmented(true)
+	returns, withheld := 0, 0
+	for i := range 6 {
+		p := PlanShareTransfers(l, in, time.Unix(int64(1000+15*i), 0), spareTimings())
+		returns += p.Returns
+		withheld += p.Withheld[ShareWithheldReturnUnplaceable]
+		if i >= 2 && p.Unfunded["G"] != ShareUnfundedNoCompatibleDonor {
+			t.Fatalf("cycle %d: G unfunded %q, want %q", i+1, p.Unfunded["G"], ShareUnfundedNoCompatibleDonor)
+		}
+	}
+	if returns != 0 || withheld == 0 {
+		t.Fatalf("fragmented: %d returned, %d withheld for G; want none returned, withheld counted", returns, withheld)
+	}
+
+	returns = 0
+	for _, p := range planEach(NewShareLedger(), fragmented(false), 6) {
+		returns += p.Returns
+	}
+	if returns == 0 {
+		t.Fatal("control, no node information: nothing returned")
+	}
+
+	// Judged every cycle, on the same ledger: two pods outside the models
+	// leave n2, and its four free GPUs and the four small pods on it make a
+	// hole for G. The spare the small models kept funds it: a set takes them
+	// to their targets of one.
+	in.Nodes["n2"] = ShareNode{Free: 4}
+	funded := false
+	for i := range 4 {
+		for _, tr := range PlanShareTransfers(l, in, time.Unix(int64(1090+15*i), 0), spareTimings()).Started {
+			funded = funded || tr.Receiver == "G"
+		}
+	}
+	if c := l.Committed(in.Held); !funded || c["G"] != 16 || c["S1"] != 1 || c["S2"] != 1 {
+		t.Fatalf("a node freed: G funded %v, committed %v; want G at 16 from the small models' spare", funded, c)
 	}
 }

@@ -23,7 +23,8 @@ import (
 //     S1 and S2 are at their floors of one, so G's target is two replicas,
 //     and the small donors can pay its 8 GPUs of quota.
 //   - G is loaded. No node can be emptied: the optimizer must plan nothing,
-//     and say why.
+//     say why, and leave S1 and S2 their spare -- returned, it would sit
+//     unassigned in the quota, since no node holds G either way.
 //   - Then the optimizer is switched off and the quota raised to 26: today's
 //     optimizer orders a G replica that no node can hold.
 var _ = Describe("Utilization share with a whole-node model: a fragmented cluster", Label("utilization-share-wholenode"), Ordered, func() {
@@ -72,13 +73,12 @@ var _ = Describe("Utilization share with a whole-node model: a fragmented cluste
 		e.load(loadG, msG, modelG, 16)
 	})
 
-	// While S1 and S2 hold spare replicas, G reports no-compatible-donor. They
-	// are idle, and their spare goes back to the quota by returns once G reads
-	// unfundable; G then reports donors-at-floor, the quota's 8 GPUs sit
-	// unassigned, and still no node holds G. Which of the two reasons a
-	// sample catches depends on when the returns land, so the spec accepts
-	// either and records the order it saw.
-	It("starts no transfer for G and reports why", func() {
+	// S1 and S2 hold spare replicas above their targets of one, and G reports
+	// no-compatible-donor. They are idle, but G is the only model below its
+	// target and no node can hold its replica, so nothing is returned: the
+	// returned GPUs would only sit unassigned. S1 and S2 keep their five
+	// replicas, and G keeps reporting no-compatible-donor.
+	It("starts no transfer for G, reports why, and returns no spare for it", func() {
 		start := time.Now()
 		wholeNodeProm()
 		Eventually(func(g Gomega) {
@@ -92,6 +92,12 @@ var _ = Describe("Utilization share with a whole-node model: a fragmented cluste
 
 		By("Holding eight minutes: nothing is given for G, G orders no replica, and says why")
 		e.holdUnfunded("fragmented", modelG, depG, []string{depS1, depS2}, start, floorDropped, 8*time.Minute, false)
+
+		By("S1 and S2 kept their spare: nothing was returned for a G no node can hold")
+		lines := shareLines(controllerLogsSince(start), e.ns)
+		Expect(withMsg(lines, "spare returned")).To(BeEmpty(), describeShare(lines, 40))
+		Expect(e.specReplicas(Default, depS1)).To(Equal(int32(5)))
+		Expect(e.specReplicas(Default, depS2)).To(Equal(int32(5)))
 	})
 
 	It("without the optimizer, orders a G replica that no node can hold", func() {

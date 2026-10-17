@@ -300,6 +300,11 @@ const (
 	// confirm cycles in a row -- for at most its scale-down window
 	// (returnSpare).
 	ShareWithheldReturnPodBusy = "return-pod-busy"
+	// ShareWithheldReturnUnplaceable counts a role above its target that
+	// keeps its spare because every role below its own target is one no node
+	// can hold a replica of (returnSpare): returned, the GPUs would sit
+	// unassigned.
+	ShareWithheldReturnUnplaceable = "return-receiver-unplaceable"
 )
 
 // ShareDebt is how far a committed allocation stands above the budget, or 0.
@@ -633,7 +638,7 @@ func (p *sharePlanRun) hardReceivers() map[string]bool {
 // over its scale-down window, as a scale-down is: judged on one reading, a
 // calm donor read in a trough of its normal demand is drained in two cycles.
 func (p *sharePlanRun) donorView(r ShareRole) ShareRole {
-	r.Need = math.Max(p.need(r.Key), p.l.RecentPeak(r.Key, p.now, p.tm.Window))
+	r.Need = math.Max(p.need(r.Key), r.gpusFor(p.l.RecentPeak(r.Key, p.now, p.tm.Window)))
 	return r
 }
 
@@ -717,7 +722,7 @@ func (p *sharePlanRun) capHeadroom(peakSum int) {
 	for i, r := range p.roles {
 		views[i] = p.needView(r)
 		if fast[r.Key] {
-			mean := p.l.MeanNeed(r.Key, r.Need)
+			mean := r.gpusFor(p.l.MeanNeed(r.Key, r.serves(r.Need)))
 			onMean := views[i]
 			onMean.Need = mean
 			// Reported only where the mean lowers the cap the role ends up
@@ -803,7 +808,7 @@ func (p *sharePlanRun) peakClaims() (map[string]int, int) {
 	for _, r := range p.roles {
 		g := max(r.ReplicaGPUs, 1)
 		peak := r
-		peak.Need = p.l.PeakNeed(r.Key, r.Need)
+		peak.Need = r.gpusFor(p.l.PeakNeed(r.Key, r.serves(r.Need)))
 		switch {
 		case p.l.PeakKnown(r.Key, p.now, p.tm):
 		case established:
@@ -834,18 +839,22 @@ func (p *sharePlanRun) unpaced(rc string) bool {
 }
 
 // planningRoles records this cycle's needs and plans a swinging role on its
-// mean need (rule 5).
+// mean need (rule 5). Needs are recorded in what they serve (ShareRole.serves)
+// and read back on the role's curve of the cycle reading them: in GPUs, the
+// same demand reads fewer once a dense replica serves part of it, and a
+// history mixing curves would overstate a role that just gained one, and
+// average a swinging role's readings on different curves.
 func (p *sharePlanRun) planningRoles() {
 	raw := make(map[string]float64, len(p.in.Roles))
 	for _, r := range p.in.Roles {
-		raw[r.Key] = r.Need
+		raw[r.Key] = r.serves(r.Need)
 	}
 	p.l.RecordNeeds(raw, p.now, p.tm)
 	p.roles = slices.Clone(p.in.Roles)
 	p.byKey = make(map[string]ShareRole, len(p.roles))
 	for i := range p.roles {
-		if p.l.Swinging(p.roles[i].Key, p.now) {
-			p.roles[i].Need = p.l.PlanningNeed(p.roles[i].Key, p.roles[i].Need, p.now)
+		if r := p.roles[i]; p.l.Swinging(r.Key, p.now) {
+			p.roles[i].Need = r.gpusFor(p.l.PlanningNeed(r.Key, r.serves(r.Need), p.now))
 			p.plan.Swinging = append(p.plan.Swinging, p.roles[i].Key)
 		}
 		p.byKey[p.roles[i].Key] = p.roles[i]
@@ -862,7 +871,14 @@ func (p *sharePlanRun) cancelReversals() {
 		}
 		dn := p.byKey[t.Donor]
 		donorAfter := p.committed[t.Donor] // already net of this transfer
-		donorShort := float64(donorAfter) < p.cont[t.Donor]-2*shareTol(p.cont[t.Donor], dn, in.Tolerance)
+		// A reversal is judged against both targets: the continuous one, for
+		// its band, and the whole-replica one, which admission started the
+		// move against. The continuous split shares the spare by need in
+		// GPUs, the whole-replica targets by what the GPUs serve; judged on
+		// the first alone, a move the second had just started was cancelled
+		// the next cycle, and started again.
+		donorShort := float64(donorAfter) < p.cont[t.Donor]-2*shareTol(p.cont[t.Donor], dn, in.Tolerance) &&
+			donorAfter < p.integ[t.Donor]
 		// A returned spare is called off, while it is free, when its role's
 		// demand came back: the GPUs would otherwise drain from it only for
 		// the fill to raise it again. Back means below its target, or busier
@@ -870,7 +886,7 @@ func (p *sharePlanRun) cancelReversals() {
 		// the return was started under, so the two do not alternate.
 		g := float64(max(dn.ReplicaGPUs, 1))
 		bar := float64(donorAfter) - float64(in.Headroom.spareReplicas(dn))*g + g
-		back := donorShort || donorAfter < p.integ[t.Donor] || p.need(t.Donor) > in.Headroom.returnLoad()*bar
+		back := donorAfter < p.integ[t.Donor] || !p.returnCalm(dn, bar)
 		if t.Returned && back && l.Cancel(t.ID, now, tm) {
 			p.plan.Cancelled = append(p.plan.Cancelled, t.ID)
 			p.committed = l.Committed(in.Held)
@@ -885,7 +901,8 @@ func (p *sharePlanRun) cancelReversals() {
 		}
 		rc := p.byKey[t.Receiver]
 		receiverWithout := p.committed[t.Receiver] - t.GPUs
-		receiverFine := float64(receiverWithout) > p.cont[t.Receiver]+shareTol(p.cont[t.Receiver], rc, in.Tolerance)
+		receiverFine := float64(receiverWithout) > p.cont[t.Receiver]+shareTol(p.cont[t.Receiver], rc, in.Tolerance) &&
+			receiverWithout >= p.integ[t.Receiver]
 		if (donorShort || receiverFine) && l.Cancel(t.ID, now, tm) {
 			p.plan.Cancelled = append(p.plan.Cancelled, t.ID)
 			// A set's contributors go with its primary, while they still can.
@@ -1196,12 +1213,15 @@ func (p *sharePlanRun) fundFrom(rc, dn string) (started int, step fundStep, cand
 //     whole replicas -- with one short, the GPUs go to it by a transfer,
 //     which the holds govern; a role short only of its headroom, or held
 //     from filling, does not block;
+//   - not while every role below its target is one no node can hold a
+//     replica of (unplaceable): the GPUs would sit unassigned, and the role
+//     would lose its headroom for nothing;
 //   - never below its target, floor or keep, and not while held from giving;
-//   - and only while it stays calm one replica lower: its need at most the
-//     return load of what it would keep less its headroom. The fill raises a
-//     role once its need passes what it holds less its headroom, so a
-//     returned replica is filled again only once need has grown by the
-//     inverse of the return load.
+//   - and only while it stays calm one replica lower: what its need serves at
+//     most the return load of what it would keep less its headroom serves
+//     (returnCalm). The fill raises a role once its need passes what it holds
+//     less its headroom, so a returned replica is filled again only once
+//     need has grown by the inverse of the return load.
 //
 // What is returned goes in one cycle, as a scale-down would.
 func (p *sharePlanRun) returnSpare() {
@@ -1210,7 +1230,14 @@ func (p *sharePlanRun) returnSpare() {
 	for _, r := range p.roles {
 		// Only a capped spare is returned: spread, the targets give it all
 		// away by weight, and what moves between roles moves by transfer.
-		over[r.Key] = p.plan.HeadroomCapped && p.work[r.Key] > p.integ[r.Key]
+		// And only above its target on what it holds, not on what the idle
+		// fill or returns still releasing raise it by this cycle (fromIdle,
+		// returnsCover): a replica of its grow variant can take it past its
+		// target, and it would give back what it holds for GPUs it does not
+		// have yet -- a role holding 5 of a target of 8, credited an 8-GPU
+		// replica, returned a 2-GPU one, and the return was called off the
+		// next cycle, every cycle.
+		over[r.Key] = p.plan.HeadroomCapped && p.work[r.Key] > p.integ[r.Key] && p.committed[r.Key] > p.integ[r.Key]
 	}
 	cycles := l.MarkOver(over)
 	load := in.Headroom.returnLoad()
@@ -1234,6 +1261,14 @@ func (p *sharePlanRun) returnSpare() {
 				return
 			}
 		}
+	}
+	if p.onlyUnplaceableShort() {
+		for _, o := range over {
+			if o {
+				p.plan.Withheld[ShareWithheldReturnUnplaceable]++
+			}
+		}
+		return
 	}
 	for _, r := range p.roles {
 		dn := r.Key
@@ -1265,13 +1300,13 @@ func (p *sharePlanRun) returnSpare() {
 		// cycles in a row and lasts at most the donor's scale-down window,
 		// after which the return goes. Only a return the fleet's load would
 		// let go is held, and counted, here; any other keeps its own reason.
-		fleetCalm := p.work[dn]-gd >= max(floor, band) && p.need(dn) <= load*(float64(p.work[dn]-gd)-spare)
+		fleetCalm := p.work[dn]-gd >= max(floor, band) && p.returnCalm(r, float64(p.work[dn]-gd)-spare)
 		if b, ok := podBusy[dn]; ok && fleetCalm && b.cycles >= p.confirmCycles() && now.Sub(b.since) < tm.Window {
 			p.plan.Withheld[ShareWithheldReturnPodBusy]++
 			continue
 		}
 		returned := 0
-		for p.work[dn]-gd >= max(floor, band) && p.need(dn) <= load*(float64(p.work[dn]-gd)-spare) {
+		for p.work[dn]-gd >= max(floor, band) && p.returnCalm(r, float64(p.work[dn]-gd)-spare) {
 			t := l.Start(ShareTransfer{Donor: dn, DonorGPUs: gd, DonorVariant: give.Name, Entitled: true, Returned: true,
 				DonorPodGPUs: shareReplicaPods(give)}, in.Held, now, tm)
 			p.plan.Started = append(p.plan.Started, t)
@@ -1282,13 +1317,55 @@ func (p *sharePlanRun) returnSpare() {
 		}
 		switch {
 		case returned > 0 || p.work[dn]-gd < floor:
-		case p.work[dn]-gd < band && p.need(dn) <= load*(float64(p.work[dn]-gd)-spare):
+		case p.work[dn]-gd < band && p.returnCalm(r, float64(p.work[dn]-gd)-spare):
 			// The band withheld it only if the load would have let it go.
 			p.plan.Withheld[ShareWithheldScaleDownBand]++
 		default:
 			p.plan.Withheld[ShareWithheldReturnNotCalm]++
 		}
 	}
+}
+
+// returnCalm reports whether role r is calm on g GPUs at the return load:
+// what its need serves is at most the return load of what g serves
+// (ShareRole.serves). Read as need over GPUs, a role whose sparse replicas
+// sit at the end of its curve read calm while busier: 1.639 needed on 4 GPUs
+// of a curve of 2 dense and 12 sparse is 0.41 in GPUs and 0.625 of what they
+// serve.
+func (p *sharePlanRun) returnCalm(r ShareRole, g float64) bool {
+	return r.serves(p.need(r.Key)) <= p.in.Headroom.returnLoad()*r.serves(g)
+}
+
+// onlyUnplaceableShort reports whether there are roles below their
+// whole-replica target that can grow and are not held from filling -- the
+// roles the GPUs a return frees would go to -- and every one of them is
+// unplaceable.
+func (p *sharePlanRun) onlyUnplaceableShort() bool {
+	short := false
+	for _, r := range p.roles {
+		if p.work[r.Key] >= p.integ[r.Key] || p.l.FillHeld(r.Key, p.now) {
+			continue
+		}
+		if _, grows := variantOf(p.in.Grow, r.Key, r.ReplicaGPUs); !grows {
+			continue
+		}
+		if !p.unplaceable(r.Key) {
+			return false
+		}
+		short = true
+	}
+	return short
+}
+
+// unplaceable reports whether no node can hold a replica of receiver rc: no
+// donor could fund it (ShareUnfundedNoCompatibleDonor) while the planner knew
+// the nodes and rc's pods, so no node-aware set -- donor pods and free GPUs on
+// one node -- could open a hole for it. A return frees no more than such a set
+// would. Without node information the idle fill places blind, and a return
+// may still serve rc.
+func (p *sharePlanRun) unplaceable(rc string) bool {
+	grow, ok := p.in.Grow[rc]
+	return ok && len(grow.PodGPUs) > 0 && p.in.Nodes != nil && p.plan.Unfunded[rc] == ShareUnfundedNoCompatibleDonor
 }
 
 // fundBySet funds rc from several donors when no single donor replica fits

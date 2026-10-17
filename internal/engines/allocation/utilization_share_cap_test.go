@@ -1,6 +1,7 @@
 package allocation
 
 import (
+	"math"
 	"slices"
 	"testing"
 	"time"
@@ -282,5 +283,33 @@ func TestShareRetainForgetsWhenANeedWasFirstSeen(t *testing.T) {
 	l.RecordNeeds(map[string]float64{"X": 1}, gone, tm)
 	if l.PeakKnown("X", gone, tm) {
 		t.Fatal("X, back, has a known peak from one reading")
+	}
+}
+
+// A role's need history is kept in what its GPUs serve, and read back on the
+// curve it has now (#233): the same demand reads 12 GPUs on sparse replicas
+// and 8 once a dense replica serves part of it. Kept in GPUs, its peak would
+// still read 12 after the change, on GPUs it no longer has.
+func TestSharePeakIsReadOnTodaysCurve(t *testing.T) {
+	sparse := []ShareCapacityStep{{GPUs: 100, PerGPU: 0.5}}
+	dense := []ShareCapacityStep{{GPUs: 4, PerGPU: 1}, {GPUs: 100, PerGPU: 0.5}}
+	in := SharePlanInput{
+		Roles: []ShareRole{
+			{Key: "A", Weight: 1, Need: 12, Ceiling: 40, ReplicaGPUs: 1, Capacity: sparse},
+			{Key: "B", Weight: 1, Need: 2, Ceiling: 8, ReplicaGPUs: 1},
+		},
+		Held:       map[string]int{"A": 12, "B": 2},
+		Thresholds: map[string]float64{"A": 0.8, "B": 0.8}, Budget: 20, Tolerance: 0.15,
+		PhysicalFree: math.MaxInt, Headroom: ShareHeadroom{Capped: true, Replicas: 1},
+	}
+	l := NewShareLedger()
+	t0 := time.Unix(1000, 0)
+	knownFor(l, t0, "A", "B")
+	PlanShareTransfers(l, in, t0, spareTimings())
+	PlanShareTransfers(l, in, t0.Add(15*time.Second), spareTimings())
+	in.Roles[0].Need, in.Roles[0].Capacity = 8, dense
+	p := PlanShareTransfers(l, in, t0.Add(30*time.Second), spareTimings())
+	if p.PeakClaimGPUs != 10 {
+		t.Fatalf("peak claims %d, want 10: A's peak of 6 served is 8 GPUs on its curve now, B's is 2", p.PeakClaimGPUs)
 	}
 }

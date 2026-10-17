@@ -921,6 +921,9 @@ func (l *ShareLedger) Swinging(role string, now time.Time) bool {
 }
 
 // RecordNeeds stores this cycle's needs, keeping a swing window of history.
+// The planner records each need as what it serves (ShareRole.serves), so the
+// history, and every peak, mean and burst read from it, is in GPUs of the
+// role's best variant, whatever mix of variants the role held at the time.
 func (l *ShareLedger) RecordNeeds(needs map[string]float64, now time.Time, tm ShareTimings) {
 	for role, n := range needs {
 		l.needs[role] = slices.DeleteFunc(l.needs[role], func(x shareNeedSample) bool { return now.Sub(x.at) > tm.SwingWindow })

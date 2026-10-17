@@ -1523,8 +1523,10 @@ is not giving it back shows why in `wva_utilization_share_withheld_total`:
 `return-not-calm` (its load is above `returnSpareWhenLoadAtMost`),
 `return-pod-busy` (its load would let the return go, but more than
 `returnSpareWhenLoadAtMost` x `queueLengthThreshold` requests are waiting on
-one of its pods; counted until the scale-down window bound passes) or
-`return-role-short` (another model is short of its need).
+one of its pods; counted until the scale-down window bound passes),
+`return-role-short` (another model is short of its need) or
+`return-receiver-unplaceable` (the only models below their target are ones no
+node can hold a new replica of, so the GPUs would sit unassigned).
 
 Whether the cap is on: `wva_utilization_share_headroom_capped == 1` for the
 group (published only while the optimizer acts, not in shadow mode, and not
