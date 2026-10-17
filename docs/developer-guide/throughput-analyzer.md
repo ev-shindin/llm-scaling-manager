@@ -392,7 +392,7 @@ On leader failover the incoming leader starts with an empty analyzer. During war
        │ vllm:inter_token_latency_seconds_*      (QueryAvgITL               → AvgITL)
        │ vllm:request_generation_tokens_*        (QueryAvgOutputTokens       → AvgOutputTokens)
        │ vllm:request_prompt_tokens_*            (QueryAvgInputTokens        → AvgInputTokens)
-       │ vllm:prefix_cache_hits/queries          (QueryPrefixCacheHitRate    → PrefixCacheHitRate)
+       │ vllm:prefix_cache_{hits,queries}_total  (QueryPrefixCacheHitRate    → PrefixCacheHitRate)
        │ inference_extension_flow_control_*      (QueryModelArrivalRate      → AnalyzerInput.ArrivalRate)
        │ inference_extension_flow_control_*      (QuerySchedulerQueueSize    → QueueSize)
        ↓

@@ -54,7 +54,7 @@ labelled with `model_name`, which the scaling manager filters on:
 | Inter-token latency | `vllm:inter_token_latency_seconds` | `sglang:inter_token_latency_seconds` |
 | Prompt tokens / request | `vllm:request_prompt_tokens_*` | `sglang:prompt_tokens_histogram_*` |
 | Generation tokens / request | `vllm:request_generation_tokens_*` | `sglang:generation_tokens_histogram_*` |
-| Prefix-cache hit rate | `vllm:prefix_cache_hits / _queries` | `sglang:cached_tokens_total / sglang:prompt_tokens_total` |
+| Prefix-cache hit rate | `vllm:prefix_cache_hits_total / vllm:prefix_cache_queries_total` | `sglang:cached_tokens_total / sglang:prompt_tokens_total` |
 | Request count (scale-to-zero) | `vllm:request_success_total` | `sglang:num_requests_total` |
 
 > Your Prometheus (or VictoriaMetrics) must scrape the SGLang pods' `/metrics`,

@@ -272,7 +272,7 @@ model; check the health metrics below.
 | `vllm:num_requests_waiting` | gauge | local queue → **compute-ceiling** trigger + demand |
 | `vllm:request_prompt_tokens_sum` / `_count` | histogram | average **input** tokens per request |
 | `vllm:request_generation_tokens_sum` / `_count` | histogram | average **output** tokens per request |
-| `vllm:prefix_cache_hits` / `vllm:prefix_cache_queries` | counters | prefix-cache hit rate (discounts input-token demand) — *optional* |
+| `vllm:prefix_cache_hits_total` / `vllm:prefix_cache_queries_total` | counters | prefix-cache hit rate (discounts input-token demand) — *optional* |
 | `inference_extension_flow_control_queue_size` / `_bytes` | gauges (EPP) | upstream scheduler-queue demand — *optional* |
 
 Deployment engine args (`--max-num-seqs`, `--gpu-memory-utilization`, `--block-size`,

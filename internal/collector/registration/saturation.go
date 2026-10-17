@@ -148,10 +148,14 @@ func RegisterSaturationQueries(sourceRegistry *source.SourceRegistry) {
 	// Used to reduce estimated input token demand for scheduler-queued requests.
 	// Returns 0..1 where 1 means all prefix lookups were cache hits.
 	// Grouping key and namespace scoping: see the note above RegisterSaturationQueries
+	//
+	// vLLM declares both as Counters named vllm:prefix_cache_hits and
+	// vllm:prefix_cache_queries; the Prometheus client exposes a Counter with a
+	// _total suffix, so the scraped names carry it (issue #232).
 	registry.MustRegister(source.QueryTemplate{
 		Name:        QueryPrefixCacheHitRate,
 		Type:        source.QueryTypePromQL,
-		Template:    `max by (model_name, instance, pod) (rate(vllm:prefix_cache_hits{namespace="{{.namespace}}"}[5m]) / rate(vllm:prefix_cache_queries{namespace="{{.namespace}}"}[5m]))`,
+		Template:    `max by (model_name, instance, pod) (rate(vllm:prefix_cache_hits_total{namespace="{{.namespace}}"}[5m]) / rate(vllm:prefix_cache_queries_total{namespace="{{.namespace}}"}[5m]))`,
 		Params:      []string{source.ParamNamespace},
 		Description: "Prefix cache hit rate per instance (0.0-1.0, 5m rate)",
 	})

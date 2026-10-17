@@ -367,6 +367,14 @@ What changes without a config change:
   is skipped (no node read, say), no new borrowing starts. See the box above
   and [the guide](../guides/kueue-borrowing/). Borrowing state is kept in
   `wva-controller-status`, so it survives a restart.
+- **vLLM's prefix-cache hit rate is read** (bug fix). The query used the
+  counter names without the `_total` suffix vLLM exposes, so the hit rate was
+  always 0. With prefix caching on, a cached part of the prompt is no longer
+  charged: the KV each request needs, the router's queued demand and
+  prefill's work are all discounted by the hit rate, so a workload with shared
+  prefixes can get fewer replicas than before. A prefill variant's learned
+  throughput is keyed on the prompt net of cache hits, so it may start a new
+  window once. SGLang is not affected.
 
 New reads, for borrowing: `cohorts` and `workloads` (Kueue; `workloads`
 cluster-wide, watched through an informer), the `kueue-controller-manager`
