@@ -1,6 +1,8 @@
 package collector
 
 import (
+	"math"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
@@ -8,9 +10,15 @@ import (
 // a domain.ReplicaMetrics is one *scale-target replica* rather than one engine
 // instance.
 //
-// A vLLM pod running data parallelism hosts DP independently-scraped engine
-// instances, distinguished by the port in the instance label; the collector keys
-// them "pod:port". Everything downstream, though, counts in scale-target units:
+// A vLLM pod running data parallelism with one API server per rank hosts DP
+// independently-scraped engine instances, distinguished by the port in the
+// instance label; the collector keys them "pod:port". A pod running its ranks
+// behind ONE API server is a single instance whose series differ only by vLLM's
+// engine label; the per-pod queries fold those ranks in PromQL by the same rules
+// as below (registration/saturation.go), so it arrives here as one row already.
+// Either way the row's EngineRanks says how many ranks it covers, and the two
+// layouts give the same row for the same ranks. Everything downstream, though,
+// counts in scale-target units:
 // the optimizer's targets, MaxReplicas, GPUsPerReplica, CurrentReplicas and
 // PendingReplicas are all pods (or, for LWS, groups). Emitting per-instance rows
 // made the analyzers' supply arithmetic disagree with the units its result is
@@ -27,17 +35,24 @@ import (
 //
 // How each field merges follows from what it measures:
 //
-//   - Capacities, queue depth and rates are extensive — summed. A pod's KV
-//     capacity is the sum of its instances' capacities, and a request served by
-//     any instance is a request served by the pod.
+//   - Capacities, queue depth, rates and engine ranks are extensive — summed. A
+//     pod's KV capacity is the sum of its instances' capacities, and a request
+//     served by any instance is a request served by the pod.
 //   - Utilization fractions (KvCacheUsage, KvUsageInstant) are recomputed as
 //     Σtokens/Σcapacity rather than averaged, so an instance with a larger cache
 //     weighs proportionally more. Without capacity to weigh by they fall back to
 //     the plain mean.
-//   - Request-shape ratios (input/output tokens, ITL, prefix hit rate) are
+//   - The busiest rank's queue and utilization (MaxRankQueueLength,
+//     MaxRankKvCacheUsage) take the max over the instances: they describe one
+//     engine, the fullest, which the saturation guards judge.
+//   - Request-shape ratios (input/output tokens, service time, TTFT) are
 //     weighted by RequestRate: they describe the average request, so the
-//     instance serving more of them should dominate. With no traffic anywhere on
-//     the pod they fall back to the plain mean.
+//     instance serving more of them should dominate. ITL is a mean per
+//     generated token and weighs by GenerationTokenRate; the prefix hit rate
+//     is a fraction of prompt tokens and weighs by the prompt-token rate. Each
+//     weight is the count the matching PromQL mean divides by, so ranks merged
+//     here and ranks folded by the per-pod queries give the same figure. With
+//     no traffic anywhere on the pod they fall back to the plain mean.
 //   - Metadata takes the worst freshness and the oldest age across the
 //     instances, so a pod is only as trustworthy as its stalest rank.
 //
@@ -101,8 +116,11 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 
 	pod.NumGpuBlocks = 0
 	pod.TotalKvCapacityTokens = 0
+	pod.EngineRanks = 0
 	pod.TokensInUse = 0
 	pod.QueueLength = 0
+	pod.MaxRankQueueLength = 0
+	pod.MaxRankKvCacheUsage = 0
 	pod.RequestRate = 0
 	pod.GenerationTokenRate = 0
 
@@ -110,8 +128,17 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	for _, m := range group {
 		pod.NumGpuBlocks += m.NumGpuBlocks
 		pod.TotalKvCapacityTokens += m.TotalKvCapacityTokens
+		// Ranks(), not EngineRanks: a row without a cache_config_info series
+		// is still one engine, and the pod still has one rank per row.
+		pod.EngineRanks += m.Ranks()
 		pod.TokensInUse += m.TokensInUse
 		pod.QueueLength += m.QueueLength
+		// The busiest rank of the pod is the busiest rank of its busiest
+		// row: a max, as the per-pod query takes it over ranks behind one
+		// API server. Each row's figure is read through the row's own ranks,
+		// so a row of one rank gives its queue and utilization as they are.
+		pod.MaxRankQueueLength = max(pod.MaxRankQueueLength, m.BusiestRankQueue())
+		pod.MaxRankKvCacheUsage = max(pod.MaxRankKvCacheUsage, m.BusiestRankKvUsage())
 		pod.RequestRate += m.RequestRate
 		pod.GenerationTokenRate += m.GenerationTokenRate
 
@@ -136,7 +163,13 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	// instance that served more requests counts for more.
 	pod.AvgOutputTokensRecent = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.AvgOutputTokensRecent })
 	pod.AvgInputTokensRecent = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.AvgInputTokensRecent })
-	pod.AvgITL = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.AvgITL })
+	// ITL is a per-TOKEN mean, so each instance weighs by the tokens it
+	// generated. That is what the per-pod ITL query computes for ranks behind
+	// one API server (sum of the ITL sums over sum of the counts, one count
+	// per generated token), so both layouts agree. Falls back to the request
+	// rate when no instance reports a generation rate.
+	pod.AvgITL = weightedBy(group, func(m domain.ReplicaMetrics) float64 { return m.AvgITL },
+		func(m domain.ReplicaMetrics) float64 { return m.GenerationTokenRate })
 	// Weighted like AvgITL: both are per-request costs, so the engine instance
 	// that served more requests should count for more when merging a pod's
 	// instances into one replica.
@@ -149,7 +182,11 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	for _, m := range group {
 		pod.PrefillComputedTokenRate += m.PrefillComputedTokenRate
 	}
-	pod.PrefixCacheHitRate = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.PrefixCacheHitRate })
+	// The hit rate is a fraction of the prompt tokens looked up, so each
+	// instance weighs by its prompt-token rate, as the per-pod query weighs a
+	// rank by its prefix_cache_queries. Falls back to the request rate.
+	pod.PrefixCacheHitRate = weightedBy(group, func(m domain.ReplicaMetrics) float64 { return m.PrefixCacheHitRate },
+		func(m domain.ReplicaMetrics) float64 { return m.RequestRate * m.AvgInputTokens })
 
 	pod.Metadata = mergeMetadata(group)
 	return pod
@@ -168,6 +205,25 @@ func weightedByRequestRate(group []domain.ReplicaMetrics, field func(domain.Repl
 		return weighted / totalRate
 	}
 	return mean(group, field)
+}
+
+// weightedBy averages field across the group weighted by weight, falling back
+// to weightedByRequestRate when no instance carries any weight, or a weight is
+// not a finite non-negative number.
+func weightedBy(group []domain.ReplicaMetrics, field, weight func(domain.ReplicaMetrics) float64) float64 {
+	var weighted, total float64
+	for _, m := range group {
+		w := weight(m)
+		if !(w >= 0) || math.IsInf(w, 0) {
+			return weightedByRequestRate(group, field)
+		}
+		weighted += field(m) * w
+		total += w
+	}
+	if total > 0 {
+		return weighted / total
+	}
+	return weightedByRequestRate(group, field)
 }
 
 // mean returns the arithmetic mean of field across the group. group is non-empty.

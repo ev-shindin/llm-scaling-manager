@@ -1,0 +1,501 @@
+# promtool unit test for the per-pod vLLM queries the collector registers
+# (internal/collector/registration). hack/check-collector-queries.sh runs
+# promtool test rules on it; TestPerPodQueriesMatchPromtoolFixture keeps every
+# expr below identical to the query the registry builds for namespace "llm".
+#
+# dp8-0 is one pod running eight data-parallel ranks behind ONE vLLM API
+# server: every series once per rank, told apart only by the engine label, as
+# vllm/v1/metrics/loggers.py exports them. Its cache_config_info repeats once
+# per rank with the SAME num_gpu_blocks, the API server's sum over its engines
+# (80000 = 8 x 10000). Rank 7 is hot: twice the requests, four times the
+# output, the busiest cache (0.875) and the slowest tokens. Rank 5 is idle.
+#
+# solo-0 is an ordinary pod with one rank. Every query returns for it exactly
+# what the max-based queries before issue #150 returned, including when the
+# target is scraped twice.
+#
+# pid-0 is a pod of two ranks behind an older vLLM run with
+# --api-server-count 2, whose gauges are exported once per API server process
+# (a pid label); the process that did not receive a rank's stats holds 0.
+# dup-2 is a pod of two ranks whose target is scraped twice (job a and b).
+# Neither may count a rank twice.
+#
+# Each expected value is the rank figures combined by hand: the plain mean for
+# utilization, the sum for the queue, the count for the ranks, the max for the
+# busiest rank's queue and cache, and for every mean its sum over the ranks
+# divided by its count over the ranks. Each is exact in binary or a correctly
+# rounded quotient, so promtool compares them exactly. Under the max-based
+# queries before issue #150 every dp8-0 sample of the mean, sum and count
+# queries fails and every solo-0 sample passes.
+rule_files: []
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="0",model_name="glm"}'
+        values: '0.125x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="0",model_name="glm"}'
+        values: '0x15'
+      - series: 'vllm:cache_config_info{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="0",num_gpu_blocks="80000",block_size="64",cache_dtype="auto"}'
+        values: '1x15'
+      - series: 'vllm:request_generation_tokens_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="0",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_generation_tokens_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="0",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:request_prompt_tokens_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="0",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_prompt_tokens_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="0",model_name="glm"}'
+        values: '0+61440x15'
+      - series: 'vllm:prefix_cache_queries{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="0",model_name="glm"}'
+        values: '0+61440x15'
+      - series: 'vllm:prefix_cache_hits{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="0",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:inter_token_latency_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="0",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:inter_token_latency_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="0",model_name="glm"}'
+        values: '0+480x15'
+      - series: 'vllm:time_to_first_token_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="0",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:time_to_first_token_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="0",model_name="glm"}'
+        values: '0+15x15'
+      - series: 'vllm:request_inference_time_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="0",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_inference_time_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="0",model_name="glm"}'
+        values: '0+480x15'
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="1",model_name="glm"}'
+        values: '0.125x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="1",model_name="glm"}'
+        values: '0x15'
+      - series: 'vllm:cache_config_info{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="1",num_gpu_blocks="80000",block_size="64",cache_dtype="auto"}'
+        values: '1x15'
+      - series: 'vllm:request_generation_tokens_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="1",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_generation_tokens_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="1",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:request_prompt_tokens_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="1",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_prompt_tokens_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="1",model_name="glm"}'
+        values: '0+61440x15'
+      - series: 'vllm:prefix_cache_queries{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="1",model_name="glm"}'
+        values: '0+61440x15'
+      - series: 'vllm:prefix_cache_hits{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="1",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:inter_token_latency_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="1",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:inter_token_latency_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="1",model_name="glm"}'
+        values: '0+480x15'
+      - series: 'vllm:time_to_first_token_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="1",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:time_to_first_token_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="1",model_name="glm"}'
+        values: '0+15x15'
+      - series: 'vllm:request_inference_time_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="1",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_inference_time_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="1",model_name="glm"}'
+        values: '0+480x15'
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="2",model_name="glm"}'
+        values: '0.125x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="2",model_name="glm"}'
+        values: '0x15'
+      - series: 'vllm:cache_config_info{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="2",num_gpu_blocks="80000",block_size="64",cache_dtype="auto"}'
+        values: '1x15'
+      - series: 'vllm:request_generation_tokens_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="2",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_generation_tokens_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="2",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:request_prompt_tokens_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="2",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_prompt_tokens_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="2",model_name="glm"}'
+        values: '0+61440x15'
+      - series: 'vllm:prefix_cache_queries{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="2",model_name="glm"}'
+        values: '0+61440x15'
+      - series: 'vllm:prefix_cache_hits{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="2",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:inter_token_latency_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="2",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:inter_token_latency_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="2",model_name="glm"}'
+        values: '0+480x15'
+      - series: 'vllm:time_to_first_token_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="2",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:time_to_first_token_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="2",model_name="glm"}'
+        values: '0+15x15'
+      - series: 'vllm:request_inference_time_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="2",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_inference_time_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="2",model_name="glm"}'
+        values: '0+480x15'
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="3",model_name="glm"}'
+        values: '0.125x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="3",model_name="glm"}'
+        values: '0x15'
+      - series: 'vllm:cache_config_info{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="3",num_gpu_blocks="80000",block_size="64",cache_dtype="auto"}'
+        values: '1x15'
+      - series: 'vllm:request_generation_tokens_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="3",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_generation_tokens_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="3",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:request_prompt_tokens_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="3",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_prompt_tokens_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="3",model_name="glm"}'
+        values: '0+61440x15'
+      - series: 'vllm:prefix_cache_queries{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="3",model_name="glm"}'
+        values: '0+61440x15'
+      - series: 'vllm:prefix_cache_hits{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="3",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:inter_token_latency_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="3",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:inter_token_latency_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="3",model_name="glm"}'
+        values: '0+480x15'
+      - series: 'vllm:time_to_first_token_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="3",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:time_to_first_token_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="3",model_name="glm"}'
+        values: '0+15x15'
+      - series: 'vllm:request_inference_time_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="3",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_inference_time_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="3",model_name="glm"}'
+        values: '0+480x15'
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="4",model_name="glm"}'
+        values: '0.125x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="4",model_name="glm"}'
+        values: '0x15'
+      - series: 'vllm:cache_config_info{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="4",num_gpu_blocks="80000",block_size="64",cache_dtype="auto"}'
+        values: '1x15'
+      - series: 'vllm:request_generation_tokens_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="4",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_generation_tokens_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="4",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:request_prompt_tokens_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="4",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_prompt_tokens_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="4",model_name="glm"}'
+        values: '0+61440x15'
+      - series: 'vllm:prefix_cache_queries{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="4",model_name="glm"}'
+        values: '0+61440x15'
+      - series: 'vllm:prefix_cache_hits{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="4",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:inter_token_latency_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="4",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:inter_token_latency_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="4",model_name="glm"}'
+        values: '0+480x15'
+      - series: 'vllm:time_to_first_token_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="4",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:time_to_first_token_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="4",model_name="glm"}'
+        values: '0+15x15'
+      - series: 'vllm:request_inference_time_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="4",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_inference_time_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="4",model_name="glm"}'
+        values: '0+480x15'
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="5",model_name="glm"}'
+        values: '0x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="5",model_name="glm"}'
+        values: '0x15'
+      - series: 'vllm:cache_config_info{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="5",num_gpu_blocks="80000",block_size="64",cache_dtype="auto"}'
+        values: '1x15'
+      - series: 'vllm:request_generation_tokens_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="5",model_name="glm"}'
+        values: '0+0x15'
+      - series: 'vllm:request_generation_tokens_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="5",model_name="glm"}'
+        values: '0+0x15'
+      - series: 'vllm:request_prompt_tokens_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="5",model_name="glm"}'
+        values: '0+0x15'
+      - series: 'vllm:request_prompt_tokens_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="5",model_name="glm"}'
+        values: '0+0x15'
+      - series: 'vllm:prefix_cache_queries{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="5",model_name="glm"}'
+        values: '0+0x15'
+      - series: 'vllm:prefix_cache_hits{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="5",model_name="glm"}'
+        values: '0+0x15'
+      - series: 'vllm:inter_token_latency_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="5",model_name="glm"}'
+        values: '0+0x15'
+      - series: 'vllm:inter_token_latency_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="5",model_name="glm"}'
+        values: '0+0x15'
+      - series: 'vllm:time_to_first_token_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="5",model_name="glm"}'
+        values: '0+0x15'
+      - series: 'vllm:time_to_first_token_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="5",model_name="glm"}'
+        values: '0+0x15'
+      - series: 'vllm:request_inference_time_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="5",model_name="glm"}'
+        values: '0+0x15'
+      - series: 'vllm:request_inference_time_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="5",model_name="glm"}'
+        values: '0+0x15'
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="6",model_name="glm"}'
+        values: '0.125x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="6",model_name="glm"}'
+        values: '2x15'
+      - series: 'vllm:cache_config_info{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="6",num_gpu_blocks="80000",block_size="64",cache_dtype="auto"}'
+        values: '1x15'
+      - series: 'vllm:request_generation_tokens_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="6",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_generation_tokens_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="6",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:request_prompt_tokens_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="6",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_prompt_tokens_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="6",model_name="glm"}'
+        values: '0+61440x15'
+      - series: 'vllm:prefix_cache_queries{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="6",model_name="glm"}'
+        values: '0+61440x15'
+      - series: 'vllm:prefix_cache_hits{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="6",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:inter_token_latency_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="6",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:inter_token_latency_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="6",model_name="glm"}'
+        values: '0+480x15'
+      - series: 'vllm:time_to_first_token_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="6",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:time_to_first_token_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="6",model_name="glm"}'
+        values: '0+15x15'
+      - series: 'vllm:request_inference_time_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="6",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_inference_time_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="6",model_name="glm"}'
+        values: '0+480x15'
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="7",model_name="glm"}'
+        values: '0.875x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="7",model_name="glm"}'
+        values: '6x15'
+      - series: 'vllm:cache_config_info{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="7",num_gpu_blocks="80000",block_size="64",cache_dtype="auto"}'
+        values: '1x15'
+      - series: 'vllm:request_generation_tokens_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="7",model_name="glm"}'
+        values: '0+120x15'
+      - series: 'vllm:request_generation_tokens_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="7",model_name="glm"}'
+        values: '0+245760x15'
+      - series: 'vllm:request_prompt_tokens_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="7",model_name="glm"}'
+        values: '0+120x15'
+      - series: 'vllm:request_prompt_tokens_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="7",model_name="glm"}'
+        values: '0+491520x15'
+      - series: 'vllm:prefix_cache_queries{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="7",model_name="glm"}'
+        values: '0+491520x15'
+      - series: 'vllm:prefix_cache_hits{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="7",model_name="glm"}'
+        values: '0+122880x15'
+      - series: 'vllm:inter_token_latency_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="7",model_name="glm"}'
+        values: '0+245760x15'
+      - series: 'vllm:inter_token_latency_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="7",model_name="glm"}'
+        values: '0+15360x15'
+      - series: 'vllm:time_to_first_token_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="7",model_name="glm"}'
+        values: '0+120x15'
+      - series: 'vllm:time_to_first_token_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="7",model_name="glm"}'
+        values: '0+120x15'
+      - series: 'vllm:request_inference_time_seconds_count{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="7",model_name="glm"}'
+        values: '0+120x15'
+      - series: 'vllm:request_inference_time_seconds_sum{namespace="llm",pod="dp8-0",instance="10.0.0.8:8000",engine="7",model_name="glm"}'
+        values: '0+3840x15'
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm"}'
+        values: '0.5x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm"}'
+        values: '3x15'
+      - series: 'vllm:cache_config_info{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",num_gpu_blocks="10000",block_size="64",cache_dtype="auto"}'
+        values: '1x15'
+      - series: 'vllm:request_generation_tokens_count{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_generation_tokens_sum{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:request_prompt_tokens_count{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_prompt_tokens_sum{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm"}'
+        values: '0+61440x15'
+      - series: 'vllm:prefix_cache_queries{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm"}'
+        values: '0+61440x15'
+      - series: 'vllm:prefix_cache_hits{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:inter_token_latency_seconds_count{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:inter_token_latency_seconds_sum{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm"}'
+        values: '0+480x15'
+      - series: 'vllm:time_to_first_token_seconds_count{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:time_to_first_token_seconds_sum{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm"}'
+        values: '0+15x15'
+      - series: 'vllm:request_inference_time_seconds_count{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm"}'
+        values: '0+60x15'
+      - series: 'vllm:request_inference_time_seconds_sum{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm"}'
+        values: '0+480x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm",job="second-monitor"}'
+        values: '3x15'
+      - series: 'vllm:cache_config_info{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",num_gpu_blocks="10000",block_size="64",cache_dtype="auto",job="second-monitor"}'
+        values: '1x15'
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="pid-0",instance="10.0.0.6:8000",engine="0",model_name="glm",pid="101"}'
+        values: '0.75x15'
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="pid-0",instance="10.0.0.6:8000",engine="0",model_name="glm",pid="102"}'
+        values: '0x15'
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="pid-0",instance="10.0.0.6:8000",engine="1",model_name="glm",pid="101"}'
+        values: '0x15'
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="pid-0",instance="10.0.0.6:8000",engine="1",model_name="glm",pid="102"}'
+        values: '0.75x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="pid-0",instance="10.0.0.6:8000",engine="0",model_name="glm",pid="101"}'
+        values: '2x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="pid-0",instance="10.0.0.6:8000",engine="0",model_name="glm",pid="102"}'
+        values: '0x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="pid-0",instance="10.0.0.6:8000",engine="1",model_name="glm",pid="101"}'
+        values: '0x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="pid-0",instance="10.0.0.6:8000",engine="1",model_name="glm",pid="102"}'
+        values: '4x15'
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="a"}'
+        values: '0.25x15'
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="b"}'
+        values: '0.25x15'
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="a"}'
+        values: '0.75x15'
+      - series: 'vllm:kv_cache_usage_perc{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="b"}'
+        values: '0.75x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="a"}'
+        values: '3x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="b"}'
+        values: '3x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="a"}'
+        values: '5x15'
+      - series: 'vllm:num_requests_waiting{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="b"}'
+        values: '5x15'
+      - series: 'vllm:cache_config_info{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",num_gpu_blocks="2000",block_size="16",cache_dtype="auto",job="a"}'
+        values: '1x15'
+      - series: 'vllm:cache_config_info{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",num_gpu_blocks="2000",block_size="16",cache_dtype="auto",job="b"}'
+        values: '1x15'
+      - series: 'vllm:cache_config_info{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",num_gpu_blocks="2000",block_size="16",cache_dtype="auto",job="a"}'
+        values: '1x15'
+      - series: 'vllm:cache_config_info{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",num_gpu_blocks="2000",block_size="16",cache_dtype="auto",job="b"}'
+        values: '1x15'
+      - series: 'vllm:inter_token_latency_seconds_count{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="a"}'
+        values: '0+128x15'
+      - series: 'vllm:inter_token_latency_seconds_sum{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="a"}'
+        values: '0+4x15'
+      - series: 'vllm:inter_token_latency_seconds_count{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="b"}'
+        values: '0+128x15'
+      - series: 'vllm:inter_token_latency_seconds_sum{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="b"}'
+        values: '0+4x15'
+      - series: 'vllm:inter_token_latency_seconds_count{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="a"}'
+        values: '0+384x15'
+      - series: 'vllm:inter_token_latency_seconds_sum{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="a"}'
+        values: '0+12x15'
+      - series: 'vllm:inter_token_latency_seconds_count{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="b"}'
+        values: '0+384x15'
+      - series: 'vllm:inter_token_latency_seconds_sum{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="b"}'
+        values: '0+12x15'
+    promql_expr_test:
+      # kv_cache_usage: the mean of the ranks' peaks, used tokens over capacity (not the busiest rank, 0.875); each rank once, however many copies of its gauge (pid-0: 0.75, not 0.375)
+      - expr: 'avg by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (max_over_time(vllm:kv_cache_usage_perc{namespace="llm"}[1m])))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.8:8000",pod="dp8-0"}'
+            value: 0.203125
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 0.5
+          - labels: '{model_name="glm",instance="10.0.0.6:8000",pod="pid-0"}'
+            value: 0.75
+          - labels: '{model_name="glm",instance="10.0.0.2:8000",pod="dup-2"}'
+            value: 0.5
+      # kv_usage_instant: the same mean, without the window
+      - expr: 'avg by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (vllm:kv_cache_usage_perc{namespace="llm"}))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.8:8000",pod="dp8-0"}'
+            value: 0.203125
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 0.5
+          - labels: '{model_name="glm",instance="10.0.0.6:8000",pod="pid-0"}'
+            value: 0.75
+          - labels: '{model_name="glm",instance="10.0.0.2:8000",pod="dup-2"}'
+            value: 0.5
+      # queue_length: summed over the ranks; a second scrape (solo-0, dup-2) or a pid copy (pid-0) is not counted twice
+      - expr: 'sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (max_over_time(vllm:num_requests_waiting{namespace="llm"}[1m])))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.8:8000",pod="dp8-0"}'
+            value: 8
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 3
+          - labels: '{model_name="glm",instance="10.0.0.6:8000",pod="pid-0"}'
+            value: 6
+          - labels: '{model_name="glm",instance="10.0.0.2:8000",pod="dup-2"}'
+            value: 8
+      # max_rank_kv_cache_usage: the busiest rank's cache, which the saturation guards judge
+      - expr: 'max by (model_name, instance, pod) (max_over_time(vllm:kv_cache_usage_perc{namespace="llm"}[1m]))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.8:8000",pod="dp8-0"}'
+            value: 0.875
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 0.5
+          - labels: '{model_name="glm",instance="10.0.0.6:8000",pod="pid-0"}'
+            value: 0.75
+          - labels: '{model_name="glm",instance="10.0.0.2:8000",pod="dup-2"}'
+            value: 0.75
+      # max_rank_queue_length: the busiest rank's queue (dp8-0: rank 7's 6 of the pod's 8)
+      - expr: 'max by (model_name, instance, pod) (max_over_time(vllm:num_requests_waiting{namespace="llm"}[1m]))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.8:8000",pod="dp8-0"}'
+            value: 6
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 3
+          - labels: '{model_name="glm",instance="10.0.0.6:8000",pod="pid-0"}'
+            value: 4
+          - labels: '{model_name="glm",instance="10.0.0.2:8000",pod="dup-2"}'
+            value: 5
+      # cache_config_info: the value counts the ranks; num_gpu_blocks is already the total and is kept as is; a second scrape (solo-0, dup-2) counts no rank twice
+      - expr: 'count by (instance, pod, num_gpu_blocks, block_size) (max by (instance, pod, num_gpu_blocks, block_size, engine) (vllm:cache_config_info{namespace="llm"}))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{instance="10.0.0.8:8000",pod="dp8-0",num_gpu_blocks="80000",block_size="64"}'
+            value: 8
+          - labels: '{instance="10.0.1.1:8000",pod="solo-0",num_gpu_blocks="10000",block_size="64"}'
+            value: 1
+          - labels: '{instance="10.0.0.2:8000",pod="dup-2",num_gpu_blocks="2000",block_size="16"}'
+            value: 2
+      # avg_output_tokens: weighted by each rank's requests; the idle rank adds nothing
+      - expr: 'sum by (model_name, instance, pod) (rate(vllm:request_generation_tokens_sum{namespace="llm"}[5m])) / sum by (model_name, instance, pod) (rate(vllm:request_generation_tokens_count{namespace="llm"}[5m]))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.8:8000",pod="dp8-0"}'
+            value: 896
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 512
+      # avg_output_tokens_recent
+      - expr: 'sum by (model_name, instance, pod) (rate(vllm:request_generation_tokens_sum{namespace="llm"}[1m])) / sum by (model_name, instance, pod) (rate(vllm:request_generation_tokens_count{namespace="llm"}[1m]))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.8:8000",pod="dp8-0"}'
+            value: 896
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 512
+      # avg_input_tokens
+      - expr: 'sum by (model_name, instance, pod) (rate(vllm:request_prompt_tokens_sum{namespace="llm"}[5m])) / sum by (model_name, instance, pod) (rate(vllm:request_prompt_tokens_count{namespace="llm"}[5m]))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.8:8000",pod="dp8-0"}'
+            value: 1792
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 1024
+      # avg_input_tokens_recent
+      - expr: 'sum by (model_name, instance, pod) (rate(vllm:request_prompt_tokens_sum{namespace="llm"}[1m])) / sum by (model_name, instance, pod) (rate(vllm:request_prompt_tokens_count{namespace="llm"}[1m]))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.8:8000",pod="dp8-0"}'
+            value: 1792
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 1024
+      # prefix_cache_hit_rate: weighted by the tokens each rank looked up
+      - expr: 'sum by (model_name, instance, pod) (rate(vllm:prefix_cache_hits{namespace="llm"}[5m])) / sum by (model_name, instance, pod) (rate(vllm:prefix_cache_queries{namespace="llm"}[5m]))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.8:8000",pod="dp8-0"}'
+            value: 0.35714285714285715
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 0.5
+      # avg_itl: weighted by each rank's generated tokens (not the slowest rank, 0.0625); a second scrape doubles both sides and leaves the mean (dup-2)
+      - expr: 'sum by (model_name, instance, pod) (rate(vllm:inter_token_latency_seconds_sum{namespace="llm"}[1m])) / sum by (model_name, instance, pod) (rate(vllm:inter_token_latency_seconds_count{namespace="llm"}[1m]))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.8:8000",pod="dp8-0"}'
+            value: 0.04241071428571429
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 0.015625
+          - labels: '{model_name="glm",instance="10.0.0.2:8000",pod="dup-2"}'
+            value: 0.03125
+      # avg_ttft: weighted by each rank's requests
+      - expr: 'sum by (model_name, instance, pod) (rate(vllm:time_to_first_token_seconds_sum{namespace="llm"}[1m])) / sum by (model_name, instance, pod) (rate(vllm:time_to_first_token_seconds_count{namespace="llm"}[1m]))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.8:8000",pod="dp8-0"}'
+            value: 0.4375
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 0.25
+      # avg_service_time: weighted by each rank's requests
+      - expr: 'sum by (model_name, instance, pod) (rate(vllm:request_inference_time_seconds_sum{namespace="llm"}[1m])) / sum by (model_name, instance, pod) (rate(vllm:request_inference_time_seconds_count{namespace="llm"}[1m]))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.8:8000",pod="dp8-0"}'
+            value: 14
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 8

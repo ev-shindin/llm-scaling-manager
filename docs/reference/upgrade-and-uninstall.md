@@ -349,6 +349,32 @@ What changes without a config change:
   is skipped (no node read, say), no new borrowing starts. See the box above
   and [the guide](../guides/kueue-borrowing/). Borrowing state is kept in
   `wva-controller-status`, so it survives a restart.
+- **A vLLM pod running several data-parallel ranks behind one API server now
+  gets its real capacity, so fewer replicas are ordered for it.** Before, each
+  per-pod figure took the busiest rank: its cache use, its latency and its
+  queue stood for the whole pod, and `--max-num-seqs` capped the whole pod at
+  one rank's batch. A pod of eight ranks could be ordered up to about eight
+  times the replicas it needs. Now its use is the mean over its ranks, its
+  queue is the sum, its latencies are traffic-weighted means, and its batch cap
+  is the ranks times `--max-num-seqs`. A pod with one rank (DP=1) is priced as
+  before. A pod with one API server per rank changes too: its ranks are
+  counted, so its batch cap and its derived capacity are the ranks times one
+  engine's, and its ITL is weighted by the tokens each rank generated
+  (bug fix). See
+  [Data-parallel pods](../developer-guide/signal-dataflow.md#data-parallel-pods).
+- **A hot rank is judged on its own.** Whether a pod is saturated is read from
+  its busiest rank: a queue on one rank at `queueLengthThreshold`, and that
+  rank's cache at `kvCacheThreshold`. Eight ranks with one request waiting
+  each are not saturated, though their queues add up to eight. A pod with one
+  full rank is not released on its mean: only the other pods' spare capacity
+  can be given back while that rank stays full.
+- **Learned capacity saved before the upgrade.** With the learned-state
+  snapshot turned on (`LEARNED_STATE_SNAPSHOT`, off by default), the k2
+  figures it carries across the upgrade were measured the old way, from the
+  busiest rank. For a data-parallel pod they can be off until new readings
+  replace them or they age out. To drop them for one variant, see
+  [Reset one variant's learned state](troubleshooting.md#reset-one-variants-learned-state).
+  With the snapshot off, nothing carries over.
 
 New reads, for borrowing: `cohorts` and `workloads` (Kueue; `workloads`
 cluster-wide, watched through an informer), the `kueue-controller-manager`

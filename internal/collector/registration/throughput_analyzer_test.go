@@ -118,7 +118,8 @@ var _ = Describe("the queries the demand floor and the throughput analyzer share
 			Expect(rendered).To(ContainSubstring(`vllm:kv_cache_usage_perc`))
 			Expect(rendered).NotTo(ContainSubstring(`max_over_time`))
 			Expect(rendered).To(ContainSubstring(`namespace="test-ns"`))
-			Expect(rendered).To(ContainSubstring(`max by (model_name,`))
+			Expect(rendered).To(ContainSubstring(`avg by (model_name,`),
+				"the mean over a pod's engine ranks, not the busiest rank (issue #150)")
 			Expect(rendered).NotTo(ContainSubstring(`model_name="`), "the model is partitioned in the collector, not matched in PromQL")
 		})
 

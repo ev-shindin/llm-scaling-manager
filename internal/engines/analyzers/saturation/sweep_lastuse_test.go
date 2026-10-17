@@ -56,6 +56,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 				1000, // avgInput
 				10,   // queueThreshold
 				params,
+				1, // ranks
 				k1,
 				k1, // kvCeiling
 				domain.RoleDecode, false, admission{}, false, logr.Discard())
@@ -170,7 +171,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 				50,    // queueLen over threshold: Priority 1 fires
 				10000, // tokensInUse -> k2Observed well below the stored 90,000
 				600, 1000, 10,
-				nil,
+				nil, 1,
 				1000000, 1000000,
 				domain.RoleDecode, false, admission{}, false, logr.Discard())
 			src := d.src

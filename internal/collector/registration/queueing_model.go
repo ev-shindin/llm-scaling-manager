@@ -57,7 +57,22 @@ const (
 	//
 	// A SUM across the pod's engines, not a max: the two halves of a
 	// multi-engine replica each compute part of the work, and their rates add.
-	// The latency queries above take a max because a latency does not.
+	//
+	// The latency queries above do not add either, but they no longer take a
+	// max over the engines. They take the traffic-weighted mean,
+	// sum(rate(_sum)) / sum(rate(_count)) (perPodMean). A pod's ranks share
+	// one frontend that sends each request to its least-loaded rank, so the
+	// pod's latency is what its average request sees, and the busiest rank's
+	// figure describes one rank only. Fitted against the pod's MEAN
+	// utilization and priced on the pod's WHOLE capacity, the max read the
+	// pod as one hot rank's latency eight times over. Demand stuck on a hot
+	// rank is not lost by this: the waiting queue is summed over the ranks
+	// (QueryQueueLength) into demand, and the saturation guards read the
+	// busiest rank's queue and cache (QueryMaxRankQueueLength).
+	// It is also what collector.collapseToPods already did for ranks that run
+	// their own API servers, so both layouts give the same answer. On an
+	// expert-parallel pod the ranks step together and their latencies barely
+	// differ, so mean and max agree there anyway.
 	//
 	// vLLM only. SGLang publishes no per-stage prefill counter
 	// (sgl-project/sglang issue #14303), so there is deliberately no SGLang
@@ -77,7 +92,7 @@ func RegisterQueueingModelQueries(sourceRegistry *source.SourceRegistry) {
 	registry.MustRegister(source.QueryTemplate{
 		Name:     QueryAvgITL,
 		Type:     source.QueryTypePromQL,
-		Template: `max by (model_name, instance, pod) (rate(vllm:inter_token_latency_seconds_sum{namespace="{{.namespace}}"}[1m]) / rate(vllm:inter_token_latency_seconds_count{namespace="{{.namespace}}"}[1m]))`,
+		Template: perPodMean("vllm:inter_token_latency_seconds_sum", "vllm:inter_token_latency_seconds_count", "1m"),
 		Params:   []string{source.ParamNamespace},
 		Description: "Average inter-token latency per instance (seconds), " +
 			"used by queueing model tuner for parameter learning",
@@ -89,7 +104,7 @@ func RegisterQueueingModelQueries(sourceRegistry *source.SourceRegistry) {
 	registry.MustRegister(source.QueryTemplate{
 		Name:     QueryAvgServiceTime,
 		Type:     source.QueryTypePromQL,
-		Template: `max by (model_name, instance, pod) (rate(vllm:request_inference_time_seconds_sum{namespace="{{.namespace}}"}[1m]) / rate(vllm:request_inference_time_seconds_count{namespace="{{.namespace}}"}[1m]))`,
+		Template: perPodMean("vllm:request_inference_time_seconds_sum", "vllm:request_inference_time_seconds_count", "1m"),
 		Params:   []string{source.ParamNamespace},
 		Description: "Average per-request service time excluding queue wait (seconds), " +
 			"used to size demand from the offered load",
@@ -102,7 +117,7 @@ func RegisterQueueingModelQueries(sourceRegistry *source.SourceRegistry) {
 	registry.MustRegister(source.QueryTemplate{
 		Name:     QueryAvgTTFT,
 		Type:     source.QueryTypePromQL,
-		Template: `max by (model_name, instance, pod) (rate(vllm:time_to_first_token_seconds_sum{namespace="{{.namespace}}"}[1m]) / rate(vllm:time_to_first_token_seconds_count{namespace="{{.namespace}}"}[1m]))`,
+		Template: perPodMean("vllm:time_to_first_token_seconds_sum", "vllm:time_to_first_token_seconds_count", "1m"),
 		Params:   []string{source.ParamNamespace},
 		Description: "Average time to first token per instance (seconds), " +
 			"the prefill capacity model's regressand",

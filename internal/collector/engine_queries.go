@@ -21,6 +21,8 @@ import (
 var engineSpecificReplicaQueries = []string{
 	registration.QueryKvCacheUsage,
 	registration.QueryQueueLength,
+	registration.QueryMaxRankKvCacheUsage,
+	registration.QueryMaxRankQueueLength,
 	registration.QueryCacheConfigInfo,
 	registration.QueryAvgOutputTokens,
 	registration.QueryAvgOutputTokensRecent,

@@ -154,6 +154,32 @@ var _ = Describe("Analyzer state and inputs", func() {
 			Expect(res.VariantCapacities[0].PerReplicaCapacity).To(BeNumerically("~", 64/line.ITLAt(0.32), 1e-6))
 		})
 
+		It("reads a replica that says it runs one rank exactly as one that says nothing", func() {
+			res := warmWith(newAt(store(capacity.EngineParams{MaxNumSeqs: 64})),
+				func(rm *domain.ReplicaMetrics) { rm.EngineRanks = 1 })
+			Expect(res.VariantCapacities[0].PerReplicaCapacity).To(BeNumerically("~", 64/line.ITLAt(0.32), 1e-6))
+		})
+
+		// Issue #150: max_num_seqs bounds one engine. A replica of eight
+		// data-parallel ranks admits eight times it, against KV that is
+		// already the whole replica's.
+		It("caps a data-parallel replica at max_num_seqs per rank, not per replica", func() {
+			res := warmWith(newAt(store(capacity.EngineParams{MaxNumSeqs: 16})),
+				func(rm *domain.ReplicaMetrics) { rm.EngineRanks = 8 })
+			// k = 0.6 implies 120 sequences; eight ranks admit 8 x 16 = 128,
+			// so the cap does not bind. Capped at one rank's 16, the fill
+			// would stop at 16 * 500 / 100000 = 0.08 and the replica be priced
+			// at 16 sequences.
+			Expect(res.VariantCapacities[0].PerReplicaCapacity).To(BeNumerically("~", 120/0.044, 1e-6))
+		})
+
+		It("scales the configured KV override, which sizes one engine, by the replica's ranks", func() {
+			res := warmWith(newAt(store(capacity.EngineParams{TotalKvTokensOverride: 100000})),
+				func(rm *domain.ReplicaMetrics) { rm.TotalKvCapacityTokens = 0; rm.EngineRanks = 2 })
+			// Two ranks of 100000: 0.6 * 200000 / 500 = 240 sequences.
+			Expect(res.VariantCapacities[0].PerReplicaCapacity).To(BeNumerically("~", 240/0.044, 1e-6))
+		})
+
 		It("reads the configured KV override where the live reading is absent or the overflow sentinel", func() {
 			for _, live := range []int64{0, math.MaxInt64} {
 				res := warmWith(newAt(store(capacity.EngineParams{TotalKvTokensOverride: 200000})),

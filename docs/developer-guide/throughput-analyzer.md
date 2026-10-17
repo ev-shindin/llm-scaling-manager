@@ -148,13 +148,13 @@ Throughput Analyzer sees the current operating point k*, not a high-water mark f
 spike that has since subsided. Using the peak would overestimate load and cause premature
 scale-up. Both fields coexist on `ReplicaMetrics` for their respective purposes.
 
-**Why `max by (model_name, instance, pod)` and not `avg by (...)`:** `vllm:kv_cache_usage_perc`
-is a scalar gauge per vLLM process, so there is one Prometheus series per pod in normal
-deployment. The `max by (...)` clause is purely deduplication: if the same pod is scraped by
-multiple targets (e.g., a PodMonitor and a ServiceMonitor), duplicate series with identical
-values appear under the same pod label. `max` collapses them. Since duplicates carry the same
-value, `max = avg` — the choice has no effect on correctness. This follows the convention used
-by every other per-pod query in this codebase.
+**Why `avg by (model_name, instance, pod)` and not `max by (...)`:** `vllm:kv_cache_usage_perc`
+is one gauge per engine rank, labeled `engine`. An ordinary pod has one rank, and the two give
+the same value, also when the pod is scraped by two targets (a PodMonitor and a ServiceMonitor)
+and its series are duplicated. A pod running several data-parallel ranks behind one API server
+exports one series per rank, and there they differ: `max` reads the busiest rank as the whole
+pod, while the mean of the ranks' fractions is the pod's used tokens over its capacity. See
+[Data-parallel pods](signal-dataflow.md#data-parallel-pods).
 
 **There is no `llm_d_ai_variant` in the grouping.** The label was dropped from every
 per-pod query (issue #1263) and is read by no code; no constant for it is defined any

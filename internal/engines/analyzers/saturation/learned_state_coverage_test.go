@@ -271,7 +271,7 @@ func TestARowPricedAtItsRolloutReadingReportsNoBorrow(t *testing.T) {
 	params := mtParams(256, "vllm:v1")
 	k2 := func(queue int, tokens int64, adm admission) k2Decision {
 		return a.computeK2(own, "test-model", "test-ns", "variant-b",
-			queue, tokens, 50, 100, 5, params, 12800, 16000,
+			queue, tokens, 50, 100, 5, params, 1, 12800, 16000,
 			domain.RoleBoth, false, adm, false, logr.Discard())
 	}
 	const donor = "variant-a"

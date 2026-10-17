@@ -143,13 +143,24 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	if adm.serving() {
 		a.noteBorrowServing(historyKey, a.now(), !config.DisableK2Borrow)
 	}
+	// The saturated reading is judged, and recorded, on the BUSIEST engine
+	// rank, not on the pod's sum and mean (domain.ReplicaMetrics.
+	// MaxRankQueueLength). queueLengthThreshold is a queue on one engine: a
+	// pod of eight ranks with one request waiting on each sums to eight and
+	// is not saturated, and recording its 30 % occupancy as k2 priced it at
+	// half its capacity for as long as the window lived. And a k2 is one
+	// engine's occupancy at saturation scaled by the ranks
+	// (BusiestRankTokens): the tokens one full rank holds plus seven idle
+	// ones' nothing is not what the pod holds when it is full. With one rank
+	// both are the pod's own queue and tokens, as before.
 	d := a.computeK2(
 		historyKey,
 		modelID, namespace, rm.VariantName,
-		rm.QueueLength, rm.TokensInUse,
+		rm.BusiestRankQueue(), rm.BusiestRankTokens(),
 		rm.AvgOutputTokens, rm.AvgInputTokens,
 		config.QueueLengthThreshold,
 		engineParams,
+		rm.Ranks(),
 		k1,
 		rm.TotalKvCapacityTokens,
 		role,
@@ -305,6 +316,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		"effectiveCapacity", effectiveCapacity, "boundBy", bound,
 		"tokensInUse", rm.TokensInUse, "localQueueDemand", localQueueDemand, "replicaDemand", replicaDemand,
 		"queueLength", rm.QueueLength, "queueThreshold", config.QueueLengthThreshold,
+		"engineRanks", rm.Ranks(), "busiestRankQueue", rm.BusiestRankQueue(),
+		"busiestRankKvUsage", rm.BusiestRankKvUsage(),
 		"requestRate", rm.RequestRate,
 		"saturatedThroughput", saturatedThroughput, "saturatedThroughputBucket", throughputBucket)
 
@@ -515,6 +528,9 @@ func (a *SaturationAnalyzer) computeK2(
 	avgOutput, avgInput float64,
 	queueThreshold float64,
 	engineParams *capacity.EngineParams,
+	// ranks is the engine ranks the replica runs (domain.ReplicaMetrics.Ranks);
+	// the derived k2 (P3) prices one engine and is scaled by it.
+	ranks int,
 	k1 int64,
 	kvCeiling int64,
 	role string,
@@ -525,7 +541,7 @@ func (a *SaturationAnalyzer) computeK2(
 	logger logr.Logger,
 ) k2Decision {
 	chain, chainSrc, borrowed := a.k2Chain(historyKey, modelID, namespace, variantName, queueLen, tokensInUse,
-		avgOutput, avgInput, queueThreshold, engineParams, k1, kvCeiling, role, downstreamSaturated,
+		avgOutput, avgInput, queueThreshold, engineParams, ranks, k1, kvCeiling, role, downstreamSaturated,
 		adm, borrowDisabled, logger)
 	k2, src, recordable := a.unadmittedPrice(chain, chainSrc, historyKey, modelID, namespace, variantName,
 		queueLen, tokensInUse, queueThreshold, kvCeiling, downstreamSaturated, adm, logger)
@@ -614,6 +630,7 @@ func (a *SaturationAnalyzer) k2Chain(
 	avgOutput, avgInput float64,
 	queueThreshold float64,
 	engineParams *capacity.EngineParams,
+	ranks int,
 	k1 int64,
 	kvCeiling int64,
 	role string,
@@ -897,7 +914,13 @@ func (a *SaturationAnalyzer) k2Chain(
 	}
 	isPrefill := domain.CanonicalRole(role) == domain.RolePrefill
 	if !isPrefill {
-		if k2Derived := estimateCapacityFromParams(engineParams, avgInput, avgOutput); k2Derived > 0 {
+		// The formula prices ONE engine: B and S are --max-num-batched-tokens
+		// and --max-num-seqs, which bound a single rank. A replica of several
+		// data-parallel ranks runs that many engines side by side, and k1
+		// beside it is already the whole replica's KV, so the derived figure
+		// is scaled to the replica. Left per rank, min(k1, k2) priced a pod of
+		// eight ranks at about one (issue #150).
+		if k2Derived := estimateCapacityFromParams(engineParams, avgInput, avgOutput) * int64(max(ranks, 1)); k2Derived > 0 {
 			if b, ok := borrow(min(k1, k2Derived)); ok {
 				logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, min(k1, k2Derived), capacity.K2SrcDerived)
 				return b.k2, b.source(), b
@@ -906,7 +929,7 @@ func (a *SaturationAnalyzer) k2Chain(
 				"modelID", modelID, "namespace", namespace, "variant", variantName,
 				"priority", capacity.K2SrcDerived.String(), "historyKey", historyKey,
 				"avgInputTokens", avgInput, "avgOutputTokens", avgOutput,
-				"engineParams", engineParams, "k2", k2Derived)
+				"engineParams", engineParams, "engineRanks", max(ranks, 1), "k2", k2Derived)
 			return k2Derived, capacity.K2SrcDerived, k2Borrow{}
 		}
 	}
@@ -1078,6 +1101,12 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 // Used by computeK2 (Priority 3) for per-replica estimation and by
 // estimateStoredCapacity for zero-replica variants with model-level workload averages.
 // Returns 0 if estimation is not possible.
+//
+// The figure is ONE engine's: B and S bound a single data-parallel rank.
+// computeK2 multiplies it by the ranks the live replica reports. The
+// zero-replica path has no live replica to count and keeps the one-engine
+// figure, which can only under-price a data-parallel variant and order more
+// on its way up from zero; its first live replica then prices it in full.
 func estimateCapacityFromParams(params *capacity.EngineParams, avgInput, avgOutput float64) int64 {
 	if params == nil || params.EffectiveMaxBatchedTokens <= 0 || avgOutput <= 0 {
 		return 0

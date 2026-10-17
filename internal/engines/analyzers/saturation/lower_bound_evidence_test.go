@@ -98,7 +98,7 @@ func TestANotReadyPodMidRolloutIsPricedAtTheChain(t *testing.T) {
 		adm := admissionOf(rm)
 		adm.rollout = true
 		d := a.computeK2("k", "test-model", "test-ns", "variant-a", 6, 3000, 50, 100, 5,
-			nil, 12800, 16000, domain.RoleDecode, false, adm, false, logr.Discard())
+			nil, 1, 12800, 16000, domain.RoleDecode, false, adm, false, logr.Discard())
 		return d.k2, d.src
 	}
 	if k2, src := price(true); k2 != 3000 || src != capacity.K2SrcUnadmitted {

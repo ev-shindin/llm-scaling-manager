@@ -193,7 +193,7 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				"notReady", d.line.NotReady, "declined", d.line.Declined,
 				// The fill before the clamp and the batch cap, and the cap's inputs.
 				"targetFill", d.targetFill, "capacityTokens", d.capTokens, "kvTokensPerRequest", fleet.shape.KVreq,
-				"maxNumSeqs", d.maxSeqs, "scaleUpThreshold", scaleUp)
+				"maxNumSeqs", d.maxSeqs, "engineRanks", d.ranks, "scaleUpThreshold", scaleUp)
 		}
 	}
 
@@ -241,7 +241,9 @@ type pricingDetail struct {
 	line       itl.Reading
 	targetFill float64
 	capTokens  float64
-	maxSeqs    int64
+	// maxSeqs is the replica's batch cap: max_num_seqs times ranks.
+	maxSeqs int64
+	ranks   int64
 }
 
 // priceVariant fits the variant's line and prices one replica of it at the
@@ -289,8 +291,12 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 		return vc, reading, d
 	}
 	params := a.engineParams(input.Namespace, input.ModelID, vs.VariantName)
+	// max_num_seqs bounds one engine; a replica of several data-parallel
+	// ranks admits that many times it, against capacity tokens that are
+	// already the whole replica's (issue #150).
+	d.ranks = fleet.engineRanks(vs.VariantName)
 	if params != nil {
-		d.maxSeqs = params.MaxNumSeqs
+		d.maxSeqs = params.MaxNumSeqs * d.ranks
 	}
 	maxSeqs := d.maxSeqs
 	capTokens := fleet.capacityTokens(vs.VariantName, params)
@@ -658,7 +664,8 @@ func (f fleetReading) capacityTokens(variant string, params *capacity.EnginePara
 		if rm.TotalKvCapacityTokens > 0 && rm.TotalKvCapacityTokens < math.MaxInt64 {
 			c = float64(rm.TotalKvCapacityTokens)
 		} else if params != nil && params.TotalKvTokensOverride > 0 {
-			c = float64(params.TotalKvTokensOverride)
+			// The flag sizes one engine; the row may run several.
+			c = float64(params.TotalKvTokensOverride) * float64(rm.Ranks())
 		}
 		if c > 0 {
 			sum += c
@@ -669,4 +676,25 @@ func (f fleetReading) capacityTokens(variant string, params *capacity.EnginePara
 		return 0
 	}
 	return sum / float64(n)
+}
+
+// engineRanks is the data-parallel engine ranks one of the variant's ready
+// replicas runs, over the rows capacityTokens reads (ready, not a warm-pool
+// bridge): the rounded mean of their counts, and one when there is no such
+// row. A row with no count is one rank. Every replica of a variant
+// runs one layout, so the mean is that layout's count; the rounding only keeps
+// a row caught mid-rollout from making the cap fractional.
+func (f fleetReading) engineRanks(variant string) int64 {
+	var sum, n int
+	for _, rm := range f.rows {
+		if rm.VariantName != variant || !rm.Ready || rm.FromWarmPool {
+			continue
+		}
+		sum += rm.Ranks()
+		n++
+	}
+	if n == 0 {
+		return 1
+	}
+	return max(int64(math.Round(float64(sum)/float64(n))), 1)
 }

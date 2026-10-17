@@ -1552,10 +1552,11 @@ not readings of the fleet:
     / on (exported_namespace, model_name)
   (0.85 * max by (exported_namespace, model_name) (wva_analyzer_target{analyzer_name="slo"} > 0))
   ```
-- **Known to be off** in three cases: speculative decoding (the engine's ITL is
-  per step, not per token), a high prefix-cache hit rate (the per-request KV
-  footprint is under-counted), and a pod running several data-parallel ranks
-  behind one API server -- the normal wide-EP decode layout. The
+- **Known to be off** in two cases: speculative decoding (the engine's ITL is
+  per step, not per token) and a high prefix-cache hit rate (the per-request KV
+  footprint is under-counted). A pod running several data-parallel ranks, the
+  normal wide-EP decode layout, is priced as all of its ranks: its batch cap is
+  the ranks times `max_num_seqs`. The
   [proposal](../proposals/slo-tiers.md#before-phase-1-prices-anything) lists
   what is fixed before any of it sizes a fleet.
 - **Prefill is not priced.** On a P/D model only decode variants get a figure,

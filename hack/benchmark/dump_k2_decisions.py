@@ -37,6 +37,10 @@ Reads the following log lines:
                                     prefill demand found and the figure it
                                     was held at, neither ordering nor
                                     releasing prefill on decode's backlog
+  - hot-rank-hold                  (saturation_v2) per model, per cycle a
+                                    replica of several engine ranks has a
+                                    full rank: the demand added so its
+                                    capacity is not released on its mean
   - Applied saturation decision via shared cache
                                     (steadystate) the actual, post-enforcement
                                     target replica count for the variant this
@@ -116,6 +120,7 @@ MESSAGES = {
     TFLOOR_MSG,
     "scheduler-queue-prefill-share-dropped",
     "prefill-demand-held",
+    "hot-rank-hold",
     "replica-capacity-skipped",
     "replica-capacity-store-fallback",
     "variant-capacity-source",

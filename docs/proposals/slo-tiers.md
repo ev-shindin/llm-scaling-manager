@@ -350,7 +350,9 @@ separate collector fix.
    The 20-reading window bounds this in practice. Reset on a shape change, or
    add prefill tok/s as a second regressor.
 7. **The batch cap is per engine instance**, so a pod collapsed from several
-   data-parallel ranks needs the cap times the ranks. Collector-wide.
+   data-parallel ranks needs the cap times the ranks. Collector-wide. Done in
+   issue #150: rows carry `EngineRanks`, and ranks behind one API server are
+   folded in the per-pod queries.
 8. **`max_num_batched_tokens` can bind first**: with speculative decoding the
    cap is `min(max_num_seqs, max_num_batched_tokens ÷ (1 + n_spec))`.
 9. **Seed a line from a profile**, the direct remedy for `pinned-default`

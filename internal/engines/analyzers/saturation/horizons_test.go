@@ -193,6 +193,7 @@ var _ = Describe("learned-state horizons", func() {
 			1000,    // avgInput
 			10,      // queueThreshold
 			nil,     // engineParams
+			1,       // ranks
 			2000000, // k1
 			2000000, // kvCeiling, at or above tokensInUse or the read is refused
 			domain.RoleDecode, false, admission{}, false, logr.Discard())

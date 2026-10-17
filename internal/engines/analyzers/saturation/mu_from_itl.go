@@ -77,7 +77,11 @@ type derivedMu struct {
 // over-states mu -- and an over-stated mu UNDER-orders replicas. A flag is a
 // fallback for a replica reporting nothing at all (a cold variant, or an
 // engine that emits no cache_config_info); it is not a measurement.
-func capacityTokensFor(params *capacity.EngineParams, liveTokens int64) float64 {
+//
+// ranks is how many engine ranks the replica runs (domain.ReplicaMetrics.Ranks).
+// The live reading is already the whole replica's; the flag sizes ONE engine,
+// so it is multiplied by the ranks.
+func capacityTokensFor(params *capacity.EngineParams, ranks int, liveTokens int64) float64 {
 	// math.MaxInt64 is the collector's overflow SENTINEL, not a capacity
 	// (internal/collector/attribute.go). Taken literally it makes the resident
 	// sequence count astronomical, which prices mu at an absurd figure and --
@@ -87,7 +91,7 @@ func capacityTokensFor(params *capacity.EngineParams, liveTokens int64) float64 
 		return float64(liveTokens)
 	}
 	if params != nil && params.TotalKvTokensOverride > 0 {
-		return float64(params.TotalKvTokensOverride)
+		return float64(params.TotalKvTokensOverride) * float64(max(ranks, 1))
 	}
 	return 0
 }
@@ -137,7 +141,7 @@ func (a *SaturationAnalyzer) noteLineMismatch(model itl.Model, params *capacity.
 	if rm.FromWarmPool || domain.CanonicalRole(role) != domain.RoleDecode {
 		return
 	}
-	capacityTokens := capacityTokensFor(params, rm.TotalKvCapacityTokens)
+	capacityTokens := capacityTokensFor(params, rm.Ranks(), rm.TotalKvCapacityTokens)
 	errPct, ok := itl.GPSErrorPct(model, rm.KvUsageInstant, capacityTokens,
 		kvReq, rm.GenerationTokenRate)
 	if !ok || errPct <= itl.DefaultGPSMismatchThresholdPct {
@@ -190,6 +194,12 @@ func pricingK(cfg *config.ScalingPolicy) float64 {
 // not apply it -- it prices a cache, not an engine -- so the sequence count is
 // capped here before the division.
 //
+// max_num_seqs bounds ONE engine, and a data-parallel replica runs ranks of
+// them (domain.ReplicaMetrics.Ranks): the replica admits ranks x max_num_seqs.
+// The sequence count is the whole replica's, from its whole KV capacity, so the
+// cap is scaled to match. Capping a pod of eight ranks at one rank's 256 priced
+// it at an eighth of what it serves (issue #150).
+//
 // C is the engine's whole KV capacity, not k1. k1 is already C times the
 // analyzer's KV threshold, and itl.Sequences applies k itself, so passing k1
 // would apply a threshold twice.
@@ -201,7 +211,7 @@ func pricingK(cfg *config.ScalingPolicy) float64 {
 // and the divisor is where that error reaches mu undamped. KVreq, by contrast,
 // is ILeff + OL/2 and barely moves: at a 20k prompt the same error shifts it
 // about 1.5%.
-func deriveMu(model itl.Model, params *capacity.EngineParams,
+func deriveMu(model itl.Model, params *capacity.EngineParams, ranks int,
 	totalKvTokens int64, fleet shape.Shape, kPrice float64, avgOutput float64) derivedMu {
 	if model.IsZero() || !(avgOutput > 0) || !(fleet.KVreq > 0) {
 		return derivedMu{}
@@ -209,7 +219,7 @@ func deriveMu(model itl.Model, params *capacity.EngineParams,
 	if !(kPrice > 0) || kPrice > 1 {
 		return derivedMu{}
 	}
-	capacityTokens := capacityTokensFor(params, totalKvTokens)
+	capacityTokens := capacityTokensFor(params, ranks, totalKvTokens)
 	// The SHAPE's KVreq, not one re-derived here. shape.New computes
 	// ILeff = IL*(1 - prefixHitRate) and KVreq = ILeff + OL/2, so a fleet
 	// whose prompts are largely cache hits occupies far less than IL + OL/2
@@ -225,7 +235,7 @@ func deriveMu(model itl.Model, params *capacity.EngineParams,
 		return derivedMu{}
 	}
 	if params != nil && params.MaxNumSeqs > 0 {
-		seqs = min(seqs, float64(params.MaxNumSeqs))
+		seqs = min(seqs, float64(params.MaxNumSeqs)*float64(max(ranks, 1)))
 	}
 	itlSec := model.ITLAt(kPrice)
 	if !(itlSec > 0) {

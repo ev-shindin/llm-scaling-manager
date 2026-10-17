@@ -23,6 +23,8 @@ import (
 var EngineSpecificQueries = []string{
 	QueryKvCacheUsage,
 	QueryQueueLength,
+	QueryMaxRankKvCacheUsage,
+	QueryMaxRankQueueLength,
 	QueryCacheConfigInfo,
 	QueryAvgOutputTokens,
 	QueryAvgOutputTokensRecent,

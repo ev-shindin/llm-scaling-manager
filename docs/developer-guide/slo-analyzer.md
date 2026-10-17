@@ -39,7 +39,9 @@ hands the optimizer `namedResults[0]`, saturation's.
        `pinned`, `pinned-default`, or with no line `declined` or `no-line`;
      - `priceTPOT` inverts `ITL = A·k + B` at the target, clamps to
        `[0.15, 0.80]`, or says `infeasible` when `ITL(0.15)` already reaches it;
-     - `reachableFill` caps the fill where `max_num_seqs` binds,
+     - `reachableFill` caps the fill where the replica's batch cap binds:
+       `max_num_seqs` times the data-parallel ranks the rows report
+       (`fleetReading.engineRanks`),
        `replicaTokenRate` is the per-replica capacity there, and
        `realisedFill` the fill the fleet would run at after `scaleUpThreshold`
        headroom, where `PredictedITL` is read.

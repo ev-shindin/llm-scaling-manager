@@ -55,11 +55,17 @@ const (
 	// 1-minute high-water mark that could overestimate load and trigger premature
 	// scale-up after a transient spike.
 	//
-	// max by (model_name, instance, pod): deduplication only. vllm:kv_cache_usage_perc
-	// is a single scalar gauge per vLLM process; there is one series per pod in normal
-	// deployment. The max by (...) collapses any duplicate series that arise when a pod
-	// is scraped by multiple targets (e.g., PodMonitor + ServiceMonitor). Since duplicates
-	// carry the same value, max = avg — the choice has no effect on correctness.
+	// avg by (model_name, instance, pod): the mean over the instance's engine
+	// ranks. vllm:kv_cache_usage_perc is one gauge per engine rank, labeled
+	// engine; a pod running data parallelism behind one API server exports one
+	// per rank, and the mean of the ranks' fractions is the pod's used tokens
+	// over its capacity (the ranks are alike). A max here read the busiest rank
+	// as the whole pod (issue #150). With one rank the mean is that rank's
+	// value. A max per rank comes first, so copies of a rank's gauge count
+	// once: duplicate series from a pod scraped by two targets (PodMonitor +
+	// ServiceMonitor), and the per-process copies an older vLLM run with
+	// --api-server-count above one can export, where a process that never
+	// received the rank's stats holds 0 (see QueryKvCacheUsage).
 	// Source: vllm:kv_cache_usage_perc (gauge)
 	QueryKvUsageInstant = "kv_usage_instant"
 
@@ -298,11 +304,12 @@ func RegisterAlwaysOnQueries(sourceRegistry *source.SourceRegistry) {
 	// named above and in cmd/main.go.
 	//
 	// No max_over_time, unlike QueryKvCacheUsage: the model wants the point
-	// the replica is at, not a one-minute high-water mark.
+	// the replica is at, not a one-minute high-water mark. Like it, the mean
+	// over a pod's engine ranks (see the note above RegisterSaturationQueries).
 	registry.MustRegister(source.QueryTemplate{
 		Name:        QueryKvUsageInstant,
 		Type:        source.QueryTypePromQL,
-		Template:    `max by (model_name, instance, pod) (vllm:kv_cache_usage_perc{namespace="{{.namespace}}"})`,
+		Template:    `avg by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (vllm:kv_cache_usage_perc{namespace="{{.namespace}}"}))`,
 		Params:      []string{source.ParamNamespace},
 		Description: "Instantaneous KV cache utilization per pod (0.0–1.0), used as k* in the ITL model",
 	})

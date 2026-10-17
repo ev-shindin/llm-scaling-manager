@@ -497,7 +497,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		var derived derivedMu
 		if domain.CanonicalRole(role) == domain.RoleDecode {
 			kPrice := pricingK(c.cfg)
-			derived = deriveMu(itlModel, engineParams, rm.TotalKvCapacityTokens,
+			derived = deriveMu(itlModel, engineParams, rm.Ranks(), rm.TotalKvCapacityTokens,
 				muShape, kPrice, c.muDivisor)
 			// Every term, because the result alone cannot be attributed to one.
 			// A derived mu that is wrong by 8x looks identical in the log
@@ -531,7 +531,8 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				"kvReqPerSeq", muShape.KVreq,
 				"kvReqFleet", fleetShape.KVreq,
 				"replicaKvTokens", rm.TotalKvCapacityTokens,
-				"maxNumSeqs", maxSeqs)
+				// Per engine rank; the replica admits engineRanks times it.
+				"maxNumSeqs", maxSeqs, "engineRanks", rm.Ranks())
 		}
 		c.a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq,
 			c.itlBorrowedFrom[rm.VariantName], c.logger)
@@ -707,6 +708,28 @@ func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandPart
 	}
 	total = c.a.applyThroughputFloor(c.input, c.cfg, caps, d.variants,
 		total, d.roleDemand, d.queueByRole, eppQueued, c.shapeChanged, c.logger)
+
+	// A replica with a full engine rank is not released on its mean
+	// (hot_rank_hold.go). Prefill is not judged here, so this cannot meet
+	// the prefill hold below.
+	{
+		scaleUp, scaleDown := c.cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
+		before := maps.Clone(d.roleDemand)
+		moved, byRole := holdHotRanks(c.input.ReplicaMetrics, c.rolesByVariant, caps, d.variants,
+			d.roleDemand, total, scaleUp, scaleDown, c.cfg.KvCacheThreshold)
+		if moved > 0 {
+			total += moved
+			if d.roleDemand != nil {
+				for role := range byRole {
+					hold(role, before[role])
+				}
+			}
+			c.logger.V(logging.DEFAULT).Info("hot-rank-hold",
+				"modelID", c.input.ModelID, "namespace", c.input.Namespace,
+				"raisedByRole", byRole, "totalDemandMoved", moved,
+				"reason", "a replica's busiest engine rank is full: its capacity is kept, and only the other replicas' spare may be released")
+		}
+	}
 
 	// While decode is saturated, prefill's DEMAND is not a reading of prefill
 	// either: the KV it holds and the queue behind it are decode's backlog

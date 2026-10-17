@@ -52,6 +52,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 				1000,  // avgInput
 				10,    // queueThreshold
 				nil,   // engineParams: nil so Priority 3 has nothing but the k1 fallback
+				1,     // ranks
 				90000, // k1
 				90000, // kvCeiling
 				domain.RoleDecode, false, admission{}, false, logr.Discard())
@@ -133,7 +134,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 			params := &capacity.EngineParams{EffectiveMaxBatchedTokens: 8192, MaxNumSeqs: 16}
 			d := a.computeK2(historyKey, model, ns, variant,
 				0, 0, 6000, 1000, 10,
-				params,
+				params, 1,
 				919859, // k1: large, so it clamps neither figure
 				919859,
 				domain.RoleDecode, false, admission{}, false, logr.Discard())
@@ -149,7 +150,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 			// assert it: the same call with no history reaches Priority 3.
 			fresh := NewSaturationAnalyzer(capacity.NewStore())
 			dFresh := fresh.computeK2(historyKey, model, ns, variant,
-				0, 0, 6000, 1000, 10, params, 919859, 919859,
+				0, 0, 6000, 1000, 10, params, 1, 919859, 919859,
 				domain.RoleDecode, false, admission{}, false, logr.Discard())
 			derived, derivedSrc := dFresh.k2, dFresh.src
 			Expect(derivedSrc).To(Equal(capacity.K2SrcDerived))

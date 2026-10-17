@@ -63,9 +63,12 @@ func priceTPOT(line itl.Model, targetSeconds float64) pricing {
 }
 
 // replicaTokenRate is the generation tokens per second one replica sustains at
-// fill k: the sequences resident there, capped at the engine's max_num_seqs,
-// each advancing one token every ITL(k) seconds. Zero when any input is
-// unusable.
+// fill k: the sequences resident there, capped at maxNumSeqs, each advancing
+// one token every ITL(k) seconds. Zero when any input is unusable.
+//
+// maxNumSeqs is the REPLICA's cap: the engine's max_num_seqs times the
+// data-parallel ranks the replica runs, since capacityTokens is the whole
+// replica's KV (priceVariant scales it).
 //
 // itl.TokenRate does not apply the cap -- it prices a cache, not an engine --
 // and short requests imply more resident sequences than the engine admits, so

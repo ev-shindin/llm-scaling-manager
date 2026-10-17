@@ -104,31 +104,41 @@ func (a *SaturationAnalyzer) StableAcceleratorFor(namespace, variantName, accele
 // it, so its queue and resident KV are left over or frozen (the rows
 // computeK2 does not record from), and counting it would gate prefill's
 // learning and hold prefill's demand for as long as the Pod sat unready.
+// Both tests read the replica's busiest engine rank (BusiestRankQueue,
+// kvFull), as computeK2 does: the thresholds are one engine's.
 func roleSaturated(metrics []domain.ReplicaMetrics, rolesByVariant map[string]string, role string, queueThreshold, kvCacheThreshold float64) bool {
 	for _, rm := range metrics {
 		if !rm.Ready || domain.CanonicalRole(rolesByVariant[rm.VariantName]) != role {
 			continue
 		}
-		if rm.QueueLength >= int(queueThreshold) && kvFull(rm, kvCacheThreshold) {
+		if rm.BusiestRankQueue() >= int(queueThreshold) && kvFull(rm, kvCacheThreshold) {
 			return true
 		}
 	}
 	return false
 }
 
-// kvFull reports whether rm's resident KV is at or over its k1 (the cache
-// times kvCacheThreshold) and within the cache's physical ceiling: a reading
-// above the ceiling is a scrape artifact, and a row with no cache size or no
-// KV in use cannot be judged. A kvCacheThreshold at or below zero puts k1 at
-// zero, so any KV in use counts as full.
+// kvFull reports whether rm's busiest engine rank is full: its resident KV,
+// scaled to the replica (domain.ReplicaMetrics.BusiestRankTokens), at or
+// over the replica's k1 (the cache times kvCacheThreshold) and within the
+// cache's physical ceiling. A reading above the ceiling is a scrape artifact,
+// and a row with no cache size or no KV in use cannot be judged. A
+// kvCacheThreshold at or below zero puts k1 at zero, so any KV in use counts
+// as full.
+//
+// The busiest rank, not the mean: kvCacheThreshold is a fraction of one
+// engine's cache, and a pod with one full rank among idle ones has an engine
+// that cannot allocate, whatever its mean reads. With one rank it is the
+// replica's own KV.
 func kvFull(rm domain.ReplicaMetrics, kvCacheThreshold float64) bool {
-	return rm.TokensInUse > 0 && rm.TotalKvCapacityTokens > 0 &&
-		rm.TokensInUse <= rm.TotalKvCapacityTokens &&
-		rm.TokensInUse >= memoryBound(rm.TotalKvCapacityTokens, kvCacheThreshold)
+	tokens := rm.BusiestRankTokens()
+	return tokens > 0 && rm.TotalKvCapacityTokens > 0 &&
+		tokens <= rm.TotalKvCapacityTokens &&
+		tokens >= memoryBound(rm.TotalKvCapacityTokens, kvCacheThreshold)
 }
 
 // busiestQueueLoadByVariant is, per decode or aggregated variant, the
-// deepest waiting queue on any one Ready replica as a fraction of
+// deepest waiting queue on any one engine of a Ready replica as a fraction of
 // queueThreshold (domain.AnalyzerResult.VariantBusiestQueueLoad). Bridges
 // count, as in roleSaturated. A replica not Ready is not routed to, so its
 // queue says nothing about routing. Prefill is left out: its queue is
@@ -158,7 +168,10 @@ func busiestQueueLoadByVariant(metrics []domain.ReplicaMetrics, rolesByVariant m
 				continue
 			}
 		}
-		out[v] = max(out[v], float64(max(rm.QueueLength, 0))/queueThreshold)
+		// The busiest rank's queue: it is what one engine of the pod holds,
+		// as queueThreshold is one engine's. The pod's sum would read eight
+		// ranks with one request each as a queue of eight.
+		out[v] = max(out[v], float64(max(rm.BusiestRankQueue(), 0))/queueThreshold)
 	}
 	return out
 }

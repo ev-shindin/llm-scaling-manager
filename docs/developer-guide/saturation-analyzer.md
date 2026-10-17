@@ -122,6 +122,13 @@ and `O` decode steps, so the fraction of a request's life that is decode is
 own `--max-num-seqs`. Multiplying by `(I + O/2)` converts a count of requests
 into the tokens they occupy, the same per-request footprint as `KVreq`.
 
+`B` and `S` bound one engine. A replica running several data-parallel ranks
+runs that many engines, so `computeK2` multiplies the derived k2 by the ranks
+the row reports (`ReplicaMetrics.Ranks`), and `deriveMu` caps the sequences at
+the ranks times `S`. k1 needs no scaling: the replica's KV is already all of
+its ranks'. See
+[Data-parallel pods](signal-dataflow.md#data-parallel-pods).
+
 `computeK2` has a priority order (observed, historical, derived, fallback);
 `k2Source` in the `replica-capacity-decision` log line says which answered.
 k2's persistence is deliberate and load-bearing — see

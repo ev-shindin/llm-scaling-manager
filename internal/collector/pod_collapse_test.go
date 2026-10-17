@@ -67,12 +67,18 @@ func TestCollapseToPods_MergesDPRanksIntoOneReplica(t *testing.T) {
 	// Request shape is weighted by traffic: rank B serves 3 of every 4 requests.
 	assert.InDelta(t, 175.0, pod.AvgInputTokens, 1e-9)
 	assert.InDelta(t, 35.0, pod.AvgOutputTokens, 1e-9)
+	// Weighted by generated tokens (100 and 300 tok/s, the same 1:3 as the
+	// requests here).
 	assert.InDelta(t, 0.05, pod.AvgITL, 1e-9)
-	// Weighted by request rate like AvgITL, and asymmetric on purpose: a plain
+	// Weighted by request rate, and asymmetric on purpose: a plain
 	// mean would give 20, so 25 is what distinguishes the weighting from an
 	// average. (1x10 + 3x30) / 4.
 	assert.InDelta(t, 25.0, pod.AvgServiceTime, 1e-9)
-	assert.InDelta(t, 0.7, pod.PrefixCacheHitRate, 1e-9)
+	// Weighted by the prompt tokens each rank looked up, as vLLM's
+	// prefix_cache_hits/prefix_cache_queries pool them: rank A 1 req/s x 100
+	// tokens, rank B 3 x 200. (100x0.4 + 600x0.8) / 700. By request rate alone
+	// it would be 0.7.
+	assert.InDelta(t, 520.0/700.0, pod.PrefixCacheHitRate, 1e-9)
 
 	// A pod is only as trustworthy as its stalest rank.
 	require.NotNil(t, pod.Metadata)

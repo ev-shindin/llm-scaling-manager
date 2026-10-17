@@ -74,6 +74,9 @@ var logContract = map[string][]string{
 	// is saturated (analyzer.go, holdPrefillDemand); the line is what explains
 	// a prefill RoleDemand that matches neither its rows nor its floor.
 	"prefill-demand-held": {"modelID", "namespace", "demandBefore", "demandHeld", "holdFloor", "holdCap"},
+	// A replica with a full engine rank is kept (hot_rank_hold.go); the line
+	// is what explains a demand above what the rows hold.
+	"hot-rank-hold": {"modelID", "namespace", "raisedByRole", "totalDemandMoved"},
 	// Why the derived mu is or is not available, which a run cannot work out
 	// afterwards: an empty ITL window has four causes and the counts separate
 	// them. Added after a benchmark produced 3,157 lines that said none of it.

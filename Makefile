@@ -2918,6 +2918,10 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# evaluates the shipped rules on synthetic series.
 	@$(MAKE) --no-print-directory promtool
 	@PROMTOOL=$(PROMTOOL) bash hack/check-alert-rules.sh
+	@# A per-pod query that folds a pod's data-parallel ranks with max parses
+	@# and returns a plausible number; only evaluating it on per-rank series
+	@# shows it priced the busiest rank.
+	@PROMTOOL=$(PROMTOOL) bash hack/check-collector-queries.sh
 	@echo "Checking what warmpool.sh actually emits..."
 	@# Renders the pool manifests and asserts their shape. Every bug this covers
 	@# parses fine: one container with the proxy image under the supervisor's
