@@ -24,6 +24,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | flapping, or a scale-up that never lands | `WVAReplicaScalingThrashing` (it counts every cycle that is not `no-change`); `tgt` alternating in `scaling-decision`, or `tgt` steady above `curr` | utilization crossing a narrow band, short stabilization windows, utilization-share swings; or actuation stuck, Pods Pending, slow replica starts | [flapping](#a-model-is-flapping); [actuation stuck](#desired-is-not-current-actuation-stuck) |
 | a lightly loaded model reads busy | `util` in `analyzer-result` far above what its load implies; `eppQueueSize` above 0 in its `scheduler-queue-demand` line while its own router queues nothing | v0.10.0-rc2 and earlier: another namespace serving the same model name, whose router queue was read as this model's | [reads busy](#a-lightly-loaded-model-reads-busy) |
 | pinned at max | `wva_variant_at_max_replicas == 1`; `"atMax":true` in `scaling-decision` | `maxReplicaCount` too low for the load | [pinned at max](#a-model-is-pinned-at-max) |
+| one replica full while others idle | `WVALoadImbalanced`; `wva_load_imbalanced == 1`; log `WARNING: load imbalanced` | the router's scorer weights (`prefix-cache-scorer` above `queue-scorer`, `active-request-scorer`, `kv-cache-utilization-scorer`), prefix caching off on the engines | [uneven load](#one-replica-is-saturated-while-others-idle) |
 | desired is not current | `wva_desired_replicas != wva_current_replicas` for many cycles | HPA stabilization window, KEDA not reaching the scaler, Pods Pending (GPUs, ResourceQuota), slow starts | [actuation stuck](#desired-is-not-current-actuation-stuck) |
 | replicas dropped under Kueue borrowing | fewer replicas with no scale-down asked for; `wva_model_scaling_blocked{reason=~"lender-reclaimed\|borrow-unplaced\|released-to-lender"}`; `BorrowedCapacityReleased` Event | Kueue preempted, a borrowed replica did not place and was released, a waiting lender was handed it back (opt-in), demand fell | [replicas dropped](#replicas-dropped-under-kueue-borrowing) |
 | a lender's replica Pending after Kueue preempted | the lender's new pod `Pending` with no node; a borrower's Workload evicted with reason `Preempted`; later `reason="borrow-unplaced"` | Kueue preempts by priority, not by node: the GPUs it freed form no node the replica fits | [replicas dropped](#replicas-dropped-under-kueue-borrowing) |
@@ -380,6 +381,59 @@ kubectl patch scaledobject <name> -n <ns> --type=merge -p '{"spec":{"maxReplicaC
 Check for free GPUs first; without them a higher ceiling gives Pending pods
 ([GPUs held](#gpus-held-or-quota-spent)). A benchmark pinned at its ceiling
 measures the ceiling, not the autoscaler.
+
+## One replica is saturated while others idle
+
+**Symptom**: `WVALoadImbalanced` fires, or `wva_load_imbalanced == 1`; the
+controller log has `WARNING: load imbalanced across a role's replicas` naming
+a `busiestPod` and `idlePods`; latency stays high however many replicas the
+role has.
+
+The router (EPP) picks the replica for each request. When its scorers keep
+choosing one replica, that replica fills and queues while its siblings idle.
+A replica count is unlikely to fix this: the warning needs an idle replica
+that has been Ready for at least 2 minutes, so the role already has capacity
+the router is not using, and new replicas are routed to no more than the idle
+ones are. A scale-up in progress does not raise it: a replica Ready for less
+than 2 minutes is never counted idle. The usual cause is the role's scheduling profile, where
+the largest weight wins ties it should not. With `prefix-cache-scorer: 3`
+against `queue-scorer: 2`, the replica that saw a prefix gets the request
+however busy it is. One measured prefill fleet held 439 queued requests on one
+replica while three of its four sat idle.
+
+1. Measure the spread, per role:
+
+   ```promql
+   wva_load_kv_max_to_mean_ratio
+   wva_load_queue_max_to_mean_ratio
+   wva_load_idle_replicas_while_saturated
+   ```
+
+   A ratio near the replica count means one replica holds almost everything.
+
+2. Read the scheduling profile the router loaded for that role, and look at
+   the weights of `queue-scorer`, `active-request-scorer` and
+   `kv-cache-utilization-scorer` against `prefix-cache-scorer`. How the
+   weights combine is in
+   [scheduling profiles](router-configuration.md#scheduling-profiles-decide-whether-ordered-replicas-get-used);
+   how to print and patch the profile is in
+   [changing router configuration](router-configuration.md#changing-router-configuration).
+
+3. Check that the affinity you pay for exists: with prefix caching off on the
+   engines, the prefix scorer steers toward KV that was never kept
+   ([what to check first](router-configuration.md#what-to-check-first)).
+
+4. Change one weight, restart the router, and measure the spread again over
+   repeated runs. No weight set is known to be right for every workload.
+   **Restarting the router drops traffic**: it runs as one replica with the
+   `Recreate` strategy, so requests fail for 10 to 30 s while it restarts
+   ([changing router configuration](router-configuration.md#changing-router-configuration)).
+   Do it in a quiet window, not in the middle of the incident that paged you.
+
+What the scaling manager does meanwhile: capacity is learned per replica from
+that replica's own readings. But a deep queue pinned on one replica still
+counts as demand, so the role may grow while the imbalance lasts, by replicas
+that the router then leaves idle.
 
 ## Desired is not current (actuation stuck)
 
