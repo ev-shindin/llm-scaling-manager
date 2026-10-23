@@ -362,6 +362,34 @@ tests:
         values: '0+384x15'
       - series: 'vllm:inter_token_latency_seconds_sum{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="b"}'
         values: '0+12x15'
+      - series: 'vllm:generation_tokens_total{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm"}'
+        values: '0+30720x15'
+      - series: 'vllm:request_prefill_kv_computed_tokens_sum{namespace="llm",pod="solo-0",instance="10.0.1.1:8000",engine="0",model_name="glm"}'
+        values: '0+61440x15'
+      - series: 'vllm:request_generation_tokens_count{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="a"}'
+        values: '0+60x15'
+      - series: 'vllm:request_generation_tokens_count{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="b"}'
+        values: '0+60x15'
+      - series: 'vllm:request_generation_tokens_count{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="a"}'
+        values: '0+120x15'
+      - series: 'vllm:request_generation_tokens_count{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="b"}'
+        values: '0+120x15'
+      - series: 'vllm:generation_tokens_total{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="a"}'
+        values: '0+30720x15'
+      - series: 'vllm:generation_tokens_total{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="b"}'
+        values: '0+30720x15'
+      - series: 'vllm:generation_tokens_total{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="a"}'
+        values: '0+61440x15'
+      - series: 'vllm:generation_tokens_total{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="b"}'
+        values: '0+61440x15'
+      - series: 'vllm:request_prefill_kv_computed_tokens_sum{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="a"}'
+        values: '0+61440x15'
+      - series: 'vllm:request_prefill_kv_computed_tokens_sum{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="b"}'
+        values: '0+61440x15'
+      - series: 'vllm:request_prefill_kv_computed_tokens_sum{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="a"}'
+        values: '0+122880x15'
+      - series: 'vllm:request_prefill_kv_computed_tokens_sum{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="b"}'
+        values: '0+122880x15'
     promql_expr_test:
       # kv_cache_usage: the mean of the ranks' peaks, used tokens over capacity (not the busiest rank, 0.875); each rank once, however many copies of its gauge (pid-0: 0.75, not 0.375)
       - expr: 'avg by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (max_over_time(vllm:kv_cache_usage_perc{namespace="llm"}[1m])))'
@@ -499,3 +527,29 @@ tests:
             value: 14
           - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
             value: 8
+      # request_rate: completions summed over the ranks (dp8-0: six ranks at 1, rank 7 at 2, rank 5 idle); a second scrape counts no rank twice (dup-2: 3, not 6)
+      - expr: 'sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (rate(vllm:request_generation_tokens_count{namespace="llm"}[1m])))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.8:8000",pod="dp8-0"}'
+            value: 8
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 1
+          - labels: '{model_name="glm",instance="10.0.0.2:8000",pod="dup-2"}'
+            value: 3
+      # generation_token_rate: generated tokens summed over the ranks; a second scrape counts no rank twice (dup-2: 1536, not 3072)
+      - expr: 'sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (rate(vllm:generation_tokens_total{namespace="llm"}[1m])))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 512
+          - labels: '{model_name="glm",instance="10.0.0.2:8000",pod="dup-2"}'
+            value: 1536
+      # prefill_computed_token_rate: computed prompt tokens summed over the ranks; a second scrape counts no rank twice (dup-2: 3072, not 6144)
+      - expr: 'sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (rate(vllm:request_prefill_kv_computed_tokens_sum{namespace="llm"}[1m])))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 1024
+          - labels: '{model_name="glm",instance="10.0.0.2:8000",pod="dup-2"}'
+            value: 3072

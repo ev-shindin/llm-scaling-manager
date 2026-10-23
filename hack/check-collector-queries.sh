@@ -35,8 +35,8 @@ if [ ! -f "$FIXTURE" ]; then
 fi
 # An empty fixture passes promtool; count the cases it holds first.
 N=$(grep -c '^      - expr:' "$FIXTURE")
-if [ "$N" -ne 14 ]; then
-  echo "FAIL: $N query cases in $(basename "$FIXTURE"), not 14. Update the count deliberately." >&2
+if [ "$N" -ne 17 ]; then
+  echo "FAIL: $N query cases in $(basename "$FIXTURE"), not 17. Update the count deliberately." >&2
   exit 1
 fi
 if ! (cd "$(dirname "$FIXTURE")" && "$PROMTOOL" test rules "$(basename "$FIXTURE")"); then

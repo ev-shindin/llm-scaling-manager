@@ -71,13 +71,20 @@ type Floor struct {
 type Term struct {
 	// Mu is the saturated completion rate of one replica, requests/s.
 	Mu float64
-	// PerReplica is the tokens one replica of the role is worth (P).
+	// PerReplica is the tokens one replica of the role is worth (P), as the
+	// floor prices it: cost x Mu, which for a derived mu is P x
+	// scaleUpThreshold (replicaCost).
 	PerReplica float64
 	// Backlog is the queued requests priced into the floor: the role's own
 	// engine queues plus the scheduler's.
 	Backlog float64
 	// Replicas is (lambda + Backlog / DrainSeconds) / Mu.
 	Replicas float64
+	// ArrivalDemand is the floor without its backlog: lambda x cost, the tokens
+	// the arrival rate alone asks for. The saturation analyzer compares it
+	// with the resident KV to tell a lagging lambda from a backlog the floor
+	// may price as drain (applyThroughputFloor).
+	ArrivalDemand float64
 	// Held reports that the floor was capped at the fleet's anticipated size
 	// because its mu is not one the floor may order on -- HeldWhy says
 	// which: "borrowed" (a neighbouring bucket's reading), "single-sample",
@@ -201,6 +208,50 @@ func borrowedReading(rc capacity.ReplicaCapacity) bool {
 		return true
 	}
 	return rc.SaturatedThroughputBorrowed && !rc.SaturatedThroughputDerived
+}
+
+// replicaCost is the tokens one unit of arrival rate costs on this replica,
+// P / mu, with the engine's scale-up headroom taken out of a DERIVED mu.
+//
+// The engine scales out at scaleUpThreshold of what a replica is worth (RC =
+// D / scaleUpThreshold - anticipated). A measured mu is the replica's rate at
+// saturation, the same moment that measures P, so the headroom is applied
+// once, by the engine, and the fleet scales out at scaleUpThreshold of the
+// saturated rate -- as occupancy does at scaleUpThreshold of P.
+//
+// A derived mu already has the headroom in it. It is priced at kPrice =
+// kvCacheThreshold x scaleUpThreshold of the KV cache (0.68 on the defaults),
+// the fill the autoscaler targets, not at saturation. Divided through the
+// engine's threshold a second time, the floor scaled out at 85 % of the rate
+// AT the target fill, and since throughput is concave in fill that cost about
+// half the fill: on the run that showed it, a decode replica reached the
+// floor's equilibrium at 97 sequences (k 0.32) where occupancy's was 205
+// (k 0.68), and the floor ordered a third replica for two that held 95-97
+// sequences each with no queue. Multiplying the cost by scaleUpThreshold
+// cancels the engine's division, so the role scales out when arrivals exceed
+// replicas x mu(kPrice): occupancy and the floor then agree at the documented
+// target. A threshold outside (0, 1] leaves the cost as it was.
+func replicaCost(rc capacity.ReplicaCapacity, p, scaleUpThreshold float64) float64 {
+	cost := p / rc.SaturatedThroughput
+	if rc.SaturatedThroughputDerived && scaleUpThreshold > 0 && scaleUpThreshold <= 1 {
+		cost *= scaleUpThreshold
+	}
+	return cost
+}
+
+// DrainHorizon is the seconds a role's backlog is priced to clear in:
+// drainSeconds, or one replica's start time (startSeconds) where that is
+// longer. Nothing added can clear anything before it is Ready, so the window
+// is at least a start. drainSeconds is 60 s and the measured start 67-82 s,
+// and dividing arrivals-over-the-start by the drain alone priced the arrival
+// rate at 1 + start/drain -- 2.17x lambda at run T's figures, every cycle the
+// fleet was behind.
+// A NaN start is no start: the comparison, unlike the builtin max, ignores it.
+func DrainHorizon(drainSeconds, startSeconds float64) float64 {
+	if startSeconds > drainSeconds {
+		return startSeconds
+	}
+	return drainSeconds
 }
 
 func Estimate(
@@ -338,14 +389,14 @@ func Estimate(
 			continue
 		}
 		if borrowedReading(rc) {
-			borrowedCosts[role] = append(borrowedCosts[role], p/rc.SaturatedThroughput)
+			borrowedCosts[role] = append(borrowedCosts[role], replicaCost(rc, p, scaleUpThreshold))
 			borrowedMus[role] = append(borrowedMus[role], rc.SaturatedThroughput)
 			if rc.SaturatedThroughputLineBorrowed {
 				lineBorrowed[role] = true
 			}
 			continue
 		}
-		costs[role] = append(costs[role], p/rc.SaturatedThroughput)
+		costs[role] = append(costs[role], replicaCost(rc, p, scaleUpThreshold))
 		mus[role] = append(mus[role], rc.SaturatedThroughput)
 		if cur, seen := smallestP[role]; !seen || p < cur {
 			smallestP[role] = p
@@ -401,16 +452,7 @@ func Estimate(
 		var observed, b float64
 		if drainSeconds > 0 {
 			observed = max(backlog[role], 0)
-			// Nothing to clear before capacity arrives, so the window the
-			// backlog must clear in is at least as long as a replica takes to
-			// start. drainSeconds is 60 s and the measured start is 67-82 s, so
-			// dividing arrivals-over-T by drain alone priced the arrival rate at
-			// 1 + T/drain -- 2.17x lambda at run T's figures, every cycle the
-			// fleet was behind.
-			horizon := drainSeconds
-			if T := startSeconds[role]; T > horizon {
-				horizon = T
-			}
+			horizon := DrainHorizon(drainSeconds, startSeconds[role])
 			b = backlogAtLanding(observed, lambda, mu, startSeconds[role],
 				readyByRole[role], startingByRole[role])
 			rate += b / horizon
@@ -421,7 +463,7 @@ func Estimate(
 		// observed queue unrecoverable from the log -- and its meaning silently
 		// changed relative to every earlier run the commit messages reason from.
 		term := Term{Mu: mu, PerReplica: cost * mu, Backlog: observed,
-			ProjectedBacklog: b, Replicas: rate / mu}
+			ProjectedBacklog: b, Replicas: rate / mu, ArrivalDemand: lambda * cost}
 		// A single reading may order while the SCHEDULER holds a real queue.
 		//
 		// Nothing here withholds the figure while a replica is starting, and

@@ -171,17 +171,19 @@ var _ = Describe("the prefill pricing queries", func() {
 		Expect(q.Template).To(ContainSubstring("sglang:time_to_first_token_seconds_count"))
 	})
 
-	// SUMMED, not maxed. A pod's engines each compute part of the prefill, so
-	// their token rates add; pod_collapse.go sums this field for the same
-	// reason. `max by` would report a multi-engine replica at a fraction of the
-	// work it is really doing.
+	// SUMMED over the engines, not maxed. A pod's engines each compute part of
+	// the prefill, so their token rates add; pod_collapse.go sums this field for
+	// the same reason. A max over the pod would report a multi-engine replica at
+	// a fraction of the work it is really doing. The max is per ENGINE only, so
+	// a target scraped twice counts each engine once.
 	It("sums the prefill computed-token rate across a pod's engines", func() {
 		q := get(inferenceengine.EngineVLLM, QueryPrefillComputedTokenRate)
 		Expect(q).NotTo(BeNil())
 		Expect(q.Template).To(ContainSubstring("vllm:request_prefill_kv_computed_tokens_sum"))
 		Expect(q.Template).To(HavePrefix("sum by"),
 			"a pod's engines each compute part of the prefill, so their rates add")
-		Expect(q.Template).NotTo(ContainSubstring("max by"))
+		Expect(q.Template).To(HavePrefix("sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) ("),
+			"the max folds a second scrape of one engine, never two engines")
 	})
 
 	// Deliberately NOT an engine-specific pair: SGLang publishes no per-stage

@@ -173,7 +173,7 @@ locator cannot resolve are counted by `wva_pod_mapping_miss_total`.
 #### QueryRequestRate (`request_rate`)
 
 ```promql
-sum by (model_name, instance, pod) (rate(vllm:request_generation_tokens_count{namespace="..."}[1m]))
+sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (rate(vllm:request_generation_tokens_count{namespace="..."}[1m])))
 ```
 
 **What it measures:** Engine-side request completion rate per pod (req/s), derived from the

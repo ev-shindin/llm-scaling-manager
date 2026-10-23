@@ -672,8 +672,10 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		// moves. mu must still follow the live figure.
 		record := func(out float64) float64 {
 			rm := makeReplicaMetrics("d0", decodeV, 1_100_000, kvCap, 20, 1000, out)
-			rm.RequestRate = 1.0
 			rm.GenerationTokenRate = 6000 // held constant: only O moves
+			// Completions agree with the tokens, as a replica past its fill
+			// reads (tokensOutrunCompletions).
+			rm.RequestRate = rm.GenerationTokenRate / out
 			rm.Ready = true
 			in := makeAnalyzerInput([]domain.ReplicaMetrics{rm}, states(1))
 			in.ArrivalRate = 5.68

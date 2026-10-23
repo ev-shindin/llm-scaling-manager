@@ -203,3 +203,20 @@ func TestCollapseToPods_MixedPodsMergeOnlyWhereShared(t *testing.T) {
 	assert.Equal(t, "pod-single", pods[1].PodName)
 	assert.Equal(t, int64(4000), pods[1].TotalKvCapacityTokens)
 }
+
+func TestCollapseToPods_InstantKvKnownOnlyIfEveryRankReportedIt(t *testing.T) {
+	// A rank with no instant series would be averaged in as an empty cache;
+	// the pod's instant reading is then not one the analyzer may charge at.
+	instances := []domain.ReplicaMetrics{
+		{PodName: "pod-a", TotalKvCapacityTokens: 100, KvUsageInstant: 0.8, KvUsageInstantKnown: true},
+		{PodName: "pod-a", TotalKvCapacityTokens: 100},
+		{PodName: "pod-b", TotalKvCapacityTokens: 100, KvUsageInstant: 0.2, KvUsageInstantKnown: true},
+		{PodName: "pod-b", TotalKvCapacityTokens: 100, KvUsageInstant: 0.4, KvUsageInstantKnown: true},
+	}
+
+	pods := collapseToPods(instances)
+
+	require.Len(t, pods, 2)
+	assert.False(t, pods[0].KvUsageInstantKnown, "pod-a: one rank had no instant series")
+	assert.True(t, pods[1].KvUsageInstantKnown, "pod-b: both ranks reported one")
+}

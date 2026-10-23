@@ -317,6 +317,10 @@ type ReplicaMetrics struct {
 	// Differs from KvCacheUsage which uses max_over_time[1m] for the saturation analyzer.
 	// Zero when metrics are unavailable.
 	KvUsageInstant float64
+	// KvUsageInstantKnown is set when KvUsageInstant was read from a series,
+	// so a zero means an empty cache and not a missing reading. A pod whose
+	// ranks did not all report one is not known.
+	KvUsageInstantKnown bool
 
 	// RequestRate is the engine-side request completion rate on this replica (req/s).
 	// Engine-agnostic: derived per pod from rate(vllm:request_generation_tokens_count[1m])
