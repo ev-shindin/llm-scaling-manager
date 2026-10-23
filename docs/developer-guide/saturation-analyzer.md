@@ -176,6 +176,20 @@ evidence:
 | `DefaultObservationMaxAge` | 30m | |
 | `DefaultMinObservableK` | 0.15 | below this the engine is not batching |
 | `DefaultMaxObservableK` | 0.80 | above it, preemption makes ITL non-linear |
+| `DefaultSteadyFor` | 2m | a replica's `k` must have held still this long |
+| `DefaultMaxKDrift` | 0.10 | how far it may have moved and still count as still |
+
+The full fit, and so the remembered `B`, uses **steady** readings only: a
+replica whose `k` stayed within `DefaultMaxKDrift` over the last
+`DefaultSteadyFor`, and that has served at least that long if it joined after
+the key was first observed. `k` is instantaneous and ITL is a `rate[1m]` mean,
+so across a step in load the two describe different moments; in a balanced
+fleet that step is the only spread a window ever holds. Before this gate, two
+identical models in two namespaces remembered `B` = 4.5 ms and 14.8 ms from
+whichever transient each window caught, and priced the same replica at 5.3 and
+7.7 requests/s (issue #270). Unsteady readings still feed the pinned fit, and
+the steady readings are never older than the window's oldest. `itl-window`
+reports `unsteady` and `steadyHeld`.
 
 From the line, two closed forms:
 
@@ -184,9 +198,86 @@ Sequences(k, C, KVreq) = k x C / KVreq          // resident requests at occupanc
 TokenRate(m, k, C, KVreq) = Sequences / ITL(k)  // generated tokens/second
 ```
 
-`GPSErrorPct` compares `TokenRate` against the observed
-`rm.GenerationTokenRate`. It **reports and does not act** — `noteLineMismatch`
-logs `itl-gps-mismatch` with `gates: false`.
+### Calibrating the line by the observed token rate
+
+`TokenRate` multiplies two readings that are not the same measurement: the
+sequence count comes from the KV fill, `ITL(k)` from the inter-token-latency
+histogram. On a real-GPU run (issue #270: Qwen3-32B-FP8, one H200, vLLM
+v0.26.0, 1000 in / 500 out, 192 concurrent) they disagreed by a steady factor.
+Over 17 one-minute intervals of the pods' own counters, in two namespaces:
+
+| | measured | from the line |
+| --- | --- | --- |
+| sequences resident | 189-192 running | `k x C / KVreq` = 191.6 on average (k 0.58-0.69) |
+| seconds per token per sequence | `running / GPS` = 0.059-0.066 | `ITL(k)` = 0.066-0.078 |
+| ratio | | 1.13 on average (1.02-1.24) |
+| mu at `kPrice` 0.68 | 5.99 and 6.05 req/s | 5.33 and 5.41 req/s |
+
+The sequence count was right and the latency was not, so the derived mu was
+11% low and the floor ordered about 12% more replicas than the load needed.
+`itl-gps-mismatch` fired on the same cycles (observed 3006-3292 tokens/s
+against 2538-2706 predicted). Why the histogram mean reads above
+`running / GPS` is not settled: vLLM observes one interval per generated token,
+which makes the mean at most `running / GPS`. The fit window held only readings
+near the operating fill, so the 1.13 is in the readings, not in the fit's
+extrapolation. It does not depend on `B`: a pinned fit through readings at one
+`k` reproduces them at that `k` whatever `B` is pinned.
+
+`cycle.calibrateLine` (`mu_from_itl.go`) corrects for it. For each decode
+variant with a line, own or borrowed, every cycle:
+
+```
+settled   = itl.Tracker.Settled(key, pod)       // seen for DefaultSteadyFor, k within DefaultMaxKDrift
+predicted = min(Sequences(k, C, KVreq), S) / ITL(k)   // at the replica's own k
+ratio     = sum(observed GPS) / sum(predicted)  // over settled replicas with k >= 0.30
+factor    = factor + 0.25 x (ratio - factor)    // the first ratio is taken as it is
+```
+
+| constant | value | why |
+| --- | --- | --- |
+| `DefaultGPSMinKForVerification` | 0.30 | below it a handful of sequences make the ratio quantisation |
+| `DefaultMinGPSCalibration`, `DefaultMaxGPSCalibration` | 0.5, 2.0 | outside them the line is wrong, not biased; `itl-gps-mismatch` reports it |
+| `DefaultGPSCalibrationWeight` | 0.25 | one-minute rates move 5-10% between cycles on a steady replica |
+
+`Settled` is stricter than the full fit's steadiness, which takes a replica
+present at a key's first observation as steady on no history. On a ramp the
+one-minute token rate trails the instantaneous fill on every replica at once,
+which is how a GPS **gate** withheld ordering 28 times in run T. The factor
+therefore moves only on settled replicas, and is kept through cycles with none:
+an over-provisioned fleet below `k` 0.30 keeps the factor it measured while it
+was working, which is when the derived mu matters most. `deriveMu`'s result is
+scaled by the factor (`derivedMu.calibrated`); the output-length divisor is
+untouched, so the paired-window rule below holds as before.
+
+The factor lives in `itl.Tracker` beside the window, and goes with it: the
+tracker's `Sweep` removes it for a stale key, for a variant dropped by name, and
+for a key whose engine arguments changed (`itlUnderArgs`). It is not part of the
+learned-state snapshot, so a controller restart starts it again at 1, the line
+as fitted.
+
+`itl-gps-calibration` logs the cycle's `ratio`, the `factor` and how many
+`replicas` gave evidence; `derived-mu` and `itl-gps-mismatch` carry
+`gpsCalibration`. `noteLineMismatch` compares the **calibrated** prediction
+against `rm.GenerationTokenRate` and still **reports and does not act**: it logs
+`itl-gps-mismatch` with `gates: false`. After calibration a mismatch is
+something the factor has not absorbed: a ramp, or a line that no longer
+describes the fleet.
+
+On the run's numbers `TestDerivedMuMatchesTheRunsMeasuredThroughput` derives
+6.22 req/s against 6.05 measured (factor 1.149). The line alone gives 5.41.
+
+### The default intercept
+
+`B` is pinned to `DefaultBaselineSec` (6 ms) until a key has a full fit, and a
+full fit now needs `DefaultMinKSpread` (0.30) of **settled** readings in one
+window. A balanced fleet whose load never settles at two levels 0.30 apart
+within the window's 20 readings keeps 6 ms indefinitely (`baselineLearned:
+false` on `itl-fit`). That is acceptable for pricing because the slope is fitted
+against the pinned `B` from readings near the operating fill, so the line is
+right where it was measured and the calibration factor corrects the rest. It is
+wrong far from that fill, for example a fleet whose readings all sit at `k`
+0.20 priced at 0.68. No better default exists: on a large accelerator the real
+intercept is several times 6 ms.
 
 ## The service rate (mu)
 
@@ -212,7 +303,7 @@ line is validated, while 0.68 is the occupancy the autoscaler actually targets.
 ```
 C        = capacityTokensFor(params, rm.TotalKvCapacityTokens)
 seqs     = min(Sequences(kPrice, C, KVreq), MaxNumSeqs)
-tokenSec = seqs / ITL(kPrice)
+tokenSec = seqs / ITL(kPrice) x factor     // factor: calibrateLine, 1 until measured
 mu       = tokenSec / avgOutput
 ```
 
@@ -439,6 +530,8 @@ token per request, so its output length is not a property of its work.
 | `DefaultMaxObservableK` | 0.80 | `internal/signals/itl` |
 | `DefaultMinSamples` | 10 | `internal/signals/itl` |
 | `DefaultMinKSpread` | 0.30 | `internal/signals/itl` |
+| `DefaultSteadyFor` | 2m | `internal/signals/itl` |
+| `DefaultMaxKDrift` | 0.10 | `internal/signals/itl` |
 | `BacklogDrainSeconds` | 60 | `internal/signals/floor` |
 | `MinThroughputSamplesToOrder` | 2 | `internal/signals/floor` |
 | `ShapeChangeHoldMax` | 5m | `saturation` |
@@ -551,6 +644,10 @@ Three lines carry the whole chain, all at `logging.DEFAULT`:
   sequence count, the ITL line or the pricing point. `kvReqPerSeq` is the
   priced shape and `kvReqFleet` the fleet's own; `muShortWindow` says whether
   the pair moved to the short window.
+  It, and every ITL line (`itl-window`, `itl-fit`, `itl-fit-declined`,
+  `itl-line-borrowed`, `itl-gps-mismatch`), carries `namespace` beside
+  `variant`: one Deployment applied to two namespaces logs the same variant
+  name in both, and only the namespace tells their lines apart.
 - `replica-capacity-decision` — `k1MemoryBound`, `k2ComputeBound`, `k2Source`,
   `boundBy`, `saturatedThroughput`, `saturatedThroughputBucket`.
 - `throughput-demand-floor` — `arrivalRate`, `backlogRequests`,

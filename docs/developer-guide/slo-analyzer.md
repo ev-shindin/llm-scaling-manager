@@ -90,8 +90,12 @@ instance and its own keys.
   out within 30 minutes: then `no-line`, with `aboveBand` counting why.
 - **The window** (`Window`) holds at most 20 readings for at most 30 minutes.
   Nothing clears it on a change of shape.
-- **The fit.** With 10 readings spanning 0.30 of `k`, a least-squares `Fit`,
-  and its `B` remembered when positive. Otherwise, with 10 readings,
+- **The fit.** With 10 **steady** readings spanning 0.30 of `k`, a
+  least-squares `Fit`, and its `B` remembered when positive. A reading is
+  steady when its replica's `k` stayed within 0.10 over the last two minutes
+  (`DefaultSteadyFor`, `DefaultMaxKDrift`) and, if the replica joined after the
+  key was first observed, it has served that long: across a step in load the
+  instantaneous `k` and the `rate[1m]` ITL describe different moments. Otherwise, with 10 readings,
   `FitPinnedB` with `B` held at the remembered intercept or, before there is
   one, `DefaultBaselineSec` (6 ms). A balanced fleet spans little of `k`, so the
   pinned fit is the normal case. A pinned fit that refuses the readings is

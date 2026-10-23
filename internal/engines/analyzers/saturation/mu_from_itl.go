@@ -57,7 +57,114 @@ type derivedMu struct {
 	rate     float64
 	seqs     float64
 	tokenSec float64
-	ok       bool
+	// calibration is the factor rate and tokenSec were scaled by to match
+	// the token rate the variant's replicas report; 1 is the line as fitted.
+	calibration float64
+	ok          bool
+}
+
+// calibrated scales the derived figures by the variant's calibration factor
+// (calibrateLine). A factor that is not positive leaves them as derived.
+//
+// The output-length divisor is untouched, so the paired-window rule -- the
+// divisor and KVreq come from the same window -- holds as it did: the factor
+// corrects the token rate, which is a property of the line, and nothing about
+// the shape.
+func (d derivedMu) calibrated(factor float64) derivedMu {
+	d.calibration = 1
+	if !d.ok || !(factor > 0) {
+		return d
+	}
+	d.calibration = factor
+	d.tokenSec *= factor
+	d.rate *= factor
+	return d
+}
+
+// sequencesAt is how many sequences a replica holds at KV fill k, capped at what
+// its engines admit: max_num_seqs per engine rank (see deriveMu).
+func sequencesAt(params *capacity.EngineParams, ranks int, capacityTokens, kvReq, k float64) float64 {
+	seqs := itl.Sequences(k, capacityTokens, kvReq)
+	if seqs > 0 && params != nil && params.MaxNumSeqs > 0 {
+		seqs = min(seqs, float64(params.MaxNumSeqs)*float64(max(ranks, 1)))
+	}
+	return seqs
+}
+
+// lineTokenRate is the token rate the line predicts for this replica at its
+// own fill, with the sequence count capped as deriveMu caps it. 0 when the line
+// prices nothing there.
+func lineTokenRate(model itl.Model, params *capacity.EngineParams, rm domain.ReplicaMetrics, kvReq float64) float64 {
+	capacityTokens := capacityTokensFor(params, rm.Ranks(), rm.TotalKvCapacityTokens)
+	seqs := sequencesAt(params, rm.Ranks(), capacityTokens, kvReq, rm.KvUsageInstant)
+	itlSec := model.ITLAt(rm.KvUsageInstant)
+	if !(seqs > 0) || !(itlSec > 0) {
+		return 0
+	}
+	return seqs / itlSec
+}
+
+// calibrateLine folds this cycle's evidence into the variant's calibration
+// factor and returns the factor its replicas are priced with: 1 while the key
+// has none.
+//
+// The evidence is the token rate the variant's settled decode replicas report
+// against the one model predicts for each at its own fill, pooled over the
+// replicas (sum over sum, so a replica serving more counts for more).
+// Settled is itl.Tracker.Settled: seen for DefaultSteadyFor with k inside
+// DefaultMaxKDrift throughout. That is what keeps a ramp out -- on one the
+// one-minute rate trails the instantaneous fill on every replica at once
+// (noteLineMismatch) -- and a cycle with no settled replica leaves the factor
+// as it was, so an over-provisioned fleet sitting below
+// DefaultGPSMinKForVerification keeps the factor it measured while it was
+// working.
+//
+// Why the line needs correcting at all is set out in
+// internal/signals/itl/calibration.go: on the run that found it the histogram
+// mean read 1.13x the running count over the reported rate, and every line
+// fitted to it under-priced the replica by that much.
+func (c *cycle) calibrateLine(key, variant string, model itl.Model, rows []domain.ReplicaMetrics,
+	params *capacity.EngineParams, logger logr.Logger) float64 {
+	now := c.a.now()
+	var observed, predicted float64
+	used := 0
+	for _, rm := range rows {
+		if rm.VariantName != variant || !rm.Ready || rm.FromWarmPool {
+			continue
+		}
+		if !c.a.itlTracker.Settled(key, rm.PodName, now) {
+			continue
+		}
+		kvReq := shape.New(c.fleetInput, c.fleetOutput, rm.PrefixCacheHitRate).KVreq
+		pred := lineTokenRate(model, params, rm, kvReq)
+		if _, ok := itl.CalibrationRatio(rm.GenerationTokenRate, pred, rm.KvUsageInstant); !ok {
+			continue
+		}
+		observed += rm.GenerationTokenRate
+		predicted += pred
+		used++
+	}
+	if used > 0 {
+		factor := c.a.itlTracker.NoteGPSRatio(key, observed/predicted)
+		logger.V(logging.DEFAULT).Info("itl-gps-calibration",
+			"variant", variant, "replicas", used,
+			"observedGPS", observed, "predictedGPS", predicted,
+			"ratio", observed/predicted, "factor", factor)
+		return factor
+	}
+	if factor, ok := c.a.itlTracker.GPSCalibration(key); ok {
+		return factor
+	}
+	return 1
+}
+
+// lineCalibration is the factor calibrateLine settled on for the variant this
+// cycle; 1 when it has none.
+func (c *cycle) lineCalibration(variant string) float64 {
+	if f, ok := c.itlCalibration[variant]; ok && f > 0 {
+		return f
+	}
+	return 1
 }
 
 // capacityTokensFor is the replica's whole KV capacity in tokens: the LIVE
@@ -97,8 +204,11 @@ func capacityTokensFor(params *capacity.EngineParams, ranks int, liveTokens int6
 }
 
 // noteLineMismatch logs, and only logs, when this replica's observed
-// generation-token rate disagrees with what the fitted line predicts at the
-// replica's own utilization.
+// generation-token rate disagrees with what the fitted line, scaled by the
+// variant's calibration factor, predicts at the replica's own utilization.
+// The factor is what calibrateLine measured from settled replicas, so after
+// it a mismatch is a disagreement the calibration has not absorbed: a ramp,
+// or a line that has stopped describing the fleet.
 //
 // It is a DIAGNOSTIC, not a gate, and that is a decision taken against
 // measurement rather than taste.
@@ -111,9 +221,9 @@ func capacityTokensFor(params *capacity.EngineParams, ranks int, liveTokens int6
 // role rejected at once. The fleet still reached 9 so the run stands, but its
 // phase-1 TTFT p95 was 64 s against main's 42 s.
 //
-// The cause is not a threshold that needs tuning. The three signals are
-// collected over three different windows -- KvUsageInstant has none,
-// GenerationTokenRate is rate[1m], AvgITL is rate[5m] -- so on a ramp k reaches
+// The cause is not a threshold that needs tuning. The signals are not
+// collected over the same window -- KvUsageInstant has none, while
+// GenerationTokenRate and AvgITL are both rate[1m] -- so on a ramp k reaches
 // its new level in seconds while the 1m rate still reports a fraction of the
 // steady state. The disagreement is therefore largest exactly when a scale-up
 // is needed, and it moves every replica together, so neither N-consecutive
@@ -135,22 +245,36 @@ func capacityTokensFor(params *capacity.EngineParams, ranks int, liveTokens int6
 // different remedies: a mismatch on a borrowed line says those two
 // configurations are not really alike and names who to look at, while a
 // mismatch on an own line says this variant's own fit has drifted.
-func (a *SaturationAnalyzer) noteLineMismatch(model itl.Model, params *capacity.EngineParams,
-	rm domain.ReplicaMetrics, role string, kvReq float64, borrowedFrom string,
-	logger logr.Logger) {
+//
+// calibration is the variant's factor (cycle.lineCalibration); 1 compares the
+// line as fitted.
+func (a *SaturationAnalyzer) noteLineMismatch(model itl.Model, calibration float64,
+	params *capacity.EngineParams, rm domain.ReplicaMetrics, role string, kvReq float64,
+	borrowedFrom string, logger logr.Logger) {
 	if rm.FromWarmPool || domain.CanonicalRole(role) != domain.RoleDecode {
 		return
 	}
-	capacityTokens := capacityTokensFor(params, rm.Ranks(), rm.TotalKvCapacityTokens)
-	errPct, ok := itl.GPSErrorPct(model, rm.KvUsageInstant, capacityTokens,
-		kvReq, rm.GenerationTokenRate)
-	if !ok || errPct <= itl.DefaultGPSMismatchThresholdPct {
+	if !(calibration > 0) {
+		calibration = 1
+	}
+	observed := rm.GenerationTokenRate
+	if !(observed > 0) || rm.KvUsageInstant < itl.DefaultGPSMinKForVerification {
+		return
+	}
+	// Capped as deriveMu caps it, so the line is judged on the figure it
+	// prices with.
+	predicted := lineTokenRate(model, params, rm, kvReq) * calibration
+	if !(predicted > 0) {
+		return
+	}
+	errPct := math.Abs(predicted-observed) / observed * 100
+	if errPct <= itl.DefaultGPSMismatchThresholdPct {
 		return
 	}
 	logger.V(logging.DEFAULT).Info("itl-gps-mismatch",
-		"variant", rm.VariantName, "pod", rm.PodName,
-		"k", rm.KvUsageInstant, "observedGPS", rm.GenerationTokenRate,
-		"predictedGPS", itl.TokenRate(model, rm.KvUsageInstant, capacityTokens, kvReq),
+		"namespace", rm.Namespace, "variant", rm.VariantName, "pod", rm.PodName,
+		"k", rm.KvUsageInstant, "observedGPS", observed,
+		"predictedGPS", predicted, "gpsCalibration", calibration,
 		"errPct", errPct, "thresholdPct", itl.DefaultGPSMismatchThresholdPct,
 		"lineBorrowed", borrowedFrom != "", "from", borrowedFrom,
 		"gates", false)
@@ -230,12 +354,9 @@ func deriveMu(model itl.Model, params *capacity.EngineParams, ranks int,
 	// series at all, so the hit rate was 0 and the two agreed at 4000 -- but
 	// that is the workload being uninteresting, not the arithmetic being
 	// right.)
-	seqs := itl.Sequences(kPrice, capacityTokens, fleet.KVreq)
+	seqs := sequencesAt(params, ranks, capacityTokens, fleet.KVreq, kPrice)
 	if seqs <= 0 {
 		return derivedMu{}
-	}
-	if params != nil && params.MaxNumSeqs > 0 {
-		seqs = min(seqs, float64(params.MaxNumSeqs)*float64(max(ranks, 1)))
 	}
 	itlSec := model.ITLAt(kPrice)
 	if !(itlSec > 0) {
@@ -353,6 +474,9 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		"variant", variantName, "key", key,
 		"replicas", r.Considered, "offered", r.Offered, "held", r.Held,
 		"notReady", r.NotReady, "noITL", r.NoITL, "noK", r.NoK, "aboveBand", r.AboveBand,
+		// Kept, but not for the full fit: the replica's load had just moved,
+		// so its k and its ITL describe different moments (itl.DefaultSteadyFor).
+		"unsteady", r.Unsteady, "steadyHeld", r.SteadyHeld,
 		"ready", r.Ready, "minSamples", itl.DefaultMinSamples)
 	switch {
 	case r.Tier == itl.TierOLS:

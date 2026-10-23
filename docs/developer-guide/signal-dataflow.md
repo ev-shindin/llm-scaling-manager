@@ -234,18 +234,25 @@ spread, with 10 readings, `itl.Tracker` fits the slope alone with the intercept
 pinned to the key's last full fit, or to `DefaultBaselineSec` before it has
 one: on a balanced fleet that is the normal case.
 
-`GPSErrorPct` compares `TokenRate` against the observed `GenerationTokenRate`
-and **reports without acting**: a disagreement means the line is suspect, not
-that the fleet should move.
+The saturation analyzer's `itl-gps-mismatch` compares the calibrated
+`TokenRate` against the observed `GenerationTokenRate` and **reports without
+acting**: a disagreement means the line is suspect, not that the fleet should
+move. The steady part of that disagreement, measured on settled replicas only,
+is what calibrates the line (below).
 
 ### The service rate, decode — `analyzers/saturation`
 
 ```
 kPrice   = clamp(kvCacheThreshold x scaleUpThreshold, 0.15, 0.80)
 seqs     = min(Sequences(kPrice, C, KVreq), S)
-tokenSec = seqs / ITL(kPrice)
+tokenSec = seqs / ITL(kPrice) x factor
 mu       = tokenSec / avgOutput
 ```
+
+`factor` is the line's calibration: the variant's observed `GenerationTokenRate`
+over the line's prediction at each settled replica's own `k`, smoothed, and 1
+until measured
+([calibrating the line](saturation-analyzer.md#calibrating-the-line-by-the-observed-token-rate)).
 
 | in | unit | from | what it is |
 | --- | --- | --- | --- |

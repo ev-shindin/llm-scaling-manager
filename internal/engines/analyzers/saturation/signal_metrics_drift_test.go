@@ -37,6 +37,7 @@ type derivedMuField struct {
 
 var derivedMuMetricFields = map[string]derivedMuField{
 	"variant":         {metric: constants.WVAServiceRatePerReplica}, // the variant_name label every series carries
+	"namespace":       {metric: constants.WVAServiceRatePerReplica}, // the namespace label every series carries
 	"ok":              {metric: constants.WVAServiceRatePerReplica}, // a derived rate in use shows as source=derived or borrowed-line; ok=true alone does not mean it was used (an own measured window can win)
 	"rate":            {metric: constants.WVAServiceRatePerReplica},
 	"kPrice":          {metric: constants.WVAPricingK},
@@ -51,6 +52,7 @@ var derivedMuMetricFields = map[string]derivedMuField{
 	"seqs":             {excluded: "per-pod intermediate of rate (k*C/KVreq capped at maxNumSeqs); rate carries the result"},
 	"tokenSec":         {excluded: "per-pod intermediate of rate (rate = tokenSec / muDivisor)"},
 	"engineRanks":      {excluded: "per-pod: the data-parallel ranks the row reports, which scale maxNumSeqs; the configured size is the data_parallel_size label of wva_engine_config"},
+	"gpsCalibration":   {excluded: "already folded into rate, which wva_service_rate_per_replica publishes; the factor itself is logged per cycle by itl-gps-calibration"},
 	"lineBorrowed":     {metric: constants.WVAServiceRatePerReplica}, // source=borrowed-line
 	"lineBorrowedFrom": {excluded: "a lender variant name: a label value that changes with the lender, published as donor on wva_learned_state_borrowed (PR #152), not here"},
 	"avgOutputTokens":  {excluded: "the shape family (stage 1, wva_shape_output_tokens), not built yet"},

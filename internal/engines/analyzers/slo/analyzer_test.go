@@ -45,12 +45,17 @@ func row(variant, pod string, k float64) domain.ReplicaMetrics {
 	}
 }
 
-// cycleRows is cycle i's readings: two replicas whose fills climb 0.1 a
-// cycle, so five cycles give the window ten readings spanning 0.45 of k.
+// cycleRows is cycle i's readings: two replicas each holding its own fill, so
+// five cycles give the window ten readings spanning 0.45 of k.
+//
+// Each replica holds still because only a steady reading may teach the full
+// fit (itl.DefaultSteadyFor): a fill that climbs 0.1 a cycle is a ramp, whose
+// k and ITL describe different moments. The fill moves inside
+// itl.DefaultMaxKDrift with i, so a cycle is still told apart from the next.
 func cycleRows(variant string, i int) []domain.ReplicaMetrics {
 	return []domain.ReplicaMetrics{
-		row(variant, variant+"-a", 0.20+0.1*float64(i)),
-		row(variant, variant+"-b", 0.25+0.1*float64(i)),
+		row(variant, variant+"-a", 0.20+0.01*float64(i)),
+		row(variant, variant+"-b", 0.65+0.01*float64(i)),
 	}
 }
 

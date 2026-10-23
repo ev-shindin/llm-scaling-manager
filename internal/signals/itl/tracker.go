@@ -32,11 +32,25 @@ type Tracker struct {
 	mu        sync.Mutex
 	windows   map[string]*Window
 	baselines map[string]float64
+	// steady holds, per key, only the readings taken while their replica's
+	// load had held still, and is the only window the full fit -- and so the
+	// remembered B -- is taken from. See DefaultSteadyFor.
+	steady map[string]*Window
+	traces map[string]*keyTraces
+	// calibration is, per key, the factor the line's token rate is scaled by
+	// to match the rate its replicas report (calibration.go).
+	calibration map[string]float64
 }
 
 // NewTracker returns an empty Tracker.
 func NewTracker() *Tracker {
-	return &Tracker{windows: map[string]*Window{}, baselines: map[string]float64{}}
+	return &Tracker{
+		windows:     map[string]*Window{},
+		baselines:   map[string]float64{},
+		steady:      map[string]*Window{},
+		traces:      map[string]*keyTraces{},
+		calibration: map[string]float64{},
+	}
 }
 
 // Reading is what one Observe saw and fitted, for the caller to log and use.
@@ -57,9 +71,16 @@ type Reading struct {
 	// Offered counts the readings the window kept; BelowBand those it dropped
 	// for a k below DefaultMinObservableK (an idle replica).
 	Considered, NotReady, NoITL, NoK, AboveBand, BelowBand, Offered int
-	// Held is the window's size after pruning, Ready its own confidence gate.
-	Held  int
-	Ready bool
+	// Unsteady counts the Offered readings kept out of the full fit because
+	// their replica's load had moved within DefaultSteadyFor.
+	Unsteady int
+	// Held is the window's size after pruning.
+	Held int
+	// SteadyHeld is how many of the readings the full fit may use, and Ready
+	// is the confidence gate judged on those alone: a spread made of a
+	// transient is not a spread.
+	SteadyHeld int
+	Ready      bool
 }
 
 // Observe offers one cycle's replica rows of a variant to the key's window and
@@ -73,6 +94,18 @@ type Reading struct {
 // remembered intercept, or DefaultBaselineSec before there is one: a fleet the
 // router balances spans little of k, so this is the normal case, not a
 // degenerate one.
+//
+// The full fit is judged and taken on steady readings only: those whose
+// replica's k had not moved by more than DefaultMaxKDrift within
+// DefaultSteadyFor, from a replica that has been serving at least that long.
+// In a balanced fleet the only spread in k a window ever sees is a transient
+// -- a replica joining, or the load stepping -- and across a transient k and
+// ITL describe different moments, so the line through them is not ITL(k).
+// Its intercept was remembered and pinned into every fit after it: on one
+// run, two identical models in two namespaces kept B = 4.5 ms and 14.8 ms
+// from whichever transient each window happened to catch, and priced the
+// same replica at 5.3 and 7.7 requests/s (issue #270). The pinned fit still
+// takes every reading, so a fleet still gets a line while it moves.
 func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now time.Time) Reading {
 	var r Reading
 	t.mu.Lock()
@@ -82,11 +115,37 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 			DefaultMinKSpread, DefaultMinObservableK, DefaultMaxObservableK)
 		t.windows[key] = w
 	}
+	sw, ok := t.steady[key]
+	if !ok {
+		sw = NewWindow(DefaultWindowMaxSize, DefaultObservationMaxAge, DefaultMinSamples,
+			DefaultMinKSpread, DefaultMinObservableK, DefaultMaxObservableK)
+		t.steady[key] = sw
+	}
+	traces, ok := t.traces[key]
+	if !ok {
+		traces = &keyTraces{since: now, replicas: map[string]*replicaTrace{}}
+		t.traces[key] = traces
+	}
+	seen := make(map[string]bool, len(rows))
 	for _, rm := range rows {
 		if rm.VariantName != variant {
 			continue
 		}
 		r.Considered++
+		// Judged before the switch and noted after it, so a row that is no
+		// reading -- k below the band, no ITL yet -- still says where the
+		// replica's load is.
+		steady := false
+		var trace *replicaTrace
+		if traceable(rm.Ready, rm.FromWarmPool, rm.KvUsageInstant) {
+			seen[rm.PodName] = true
+			trace = traces.replicas[rm.PodName]
+			if trace == nil {
+				trace = &replicaTrace{since: now, joined: now.After(traces.since)}
+				traces.replicas[rm.PodName] = trace
+			}
+			steady = trace.steady(rm.KvUsageInstant, now)
+		}
 		switch {
 		case !rm.Ready || rm.FromWarmPool:
 			r.NotReady++
@@ -103,12 +162,37 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 				r.BelowBand++
 			} else {
 				r.Offered++
+				if steady {
+					sw.Add(rm.KvUsageInstant, rm.AvgITL, now)
+				} else {
+					r.Unsteady++
+				}
 			}
+		}
+		if trace != nil {
+			trace.note(rm.KvUsageInstant, now)
+		}
+	}
+	// A replica missing from this cycle starts over when it returns: what it
+	// served in between is unknown.
+	for pod := range traces.replicas {
+		if !seen[pod] {
+			delete(traces.replicas, pod)
 		}
 	}
 	w.Prune(now)
 	obs := w.Observations()
-	r.Held, r.Ready = len(obs), w.Ready()
+	// The steady readings are a subset of the window, never older than it: a
+	// steady window that outlived the readings beside it would keep fitting a
+	// line the fleet has since moved off, and A moves with the workload.
+	sw.Prune(now)
+	if len(obs) > 0 {
+		sw.dropBefore(obs[0].Timestamp)
+	} else {
+		sw.Clear()
+	}
+	steadyObs := sw.Observations()
+	r.Held, r.Ready, r.SteadyHeld = len(obs), sw.Ready(), len(steadyObs)
 	baseline, stored := t.baselines[key]
 	t.mu.Unlock()
 
@@ -119,7 +203,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 	}
 	// The fits run outside the lock: they read a copy of the window.
 	if r.Ready {
-		if m, ok := Fit(obs); ok {
+		if m, ok := Fit(steadyObs); ok {
 			// B, not A, is remembered: B is the hardware floor, A the
 			// contention that moves with the workload. And only a physical,
 			// positive floor -- a negative B pinned into the next fit would
@@ -160,10 +244,33 @@ func (t *Tracker) Sweep(now time.Time, stale func(key string) bool) (windows, ba
 	for _, w := range t.windows {
 		w.Prune(now)
 	}
+	for _, w := range t.steady {
+		w.Prune(now)
+	}
 	for key := range t.windows {
 		if stale(key) {
 			delete(t.windows, key)
 			windows++
+		}
+	}
+	// The steady window and the traces are part of the window: counted with
+	// it, not apart.
+	for key := range t.steady {
+		if stale(key) {
+			delete(t.steady, key)
+		}
+	}
+	for key := range t.traces {
+		if stale(key) {
+			delete(t.traces, key)
+		}
+	}
+	// The calibration is measured against the window's readings and goes
+	// with them: a key swept for new engine arguments must not price its new
+	// line with the old engine's factor.
+	for key := range t.calibration {
+		if stale(key) {
+			delete(t.calibration, key)
 		}
 	}
 	// Apart from the windows: a key can hold an intercept with no window, one
