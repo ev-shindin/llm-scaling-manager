@@ -1495,7 +1495,9 @@ claimable Releasing transfer. The warm pool draws from idle GPUs only.
 
 **Cancellation is cheap until the first pod goes, and it has hysteresis.** If
 during Releasing the donor's demand rises so that its reduced size would land
-**more than twice its tolerance** below its target, or the receiver is now
+**twice its tolerance or more** below its target (twice the band is one whole
+replica at the half-replica minimum, so a donor that wants back exactly the
+replica it is giving is a reversal), or the receiver is now
 **more than its tolerance above** its own target without the transfer, the
 transfer is cancelled and the donor's target restored. The thresholds are deliberately wider than the
 admission test's: a cancel rule that mirrors admission flips with demand noise
