@@ -228,6 +228,8 @@ func (a *SaturationAnalyzer) throughputWindowUnderLocked(key, args string) {
 		delete(a.saturatedThroughput, key)
 		delete(a.throughputSampledAt, key)
 		delete(a.throughputLastRead, key)
+		delete(a.throughputPodReads, key)
+		delete(a.throughputMuChoice, key)
 		delete(a.throughputWindowArgs, key)
 	}
 	if back, ok := a.throughputStash[stashKey(key, args)]; ok {

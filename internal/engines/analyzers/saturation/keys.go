@@ -117,3 +117,28 @@ func (a *SaturationAnalyzer) historyKey(
 		modelID, a.stableAccelerator(namespace, variantName, accelerator),
 		gpuCount, domain.CanonicalRole(role), classifyOutputLength(avgOutput), queueThreshold)
 }
+
+// k2KeyOutput is the output length a replica's k2 history is keyed by: the
+// fleet's TRACKED length (shapeKeyOutput), the one the throughput key uses,
+// and not the replica's own average.
+//
+// The replica's own average has no hysteresis, and a workload that sits on a
+// bucket boundary crosses it every few cycles. Measured on a two-namespace
+// run at max_tokens=500: per-replica averages read 482-582, the k2 window
+// alternated between "medium" and "long" on consecutive cycles (541 against
+// 485 decisions), and the two windows held 260 622 and 187 458. Per-replica
+// capacity swung 39 % at constant load, and utilization 1.02 <-> 1.42 with
+// it. The tracked length moves only when the fleet's shape changes, so one
+// workload has one window.
+//
+// Prefill keeps its own average. It hands a request to decode after one
+// token, so its own figure is always the same bucket ("short"), which is as
+// stable as a key can be, and the fleet's generating length is not work
+// prefill does (prefillOutputBucket says the same for the throughput key).
+// A fleet with no tracked length yet falls back to the replica's own.
+func k2KeyOutput(role string, shapeKeyOutput, own float64) float64 {
+	if domain.CanonicalRole(role) == domain.RolePrefill || !(shapeKeyOutput > 0) {
+		return own
+	}
+	return shapeKeyOutput
+}

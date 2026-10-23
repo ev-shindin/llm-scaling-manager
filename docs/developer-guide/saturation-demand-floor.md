@@ -48,10 +48,92 @@ so each must keep up with all of it), and on the total otherwise.
 - `B` is the role's backlog: the requests waiting in its engines' queues plus
   the scheduler's. `T` is the drain target (`BacklogDrainSeconds`, 60). The
   fleet asked for clears the backlog in about `T` while keeping up with
-  `lambda`.
+  `lambda`. Every engine queue counts, whichever replica it stands on, and
+  the scheduler's counts in full. `B` is requests to drain at `mu`, and an
+  idle sibling's KV room drains none of them: in this model its `mu` is
+  already spent on its share of `lambda`. Leaving out the share such a
+  sibling had room for read three full replicas queued 60 beside a fourth
+  never routed to at 5.88 replicas against the 9.41 the fleet needs with
+  perfect routing (`TestUnevenRoutingShortFleetKeepsItsBacklog`).
+
+  A request waiting in one engine's queue is served by that engine only, so
+  each replica's own queue counts for at most what the replica drains itself
+  in the drain horizon, `min(queue, mu x T)` (`localQueueBacklog`; `T` is
+  `floor.DrainHorizon`, the drain target or one replica's start time where
+  longer). A queued replica is then worth at most one replica, and the floor
+  asks for `lambda / mu` plus the queued replicas. Charged in full, a queue
+  of 1000 pinned on one of four replicas (`mu` 1, `lambda` 2) ordered 21.96
+  replicas where 3.53 can help, and three replicas each queued 600 at
+  `lambda` 5 ordered 41.2 against the 9.41 of use
+  (`TestUnevenRoutingAPinnedQueueIsPricedAtWhatItsReplicaDrains`). A queue
+  each replica drains inside `T` is unchanged, so the short fleet above
+  still reads 9.41. The scheduler's queue is not capped: the router can send
+  it to any replica, added ones included. Growth (below) is judged on the
+  uncapped queues, logged as `queuedRequests`.
+
+  The cap holds only while the queue stands. A queue that grows is arrivals
+  above what the fleet serves, and added replicas can take those arrivals.
+  `lambda` may not count them yet: the router's rate is a one-minute rate
+  that reads a step late, and with no router rate `lambda` falls back to
+  completions, which on a full fleet are `n x mu` whatever arrives. So while
+  the role's backlog grows (`backlogGrew`) every engine queue is charged in
+  full. With the cap on growing queues too, four full replicas (`mu` 1) read
+  18.82 replicas 30 s into a step from 4 to 20 req/s, under the 23.53 the
+  arrivals need. With no router rate, a true 12 req/s read 9.41 for two
+  minutes against 14.12. Charged in full, both read 23.53
+  (`TestUnevenRoutingAGrowingQueueIsNotCappedWhileLambdaLags`,
+  `TestUnevenRoutingAGrowingQueueIsNotCappedWithNoRouterRate`). Once the
+  queues have stood a minute the cap is back: four replicas queued 100 at
+  `lambda` 2 read 7.06, and four queued 600 at `lambda` 8 read 14.12
+  (`TestUnevenRoutingAStandingQueueIsCappedAtWhatItsReplicaDrains`).
+
+  `backlogGrew` compares with the backlog one minute ago, so it stays on
+  for up to a minute after the growth stops, and the queues are charged in
+  full that long. That over-orders for a minute. We accept it: over-ordering
+  is the cheap direction, and a shorter memory would let jitter flip the
+  charge from cycle to cycle.
 - For a role with a `mu`, the queues enter the model this way, and their
   residency charge (every queued request at its full KV footprint, as if all
-  were resident at once) comes out.
+  were resident at once) comes out -- but only where the floor's figure can
+  carry the queue: the term may order (`mayOrder`) and is not held, and in
+  proportion to how much of the resident KV its arrival half `lambda x P / mu`
+  accounts for -- none at `FloorLagFraction` (0.5) or under, all of it at
+  `FloorTrustFraction` (0.8) or over, linear between (`floorTrust`), so
+  demand moves continuously with `lambda`; a hard switch took one replica
+  499 446 -> 260 123 between 2.95 and 3.0 req/s. Elsewhere
+  `demand = max(measured, floor)`. What is
+  resident arrived within one residence time, so the resident KV implies an
+  arrival rate of about `resident x mu / P`; a `lambda` well under it is a
+  `[1m]` rate still reading the minute before a load step. Measured on the
+  two-namespace rerun (2026-10-23, 11:20:09): `lambda` 0.8 req/s with 160
+  queued cut 499 446 to the 260 123 resident, and the analyzer's `rc` fell
+  312 936 -> 47 265 in one cycle.
+
+  Nor while the role's backlog has grown over the last minute
+  (`noteBacklogGrowth`, logged as `backlogGrew`): past
+  `max(BacklogGrowthMinRequests, BacklogGrowthFraction x B then)` (2
+  requests, 10 %) above the backlog `BacklogGrowthLookback` (1m) ago, or the
+  oldest on record before there is one that old. 10 % sits above a standing
+  queue's minute-to-minute jitter: at 5 %, four queues alternating 100 / 106
+  lifted the engine-queue cap every other minute and flipped the order
+  7.06 <-> 10.67 (`TestUnevenRoutingAJitteringStandingQueueStaysCapped`).
+  A queue growing slower than that is read as standing. Not against the previous
+  cycle: the engine queue is a one-minute max read every 15 s, and a fleet
+  draining steadily reads a request or two either way. Counted strictly, a
+  queue reading 160, 161, 160, 161 at 4.75 req/s moved demand
+  326 185 <-> 500 942 every cycle
+  (`TestThroughputFloor_AQueueJitterDoesNotFlipTheSwap`). The lag test cannot see a
+  step above fleet capacity: on a saturated fleet the resident KV sits at
+  about `P` per replica whatever the arrival rate, so the ratio reads
+  `lambda / (n x mu)` and reaches full trust once a lagging rate reads 80 %
+  of capacity, even with the true rate at 150 %. A queue that grows is
+  arrivals above what the fleet drains. In review a step from 3 to 9 req/s on
+  one replica of `mu` 6 read 319 763 before it and 280 704 / 354 736 under
+  the occupancy (387 263 / 454 573) that held the queue for the cycles it
+  tripled; it now keeps the occupancy demand
+  (`TestThroughputFloor_AGrowingQueueKeepsTheOccupancyDemand`). The swap is
+  made on a queue that has stood a cycle, so its first cycle is priced at
+  `max(measured, floor)`, which only over-orders.
 - A role with no `mu` keeps the residency charge, except prefill's share of the
   scheduler queue, which is dropped. A prefill replica holds a prompt for its
   prefill time plus the hand-off. Only a saturated decode makes it hold longer,
@@ -253,6 +335,15 @@ Properties, each with a spec in `throughput_floor_test.go`:
   allocate the blocks a pull needs, which the transfer pipeline does not
   produce.
 
+  Any one such replica gates prefill's learning, whatever its siblings do:
+  KV prefilled for it waits on it, so prefill's reading is its back-pressure,
+  and a prefill k2 learned from it is never corrected (with decode-0 at 26 %
+  and decode-1 full with 81 waiting, prefill would record 357 800 against a
+  k1 of 919 449). Only the hold on prefill's DEMAND relaxes, and only once a
+  decode replica has read idle for `IdleSettledFor` (two minutes;
+  `settledIdleDecode`): then decode has room the router is not using, and
+  prefill may be ordered on its own demand.
+
   The test is remembered for the collector's row window
   (`DecodeSaturationMemory`, one minute): on the measured episode decode's
   occupancy dropped under k1 on the fourth cycle while its queue and
@@ -308,6 +399,38 @@ whatever the previous shape's was.
 That window closes on its own, because the batch does reach the ceiling,
 unless something orders a replica first and drains the batch before saturation
 is observed. The retired floor did exactly that.
+
+EPP flow control keeps it open. The router holds the queue upstream, so
+vLLM's own `num_requests_waiting` stays near zero and `P1-obs` (queue at or over
+`queueLengthThreshold`) fires only in the minutes a replica joins or a step
+lands -- which are the readings the admission refuses. On E1 (2026-10-23,
+flow control on) no replica queued again after its first minute. A measured
+`mu` then is rarely written or refreshed, and the floor prices from the
+**derived** `mu` of the ITL line wherever it is the lower figure: an own
+measured window more than 2x above it outranks it only while the bucket has
+read saturated in agreement with it in the last five minutes, and a stale one
+under it keeps pricing for up to 30 minutes (`MeasuredLowHoldFor`), or until a
+Ready replica serves more than twice it (`measuredYieldsToDerived`). That holds for the
+variant's **own** line only:
+
+- **A borrowed line holds the fleet but does not grow it.** A derived `mu`
+  from a line borrowed from another variant (a fresh namespace, a rename) is a
+  `borrowedReading` in `floor.Estimate` and never sets `mayOrder`: it prices
+  the replicas but caps the floor at the role's anticipated supply. In review,
+  three replicas at KV 0.8 under flow control with a borrowed line read the
+  same demand as with no line at all (1 082 760).
+- **No line is no floor.** With no line fitted yet there is no derived `mu`
+  either, and occupancy alone sizes the role until the variant fits its own
+  line (about 28 cycles of readings across the k spread). Occupancy
+  under-orders at a step: a step to twice the fleet's capacity (lambda 24 on
+  a fleet good for 12) read 3.53 replicas at a router queue of 0 and 5.63 at
+  360, against the 7.1 and 8.8 the load needs, closing only as the router's
+  queue builds. This is the cost of refusing the join-time readings, which on
+  E1 over-ordered 12-20x.
+
+k2 is the same: it
+is learned in those minutes or not at all, and otherwise comes from the
+history window or the engine arguments (`P2-hist`, `P3-k2`).
 
 ## Why the Little's-law floor was retired
 

@@ -55,14 +55,15 @@ import (
 // share no samples.
 //
 // A reading inside the spacing belongs to the last sample's window, and is
-// folded into it: the sample becomes the max of what that window read
-// (RaiseLast) -- the max the window kept when every cycle was added, no
+// folded into it: the sample becomes the max of what that replica
+// read -- the max the window kept when every cycle was added, no
 // more. Dropping in-spacing readings instead lost the highest reading of
 // an episode exactly when no next window would come, and on two replayed
 // passes left mu 10-12 % low for the rest of the pass, on one of them
-// ordering a fourth replica the run never needed. Folding also makes two
-// replicas saturating in one cycle read as one moment at the higher of
-// the two, whichever row the collector's map yields first.
+// ordering a fourth replica the run never needed. The fold is a max over
+// re-reads of one replica and the mean across replicas
+// (recordSaturatedThroughputFrom): two replicas saturating in one cycle read
+// as one moment at the mean of their two readings.
 //
 // What the max is worth is another matter. A saturated rate under-reads
 // while the replica is full (file header),
@@ -97,6 +98,37 @@ import (
 // Same window size and staleness rule as k2 history, and pruned beside it in
 // EvictStaleHistory.
 func (a *SaturationAnalyzer) recordSaturatedThroughput(key string, rate float64) {
+	a.recordSaturatedThroughputFrom(key, "", rate)
+}
+
+// recordSaturatedThroughputFrom is recordSaturatedThroughput for a reading
+// from one named replica (pod).
+//
+// The window is per bucket, not per replica, and every saturated replica of
+// the variant reads into it each cycle. A reading inside the spacing is folded
+// into the last sample, and the fold is a max over re-reads of ONE replica's
+// rate window -- the same moment read again, whose highest reading is the
+// best one -- and the MEAN across replicas, whose readings are independent.
+// Folded by a max across replicas too, a sample was the hottest of N
+// readings and the window's median an order statistic whose expectation
+// rose with N: measured with 6 % reading noise on a true 6.0 req/s, +5.5 % at
+// one saturated replica and +13.6 % at sixteen. An over-stated mu orders too
+// few replicas. Per replica, the cross-replica part is gone and what is left
+// is the one-replica re-read max the window always kept.
+//
+// The mean, not the median: a fleet serves the sum of its replicas' rates,
+// so what one replica serves on average is their mean. A lower median
+// ignores a slow replica once three or more read: four at 1, 1, 1 and 0.5
+// read 1.0 against the 0.875 they serve, 14 % high, the side that orders too
+// few (review, round 5). The median was there against outliers; the
+// readings that reach this fold have passed the settle, joined, filling and
+// served-bound tests, so what is left is what a replica serves.
+//
+// The per-replica readings of the sample belong to the sample: they are kept
+// with its time (throughputPodReads) and start over with the next sample, and
+// a sample with none on record -- restored, or put aside and brought back --
+// counts its own value as the reading of the replica that reads next.
+func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate float64) {
 	// `!(rate > 0)` rejects a NaN, which `rate <= 0` would admit. +Inf is
 	// excluded too, to match floor.priceable: it passes `rate > 0`, and left in
 	// it would take one of the window's ten slots from a real reading and be
@@ -117,12 +149,25 @@ func (a *SaturationAnalyzer) recordSaturatedThroughput(key string, rate float64)
 		a.saturatedThroughput[key] = ra
 		delete(a.throughputSampledAt, key)
 		delete(a.throughputLastRead, key)
+		delete(a.throughputPodReads, key)
+		// A new window's freshness is its own; a replica's run of low
+		// readings is about the replica, and stands.
+		if c, ok := a.throughputMuChoice[key]; ok {
+			c.saturatedAt, c.yielded, c.sibling = time.Time{}, false, 0
+		}
 	}
 	lastRead, read := a.throughputLastRead[key]
 	a.throughputLastRead[key] = rate
 	if last, sampled := a.throughputSampledAt[key]; sampled {
 		if now.Sub(last) < ThroughputSampleSpacing {
-			ra.RaiseLast(rate) // the last sample's window, still being read
+			// The last sample's window, still being read.
+			reads := a.throughputPodReads[key]
+			if reads.at != last || reads.pods == nil {
+				reads = podReads{at: last, pods: map[string]float64{pod: ra.Last()}}
+			}
+			reads.pods[pod] = max(reads.pods[pod], rate)
+			a.throughputPodReads[key] = reads
+			ra.SetLast(meanOf(reads.pods))
 			return
 		}
 		if read && rate == lastRead {
@@ -132,6 +177,36 @@ func (a *SaturationAnalyzer) recordSaturatedThroughput(key string, rate float64)
 	}
 	ra.Add(rate)
 	a.throughputSampledAt[key] = now
+	a.throughputPodReads[key] = podReads{at: now, pods: map[string]float64{pod: rate}}
+}
+
+// podReads is one throughput sample's readings per replica, and the time of
+// the sample they belong to (recordSaturatedThroughputFrom).
+type podReads struct {
+	at   time.Time
+	pods map[string]float64
+}
+
+// meanOf is the mean of the readings, zero when there are none.
+func meanOf(reads map[string]float64) float64 {
+	if len(reads) == 0 {
+		return 0
+	}
+	sum := 0.0
+	for _, v := range reads {
+		sum += v
+	}
+	return sum / float64(len(reads))
+}
+
+// lowerMedian is the lower median of the readings, the order statistic the
+// window itself reads (capacity.RollingAverage.Median).
+func lowerMedian(reads map[string]float64) float64 {
+	vs := slices.Sorted(maps.Values(reads))
+	if len(vs) == 0 {
+		return 0
+	}
+	return vs[(len(vs)-1)/2]
 }
 
 // saturatedThroughputFor returns the saturated completion rate on record for
@@ -152,6 +227,9 @@ type throughputReading struct {
 	bucket   string
 	samples  int
 	borrowed bool
+	// sampledAt is when the key's own window took its newest sample
+	// (throughputSampledAt); zero for any other reading, or when unknown.
+	sampledAt time.Time
 }
 
 // saturatedThroughputReading is saturatedThroughputFor with the window's
@@ -180,7 +258,8 @@ func (a *SaturationAnalyzer) saturatedThroughputReadingUnder(key, args string, s
 	defer a.mu.Unlock()
 	if ra, ok := a.saturatedThroughput[key]; ok {
 		ra.Touch()
-		return throughputReading{rate: ra.Median(), bucket: bucketOf(key), samples: ra.Len()}
+		return throughputReading{rate: ra.Median(), bucket: bucketOf(key), samples: ra.Len(),
+			sampledAt: a.throughputSampledAt[key]}
 	}
 	// The key's own window from before the variant's arguments changed: a
 	// hold-only figure, with the same authority as a neighbouring bucket's
@@ -373,18 +452,53 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	for _, vc := range variants {
 		roleOf[vc.VariantName] = domain.CanonicalRole(vc.Role)
 	}
+	// The projection is handed start times ONLY when lambda is a true arrival
+	// rate. offeredArrivalRate falls back to the replicas' COMPLETION rate when
+	// EPP reports nothing, and its own doc says that understates lambda exactly
+	// when demand is highest -- so on that path arrived = lambda*T is computed at
+	// one rate while served = mu*(...) is computed at another, the two cancel,
+	// and the projection becomes a pure subtraction that under-orders. Better no
+	// projection than one built on two different rates. Read before the
+	// backlog, whose engine queues are capped over the same drain horizon.
+	var startSeconds map[string]float64
+	if input.ArrivalRate > 0 {
+		startSeconds = a.startSecondsByRole(input, roleOf)
+	}
 	// Per role: the requests waiting in the engines' own queues, and the
 	// residency charge on them. Own replicas only -- a bridge's queue is
 	// counted toward the variant's demand by aggregation, but it is not this
 	// variant's backlog to size for.
 	backlog := make(map[string]float64)
+	// queued is the same backlog uncapped: what noteBacklogGrowth compares.
+	queued := make(map[string]float64)
 	residency := make(map[string]float64)
 	for _, rc := range replicas {
 		if rc.FromWarmPool {
 			continue
 		}
 		role := roleOf[rc.VariantName]
-		backlog[role] += float64(rc.QueueLength)
+		// Every queue counts, whichever replica it stands on. The backlog is
+		// requests to drain at mu, and a sibling's KV room says nothing about
+		// whether the fleet has the throughput to drain them: in the floor's
+		// own model a replica's mu is already spent on its share of lambda.
+		// Leaving out the share an idle sibling had room for read three
+		// replicas queued 60 each beside a fourth never routed to at 5.88
+		// replicas, against the 9.41 the fleet needed with perfect routing.
+		//
+		// But a request waiting in one engine's queue can only be served by
+		// that engine: replicas added take new arrivals and nothing else. So a
+		// replica's own queue counts for at most what the replica itself
+		// drains in the floor's drain time, mu x T (localQueueBacklog), which
+		// is one replica's worth: the floor then asks for lambda / mu plus the
+		// replicas that are queued. Charged in full, in review, a queue of
+		// 1000 pinned on one of four replicas (mu 1, lambda 2) ordered 21.96
+		// replicas where at most 3.53 can help, and three replicas each queued
+		// 600 at lambda 5 ordered 41.2 against the 9.41 of use. A queue each
+		// replica drains inside T is untouched, so the short fleet above still
+		// reads 9.41. The router's queue (eppQueued, below) is not capped: the
+		// router can send it to any replica, new ones included.
+		backlog[role] += localQueueBacklog(rc, floor.DrainHorizon(floor.BacklogDrainSeconds, startSeconds[role]))
+		queued[role] += float64(rc.QueueLength)
 		residency[role] += float64(rc.LocalQueueDemand)
 	}
 	// The residency charge is per role -- estimateSchedulerQueueDemand already
@@ -418,8 +532,34 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	for role, tokens := range eppByRole {
 		if queueOwner == "" || role == queueOwner {
 			backlog[role] += eppQueued
+			queued[role] += eppQueued
 		}
 		residency[role] += tokens
+	}
+	// Recorded every cycle, priced or not, so the next has this one to
+	// compare with. Uncapped: a queue that grows past what its replica
+	// drains in T is still arrivals above what the fleet drains.
+	grew := a.noteBacklogGrowth(input.Namespace, input.ModelID, queued)
+	// The cap above is right for a STANDING queue only. Requests waiting in
+	// an engine can be served by that engine alone, but a queue that grows
+	// is arrivals above what the fleet serves, and those arrivals are still
+	// to come: replicas added can take them. Lambda may not count them yet
+	// -- the router's rate is a one-minute rate that reads a step late, and
+	// with no router rate lambda falls back to completions, which on a full
+	// fleet are n x mu whatever arrives -- so the growing queue is the only
+	// evidence of them, and capped it is lost. While the role's backlog grows
+	// (noteBacklogGrowth) the engine queues are charged in full, as the
+	// growth test reads them. In review (mu ~1, four full replicas, flow
+	// control off): a step from 4 to 20 req/s read 18.82 replicas at 30 s,
+	// under the 23.53 the arrivals alone need, and with no router rate a true
+	// 12 req/s read 9.41 for two minutes against 14.12. Charged in full they
+	// read 23.53 by 30 s and by 120 s. grew lingers for up to
+	// BacklogGrowthLookback after the growth stops, so the full charge
+	// outlives it by up to a minute: an over-order, the cheap direction.
+	for role, q := range queued {
+		if grew[role] {
+			backlog[role] = q
+		}
 	}
 
 	// The hold cap is measured against the threshold the ENGINE sizes RC
@@ -427,17 +567,6 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	// a cap drawn at the policy-level figure while the engine divides by a
 	// per-analyzer override would leave a gap that orders a replica.
 	scaleUp, _ := cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
-	// The projection is handed start times ONLY when lambda is a true arrival
-	// rate. offeredArrivalRate falls back to the replicas' COMPLETION rate when
-	// EPP reports nothing, and its own doc says that understates lambda exactly
-	// when demand is highest -- so on that path arrived = lambda*T is computed at
-	// one rate while served = mu*(...) is computed at another, the two cancel,
-	// and the projection becomes a pure subtraction that under-orders. Better no
-	// projection than one built on two different rates.
-	var startSeconds map[string]float64
-	if input.ArrivalRate > 0 {
-		startSeconds = a.startSecondsByRole(input, roleOf)
-	}
 	tf := floor.Estimate(offeredArrivalRate(input), replicas, variants, backlog,
 		floor.BacklogDrainSeconds, scaleUp, staleShape, eppQueued, startSeconds)
 
@@ -495,7 +624,53 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		// the resident KV alone. The queued requests are in the floor as a
 		// backlog now, and must not be counted twice.
 		resident := max(measured-residency[role], 0)
-		want := max(resident, tokens)
+		// The swap -- the queue priced as work to drain instead of as KV
+		// resident at once -- may LOWER the role's demand, and so it is made
+		// only where the floor's figure can be trusted to carry the queue:
+		// a term that may order and is not held, whose arrival rate is not
+		// lagging (FloorLagFraction). Anywhere else the floor only raises:
+		// want = max(measured, floor).
+		//
+		// At a load step lambda lags -- a [1m] rate, or the completion
+		// fallback, still reading the minute before -- while the queue is
+		// already standing. The replicas say so themselves: what is resident
+		// arrived within one residence time, and at saturation a replica
+		// holding P tokens completes mu, so the resident KV implies an arrival
+		// rate of about resident / cost, and the floor's arrival half
+		// (lambda x cost, ArrivalDemand) about the resident KV. A lambda that
+		// accounts for less than FloorLagFraction of it is the minute before
+		// the step, and cannot price the queue behind it. Measured on the
+		// two-namespace rerun
+		// (11:20:09): lambda 0.8 req/s with 160 queued, demand 499 446 cut to
+		// the 260 123 resident, the analyzer's rc falling 312 936 -> 47 265 in
+		// one cycle; at 07:46:12 a term that could not order (mayOrder=false)
+		// took 356 392 to 274 556.
+		//
+		// Blended, not switched (floorTrust). A hard switch at
+		// FloorLagFraction made demand fall as lambda rose: in review, the
+		// replica above went 499 446 -> 260 123 between 2.95 and 3.0 req/s,
+		// so a fleet sitting near the line flipped between the two demands
+		// cycle to cycle.
+		//
+		// And not while the role's backlog is growing (backlogGrew). The
+		// lag test reads lambda against the resident KV, which on a saturated
+		// fleet sits at about P per replica whatever the arrival rate, so it
+		// reads lambda / (n x mu): full trust once a lagging rate reads 80 %
+		// of the fleet's capacity, even with the true rate at 150 %. A queue
+		// that grew past a noise band over the last minute
+		// (noteBacklogGrowth) is arrivals above what the fleet drains, whatever lambda reads, and the swap would price it below
+		// the occupancy that holds it. In review, a step from 3 to 9 req/s on
+		// one replica of mu 6 read 319 763 before it and 280 704, 354 736
+		// under occupancy's 387 263 and 454 573, for the three cycles the
+		// queue tripled.
+		want := max(measured, tokens)
+		if term.MayOrder && !term.Held && !grew[role] {
+			trust := 1.0
+			if resident > 0 {
+				trust = floorTrust(term.ArrivalDemand / resident)
+			}
+			want -= trust * (want - max(resident, tokens))
+		}
 		if want == measured {
 			continue
 		}
@@ -503,6 +678,9 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			"modelID", input.ModelID, "namespace", input.Namespace, "role", role,
 			"demandBeforeFloor", measured, "residentDemand", resident, "flooredTo", want,
 			"arrivalRate", tf.Lambda, "backlogRequests", term.Backlog, "drainSeconds", tf.DrainSeconds,
+			// backlogRequests with each engine queue capped at what its
+			// replica drains in the drain time; this is the queues uncapped.
+			"queuedRequests", queued[role],
 			"saturatedThroughput", term.Mu, "perReplicaCapacity", term.PerReplica,
 			"replicasImplied", term.Replicas, "heldAtFleet", term.Held, "heldWhy", term.HeldWhy,
 			"orderedBehindQueue", term.OrderedBehindQueue,
@@ -525,7 +703,11 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			// what was measured; projectedBacklog is what the floor priced,
 			// and a run that shows only one cannot tell an empty queue from a
 			// queue the fleet is projected to outrun.
-			"projectedBacklog", term.ProjectedBacklog)
+			"projectedBacklog", term.ProjectedBacklog,
+			// The backlog grew past the noise band over the last minute
+			// (noteBacklogGrowth), so the swap was not made: arrivals
+			// exceed what the fleet drains.
+			"backlogGrew", grew[role])
 		if roleDemand != nil {
 			roleDemand[role] = want
 		}
@@ -570,6 +752,138 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 // not changed: it comes from aggregateRoleDemand as DemandByRole plus the
 // queue's per-role charge, while the post-floor `want` is an independent
 // (lambda + backlog / drain) x P / mu with no queue term at all.
+
+// FloorLagFraction is the least share of the resident KV the floor's arrival
+// half (floor.Term.ArrivalDemand) must account for before the floor may price
+// the queues as drain rather than residency, and so lower a role's demand
+// (applyThroughputFloor). Half, not one: the resident KV of a saturated
+// replica can stand above P -- k1 is kvCacheThreshold of the cache and a full
+// replica holds more -- and a fleet draining a backlog with lambda right reads
+// 0.8-0.9 of it. A load step whose lambda still reads the minute before reads
+// 0.13 (0.8 req/s against a replica holding 260 123 tokens at mu 6).
+const FloorLagFraction = 0.5
+
+// FloorTrustFraction is the share of the resident KV the arrival half must
+// account for before the floor's drain price replaces the queues' residency
+// charge in full. Between FloorLagFraction and it the two are blended in
+// proportion (floorTrust); 0.8 is the bottom of what a fleet draining a
+// backlog with lambda right reads (0.8-0.9), so such a fleet is fully trusted.
+const FloorTrustFraction = 0.8
+
+// A role's backlog has grown (noteBacklogGrowth) when it exceeds the backlog
+// BacklogGrowthLookback ago by more than max(BacklogGrowthMinRequests,
+// BacklogGrowthFraction of it).
+//
+// Not "larger than on the previous cycle". The engine queue is a one-minute
+// max read every 15 s, so successive readings overlap, and with the
+// scheduler's queue beside it a fleet draining steadily reads a request or two
+// either way from cycle to cycle. Counted strictly, each +1 cycle skipped the
+// swap and the next made it: in review a queue reading 160, 161, 160, 161 at
+// 4.75 req/s moved demand 326 185 <-> 500 942 every cycle -- the cycle-to-cycle
+// flip floorTrust exists to remove, brought back on a noisier input. A step
+// grows the queue by tens of requests a cycle and clears the band at once.
+const (
+	// BacklogGrowthLookback is how far back the backlog a cycle's is compared
+	// with was read: one rate window (ThroughputSampleSpacing), so the two
+	// one-minute maxima share no samples. Until a reading that old exists the
+	// oldest on record stands in.
+	BacklogGrowthLookback = ThroughputSampleSpacing
+	// BacklogGrowthMinRequests is the least growth, in requests, that counts.
+	BacklogGrowthMinRequests = 2.0
+	// BacklogGrowthFraction is the least growth, as a share of the backlog it
+	// is compared with, that counts. A standing queue's one-minute max moves
+	// by a few percent from minute to minute; at 5 %, in review, four queues
+	// alternating 100 / 106 cleared the band every other minute, lifted the
+	// engine-queue cap and flipped the order 7.06 <-> 10.67 (round 5). 10 %
+	// is above that jitter, and a queue really growing -- tens of requests a
+	// cycle -- clears it within a cycle or two. What it costs is a queue that
+	// grows slower than 10 % a minute: the cap stays on it and the floor
+	// reads it as standing.
+	BacklogGrowthFraction = 0.10
+)
+
+// maxBacklogReadings bounds the backlog readings a model's memo keeps, for a
+// clock that does not advance: BacklogGrowthLookback at 15 s cycles is 4.
+const maxBacklogReadings = 16
+
+// backlogReading is the throughput floor's backlog per role on one cycle.
+type backlogReading struct {
+	at     time.Time
+	byRole map[string]float64
+}
+
+// noteBacklogGrowth records this cycle's floor backlog per role in the
+// model's memo and reports the roles whose backlog has grown past the band
+// above since BacklogGrowthLookback ago. A role with no earlier reading has
+// not grown: there is nothing to compare with.
+func (a *SaturationAnalyzer) noteBacklogGrowth(namespace, modelID string, backlog map[string]float64) map[string]bool {
+	model := namespace + "|" + modelID
+	var now time.Time
+	if a.now != nil {
+		now = a.now()
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.k2Settle == nil {
+		a.k2Settle = make(map[string]*settleMemo)
+	}
+	memo, ok := a.k2Settle[model]
+	if !ok {
+		memo = newSettleMemo()
+		a.k2Settle[model] = memo
+	}
+	// The newest reading at least BacklogGrowthLookback old, else the oldest;
+	// everything older than it is no longer needed.
+	ref := 0
+	for i, r := range memo.backlogs {
+		if now.Sub(r.at) >= BacklogGrowthLookback {
+			ref = i
+		}
+	}
+	memo.backlogs = memo.backlogs[ref:]
+	grew := make(map[string]bool, len(backlog))
+	if len(memo.backlogs) > 0 {
+		then := memo.backlogs[0].byRole
+		for role, b := range backlog {
+			if prev, seen := then[role]; seen && b > prev+max(BacklogGrowthMinRequests, BacklogGrowthFraction*prev) {
+				grew[role] = true
+			}
+		}
+	}
+	memo.backlogs = append(memo.backlogs, backlogReading{at: now, byRole: maps.Clone(backlog)})
+	if n := len(memo.backlogs); n > maxBacklogReadings {
+		memo.backlogs = memo.backlogs[n-maxBacklogReadings:]
+	}
+	if a.now != nil {
+		memo.seen = now
+	}
+	return grew
+}
+
+// localQueueBacklog is what one replica's own engine queue adds to its role's
+// floor backlog: the queue, but no more than the replica drains itself in
+// horizon seconds at its saturated throughput (applyThroughputFloor). A
+// replica with no throughput that can price it adds its whole queue; its role
+// is priced by its siblings' mu, if at all.
+func localQueueBacklog(rc capacity.ReplicaCapacity, horizon float64) float64 {
+	q := float64(rc.QueueLength)
+	if mu := rc.SaturatedThroughput; mu > 0 && !math.IsInf(mu, 1) && horizon > 0 {
+		return min(q, mu*horizon)
+	}
+	return q
+}
+
+// floorTrust is how far the floor's drain price may replace the queues'
+// residency charge, from 0 at FloorLagFraction of the resident KV or less to
+// 1 at FloorTrustFraction or more, given ratio = ArrivalDemand / resident.
+// Linear between, so the demand moves continuously with lambda rather than
+// dropping by the whole queue at one point.
+func floorTrust(ratio float64) float64 {
+	if !(ratio > FloorLagFraction) {
+		return 0
+	}
+	return min((ratio-FloorLagFraction)/(FloorTrustFraction-FloorLagFraction), 1)
+}
 
 // offeredArrivalRate is the model-level arrival rate: the scheduler's, or the
 // completion rate of the replicas that generate output when the scheduler

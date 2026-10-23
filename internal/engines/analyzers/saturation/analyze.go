@@ -151,6 +151,14 @@ type cycle struct {
 	rolesByVariant  map[string]string
 	accelByVariant  map[string]string
 	decodeSaturated bool
+	// busyNowRoles is the roles with a Ready replica busy NOW by its
+	// instant KV (rolesBusyNow). A sibling idle now is charged its instant
+	// KV, not its one-minute peak, while its role is in it.
+	busyNowRoles map[string]bool
+
+	// priceReplicas: how many decode replicas have read idle for
+	// IdleSettledFor (settledIdleDecode), found once every row is priced.
+	settledIdleDecode int
 
 	// observeFleetShape: the one shape the fleet is serving, and the tracker's
 	// view of whether it just changed.
@@ -260,6 +268,8 @@ func (a *SaturationAnalyzer) newCycle(
 	c.decodeSaturated = a.rememberDecodeSaturation(input.Namespace, input.ModelID,
 		roleSaturated(input.ReplicaMetrics, c.rolesByVariant, domain.RoleDecode,
 			cfg.QueueLengthThreshold, cfg.KvCacheThreshold))
+	// Decided over every row before any is priced, for the same reason.
+	c.busyNowRoles = rolesBusyNow(input.ReplicaMetrics, c.rolesByVariant)
 
 	return c
 }
@@ -465,7 +475,10 @@ func (c *cycle) fitLines() {
 // service rate the floor will divide the arrival rate by.
 func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, error) {
 	replicaCapacities := make([]capacity.ReplicaCapacity, 0, len(c.input.ReplicaMetrics))
+	pricedRows := make([]domain.ReplicaMetrics, 0, len(c.input.ReplicaMetrics))
 	mixed := revisionsMixed(c.input.ReplicaMetrics)
+	served := servedBounds(c.input.ReplicaMetrics, c.rolesByVariant, c.cfg.QueueLengthThreshold, c.cfg.KvCacheThreshold, c.fleetOutput,
+		c.stableInput, c.stableOutput, c.fleetHitRate)
 	for _, rm := range c.input.ReplicaMetrics {
 		select {
 		case <-ctx.Done():
@@ -545,7 +558,10 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			c.itlBorrowedFrom[rm.VariantName], c.logger)
 		rc := c.a.computeReplicaCapacity(rm, c.cfg, c.input.ModelID, c.input.Namespace, gpuCount,
 			role, c.accelByVariant[rm.VariantName], c.stableOutput, c.fleetOutput, c.stableInput,
-			c.fleetHitRate, derived, downstreamSaturated, mixed[rm.VariantName], c.logger)
+			c.fleetHitRate, derived, served[rm.VariantName], downstreamSaturated, mixed[rm.VariantName],
+			replicaRouting{
+				kvFromInstant: kvFromInstant(rm, c.busyNowRoles[domain.CanonicalRole(role)]),
+			}, c.logger)
 		if rc != nil {
 			// A derived figure inherits the borrowed-ness of the line it came
 			// from. Set here rather than threaded through
@@ -559,8 +575,13 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			rc.SaturatedThroughputLineBorrowed =
 				rc.SaturatedThroughputDerived && c.itlBorrowedFrom[rm.VariantName] != ""
 			replicaCapacities = append(replicaCapacities, *rc)
+			pricedRows = append(pricedRows, rm)
 		}
 	}
+	// Whether a decode replica is idle against what it can do needs its
+	// effective capacity, so every row priced first (idle_room.go).
+	c.settledIdleDecode = c.a.settledIdleDecode(c.input.Namespace, c.input.ModelID,
+		replicaCapacities, pricedRows, c.rolesByVariant)
 	return replicaCapacities, nil
 }
 
@@ -644,8 +665,12 @@ func (c *cycle) priceDemand(caps []capacity.ReplicaCapacity) demandParts {
 	// idle period; the rest is configuration.
 	expectedOutput := c.cfg.ExpectedOutputTokens(c.fleetOutput, c.stableOutput, DefaultExpectedOutputTokens)
 	queueMetrics := withExpectedOutputTokens(c.input.ReplicaMetrics, c.rolesByVariant, expectedOutput)
-	queueDemand := estimateSchedulerQueueDemand(c.input.SchedulerQueue, queueMetrics,
-		c.rolesByVariant, activeRoles, c.fleetHitRate)
+	// With no replica reporting a shape at all, both halves fall back: the
+	// output as above, the prompt to what the fleet last knew
+	// (estimateSchedulerQueueDemandAt).
+	queueDemand := estimateSchedulerQueueDemandAt(c.input.SchedulerQueue, queueMetrics,
+		c.rolesByVariant, activeRoles, c.fleetHitRate,
+		queueShape{input: c.stableInput, output: expectedOutput})
 	total += queueDemand.total
 	if c.input.SchedulerQueue != nil {
 		c.logger.Info("scheduler-queue-demand",
@@ -742,7 +767,14 @@ func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandPart
 	// prefill first. Only the disaggregated case has a prefill
 	// entry to hold; the model-level total moves by the same amount so
 	// RoleDemand and TotalDemand keep moving together.
-	if c.decodeSaturated && d.roleDemand != nil {
+	//
+	// One thing relaxes the hold and nothing else: a decode replica that
+	// has read idle for IdleSettledFor (settledIdleDecode). Then decode has
+	// room the router is not using, and prefill's demand is its own to be
+	// ordered on; what prefill may LEARN stays gated on decodeSaturated
+	// alone (roleSaturated says why). Relaxing a hold only raises an order.
+	prefillHeld := c.decodeSaturated && c.settledIdleDecode == 0
+	if prefillHeld && d.roleDemand != nil {
 		scaleUp, scaleDown := c.cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
 		// The scheduler queue's share is exempt: those requests have been
 		// given to no pod and have had no first token, so prefill is what
@@ -787,7 +819,7 @@ func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandPart
 	{
 		scaleUp, scaleDown := c.cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
 		hot := c.a.hotRankPods(c.input.Namespace, c.input.ModelID, c.input.ReplicaMetrics,
-			c.rolesByVariant, c.cfg.KvCacheThreshold, c.decodeSaturated)
+			c.rolesByVariant, c.cfg.KvCacheThreshold, prefillHeld)
 		after, byRole := holdHotRanks(hot, caps, d.variants, c.input.VariantStates,
 			d.roleDemand, total, scaleUp, scaleDown)
 		if after > total {

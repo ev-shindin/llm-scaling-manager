@@ -124,6 +124,21 @@ on half the picture.
    rate condition? Strict costs calibration opportunities on fleets that rarely
    queue; loose re-admits the degenerate-sample failure, permanently, under a
    running minimum.
+   Resolved for the queue-depth path: a reading whose queue is larger than the
+   replica's whole resident batch is admitted only when its service rate has
+   reached 0.7 of the rate on record AND it holds 0.7 of the k2 on record, or
+   when the queue has stood for a whole window (one minute) and the residency
+   is within 25 % either way of the reading a window back (`k2_settle.go`,
+   `P1-obs-unsettled`). Measured cause: a load step's first reading, 31 713
+   tokens under a queue of 160, pulled a 270 539 window to 151 126. The band
+   was first one-sided (no more than 25 % higher), which admitted the same
+   reading straight after a queued 270 539 -- traffic the router moved off a
+   pod and back -- and took the window to 222 774. It was then compared a
+   cycle back, which admitted a `max_num_seqs`-capped batch mid-fill (first k2
+   0.49-0.66 of steady on simulated 1000/4000 and 1000/6000 traces; a window
+   back, 1.04-1.05); and the rate path alone admitted a busy sibling handed
+   the hot queue (k2 mean 250 000 -> 232 000), hence the residency
+   condition.
 3. **Relaxation policy.** How does a bucket minimum ever move up when a workload
    genuinely gets cheaper? Slow age-based relaxation is the proposal; the rate and
    its interaction with the SLO asymmetry need choosing deliberately.

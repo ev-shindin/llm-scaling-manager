@@ -54,7 +54,8 @@ var _ = Describe("Estimate with a borrowed ITL line", func() {
 		Expect(f.Terms[domain.RoleDecode].Held).To(BeFalse(),
 			"a variant's own derived line orders without waiting for samples, by design")
 		Expect(f.ByRole[domain.RoleDecode]).To(
-			BeNumerically("~", runLambda/runMu*float64(runK1), 1e-6))
+			BeNumerically("~", 0.85*runLambda/runMu*float64(runK1), 1e-6),
+			"a derived mu is priced at the target fill, so the engine headroom comes out of it (replicaCost)")
 	})
 
 	It("holds but does not order on a borrowed line", func() {
@@ -190,7 +191,7 @@ var _ = Describe("Estimate with a borrowed ITL line", func() {
 			"precondition: at lambda/mu = %.3f the floor is below the cap, so it cannot bind",
 			idleLambda/runMu)
 		Expect(f.ByRole[domain.RoleDecode]).To(
-			BeNumerically("~", idleLambda/runMu*float64(runK1), 1e-6),
+			BeNumerically("~", 0.85*idleLambda/runMu*float64(runK1), 1e-6),
 			"and the floor is the uncapped figure, not the cap")
 
 		// The point: the gates are still reported.

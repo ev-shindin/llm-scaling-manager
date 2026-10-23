@@ -115,7 +115,8 @@ demand = tokens_in_use          (live: kv_cache_usage × capacity)
 ```
 
 The scheduler-queue term counts load that has not reached a pod yet. When known, the
-prefix-cache hit rate discounts its input tokens.
+prefix-cache hit rate discounts its input tokens. The local-queue term counts in
+full on whichever replica the queue stands; see [uneven routing](#uneven-routing).
 
 #### The throughput floor
 
@@ -135,6 +136,20 @@ figure is a **floor** under the occupancy demand: it only ever raises demand.
 mu is measured per request shape, so a shape change re-prices the fleet with no
 threshold re-tuned. This catches a shape change before a queue forms.
 
+On a decode role mu can also be computed from the replica's inter-token latency
+line, for a shape it has not yet run saturated. That figure is the rate at the
+fill the autoscaler targets (`kvCacheThreshold x scaleUpThreshold` of the KV
+cache, 0.68 on the defaults), not at saturation, so the floor does not apply
+the `scaleUpThreshold` headroom to it again: a replica at the target fill,
+serving exactly that rate, is "full" to the floor and to occupancy alike.
+
+Only the variant's own line can grow a fleet this way. A line borrowed from
+another variant (a new namespace, a renamed variant) can hold the fleet but
+not grow it. With no line at all there is no floor: occupancy alone sizes the
+role, and it under-orders at a load step until the variant has fitted its own
+line. Under EPP flow control, where replicas rarely queue, that is the normal
+state of a new variant for its first minutes.
+
 Three rules keep it honest. Each was learned from a measured mistake; the runs
 are in [analyzer evidence](../developer-guide/analyzer-evidence.md):
 
@@ -150,7 +165,10 @@ are in [analyzer evidence](../developer-guide/analyzer-evidence.md):
 - **A backlog is work to drain, not residency.** `B` queued requests are priced
   as `B / 60s` extra arrivals on top of `lambda`, not as `B` requests resident
   at once. Pricing them as resident sized fleets for queues that were gone
-  before the replicas arrived. Prefill's share of the scheduler queue is dropped:
+  before the replicas arrived. This can lower the demand, so it is done only
+  when the floor may order on its mu and the arrival rate accounts for what the
+  replicas already hold; in the first minute of a load step the arrival rate
+  still reads the minute before, and the queue keeps its full charge. Prefill's share of the scheduler queue is dropped:
   more prefill replicas do not fix a full decode.
 
 **Prefill's mu without a prefill saturation.** On a P/D model prefill rarely
@@ -184,6 +202,47 @@ It is off by default. Turn it on for every model or for one with
 [`enablePrefillThroughputBound`](../reference/scaling-policy.md#enableprefillthroughputbound).
 Its extra prefill lasts until the variant's learned state is reset, because a
 prefill held that large rarely queues on its own.
+
+#### Uneven routing
+
+The router can load one replica while another replica of the same role sits
+idle. The engine does not try to correct for that in its capacity math.
+Demand and supply are both sums over a role's replicas, so a queue on the
+wrong replica is still the role's demand, and the idle replica's capacity is
+still in supply. Leaving the queue out could only hide demand.
+
+So every queue counts in full, wherever it stands, in demand and in the
+throughput floor's backlog. When routing is uneven, the error is on the side
+of ordering too many replicas, never too few. Uneven routing is reported by
+the load-balance metrics, so you can fix it at the router.
+
+What the engine does guard is what it **learns**, because a learned figure
+that is wrong stays wrong:
+
+- **A replica the router emptied and refilled is not measured.** A full replica
+  whose traffic is moved off and handed back shows a deep queue on a nearly
+  empty cache. That reading is not kept as its compute ceiling: a ceiling
+  learned too low never corrects itself. A reading like that is kept only once
+  its resident KV has stayed flat for a whole minute with the queue standing,
+  or when the replica both completes at the rate on record and holds most of
+  the compute ceiling on record.
+- **A replica that just became Ready is not measured.** For its first minute
+  its one-minute readings still describe the minute before the router sent it
+  work, and its batch is still filling.
+- **Decode back-pressure still protects prefill's learning.** If any decode
+  replica is full and queued, prefill's readings are decode's back-pressure and
+  are not learned, whatever the other decode replicas are doing. A decode
+  replica that has been idle for two minutes only lifts the hold on prefill's
+  demand, so prefill can still be ordered.
+
+One rule counts a load once in time, not in place. KV use is read as each
+pod's peak over the last minute. If the router moves its hot pod during that
+minute, every pod it visited shows a full peak, and the same tokens would be
+counted on each. A pod with nothing waiting that is idle now, while another pod
+of its role is busy now, is charged what it holds now. A pod with requests
+waiting keeps its peak, and so does a pod with no instant reading. If no pod of
+the role is busy now, every peak counts. The role is never charged less than
+what its pods hold now.
 
 ### 3. The scaling signal
 

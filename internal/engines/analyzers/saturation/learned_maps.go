@@ -82,6 +82,8 @@ func (a *SaturationAnalyzer) learnedMapsLocked() []learnedMap {
 		registered("saturatedThroughput", scopeK2Key, a.saturatedThroughput),
 		registered("throughputSampledAt", scopeK2Key, a.throughputSampledAt),
 		registered("throughputLastRead", scopeK2Key, a.throughputLastRead),
+		registered("throughputPodReads", scopeK2Key, a.throughputPodReads),
+		registered("throughputMuChoice", scopeK2Key, a.throughputMuChoice),
 		registered("k2WindowArgs", scopeK2Key, a.k2WindowArgs),
 		registered("throughputWindowArgs", scopeK2Key, a.throughputWindowArgs),
 		registered("k2Stash", scopeK2Key, a.k2Stash),
@@ -100,6 +102,7 @@ func (a *SaturationAnalyzer) learnedMapsLocked() []learnedMap {
 		registered("forgotten", scopeOwnRule, a.forgotten),
 		registered("decodeSaturatedAt", scopeShared, a.decodeSaturatedAt),
 		registered("hotRankHeld", scopeShared, a.hotRankHeld),
+		registered("k2Settle", scopeShared, a.k2Settle),
 		registered("fleetShape", scopeShared, a.fleetShape),
 	}
 }

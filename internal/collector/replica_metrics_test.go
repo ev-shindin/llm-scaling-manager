@@ -647,8 +647,8 @@ func TestCollectReplicaMetrics_ThroughputKeyMerge(t *testing.T) {
 	if m.GenerationTokenRate == 0 {
 		t.Errorf("GenerationTokenRate is zero — throughput key merge failed")
 	}
-	if m.KvUsageInstant == 0 {
-		t.Errorf("KvUsageInstant is zero — throughput key merge failed")
+	if m.KvUsageInstant == 0 || !m.KvUsageInstantKnown {
+		t.Errorf("KvUsageInstant is zero or not known (%v) — throughput key merge failed", m.KvUsageInstantKnown)
 	}
 	if m.RequestRate == 0 {
 		t.Errorf("RequestRate is zero — throughput key merge failed")
