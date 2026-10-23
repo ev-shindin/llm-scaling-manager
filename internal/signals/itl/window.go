@@ -72,6 +72,10 @@ type Observation struct {
 	ITLSec float64
 	// Timestamp is when this observation was collected.
 	Timestamp time.Time
+	// settling marks a reading taken while its replica was inside its settle
+	// (replicaTrace.settling): a known transient, which the pinned fit leaves
+	// out.
+	settling bool
 }
 
 // Window is a rolling window of (k, ITL_obs) pairs for one variant.
@@ -113,16 +117,21 @@ func NewWindow(maxSize int, maxAge time.Duration, minSamples int, minKSpread, mi
 // evicted first. Returns true if the observation was dropped (NaN/out-of-range
 // k or invalid itl) so the caller can log with a reconcile-scoped logger.
 func (w *Window) Add(k, itl float64, ts time.Time) bool {
-	if math.IsNaN(k) || k < w.minK || k > w.maxK {
+	return w.add(Observation{K: k, ITLSec: itl, Timestamp: ts})
+}
+
+// add is Add for an observation whose settling mark is already set.
+func (w *Window) add(o Observation) bool {
+	if math.IsNaN(o.K) || o.K < w.minK || o.K > w.maxK {
 		return true // dropped: NaN or out of range
 	}
-	if itl <= 0 || math.IsNaN(itl) {
+	if o.ITLSec <= 0 || math.IsNaN(o.ITLSec) {
 		return true // dropped: invalid
 	}
 	if len(w.observations) >= w.maxSize {
 		w.observations = w.observations[1:]
 	}
-	w.observations = append(w.observations, Observation{K: k, ITLSec: itl, Timestamp: ts})
+	w.observations = append(w.observations, o)
 	return false
 }
 

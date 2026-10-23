@@ -46,6 +46,7 @@ var derivedMuFields = []string{
 	"muDivisor",
 	"muInputTokens",
 	"muShortWindow",
+	"namespace",
 	"ok",
 	"pod",
 	"rate",

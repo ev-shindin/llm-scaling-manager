@@ -1,6 +1,7 @@
 package itl
 
 import (
+	"fmt"
 	"math"
 	"time"
 
@@ -162,6 +163,102 @@ var _ = Describe("Tracker", func() {
 		b, _ = t.Baseline("new")
 		Expect(b).To(Equal(0.5))
 	})
+
+	// extra adds joiners that arrive with bpxrs and follow its first rows: a
+	// k-0.091 row without an ITL, the warm-up reading, then above the band
+	// (the round-3 statistics review's probe). The interquartile mean held to
+	// 0.102 up to two of them and read 0.127 with three, the warm-ups 27% of
+	// the window's weight: a scale-up from three to six priced mu about 20%
+	// low.
+	DescribeTable("prices a saturated fleet from its replicas at work, not from their first readings", func(extra int) {
+		// One namespace of a two-namespace run (Qwen3-32B-FP8 on H200, vLLM),
+		// the 14 requests/s phase: one replica from idle, two more joining at
+		// 14:19:42. Every replica sat above the band but for a dip now and
+		// then, and the one there from the start served 5.9 requests/s. The
+		// window's first reading is the load arriving at an idle replica (k
+		// 0.285 at 268 ms), and a joiner's first is k 0.507 at 503 ms. Least
+		// squares took both and the run
+		// logged A = 0.162 at 14:21:28, a derived mu of 3.55 requests/s.
+		//
+		// k is the instantaneous fill where the run logged it (the last
+		// cycle), and otherwise the minute's maximum, held to 0.790 on the
+		// cycles the run offered a reading at and the maximum was above the
+		// band. A reading without k or ITL is the replica idle or starting.
+		type cell struct {
+			pod     string
+			k, itlS float64
+		}
+		cycles := []struct {
+			at    string
+			cells []cell
+		}{
+			{"14:12:53", []cell{{"wnx8v", 0, 0}}},
+			{"14:13:23", []cell{{"wnx8v", 0, 0}}},
+			{"14:13:53", []cell{{"wnx8v", 0, 0}}},
+			{"14:14:23", []cell{{"wnx8v", 0, 0}}},
+			{"14:14:54", []cell{{"wnx8v", 0, 0}}},
+			{"14:15:09", []cell{{"wnx8v", 0.285, 0.2675}}},
+			{"14:15:24", []cell{{"wnx8v", 0.860, 0.0727}}},
+			{"14:15:39", []cell{{"wnx8v", 0.966, 0.0630}}},
+			{"14:15:54", []cell{{"wnx8v", 0.790, 0.0870}}},
+			{"14:16:09", []cell{{"wnx8v", 0.966, 0.0713}}},
+			{"14:16:24", []cell{{"wnx8v", 0.966, 0.0896}}},
+			{"14:16:39", []cell{{"wnx8v", 0.790, 0.0886}}},
+			{"14:16:54", []cell{{"wnx8v", 0.947, 0.0733}}},
+			{"14:17:09", []cell{{"wnx8v", 0.947, 0.0882}}},
+			{"14:17:25", []cell{{"wnx8v", 0.947, 0.0742}}},
+			{"14:17:40", []cell{{"wnx8v", 0.947, 0.0738}}},
+			{"14:17:55", []cell{{"wnx8v", 0.790, 0.0882}}},
+			{"14:18:11", []cell{{"wnx8v", 0.935, 0.0770}}},
+			{"14:18:26", []cell{{"wnx8v", 0.935, 0.0864}}},
+			{"14:18:41", []cell{{"wnx8v", 0.790, 0.0882}}},
+			{"14:18:57", []cell{{"wnx8v", 0.926, 0.0735}}},
+			{"14:19:12", []cell{{"wnx8v", 0.926, 0.0848}}},
+			{"14:19:27", []cell{{"wnx8v", 0.923, 0.0805}}},
+			{"14:19:42", []cell{{"s92zt", 0.156, 0}, {"wnx8v", 0.923, 0.0729}}},
+			{"14:19:57", []cell{{"s92zt", 0.810, 0.0842}, {"wnx8v", 0.919, 0.0871}, {"bpxrs", 0.091, 0}}},
+			{"14:20:12", []cell{{"s92zt", 0.952, 0.0622}, {"wnx8v", 0.919, 0.0804}, {"bpxrs", 0.507, 0.5030}}},
+			{"14:20:27", []cell{{"s92zt", 0.952, 0.0838}, {"wnx8v", 0.790, 0.0831}, {"bpxrs", 0.932, 0.0644}}},
+			{"14:20:42", []cell{{"s92zt", 0.952, 0.0763}, {"wnx8v", 0.899, 0.0864}, {"bpxrs", 0.932, 0.0691}}},
+			{"14:20:57", []cell{{"s92zt", 0.953, 0.0843}, {"wnx8v", 0.790, 0.0734}, {"bpxrs", 0.932, 0.0836}}},
+			{"14:21:12", []cell{{"s92zt", 0.953, 0.0917}, {"wnx8v", 0.790, 0.0822}, {"bpxrs", 0.932, 0.0690}}},
+			{"14:21:28", []cell{{"s92zt", 0.937, 0.0701}, {"wnx8v", 0.799, 0.0831}, {"bpxrs", 0.801, 0.0905}}},
+		}
+		var r Reading
+		for ci, c := range cycles {
+			at, err := time.Parse(time.TimeOnly, c.at)
+			Expect(err).NotTo(HaveOccurred())
+			rows := make([]domain.ReplicaMetrics, 0, len(c.cells)+extra)
+			for _, x := range c.cells {
+				rows = append(rows, row(x.pod, x.k, x.itlS))
+			}
+			for j := range extra {
+				pod := fmt.Sprintf("join%d", j)
+				switch since := ci - 24; {
+				case since == 0:
+					rows = append(rows, row(pod, 0.091, 0))
+				case since == 1:
+					rows = append(rows, row(pod, 0.507-0.01*float64(j), 0.503))
+				case since > 1:
+					rows = append(rows, row(pod, 0.932, 0.07))
+				}
+			}
+			offset := time.Duration(at.Hour())*time.Hour + time.Duration(at.Minute())*time.Minute +
+				time.Duration(at.Second())*time.Second
+			r = t.Observe("key", "v", rows, now.Add(offset))
+		}
+		Expect(r.Held).To(Equal(10+extra), "the run's window held 10 on this cycle too")
+		Expect(r.Tier).To(Equal(TierPinnedB))
+		// The dips' own slopes through the 6 ms floor are 0.085 to 0.105, and
+		// the six of them past their replica's settle average 0.097.
+		Expect(r.Model.A).To(BeNumerically("~", 0.100, 0.005))
+		// The first reading is the warm-up one, of a replica the load came
+		// back to after five idle cycles: it starts over as a joiner, as the
+		// two that did join, and its k swings by more than DefaultMaxKDrift
+		// after that.
+		Expect(r.SteadyHeld).To(BeZero(), "the load coming back is not a steady reading")
+		Expect(r.SteadySpread).To(BeZero())
+	}, Entry("the run as it was", 0), Entry("one more joiner", 1), Entry("two more", 2), Entry("three more: a fleet of three growing to six", 3))
 
 	It("forgets intercepts and keeps the readings", func() {
 		t.Observe("key", "v", onLine(10, 0.2, 0.7), now)

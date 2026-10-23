@@ -32,11 +32,25 @@ type Tracker struct {
 	mu        sync.Mutex
 	windows   map[string]*Window
 	baselines map[string]float64
+	// steady holds, per key, only the readings taken while their replica's
+	// load had held still, and is the only window the full fit -- and so the
+	// remembered B -- is taken from. See DefaultSteadyFor.
+	steady map[string]*Window
+	traces map[string]*keyTraces
+	// slopes holds, per key, the A of its last line, which the pinned fit
+	// holds while too few readings are past their settle to fit a new one.
+	slopes map[string]float64
 }
 
 // NewTracker returns an empty Tracker.
 func NewTracker() *Tracker {
-	return &Tracker{windows: map[string]*Window{}, baselines: map[string]float64{}}
+	return &Tracker{
+		windows:   map[string]*Window{},
+		baselines: map[string]float64{},
+		steady:    map[string]*Window{},
+		traces:    map[string]*keyTraces{},
+		slopes:    map[string]float64{},
+	}
 }
 
 // Reading is what one Observe saw and fitted, for the caller to log and use.
@@ -57,9 +71,27 @@ type Reading struct {
 	// Offered counts the readings the window kept; BelowBand those it dropped
 	// for a k below DefaultMinObservableK (an idle replica).
 	Considered, NotReady, NoITL, NoK, AboveBand, BelowBand, Offered int
-	// Held is the window's size after pruning, Ready its own confidence gate.
-	Held  int
-	Ready bool
+	// Unsteady counts the Offered readings kept out of the full fit because
+	// their replica's load had moved within DefaultSteadyFor.
+	Unsteady int
+	// Settling counts the Unsteady readings whose replica was inside its
+	// settle -- it joined, or the load came back to it, within
+	// DefaultSteadyFor -- and which the pinned fit leaves out too.
+	Settling int
+	// SlopeHeld is set when the pinned fit had too few readings past their
+	// settle to fit and Model's A is the key's last one.
+	SlopeHeld bool
+	// Held is the window's size after pruning.
+	Held int
+	// SteadyHeld is how many steady readings the full fit may use, and Ready
+	// is the confidence gate judged on those alone: a spread made of a
+	// transient is not a spread. It can exceed Held: a steady reading
+	// outlives the main window by up to DefaultSteadyCarry.
+	SteadyHeld int
+	Ready      bool
+	// SteadySpread is max k - min k over the steady readings: the other half
+	// of Ready, and how far it is from DefaultMinKSpread.
+	SteadySpread float64
 }
 
 // Observe offers one cycle's replica rows of a variant to the key's window and
@@ -73,6 +105,31 @@ type Reading struct {
 // remembered intercept, or DefaultBaselineSec before there is one: a fleet the
 // router balances spans little of k, so this is the normal case, not a
 // degenerate one.
+//
+// The full fit is judged and taken on steady readings only: those whose
+// replica's k had not moved by more than DefaultMaxKDrift within
+// DefaultSteadyFor, from a replica that has been serving at least that long.
+// In a balanced fleet the only spread in k a window ever sees is a transient
+// -- a replica joining, or the load stepping -- and across a transient k and
+// ITL describe different moments, so the line through them is not ITL(k).
+// Its intercept was remembered and pinned into every fit after it: on one
+// run, two identical models in two namespaces kept B = 4.5 ms and 14.8 ms
+// from whichever transient each window happened to catch, and priced the
+// same replica at 5.3 and 7.7 requests/s (issue #270). The steady readings
+// outlive the window by up to DefaultSteadyCarry, so a step's old level is
+// still there when the new one settles, and the two give the spread.
+//
+// The pinned fit takes the steady readings too while there are at least
+// DefaultMinSamples of them, and every reading only below that, so a fleet
+// that has not settled yet still gets a line. A load step is a transient the
+// pinned fit would otherwise take whole: on the issue #270 rerun A jumped from
+// 0.077 to 0.207 on the cycle the load stepped, with every new reading
+// unsteady and 10 steady ones held, and the derived mu fell from 6.4 to 2.65
+// requests/s for two and a half minutes. It does not take the carry: see
+// pinnedReadings. Taking every reading, it still leaves out those of a replica
+// inside its settle -- a joiner's, or one the load came back to -- whose ITL
+// covers its warm-up, and while fewer than DefaultMinSettledSamples remain it
+// holds the key's last A.
 func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now time.Time) Reading {
 	var r Reading
 	t.mu.Lock()
@@ -82,11 +139,44 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 			DefaultMinKSpread, DefaultMinObservableK, DefaultMaxObservableK)
 		t.windows[key] = w
 	}
+	sw, ok := t.steady[key]
+	if !ok {
+		sw = NewWindow(DefaultSteadyWindowMaxSize, DefaultObservationMaxAge, DefaultMinSamples,
+			DefaultMinKSpread, DefaultMinObservableK, DefaultMaxObservableK)
+		t.steady[key] = sw
+	}
+	traces, ok := t.traces[key]
+	if !ok {
+		traces = &keyTraces{since: now, replicas: map[string]*replicaTrace{}}
+		t.traces[key] = traces
+	}
+	seen := make(map[string]bool, len(rows))
 	for _, rm := range rows {
 		if rm.VariantName != variant {
 			continue
 		}
 		r.Considered++
+		// Judged before the switch and noted after it, so a row that is no
+		// reading -- k below the band, no ITL yet -- still says where the
+		// replica's load is.
+		steady, settling := false, false
+		var trace *replicaTrace
+		if rm.Ready && !rm.FromWarmPool {
+			seen[rm.PodName] = true
+			trace = traces.replicas[rm.PodName]
+			if trace == nil {
+				trace = &replicaTrace{since: now, joined: now.After(traces.since)}
+				traces.replicas[rm.PodName] = trace
+			}
+			trace.serving(rm.AvgITL > 0 && !math.IsInf(rm.AvgITL, 1), traceable(rm.KvUsageInstant), now)
+			settling = trace.settling(now)
+			if traceable(rm.KvUsageInstant) {
+				steady = trace.steady(rm.KvUsageInstant, now)
+			} else {
+				// Present, so its trace is kept; no k, so nothing is noted.
+				trace = nil
+			}
+		}
 		switch {
 		case !rm.Ready || rm.FromWarmPool:
 			r.NotReady++
@@ -99,16 +189,47 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 			r.AboveBand++
 		default:
 			// Add reports a reading it dropped: here, only a k below the band.
-			if w.Add(rm.KvUsageInstant, rm.AvgITL, now) {
+			if w.add(Observation{K: rm.KvUsageInstant, ITLSec: rm.AvgITL, Timestamp: now, settling: settling}) {
 				r.BelowBand++
 			} else {
 				r.Offered++
+				switch {
+				case steady:
+					sw.Add(rm.KvUsageInstant, rm.AvgITL, now)
+				case settling:
+					r.Unsteady++
+					r.Settling++
+				default:
+					r.Unsteady++
+				}
 			}
+		}
+		if trace != nil {
+			trace.note(rm.KvUsageInstant, now)
+		}
+	}
+	// A replica missing from this cycle starts over when it returns: what it
+	// served in between is unknown.
+	for pod := range traces.replicas {
+		if !seen[pod] {
+			delete(traces.replicas, pod)
 		}
 	}
 	w.Prune(now)
 	obs := w.Observations()
-	r.Held, r.Ready = len(obs), w.Ready()
+	// A steady reading outlives the main window's oldest by at most
+	// DefaultSteadyCarry: long enough for the old level to still be there
+	// when a step's new level settles, and no longer, because A moves with
+	// the workload and a steady window kept for its own sake would keep
+	// fitting a line the fleet has since moved off.
+	sw.Prune(now)
+	cutoff := now.Add(-DefaultSteadyCarry)
+	if len(obs) > 0 && obs[0].Timestamp.Before(cutoff) {
+		cutoff = obs[0].Timestamp
+	}
+	sw.dropBefore(cutoff)
+	steadyObs := sw.Observations()
+	r.Held, r.Ready, r.SteadyHeld, r.SteadySpread = len(obs), sw.Ready(), len(steadyObs), sw.KSpread()
 	baseline, stored := t.baselines[key]
 	t.mu.Unlock()
 
@@ -119,16 +240,18 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 	}
 	// The fits run outside the lock: they read a copy of the window.
 	if r.Ready {
-		if m, ok := Fit(obs); ok {
-			// B, not A, is remembered: B is the hardware floor, A the
-			// contention that moves with the workload. And only a physical,
+		if m, ok := Fit(steadyObs); ok {
+			// B is what is remembered as the key's: B is the hardware floor,
+			// A the contention that moves with the workload, kept only for
+			// the pinned fit to hold through a settle. And only a physical,
 			// positive floor -- a negative B pinned into the next fit would
 			// be worse than the constant it replaced.
+			t.mu.Lock()
 			if m.B > 0 {
-				t.mu.Lock()
 				t.baselines[key] = m.B
-				t.mu.Unlock()
 			}
+			t.slopes[key] = m.A
+			t.mu.Unlock()
 			r.Model, r.Tier = m, TierOLS
 			return r
 		}
@@ -136,16 +259,85 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 	// The sample floor still applies when the spread is waived: the pinned
 	// fit answers from a single pair, and a line should not rest on one
 	// reading from one replica on one cycle.
-	if len(obs) < DefaultMinSamples {
+	pinned, settled := pinnedReadings(obs, steadyObs)
+	if !settled {
 		return r
 	}
-	m, ok := FitPinnedB(obs, baseline)
+	if len(pinned) < DefaultMinSettledSamples {
+		// The window is full of replicas still settling: a scale-up's
+		// joiners, or a fleet the load just came back to. Their readings
+		// are the transient, and what remains is too little to price the
+		// fleet, so the last A holds until they settle.
+		t.mu.Lock()
+		a, have := t.slopes[key]
+		t.mu.Unlock()
+		if !have {
+			return r
+		}
+		r.Model, r.Tier, r.SlopeHeld = Model{A: a, B: baseline}, TierPinnedB, true
+		return r
+	}
+	m, ok := FitPinnedB(pinned, baseline)
 	if !ok {
 		r.Declined = true
 		return r
 	}
+	t.mu.Lock()
+	t.slopes[key] = m.A
+	t.mu.Unlock()
 	r.Model, r.Tier = m, TierPinnedB
 	return r
+}
+
+// DefaultMinSettledSamples is the fewest readings, from replicas past their
+// settle, the pinned fit is taken from on the every-reading path; below it the
+// key's last A holds. The window's DefaultMinSamples still has to be met
+// first: this floor is for what is left once the settling replicas' readings
+// are set aside, and three is one cycle of a three-replica fleet or three of a
+// lone replica -- not one reading of one replica on one cycle.
+const DefaultMinSettledSamples = 3
+
+// pinnedReadings is what the pinned fit reads: the steady readings the main
+// window spans, never more than it holds, reaching back into the carry only
+// as far as DefaultMinSamples needs, and every reading of the main window when
+// fewer than DefaultMinSamples are steady at all. Both windows are in time
+// order.
+//
+// The carry is the full fit's: it keeps a step's old level until the new one
+// settles, which B needs and A does not. A moves with the workload, and
+// fitted on the carried window it followed a heavier shape at the same fill
+// twice as slowly -- two replicas took 17 cycles to price the new A, against 8
+// on the main window alone, and a minute in priced 0.090 for a true 0.12, so
+// the derived mu read about 30% high. Through a load step the main
+// window's steady readings run short, and the newest DefaultMinSamples, the
+// old level's, hold A until the new level settles.
+//
+// Fewer than DefaultMinSamples are steady on a saturated fleet nearly always:
+// k swings between above the band and the dips into it by more than
+// DefaultMaxKDrift, and on a two-namespace run the steady readings numbered 0
+// on almost every cycle. Taking every reading there took each settling
+// replica's warm-up too, so those are set aside by the replica's state when
+// the reading was taken, not by its value: see FitPinnedB. ok is false when
+// neither window holds DefaultMinSamples, the floor the fit has always had.
+func pinnedReadings(obs, steady []Observation) (pinned []Observation, ok bool) {
+	if len(steady) < DefaultMinSamples {
+		if len(obs) < DefaultMinSamples {
+			return nil, false
+		}
+		pinned = make([]Observation, 0, len(obs))
+		for _, o := range obs {
+			if !o.settling {
+				pinned = append(pinned, o)
+			}
+		}
+		return pinned, true
+	}
+	start := len(steady)
+	for start > 0 && len(obs) > 0 && len(steady)-start < len(obs) &&
+		!steady[start-1].Timestamp.Before(obs[0].Timestamp) {
+		start--
+	}
+	return steady[min(start, len(steady)-DefaultMinSamples):], true
 }
 
 // Sweep prunes every window and forgets the window and intercept of each key
@@ -160,10 +352,30 @@ func (t *Tracker) Sweep(now time.Time, stale func(key string) bool) (windows, ba
 	for _, w := range t.windows {
 		w.Prune(now)
 	}
+	for _, w := range t.steady {
+		w.Prune(now)
+	}
 	for key := range t.windows {
 		if stale(key) {
 			delete(t.windows, key)
 			windows++
+		}
+	}
+	// The steady window, the traces and the held slope are part of the
+	// window: counted with it, not apart.
+	for key := range t.steady {
+		if stale(key) {
+			delete(t.steady, key)
+		}
+	}
+	for key := range t.traces {
+		if stale(key) {
+			delete(t.traces, key)
+		}
+	}
+	for key := range t.slopes {
+		if stale(key) {
+			delete(t.slopes, key)
 		}
 	}
 	// Apart from the windows: a key can hold an intercept with no window, one

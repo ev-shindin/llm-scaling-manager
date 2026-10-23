@@ -111,9 +111,9 @@ func capacityTokensFor(params *capacity.EngineParams, ranks int, liveTokens int6
 // role rejected at once. The fleet still reached 9 so the run stands, but its
 // phase-1 TTFT p95 was 64 s against main's 42 s.
 //
-// The cause is not a threshold that needs tuning. The three signals are
-// collected over three different windows -- KvUsageInstant has none,
-// GenerationTokenRate is rate[1m], AvgITL is rate[5m] -- so on a ramp k reaches
+// The cause is not a threshold that needs tuning. The signals are not
+// collected over the same window -- KvUsageInstant has none, while
+// GenerationTokenRate and AvgITL are both rate[1m] -- so on a ramp k reaches
 // its new level in seconds while the 1m rate still reports a fraction of the
 // steady state. The disagreement is therefore largest exactly when a scale-up
 // is needed, and it moves every replica together, so neither N-consecutive
@@ -148,7 +148,7 @@ func (a *SaturationAnalyzer) noteLineMismatch(model itl.Model, params *capacity.
 		return
 	}
 	logger.V(logging.DEFAULT).Info("itl-gps-mismatch",
-		"variant", rm.VariantName, "pod", rm.PodName,
+		"namespace", rm.Namespace, "variant", rm.VariantName, "pod", rm.PodName,
 		"k", rm.KvUsageInstant, "observedGPS", rm.GenerationTokenRate,
 		"predictedGPS", itl.TokenRate(model, rm.KvUsageInstant, capacityTokens, kvReq),
 		"errPct", errPct, "thresholdPct", itl.DefaultGPSMismatchThresholdPct,
@@ -346,13 +346,28 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	//
 	// Counted per reason, because "the window is empty" has four different
 	// causes with four different fixes, and a run that cannot tell them apart
-	// costs a rebuild to find out which one it was. Below
-	// DefaultMinObservableK the window drops the reading itself, so `offered`
-	// counts what was offered and `held` what was kept.
+	// costs a rebuild to find out which one it was. Every row is counted
+	// under exactly one of them, so they add up to `replicas`. belowBand was
+	// the one missing: a single replica at 0.5 to 3 requests/s sat below k
+	// 0.15 on nearly every cycle for 24 minutes and logged `offered: 0` with
+	// every other count 0, which reads as the window being broken rather than
+	// the load being light.
 	logger.V(logging.DEFAULT).Info("itl-window",
 		"variant", variantName, "key", key,
 		"replicas", r.Considered, "offered", r.Offered, "held", r.Held,
-		"notReady", r.NotReady, "noITL", r.NoITL, "noK", r.NoK, "aboveBand", r.AboveBand,
+		"notReady", r.NotReady, "noITL", r.NoITL, "noK", r.NoK,
+		"belowBand", r.BelowBand, "aboveBand", r.AboveBand,
+		// Kept, but not for the full fit: the replica's load had just moved,
+		// so its k and its ITL describe different moments (itl.DefaultSteadyFor).
+		"unsteady", r.Unsteady, "steadyHeld", r.SteadyHeld,
+		// Of those, the readings of a replica still inside its settle (it
+		// joined, or the load came back to it): left out of the pinned fit
+		// as well.
+		"settling", r.Settling,
+		// Ready needs minSamples steady readings AND this much spread among
+		// them; without it a window that never becomes Ready does not say
+		// which of the two it lacked.
+		"steadySpread", r.SteadySpread, "minKSpread", itl.DefaultMinKSpread,
 		"ready", r.Ready, "minSamples", itl.DefaultMinSamples)
 	switch {
 	case r.Tier == itl.TierOLS:
@@ -380,7 +395,8 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		// DefaultMinObservableK and is priced from the readings the window
 		// already holds from when it was working.
 		logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "pinned-B",
-			"a", r.Model.A, "b", r.Model.B, "held", r.Held, "baselineLearned", r.BaselineStored)
+			"a", r.Model.A, "b", r.Model.B, "held", r.Held, "baselineLearned", r.BaselineStored,
+			"slopeHeld", r.SlopeHeld)
 	case r.Declined:
 		logger.V(logging.DEFAULT).Info("itl-fit-declined", "variant", variantName, "held", r.Held)
 	}

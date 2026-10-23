@@ -81,17 +81,18 @@ var logContract = map[string][]string{
 	// afterwards: an empty ITL window has four causes and the counts separate
 	// them. Added after a benchmark produced 3,157 lines that said none of it.
 	"itl-window": {
-		"variant", "key", // join keys
+		"namespace", "variant", "key", // join keys
 		"replicas", "offered", "held", // what arrived, what was taken, what is kept
-		"notReady", "noITL", "noK", "aboveBand", // and why the rest were not
-		"ready", "minSamples", // and whether that is enough to fit on
+		"notReady", "noITL", "noK", "belowBand", "aboveBand", // and why the rest were not
+		"unsteady", "steadyHeld", // and how many of those kept may teach the full fit
+		"steadySpread", "minKSpread", "ready", "minSamples", // and whether that is enough to fit on
 	},
 	// Which tier answered, and with what line. A pinned-B fit is the weaker
 	// answer and the report has to be able to tell the two apart.
 	// baselineLearned says whether B came from this card or from the
 	// bootstrap constant -- the difference between a measured floor and a
 	// guess, and the one that collapsed a fleet on 2026-09-27.
-	"itl-fit": {"variant", "tier", "a", "b", "held", "baselineLearned"},
+	"itl-fit": {"namespace", "variant", "tier", "a", "b", "held", "baselineLearned"},
 	// Every term the derived mu is built from, because the RESULT alone cannot
 	// be attributed to one. A mu wrong by 8x reads identically in the log
 	// whether the fault is the output length it divides by, the sequence count
@@ -100,7 +101,7 @@ var logContract = map[string][]string{
 	// refuted by the next measurement. seqs and maxNumSeqs are separate so a
 	// binding engine cap is visible rather than inferred.
 	"derived-mu": {
-		"variant", "pod", // join keys
+		"namespace", "variant", "pod", // join keys
 		"ok", "rate", "seqs", "tokenSec", // the result and its two factors
 		"kPrice", "itlAtKPrice", "itlA", "itlB", "itlZero", // the line and where it is read
 		// and whose line it is: a borrowed one may hold a fleet and not grow one
@@ -248,6 +249,37 @@ func TestLogContract_DerivedMuReportsItsTerms(t *testing.T) {
 		assert.Contains(t, fields, key,
 			"derived-mu must carry %q: the contract names it and the report reads it by key", key)
 	}
+}
+
+// itl-window counts every row under one reason. A light replica's reading is
+// below the band, and before belowBand was logged a single replica at 0.5 to 3
+// requests/s logged `offered: 0` and every other count 0 for 24 minutes.
+func TestLogContract_ITLWindowCountsEveryRow(t *testing.T) {
+	ctx, logs := observedCtx(t)
+	analyzer := NewSaturationAnalyzer(capacity.NewStore())
+
+	light := makeReplicaMetrics("pod-1", "variant-d", 5000, 100000, 0, 1000, 500)
+	light.KvUsageInstant, light.AvgITL = 0.05, 0.0145 // that run, at 0.5 requests/s
+	input := makeAnalyzerInput(
+		[]domain.ReplicaMetrics{light},
+		[]domain.VariantReplicaState{
+			{VariantName: "variant-d", Role: domain.RoleDecode, AcceleratorName: "H100",
+				CurrentReplicas: 1, GPUsPerReplica: 1},
+		},
+	)
+
+	_, err := analyzer.Analyze(ctx, input)
+	require.NoError(t, err)
+
+	fields := requireLogged(t, logs, "itl-window")
+	assert.EqualValues(t, 1, fields["belowBand"])
+	var sum int64
+	for _, key := range []string{"offered", "notReady", "noITL", "noK", "belowBand", "aboveBand"} {
+		n, ok := fields[key].(int64)
+		require.True(t, ok, "%q must be an integer, got %T", key, fields[key])
+		sum += n
+	}
+	assert.EqualValues(t, fields["replicas"], sum, "every row is counted under exactly one reason")
 }
 
 // The divisor is the [5m] mean on a steady shape, and the short window only

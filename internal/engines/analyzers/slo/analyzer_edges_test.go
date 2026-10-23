@@ -234,10 +234,11 @@ var _ = Describe("Analyzer state and inputs", func() {
 		b, _ := a.lines.Baseline(key)
 		Expect(b).To(BeNumerically("~", 0.030, 1e-9))
 
-		// Twenty readings at nearly one fill push the spread-out ones out of
-		// the window, so only a pinned fit is possible.
+		// Readings at nearly one fill, for longer than a steady reading may
+		// outlive the window (itl.DefaultSteadyCarry), push the spread-out
+		// ones out, so only a pinned fit is possible.
 		var m itl.Model
-		for range 10 {
+		for range int(itl.DefaultSteadyCarry/(15*time.Second)) + 2 {
 			rows := []domain.ReplicaMetrics{row("agg", "agg-a", 0.50), row("agg", "agg-b", 0.52)}
 			for j := range rows {
 				rows[j].AvgITL = steep(rows[j].KvUsageInstant)
