@@ -81,9 +81,10 @@ var logContract = map[string][]string{
 	// afterwards: an empty ITL window has four causes and the counts separate
 	// them. Added after a benchmark produced 3,157 lines that said none of it.
 	"itl-window": {
-		"variant", "key", // join keys
+		"namespace", "variant", "key", // join keys
 		"replicas", "offered", "held", // what arrived, what was taken, what is kept
 		"notReady", "noITL", "noK", "aboveBand", // and why the rest were not
+		"unsteady", "steadyHeld", // and how many of those kept may teach the full fit
 		"ready", "minSamples", // and whether that is enough to fit on
 	},
 	// Which tier answered, and with what line. A pinned-B fit is the weaker
@@ -91,7 +92,7 @@ var logContract = map[string][]string{
 	// baselineLearned says whether B came from this card or from the
 	// bootstrap constant -- the difference between a measured floor and a
 	// guess, and the one that collapsed a fleet on 2026-09-27.
-	"itl-fit": {"variant", "tier", "a", "b", "held", "baselineLearned"},
+	"itl-fit": {"namespace", "variant", "tier", "a", "b", "held", "baselineLearned"},
 	// Every term the derived mu is built from, because the RESULT alone cannot
 	// be attributed to one. A mu wrong by 8x reads identically in the log
 	// whether the fault is the output length it divides by, the sequence count
@@ -100,7 +101,7 @@ var logContract = map[string][]string{
 	// refuted by the next measurement. seqs and maxNumSeqs are separate so a
 	// binding engine cap is visible rather than inferred.
 	"derived-mu": {
-		"variant", "pod", // join keys
+		"namespace", "variant", "pod", // join keys
 		"ok", "rate", "seqs", "tokenSec", // the result and its two factors
 		"kPrice", "itlAtKPrice", "itlA", "itlB", "itlZero", // the line and where it is read
 		// and whose line it is: a borrowed one may hold a fleet and not grow one

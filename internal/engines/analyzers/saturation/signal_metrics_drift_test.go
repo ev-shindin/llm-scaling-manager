@@ -37,6 +37,7 @@ type derivedMuField struct {
 
 var derivedMuMetricFields = map[string]derivedMuField{
 	"variant":         {metric: constants.WVAServiceRatePerReplica}, // the variant_name label every series carries
+	"namespace":       {metric: constants.WVAServiceRatePerReplica}, // the namespace label every series carries
 	"ok":              {metric: constants.WVAServiceRatePerReplica}, // a derived rate in use shows as source=derived or borrowed-line; ok=true alone does not mean it was used (an own measured window can win)
 	"rate":            {metric: constants.WVAServiceRatePerReplica},
 	"kPrice":          {metric: constants.WVAPricingK},
