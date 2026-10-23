@@ -420,6 +420,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	out.overrides = e.shareOverrides(g, variantKey, "utilization share")
 	out.promised = l.Promised() + l.WakeHeld(now)
 	out.swinging = plan.Swinging
+	st.reportSwinging(logger, key, plan, tm)
 	out.reserveDebt = shareDebtNow(l, held, g.Budget)
 	unfunded := e.shareUnfunded(ctx, logger, l, g, plan.Evaluation, plan.Unfunded, accessor, nodes, domains, placements)
 	out.blocked = shareBlockedReasons(l, g, plan.Evaluation, unfunded, plan.MeanCapped, shareSkipWaits(us), now, tm)
@@ -1123,4 +1124,41 @@ func (e *Engine) holdFillTimeout(tm allocation.ShareTimings) time.Duration {
 		}
 	}
 	return tm.ReleaseTimeout
+}
+
+// reportSwinging logs each role of group key that starts, or stops, being
+// planned on its mean need (the swing rule, §6.7 rule 5). The rule holds a
+// short role below its reading for as long as it lasts -- before a swing
+// took three changes of direction, two models sat at 2:2 for eleven minutes
+// after a single swap back, the busy one past its threshold (issue #269) --
+// and only a gauge and a blocked reason said why. The line names the need each way, so the hold can be told from a
+// stall.
+func (st *utilizationShareState) reportSwinging(logger logr.Logger, key string, plan allocation.SharePlan, tm allocation.ShareTimings) {
+	was := st.swinging[key]
+	now := make(map[string]bool, len(plan.Swinging))
+	for _, role := range plan.Swinging {
+		now[role] = true
+		if was[role] {
+			continue
+		}
+		n := plan.SwingNeeds[role]
+		logger.Info("Utilization share: planned on its mean need -- its transfers changed direction three times within "+
+			"the flappingWindow -- until its need stays more than a quarter from that mean for longer than a move "+
+			"takes and than any earlier swing, or the window passes",
+			"role", role, "meanNeedGPUs", fmt.Sprintf("%.2f", n.Mean), "currentNeedGPUs", fmt.Sprintf("%.2f", n.Current),
+			"flappingWindow", tm.SwingWindow.String())
+	}
+	for _, role := range slices.Sorted(maps.Keys(was)) {
+		if !now[role] {
+			logger.Info("Utilization share: planned on its current need again", "role", role)
+		}
+	}
+	if len(now) == 0 {
+		delete(st.swinging, key)
+		return
+	}
+	if st.swinging == nil {
+		st.swinging = map[string]map[string]bool{}
+	}
+	st.swinging[key] = now
 }

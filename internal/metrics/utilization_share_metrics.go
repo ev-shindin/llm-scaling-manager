@@ -105,7 +105,7 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		append(slices.Clone(groupLabels), constants.LabelParam, constants.LabelSource))
 	utilizationShareSwinging = gauge(constants.WVAUtilizationShareSwinging,
 		"Utilization-share optimizer: 1 while a role is planned on its mean need because it reversed "+
-			"direction twice within the swing window. Published only while the optimizer acts.",
+			"direction three times within the swing window. Published only while the optimizer acts.",
 		roleLabels)
 	utilizationShareRelease = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    constants.WVAUtilizationShareReleaseSeconds,

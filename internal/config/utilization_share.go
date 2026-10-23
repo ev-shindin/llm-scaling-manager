@@ -160,8 +160,9 @@ type UtilizationShareStabilization struct {
 	// receive any, and one that received may not give: a Go duration ("12m")
 	// or "auto" (the default), twice the group's release time.
 	WaitBeforeReverseMove string `yaml:"waitBeforeReverseMove,omitempty"`
-	// FlappingWindow: a model whose moves change direction twice within it is
-	// planned on its average demand over the window, not its current one. A Go
+	// FlappingWindow: a model whose moves change direction three times within
+	// it (a transfer cancelled on a reversal counts as one) is planned on its
+	// average demand over the window, not its current one. A Go
 	// duration or "auto" (the default), eight times the time a move takes from
 	// decision to serving. "0s" turns the rule off.
 	FlappingWindow string `yaml:"flappingWindow,omitempty"`

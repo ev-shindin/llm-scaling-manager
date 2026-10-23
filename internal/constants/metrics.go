@@ -902,7 +902,7 @@ const (
 	// ScalingBlockedReversalHold indicates the role is short but gave GPUs
 	// within the reversal hold, so it may not receive yet (section 6.7 rule 4).
 	ScalingBlockedReversalHold = "reversal-hold"
-	// ScalingBlockedSwinging indicates the role reversed direction twice
+	// ScalingBlockedSwinging indicates the role reversed direction three times
 	// within the swing window and is planned on its mean need, not its
 	// current one (section 6.7 rule 5).
 	ScalingBlockedSwinging = "swinging"

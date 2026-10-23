@@ -201,7 +201,9 @@ B stayed under a second in every arm, and every request was served.
   transfer back started 16 minutes into A's burst, and landed after B's
   scale-down window.
 - Fixed now, not yet measured: a cancelled transfer removes exactly its own
-  recorded moves, so it holds neither model and counts toward no swing, and
+  recorded moves, so it holds neither model and counts toward no swing as a
+  move (since issue #269 the cancel itself is one of the three changes of
+  direction a swing takes), and
   it holds only that donor -> receiver pair from starting again
   ([proposal §6.3](../../proposals/utilization-share-optimizer.md#63-execute-scale-down-first-scale-up-into-released-gpus)).
   The first attempt at this fix, in the image of the rerun below, restored a

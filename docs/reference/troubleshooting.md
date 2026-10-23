@@ -1402,8 +1402,17 @@ Work down the list in order.
      scale-down, and goes no lower.
 7. **Is it swinging, paced, or at the transfer limit?** Blocked reasons:
    - `swinging` (`wva_utilization_share_swinging == 1`): the role reversed
-     direction twice within the swing window and is planned on its mean need,
-     so it may look short and still not receive.
+     direction three times within the swing window (a transfer called off
+     on a reversal counts as one) and is planned on its mean need, so it may
+     look short and still not receive. The controller logs
+     `Utilization share: planned on its mean need` with the role,
+     `meanNeedGPUs`, `currentNeedGPUs` and the `flappingWindow` when the rule
+     takes a role, and `planned on its current need again` when it lets go.
+     Two models that swap loads and swap back once are not a swing: the swap
+     back follows current demand. A load that swaps a second time within the
+     window is: the move that follows waits until the busy model's mean
+     catches up, or its need has stayed high for longer than the earlier
+     halves did. A shorter `stabilization.flappingWindow` shortens this.
    - `transfer-limit`: the group already runs two transfers with a donor;
      clears as they land.
    - `burst-ending`: the role is short with a hard imbalance, but its model's

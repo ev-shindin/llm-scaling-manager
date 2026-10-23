@@ -348,7 +348,7 @@ working as documented:
   `stabilization.skipWaitsWhen`), which no run has measured yet. A model whose
   long-output burst just ended is usually not that lightly loaded, so the hold
   can still bite.
-- A role that reverses direction twice within the swing window is planned on its
+- A role that reverses direction three times within the swing window is planned on its
   mean need, and shows `swinging`.
 
 To measure the slow-swing case the optimizer is built for, raise `PHASE_SECONDS`
