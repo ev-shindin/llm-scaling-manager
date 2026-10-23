@@ -124,6 +124,12 @@ on half the picture.
    rate condition? Strict costs calibration opportunities on fleets that rarely
    queue; loose re-admits the degenerate-sample failure, permanently, under a
    running minimum.
+   Resolved for the queue-depth path: a reading whose queue is larger than the
+   replica's whole resident batch is admitted only when its service rate has
+   reached the rate on record, or when the queue stood the previous cycle and
+   the residency stopped rising (`k2_settle.go`, `P1-obs-unsettled`). Measured
+   cause: a load step's first reading, 31 713 tokens under a queue of 160,
+   pulled a 270 539 window to 151 126.
 3. **Relaxation policy.** How does a bucket minimum ever move up when a workload
    genuinely gets cheaper? Slow age-based relaxation is the proposal; the rate and
    its interaction with the SLO asymmetry need choosing deliberately.

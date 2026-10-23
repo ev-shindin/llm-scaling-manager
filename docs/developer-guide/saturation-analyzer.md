@@ -134,6 +134,27 @@ its ranks'. See
 k2's persistence is deliberate and load-bearing — see
 [analyzer-evidence.md](analyzer-evidence.md).
 
+Because a recorded k2 persists, the observed priority admits a reading only
+when it is a replica at its limit (`k2Unsettled` in `k2_settle.go`, the strict
+admission `docs/plans/analyzers/k2-capacity-model.md` calls for). A reading is
+suspect when the busiest rank's queue, at the request's footprint, is larger
+than everything the rank holds:
+
+```
+suspect  = queue x (I [+ O unless prefill]) > tokens / ranks
+admitted = !suspect
+        || rate >= K2SettleRateFraction x rateOnRecord              // 0.7
+        || (queued last cycle, within K2SettleMaxGap = 2m,
+            and tokens <= (1 + K2SettleMaxRise) x tokens last cycle) // 0.25
+```
+
+`rate` is the replica's own `saturatedCompletionRate`; `rateOnRecord` is the
+bucket's measured saturated throughput, read without touching the window, or
+the derived mu. A refused reading logs `P1-obs-unsettled` and writes neither
+the k2 window nor the throughput window. The per-replica readings live in
+`k2Settle`, one memo per `namespace|model`, swept beside `hotRankHeld`. A
+refusal can only keep k2 where it was; nothing here raises a recorded k2.
+
 ### Which bound applies
 
 ```
@@ -308,6 +329,20 @@ mu_prefill = rm.PrefillComputedTokenRate / ILeff
 `PrefillComputedTokenRate` is **summed** across a pod's engines, not averaged:
 each computes part of the prefill and their rates add.
 
+The window (`recordSaturatedThroughputFrom`) takes one sample per
+`ThroughputSampleSpacing`. Readings inside the spacing fold into the last
+sample: by their **max** for re-reads of one replica (the same rate window read
+again) and by their **lower median** across replicas (independent readings,
+`throughputPodReads`). Only replicas that are themselves admitted saturated
+readings (`P1-obs`, after the settle test) read into a sample at all, so on a
+fleet the router loads unevenly the idle replicas neither enter nor dilute it
+(`TestMeasuredMuAndK2_IgnoreTheIdleReplicasOfAnImbalancedFleet`: 1 of 4
+saturated learns the balanced fleet's mu and k2). With a max across replicas the sample was the hottest of
+N readings, and the window's median rose with the number of saturated replicas:
+with 6 % reading noise on a true 6.0 req/s, +5.4 % at one replica and +13.6 %
+at sixteen. Per replica it stays at the one-replica +5.4-5.5 % at any size
+(`TestMeasuredMu_DoesNotGrowWithTheSaturatedFleet`).
+
 ## Demand
 
 Two sources, added.
@@ -348,6 +383,14 @@ role's hit rate, because prefill is where the prefix cache lives.
 reporting none, so a cold fleet does not price its queue at zero — `mu` divides
 by `avgOutput`, and a fleet that has completed nothing would otherwise divide by
 zero and emit no floor at all, in the one window the projection exists for.
+
+With no replica reporting a shape at all (parked at zero, or Ready without
+engine series), `estimateSchedulerQueueDemandAt` falls back for each half on
+its own: `avgInput` to the fleet's tracked prompt length (`stableInput`; the
+bytes still win when larger) and `avgOutput` to the same expected output
+length, unless prefill is the only active role. Before, 100 queued requests
+were worth 0, 100 000 or 51 200 tokens depending on whether there were zero
+replicas or one without series and whether the queue reported bytes.
 
 ## Aggregation
 
@@ -392,6 +435,7 @@ role from arrival rate and backlog instead. Per role:
 
 ```
 cost   = median over the role's own replicas of (P / mu)   // tokens per unit arrival rate
+         x scaleUp for a derived mu                        // replicaCost
 mu     = median over the role's own mus
 horizon = max(drainSeconds, startSeconds[role])            // BacklogDrainSeconds = 60
 b      = backlogAtLanding(observed, lambda, mu, startSeconds, ready, starting)
@@ -401,6 +445,17 @@ replicasImplied = rate / mu
 ```
 
 Medians, not maxima: one replica draining a batch must not set the role's price.
+
+The `x scaleUp` on a derived mu is not extra headroom; it removes a second
+copy. The engine scales out at `scaleUp` of what a replica is worth
+(`RC = D / scaleUp - anticipated`). A measured mu is the rate at saturation, so
+one `scaleUp` is right for it. A derived mu is already the rate at `kPrice`,
+the target fill, so the engine's division applied the headroom twice: on the
+defaults the floor scaled out at 85 % of the rate at 0.68 fill, which with
+throughput concave in fill is about 0.32 fill (97 sequences on the run that
+found it, against 205 at 0.68). With the factor, a replica at `kPrice` serving
+`mu` arrivals reads `RC = 0` from occupancy and from the floor alike
+(`TestThroughputFloor_AgreesWithOccupancyAtTheTarget`).
 
 The projection is what makes a backlog an *order* rather than a residency:
 
@@ -460,6 +515,15 @@ shape cannot price another:
 
 Prefill is keyed `prefillOutputBucket = "noout"` instead: it emits about one
 token per request, so its output length is not a property of its work.
+
+The k2 history is keyed the same way (`k2KeyOutput` in `keys.go`): by the
+fleet's **tracked** output length, which moves only when the shape changes by
+more than `DefaultChangeTolerance`, not by the replica's own average. A
+workload at `max_tokens=500` reads per-replica averages of 482-582 and, keyed
+on those, alternated between the `medium` and `long` windows cycle by cycle,
+each holding a different k2 (260 622 and 187 458 on the run that showed it).
+Prefill keeps its own average, which is always `short`. The key strings are
+unchanged, so stored windows are still found.
 
 ## Constants
 

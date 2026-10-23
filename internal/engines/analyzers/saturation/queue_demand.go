@@ -293,6 +293,36 @@ func estimateSchedulerQueueDemand(
 	activeRoles map[string]bool,
 	prefillHitRate float64,
 ) schedulerQueueDemand {
+	return estimateSchedulerQueueDemandAt(sq, replicaMetrics, rolesByVariant, activeRoles, prefillHitRate, queueShape{})
+}
+
+// queueShape is the request shape a scheduler queue is priced at when no
+// replica reports one: the prompt and output lengths the fleet last knew,
+// or was told (estimateSchedulerQueueDemandAt).
+type queueShape struct{ input, output float64 }
+
+// estimateSchedulerQueueDemandAt is estimateSchedulerQueueDemand with a
+// fallback shape for a queue no replica can price.
+//
+// The replicas are where the shape comes from, and with none reporting --
+// parked at zero, or Ready with no engine series yet -- the same queue was
+// priced three ways: zero replicas and no bytes at 0 tokens, zero replicas
+// with bytes at the prompt alone, and one replica without series at the
+// output alone (withExpectedOutputTokens fills the output on rows, and with
+// no rows there is nothing to fill). A queue of 100 requests was worth 0,
+// 100 000 or 51 200 tokens depending on which. Each half now falls back on
+// its own: the prompt to the fleet's tracked prompt length (the bytes still
+// win when larger), and the output to the expected output length, so the
+// three price the same queue the same way. The output fallback is not taken
+// for a fleet whose only active role is prefill, which generates nothing.
+func estimateSchedulerQueueDemandAt(
+	sq *domain.SchedulerQueueMetrics,
+	replicaMetrics []domain.ReplicaMetrics,
+	rolesByVariant map[string]string,
+	activeRoles map[string]bool,
+	prefillHitRate float64,
+	fallback queueShape,
+) schedulerQueueDemand {
 	if sq == nil || (sq.QueueSize == 0 && sq.QueueBytes == 0) {
 		return schedulerQueueDemand{}
 	}
@@ -302,6 +332,13 @@ func estimateSchedulerQueueDemand(
 	// computeModelWorkloadAverages): a prefill replica's ~1 must not dilute the
 	// per-request charge below.
 	avgInput, avgOutput, avgHitRate := computeModelWorkloadAverages(replicaMetrics, rolesByVariant)
+	if !(avgInput > 0) && fallback.input > 0 {
+		avgInput = fallback.input
+	}
+	generating := len(activeRoles) == 0 || activeRoles[domain.RoleDecode] || activeRoles[domain.RoleBoth] || activeRoles[""]
+	if !(avgOutput > 0) && fallback.output > 0 && generating {
+		avgOutput = fallback.output
+	}
 
 	// Estimate input tokens from two signals, take the max for robustness
 	tokensFromBytes := float64(sq.QueueBytes) / BytesPerToken

@@ -135,6 +135,13 @@ figure is a **floor** under the occupancy demand: it only ever raises demand.
 mu is measured per request shape, so a shape change re-prices the fleet with no
 threshold re-tuned. This catches a shape change before a queue forms.
 
+On a decode role mu can also be computed from the replica's inter-token latency
+line, for a shape it has not yet run saturated. That figure is the rate at the
+fill the autoscaler targets (`kvCacheThreshold x scaleUpThreshold` of the KV
+cache, 0.68 on the defaults), not at saturation, so the floor does not apply
+the `scaleUpThreshold` headroom to it again: a replica at the target fill,
+serving exactly that rate, is "full" to the floor and to occupancy alike.
+
 Three rules keep it honest. Each was learned from a measured mistake; the runs
 are in [analyzer evidence](../developer-guide/analyzer-evidence.md):
 
@@ -150,7 +157,10 @@ are in [analyzer evidence](../developer-guide/analyzer-evidence.md):
 - **A backlog is work to drain, not residency.** `B` queued requests are priced
   as `B / 60s` extra arrivals on top of `lambda`, not as `B` requests resident
   at once. Pricing them as resident sized fleets for queues that were gone
-  before the replicas arrived. Prefill's share of the scheduler queue is dropped:
+  before the replicas arrived. This can lower the demand, so it is done only
+  when the floor may order on its mu and the arrival rate accounts for what the
+  replicas already hold; in the first minute of a load step the arrival rate
+  still reads the minute before, and the queue keeps its full charge. Prefill's share of the scheduler queue is dropped:
   more prefill replicas do not fix a full decode.
 
 **Prefill's mu without a prefill saturation.** On a P/D model prefill rarely

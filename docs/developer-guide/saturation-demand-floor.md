@@ -51,7 +51,16 @@ so each must keep up with all of it), and on the total otherwise.
   `lambda`.
 - For a role with a `mu`, the queues enter the model this way, and their
   residency charge (every queued request at its full KV footprint, as if all
-  were resident at once) comes out.
+  were resident at once) comes out -- but only where the floor's figure can
+  carry the queue: the term may order (`mayOrder`), is not held, and its
+  arrival half `lambda x P / mu` accounts for at least `FloorLagFraction`
+  (0.5) of the resident KV. Elsewhere `demand = max(measured, floor)`. What is
+  resident arrived within one residence time, so the resident KV implies an
+  arrival rate of about `resident x mu / P`; a `lambda` well under it is a
+  `[1m]` rate still reading the minute before a load step. Measured on the
+  two-namespace rerun (2026-10-23, 11:20:09): `lambda` 0.8 req/s with 160
+  queued cut 499 446 to the 260 123 resident, and the analyzer's `rc` fell
+  312 936 -> 47 265 in one cycle.
 - A role with no `mu` keeps the residency charge, except prefill's share of the
   scheduler queue, which is dropped. A prefill replica holds a prompt for its
   prefill time plus the hand-off. Only a saturated decode makes it hold longer,

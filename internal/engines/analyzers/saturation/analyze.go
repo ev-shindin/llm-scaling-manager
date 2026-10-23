@@ -644,8 +644,12 @@ func (c *cycle) priceDemand(caps []capacity.ReplicaCapacity) demandParts {
 	// idle period; the rest is configuration.
 	expectedOutput := c.cfg.ExpectedOutputTokens(c.fleetOutput, c.stableOutput, DefaultExpectedOutputTokens)
 	queueMetrics := withExpectedOutputTokens(c.input.ReplicaMetrics, c.rolesByVariant, expectedOutput)
-	queueDemand := estimateSchedulerQueueDemand(c.input.SchedulerQueue, queueMetrics,
-		c.rolesByVariant, activeRoles, c.fleetHitRate)
+	// With no replica reporting a shape at all, both halves fall back: the
+	// output as above, the prompt to what the fleet last knew
+	// (estimateSchedulerQueueDemandAt).
+	queueDemand := estimateSchedulerQueueDemandAt(c.input.SchedulerQueue, queueMetrics,
+		c.rolesByVariant, activeRoles, c.fleetHitRate,
+		queueShape{input: c.stableInput, output: expectedOutput})
 	total += queueDemand.total
 	if c.input.SchedulerQueue != nil {
 		c.logger.Info("scheduler-queue-demand",
