@@ -193,14 +193,14 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 	metrics.SetReplicaStartSecondsEstimate(namespace, variantName, est, measured)
 	for _, o := range rejected {
 		logger.V(logging.DEFAULT).Info("replica-start-outlier-rejected",
-			"variant", variantName, "pod", o.pod,
+			"namespace", namespace, "variant", variantName, "pod", o.pod,
 			"sampleSeconds", o.sample, "estimateSeconds", o.against,
 			"factor", maxStartOutlierFactor,
 			"reason", "the Ready condition re-transitions, so a probe blip reports the pod's age")
 	}
 	if observed > 0 {
 		logger.V(logging.DEFAULT).Info("replica-start-measured",
-			"variant", variantName, "observations", observed,
+			"namespace", namespace, "variant", variantName, "observations", observed,
 			"estimateSeconds", est, "source", startSource(measured))
 	}
 }

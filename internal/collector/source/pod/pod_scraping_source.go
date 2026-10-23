@@ -32,6 +32,11 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
+// ErrNoReadyPods is returned, wrapped, by Refresh when the service selects no
+// Ready pod: every pod NotReady, or no pod at all. Nothing was scraped, so the
+// answer is unknown rather than empty.
+var ErrNoReadyPods = errors.New("no Ready pods to scrape")
+
 // PodScrapingSource implements MetricsSource for direct pod scraping.
 type PodScrapingSource struct {
 	config     PodScrapingSourceConfig
@@ -48,6 +53,10 @@ type PodScrapingSource struct {
 	// cleared when the file yields a token again, so each empty spell is
 	// logged once rather than on every scrape.
 	emptyTokenLogged atomic.Bool
+	// allFailing is set while every Ready pod's scrape fails, so the change into
+	// and out of that state is logged once instead of once per pod per scrape.
+	// Guarded by mu: only Refresh, which holds it, reads or writes it.
+	allFailing bool
 }
 
 // NewPodScrapingSource creates a new PodScrapingSource for an InferencePool.
@@ -119,7 +128,9 @@ func (p *PodScrapingSource) Close() {
 }
 
 // Refresh executes queries and updates the cache.
-// Called by engine/reconciler on-demand.
+// Called by engine/reconciler on-demand. It returns an error when there is no
+// Ready pod (ErrNoReadyPods) or when none of the Ready pods could be scraped; a
+// partial failure returns the pods that answered and a nil error.
 func (p *PodScrapingSource) Refresh(ctx context.Context, spec source.RefreshSpec) (map[string]*source.MetricResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -132,19 +143,51 @@ func (p *PodScrapingSource) Refresh(ctx context.Context, spec source.RefreshSpec
 		return nil, fmt.Errorf("failed to discover pods: %w", err)
 	}
 
+	// No Ready pod is a failure to look too: an EPP in a crash loop, mid
+	// rollout, or scaled to zero. This used to return an empty answer with a nil
+	// error, which the scale-from-zero engine read as "the EPP exports no
+	// queue" and so never engaged its Prometheus fallback. The all-failing
+	// state is cleared without a line: there were no pods to fail, so the next
+	// all-failing spell is a new one and is logged again.
 	if len(pods) == 0 {
-		logger.V(logging.DEBUG).Info("No ready pods found for scraping")
-		return map[string]*source.MetricResult{
-			"all_metrics": {
-				QueryName:   "all_metrics",
-				Values:      []source.MetricValue{},
-				CollectedAt: time.Now(),
-			},
-		}, nil
+		p.allFailing = false
+		logger.V(logging.DEBUG).Info("No ready pods found for scraping",
+			"namespace", p.config.ServiceNamespace, "service", p.config.ServiceName)
+		return nil, fmt.Errorf("service %s/%s: %w",
+			p.config.ServiceNamespace, p.config.ServiceName, ErrNoReadyPods)
 	}
 
 	// Scrape all pods concurrently
-	results := p.scrapeAllPods(ctx, pods)
+	results, firstErr := p.scrapeAllPods(ctx, pods)
+
+	// Every pod failed: that is a failure to look, not an empty answer. An
+	// empty aggregate with a nil error read as "the EPP exports nothing", so the
+	// scale-from-zero engine never engaged its Prometheus fallback and reported
+	// no-wake-signal for an EPP that was answering 401 or 500. The cache keeps
+	// its last good answer rather than being overwritten with nothing.
+	if len(results) == 0 {
+		err := fmt.Errorf("scrape of every Ready pod (%d) of service %s/%s failed: %w",
+			len(pods), p.config.ServiceNamespace, p.config.ServiceName, firstErr)
+		// A cancelled or expired context fails every scrape too, at shutdown or
+		// when the caller gave up. That is not an EPP outage: no line, and the
+		// state is left as it was.
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		if !p.allFailing {
+			p.allFailing = true
+			p.log.Info("EPP metrics scrape failing on every pod; logged once until a scrape succeeds",
+				"namespace", p.config.ServiceNamespace, "service", p.config.ServiceName,
+				"pods", len(pods), "error", firstErr)
+		}
+		return nil, err
+	}
+	if p.allFailing {
+		p.allFailing = false
+		p.log.Info("EPP metrics scrape recovered",
+			"namespace", p.config.ServiceNamespace, "service", p.config.ServiceName,
+			"pods", len(pods), "succeeded", len(results))
+	}
 
 	// Aggregate results
 	aggregated := p.aggregateResults(results)
@@ -238,19 +281,22 @@ func isPodReady(pod *corev1.Pod) bool {
 	return false
 }
 
-// scrapeAllPods scrapes metrics from all pods concurrently.
-func (p *PodScrapingSource) scrapeAllPods(ctx context.Context, pods []*corev1.Pod) map[string]*source.MetricResult {
+// scrapeAllPods scrapes metrics from all pods concurrently. It returns the
+// results of the pods that answered and the error of the first pod, in pods
+// order, that did not; the error is nil when none failed.
+func (p *PodScrapingSource) scrapeAllPods(ctx context.Context, pods []*corev1.Pod) (map[string]*source.MetricResult, error) {
 	logger := ctrl.LoggerFrom(ctx)
 	results := make(map[string]*source.MetricResult)
+	errs := make([]error, len(pods))
 	var resultsMu sync.Mutex
 
 	// Semaphore for concurrency control
 	sem := make(chan struct{}, p.config.MaxConcurrentScrapes)
 	var wg sync.WaitGroup
 
-	for _, pod := range pods {
+	for i, pod := range pods {
 		wg.Add(1)
-		go func(pod *corev1.Pod) {
+		go func(i int, pod *corev1.Pod) {
 			defer wg.Done()
 
 			sem <- struct{}{}        // Acquire
@@ -259,20 +305,30 @@ func (p *PodScrapingSource) scrapeAllPods(ctx context.Context, pods []*corev1.Po
 			result, err := p.scrapePodMetrics(ctx, pod)
 			if err != nil {
 				errorType := "Failed to scrape pod"
-				logger.V(logging.VERBOSE).Error(err, errorType,
-					"pod", pod.Name)
+				// Info, not Error: logr ignores V() on Error, so this printed an
+				// ERROR per pod per scrape at the default level. Refresh logs the
+				// all-pods-failing state once per change at the default level,
+				// and the collector error counter below counts every failure.
+				logger.V(logging.VERBOSE).Info(errorType,
+					"namespace", pod.Namespace, "pod", pod.Name, "error", err)
 				metrics.RecordError(constants.ComponentCollector, errorType)
+				errs[i] = err // each goroutine owns its own index
 				return
 			}
 
 			resultsMu.Lock()
 			results[pod.Name] = result
 			resultsMu.Unlock()
-		}(pod)
+		}(i, pod)
 	}
 
 	wg.Wait()
-	return results
+	for _, err := range errs {
+		if err != nil {
+			return results, err
+		}
+	}
+	return results, nil
 }
 
 // scrapePodMetrics scrapes metrics from a single pod.

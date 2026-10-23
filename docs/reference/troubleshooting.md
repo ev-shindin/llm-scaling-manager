@@ -154,7 +154,9 @@ With no such line and no such reason, work through these in order. Do not run
    kubectl get svc -n <ns> | grep epp
    ```
    A model with no queue metric at all shows
-   `wva_model_scaling_blocked{reason="no-wake-signal"}`. Enable the EPP's
+   `wva_model_scaling_blocked{reason="no-wake-signal"}`. That reason means the
+   EPP answered without the metric; an EPP that cannot be scraped, or has no
+   Ready pod, does not set it (see [the EPP scrape is failing](#the-epp-scrape-is-failing-but-the-scaling-manager-still-wakes-models-slowly)). Enable the EPP's
    `flowControl` feature gate, then restart the EPP: it reads its config once
    at start.
 
@@ -186,6 +188,26 @@ interval — fix the direct path.
 ```
 
 and `wva_scale_from_zero_queue_fallback_active{pool="..."}` is `1`.
+
+The scrape failure itself is logged once, when every EPP pod starts failing:
+
+```text
+EPP metrics scrape failing on every pod; logged once until a scrape succeeds
+  {"namespace": "<ns>", "service": "<epp-service>", "pods": 2, "error": "pod <epp-pod> returned status 401"}
+```
+
+`EPP metrics scrape recovered` follows once a scrape succeeds again. The
+per-pod line, `Failed to scrape pod` with `namespace`, `pod` and `error`, is
+logged only at `-v=3`. The fallback needs every pod to fail: while one EPP pod
+still answers, the scaling manager reads the queue from that pod.
+
+An EPP with no Ready pod (crash loop, rollout, readiness probe failing, or
+scaled to zero) also counts as a failed scrape, and the fallback engages the
+same way. There is no once-per-change line for it; `kubectl get pods -n <ns>`
+on the EPP shows it. With no EPP serving, the queue in Prometheus is the last
+one the EPP reported, so a model can wake on demand up to 90 s old. That is
+deliberate: a wrong wake costs one replica until scale to zero parks it again,
+and a missed wake parks a model with real demand for as long as the EPP is down.
 
 **What it means**: the scaling manager reads the flow-control queue by scraping
 the EPP pod **directly** (pod IP, EPP metrics port, bearer token projected at

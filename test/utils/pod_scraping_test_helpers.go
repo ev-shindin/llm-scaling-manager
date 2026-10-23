@@ -285,7 +285,11 @@ func TestPodScrapingCaching(ctx context.Context, config PodScrapingTestConfig, g
 	})
 
 	cached := source.Get("all_metrics", nil)
-	g.Expect(cached).NotTo(gom.BeNil(), "Cached result should exist")
+	// A Refresh that fails on every pod returns an error and leaves the cache
+	// as it was, so on a first refresh there is nothing cached to expect.
+	if err == nil {
+		g.Expect(cached).NotTo(gom.BeNil(), "Cached result should exist")
+	}
 
 	if err == nil && cached != nil && len(cached.Result.Values) > 0 {
 		g.Expect(cached.Result.Values).NotTo(gom.BeEmpty(), "Cached result should have values")

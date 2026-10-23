@@ -34,6 +34,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source/pod"
 	poolreconciler "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/controller"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/datastore"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
@@ -322,8 +323,10 @@ func TestMultipleInactiveVariants(t *testing.T) {
 
 	// Run optimize - it should handle multiple VAs concurrently
 	err = engine.optimize(ctx)
-	// No error expected when EPP metrics source is not set up (it just skips processing)
-	assert.NoError(t, err)
+	// The EPP Service selects no pod, so the queue could not be read: that is
+	// an error for each model, not an empty queue. This used to assert no
+	// error, which was the answer that kept the Prometheus fallback off.
+	require.ErrorIs(t, err, pod.ErrNoReadyPods)
 }
 
 func TestEmptyInactiveVariants(t *testing.T) {
