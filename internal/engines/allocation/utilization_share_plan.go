@@ -911,7 +911,7 @@ func (p *sharePlanRun) cancelReversals() {
 		if t.State != ShareReleasing || now.Sub(t.Started) >= tm.Window {
 			continue
 		}
-		dn := p.byKey[t.Donor]
+		dn, planned := p.byKey[t.Donor]
 		donorAfter := p.committed[t.Donor] // already net of this transfer
 		// A reversal is judged against both targets: the continuous one, for
 		// its band, and the whole-replica one, which admission started the
@@ -919,7 +919,21 @@ func (p *sharePlanRun) cancelReversals() {
 		// GPUs, the whole-replica targets by what the GPUs serve; judged on
 		// the first alone, a move the second had just started was cancelled
 		// the next cycle, and started again.
-		donorShort := float64(donorAfter) < p.cont[t.Donor]-2*shareTol(p.cont[t.Donor], dn, in.Tolerance) &&
+		//
+		// Twice the band below, or more, not strictly more: the band is at
+		// least half a replica, so twice it is a whole one, and a donor one
+		// whole replica short wants back exactly the replica it is giving --
+		// the move reversed. Strictly more, a one-replica move was never
+		// called off on its donor: measured, a busy model that read no demand
+		// for two cycles as its load generator was swapped started giving a
+		// replica to an idle one, wanted it back 15s later, and lost it six
+		// minutes later, when its scale-down window let the pod go.
+		//
+		// Only a donor planned this cycle is judged: one out of the group --
+		// frozen, or not collected -- has no target, and what it holds reads
+		// as zero, net of its transfer below it.
+		donorShort := planned &&
+			float64(donorAfter) <= p.cont[t.Donor]-2*shareTol(p.cont[t.Donor], dn, in.Tolerance)+shareCancelSlack &&
 			donorAfter < p.integ[t.Donor]
 		// A returned spare is called off, while it is free, when its role's
 		// demand came back: the GPUs would otherwise drain from it only for
@@ -945,7 +959,15 @@ func (p *sharePlanRun) cancelReversals() {
 		receiverWithout := p.committed[t.Receiver] - t.GPUs
 		receiverFine := float64(receiverWithout) > p.cont[t.Receiver]+shareTol(p.cont[t.Receiver], rc, in.Tolerance) &&
 			receiverWithout >= p.integ[t.Receiver]
-		if (donorShort || receiverFine) && l.Cancel(t.ID, now, tm) {
+		// Called off for the donor, the cancel is a turn of the donor's own
+		// demand, a change of direction at its second turn inside the swing
+		// window (CancelDonorBack); for the receiver, the move it would have
+		// made.
+		cancel := l.Cancel
+		if donorShort {
+			cancel = l.CancelDonorBack
+		}
+		if (donorShort || receiverFine) && cancel(t.ID, now, tm) {
 			p.plan.Cancelled = append(p.plan.Cancelled, t.ID)
 			// A set's contributors go with its primary, while they still can.
 			if t.IsSetPrimary() {
@@ -1551,6 +1573,11 @@ func (rule shareSetRule) donor(r ShareRole) ShareRole {
 	}
 	return rule.donorNeed(r)
 }
+
+// shareCancelSlack absorbs floating-point error when a donor's shortfall is
+// compared with a whole number of replicas: a continuous target of exactly 3
+// can arrive as 2.9999999999999996.
+const shareCancelSlack = 1e-9
 
 // shareTol is a role's band half-width in GPUs at target (proposal §6.1): the
 // configured tolerance of the target, never under half a replica.
