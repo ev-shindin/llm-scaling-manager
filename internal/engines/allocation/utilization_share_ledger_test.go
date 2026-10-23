@@ -149,7 +149,7 @@ var _ = Describe("ShareLedger", func() {
 		Expect(l.GivingHeld("B", at(30), tm)).To(BeFalse())
 	})
 
-	It("marks a role swinging after two direction changes and plans it on its mean need", func() {
+	It("marks a role swinging after three direction changes and plans it on its mean need", func() {
 		l := NewShareLedger()
 		held := map[string]int{"A": 9, "B": 5}
 		for i, need := range []float64{4, 6, 8} {
@@ -159,10 +159,108 @@ var _ = Describe("ShareLedger", func() {
 		l.Start(ShareTransfer{Donor: "B", Receiver: "A", GPUs: 1}, held, at(900), tm) // A receives: one flip
 		Expect(l.Swinging("A", at(900))).To(BeFalse())
 		l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 1}, held, at(1800), tm) // A gives: two flips
-		Expect(l.Swinging("A", at(1800))).To(BeTrue())
-		Expect(l.PlanningNeed("A", 99, at(1800))).To(BeNumerically("~", 6, 1e-9))
-		Expect(l.PlanningNeed("B", 99, at(1800))).To(Equal(99.0), "B flipped too, but has no recorded need")
-		Expect(l.Swinging("A", at(1800).Add(tm.SwingWindow))).To(BeFalse())
+		Expect(l.Swinging("A", at(1800))).To(BeFalse(), "a load that went and came back once is no swing")
+		l.Start(ShareTransfer{Donor: "B", Receiver: "A", GPUs: 1}, held, at(2700), tm) // A receives: three flips
+		Expect(l.Swinging("A", at(2700))).To(BeTrue())
+		Expect(l.PlanningNeed("A", 99, at(2700))).To(BeNumerically("~", 6, 1e-9))
+		Expect(l.PlanningNeed("B", 99, at(2700))).To(Equal(99.0), "B flipped too, but has no recorded need")
+		Expect(l.Swinging("A", at(2700).Add(tm.SwingWindow))).To(BeFalse())
+	})
+
+	It("counts flips only within the swing window", func() {
+		l := NewShareLedger()
+		held := map[string]int{"A": 9, "B": 5}
+		gap := int(tm.SwingWindow/time.Second) / 2
+		for i := range 4 {
+			d, r := "A", "B"
+			if i%2 == 1 {
+				d, r = r, d
+			}
+			// Each move more than half a window after the last: three flips
+			// in all, never three within one window.
+			l.Start(ShareTransfer{Donor: d, Receiver: r, GPUs: 1}, held, at(i*(gap+60)), tm)
+		}
+		Expect(l.Swinging("A", at(3*(gap+60)))).To(BeFalse())
+	})
+
+	It("counts a cancel toward a swing as the move it would have made", func() {
+		l := NewShareLedger()
+		held := map[string]int{"A": 9, "B": 5}
+		l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 1}, held, at(0), tm)   // A gives
+		l.Start(ShareTransfer{Donor: "B", Receiver: "A", GPUs: 1}, held, at(900), tm) // A receives: one flip
+		// Two transfers called off in one cycle -- a set's contributors go
+		// with its primary -- are one attempted give, one change of
+		// direction: two in all.
+		c1 := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 1}, held, at(1800), tm)
+		c2 := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 1}, held, at(1800), tm)
+		l.ConfirmStarted(c1.ID, nil)
+		l.ConfirmStarted(c2.ID, nil)
+		Expect(l.Cancel(c1.ID, at(1860), tm)).To(BeTrue())
+		Expect(l.Cancel(c2.ID, at(1860), tm)).To(BeTrue())
+		Expect(l.Swinging("A", at(1860))).To(BeFalse())
+		c := l.Start(ShareTransfer{Donor: "B", Receiver: "A", GPUs: 1}, held, at(2400), tm)
+		l.ConfirmStarted(c.ID, nil)
+		Expect(l.Cancel(c.ID, at(2460), tm)).To(BeTrue()) // three
+		Expect(l.Swinging("A", at(2460))).To(BeTrue())
+		Expect(l.Swinging("A", at(2460).Add(tm.SwingWindow))).To(BeFalse())
+	})
+
+	// A spare return (Entitled) records no move: it trades no GPU with
+	// another role. Counted when called off -- as a bursty role's load came
+	// back inside its scale-down window -- three such cancels made a role
+	// swinging that never gave to or received from anyone, and held its next
+	// swap back on its mean for 28 minutes against 8m30s.
+	It("does not count a cancelled spare return toward a swing", func() {
+		l := NewShareLedger()
+		held := map[string]int{"A": 24, "B": 8}
+		for i := range 3 {
+			s := i * 600
+			r := l.Start(ShareTransfer{Donor: "A", DonorGPUs: 8, GPUs: 8, Entitled: true, Returned: true}, held, at(s), tm)
+			l.ConfirmStarted(r.ID, nil)
+			Expect(l.Cancel(r.ID, at(s+120), tm)).To(BeTrue())
+		}
+		Expect(l.Swinging("A", at(1320))).To(BeFalse())
+	})
+
+	// A cancel is a change of direction only when it reverses the move
+	// before it. Counted as one whatever its direction, a single swap back
+	// with one transfer of the first swap called off was a swing, and so was
+	// one real reversal after two called-off gives.
+	It("counts a cancel as a change of direction only when it reverses the move before it", func() {
+		By("raise, swap with one transfer called off, swap back: two changes")
+		l := NewShareLedger()
+		held := map[string]int{"A": 16, "B": 16}
+		l.Start(ShareTransfer{Donor: "B", Receiver: "A", GPUs: 8}, held, at(0), tm)    // A raised
+		l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 8}, held, at(1500), tm) // load to B: A gives
+		c := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 8}, held, at(1620), tm)
+		l.ConfirmStarted(c.ID, nil)
+		// A wobble: A's second give is called off.
+		Expect(l.Cancel(c.ID, at(1680), tm)).To(BeTrue())
+		// The swap back: A receives.
+		l.Start(ShareTransfer{Donor: "B", Receiver: "A", GPUs: 8}, held, at(3000), tm)
+		Expect(l.Swinging("A", at(3000))).To(BeFalse())
+		Expect(l.Swinging("B", at(3000))).To(BeFalse())
+
+		By("two called-off gives, then one real reversal: one change")
+		l = NewShareLedger()
+		held = map[string]int{"A": 24, "B": 8, "C": 8}
+		l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 8}, held, at(0), tm)
+		for _, s := range []int{300, 900} {
+			c := l.Start(ShareTransfer{Donor: "A", Receiver: "C", GPUs: 8}, held, at(s), tm)
+			l.ConfirmStarted(c.ID, nil)
+			Expect(l.Cancel(c.ID, at(s+60), tm)).To(BeTrue())
+		}
+		l.Start(ShareTransfer{Donor: "B", Receiver: "A", GPUs: 8}, held, at(1800), tm)
+		Expect(l.Swinging("A", at(1800))).To(BeFalse())
+
+		By("control: a called-off receive between them reverses both ways")
+		c = l.Start(ShareTransfer{Donor: "A", Receiver: "C", GPUs: 8}, held, at(2400), tm)
+		l.ConfirmStarted(c.ID, nil)
+		Expect(l.Cancel(c.ID, at(2460), tm)).To(BeTrue()) // A gives after receiving: two
+		c = l.Start(ShareTransfer{Donor: "C", Receiver: "A", GPUs: 8}, held, at(2700), tm)
+		l.ConfirmStarted(c.ID, nil)
+		Expect(l.Cancel(c.ID, at(2760), tm)).To(BeTrue()) // and receives again: three
+		Expect(l.Swinging("A", at(2760))).To(BeTrue())
 	})
 
 	It("counts consecutive actionable cycles and resets on a miss", func() {

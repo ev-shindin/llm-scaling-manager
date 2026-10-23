@@ -30,8 +30,10 @@ func TestShareSkipWaitsComesFromThePolicy(t *testing.T) {
 
 // waitBeforeReverseMove and flappingWindow replace the derived timings, and
 // the published source says the policy set them; "auto" leaves them derived.
+// swingReversals reaches the ledger as set, and as its default when not.
 func TestShareStabilizationTimingsComeFromThePolicy(t *testing.T) {
-	derived := allocation.ShareTimings{ReversalHold: 12 * time.Minute, SwingWindow: 2 * time.Hour}
+	derived := allocation.ShareTimings{ReversalHold: 12 * time.Minute, SwingWindow: 2 * time.Hour,
+		SwingReversals: config.DefaultSwingReversals}
 	source := func(series []metrics.UtilizationShareTiming, param string) string {
 		for _, s := range series {
 			if s.Param == param {
@@ -42,15 +44,15 @@ func TestShareStabilizationTimingsComeFromThePolicy(t *testing.T) {
 	}
 
 	us, err := config.ResolveUtilizationShare(&config.UtilizationShareConfig{
-		Stabilization: &config.UtilizationShareStabilization{WaitBeforeReverseMove: "5m", FlappingWindow: "0s"},
+		Stabilization: &config.UtilizationShareStabilization{WaitBeforeReverseMove: "5m", FlappingWindow: "0s", SwingReversals: 2},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	tm, src := derived, allocation.ShareTimingSource{}
 	shareStabilizationTimings(&tm, src, us.Stabilization)
-	if tm.ReversalHold != 5*time.Minute || tm.SwingWindow != 0 {
-		t.Fatalf("timings %+v, want the policy's 5m and 0s", tm)
+	if tm.ReversalHold != 5*time.Minute || tm.SwingWindow != 0 || tm.SwingReversals != 2 {
+		t.Fatalf("timings %+v, want the policy's 5m, 0s and 2 reversals", tm)
 	}
 	series := shareTimingSeries(tm, src)
 	for _, p := range []string{constants.UtilizationShareParamReversalHold, constants.UtilizationShareParamSwingWindow} {
