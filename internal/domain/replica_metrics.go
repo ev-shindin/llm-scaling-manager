@@ -122,6 +122,15 @@ type ReplicaMetrics struct {
 	// routinely differ.
 	StartSeconds float64
 
+	// ReadySince is when this replica last became Ready: the Pod's Ready
+	// condition LastTransitionTime. Zero when the Pod is not Ready, the time
+	// is unset, or the Pod listing could not be read; zero means unknown.
+	//
+	// The load-balance diagnostic (internal/signals/balance) reads it: a
+	// replica that became Ready a moment ago has had no time to receive work,
+	// so its empty KV cache says nothing about the router.
+	ReadySince time.Time
+
 	// Metadata contains freshness information (optional)
 	Metadata *ReplicaMetricsMetadata `json:"metadata,omitempty"`
 

@@ -1,0 +1,135 @@
+# promtool unit tests for WVALoadImbalanced. hack/check-alert-rules.sh copies
+# the shipped PrometheusRule groups, annotations stripped, to rules.yaml beside
+# this file and runs promtool test rules on it.
+#
+# The series carry the labels they have once scraped: the model namespace as
+# exported_namespace, the controller namespace as namespace, and pod for the
+# controller pod.
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  # 1. Sustained imbalance fires after 10 minutes, once per model and role,
+  #    the same model seen from two controller pods included. A balanced role
+  #    of the same model, and the same model name in another namespace that
+  #    is balanced, do not.
+  - interval: 1m
+    input_series:
+      - series: 'wva_load_imbalanced{exported_namespace="team-a",model_name="m1",role="prefill",namespace="wva",pod="wva-a"}'
+        values: '1x20'
+      - series: 'wva_load_imbalanced{exported_namespace="team-a",model_name="m1",role="prefill",namespace="wva",pod="wva-b"}'
+        values: '1x20'
+      - series: 'wva_load_imbalanced{exported_namespace="team-a",model_name="m1",role="decode",namespace="wva",pod="wva-a"}'
+        values: '0x20'
+      - series: 'wva_load_imbalanced{exported_namespace="team-b",model_name="m1",role="prefill",namespace="wva",pod="wva-a"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: WVALoadImbalanced
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: WVALoadImbalanced
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m1, role: prefill}
+
+  # 2. An imbalance that clears inside the 10 minutes, or flips on and off,
+  #    does not fire: the router settling after a scale-out is not a finding.
+  - interval: 1m
+    input_series:
+      - series: 'wva_load_imbalanced{exported_namespace="team-a",model_name="m2",role="both",namespace="wva",pod="wva-a"}'
+        values: '1x6 0x14'
+      - series: 'wva_load_imbalanced{exported_namespace="team-a",model_name="m3",role="both",namespace="wva",pod="wva-a"}'
+        values: '1 1 1 1 1 0 1 1 1 1 1 0 1 1 1 1 1 0 1 1'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: WVALoadImbalanced
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: WVALoadImbalanced
+        exp_alerts: []
+
+  # 3. Review r1: a persistent imbalance whose gauge dips for one sample
+  #    every 13 minutes. Without keep_firing_for it paged at 11m, resolved
+  #    at 12m and paged again at 24m. It stays firing.
+  - interval: 1m
+    input_series:
+      - series: 'wva_load_imbalanced{exported_namespace="team-a",model_name="m4",role="prefill",namespace="wva",pod="wva-a"}'
+        values: '1x11 0 1x11 0 1x11'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: WVALoadImbalanced
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m4, role: prefill}
+      - eval_time: 12m
+        alertname: WVALoadImbalanced
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m4, role: prefill}
+      - eval_time: 18m
+        alertname: WVALoadImbalanced
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m4, role: prefill}
+      - eval_time: 25m
+        alertname: WVALoadImbalanced
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m4, role: prefill}
+
+  # 4. An imbalance that has cleared resolves once keep_firing_for (15m)
+  #    has passed since the gauge last read 1 (at 11m).
+  - interval: 1m
+    input_series:
+      - series: 'wva_load_imbalanced{exported_namespace="team-a",model_name="m5",role="decode",namespace="wva",pod="wva-a"}'
+        values: '1x11 0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WVALoadImbalanced
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m5, role: decode}
+      - eval_time: 30m
+        alertname: WVALoadImbalanced
+        exp_alerts: []
+
+  # 5. Review r3: the series as the controller exports them when collection
+  #    fails for less than 2 minutes, here once at 8m (m6) and once every
+  #    8 minutes (m7). The series keep their value through the failure, so
+  #    the page comes at 10m. The controller used to delete the series and
+  #    restart the sustain on one failure, exporting '1x7 stale 0 0 1x30':
+  #    that paged at 21m, and one failure every 8 minutes never paged.
+  - interval: 1m
+    input_series:
+      - series: 'wva_load_imbalanced{exported_namespace="team-a",model_name="m6",role="decode",namespace="wva",pod="wva-a"}'
+        values: '1x40'
+      - series: 'wva_load_imbalanced{exported_namespace="team-a",model_name="m7",role="decode",namespace="wva",pod="wva-a"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: WVALoadImbalanced
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: WVALoadImbalanced
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m6, role: decode}
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m7, role: decode}
+
+  # 6. Collection that keeps failing still takes the series away 2 minutes
+  #    in, so a page does not stand on figures nothing measures. A pending
+  #    page (m8, failing from 6m, series gone at 8m) never fires; a firing
+  #    one (m9, failing from 11m, gone at 13m) resolves once keep_firing_for
+  #    has passed.
+  - interval: 1m
+    input_series:
+      - series: 'wva_load_imbalanced{exported_namespace="team-a",model_name="m8",role="decode",namespace="wva",pod="wva-a"}'
+        values: '1x7 stale'
+      - series: 'wva_load_imbalanced{exported_namespace="team-a",model_name="m9",role="decode",namespace="wva",pod="wva-a"}'
+        values: '1x12 stale'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: WVALoadImbalanced
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m9, role: decode}
+      - eval_time: 20m
+        alertname: WVALoadImbalanced
+        exp_alerts:
+          - exp_labels: {severity: warning, exported_namespace: team-a, model_name: m9, role: decode}
+      - eval_time: 30m
+        alertname: WVALoadImbalanced
+        exp_alerts: []
