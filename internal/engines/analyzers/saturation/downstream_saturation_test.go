@@ -140,9 +140,16 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		// through the scale-down window once decode recovers.
 		seedP := makeReplicaMetrics("prefill-0", prefillVariant, 80_000, prefillKv, 30, 6000, 1)
 		seedP.RequestRate, seedP.Ready = 30, true
-		_, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{
-			decode("decode-0", 300_000, 0), decode("decode-1", 280_000, 0), seedP}, states))
-		Expect(err).NotTo(HaveOccurred())
+		// A window of cycles: 30 waiting prompts of 6000 tokens are more
+		// than the 80 000 the replica holds, which is what a load step looks
+		// like, so only a queue that has stood for K2SettleLookback with the
+		// residency flat is recorded (k2_settle.go).
+		for range 5 {
+			_, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{
+				decode("decode-0", 300_000, 0), decode("decode-1", 280_000, 0), seedP}, states))
+			Expect(err).NotTo(HaveOccurred())
+			clock = clock.Add(15 * time.Second)
+		}
 
 		By("capping the demand at the scale-up threshold of the anticipated supply")
 		result, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{
@@ -322,10 +329,12 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(analyzer.computeCapacityHistory).To(HaveKey(prefillKey))
 		Expect(analyzer.saturatedThroughput).To(HaveKey(tkey(analyzer, prefillMuKey)))
-		// Priced by its own reading: k2 = 357 800, the queue as a backlog
-		// against its mu, the resident KV standing -- 100 % of the replica,
-		// above the band's cap of 85 %, so an order, and not held.
-		Expect(result.RoleDemand[domain.RolePrefill]).To(BeNumerically("~", 357_800, 1), "not held")
+		// Priced by its own reading: k2 = 357 800, and the resident KV plus
+		// its queue's charge (30 x 6000), since a single reading of mu may
+		// not order and so may not price that queue as drain either -- 150 %
+		// of the replica, above the band's cap of 85 %, so an order, and not
+		// held.
+		Expect(result.RoleDemand[domain.RolePrefill]).To(BeNumerically("~", 357_800+30*6000, 1), "not held")
 		Expect(result.RoleDemand[domain.RolePrefill]).To(BeNumerically(">", 0.85*prefillP(result)))
 	})
 

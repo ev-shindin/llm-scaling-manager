@@ -337,7 +337,8 @@ it has never saturated under. See [Prefill, specifically](#prefill-specifically)
 ### Demand — `analyzers/saturation`
 
 ```
-replicaDemand  = TokensInUse + waitingQueueDemand(role)
+replicaDemand  = residentCharge(TokensInUse)          // instant KV for an unqueued pod idle now beside one busy now
+               + waitingQueueDemand(role)            // less the share settled-idle siblings have room for
 inputTokensRaw = max(QueueBytes / BytesPerToken, QueueSize x avgInput)
 prefill charge = inputTokensRaw x (1 - prefillHitRate)
 decode charge  = QueueSize x avgOutput            // split fleet
@@ -510,7 +511,7 @@ The rules, the same in both:
 | KV capacity (`NumGpuBlocks`, `TotalKvCapacityTokens`) | the sum over the ranks. vLLM's API server already sums its engines' blocks into the `num_gpu_blocks` label of `vllm:cache_config_info`, so that label is read as is and never multiplied |
 | `EngineRanks` | the sum: the merge adds rows, the query counts the `cache_config_info` series (one per rank). `Ranks()` reads an unknown count as 1 |
 | `KvCacheUsage`, `KvUsageInstant` | used tokens over total capacity: the merge weighs by each row's capacity, the query takes the mean over ranks (ranks of a pod are alike), after a max per rank so a second scrape or a per-process copy of a rank's gauge counts once |
-| `QueueLength`, `RequestRate`, `GenerationTokenRate`, `PrefillComputedTokenRate` | the sum |
+| `QueueLength`, `RequestRate`, `GenerationTokenRate`, `PrefillComputedTokenRate` | the sum, after a max per rank in the query, so a target scraped twice (two PodMonitors on one pod) counts each rank once. Summed straight, a second scrape doubled the three rates: the generation-token rate is the measured mu's numerator and the derived line's check |
 | `MaxRankQueueLength`, `MaxRankKvCacheUsage` | the max: the busiest rank's queue and use. The merge takes the max over rows, the queries a max over ranks |
 | token lengths, `AvgTTFT`, `AvgServiceTime` | weighted by each rank's requests |
 | `AvgITL` | weighted by each rank's generated tokens |

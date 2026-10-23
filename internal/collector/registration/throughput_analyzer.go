@@ -237,7 +237,7 @@ func RegisterAlwaysOnQueries(sourceRegistry *source.SourceRegistry) {
 	registry.MustRegister(source.QueryTemplate{
 		Name:        QueryRequestRate,
 		Type:        source.QueryTypePromQL,
-		Template:    `sum by (model_name, instance, pod) (rate(vllm:request_generation_tokens_count{namespace="{{.namespace}}"}[` + RequestRateWindow + `]))`,
+		Template:    `sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (rate(vllm:request_generation_tokens_count{namespace="{{.namespace}}"}[` + RequestRateWindow + `])))`,
 		Params:      []string{source.ParamNamespace},
 		Description: "vLLM request completion rate per pod (req/s); fallback for λ when EPP metrics are unavailable",
 	})
@@ -286,7 +286,7 @@ func RegisterAlwaysOnQueries(sourceRegistry *source.SourceRegistry) {
 	registry.MustRegister(source.QueryTemplate{
 		Name:        QueryGenerationTokenRate,
 		Type:        source.QueryTypePromQL,
-		Template:    `sum by (model_name, instance, pod) (rate(vllm:generation_tokens_total{namespace="{{.namespace}}"}[1m]))`,
+		Template:    `sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (rate(vllm:generation_tokens_total{namespace="{{.namespace}}"}[1m])))`,
 		Params:      []string{source.ParamNamespace},
 		Description: "Observed generation (decode) token rate per pod (tokens/sec), proxy for μ_dec^obs",
 	})

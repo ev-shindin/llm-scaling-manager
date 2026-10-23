@@ -113,7 +113,11 @@ type SaturationAnalyzer struct {
 	// both swept with the window.
 	throughputSampledAt map[string]time.Time
 	throughputLastRead  map[string]float64
-	capacityStore       *capacity.Store
+	// throughputPodReads is, per saturatedThroughput key, the last sample
+	// readings per replica (recordSaturatedThroughputFrom); swept with the
+	// window.
+	throughputPodReads map[string]podReads
+	capacityStore      *capacity.Store
 
 	// decodeSaturatedAt is, per namespace|model, the last cycle a decode
 	// replica was seen full and queued (roleSaturated). Prefill's readings
@@ -126,6 +130,9 @@ type SaturationAnalyzer struct {
 	// not turn it on and off every cycle. Deleted the cycle no replica is
 	// hot; swept by EvictStaleHistory for a model that stops being analysed.
 	hotRankHeld map[string]hotRankMemo
+	// k2Settle is, per namespace|model, each replica's last reading, for the
+	// next cycle's settle test (k2_settle.go). Swept beside hotRankHeld.
+	k2Settle map[string]*settleMemo
 	// fleetShape is the (I, O) bucket pair last seen per namespace|model,
 	// and when a change of either was raised and not yet settled. See
 	// shape_change.go for what the event is for.
@@ -279,7 +286,10 @@ type Evicted struct {
 	DecodeSaturation int
 	// HotRankHolds is the per-model memory of the replicas the hot-rank
 	// hold kept, for a model no longer analysed.
-	HotRankHolds  int
+	HotRankHolds int
+	// K2Settle is the per-model memory of each replica's last reading for the
+	// k2 settle test, for a model no longer analysed.
+	K2Settle      int
 	FleetShapes   int
 	VariantStamps int
 	// ITLLines is the fitted lines shared between variants running the same
@@ -301,7 +311,7 @@ func (e Evicted) Any() bool {
 	return e.K2History > 0 || e.MuWindows > 0 || e.K2Borrows > 0 || e.K2Priors > 0 || e.PendingRestores > 0 || e.ITLWindows > 0 ||
 		e.ITLBaselines > 0 || e.StartEstimates > 0 || e.StartOutliers > 0 ||
 		e.Pods > 0 || e.ITLLines > 0 || e.Accelerators > 0 || e.DecodeSaturation > 0 ||
-		e.HotRankHolds > 0 || e.FleetShapes > 0 || e.VariantStamps > 0 || e.ForgetMarks > 0 || e.StashedWindows > 0
+		e.HotRankHolds > 0 || e.K2Settle > 0 || e.FleetShapes > 0 || e.VariantStamps > 0 || e.ForgetMarks > 0 || e.StashedWindows > 0
 }
 
 // learnedLine is one measured ITL(k) line, with who measured it and when.
@@ -341,9 +351,11 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		pendingRestore:         make(map[string]*pendingVariant),
 		throughputSampledAt:    make(map[string]time.Time),
 		throughputLastRead:     make(map[string]float64),
+		throughputPodReads:     make(map[string]podReads),
 		capacityStore:          store,
 		decodeSaturatedAt:      make(map[string]time.Time),
 		hotRankHeld:            make(map[string]hotRankMemo),
+		k2Settle:               make(map[string]*settleMemo),
 		fleetShape:             make(map[string]*shapeMemo),
 		itlTracker:             itl.NewTracker(),
 		itlArgs:                make(map[string]string),
@@ -680,6 +692,7 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			delete(a.saturatedThroughput, key)
 			delete(a.throughputSampledAt, key)
 			delete(a.throughputLastRead, key)
+			delete(a.throughputPodReads, key)
 			evicted.MuWindows++
 		}
 	}
@@ -788,6 +801,11 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 		return now.Sub(m.seen) > variantTimeout
 	})
 	evicted.HotRankHolds = held - len(a.hotRankHeld)
+	settled := len(a.k2Settle)
+	maps.DeleteFunc(a.k2Settle, func(_ string, m *settleMemo) bool {
+		return now.Sub(m.seen) > variantTimeout
+	})
+	evicted.K2Settle = settled - len(a.k2Settle)
 	// The fleet-shape memo is per namespace|model and exists only to key and
 	// stabilise the capacity figures, so it goes when they do. Without this it
 	// is the one map on this struct that grows without bound as models and

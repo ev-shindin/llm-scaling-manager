@@ -21,9 +21,10 @@ const perPodQueryFixture = "testdata/per-pod-queries.test.yaml"
 // exports once per data-parallel rank, and so must fold the ranks of a pod
 // (issue #150). Each is evaluated by the promtool fixture.
 //
-// The rates that are already summed per pod (request rate, generation token
-// rate, prefill computed-token rate) are not listed: a sum is already the
-// right fold, and no change was needed there.
+// The three rates summed per pod (request rate, generation token rate,
+// prefill computed-token rate) are listed too: a sum folds the ranks, but
+// summed straight it also counts a target scraped twice twice, so each takes
+// a max per rank first, as the gauges do.
 var perPodVLLMQueries = []string{
 	QueryKvCacheUsage,
 	QueryKvUsageInstant,
@@ -39,6 +40,9 @@ var perPodVLLMQueries = []string{
 	QueryAvgITL,
 	QueryAvgTTFT,
 	QueryAvgServiceTime,
+	QueryRequestRate,
+	QueryGenerationTokenRate,
+	QueryPrefillComputedTokenRate,
 }
 
 // builtPerPodQueries returns the query the registry builds for each of
@@ -126,11 +130,14 @@ func TestPerPodQueriesFoldDataParallelRanks(t *testing.T) {
 	// scrape, a per-process pid copy -- count once.
 	const perRank = "max by (model_name, instance, pod, engine) ("
 	want := map[string]string{
-		QueryKvCacheUsage:        "avg " + perPod + perRank,
-		QueryKvUsageInstant:      "avg " + perPod + perRank,
-		QueryQueueLength:         "sum " + perPod + perRank,
-		QueryMaxRankKvCacheUsage: "max " + perPod + "max_over_time(",
-		QueryMaxRankQueueLength:  "max " + perPod + "max_over_time(",
+		QueryKvCacheUsage:             "avg " + perPod + perRank,
+		QueryKvUsageInstant:           "avg " + perPod + perRank,
+		QueryQueueLength:              "sum " + perPod + perRank,
+		QueryRequestRate:              "sum " + perPod + perRank + "rate(",
+		QueryGenerationTokenRate:      "sum " + perPod + perRank + "rate(",
+		QueryPrefillComputedTokenRate: "sum " + perPod + perRank + "rate(",
+		QueryMaxRankKvCacheUsage:      "max " + perPod + "max_over_time(",
+		QueryMaxRankQueueLength:       "max " + perPod + "max_over_time(",
 		QueryCacheConfigInfo: "count by (instance, pod, num_gpu_blocks, block_size) " +
 			"(max by (instance, pod, num_gpu_blocks, block_size, engine) (",
 	}

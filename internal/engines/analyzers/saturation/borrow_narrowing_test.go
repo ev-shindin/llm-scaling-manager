@@ -95,14 +95,18 @@ func TestLineBorrowedIsNotStampedOnAnOwnMeasuredFigure(t *testing.T) {
 
 	ctx, _ := observedCtx(t)
 
-	// Three cycles, two minutes apart. The lender publishes a line in the
-	// first; the starved variant's window needs readings spaced at least
+	// Four cycles, a minute apart. The lender publishes a line in the first;
+	// the starved variant's window needs readings spaced at least
 	// ThroughputSampleSpacing apart, so without the clock moving it would
 	// RaiseLast() the one sample it has forever. Both conditions have to hold
-	// at once for the narrowing to have anything to narrow.
+	// at once for the narrowing to have anything to narrow. The starved
+	// replica's queue (6 x 7000) is deeper than its 5000 resident, so its
+	// first reading waits for a window of flat residency (k2_settle.go) and
+	// the three after it are recorded -- a minute apart, not two, or no two
+	// readings are one window apart.
 	base := time.Now()
-	for i, rate := range []float64{5400, 5450, 5420} {
-		at := base.Add(time.Duration(i) * 2 * time.Minute)
+	for i, rate := range []float64{5400, 5450, 5420, 5430} {
+		at := base.Add(time.Duration(i) * time.Minute)
 		a.now = func() time.Time { return at }
 		_, err := a.Analyze(ctx, makeReusingAnalyzerInput(rows(rate), states))
 		require.NoError(t, err)

@@ -125,7 +125,11 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	pod.GenerationTokenRate = 0
 
 	var weightedKvUsage, weightedKvInstant float64
+	// Known only if every rank reported it: a rank with no series would
+	// otherwise be averaged in as an empty cache.
+	pod.KvUsageInstantKnown = true
 	for _, m := range group {
+		pod.KvUsageInstantKnown = pod.KvUsageInstantKnown && m.KvUsageInstantKnown
 		pod.NumGpuBlocks += m.NumGpuBlocks
 		pod.TotalKvCapacityTokens += m.TotalKvCapacityTokens
 		// Ranks(), not EngineRanks: a row without a cache_config_info series

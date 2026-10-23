@@ -428,6 +428,7 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		AvgServiceTime:           avgServiceTime,
 		GenerationTokenRate:      data.generationTokenRate,
 		KvUsageInstant:           data.kvUsageInstant,
+		KvUsageInstantKnown:      data.kvUsageInstantOK,
 		RequestRate:              data.requestRate,
 		Metadata: &domain.ReplicaMetricsMetadata{
 			CollectedAt:     collectedAt,

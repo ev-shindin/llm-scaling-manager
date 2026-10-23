@@ -62,6 +62,9 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// template revision this cycle (revisionsMixed): mid-rollout, whatever
 	// its scale target's status says.
 	revisionsMixed bool,
+	// routing is what the cycle's routing says about this replica's demand
+	// (replicaRouting): whether its own queue is the router's to move.
+	routing replicaRouting,
 	logger logr.Logger,
 ) *capacity.ReplicaCapacity {
 	if rm.TotalKvCapacityTokens <= 0 {
@@ -70,13 +73,18 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		// capacity from the capacity store. A better approach would be to estimate
 		// TotalKvCapacityTokens from deployment args (num_gpu_blocks_override, block_size)
 		// or use a dedicated percentage-based demand signal.
-		return a.computeReplicaCapacityFallback(rm, config, modelID, namespace, role, accelerator, logger)
+		return a.computeReplicaCapacityFallback(rm, config, modelID, namespace, role, accelerator, routing, logger)
 	}
 
 	// Compute demand: tokens already resident in KV cache plus the role-aware
-	// footprint of requests still waiting in the local engine queue.
+	// footprint of requests still waiting in the local engine queue, in full;
+	// a sibling idle for long enough may take some of it (routeQueuesToIdleRoom).
+	// The resident half is the one-minute peak, or the instant reading where
+	// that peak is load the router has since moved to a sibling
+	// (residentCharge).
 	localQueueDemand := waitingQueueDemand(rm, role)
-	replicaDemand := rm.TokensInUse + localQueueDemand
+	residentDemand := residentCharge(rm, rm.TokensInUse, rm.TotalKvCapacityTokens, routing)
+	replicaDemand := residentDemand + localQueueDemand
 
 	// k1: memory-bound capacity
 	k1 := memoryBound(rm.TotalKvCapacityTokens, config.KvCacheThreshold)
@@ -88,7 +96,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		engineParams = rec.EngineParams
 	}
 	historyKey := a.historyKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
-		rm.AvgOutputTokens, config.QueueLengthThreshold)
+		k2KeyOutput(role, shapeKeyOutput, rm.AvgOutputTokens), config.QueueLengthThreshold)
 	// The rows whose saturated reading may become the variant's k2 are the
 	// rows whose saturated throughput may become its mu, below: Ready, and
 	// the variant's own. A warm-pool bridge is filed under the variant it is
@@ -153,6 +161,42 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// (BusiestRankTokens): the tokens one full rank holds plus seven idle
 	// ones' nothing is not what the pod holds when it is full. With one rank
 	// both are the pod's own queue and tokens, as before.
+	//
+	// Prefill's throughput is keyed on the prompt tokens it actually has to
+	// compute: a prefix the cache already holds is not work, so the discount
+	// that shape.New applies for KVreq applies to prefill's throughput too.
+	// Raw prompt length would put the same replica in different buckets
+	// purely because the hit rate moved. Decode keeps the raw figure it has
+	// always used -- its capacity is about resident KV, which the shape's
+	// KVreq already discounts on its own path. Why the throughput key is the
+	// fleet's shape at all is said where it is written, below.
+	keyInput := shapeKeyInput
+	if domain.CanonicalRole(role) == domain.RolePrefill {
+		keyInput = shape.New(shapeKeyInput, shapeKeyOutput, fleetHitRate).ILeff
+	}
+	throughputKey := a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
+		keyInput, shapeKeyOutput, config.QueueLengthThreshold)
+	// A window written under engine arguments the variant no longer runs is
+	// not its service rate (window_args.go).
+	args := windowArgs(engineParams)
+	a.mu.Lock()
+	a.throughputWindowUnderLocked(throughputKey, args)
+	ref := a.serviceRateOnRecordLocked(throughputKey)
+	k2Ref := a.k2OnRecordLocked(historyKey)
+	a.mu.Unlock()
+	if ref <= 0 && derived.ok {
+		ref = derived.rate
+	}
+	// Whether a saturated reading is the replica at its limit or a load step
+	// it has just been handed (k2_settle.go). Judged on the busiest rank, as
+	// the reading is.
+	serviceRate, serviceRateOK := saturatedCompletionRate(rm, role, fleetOutput, keyInput)
+	adm.unsettled = a.k2Unsettled(k2SettleInput{
+		namespace: namespace, modelID: modelID, variant: rm.VariantName, pod: rm.PodName,
+		queue: rm.BusiestRankQueue(), tokens: rm.BusiestRankTokens(), ranks: rm.Ranks(),
+		perRequest: k2SettlePerRequest(rm, role), threshold: config.QueueLengthThreshold,
+		rate: serviceRate, rateOK: serviceRateOK, ref: ref, k2Ref: k2Ref,
+	})
 	d := a.computeK2(
 		historyKey,
 		modelID, namespace, rm.VariantName,
@@ -193,8 +237,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// (floor.Estimate), and the write side has to match it.
 	//
 	// Recorded and read under the FLEET's output-length bucket, not this
-	// replica's. The k2 key above is the replica's own, and rightly: its
-	// occupancy is its own. Its throughput is priced per role, as the median
+	// replica's, as the k2 key above is (k2KeyOutput). Its throughput is
+	// priced per role, as the median
 	// over the role's replicas (floor.Estimate), and a median over
 	// readings from different buckets is a reading of nothing. A replica's
 	// own average output length is a few minutes of its own completions,
@@ -215,33 +259,16 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// pre-change window read back as an own, non-borrowed reading -- which
 	// useDerived then preferred over a derived figure that had priced the
 	// change correctly. k2 keeps historyKey unchanged; this is the throughput
-	// key alone, as the shape-shift proposal scopes it.
-	// Prefill is keyed on the prompt tokens it actually has to compute: a
-	// prefix the cache already holds is not work, so the discount that
-	// shape.New applies for KVreq applies to prefill's throughput too. Raw
-	// prompt length would put the same replica in different buckets purely
-	// because the hit rate moved. Decode keeps the raw figure it has always
-	// used -- its capacity is about resident KV, which the shape's KVreq
-	// already discounts on its own path.
-	keyInput := shapeKeyInput
-	if domain.CanonicalRole(role) == domain.RolePrefill {
-		keyInput = shape.New(shapeKeyInput, shapeKeyOutput, fleetHitRate).ILeff
-	}
-	throughputKey := a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
-		keyInput, shapeKeyOutput, config.QueueLengthThreshold)
-	// A window written under engine arguments the variant no longer runs is
-	// not its service rate (window_args.go).
-	args := windowArgs(engineParams)
-	a.mu.Lock()
-	a.throughputWindowUnderLocked(throughputKey, args)
-	a.mu.Unlock()
+	// key alone, as the shape-shift proposal scopes it. (throughputKey and
+	// keyInput are built above, before computeK2, whose settle test reads the
+	// rate on record under the key.)
 	if k2Priority == capacity.K2SrcObserved && adm.admitted() {
 		// keyInput is the effective prompt length this key was built with, so
 		// the token rate is converted to requests/s at the same figure the
 		// window is keyed by -- a rate divided by one shape and stored under
 		// another is the fault the key exists to prevent.
 		if mu, ok := saturatedCompletionRate(rm, role, fleetOutput, keyInput); ok {
-			a.recordSaturatedThroughput(throughputKey, mu)
+			a.recordSaturatedThroughputFrom(throughputKey, rm.PodName, mu)
 			if args != "" {
 				a.mu.Lock()
 				if _, ok := a.saturatedThroughput[throughputKey]; ok {
@@ -328,6 +355,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		"effectiveCapacity", effectiveCapacity, "boundBy", bound,
 		"tokensInUse", rm.TokensInUse, "localQueueDemand", localQueueDemand, "replicaDemand", replicaDemand,
 		"queueLength", rm.QueueLength, "queueThreshold", config.QueueLengthThreshold,
+		"residentDemand", residentDemand, "kvFromInstant", routing.kvFromInstant, "kvUsageInstant", rm.KvUsageInstant,
 		"engineRanks", rm.Ranks(), "busiestRankQueue", rm.BusiestRankQueue(),
 		"busiestRankKvUsage", rm.BusiestRankKvUsage(),
 		"requestRate", rm.RequestRate,
@@ -399,6 +427,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		EffectiveCapacity:           effectiveCapacity,
 		ReplicaDemand:               replicaDemand,
 		FromWarmPool:                rm.FromWarmPool,
+		ServiceRate:                 serviceRate,
+		ServiceRateOnRecord:         ref,
 		SaturatedThroughput:         saturatedThroughput,
 		SaturatedThroughputSamples:  throughputSamples,
 		SaturatedThroughputBorrowed: reading.borrowed,
@@ -420,6 +450,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacityFallback(
 	modelID, namespace string,
 	role string,
 	accelerator string,
+	routing replicaRouting,
 	logger logr.Logger,
 ) *capacity.ReplicaCapacity {
 	rec := a.capacityStore.Get(namespace, modelID, rm.VariantName)
@@ -458,7 +489,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacityFallback(
 	//
 	// This is a coarse approximation — KvCacheUsage reflects memory pressure, not
 	// exact token demand — but it's sufficient when token-level metrics are absent.
-	kvUsageDemand := int64(rm.KvCacheUsage * float64(rec.EffectiveCapacity))
+	// The peak, or the instant reading where the peak has moved to a sibling,
+	// as on the main path (residentCharge).
+	kvUsageDemand := residentCharge(rm, int64(rm.KvCacheUsage*float64(rec.EffectiveCapacity)),
+		rec.EffectiveCapacity, routing)
 
 	// Add the role-aware footprint of requests waiting in the local engine queue,
 	// matching the main path.
@@ -480,7 +514,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacityFallback(
 		"reason", "no vllm:cache_config_info; using capacity-store record",
 		"storeEffectiveCapacity", rec.EffectiveCapacity, "storeLearnedFrom", rec.LearnedFrom,
 		"kvCacheUsagePct", rm.KvCacheUsage, "effectiveCapacity", effectiveCapacity,
-		"kvUsageDemand", kvUsageDemand, "localQueueDemand", localQueueDemand, "replicaDemand", replicaDemand)
+		"kvUsageDemand", kvUsageDemand, "localQueueDemand", localQueueDemand, "replicaDemand", replicaDemand,
+		"kvFromInstant", routing.kvFromInstant)
 
 	return &capacity.ReplicaCapacity{
 		PodName:               rm.PodName,
@@ -779,6 +814,13 @@ func (a *SaturationAnalyzer) k2Chain(
 			"priority", k2ReasonObsRollout, "historyKey", historyKey,
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
 			"reason", "the variant is mid-rollout and this pod may run the old engine; not recorded",
+			"tokensInUse", tokensInUse, "k1", k1)
+	case saturatedReading && adm.unsettled != "":
+		logger.V(logging.DEFAULT).Info("k2-decision",
+			"modelID", modelID, "namespace", namespace, "variant", variantName,
+			"priority", k2ReasonObsUnsettled, "historyKey", historyKey,
+			"queueLength", queueLen, "queueThreshold", queueThreshold,
+			"reason", adm.unsettled,
 			"tokensInUse", tokensInUse, "k1", k1)
 	case saturatedReading:
 		k2Observed := tokensInUse
