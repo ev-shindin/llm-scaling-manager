@@ -255,7 +255,9 @@ type ReplicaMetrics struct {
 	AvgServiceTime float64
 
 	// AvgITL is the average inter-token latency on this replica in seconds.
-	// Derived from rate(vllm:time_per_output_token_seconds_sum[5m]) / rate(..._count[5m]).
+	// Derived from rate(vllm:inter_token_latency_seconds_sum[1m]) / rate(..._count[1m])
+	// (collector/registration/queueing_model.go), and the SGLang histogram of the
+	// same name.
 	// Used by queueing model tuner as observed ITL for Kalman filter parameter learning.
 	// TA notation: ITL_obs — the (k*, ITL_obs) pair drives OLS calibration of ITL(k) = A·k + B.
 	// Zero when metrics are unavailable.

@@ -421,7 +421,12 @@ func (c *cycle) fitLines() {
 		if rec.InRollout() || mixed[variant] {
 			rows = nil
 		}
-		own := c.a.noteITL(variantKey, rows, variant, c.a.now(), c.logger)
+		// The namespace rides on every ITL line because the variant name alone
+		// does not identify one: the same Deployment applied to two namespaces
+		// logs two identical "variant" values, and their fits could not be
+		// told apart in the log (issue #271).
+		itlLogger := c.logger.WithValues("namespace", c.input.Namespace)
+		own := c.a.noteITL(variantKey, rows, variant, c.a.now(), itlLogger)
 		// The variant's own window, by the same key noteITL just wrote, and
 		// before any borrow below: a borrowed line says nothing about how
 		// close this variant is to fitting one of its own.
@@ -450,7 +455,7 @@ func (c *cycle) fitLines() {
 		}
 		c.itlModels[variant] = borrowed
 		c.itlBorrowedFrom[variant] = from
-		c.logger.V(logging.DEFAULT).Info("itl-line-borrowed",
+		itlLogger.V(logging.DEFAULT).Info("itl-line-borrowed",
 			"variant", variant, "from", from, "physicsKey", physicsKey,
 			"a", borrowed.A, "b", borrowed.B)
 	}
@@ -512,7 +517,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				maxSeqs = engineParams.MaxNumSeqs
 			}
 			c.logger.V(logging.DEFAULT).Info("derived-mu",
-				"variant", rm.VariantName, "pod", rm.PodName,
+				"namespace", c.input.Namespace, "variant", rm.VariantName, "pod", rm.PodName,
 				"ok", derived.ok,
 				"rate", derived.rate, "seqs", derived.seqs, "tokenSec", derived.tokenSec,
 				"kPrice", kPrice, "itlAtKPrice", itlModel.ITLAt(kPrice),

@@ -1,5 +1,11 @@
 package itl
 
+import (
+	"cmp"
+	"math"
+	"slices"
+)
+
 // DefaultBaselineSec is the per-token latency of an unloaded replica: the
 // intercept B of ITL(k) = A*k + B when there is not enough spread in k to fit
 // one. It is a hardware floor -- the time a single sequence takes per token
@@ -14,7 +20,21 @@ package itl
 const DefaultBaselineSec = 0.006
 
 // FitPinnedB fits ITL(k) = A*k + B with B held at the value given, by least
-// squares on the residual: A = sum((ITL_i - B) * k_i) / sum(k_i^2).
+// absolute deviations: A minimizes sum(|ITL_i - B - A*k_i|), which is the
+// median of the readings' own slopes (ITL_i - B) / k_i, each weighted by k_i.
+//
+// Not least squares, because the readings a pinned fit gets are not noise
+// around the line. Below DefaultMinSamples steady readings it takes every
+// reading, and a replica's first reading after it starts serving -- a pod
+// that joined, or one the load came back to after a minute without tokens --
+// carries an ITL many times the line's: on a two-namespace run, every new
+// replica's first reading was about 0.46 of k at 435 to 496 ms, slopes of 0.9
+// to 1.06 against 0.09 to 0.10 for the readings around them. Least squares
+// weighs a reading by its squared error, so three of sixteen moved A from
+// 0.101 to 0.170, and the derived mu read 3.1 to 4.2 requests/s against the
+// 6.1 to 6.2 each replica served, for the whole of a twenty-minute phase. The
+// median sets the minority aside, and on readings that are all on one line it
+// is that line's slope, as least squares is.
 //
 // This is the fit for a fleet whose replicas sit at similar loads. A router
 // that balances well gives every replica nearly the same k, and a full
@@ -33,20 +53,19 @@ func FitPinnedB(obs []Observation, b float64) (Model, bool) {
 	if len(obs) == 0 || !(b > 0) {
 		return Model{}, false
 	}
-	var num, den float64
-	n := 0
+	slopes := make([]weightedSlope, 0, len(obs))
+	var total float64
 	for _, o := range obs {
-		if !(o.K > 0) || !(o.ITLSec > 0) {
+		if !(o.K > 0) || !(o.ITLSec > 0) || math.IsInf(o.K, 0) || math.IsInf(o.ITLSec, 0) {
 			continue
 		}
-		num += (o.ITLSec - b) * o.K
-		den += o.K * o.K
-		n++
+		slopes = append(slopes, weightedSlope{a: (o.ITLSec - b) / o.K, w: o.K})
+		total += o.K
 	}
-	if n == 0 || !(den > 0) {
+	if len(slopes) == 0 || !(total > 0) {
 		return Model{}, false
 	}
-	a := num / den
+	a := weightedMedian(slopes, total)
 	if !(a >= 0) {
 		return Model{}, false
 	}
@@ -55,4 +74,29 @@ func FitPinnedB(obs []Observation, b float64) (Model, bool) {
 		return Model{}, false
 	}
 	return m, true
+}
+
+// weightedSlope is one reading's slope through the pinned intercept, and the
+// weight the least-absolute-deviations fit gives it: its k.
+type weightedSlope struct {
+	a, w float64
+}
+
+// weightedMedian is the slope at which half of total lies on either side:
+// the A that minimizes sum(w_i * |a_i - A|). When the halves meet exactly
+// between two slopes it is their mean. It sorts s.
+func weightedMedian(s []weightedSlope, total float64) float64 {
+	slices.SortFunc(s, func(x, y weightedSlope) int { return cmp.Compare(x.a, y.a) })
+	var cum float64
+	for i, x := range s {
+		cum += x.w
+		if cum < total/2 {
+			continue
+		}
+		if cum == total/2 && i+1 < len(s) {
+			return (x.a + s[i+1].a) / 2
+		}
+		return x.a
+	}
+	return s[len(s)-1].a
 }
