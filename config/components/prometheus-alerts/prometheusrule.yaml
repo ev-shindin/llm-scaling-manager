@@ -421,3 +421,22 @@ spec:
         runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#replicas-dropped-under-kueue-borrowing"
         summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} lost borrowed capacity more than 3 times in an hour"
         description: "Counts, over the last hour, the times the scaling manager gave borrowed capacity back (wva_borrow_releases_total: after a placement timeout; cause kueue-gate, a replica Kueue held at its gate where no borrowing is counted, is not borrowed capacity and is left out, and so is cause lender-waiting, capacity handed back on purpose to a waiting lender with releaseToNonReclaimingLenders) plus the times Kueue preempted it (wva_kueue_preempted_pods_total). Both count events: one P/D pair, or one LeaderWorkerSet group, lost together is one. With a lender that reclaims (reclaimWithinCohort Any), Kueue's preemptions are the usual cause. The model keeps growing onto capacity its cohort's lenders keep taking back: every cycle costs a cold start. Raise the model's guaranteed quota (nominalQuota), lengthen borrowCooldown, or set countBorrowable: false for it."
+
+    # Load imbalance: one replica of a role saturated while another is idle,
+    # read by the controller every cycle (wva_load_imbalanced, which already
+    # needs the imbalance to hold for 2 minutes and to read balanced for 2
+    # minutes before it drops). A routing diagnostic, not a capacity one.
+    # max by () so two controller pods, or a restarted one's overlapping
+    # series, page once per model and role. keep_firing_for so a dip of the
+    # gauge does not resolve the page and raise it again 10 minutes later.
+    # test/alerts/testdata/load-imbalance-alerts.test.yaml pins it.
+    - alert: WVALoadImbalanced
+      expr: max by (exported_namespace, model_name, role) (wva_load_imbalanced) == 1
+      for: 10m
+      keep_firing_for: 15m
+      labels:
+        severity: warning
+      annotations:
+        runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#one-replica-is-saturated-while-others-idle"
+        summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }}: {{ $labels.role }} load is uneven across its replicas"
+        description: "For 10 minutes at least one ready {{ $labels.role }} replica has been saturated (KV cache at or over 90 %, or, on prefill and aggregated roles, a queue at queueLengthThreshold) while another, Ready for at least 2 minutes, sat idle (KV under 30 %, nothing waiting). The router chose this: the role already has a replica it is not sending work to, so more replicas are unlikely to relieve it. The alert stays firing for 15 minutes after the imbalance clears. The usual cause is the scheduling profile's scorer weights: a prefix-cache-scorer weighted above queue-scorer, active-request-scorer and kv-cache-utilization-scorer sends a request to the replica that saw its prefix however busy it is. wva_load_kv_max_to_mean_ratio and wva_load_queue_max_to_mean_ratio show the spread; the controller log line 'WARNING: load imbalanced' names the busiest and the idle pods."

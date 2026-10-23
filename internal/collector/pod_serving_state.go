@@ -44,6 +44,9 @@ type podServingState struct {
 	// the EPP route on, so it is the moment the replica starts draining a queue,
 	// which is what the projection is about.
 	startSeconds float64
+	// readySince is when the Pod last became Ready: the Ready condition's
+	// LastTransitionTime. Zero when it is not Ready or the time is unset.
+	readySince time.Time
 	// revision is the pod template revision the Pod was created from
 	// (podRevision), "" when it carries none.
 	revision string
@@ -107,6 +110,7 @@ func podStates(ctx context.Context, reader client.Reader, namespace string) name
 			state.startedAt = p.Status.StartTime.Time
 		}
 		state.startSeconds = podStartSeconds(p)
+		state.readySince = podReadySince(p)
 		state.revision = podRevision(p)
 		out[p.Name] = state
 	}
@@ -179,6 +183,20 @@ func podStartSeconds(p *corev1.Pod) float64 {
 // is a clock problem or a Pod that was created long before it was scheduled,
 // neither of which describes how long the NEXT replica will take.
 const maxCredibleStartSeconds = 3600.0
+
+// podReadySince is when the Pod last became Ready, zero when it is not Ready
+// or its Ready condition carries no transition time.
+func podReadySince(p *corev1.Pod) time.Time {
+	if !podIsReady(p) {
+		return time.Time{}
+	}
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.LastTransitionTime.Time
+		}
+	}
+	return time.Time{}
+}
 
 // podIsReady reports the Pod's Ready condition.
 //
@@ -316,6 +334,19 @@ func (c *ReplicaMetricsCollector) podStartSeconds(
 		return 0
 	}
 	return state.startSeconds
+}
+
+// podReadySince reports when this Pod last became Ready, and zero when that
+// cannot be established: the listing could not be read, does not contain the
+// Pod, or the Pod is not Ready. Zero is "unknown", not "long ago".
+func (c *ReplicaMetricsCollector) podReadySince(
+	ctx context.Context, namespace, podName string,
+) time.Time {
+	state, found, listed := c.servingState(ctx, namespace, podName)
+	if !listed || !found {
+		return time.Time{}
+	}
+	return state.readySince
 }
 
 // seriesPodName pulls the Pod identity out of a series' labels.

@@ -2684,6 +2684,50 @@
             },
             "overrides": []
           }
+        },
+        {
+          "id": 87,
+          "title": "Load spread across replicas, by role (scaling manager)",
+          "type": "timeseries",
+          "description": "How evenly the router spreads each role's load over its ready replicas, as the scaling manager reads it every cycle.\n\nmax/mean is 1 when even and approaches the replica count when one replica holds everything. 'idle while saturated' counts ready replicas under 30% KV with nothing waiting while another is at 90% KV or queued. 'imbalanced' is 1 once that has held for two cycles; WVALoadImbalanced fires after 10 minutes of it. A routing finding, not a capacity one: see the troubleshooting entry 'One replica is saturated while others idle'.",
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 117
+          },
+          "targets": [
+            {
+              "expr": "max by ($namespace_label, model_name, role) (wva_load_kv_max_to_mean_ratio{$namespace_label=~\"$namespace\"})",
+              "legendFormat": "{{$namespace_label}}/{{model_name}} {{role}} KV max/mean",
+              "refId": "A"
+            },
+            {
+              "expr": "max by ($namespace_label, model_name, role) (wva_load_queue_max_to_mean_ratio{$namespace_label=~\"$namespace\"})",
+              "legendFormat": "{{$namespace_label}}/{{model_name}} {{role}} queue max/mean",
+              "refId": "B"
+            },
+            {
+              "expr": "max by ($namespace_label, model_name, role) (wva_load_idle_replicas_while_saturated{$namespace_label=~\"$namespace\"})",
+              "legendFormat": "{{$namespace_label}}/{{model_name}} {{role}} idle while saturated",
+              "refId": "C"
+            },
+            {
+              "expr": "max by ($namespace_label, model_name, role) (wva_load_imbalanced{$namespace_label=~\"$namespace\"})",
+              "legendFormat": "{{$namespace_label}}/{{model_name}} {{role}} imbalanced",
+              "refId": "D"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8
+              }
+            },
+            "overrides": []
+          }
         }
       ]
     },
