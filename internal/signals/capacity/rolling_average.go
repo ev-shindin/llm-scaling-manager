@@ -239,6 +239,16 @@ func (r *RollingAverage) RaiseLast(v float64) {
 	r.Observe()
 }
 
+// SetLast replaces the most recent value with v, and counts as a write. A
+// sample folded from several sources is re-formed this way each time one of
+// them reads again. An empty window is left empty.
+func (r *RollingAverage) SetLast(v float64) {
+	if n := len(r.values); n > 0 {
+		r.values[n-1] = v
+	}
+	r.Observe()
+}
+
 // Last returns the most recent value, or 0 if empty. No production caller;
 // the tests read it.
 func (r *RollingAverage) Last() float64 {

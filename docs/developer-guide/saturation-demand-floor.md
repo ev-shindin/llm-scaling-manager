@@ -48,10 +48,34 @@ so each must keep up with all of it), and on the total otherwise.
 - `B` is the role's backlog: the requests waiting in its engines' queues plus
   the scheduler's. `T` is the drain target (`BacklogDrainSeconds`, 60). The
   fleet asked for clears the backlog in about `T` while keeping up with
-  `lambda`.
+  `lambda`. The share of an engine's own queue that a settled-idle sibling
+  has room for is left out (`capacity.ReplicaCapacity.QueueRoutedFraction`,
+  set by `routeQueuesToIdleRoom`; see saturation-analyzer.md, "A replica's own
+  demand"): only that engine drains it, so that share is the router's
+  imbalance, not a shortfall replicas fix. Measured in the imbalance audit,
+  100 requests on one of four replicas at half the fleet's throughput implied
+  4.31 replicas against 2.35 balanced, 300 implied 8.24; with the siblings
+  idle for two minutes both read 2.35. A replica just Ready is not settled
+  idle: three full replicas queued 60 beside one read 9.41 replicas, as
+  without it, where a single-row idle test read 5.88. A role with no settled
+  idle replica counts its queues in full, as before. The scheduler's queue
+  always counts: the router can still place those.
 - For a role with a `mu`, the queues enter the model this way, and their
   residency charge (every queued request at its full KV footprint, as if all
-  were resident at once) comes out.
+  were resident at once) comes out -- but only where the floor's figure can
+  carry the queue: the term may order (`mayOrder`) and is not held, and in
+  proportion to how much of the resident KV its arrival half `lambda x P / mu`
+  accounts for -- none at `FloorLagFraction` (0.5) or under, all of it at
+  `FloorTrustFraction` (0.8) or over, linear between (`floorTrust`), so
+  demand moves continuously with `lambda`; a hard switch took one replica
+  499 446 -> 260 123 between 2.95 and 3.0 req/s. Elsewhere
+  `demand = max(measured, floor)`. What is
+  resident arrived within one residence time, so the resident KV implies an
+  arrival rate of about `resident x mu / P`; a `lambda` well under it is a
+  `[1m]` rate still reading the minute before a load step. Measured on the
+  two-namespace rerun (2026-10-23, 11:20:09): `lambda` 0.8 req/s with 160
+  queued cut 499 446 to the 260 123 resident, and the analyzer's `rc` fell
+  312 936 -> 47 265 in one cycle.
 - A role with no `mu` keeps the residency charge, except prefill's share of the
   scheduler queue, which is dropped. A prefill replica holds a prompt for its
   prefill time plus the hand-off. Only a saturated decode makes it hold longer,
@@ -253,6 +277,15 @@ Properties, each with a spec in `throughput_floor_test.go`:
   allocate the blocks a pull needs, which the transfer pipeline does not
   produce.
 
+  Any one such replica gates prefill's learning, whatever its siblings do:
+  KV prefilled for it waits on it, so prefill's reading is its back-pressure,
+  and a prefill k2 learned from it is never corrected (with decode-0 at 26 %
+  and decode-1 full with 81 waiting, prefill would record 357 800 against a
+  k1 of 919 449). Only the hold on prefill's DEMAND relaxes, and only once a
+  decode replica has been settled idle room for `IdleSettledFor` (two
+  minutes; `routeQueuesToIdleRoom`): then decode has room the router is not
+  using, and prefill may be ordered on its own demand.
+
   The test is remembered for the collector's row window
   (`DecodeSaturationMemory`, one minute): on the measured episode decode's
   occupancy dropped under k1 on the fourth cycle while its queue and
@@ -308,6 +341,19 @@ whatever the previous shape's was.
 That window closes on its own, because the batch does reach the ceiling,
 unless something orders a replica first and drains the batch before saturation
 is observed. The retired floor did exactly that.
+
+EPP flow control keeps it open. The router holds the queue upstream, so
+vLLM's own `num_requests_waiting` stays near zero and `P1-obs` (queue at or over
+`queueLengthThreshold`) fires only in the minutes a replica joins or a step
+lands -- which are the readings the admission refuses. On E1 (2026-10-23,
+flow control on) no replica queued again after its first minute. A measured
+`mu` then is rarely written or refreshed, and the floor prices from the
+**derived** `mu` of the ITL line: an own measured window outranks it only
+while it agrees within 2x or has a sample under five minutes old
+(`measuredYieldsToDerived`). With no line fitted yet there is no derived `mu`
+either, the role has no floor, and occupancy alone sizes it. k2 is the same: it
+is learned in those minutes or not at all, and otherwise comes from the
+history window or the engine arguments (`P2-hist`, `P3-k2`).
 
 ## Why the Little's-law floor was retired
 

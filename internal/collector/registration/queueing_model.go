@@ -128,7 +128,7 @@ func RegisterQueueingModelQueries(sourceRegistry *source.SourceRegistry) {
 	registry.MustRegister(source.QueryTemplate{
 		Name:     QueryPrefillComputedTokenRate,
 		Type:     source.QueryTypePromQL,
-		Template: `sum by (model_name, instance, pod) (rate(vllm:request_prefill_kv_computed_tokens_sum{namespace="{{.namespace}}"}[1m]))`,
+		Template: `sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (rate(vllm:request_prefill_kv_computed_tokens_sum{namespace="{{.namespace}}"}[1m])))`,
 		Params:   []string{source.ParamNamespace},
 		Description: "Prefill KV tokens computed per second per instance, " +
 			"excluding cached prefix; prefill's capacity unit",

@@ -58,6 +58,7 @@ type podMetricData struct {
 	// Throughput analyzer fields
 	generationTokenRate float64
 	kvUsageInstant      float64
+	kvUsageInstantOK    bool
 	requestRate         float64
 }
 
@@ -525,6 +526,7 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 				}
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value >= 0 && value.Value <= 1 {
 					podData[instanceKey].kvUsageInstant = value.Value
+					podData[instanceKey].kvUsageInstantOK = true
 				}
 			}
 		}

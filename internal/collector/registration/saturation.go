@@ -102,6 +102,12 @@ func RegisterSaturationQueries(sourceRegistry *source.SourceRegistry) {
 	// server process, told apart by a pid label, and a process that never
 	// received the rank's stats holds 0. A plain mean over such copies reads
 	// 0.375 for a pod whose two ranks are both at 0.75.
+	//
+	// A per-pod peak is right for the saturation tests and for k2, and wrong
+	// summed as demand when the router moves its hot pod within the minute:
+	// every pod it visited keeps a full peak. The saturation analyzer prices
+	// such a pod -- idle now beside a sibling busy now -- from
+	// QueryKvUsageInstant instead (residentCharge); this query is unchanged.
 	registry.MustRegister(source.QueryTemplate{
 		Name:        QueryKvCacheUsage,
 		Type:        source.QueryTypePromQL,

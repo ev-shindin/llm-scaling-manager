@@ -483,7 +483,7 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		Expect(err).NotTo(HaveOccurred())
 		r := analyzer.saturatedThroughputReading(tkey(analyzer, "test-ns|"+decodeVariant+"|test-model|H200|1|decode|long|q5"))
 		Expect(r.samples).To(Equal(1), "one moment, one sample")
-		Expect(r.rate).To(Equal(3.6), "at the higher of the two, whichever row came first")
+		Expect(r.rate).To(Equal(3.433333333333333), "at the lower median of the two: two replicas are two readings, not one re-read")
 
 		idle := makeAnalyzerInput(
 			[]domain.ReplicaMetrics{decode("decode-0", 200_000, 0, runLambda/2), decode("decode-1", 200_000, 0, runLambda/2), prefill("prefill-0", 0)},
@@ -497,8 +497,8 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 				decodeP = vc.PerReplicaCapacity
 			}
 		}
-		Expect(result.RoleDemand[domain.RoleDecode]).To(BeNumerically("~", runLambda/3.6*decodeP, 1),
-			"lambda / mu = 1.67 replicas' worth on two: under the hold at 0.85 x two, and RC = 0 on a fleet of two")
+		Expect(result.RoleDemand[domain.RoleDecode]).To(BeNumerically("~", 0.85*2*decodeP, 1),
+			"lambda / mu = 1.75 replicas' worth on two, held at 0.85 x two on one reading: RC = 0 on a fleet of two")
 
 		By("and the next window, a minute on, is the second reading")
 		clock = clock.Add(ThroughputSampleSpacing)
@@ -662,12 +662,24 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 			decode("a", 1_000_000, 2, 2.0), decode("b", 1_000_000, 2, 2.0), decode("c", 1_000_000, 2, 2.0),
 			prefill("p", 0),
 		}
+		// An arrival rate that accounts for what the replicas hold: 16 req/s
+		// at mu 5.4 is 2.96 replicas, about the 3M resident.
 		in := makeAnalyzerInput(rm, states(3, 1))
-		in.ArrivalRate = runLambda
+		in.ArrivalRate = 16
 		result, err := analyzer.Analyze(ctx, in)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RoleDemand[domain.RoleDecode]).To(BeNumerically("~", 3_000_000, 1),
 			"the six queued requests come out of the residency charge and the resident 3M stays")
+
+		By("keeping the queue's charge where the arrival rate lags what is resident")
+		// At 6 req/s the arrival half is 1.11 replicas against 3M resident:
+		// lambda is reading a minute the replicas have moved past, so it
+		// cannot price the queue as drain, and the demand stays as measured.
+		in.ArrivalRate = runLambda
+		lagging, err := analyzer.Analyze(ctx, in)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lagging.RoleDemand[domain.RoleDecode]).To(BeNumerically("~", 3_000_000+6*7000, 1),
+			"the resident 3M and the six queued requests at 6000 in + 1000 out")
 	})
 
 	It("drops prefill's share of the scheduler queue while prefill has no mu, and prices it once it has", func() {
@@ -818,8 +830,11 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		// it lands on the same history key as the variant's own replicas. Its
 		// engine runs on the pool's terms; its saturated rate must not price
 		// the variant -- and the window is a max, so one reading would.
+		// The variant's own replica serves beside it, unsaturated, from the
+		// first cycle: a replica that joined the fleet a cycle ago is still
+		// filling and records nothing (throughput_admission.go).
 		in := makeAnalyzerInput(
-			[]domain.ReplicaMetrics{decode("bridge-0", 1_158_912, 10, 9.9)},
+			[]domain.ReplicaMetrics{decode("bridge-0", 1_158_912, 10, 9.9), decode("decode-0", 600_000, 0, runMu)},
 			states(1, 0)[:1])
 		in.ReplicaMetrics[0].FromWarmPool = true
 		_, err := analyzer.Analyze(ctx, in)

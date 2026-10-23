@@ -44,6 +44,23 @@ type ReplicaCapacity struct {
 	// back out and price the same requests as work to be done instead.
 	QueueLength      int
 	LocalQueueDemand int64
+	// QueueRoutedFraction is the share of this replica's engine queue left
+	// out of its charge because a sibling of its role has been idle long
+	// enough to show it has room for it (the saturation analyzer's
+	// routeQueuesToIdleRoom): 0 when nothing was moved, 1 when the idle
+	// siblings' room covers every queue of the role. LocalQueueDemand (so
+	// ReplicaDemand) already excludes that share, and the throughput floor
+	// leaves the same share of QueueLength out of its backlog. Zero on a role
+	// with no settled-idle replica, so its queues count in full.
+	QueueRoutedFraction float64
+	// ServiceRate is the replica's own completion rate this cycle (req/s; for
+	// prefill, the prompt tokens it computed over the prompt length), 0 when
+	// it has none; ServiceRateOnRecord is the rate its bucket has on record
+	// (measured saturated throughput, else the derived one), 0 when none.
+	// The saturation analyzer reads the two to tell a prefill replica that is
+	// idle from one that is busy at a KV its work does not fill.
+	ServiceRate         float64
+	ServiceRateOnRecord float64
 
 	// FromWarmPool marks a BRIDGE: a warm pool Pod lent to this variant rather
 	// than one of its own replicas. Carried through from the collector so

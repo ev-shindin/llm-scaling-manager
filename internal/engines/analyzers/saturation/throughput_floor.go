@@ -55,14 +55,15 @@ import (
 // share no samples.
 //
 // A reading inside the spacing belongs to the last sample's window, and is
-// folded into it: the sample becomes the max of what that window read
-// (RaiseLast) -- the max the window kept when every cycle was added, no
+// folded into it: the sample becomes the max of what that replica
+// read -- the max the window kept when every cycle was added, no
 // more. Dropping in-spacing readings instead lost the highest reading of
 // an episode exactly when no next window would come, and on two replayed
 // passes left mu 10-12 % low for the rest of the pass, on one of them
-// ordering a fourth replica the run never needed. Folding also makes two
-// replicas saturating in one cycle read as one moment at the higher of
-// the two, whichever row the collector's map yields first.
+// ordering a fourth replica the run never needed. The fold is a max over
+// re-reads of one replica and the lower median across replicas
+// (recordSaturatedThroughputFrom): two replicas saturating in one cycle read
+// as one moment at the lower median of their two readings.
 //
 // What the max is worth is another matter. A saturated rate under-reads
 // while the replica is full (file header),
@@ -97,6 +98,29 @@ import (
 // Same window size and staleness rule as k2 history, and pruned beside it in
 // EvictStaleHistory.
 func (a *SaturationAnalyzer) recordSaturatedThroughput(key string, rate float64) {
+	a.recordSaturatedThroughputFrom(key, "", rate)
+}
+
+// recordSaturatedThroughputFrom is recordSaturatedThroughput for a reading
+// from one named replica (pod).
+//
+// The window is per bucket, not per replica, and every saturated replica of
+// the variant reads into it each cycle. A reading inside the spacing is folded
+// into the last sample, and the fold is a max over re-reads of ONE replica's
+// rate window -- the same moment read again, whose highest reading is the
+// best one -- and the lower median ACROSS replicas, whose readings are
+// independent. Folded by a max across replicas too, a sample was the hottest
+// of N readings and the window's median an order statistic whose expectation
+// rose with N: measured with 6 % reading noise on a true 6.0 req/s, +5.5 % at
+// one saturated replica and +13.6 % at sixteen. An over-stated mu orders too
+// few replicas. Per replica, the cross-replica part is gone and what is left
+// is the one-replica re-read max the window always kept.
+//
+// The per-replica readings of the sample belong to the sample: they are kept
+// with its time (throughputPodReads) and start over with the next sample, and
+// a sample with none on record -- restored, or put aside and brought back --
+// counts its own value as the reading of the replica that reads next.
+func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate float64) {
 	// `!(rate > 0)` rejects a NaN, which `rate <= 0` would admit. +Inf is
 	// excluded too, to match floor.priceable: it passes `rate > 0`, and left in
 	// it would take one of the window's ten slots from a real reading and be
@@ -117,12 +141,20 @@ func (a *SaturationAnalyzer) recordSaturatedThroughput(key string, rate float64)
 		a.saturatedThroughput[key] = ra
 		delete(a.throughputSampledAt, key)
 		delete(a.throughputLastRead, key)
+		delete(a.throughputPodReads, key)
 	}
 	lastRead, read := a.throughputLastRead[key]
 	a.throughputLastRead[key] = rate
 	if last, sampled := a.throughputSampledAt[key]; sampled {
 		if now.Sub(last) < ThroughputSampleSpacing {
-			ra.RaiseLast(rate) // the last sample's window, still being read
+			// The last sample's window, still being read.
+			reads := a.throughputPodReads[key]
+			if reads.at != last || reads.pods == nil {
+				reads = podReads{at: last, pods: map[string]float64{pod: ra.Last()}}
+			}
+			reads.pods[pod] = max(reads.pods[pod], rate)
+			a.throughputPodReads[key] = reads
+			ra.SetLast(lowerMedian(reads.pods))
 			return
 		}
 		if read && rate == lastRead {
@@ -132,6 +164,24 @@ func (a *SaturationAnalyzer) recordSaturatedThroughput(key string, rate float64)
 	}
 	ra.Add(rate)
 	a.throughputSampledAt[key] = now
+	a.throughputPodReads[key] = podReads{at: now, pods: map[string]float64{pod: rate}}
+}
+
+// podReads is one throughput sample's readings per replica, and the time of
+// the sample they belong to (recordSaturatedThroughputFrom).
+type podReads struct {
+	at   time.Time
+	pods map[string]float64
+}
+
+// lowerMedian is the lower median of the readings, the order statistic the
+// window itself reads (capacity.RollingAverage.Median).
+func lowerMedian(reads map[string]float64) float64 {
+	vs := slices.Sorted(maps.Values(reads))
+	if len(vs) == 0 {
+		return 0
+	}
+	return vs[(len(vs)-1)/2]
 }
 
 // saturatedThroughputFor returns the saturated completion rate on record for
@@ -152,6 +202,9 @@ type throughputReading struct {
 	bucket   string
 	samples  int
 	borrowed bool
+	// sampledAt is when the key's own window took its newest sample
+	// (throughputSampledAt); zero for any other reading, or when unknown.
+	sampledAt time.Time
 }
 
 // saturatedThroughputReading is saturatedThroughputFor with the window's
@@ -180,7 +233,8 @@ func (a *SaturationAnalyzer) saturatedThroughputReadingUnder(key, args string, s
 	defer a.mu.Unlock()
 	if ra, ok := a.saturatedThroughput[key]; ok {
 		ra.Touch()
-		return throughputReading{rate: ra.Median(), bucket: bucketOf(key), samples: ra.Len()}
+		return throughputReading{rate: ra.Median(), bucket: bucketOf(key), samples: ra.Len(),
+			sampledAt: a.throughputSampledAt[key]}
 	}
 	// The key's own window from before the variant's arguments changed: a
 	// hold-only figure, with the same authority as a neighbouring bucket's
@@ -384,7 +438,17 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			continue
 		}
 		role := roleOf[rc.VariantName]
-		backlog[role] += float64(rc.QueueLength)
+		// The share of a queue a settled-idle sibling has room for is the
+		// router's, not the role's (capacity.ReplicaCapacity.
+		// QueueRoutedFraction): replicas added cannot drain it, and pricing
+		// it as backlog ordered them -- measured in the imbalance audit, 100
+		// requests on one of four replicas at half the fleet's throughput
+		// implied 4.31 replicas against 2.35 balanced, 300 implied 8.24. Its
+		// residency charge already came out of LocalQueueDemand, so the queue
+		// is counted nowhere twice. The rest counts in full: with no sibling
+		// idle for long enough, or a queue deeper than its room, the fleet is
+		// short, and that is the order the backlog exists for.
+		backlog[role] += float64(rc.QueueLength) * (1 - rc.QueueRoutedFraction)
 		residency[role] += float64(rc.LocalQueueDemand)
 	}
 	// The residency charge is per role -- estimateSchedulerQueueDemand already
@@ -495,7 +559,41 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		// the resident KV alone. The queued requests are in the floor as a
 		// backlog now, and must not be counted twice.
 		resident := max(measured-residency[role], 0)
-		want := max(resident, tokens)
+		// The swap -- the queue priced as work to drain instead of as KV
+		// resident at once -- may LOWER the role's demand, and so it is made
+		// only where the floor's figure can be trusted to carry the queue:
+		// a term that may order and is not held, whose arrival rate is not
+		// lagging (FloorLagFraction). Anywhere else the floor only raises:
+		// want = max(measured, floor).
+		//
+		// At a load step lambda lags -- a [1m] rate, or the completion
+		// fallback, still reading the minute before -- while the queue is
+		// already standing. The replicas say so themselves: what is resident
+		// arrived within one residence time, and at saturation a replica
+		// holding P tokens completes mu, so the resident KV implies an arrival
+		// rate of about resident / cost, and the floor's arrival half
+		// (lambda x cost, ArrivalDemand) about the resident KV. A lambda that
+		// accounts for less than FloorLagFraction of it is the minute before
+		// the step, and cannot price the queue behind it. Measured on the
+		// two-namespace rerun
+		// (11:20:09): lambda 0.8 req/s with 160 queued, demand 499 446 cut to
+		// the 260 123 resident, the analyzer's rc falling 312 936 -> 47 265 in
+		// one cycle; at 07:46:12 a term that could not order (mayOrder=false)
+		// took 356 392 to 274 556.
+		//
+		// Blended, not switched (floorTrust). A hard switch at
+		// FloorLagFraction made demand fall as lambda rose: in review, the
+		// replica above went 499 446 -> 260 123 between 2.95 and 3.0 req/s,
+		// so a fleet sitting near the line flipped between the two demands
+		// cycle to cycle.
+		want := max(measured, tokens)
+		if term.MayOrder && !term.Held {
+			trust := 1.0
+			if resident > 0 {
+				trust = floorTrust(term.ArrivalDemand / resident)
+			}
+			want -= trust * (want - max(resident, tokens))
+		}
 		if want == measured {
 			continue
 		}
@@ -570,6 +668,35 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 // not changed: it comes from aggregateRoleDemand as DemandByRole plus the
 // queue's per-role charge, while the post-floor `want` is an independent
 // (lambda + backlog / drain) x P / mu with no queue term at all.
+
+// FloorLagFraction is the least share of the resident KV the floor's arrival
+// half (floor.Term.ArrivalDemand) must account for before the floor may price
+// the queues as drain rather than residency, and so lower a role's demand
+// (applyThroughputFloor). Half, not one: the resident KV of a saturated
+// replica can stand above P -- k1 is kvCacheThreshold of the cache and a full
+// replica holds more -- and a fleet draining a backlog with lambda right reads
+// 0.8-0.9 of it. A load step whose lambda still reads the minute before reads
+// 0.13 (0.8 req/s against a replica holding 260 123 tokens at mu 6).
+const FloorLagFraction = 0.5
+
+// FloorTrustFraction is the share of the resident KV the arrival half must
+// account for before the floor's drain price replaces the queues' residency
+// charge in full. Between FloorLagFraction and it the two are blended in
+// proportion (floorTrust); 0.8 is the bottom of what a fleet draining a
+// backlog with lambda right reads (0.8-0.9), so such a fleet is fully trusted.
+const FloorTrustFraction = 0.8
+
+// floorTrust is how far the floor's drain price may replace the queues'
+// residency charge, from 0 at FloorLagFraction of the resident KV or less to
+// 1 at FloorTrustFraction or more, given ratio = ArrivalDemand / resident.
+// Linear between, so the demand moves continuously with lambda rather than
+// dropping by the whole queue at one point.
+func floorTrust(ratio float64) float64 {
+	if !(ratio > FloorLagFraction) {
+		return 0
+	}
+	return min((ratio-FloorLagFraction)/(FloorTrustFraction-FloorLagFraction), 1)
+}
 
 // offeredArrivalRate is the model-level arrival rate: the scheduler's, or the
 // completion rate of the replicas that generate output when the scheduler

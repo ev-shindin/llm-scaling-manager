@@ -30,6 +30,11 @@ type admission struct {
 	// otherwise spent the whole hold and relaxation, and the morning's
 	// traffic met the variant at its own, unprotected figure.
 	idle bool
+	// unsettled is empty for a saturated reading that may be recorded as k2 and
+	// names why not otherwise: a reading that looks like a load step rather
+	// than a limit (k2Unsettled). It refuses only the P1 write; the row is
+	// admitted for everything else.
+	unsettled string
 }
 
 // admitted reports a row whose reading may be recorded, rollout aside: a Ready
