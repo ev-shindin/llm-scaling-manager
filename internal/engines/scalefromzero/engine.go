@@ -316,7 +316,7 @@ func (e *Engine) optimize(ctx context.Context) error {
 	// target that is already awake.
 	activeVAs, activeTargets, activeErr := utils.ActiveVariantAutoscaling(ctx, e.client, e.Variants)
 	if activeErr != nil {
-		logger.V(logging.DEBUG).Error(activeErr, "Could not list active variants; treating every role as uncovered")
+		logger.V(logging.DEBUG).Info("Could not list active variants; treating every role as uncovered", "error", activeErr)
 	}
 	coverage := activeRoleCoverage(activeVAs, activeTargets)
 	observeCompletedWakes(activeVAs, activeTargets)
@@ -372,7 +372,9 @@ modelLoop:
 
 			err := e.processInactiveModel(ctx, scaleTargets, g, coverage[g.key()])
 			if err != nil {
-				logger.V(logging.DEBUG).Error(err, "Error processing model", "modelID", g.modelID, "namespace", g.namespace)
+				// Info: logr ignores V() on Error. The error reaches the executor,
+				// which logs it at ERROR.
+				logger.V(logging.DEBUG).Info("Error processing model", "modelID", g.modelID, "namespace", g.namespace, "error", err)
 				errorCh <- err
 			} else {
 				errorCh <- nil

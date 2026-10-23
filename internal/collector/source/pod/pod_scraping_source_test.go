@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr/funcr"
@@ -737,12 +738,14 @@ vllm_num_requests_waiting{namespace="test-ns"} 3
 			source, err := NewPodScrapingSource(ctx, client, config)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Should return empty results (not error) when pods are unreachable
+			// Every Ready pod unreachable is a failure to look, not an empty
+			// answer. This spec used to assert a nil error here, and that nil is
+			// what kept the scale-from-zero engine off its Prometheus fallback:
+			// it read the empty result as "the EPP exports no queue".
 			results, err := source.Refresh(ctx, sourcepkg.RefreshSpec{})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(results).To(HaveKey("all_metrics"))
-			// Should have empty or no metrics due to unreachable pod
-			Expect(results["all_metrics"].Values).To(BeEmpty())
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("test-ns/test-pool-epp"))
+			Expect(results).To(BeNil())
 		})
 
 		It("should handle authentication failures", func() {
@@ -795,12 +798,83 @@ vllm_num_requests_waiting{namespace="test-ns"} 3
 			source, err := NewPodScrapingSource(ctx, client, config)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Should handle auth failure gracefully (empty results, not error)
+			// A 401 from every pod is the first case the scale-from-zero
+			// Prometheus fallback exists for (queue_fallback.go), so it must be
+			// an error the engine can count. This spec used to assert nil.
 			results, err := source.Refresh(ctx, sourcepkg.RefreshSpec{})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("401"))
+			Expect(results).To(BeNil())
+		})
+
+		It("should return the pods that answered, and no error, when only some fail", func() {
+			var port int32
+			_, err := fmt.Sscanf(mockServer1.URL, "http://127.0.0.1:%d", &port)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(results).To(HaveKey("all_metrics"))
-			// Should have no metrics due to auth failure
-			Expect(results["all_metrics"].Values).To(BeEmpty())
+			noIP := readyPod2.DeepCopy()
+			noIP.Status.PodIP = "" // scrapePodMetrics fails before any request
+
+			source, err := NewPodScrapingSource(ctx, fakeClient.WithObjects(service, readyPod1, noIP).Build(),
+				PodScrapingSourceConfig{
+					ServiceName:      "test-pool-epp",
+					ServiceNamespace: "test-ns",
+					MetricsPort:      port,
+					BearerToken:      "test-token",
+				})
+			Expect(err).NotTo(HaveOccurred())
+
+			results, err := source.Refresh(ctx, sourcepkg.RefreshSpec{})
+			Expect(err).NotTo(HaveOccurred(), "one pod answering is an answer")
+			Expect(results["all_metrics"].Values).To(HaveLen(2))
+		})
+
+		It("should log a failing scrape once per change and keep the last good cache", func() {
+			failing := atomic.Bool{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if failing.Load() {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				_, _ = fmt.Fprint(w, "llm_d_epp_flow_control_queue_size{target_model_name=\"m\"} 2\n")
+			}))
+			defer server.Close()
+			var port int32
+			_, err := fmt.Sscanf(server.URL, "http://127.0.0.1:%d", &port)
+			Expect(err).NotTo(HaveOccurred())
+
+			source, err := NewPodScrapingSource(ctx, fakeClient.WithObjects(service, readyPod1).Build(),
+				PodScrapingSourceConfig{
+					ServiceName:      "test-pool-epp",
+					ServiceNamespace: "test-ns",
+					MetricsPort:      port,
+				})
+			Expect(err).NotTo(HaveOccurred())
+			var logged []string
+			// Verbosity 0: the per-pod V(VERBOSE) line does not reach the sink,
+			// so what is counted is the once-per-change line alone.
+			source.log = funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{Verbosity: 0})
+
+			_, err = source.Refresh(ctx, sourcepkg.RefreshSpec{})
+			Expect(err).NotTo(HaveOccurred())
+
+			failing.Store(true)
+			for range 3 {
+				_, err = source.Refresh(ctx, sourcepkg.RefreshSpec{})
+				Expect(err).To(HaveOccurred())
+			}
+			Expect(logged).To(HaveLen(1), "logged once on the change, not once per scrape")
+			Expect(logged[0]).To(ContainSubstring(`"namespace"="test-ns"`))
+			Expect(logged[0]).To(ContainSubstring("500"))
+
+			cached := source.Get("all_metrics", nil)
+			Expect(cached).NotTo(BeNil(), "a failed scrape must not overwrite the last good answer")
+			Expect(cached.Result.Values).To(HaveLen(1))
+
+			failing.Store(false)
+			_, err = source.Refresh(ctx, sourcepkg.RefreshSpec{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(logged).To(HaveLen(2))
+			Expect(logged[1]).To(ContainSubstring("recovered"))
 		})
 	})
 
@@ -1111,9 +1185,11 @@ var _ = Describe("Error metrics recording", func() {
 		source, err := NewPodScrapingSource(ctx, client, config)
 		Expect(err).NotTo(HaveOccurred())
 
-		// Refresh should not error but scraping will fail
+		// The only pod fails, so Refresh reports it (it used to return nil
+		// here, which hid the failure from the scale-from-zero fallback), and
+		// the per-pod failure is still counted.
 		_, err = source.Refresh(ctx, sourcepkg.RefreshSpec{})
-		Expect(err).NotTo(HaveOccurred())
+		Expect(err).To(HaveOccurred())
 
 		// Verify error metric was recorded
 		count := testutil.GetErrorMetricValue(registry, constants.ComponentCollector, "Failed to scrape pod")

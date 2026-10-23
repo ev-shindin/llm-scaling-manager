@@ -178,6 +178,23 @@ prefill fleet in one cycle.
 adds a reading to its lower bound: `computedTokenRate`, `effectiveInputTokens`,
 and `reading`, their ratio in requests per second.
 
+### `replica-start-measured` and `replica-start-outlier-rejected`
+
+How long a replica takes to become Ready, per variant. The throughput floor
+prices the backlog over this time, so a long start raises `projectedBacklog`.
+
+`replica-start-measured` is logged on a cycle where new replicas of the variant
+became Ready: `namespace`, `variant`, `observations` (replicas counted this
+cycle), `estimateSeconds` (the estimate now in force) and `source` (`measured`,
+or `seed` while the default is in force).
+
+`replica-start-outlier-rejected` is logged when one replica's start is much
+longer than the estimate and is left out: `namespace`, `variant`, `pod`,
+`sampleSeconds`, `estimateSeconds` and `factor`. A readiness probe that fails
+and recovers reports the pod's age as its start time, which is the usual cause.
+After three rejections in a row the next sample is accepted, so a variant that
+really got slower moves its estimate.
+
 ---
 
 ## Reason values (`reason` field)
