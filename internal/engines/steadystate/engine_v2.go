@@ -149,6 +149,12 @@ func (e *Engine) runAnalyzers(
 	// e.g. unit tests, in which case the build step is a no-op join).
 	metaByVariant := metadataByVariant(variantMetadata)
 
+	// Observe only: how evenly the router loads each role (load_balance.go).
+	// Before the analyzers, so a failing analyzer does not leave the series at
+	// a value from a cycle that no longer stands: the rows are this cycle's
+	// whatever the analysis makes of them.
+	e.observeLoadBalance(logger, namespace, modelID, replicaMetrics, variantStates, config.QueueLengthThreshold)
+
 	// Run saturation analyzer (always needed for PerReplicaCapacity).
 	baseResult, err := e.runV2AnalysisOnly(ctx, modelID, namespace, replicaMetrics, config,
 		variantStates, scaleTargets, variantAutoscalings, schedulerQueue, arrivalRate)
@@ -651,6 +657,9 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 func (e *Engine) onNothingObserved(namespace, modelID string) {
 	e.zeroObservedReplicas(namespace, modelID)
 	e.dropServiceRateSeries(namespace, modelID)
+	// No ready replica, so no distribution: a parked role must not keep
+	// reporting the imbalance it had.
+	e.forgetLoadBalance(namespace, modelID)
 }
 
 // zeroObservedReplicas sets wva_analyzer_observed_replicas to 0 for every
@@ -774,6 +783,9 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 			delete(e.lastAnalyzerSeries, modelKey)
 		}
 	}
+	// Published before the model reached recordAnalyzerMetrics, so tracked
+	// apart from lastAnalyzerSeries.
+	e.retainLoadBalance(activeKeys)
 }
 
 // evictAllAnalyzerSeries removes every analyzer series the engine has published,
@@ -795,6 +807,7 @@ func (e *Engine) evictAllAnalyzerSeries() {
 		metrics.DeleteSLOModel(series.namespace, series.modelID)
 		delete(e.lastAnalyzerSeries, modelKey)
 	}
+	e.retainLoadBalance(nil)
 }
 
 // livenessThreshold is how long an analyzer stays live after its last

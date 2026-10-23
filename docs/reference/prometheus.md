@@ -1759,6 +1759,63 @@ per pod.
   - `model_name`: model ID
 - **Use Case**: Settle which utilization the autoscaler targets when pricing a replica, without recomputing it from configuration.
 
+### Load distribution
+
+How evenly the router spreads a model's load over the ready replicas of each
+role. The scaling manager prices capacity per replica and demand for the whole
+fleet, so a router that keeps one replica full while another idles is
+not something more replicas fix. These series show it, and nothing scales on
+them.
+
+They are computed every cycle from the per-replica rows the analyzers already
+read, so they cost no query. Labels are `namespace` (the **model's**
+namespace, scraped as `exported_namespace`), `model_name` and `role`
+(`prefill`, `decode` or `both`), plus `controller_instance` when
+`CONTROLLER_INSTANCE` is set. A role's series are deleted on the cycle it has
+no ready replica, and a model's when it is no longer reconciled or its metrics
+could not be collected on any cycle for 2 minutes. A shorter collection
+failure leaves the series at their last value.
+
+One replica is classified on its busiest engine rank (for a pod of one rank,
+the pod itself):
+
+| class | test |
+| --- | --- |
+| saturated | KV cache at or over 0.90, or a waiting queue at or over `queueLengthThreshold`. On a model with a prefill variant, decode is judged on KV alone: its waiting count also holds requests waiting for their remote KV. A decode variant with no prefill beside it serves whole requests, so its queue counts: a replica capped by `--max-num-seqs` can hold hundreds waiting with its KV under 0.90 |
+| idle | KV cache under 0.30, nothing waiting, and Ready for at least 2 minutes. A replica that has just passed readiness has had no time to receive work, so a scale-up does not read as an idle replica. The 2 minutes run from the later of the Pod's Ready time and the cycle the controller first saw it Ready, so a node clock behind the controller's does not shorten them. A warm-pool Pod lent to the variant counts from when it was lent, not from its Ready time in the pool |
+
+KV is the collector's one-minute peak, the same reading the saturation tests
+use. A replica whose KV figure is not a number is left out, like one that is
+not Ready. The engines' running count is not collected, so the in-flight spread is
+read from the waiting queue alone.
+
+| metric | type | value |
+| --- | --- | --- |
+| `wva_load_ready_replicas` | gauge | ready replicas the other figures are over, warm-pool bridges included |
+| `wva_load_kv_usage_max` | gauge | highest per-replica KV utilization (0-1) |
+| `wva_load_kv_usage_mean` | gauge | mean per-replica KV utilization |
+| `wva_load_kv_max_to_mean_ratio` | gauge | max / mean KV: 1 when even, up to the replica count when one replica holds everything. Absent with fewer than two ready replicas or a mean of 0 |
+| `wva_load_queue_max_to_mean_ratio` | gauge | deepest waiting queue on one replica / mean queue, up to the replica count. Absent with fewer than two ready replicas or nothing waiting |
+| `wva_load_idle_replicas_while_saturated` | gauge | idle replicas while at least one other is saturated; 0 otherwise |
+| `wva_load_imbalanced` | gauge | 1 once the role has had an idle replica beside a saturated one on every cycle for 2 minutes, longer than the one-minute window the figures are peaks over. It returns to 0 only after the role has read balanced on every cycle for 2 minutes, so a one-cycle dip does not clear it |
+
+The cycle `wva_load_imbalanced` turns to 1, the controller logs one line
+starting `WARNING: load imbalanced across a role's replicas`. The line names
+the busiest pod and the idle ones. The busiest pod is ranked by the signal
+that judged it saturated: the deepest queue on `prefill` and `both`, the
+fullest KV cache on `decode`. It is never one of the idle pods. On the cycle
+the gauge returns to 0 it logs `load balanced again across a role's replicas`.
+`WVALoadImbalanced` alerts when it stays at 1 for 10 minutes, and keeps firing
+for 15 minutes after it drops.
+
+Example: roles whose busiest replica holds more than twice the mean KV, on
+fleets of at least three:
+
+```promql
+wva_load_kv_max_to_mean_ratio > 2
+  and on (exported_namespace, model_name, role) wva_load_ready_replicas >= 3
+```
+
 ## Example queries
 
 ### Basic queries
@@ -1926,6 +1983,7 @@ notifications link to it.
 | `WVAUtilizationShareMarksUnreadable` | warning | 10m | blocked reason `marks-unreadable`: the controller cannot read the transfer marks on a group's donor pods, so every planned model of the group holds what it runs. It does not clear by itself | the Error line `Utilization share: could not read transfer marks; retrying next cycle` names the cause, typically a missing RBAC grant to list pods in one model's namespace | [T: optimizer](troubleshooting.md#the-optimizer-evaluates-but-never-moves-anything) |
 | `WVAUtilizationShareFloorsExceedQuota` | warning | 15m | blocked reason `floors-exceed-quota`: the `minReplicaCount` floors of a group's models add up to more than its quota | lower a floor or raise the quota | [T: optimizer](troubleshooting.md#the-optimizer-evaluates-but-never-moves-anything) |
 | `WVAUtilizationShareModeInvalid` | warning | 10m | `wva_utilization_share_mode{mode="invalid"}` is 1: the `optimizer:` block did not validate, and today's optimizer runs instead | the log line `Utilization share: invalid optimizer block; keeping today's optimizer` says why | [T: optimizer](troubleshooting.md#the-optimizer-evaluates-but-never-moves-anything) |
+| `WVALoadImbalanced` | warning | 10m | `wva_load_imbalanced` is 1 for a model's role: one ready replica saturated while another is idle, held for 10 minutes; keeps firing for 15 minutes after it clears. The router's choice: the role already has a replica it is not using | read the router's scheduling profile for that role: a `prefix-cache-scorer` weighted above `queue-scorer`, `active-request-scorer` and `kv-cache-utilization-scorer` is the usual cause; adding replicas is unlikely to help | [T: uneven load](troubleshooting.md#one-replica-is-saturated-while-others-idle) |
 | `WVAOptimizationLoopStalled` | info | 15m | `wva_models_processed` is 0 or absent for 10 minutes | expected when no ScaledObject names this scaler. Otherwise check the controller pod, its log and Prometheus | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
 
 There is no alert on `engine-unsupported` on purpose: it is a standing property

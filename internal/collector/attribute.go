@@ -408,6 +408,7 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		Ready:                    ready,
 		Revision:                 c.podRevision(ctx, namespace, podName),
 		StartSeconds:             c.podStartSeconds(ctx, namespace, podName),
+		ReadySince:               c.podReadySince(ctx, namespace, podName),
 		KvCacheUsage:             kvUsage,
 		QueueLength:              queueLen,
 		NumGpuBlocks:             data.numGpuBlocks,

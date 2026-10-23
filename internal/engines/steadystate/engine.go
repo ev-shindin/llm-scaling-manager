@@ -58,6 +58,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/scalingpolicy"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/balance"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
@@ -300,6 +301,14 @@ type Engine struct {
 	optimizer allocation.ScalingOptimizer
 
 	metricsEmitter *metrics.MetricsEmitter
+
+	// loadBalance remembers, per model and role, how long the router has kept
+	// one replica saturated beside an idle one (observeLoadBalance). Built on
+	// first use.
+	loadBalance *balance.Tracker
+	// loadBalanceNow is the clock observeLoadBalance reads; nil is time.Now.
+	// A test sets it to step cycles without waiting for them.
+	loadBalanceNow func() time.Time
 }
 
 // NewEngine creates a new instance of the saturation engine.
@@ -1518,6 +1527,10 @@ func (e *Engine) optimizeV2(
 		if err != nil {
 			msg := "Model data preparation failed"
 			logger.Error(err, msg, "modelID", modelID)
+			// Nothing measured the load this cycle: the series go once
+			// collection has failed for balance.StaleAfter, not on one
+			// failed cycle (loadBalanceCollectionFailed).
+			e.loadBalanceCollectionFailed(namespace, modelID)
 			e.recordOptimizationFailedEvent(modelVAs, msg)
 			e.emitSafetyNetMetrics(ctx, modelVAs, currentAllocations, nil)
 			reportSignalReason(namespace, modelID, nil)
