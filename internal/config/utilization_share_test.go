@@ -43,6 +43,8 @@ var _ = Describe("ResolveUtilizationShare", func() {
 		Expect(st.ConsecutiveCyclesBeforeMove).To(Equal(DefaultConsecutiveCyclesBeforeMove))
 		Expect(st.WaitBeforeReverseMove).To(BeNil(), "auto")
 		Expect(st.FlappingWindow).To(BeNil(), "auto")
+		Expect(st.SwingReversals).To(Equal(DefaultSwingReversals))
+		Expect(DefaultSwingReversals).To(Equal(3), "a single swap back is not a swing (issue #269)")
 		Expect(st.SkipWaitsOff).To(BeFalse())
 		Expect(st.SkipWaitsReceiverLoad).To(Equal(DefaultSkipWaitsReceiverLoad))
 		Expect(st.SkipWaitsDonorLoad).To(Equal(DefaultSkipWaitsDonorLoad))
@@ -55,6 +57,7 @@ var _ = Describe("ResolveUtilizationShare", func() {
 			ConsecutiveCyclesBeforeMove: 3,
 			WaitBeforeReverseMove:       "5m",
 			FlappingWindow:              "0s",
+			SwingReversals:              2,
 			SkipWaitsWhen:               &UtilizationShareSkipWaits{Enabled: &off, ReceiverLoadAtLeast: 1, DonorLoadAtMost: 0.5},
 			ReturnSpareWhenLoadAtMost:   0.4,
 		}})
@@ -63,6 +66,7 @@ var _ = Describe("ResolveUtilizationShare", func() {
 		Expect(st.ConsecutiveCyclesBeforeMove).To(Equal(3))
 		Expect(*st.WaitBeforeReverseMove).To(Equal(5 * time.Minute))
 		Expect(*st.FlappingWindow).To(BeZero(), "0s turns the flapping rule off, it is not auto")
+		Expect(st.SwingReversals).To(Equal(2))
 		Expect(st.SkipWaitsOff).To(BeTrue())
 		Expect(st.SkipWaitsReceiverLoad).To(Equal(1.0))
 		Expect(st.SkipWaitsDonorLoad).To(Equal(0.5))
@@ -129,7 +133,18 @@ var _ = Describe("ResolveUtilizationShare", func() {
 		Entry("unparsable wait", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{WaitBeforeReverseMove: "twelve minutes"}}, "waitBeforeReverseMove"),
 		Entry("negative wait", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{WaitBeforeReverseMove: "-1m"}}, "waitBeforeReverseMove"),
 		Entry("unparsable flapping window", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{FlappingWindow: "2"}}, "flappingWindow"),
+		Entry("one reversal: not a swing", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{SwingReversals: 1}}, "swingReversals"),
+		Entry("negative reversals", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{SwingReversals: -3}}, "swingReversals"),
+		Entry("reversals past their bound", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{SwingReversals: MaxSwingReversals + 1}}, "swingReversals"),
 	)
+
+	It("takes swingReversals across its range", func() {
+		for _, n := range []int{MinSwingReversals, 3, MaxSwingReversals} {
+			us, err := ResolveUtilizationShare(&UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{SwingReversals: n}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(us.Stabilization.SwingReversals).To(Equal(n))
+		}
+	})
 
 	It("derives the clamp and the default class from the classes", func() {
 		us, err := ResolveUtilizationShare(&UtilizationShareConfig{
@@ -295,6 +310,7 @@ optimizer:
       consecutiveCyclesBeforeMove: 3
       waitBeforeReverseMove: 8m
       flappingWindow: auto
+      swingReversals: 4
       skipWaitsWhen:
         enabled: false
         receiverLoadAtLeast: 0.95
@@ -307,6 +323,7 @@ optimizer:
 		Expect(st.ConsecutiveCyclesBeforeMove).To(Equal(3))
 		Expect(*st.WaitBeforeReverseMove).To(Equal(8 * time.Minute))
 		Expect(st.FlappingWindow).To(BeNil())
+		Expect(st.SwingReversals).To(Equal(4))
 		Expect(st.SkipWaitsOff).To(BeTrue())
 		Expect(st.SkipWaitsReceiverLoad).To(Equal(0.95))
 		Expect(st.SkipWaitsDonorLoad).To(Equal(0.5))

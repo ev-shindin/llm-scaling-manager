@@ -902,9 +902,10 @@ const (
 	// ScalingBlockedReversalHold indicates the role is short but gave GPUs
 	// within the reversal hold, so it may not receive yet (section 6.7 rule 4).
 	ScalingBlockedReversalHold = "reversal-hold"
-	// ScalingBlockedSwinging indicates the role reversed direction twice
-	// within the swing window and is planned on its mean need, not its
-	// current one (section 6.7 rule 5).
+	// ScalingBlockedSwinging indicates the role reversed direction
+	// stabilization.swingReversals times (three by default) within the swing
+	// window and is planned on its mean need, not its current one (section
+	// 6.7 rule 5).
 	ScalingBlockedSwinging = "swinging"
 	// ScalingBlockedTransferLimit indicates the role is short while its group
 	// already has the most transfers in flight it may run at once.
