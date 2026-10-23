@@ -229,6 +229,10 @@ type SharePlan struct {
 	Evaluation ShareEvaluation
 	// Swinging lists the roles planned on their mean need this cycle.
 	Swinging []string
+	// SwingNeeds is, for each role in Swinging, the need it was planned on
+	// (its mean over the swing window) and the need it read this cycle, in
+	// GPUs: what the swing rule changed, for the log line that names it.
+	SwingNeeds map[string]ShareSwingNeed
 	// ReserveDebt is how far the committed allocation stood above the budget
 	// before this cycle's refills: reserve a wake spent, or anything else that
 	// put the group over (section 6.2). Refills is how many transfers started
@@ -267,6 +271,12 @@ type SharePlan struct {
 	// placements spent, for the idle fill to place into. Nil without node
 	// information.
 	Nodes map[string]ShareNode
+}
+
+// ShareSwingNeed is a swinging role's need two ways, in GPUs: Mean, its mean
+// over the swing window, which it is planned on, and Current, its reading.
+type ShareSwingNeed struct {
+	Mean, Current float64
 }
 
 // Reasons in SharePlan.Unfunded and SharePlan.Withheld.
@@ -884,6 +894,10 @@ func (p *sharePlanRun) planningRoles() {
 		if r := p.roles[i]; p.l.Swinging(r.Key, p.now) {
 			p.roles[i].Need = r.gpusFor(p.l.PlanningNeed(r.Key, r.serves(r.Need), p.now))
 			p.plan.Swinging = append(p.plan.Swinging, p.roles[i].Key)
+			if p.plan.SwingNeeds == nil {
+				p.plan.SwingNeeds = map[string]ShareSwingNeed{}
+			}
+			p.plan.SwingNeeds[r.Key] = ShareSwingNeed{Mean: p.roles[i].Need, Current: r.Need}
 		}
 		p.byKey[p.roles[i].Key] = p.roles[i]
 	}

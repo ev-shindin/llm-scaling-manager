@@ -1868,8 +1868,15 @@ replicas. Every figure is a mean of five seeds.
    `returnSpareWhenLoadAtMost` (0.6) of what it keeps less its headroom, so it
    is refilled only after its need grows by 1/0.6.
 5. **Plan a swinging role on its mean need.** A role whose transfers change
-   direction twice within eight decide-to-serve latencies (about 96 minutes) is
-   following load it cannot catch. For the next such window it is planned on its
+   direction three times (`stabilization.swingReversals`, 2 to 20) within
+   eight decide-to-serve latencies (about 96 minutes) is following load it
+   cannot catch; a transfer cancelled on a reversal counts as one change.
+   (Two, as first written, took a single swap
+   back for a swing -- counting the move that first raised the model -- and
+   held both models halfway: issue #269. Moves alone never reached three for
+   a load swapping faster than the release window, where every transfer is
+   cancelled before it moves, hence the cancels. The results below were
+   measured under two.) For the next such window it is planned on its
    **mean** need over that window, not its current need. This is the rule that addresses resonance, below.
 
 #### Results
@@ -2108,7 +2115,8 @@ none of them:
       stabilization:                # how fast GPUs move against how often they move back (§6.7)
         consecutiveCyclesBeforeMove: 2  # cycles a model must look short (or spare) before a move
         waitBeforeReverseMove: auto     # a model that gave may not receive for this long; auto = 2 x release
-        flappingWindow: auto            # two direction changes within it: plan on average demand; auto = 8 x latency
+        flappingWindow: auto            # swingReversals direction changes within it: plan on average demand; auto = 8 x latency
+        swingReversals: 3               # direction changes within flappingWindow that make a swing; 2..20
         skipWaitsWhen:                  # a hard imbalance waits for neither (§6.2)
           enabled: true
           receiverLoadAtLeast: 0.9      # receiver's load, as a fraction of its scale-up threshold

@@ -36,6 +36,23 @@ const (
 	// DefaultMaxHeadroomReplicas is utilizationShare.maxHeadroomReplicas: the
 	// replicas above its need the quota's spare gives a model of weight 1.
 	DefaultMaxHeadroomReplicas = 1
+	// DefaultSwingReversals is stabilization.swingReversals: how many times a
+	// model's moves must change direction within the flapping window before it
+	// is planned on its mean need -- one and a half cycles. At two, a single
+	// swap back counted as a swing: a model raised for a load, drained when the
+	// load went to the other model and raised again when it came back has
+	// changed direction twice, and both models were held halfway, on their
+	// means, until the busy one's need had outlasted the earlier halves. The
+	// swap back of issue #269 sat at 2:2 for eleven minutes and reached its
+	// split after 28, against 9 with the rule off. A load that really
+	// oscillates reverses a third time within the window, and is held from
+	// then.
+	DefaultSwingReversals = 3
+	// MinSwingReversals and MaxSwingReversals bound swingReversals. Two is the
+	// rule before the default became three; one change of direction is not a
+	// swing at all, and past twenty no window holds that many moves.
+	MinSwingReversals = 2
+	MaxSwingReversals = 20
 	// MaxHeadroomReplicasLimit bounds maxHeadroomReplicas. Far above any
 	// model's maxReplicas: a larger value means "spread all of it".
 	MaxHeadroomReplicasLimit = 10000
@@ -160,11 +177,16 @@ type UtilizationShareStabilization struct {
 	// receive any, and one that received may not give: a Go duration ("12m")
 	// or "auto" (the default), twice the group's release time.
 	WaitBeforeReverseMove string `yaml:"waitBeforeReverseMove,omitempty"`
-	// FlappingWindow: a model whose moves change direction twice within it is
+	// FlappingWindow: a model whose moves change direction SwingReversals
+	// times within it (a transfer cancelled on a reversal counts as one) is
 	// planned on its average demand over the window, not its current one. A Go
 	// duration or "auto" (the default), eight times the time a move takes from
 	// decision to serving. "0s" turns the rule off.
 	FlappingWindow string `yaml:"flappingWindow,omitempty"`
+	// SwingReversals is how many changes of direction within FlappingWindow
+	// make a model swinging. In [MinSwingReversals, MaxSwingReversals]; zero
+	// takes DefaultSwingReversals.
+	SwingReversals int `yaml:"swingReversals,omitempty"`
 	// SkipWaitsWhen lets a large imbalance skip the two waits above.
 	SkipWaitsWhen *UtilizationShareSkipWaits `yaml:"skipWaitsWhen,omitempty"`
 	// ReturnSpareWhenLoadAtMost: a model holding more than its need plus its
@@ -206,6 +228,8 @@ type ShareStabilization struct {
 	// per group.
 	WaitBeforeReverseMove *time.Duration
 	FlappingWindow        *time.Duration
+	// SwingReversals is swingReversals in force.
+	SwingReversals int
 	// SkipWaitsOff, SkipWaitsReceiverLoad and SkipWaitsDonorLoad are
 	// skipWaitsWhen in force.
 	SkipWaitsOff          bool
@@ -352,6 +376,14 @@ func (u *UtilizationShare) resolveStabilization(cfg *UtilizationShareStabilizati
 	}
 	if st.FlappingWindow, err = stabilizationDuration("flappingWindow", cfg.FlappingWindow); err != nil {
 		return err
+	}
+	st.SwingReversals = cfg.SwingReversals
+	if st.SwingReversals == 0 {
+		st.SwingReversals = DefaultSwingReversals
+	}
+	if st.SwingReversals < MinSwingReversals || st.SwingReversals > MaxSwingReversals {
+		return fmt.Errorf("utilizationShare.stabilization.swingReversals must be in [%d, %d], got %d",
+			MinSwingReversals, MaxSwingReversals, cfg.SwingReversals)
 	}
 
 	skip := cfg.SkipWaitsWhen

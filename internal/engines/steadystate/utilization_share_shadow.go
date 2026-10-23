@@ -61,6 +61,9 @@ type utilizationShareState struct {
 	// headroomCapped is, per group, whether its headroom was capped when
 	// last planned: the cap's flips are logged.
 	headroomCapped map[string]bool
+	// swinging is, per group, the roles last logged as planned on their mean
+	// need: a role's entry and exit are logged (reportSwinging).
+	swinging map[string]map[string]bool
 	// history is the need history store's memory; it outlives the ledgers.
 	history shareHistoryState
 
@@ -105,6 +108,7 @@ func (st *utilizationShareState) resetActuation() {
 	st.ledgers, st.desired, st.quietUntil, st.divergedSince, st.goneSince = nil, nil, nil, nil, nil
 	// A rebuilt ledger logs its cap state afresh.
 	st.headroomCapped = nil
+	st.swinging = nil
 	// A first cycle's outcomes not yet counted go with their ledger: the group
 	// labels they would be counted under are gone, and a rebuilt ledger counts
 	// its own.
@@ -430,6 +434,7 @@ func (e *Engine) dropVanishedGroups(ctx context.Context, logger logr.Logger, see
 		delete(st.goneSince, k)
 		delete(st.uncounted, k)
 		delete(st.headroomCapped, k)
+		delete(st.swinging, k)
 		st.forgetShareHistory(k)
 	}
 }
