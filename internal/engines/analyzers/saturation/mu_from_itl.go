@@ -111,9 +111,9 @@ func capacityTokensFor(params *capacity.EngineParams, ranks int, liveTokens int6
 // role rejected at once. The fleet still reached 9 so the run stands, but its
 // phase-1 TTFT p95 was 64 s against main's 42 s.
 //
-// The cause is not a threshold that needs tuning. The three signals are
-// collected over three different windows -- KvUsageInstant has none,
-// GenerationTokenRate is rate[1m], AvgITL is rate[5m] -- so on a ramp k reaches
+// The cause is not a threshold that needs tuning. The signals are not
+// collected over the same window -- KvUsageInstant has none, while
+// GenerationTokenRate and AvgITL are both rate[1m] -- so on a ramp k reaches
 // its new level in seconds while the 1m rate still reports a fraction of the
 // steady state. The disagreement is therefore largest exactly when a scale-up
 // is needed, and it moves every replica together, so neither N-consecutive
@@ -148,7 +148,7 @@ func (a *SaturationAnalyzer) noteLineMismatch(model itl.Model, params *capacity.
 		return
 	}
 	logger.V(logging.DEFAULT).Info("itl-gps-mismatch",
-		"variant", rm.VariantName, "pod", rm.PodName,
+		"namespace", rm.Namespace, "variant", rm.VariantName, "pod", rm.PodName,
 		"k", rm.KvUsageInstant, "observedGPS", rm.GenerationTokenRate,
 		"predictedGPS", itl.TokenRate(model, rm.KvUsageInstant, capacityTokens, kvReq),
 		"errPct", errPct, "thresholdPct", itl.DefaultGPSMismatchThresholdPct,
@@ -353,6 +353,9 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		"variant", variantName, "key", key,
 		"replicas", r.Considered, "offered", r.Offered, "held", r.Held,
 		"notReady", r.NotReady, "noITL", r.NoITL, "noK", r.NoK, "aboveBand", r.AboveBand,
+		// Kept, but not for the full fit: the replica's load had just moved,
+		// so its k and its ITL describe different moments (itl.DefaultSteadyFor).
+		"unsteady", r.Unsteady, "steadyHeld", r.SteadyHeld,
 		"ready", r.Ready, "minSamples", itl.DefaultMinSamples)
 	switch {
 	case r.Tier == itl.TierOLS:

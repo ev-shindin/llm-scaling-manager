@@ -141,9 +141,9 @@ proposal must say which:
   fleet still reached 9 so the run stands, but its phase-1 TTFT p95 was 64 s
   against main's 42 s.
 
-  The cause is not a threshold. The three signals are collected over three
-  different windows -- `KvUsageInstant` has none,
-  `GenerationTokenRate` is `rate[1m]`, `AvgITL` is `rate[5m]` -- so on a ramp
+  The cause is not a threshold. The signals are not collected over the same
+  window -- `KvUsageInstant` has none, while
+  `GenerationTokenRate` and `AvgITL` are both `rate[1m]` -- so on a ramp
   `k` reaches its new level in seconds while the 1m rate still reports a
   fraction of the steady state. The disagreement is therefore largest exactly
   when a scale-up is needed, and it moves every replica together, so neither an

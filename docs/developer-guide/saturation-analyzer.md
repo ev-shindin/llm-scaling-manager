@@ -176,6 +176,42 @@ evidence:
 | `DefaultObservationMaxAge` | 30m | |
 | `DefaultMinObservableK` | 0.15 | below this the engine is not batching |
 | `DefaultMaxObservableK` | 0.80 | above it, preemption makes ITL non-linear |
+| `DefaultSteadyFor` | 2m | a replica's `k` must have held still this long |
+| `DefaultMaxKDrift` | 0.10 | how far it may have moved and still count as still |
+| `DefaultSteadyCarry` | 5m | how long a steady reading may outlive the main window's oldest |
+| `DefaultSteadyWindowMaxSize` | 40 | steady readings kept per key |
+
+The full fit, and so the remembered `B`, uses **steady** readings only: a
+replica whose `k` stayed within `DefaultMaxKDrift` over the last
+`DefaultSteadyFor`, and that has served at least that long if it joined after
+the key was first observed. `k` is instantaneous and ITL is a `rate[1m]` mean,
+so across a step in load the two describe different moments; in a balanced
+fleet that step is the only spread a window ever holds. Before this gate, two
+identical models in two namespaces remembered `B` = 4.5 ms and 14.8 ms from
+whichever transient each window caught, and priced the same replica at 5.3 and
+7.7 requests/s (issue #270). `itl-window` reports `unsteady` and `steadyHeld`.
+
+The pinned fit, which prices a balanced fleet, takes the steady readings too
+whenever there are at least `DefaultMinSamples` of them, and every reading only
+below that, so a fleet that has not settled still gets a line. Taking every
+reading, it took each load step whole: on the issue #270 rerun `A` went from
+0.077 to 0.207 on the cycle the load stepped, and the derived mu fell from 6.4
+to 2.65 requests/s for two and a half minutes.
+
+The steady readings are kept apart from the main window, and outlive its oldest
+reading by up to `DefaultSteadyCarry`. A load step is what gives a balanced
+fleet its spread, and it fills the 20-reading main window with unsteady
+readings: every replica is held out for `DefaultSteadyFor`, so N replicas add
+8N of them at 15 s cycles. When the steady readings were trimmed to the main
+window, the old level's were gone before the new level's were steady, and no
+fleet of two or more replicas ever had the spread for a full fit: on the issue
+#270 rerun, `itl-window` was `ready` on 0 of 294 multi-replica cycles, and `B`
+stayed at the 6 ms default. Carried, the old level is still there when the new
+one settles: on a step from `k` 0.35 to 0.70 (`steady_test.go`), every fleet of
+1 to 16 replicas learns the true `B`. A level the fleet only passed through
+never settles, so it never reaches the steady readings and teaches nothing.
+A reading with no `k` (the collector's zero value) is not traced, so one
+missed scrape does not make its replica unsteady.
 
 From the line, two closed forms:
 
@@ -439,6 +475,8 @@ token per request, so its output length is not a property of its work.
 | `DefaultMaxObservableK` | 0.80 | `internal/signals/itl` |
 | `DefaultMinSamples` | 10 | `internal/signals/itl` |
 | `DefaultMinKSpread` | 0.30 | `internal/signals/itl` |
+| `DefaultSteadyFor` | 2m | `internal/signals/itl` |
+| `DefaultMaxKDrift` | 0.10 | `internal/signals/itl` |
 | `BacklogDrainSeconds` | 60 | `internal/signals/floor` |
 | `MinThroughputSamplesToOrder` | 2 | `internal/signals/floor` |
 | `ShapeChangeHoldMax` | 5m | `saturation` |
@@ -551,6 +589,10 @@ Three lines carry the whole chain, all at `logging.DEFAULT`:
   sequence count, the ITL line or the pricing point. `kvReqPerSeq` is the
   priced shape and `kvReqFleet` the fleet's own; `muShortWindow` says whether
   the pair moved to the short window.
+  It, and every ITL line (`itl-window`, `itl-fit`, `itl-fit-declined`,
+  `itl-line-borrowed`, `itl-gps-mismatch`), carries `namespace` beside
+  `variant`: one Deployment applied to two namespaces logs the same variant
+  name in both, and only the namespace tells their lines apart.
 - `replica-capacity-decision` — `k1MemoryBound`, `k2ComputeBound`, `k2Source`,
   `boundBy`, `saturatedThroughput`, `saturatedThroughputBucket`.
 - `throughput-demand-floor` — `arrivalRate`, `backlogRequests`,
