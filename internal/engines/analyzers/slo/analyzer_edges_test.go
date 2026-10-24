@@ -173,6 +173,73 @@ var _ = Describe("Analyzer state and inputs", func() {
 			Expect(banded.Offered).To(Equal(1))
 		})
 
+		// Issue #284: once the window's readings age out, the line is the key's
+		// last slope, held -- and only under the engine arguments it was
+		// fitted under, and within the slope hold.
+		Describe("a line whose readings have aged out", func() {
+			// overloaded is a fleet above the band and not at its cap: it
+			// offers the window no reading, as a light one below it does.
+			overloaded := func() []domain.ReplicaMetrics {
+				return []domain.ReplicaMetrics{row("agg", "agg-a", 0.9), row("agg", "agg-b", 0.9)}
+			}
+			price := func(a *Analyzer) (*metrics.SLOVariantReading, itl.Reading) {
+				in := domain.AnalyzerInput{Namespace: "ns", ModelID: "m", Config: policy(44*time.Millisecond, 0),
+					VariantStates: []domain.VariantReplicaState{agg}, ReplicaMetrics: overloaded()}
+				_, reading, d := a.priceVariant(in, agg, windowKey("ns", "m", agg), readFleet(in), 0.044, 0.85, clock)
+				return reading, d.line
+			}
+			params := capacity.EngineParams{MaxNumSeqs: 64}
+
+			It("reads the held slope, and says it is held", func() {
+				a := newAt(store(params))
+				warmWith(a, noop)
+				clock = clock.Add(itl.DefaultObservationMaxAge + time.Minute)
+				reading, line := price(a)
+				Expect(line.Held).To(BeZero(), "the premise: every reading has aged out")
+				Expect(line.AboveBand).To(Equal(2))
+				Expect(reading.Source).To(Equal(constants.SLOSourcePinned))
+				Expect(line.SlopeHeld).To(BeTrue())
+				Expect(line.SlopeAge(clock)).To(BeNumerically(">", itl.DefaultObservationMaxAge))
+			})
+
+			It("does not hold it under other engine arguments", func() {
+				s := store(params)
+				a := newAt(s)
+				warmWith(a, noop)
+				clock = clock.Add(itl.DefaultObservationMaxAge + time.Minute)
+				s.Update("ns", "m", "agg", capacity.Record{EngineParams: &capacity.EngineParams{MaxNumSeqs: 128}})
+				reading, line := price(a)
+				Expect(line.SlopeHeld).To(BeFalse())
+				Expect(reading.Source).To(Equal(constants.SLOSourceNoLine))
+			})
+
+			// Round 2: a change of arguments while the window still holds the
+			// old engine's readings must not let them be refitted, stamped with
+			// the new arguments and then held as the new engine's slope.
+			It("forgets the old engine's readings on an arguments change, so they are not held as the new one's", func() {
+				s := store(params)
+				a := newAt(s)
+				warmWith(a, noop)
+				s.Update("ns", "m", "agg", capacity.Record{EngineParams: &capacity.EngineParams{MaxNumSeqs: 128}})
+				reading, line := price(a)
+				Expect(line.Tier).To(BeEmpty(), "no fit from the old engine's readings")
+				Expect(reading.Source).To(Equal(constants.SLOSourceNoLine))
+				clock = clock.Add(itl.DefaultObservationMaxAge + time.Minute)
+				reading, line = price(a)
+				Expect(line.SlopeHeld).To(BeFalse())
+				Expect(reading.Source).To(Equal(constants.SLOSourceNoLine))
+			})
+
+			It("does not hold it past the slope hold", func() {
+				a := newAt(store(params)).WithSlopeHoldFor(time.Hour)
+				warmWith(a, noop)
+				clock = clock.Add(time.Hour + time.Minute)
+				reading, line := price(a)
+				Expect(line.SlopeHeld).To(BeFalse())
+				Expect(reading.Source).To(Equal(constants.SLOSourceNoLine))
+			})
+		})
+
 		It("caps the resident sequences at max_num_seqs and prices the fill the engine can reach", func() {
 			res := warmWith(newAt(store(capacity.EngineParams{MaxNumSeqs: 64})), noop)
 			// k = 0.6 implies 120 sequences; the engine admits 64, so the cache

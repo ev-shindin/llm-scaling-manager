@@ -400,8 +400,11 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	replicaCollector := collector.NewReplicaMetricsCollector(promSource, client, apiReader, recorder, podLocator)
 	replicaCollector.SetBridgeResolver(decision.DefaultBridges)
 	// The slo analyzer keeps its learned state as long as saturation keeps its
-	// own: LEARNED_STATE_VARIANT_TIMEOUT governs both.
-	sloAnalyzer := slo.New(replicaCollector, capacityStore).WithStateTimeout(satV2.Horizons().VariantTimeout)
+	// own: LEARNED_STATE_VARIANT_TIMEOUT governs both, and
+	// LEARNED_STATE_BUCKET_RETENTION bounds how long both hold a line's slope.
+	sloAnalyzer := slo.New(replicaCollector, capacityStore).
+		WithStateTimeout(satV2.Horizons().VariantTimeout).
+		WithSlopeHoldFor(satV2.Horizons().BucketRetention)
 
 	engine = Engine{
 		client:                  client,

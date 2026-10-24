@@ -1830,8 +1830,11 @@ not readings of the fleet:
   rarely spans it, possibly for good. Read `pinned-default` as not a
   measurement: on an accelerator whose real floor is well above the default, it
   can call a target feasible that no fill meets. With no line: `no-line` (too
-  few readings -- warming up, or replicas outside the band: idle below a fill
-  of 0.15, or overloaded above 0.80) or
+  few readings and no earlier fit -- warming up, or replicas outside the band:
+  idle below a fill of 0.15, or overloaded above 0.80; a variant that has
+  fitted keeps its last slope there instead, as `pinned` or
+  `pinned-default`, for up to `LEARNED_STATE_BUCKET_RETENTION` and until its
+  engine arguments change or the controller restarts) or
   `declined` (enough readings, and the fit refused them: most often a card whose
   ITL sits below the default intercept).
 - `wva_slo_fill` is before any scale-up headroom: compare it with

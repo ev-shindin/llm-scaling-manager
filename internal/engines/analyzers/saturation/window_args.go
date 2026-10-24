@@ -73,19 +73,13 @@ import (
 // incompletePrefix marks a tag taken from a configuration that was not read
 // completely (EngineParams.Complete): its fingerprint hashes an unread flag
 // as its default, so it never equals a complete configuration's.
-const incompletePrefix = "incomplete:"
+const incompletePrefix = capacity.IncompleteArgsPrefix
 
 // windowArgs is the arguments a variant's windows are checked and written
 // under: its ArgsFingerprint, behind incompletePrefix when its configuration
 // was not read completely, or "" when it is unknown.
 func windowArgs(params *capacity.EngineParams) string {
-	if params == nil {
-		return ""
-	}
-	if !params.Complete() {
-		return incompletePrefix + params.ArgsFingerprint()
-	}
-	return params.ArgsFingerprint()
+	return params.ArgsTag()
 }
 
 // stashKey is where a window written under args is put aside for key.

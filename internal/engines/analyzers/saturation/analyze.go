@@ -196,6 +196,9 @@ type cycle struct {
 	// see noteLineMismatch -- and a second map holding the same fact could
 	// drift from the first.
 	itlBorrowedFrom map[string]string
+	// itlHeld marks a variant whose own line is its last slope held for want
+	// of readings (itl.Reading.SlopeHeld), not a fit made this cycle.
+	itlHeld map[string]bool
 	// itlSamples is how many readings each decode variant's OWN ITL window
 	// holds after this cycle's, whatever line it ends up priced on. Carried
 	// for the service-rate signal (attachServiceRates), where it is the
@@ -370,6 +373,7 @@ func (c *cycle) resolvePricing() {
 func (c *cycle) fitLines() {
 	c.itlModels = make(map[string]itl.Model, len(c.gpusByVariant))
 	c.itlBorrowedFrom = make(map[string]string, len(c.gpusByVariant))
+	c.itlHeld = make(map[string]bool, len(c.gpusByVariant))
 	c.itlSamples = make(map[string]int, len(c.gpusByVariant))
 	variants := make([]string, 0, len(c.gpusByVariant))
 	for variant := range c.gpusByVariant {
@@ -448,9 +452,14 @@ func (c *cycle) fitLines() {
 		// stated it, so a replica at it may teach the line from above the
 		// band (itl.Admission).
 		lo, hi := c.cfg.ITLBand()
+		// A held slope is bounded by the horizon a finished fit is kept on
+		// (BucketRetention, which ages the shared lines too) and by the
+		// arguments it was fitted under (issue #284).
 		adm := itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: params.ExplicitMaxNumSeqs(),
-			CapMaxPreemptionRate: c.cfg.ITLCapPreemptionRate(), Steady: c.tune.steadiness()}
-		own := c.a.noteITL(variantKey, rows, variant, adm, c.a.now(), itlLogger)
+			CapMaxPreemptionRate: c.cfg.ITLCapPreemptionRate(), Steady: c.tune.steadiness(),
+			SlopeHoldFor: c.a.Horizons().BucketRetention, Args: windowArgs(params)}
+		reading := c.a.noteITL(variantKey, rows, variant, adm, c.a.now(), itlLogger)
+		own := reading.Model
 		// The variant's own window, by the same key noteITL just wrote, and
 		// before any borrow below: a borrowed line says nothing about how
 		// close this variant is to fitting one of its own.
@@ -461,8 +470,20 @@ func (c *cycle) fitLines() {
 		if !own.IsZero() {
 			// A measured line becomes the line for this engine configuration,
 			// so a sibling with nothing of its own can start from it.
-			c.a.publishLine(physicsKey, variantKey, own, c.a.now())
+			//
+			// A HELD one does not. It is a fit from some time ago, and
+			// publishLine stamps learnedAt with now: republished every cycle,
+			// a slope held through days of light load, or by a variant parked
+			// at zero, would never age out of itlLines (EvictStaleHistory
+			// ages a line on when it was last written, because it is a
+			// finished fit) and would overwrite a sibling's fresh line on the
+			// same configuration. What was published when it was fitted stays
+			// published, and ages from then.
+			if !reading.SlopeHeld {
+				c.a.publishLine(physicsKey, variantKey, own, c.a.now())
+			}
 			c.itlModels[variant] = own
+			c.itlHeld[variant] = reading.SlopeHeld
 			continue
 		}
 
@@ -475,6 +496,18 @@ func (c *cycle) fitLines() {
 		// inflated to ~60.
 		borrowed, from, ok := c.a.borrowLine(physicsKey, variantKey)
 		if !ok {
+			// No line at all: none of its own -- a fresh variant whose
+			// replicas sit below the band offers the window nothing to fit
+			// -- and none to borrow. So no mu is derived, and unless a
+			// saturated reading is on record the throughput floor does not
+			// apply and the variant is sized by KV occupancy alone, which at
+			// light load reads far below the share of its throughput it is
+			// serving (issue #284). Said in so many words, because the
+			// itl-window line alone reads as a window that is broken.
+			itlLogger.V(logging.DEFAULT).Info("itl-line-none",
+				"variant", variant, "key", variantKey, "physicsKey", physicsKey,
+				"windowSamples", c.itlSamples[variant], "minSamples", itl.DefaultMinSamples,
+				"derivedMu", false)
 			continue
 		}
 		c.itlModels[variant] = borrowed
@@ -562,6 +595,9 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				// beside the number it produced.
 				"lineBorrowed", c.itlBorrowedFrom[rm.VariantName] != "",
 				"lineBorrowedFrom", c.itlBorrowedFrom[rm.VariantName],
+				// The variant's own last slope, held for want of readings:
+				// an old fit, not this cycle's.
+				"lineHeld", c.itlHeld[rm.VariantName],
 				"avgOutputTokens", fleetShape.AvgOutputTokens,
 				"muDivisor", c.muDivisor,
 				"avgInputTokens", fleetShape.AvgInputTokens,

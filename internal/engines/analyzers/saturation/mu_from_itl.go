@@ -285,7 +285,9 @@ func (a *SaturationAnalyzer) itlUnderArgs(key, args string) {
 }
 
 // noteITL adds this cycle's (k, ITL) readings for one variant to its rolling
-// window and returns the model fitted over what the window holds.
+// window and returns the reading: the model fitted over what the window holds,
+// and whether it is a slope held for want of readings (SlopeHeld) rather than
+// a fit made now.
 //
 // Ready replicas of the variant itself only, and only where both halves of the
 // pair are present: a pod still failing its readiness probe, or one lent by the
@@ -320,7 +322,7 @@ func (a *SaturationAnalyzer) itlUnderArgs(key, args string) {
 // a shape change -- so a fit made under one shape is still the right fit under
 // the next, and clearing it would reintroduce exactly the wait this replaces.
 func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetrics,
-	variantName string, adm itl.Admission, now time.Time, logger logr.Logger) itl.Model {
+	variantName string, adm itl.Admission, now time.Time, logger logr.Logger) itl.Reading {
 	// Stamped here as well as in noteReplicaStart, because this function
 	// CREATES learned state (the window, and the baseline the tracker writes
 	// on a full fit) and the sweep's rule is that an unstamped key counts as
@@ -402,12 +404,14 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		// and nothing in the case this exists for: once the shape lightens,
 		// an over-provisioned fleet sits at a k far below
 		// DefaultMinObservableK and is priced from the readings the window
-		// already holds from when it was working.
+		// already holds from when it was working -- and, once those have aged
+		// out, from the key's last slope (slopeHeld), so the line outlives a
+		// long light stretch (issue #284).
 		logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "pinned-B",
 			"a", r.Model.A, "b", r.Model.B, "held", r.Held, "baselineLearned", r.BaselineStored,
-			"slopeHeld", r.SlopeHeld)
+			"slopeHeld", r.SlopeHeld, "slopeAge", r.SlopeAge(now))
 	case r.Declined:
 		logger.V(logging.DEFAULT).Info("itl-fit-declined", "variant", variantName, "held", r.Held)
 	}
-	return r.Model
+	return r
 }

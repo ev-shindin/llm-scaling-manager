@@ -289,6 +289,33 @@ readings are left, the key's last `A` holds (`itl-fit` logs `slopeHeld`), and a
 key with no `A` yet gets no line. `itl-window` reports the marked readings as
 `settling`.
 
+The last `A` also holds when the window itself runs short: fewer than
+`DefaultMinSamples` readings left after `DefaultObservationMaxAge`. A replica
+below `itlMinObservableK` offers no reading, so a fleet that learned its line at
+load and then served light load for half an hour used to lose the line, the
+derived mu and the throughput floor with it, and was sized by KV occupancy
+alone. At light load that reads far below the throughput share served: one H200
+replica read 0.064 while serving 25% of its saturated rate (issue #284). The same
+applies above the band, for a replica not at its sequence cap.
+
+The hold is bounded. `itl.Admission.SlopeHoldFor` is the analyzer's
+`BucketRetention` (the horizon `itlLines` ages a finished fit on), and
+`Admission.Args` the variant's `windowArgs`: a slope older than the one or
+fitted under other arguments is not held. `itlUnderArgs` also sweeps the key,
+slope included, on an arguments change. `slopes` is not in the snapshot, so a
+restart ends the hold too. A held line is the variant's own: it may order, and
+a variant woken from zero inside the hold is priced from it on sight and can
+settle a shape-change hold, as its fresh fit would have. It is **not**
+republished to `itlLines`: `publishLine` stamps `learnedAt` with now, so a
+held line republished every cycle would never age out and would overwrite a
+sibling's fresh line on the same configuration. `itl-fit` logs `slopeHeld`
+and `slopeAge`, `derived-mu` logs `lineHeld`.
+
+A key
+that never fitted, and has no sibling's line to borrow, still has no line;
+`itl-line-none` says so each cycle (`derivedMu=false`), so `itl-window`'s
+`offered: 0` beside `belowBand` reads as light load, not a broken window.
+
 `FitPinnedB` then takes `A` as the `k`-weighted mean of the readings' own
 slopes, `sum(ITL_i - B) / sum(k_i)`, with nothing trimmed. A trim by value
 cannot tell a warm-up from a replica that is really slower, since both sit
@@ -970,7 +997,7 @@ Three lines carry the whole chain, all at `logging.DEFAULT`:
   priced shape and `kvReqFleet` the fleet's own; `muShortWindow` says whether
   the pair moved to the short window.
   It, and every ITL line (`itl-window`, `itl-fit`, `itl-fit-declined`,
-  `itl-line-borrowed`, `itl-gps-mismatch`), carries `namespace` beside
+  `itl-line-borrowed`, `itl-line-none`, `itl-gps-mismatch`), carries `namespace` beside
   `variant`: one Deployment applied to two namespaces logs the same variant
   name in both, and only the namespace tells their lines apart.
 - `replica-capacity-decision` — `k1MemoryBound`, `k2ComputeBound`, `k2Source`,

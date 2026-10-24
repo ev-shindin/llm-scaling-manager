@@ -2,13 +2,16 @@ package itl
 
 import (
 	"math"
+	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
 // Admission is what decides, per Observe, which replica rows are readings:
-// the KV band and the sequence-cap exception above it. The zero value is the
-// defaults with no cap known, which admits nothing above the band.
+// the KV band and the sequence-cap exception above it; and how long a key's
+// last A may stand in for a fit when there are too few readings for one. The
+// zero value is the defaults with no cap known, which admits nothing above the
+// band, and holds an A without limit.
 type Admission struct {
 	// MinK and MaxK are the band's edges; zero takes DefaultMinObservableK
 	// and DefaultMaxObservableK. The policy keys analyzerTuning.itlBand.minObservableK and
@@ -28,6 +31,27 @@ type Admission struct {
 	// the pinned one. The policy's analyzerTuning.steadyGate sets it; a zero
 	// field takes its default (DefaultSteadiness).
 	Steady Steadiness
+	// SlopeHoldFor is how long after it was fitted a key's last A may be
+	// held when the window cannot fit (Tracker.Observe). The analyzers pass
+	// their bucket retention, the horizon a finished fit is kept on
+	// elsewhere; zero holds it without limit.
+	SlopeHoldFor time.Duration
+	// Args is the engine arguments the rows were produced under
+	// (capacity.EngineParams.ArgsFingerprint), empty when unknown. An A
+	// fitted under other known arguments is not held: it describes another
+	// engine.
+	Args string
+}
+
+// mayHold reports whether a key's last A may stand in for a fit at now: it was
+// fitted within SlopeHoldFor, and not under other engine arguments. Arguments
+// unknown on either side are not a change, as the saturation analyzer's own
+// window reset (itlUnderArgs) treats them.
+func (a Admission) mayHold(s heldSlope, now time.Time) bool {
+	if a.SlopeHoldFor > 0 && now.Sub(s.fittedAt) > a.SlopeHoldFor {
+		return false
+	}
+	return a.Args == "" || s.args == "" || a.Args == s.args
 }
 
 // band is the admission's KV band, with the defaults for an edge left at zero.

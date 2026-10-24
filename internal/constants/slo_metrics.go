@@ -85,10 +85,13 @@ const (
 	// SLOSourceNoOutputLength: no replica has reported an output length, so
 	// neither the demand nor the per-request KV footprint is known.
 	SLOSourceNoOutputLength = "no-output-length"
-	// SLOSourceNoLine: too few readings in the window to fit any line: a new
-	// variant warming up, replicas that report no ITL, or replicas outside the
-	// band -- below a fill of 0.15 (an idle fleet) or above 0.80 (an overloaded
-	// one), which can last indefinitely. The slo-variant log line counts which.
+	// SLOSourceNoLine: too few readings in the window to fit any line, and no
+	// earlier slope to hold: a new variant warming up, replicas that report no
+	// ITL, or replicas outside the band -- below a fill of 0.15 (an idle fleet)
+	// or above 0.80 (an overloaded one), which can last indefinitely. A variant
+	// that has fitted holds its last slope there instead and reads pinned or
+	// pinned-default, within the slope hold and under unchanged engine
+	// arguments (itl.Admission). The slo-variant log line counts which.
 	SLOSourceNoLine = "no-line"
 	// SLOSourceDeclined: the window held enough readings and the pinned fit
 	// refused them, most often because the variant's ITL sits below the pinned

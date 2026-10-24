@@ -186,6 +186,26 @@ func (p *EngineParams) ArgsFingerprint() string {
 	return q.Fingerprint()
 }
 
+// IncompleteArgsPrefix marks an ArgsTag taken from a configuration that was
+// not read completely (Complete): its fingerprint hashes an unread flag as its
+// default, so the tag never equals a complete configuration's.
+const IncompleteArgsPrefix = "incomplete:"
+
+// ArgsTag is the arguments learned state is checked and written under: the
+// ArgsFingerprint, behind IncompleteArgsPrefix when the configuration was not
+// read completely, or "" when it is unknown (nil). Every analyzer that ties
+// learned state to engine arguments compares these, so a move between an
+// incomplete and a complete configuration is a change to all of them alike.
+func (p *EngineParams) ArgsTag() string {
+	if p == nil {
+		return ""
+	}
+	if !p.Complete() {
+		return IncompleteArgsPrefix + p.ArgsFingerprint()
+	}
+	return p.ArgsFingerprint()
+}
+
 // canonicalFloat renders a float so that equal values always produce equal
 // text. 'f' with precision -1 gives the shortest form that round-trips, so 0.9
 // is "0.9" and not "0.90000000000000002".

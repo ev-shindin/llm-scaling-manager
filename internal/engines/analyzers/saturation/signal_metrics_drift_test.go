@@ -54,6 +54,7 @@ var derivedMuMetricFields = map[string]derivedMuField{
 	"engineRanks":      {excluded: "per-pod: the data-parallel ranks the row reports, which scale maxNumSeqs; the configured size is the data_parallel_size label of wva_engine_config"},
 	"lineBorrowed":     {metric: constants.WVAServiceRatePerReplica}, // source=borrowed-line
 	"lineBorrowedFrom": {excluded: "a lender variant name: a label value that changes with the lender, published as donor on wva_learned_state_borrowed (PR #152), not here"},
+	"lineHeld":         {excluded: "a diagnostic: the line is the variant's own last slope, held for want of readings (issue #284); its rate is the one wva_service_rate_per_replica publishes"},
 	"avgOutputTokens":  {excluded: "the shape family (stage 1, wva_shape_output_tokens), not built yet"},
 	"muDivisor":        {excluded: "the shape family (stage 1, wva_shape_output_tokens{window}), not built yet"},
 	"avgInputTokens":   {excluded: "the shape family (stage 1, wva_shape_input_tokens), not built yet"},

@@ -120,6 +120,82 @@ var _ = Describe("Tracker", func() {
 		Expect(r.Model.IsZero()).To(BeTrue())
 	})
 
+	// Issue #284: a fleet that learned its line at load and then sat below the
+	// band for longer than the window keeps its readings lost every one of
+	// them, and with them the line, the derived mu and the throughput floor.
+	It("holds the key's last line through light load once its readings have aged out", func() {
+		learned := t.Observe("key", "v", onLine(10, 0.2, 0.7), Admission{}, now)
+		Expect(learned.Tier).To(Equal(TierOLS))
+
+		light := []domain.ReplicaMetrics{row("p", 0.06, 0.0115)}
+		r := t.Observe("key", "v", light, Admission{}, now.Add(DefaultObservationMaxAge+time.Minute))
+		Expect(r.BelowBand).To(Equal(1), "the replica is serving, below the band")
+		Expect(r.Held).To(BeZero(), "every reading the line was fitted from has aged out")
+		Expect(r.Tier).To(Equal(TierPinnedB))
+		Expect(r.SlopeHeld).To(BeTrue())
+		Expect(r.Model.A).To(BeNumerically("~", learned.Model.A, 1e-9))
+		Expect(r.Model.B).To(BeNumerically("~", learned.Model.B, 1e-9))
+	})
+
+	Describe("the held slope", func() {
+		aged := func() time.Time { return now.Add(DefaultObservationMaxAge + time.Minute) }
+		light := []domain.ReplicaMetrics{row("p", 0.06, 0.0115)}
+
+		It("is held with a window of one to DefaultMinSamples-1 readings too", func() {
+			learned := t.Observe("key", "v", onLine(10, 0.2, 0.7), Admission{}, now)
+			r := t.Observe("key", "v", onLine(DefaultMinSamples-1, 0.40, 0.45), Admission{}, aged())
+			Expect(r.Held).To(Equal(DefaultMinSamples - 1))
+			Expect(r.SlopeHeld).To(BeTrue())
+			Expect(r.Model.A).To(BeNumerically("~", learned.Model.A, 1e-9))
+		})
+
+		It("is replaced by a fresh fit once the window refills", func() {
+			t.Observe("key", "v", onLine(10, 0.2, 0.7), Admission{}, now)
+			Expect(t.Observe("key", "v", light, Admission{}, aged()).SlopeHeld).To(BeTrue())
+			steeper := make([]domain.ReplicaMetrics, 10)
+			for i := range steeper {
+				k := 0.40 + 0.005*float64(i)
+				steeper[i] = row("p", k, 0.04*k+0.01)
+			}
+			r := t.Observe("key", "v", steeper, Admission{}, aged().Add(time.Minute))
+			Expect(r.SlopeHeld).To(BeFalse())
+			Expect(r.Tier).To(Equal(TierPinnedB))
+			Expect(r.Model.A).To(BeNumerically("~", 0.04, 1e-9), "the new readings' slope, not the held 0.02")
+		})
+
+		It("ends once the slope is older than SlopeHoldFor", func() {
+			t.Observe("key", "v", onLine(10, 0.2, 0.7), Admission{}, now)
+			hold := Admission{SlopeHoldFor: 2 * DefaultObservationMaxAge}
+			Expect(t.Observe("key", "v", light, hold, aged()).SlopeHeld).To(BeTrue(), "inside the hold")
+			r := t.Observe("key", "v", light, hold, now.Add(hold.SlopeHoldFor+time.Minute))
+			Expect(r.SlopeHeld).To(BeFalse())
+			Expect(r.Model.IsZero()).To(BeTrue())
+		})
+
+		It("ends under other engine arguments, and not under unknown ones", func() {
+			t.Observe("key", "v", onLine(10, 0.2, 0.7), Admission{Args: "a1"}, now)
+			Expect(t.Observe("key", "v", light, Admission{Args: "a2"}, aged()).SlopeHeld).To(BeFalse())
+			Expect(t.Observe("key", "v", light, Admission{}, aged()).SlopeHeld).To(BeTrue(),
+				"arguments not known this cycle are not a change")
+			Expect(t.Observe("key", "v", light, Admission{Args: "a1"}, aged()).SlopeHeld).To(BeTrue())
+		})
+
+		It("goes with the key on a sweep", func() {
+			t.Observe("key", "v", onLine(10, 0.2, 0.7), Admission{}, now)
+			t.Sweep(aged(), func(string) bool { return true })
+			r := t.Observe("key", "v", light, Admission{}, aged())
+			Expect(r.SlopeHeld).To(BeFalse())
+			Expect(r.Model.IsZero()).To(BeTrue())
+		})
+	})
+
+	It("still fits nothing below the band for a key that never fitted", func() {
+		r := t.Observe("key", "v", []domain.ReplicaMetrics{row("p", 0.06, 0.0115)}, Admission{}, now)
+		Expect(r.BelowBand).To(Equal(1))
+		Expect(r.Tier).To(BeEmpty())
+		Expect(r.Model.IsZero()).To(BeTrue())
+	})
+
 	It("declines when the pinned fit refuses the readings", func() {
 		rows := make([]domain.ReplicaMetrics, 10)
 		for i := range rows {

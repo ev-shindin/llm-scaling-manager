@@ -1245,10 +1245,15 @@ The `wva_slo_source` values:
   high for one below it, and a target below the real floor can read feasible
   when no fill meets it. A whole-node
   replica rarely spans enough fill for a full fit, so it can stay here.
-- **`no-line`:** too few readings in the window: a new variant warming up,
-  replicas that report no inter-token latency, or replicas outside the band --
-  below a fill of 0.15 (an idle fleet) or above 0.80 (an overloaded one), which
-  can last. A replica above 0.80 still counts when its running batch is exactly
+- **`no-line`:** too few readings in the window and no earlier fit to fall
+  back on: a new variant warming up, replicas that report no inter-token
+  latency, or replicas outside the band -- below a fill of 0.15 (an idle
+  fleet) or above 0.80 (an overloaded one), which can last. A variant that has
+  fitted once keeps its last slope through such a stretch and reads `pinned`
+  or `pinned-default` instead, for up to `LEARNED_STATE_BUCKET_RETENTION`
+  (7 days by default) after that fit and only while its engine arguments are
+  unchanged; the `slo-variant` log line says so (`lineSlopeHeld`,
+  `lineSlopeAge`). After a controller restart the slope is gone. A replica above 0.80 still counts when its running batch is exactly
   the `--max-num-seqs` set on the engine, requests are waiting, and it
   preempted nothing in the last minute (vLLM only: SGLang publishes no
   preemption counter). The band is `analyzerTuning.itlBand.minObservableK` and
