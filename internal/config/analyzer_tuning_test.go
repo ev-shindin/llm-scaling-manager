@@ -180,6 +180,47 @@ func TestAnalyzerTuningCrossedFloorTrustFallsBack(t *testing.T) {
 	}
 }
 
+// An entry that sets no loadImbalance key is not judged by the default idle
+// figure: a default entry with kvCacheThreshold at or under 0.30, valid
+// before the key existed, keeps its limiters. At run time the idle bound is
+// held under the threshold instead.
+func TestIdleKvUsageUnsetDoesNotRejectALowKvCacheThreshold(t *testing.T) {
+	for _, entry := range []string{
+		"kvCacheThreshold: 0.3\nlimiters:\n- type: gpu-inventory\n",
+		"kvCacheThreshold: 0.25\nlimiters:\n- type: gpu-inventory\n",
+	} {
+		p, err := DecodeScalingPolicy(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.ValidateEntry(); err != nil {
+			t.Errorf("%q: rejected: %v", entry, err)
+		}
+		p.ApplyDefaults()
+		if got := p.IdleKvUsage(); got != p.KvCacheThreshold {
+			t.Errorf("%q: idle bound %g, want kvCacheThreshold %g", entry, got, p.KvCacheThreshold)
+		}
+	}
+	// Set by the entry, idleKvUsage is still judged against the threshold.
+	set := ScalingPolicy{KvCacheThreshold: 0.3, LoadImbalance: LoadImbalance{IdleKvUsage: 0.3}}
+	if err := set.ValidateEntry(); err == nil {
+		t.Error("idleKvUsage 0.3 under kvCacheThreshold 0.3 was accepted")
+	}
+	// Above the threshold the figure is the key's, or its default.
+	for _, tc := range []struct {
+		p    *ScalingPolicy
+		want float64
+	}{
+		{nil, DefaultIdleKvUsage},
+		{&ScalingPolicy{}, DefaultIdleKvUsage},
+		{&ScalingPolicy{KvCacheThreshold: 0.9, LoadImbalance: LoadImbalance{IdleKvUsage: 0.4}}, 0.4},
+	} {
+		if got := tc.p.IdleKvUsage(); got != tc.want {
+			t.Errorf("%+v: idle bound %g, want %g", tc.p, got, tc.want)
+		}
+	}
+}
+
 // One key of a pair set alone is not judged against its partner's default:
 // the partner may come from the layer below, which the entry cannot see.
 func TestAnalyzerTuningOneKeyOfAPairIsAccepted(t *testing.T) {

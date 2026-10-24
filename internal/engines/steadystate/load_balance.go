@@ -33,12 +33,14 @@ func loadImbalancedWarning(th balance.Thresholds) string {
 
 // loadBalanceThresholds is what the load-balance diagnostic reads from the
 // model's resolved policy: the saturation thresholds the analyzer prices
-// with, and loadImbalance, whose idleKvUsage the analyzer's idle test shares.
+// with, and loadImbalance, whose idleKvUsage the analyzer's idle test shares
+// (both read it through ScalingPolicy.IdleKvUsage, never above
+// kvCacheThreshold).
 func loadBalanceThresholds(p config.ScalingPolicy) balance.Thresholds {
 	li := p.LoadImbalance.WithDefaults()
 	return balance.Thresholds{
 		KvUsage: p.KvCacheThreshold, Queue: p.QueueLengthThreshold,
-		IdleKvUsage:    li.IdleKvUsage,
+		IdleKvUsage:    p.IdleKvUsage(),
 		IdleAfterReady: li.IdleAfterReady.Duration(),
 		SustainFor:     li.SustainFor.Duration(),
 		ClearAfter:     li.ClearAfter.Duration(),

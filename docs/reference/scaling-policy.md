@@ -1554,7 +1554,7 @@ It never changes a scaling decision.
 
 | Key | Default | Range | What it does |
 |-----|---------|-------|--------------|
-| `idleKvUsage` | `0.30` | (0, 1), below `kvCacheThreshold` | A Ready replica with nothing waiting is idle below this KV use. **The saturation analyzer reads the same key** for its own idle test, so the two cannot disagree. |
+| `idleKvUsage` | `0.30` | (0, 1), below `kvCacheThreshold` | A Ready replica with nothing waiting is idle below this KV use. **The saturation analyzer reads the same key** for its own idle test, so the two cannot disagree. The idle figure is never above `kvCacheThreshold`. An entry that sets `idleKvUsage` at or above its `kvCacheThreshold` is rejected. An entry that leaves `idleKvUsage` unset is not checked: with `kvCacheThreshold: 0.3` or lower, it is valid, and the idle figure is `kvCacheThreshold`. |
 | `idleAfterReady` | `2m` | 1m to 24h | How long a replica must be Ready before it can count as idle. |
 | `sustainFor` | `2m` | 1m to 24h | How long a role must read imbalanced, every cycle, before it is reported. Also how long collection must fail before the series are dropped. |
 | `clearAfter` | `2m` | 1s to 24h | How long a reported role must read balanced, every cycle, before the report clears. |

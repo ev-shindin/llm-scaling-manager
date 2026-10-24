@@ -35,4 +35,11 @@ func TestLoadBalanceThresholdsReadThePolicy(t *testing.T) {
 	if msg := loadImbalancedWarning(balance.Thresholds{}); !strings.Contains(msg, "at least 2m0s") {
 		t.Errorf("warning does not state the default window: %s", msg)
 	}
+	// A kvCacheThreshold at or under the default idle figure, with
+	// idleKvUsage unset, bounds the idle test: a replica is never idle and
+	// full at once.
+	low := config.ScalingPolicy{KvCacheThreshold: 0.25, QueueLengthThreshold: 5}
+	if got := loadBalanceThresholds(low).IdleKvUsage; got != 0.25 {
+		t.Errorf("idle bound under kvCacheThreshold 0.25 = %g, want 0.25", got)
+	}
 }

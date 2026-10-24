@@ -93,8 +93,9 @@ func (a *SaturationAnalyzer) StableAcceleratorFor(namespace, variantName, accele
 // idleKvUsage (tuning.idleKvUsage) is the busiest-rank KV utilization below
 // which a Ready replica with nothing waiting reads idle on one row. It is the
 // load-imbalance diagnostic's number, read from the same policy key
-// (loadImbalance.idleKvUsage, default balance.IdleKvUsage = 0.30), so the two
-// cannot disagree. One row is not enough for the analyzer to act on;
+// (loadImbalance.idleKvUsage, default balance.IdleKvUsage = 0.30, never above
+// kvCacheThreshold: config.ScalingPolicy.IdleKvUsage), so the two cannot
+// disagree. One row is not enough for the analyzer to act on;
 // settledIdleDecode says what more it needs.
 
 // replicaIdle reports whether rm reads idle on this cycle's row: Ready, its

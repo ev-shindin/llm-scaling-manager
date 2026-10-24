@@ -58,6 +58,9 @@ func TestTuningDefaultsAreTheCalibratedConstants(t *testing.T) {
 	assert.Equal(t, itl.Steadiness{For: 2 * time.Minute, MaxKDrift: 0.10, Carry: 5 * time.Minute, IdleRows: 2,
 		MinSettledSamples: 3}, itl.DefaultSteadiness())
 	assert.Equal(t, balance.IdleKvUsage, defaultTuning.idleKvUsage)
+	// A kvCacheThreshold under the default idle figure bounds it: a replica
+	// is never idle and full at once.
+	assert.Equal(t, 0.25, tuningOf(&config.ScalingPolicy{KvCacheThreshold: 0.25}).idleKvUsage)
 	li := resolved.LoadImbalance
 	assert.Equal(t, balance.IdleKvUsage, li.IdleKvUsage)
 	assert.Equal(t, balance.IdleAfterReady, li.IdleAfterReady.Duration())

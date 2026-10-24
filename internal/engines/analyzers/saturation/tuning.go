@@ -12,9 +12,10 @@ import (
 // and nothing is held in a package variable.
 type tuning struct {
 	config.AnalyzerTuning
-	// idleKvUsage is loadImbalance.idleKvUsage: the busiest-rank KV
-	// utilization below which a Ready replica with nothing waiting reads idle
-	// on one row (replicaIdle).
+	// idleKvUsage is loadImbalance.idleKvUsage, never above kvCacheThreshold
+	// (config.ScalingPolicy.IdleKvUsage): the busiest-rank KV utilization
+	// below which a Ready replica with nothing waiting reads idle on one row
+	// (replicaIdle).
 	idleKvUsage float64
 }
 
@@ -26,7 +27,7 @@ func tuningOf(cfg *config.ScalingPolicy) tuning {
 	}
 	return tuning{
 		AnalyzerTuning: p.AnalyzerTuning.WithDefaults(),
-		idleKvUsage:    p.LoadImbalance.WithDefaults().IdleKvUsage,
+		idleKvUsage:    p.IdleKvUsage(),
 	}
 }
 

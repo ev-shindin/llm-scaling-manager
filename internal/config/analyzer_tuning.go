@@ -484,7 +484,11 @@ func (t AnalyzerTuning) validate() error {
 }
 
 // validate checks each field the entry sets. kvCacheThreshold is the entry's,
-// zero when it sets none.
+// zero when it sets none. idleKvUsage is checked against it only when the
+// entry sets idleKvUsage: an entry that leaves it unset may lower
+// kvCacheThreshold to or under the default idle figure, as it could before
+// the key existed, and ScalingPolicy.IdleKvUsage keeps the idle bound under
+// the threshold at run time.
 func (l LoadImbalance) validate(kvCacheThreshold float64) error {
 	const p = "loadImbalance."
 	err := errors.Join(
@@ -496,14 +500,34 @@ func (l LoadImbalance) validate(kvCacheThreshold float64) error {
 	if err != nil {
 		return err
 	}
+	if l.IdleKvUsage == 0 {
+		return nil
+	}
 	if kvCacheThreshold == 0 {
 		kvCacheThreshold = DefaultKvCacheThreshold
 	}
-	if idle := l.WithDefaults().IdleKvUsage; idle >= kvCacheThreshold {
+	if l.IdleKvUsage >= kvCacheThreshold {
 		return fmt.Errorf("%sidleKvUsage (%g) must be below kvCacheThreshold (%g): a replica cannot be idle and full at once",
-			p, idle, kvCacheThreshold)
+			p, l.IdleKvUsage, kvCacheThreshold)
 	}
 	return nil
+}
+
+// IdleKvUsage is the KV utilization below which a Ready replica with nothing
+// waiting reads idle: loadImbalance.idleKvUsage, or its default, and never
+// above kvCacheThreshold, so a replica cannot be idle and full at once. An
+// entry may lower kvCacheThreshold to or under the default idle figure
+// without setting idleKvUsage; the bound then is the threshold. A nil policy
+// reads as the defaults.
+func (c *ScalingPolicy) IdleKvUsage() float64 {
+	if c == nil {
+		return DefaultIdleKvUsage
+	}
+	kv := c.KvCacheThreshold
+	if kv == 0 {
+		kv = DefaultKvCacheThreshold
+	}
+	return min(c.LoadImbalance.WithDefaults().IdleKvUsage, kv)
 }
 
 // resetNonFinite clears each tuning number that is NaN or infinite, through
