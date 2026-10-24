@@ -1458,8 +1458,11 @@ is not finite (`.nan`, `.inf`) is skipped and reported.
   `default` entry, as for a model with no tier. For each pair that would fall
   back, it logs one line, once per read rather than every cycle:
   `WARNING: tuning figure not used: analyzerTuning.steadyGate.steadyFor/carry = 10m0s/5m0s: carry must be at least steadyFor; using the defaults 2m0s/5m0s instead`,
-  with the entry's `key`. A pair crossed only through a named tier is not
-  checked at that point.
+  with the entry's `key` and `resolvedFor: model with no tier`. The check does
+  not see tiers, in either direction: a pair crossed only through a named tier
+  is not warned, and a warning can name a pair that a tier's own keys make
+  valid for the models on that tier. The run-time merge, which does see the
+  tier, is what the analyzer uses.
 - So when you move one key past its partner's default, set both keys in the
   same entry. For example, `steadyFor: 10m` on its own crosses the default
   `carry` of `5m`, and both go back to `2m` and `5m`. Write
