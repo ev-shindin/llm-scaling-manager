@@ -517,6 +517,12 @@ the controller's own environment, so set them on its Deployment
 (`kubectl set env deployment/<controller> -n <controller-namespace> LEARNED_STATE_SNAPSHOT=true`),
 which restarts it.
 
+The analyzer's own thresholds, windows and counts are not environment
+variables: they are scaling-policy keys, `analyzerTuning` and `loadImbalance`,
+set per tier or per model and applied live. See
+[Advanced tuning](scaling-policy.md#advanced-tuning-analyzertuning-and-loadimbalance).
+The defaults are the calibrated values; change them only on a measurement.
+
 ### Rendering the admin phase
 
 When the person installing is not a cluster admin, they render the admin

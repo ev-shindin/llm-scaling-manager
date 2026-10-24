@@ -167,9 +167,9 @@ var _ = Describe("Analyzer state and inputs", func() {
 			defaulted := price(newAt(store(capacity.EngineParams{MaxNumSeqs: 64})), policy(44*time.Millisecond, 0))
 			Expect(defaulted.AboveBand).To(Equal(1), "a parser default is not the engine's cap")
 			wide := policy(44*time.Millisecond, 0)
-			wide.ITLMaxObservableK = 0.90
+			wide.AnalyzerTuning.ITLBand.MaxObservableK = 0.90
 			banded := price(newAt(store(capacity.EngineParams{MaxNumSeqs: 64})), wide)
-			Expect(banded.AboveBand).To(BeZero(), "itlMaxObservableK must reach the line")
+			Expect(banded.AboveBand).To(BeZero(), "analyzerTuning.itlBand.maxObservableK must reach the line")
 			Expect(banded.Offered).To(Equal(1))
 		})
 

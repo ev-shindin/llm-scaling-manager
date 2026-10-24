@@ -30,6 +30,38 @@ type Thresholds struct {
 	// queue is saturated when its busiest rank's queue is at or over it. At or
 	// below zero no replica is saturated on its queue.
 	Queue float64
+
+	// IdleKvUsage is the policy's loadImbalance.idleKvUsage; IdleAfterReady,
+	// SustainFor and ClearAfter its loadImbalance durations. At or below zero
+	// each takes the package constant of the same name. StaleAfter is
+	// SustainFor.
+	IdleKvUsage    float64
+	IdleAfterReady time.Duration
+	SustainFor     time.Duration
+	ClearAfter     time.Duration
+}
+
+// WithDefaults returns th with each unset tuning field at its constant.
+func (th Thresholds) WithDefaults() Thresholds {
+	if !(th.IdleKvUsage > 0) {
+		th.IdleKvUsage = IdleKvUsage
+	}
+	if th.IdleAfterReady <= 0 {
+		th.IdleAfterReady = IdleAfterReady
+	}
+	if th.SustainFor <= 0 {
+		th.SustainFor = SustainFor
+	}
+	if th.ClearAfter <= 0 {
+		th.ClearAfter = ClearAfter
+	}
+	return th
+}
+
+// staleAfter is how long the model's collection must fail before its figures
+// are stale: SustainFor, the time an imbalance takes to be reported.
+func (th Thresholds) staleAfter() time.Duration {
+	return th.WithDefaults().SustainFor
 }
 
 // Constants that classify one replica. The KV figures are fractions of one
@@ -39,6 +71,7 @@ type Thresholds struct {
 const (
 	// IdleKvUsage is the KV utilization below which a replica with nothing
 	// waiting is idle.
+	// The default of loadImbalance.idleKvUsage (Thresholds.IdleKvUsage).
 	IdleKvUsage = 0.30
 	// IdleAfterReady is how long a replica must have been Ready before it can
 	// read idle. A replica that has just passed readiness has had no time to
@@ -53,16 +86,19 @@ const (
 	// pool, long before the lend, and a node clock behind the controller's
 	// dates the Ready time into the controller's past; either alone would
 	// skip the grace.
+	// The default of loadImbalance.idleAfterReady.
 	IdleAfterReady = 2 * time.Minute
 	// SustainFor is how long a role must read imbalanced, on every cycle,
 	// before it is reported as imbalanced (Reading.Sustained). It exceeds the
 	// one-minute window the KV and queue peaks are read over, so one burst,
 	// which stays in that window for a minute, does not warn.
+	// The default of loadImbalance.sustainFor.
 	SustainFor = 2 * time.Minute
 	// ClearAfter is how long a role reported imbalanced must read balanced,
 	// on every cycle, before the report clears. One cycle on which the
 	// saturated replica's peak dips under Thresholds.KvUsage does not clear it,
 	// so a persistent imbalance does not flap the gauge the alert reads.
+	// The default of loadImbalance.clearAfter.
 	ClearAfter = 2 * time.Minute
 )
 
@@ -185,6 +221,7 @@ func Measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, th 
 // from given by graceFrom; a zero instant is never idle.
 func measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, th Thresholds, now time.Time,
 	graceFrom func(domain.ReplicaMetrics) time.Time) map[string]Distribution {
+	th = th.WithDefaults()
 	out := map[string]Distribution{}
 	sums := map[string]struct{ kv, queue float64 }{}
 	busiest := map[string]busiestKey{}
@@ -213,7 +250,7 @@ func measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, th 
 		switch {
 		case isSaturated:
 			d.Saturated++
-		case kv < IdleKvUsage && rm.QueueLength <= 0 && readyLongEnough(graceFrom(rm), now):
+		case kv < th.IdleKvUsage && rm.QueueLength <= 0 && readyLongEnough(graceFrom(rm), now, th.IdleAfterReady):
 			d.Idle++
 			d.IdlePods = append(d.IdlePods, rm.PodName)
 			out[role] = d
@@ -237,10 +274,10 @@ func measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, th 
 	return out
 }
 
-// readyLongEnough reports whether IdleAfterReady has passed since since. An
-// unknown instant is not long enough.
-func readyLongEnough(since, now time.Time) bool {
-	return !since.IsZero() && now.Sub(since) >= IdleAfterReady
+// readyLongEnough reports whether grace (Thresholds.IdleAfterReady) has
+// passed since since. An unknown instant is not long enough.
+func readyLongEnough(since, now time.Time, grace time.Duration) bool {
+	return !since.IsZero() && now.Sub(since) >= grace
 }
 
 // saturated reports whether rm is saturated: its KV at or over th.KvUsage, or,

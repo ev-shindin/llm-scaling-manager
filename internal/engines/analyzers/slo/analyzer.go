@@ -333,7 +333,7 @@ func admission(cfg *config.ScalingPolicy, params *capacity.EngineParams) itl.Adm
 	}
 	lo, hi := cfg.ITLBand()
 	return itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: params.ExplicitMaxNumSeqs(),
-		CapMaxPreemptionRate: cfg.ITLCapPreemptionRate()}
+		CapMaxPreemptionRate: cfg.ITLCapPreemptionRate(), Steady: cfg.ITLSteadiness()}
 }
 
 // newVariantReading is a variant's reading with every figure unknown: NaN,

@@ -4,6 +4,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
@@ -140,7 +141,8 @@ const (
 	JoinedReplicaWindow = ThroughputSampleSpacing
 	// MinMeasuredOfDerived is the smallest fraction of the derived mu a
 	// saturated reading may be and still be recorded at once.
-	MinMeasuredOfDerived = 0.5
+	// The default of analyzerTuning.muChoice.minMeasuredOfDerived.
+	MinMeasuredOfDerived = config.DefaultMinMeasuredOfDerived
 	// MeasuredLowConfirmFor is how long one replica must read saturated under
 	// MinMeasuredOfDerived of the derived mu, on every saturated cycle with
 	// no gap over ThroughputSampleSpacing, before those readings are
@@ -148,19 +150,23 @@ const (
 	MeasuredLowConfirmFor = 2 * ThroughputSampleSpacing
 	// MeasuredDerivedMaxRatio is how far a stale measured mu may sit above
 	// the derived one and still outrank it.
-	MeasuredDerivedMaxRatio = 2.0
+	// The default of analyzerTuning.muChoice.maxRatio.
+	MeasuredDerivedMaxRatio = config.DefaultMeasuredDerivedMaxRatio
 	// MeasuredDerivedReturnRatio is how close a stale measured mu that has
 	// given way to the derived one must come back before it outranks it
 	// again: the hysteresis band under MeasuredDerivedMaxRatio.
-	MeasuredDerivedReturnRatio = 1.6
+	// The default of analyzerTuning.muChoice.returnRatio.
+	MeasuredDerivedReturnRatio = config.DefaultMeasuredDerivedReturn
 	// MeasuredMuFreshFor is how long after its bucket last read saturated in
 	// agreement with it a measured mu outranks a derived one it disagrees
 	// with by more than MeasuredDerivedMaxRatio.
-	MeasuredMuFreshFor = 5 * time.Minute
+	// The default of analyzerTuning.muChoice.freshFor.
+	MeasuredMuFreshFor = time.Duration(config.DefaultMeasuredMuFreshFor)
 	// MeasuredLowHoldFor is how long after its bucket last read saturated in
 	// agreement with it a measured mu more than MeasuredDerivedMaxRatio under
 	// the derived one keeps pricing.
-	MeasuredLowHoldFor = 30 * time.Minute
+	// The default of analyzerTuning.muChoice.lowHoldFor.
+	MeasuredLowHoldFor = time.Duration(config.DefaultMeasuredLowHoldFor)
 )
 
 // k2UnsettledJoined is the settle test's reason for a saturated reading from a
@@ -206,8 +212,8 @@ func (m *settleMemo) noteReady(pod string, ready bool, readyAt, now time.Time) b
 // The reasons throughputRefusal gives.
 const (
 	refusedNoCompletion = "no request completed over the rate window: every sequence is still growing, so the token rate is a batch being admitted, not served"
-	refusedUnderDerived = "under half the mu derived from the variant's ITL line: a replica still filling or stalled, not one at its limit"
-	refusedUnderServed  = "under half what a Ready replica of the variant served this cycle: a served rate is a lower bound on mu, so this is one slow replica, not the variant's service rate"
+	refusedUnderDerived = "under muChoice.minMeasuredOfDerived (half by default) of the mu derived from the variant's ITL line: a replica still filling or stalled, not one at its limit"
+	refusedUnderServed  = "under 1/muChoice.maxRatio (half by default) of what a Ready replica of the variant served this cycle: a served rate is a lower bound on mu, so this is one slow replica, not the variant's service rate"
 	refusedFilling      = "generated more tokens than its completions account for: sequences are still growing, so the token rate is a batch filling, not one being served"
 )
 
@@ -216,7 +222,8 @@ const (
 // its output length) for its rate to be a service rate
 // (tokensOutrunCompletions). A full replica past its fill reads 0.90-1.07x
 // (E1, 24 scrape intervals); a replica still filling read 1.32x and 1.44x.
-const MaxTokensOverCompletions = 1.15
+// The default of analyzerTuning.admission.maxTokensOverCompletions.
+const MaxTokensOverCompletions = config.DefaultMaxTokensOverCompletions
 
 // tokensOutrunCompletions reports whether rm generated more than
 // MaxTokensOverCompletions times the tokens its completions account for over
@@ -228,7 +235,7 @@ const MaxTokensOverCompletions = 1.15
 // token per request, and its rate is not read from generated tokens
 // (saturatedCompletionRate). Nor is a replica with no completions, which
 // throughputRefusal refuses on its own.
-func tokensOutrunCompletions(rm domain.ReplicaMetrics, role string, fleetOutput float64) bool {
+func (t tuning) tokensOutrunCompletions(rm domain.ReplicaMetrics, role string, fleetOutput float64) bool {
 	if domain.CanonicalRole(role) == domain.RolePrefill || !(rm.RequestRate > 0) || !(rm.GenerationTokenRate > 0) {
 		return false
 	}
@@ -239,7 +246,7 @@ func tokensOutrunCompletions(rm domain.ReplicaMetrics, role string, fleetOutput 
 	if !(out > 0) {
 		return false
 	}
-	return rm.GenerationTokenRate > MaxTokensOverCompletions*rm.RequestRate*out
+	return rm.GenerationTokenRate > t.Admission.MaxTokensOverCompletions*rm.RequestRate*out
 }
 
 // throughputRefusal says why a saturated replica's completion rate mu is not
@@ -248,17 +255,17 @@ func tokensOutrunCompletions(rm domain.ReplicaMetrics, role string, fleetOutput 
 // served is the variant's highest served rate this cycle (servedBounds), and
 // filling whether the replica's tokens outran its completions
 // (tokensOutrunCompletions).
-func throughputRefusal(requestRate, mu float64, derived derivedMu, served float64, filling bool) string {
+func (t tuning) throughputRefusal(requestRate, mu float64, derived derivedMu, served float64, filling bool) string {
 	if !(requestRate > 0) {
 		return refusedNoCompletion
 	}
 	if filling {
 		return refusedFilling
 	}
-	if served > MeasuredDerivedMaxRatio*mu {
+	if served > t.MuChoice.MaxRatio*mu {
 		return refusedUnderServed
 	}
-	if derived.ok && mu < MinMeasuredOfDerived*derived.rate {
+	if derived.ok && mu < t.MuChoice.MinMeasuredOfDerived*derived.rate {
 		return refusedUnderDerived
 	}
 	return ""
@@ -310,7 +317,7 @@ type servedRates struct {
 // engine and are left out, as a Pod that is not Ready is, whose rate is not
 // a capacity (admissionOf), and so is a replica still filling, whose token
 // rate runs ahead of what it serves (tokensOutrunCompletions).
-func servedBounds(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, queueThreshold, kvCacheThreshold,
+func (t tuning) servedBounds(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, queueThreshold, kvCacheThreshold,
 	fleetOutput, shapeKeyInput, shapeKeyOutput, fleetHitRate float64) map[string]servedRates {
 	out := make(map[string]servedRates)
 	full := make(map[string]map[string]float64)
@@ -321,7 +328,7 @@ func servedBounds(rows []domain.ReplicaMetrics, rolesByVariant map[string]string
 		role := rolesByVariant[rm.VariantName]
 		rate, ok := saturatedCompletionRate(rm, role, fleetOutput,
 			throughputKeyInput(role, shapeKeyInput, shapeKeyOutput, fleetHitRate))
-		if !ok || !(rate > 0) || math.IsInf(rate, 1) || tokensOutrunCompletions(rm, role, fleetOutput) {
+		if !ok || !(rate > 0) || math.IsInf(rate, 1) || t.tokensOutrunCompletions(rm, role, fleetOutput) {
 			continue
 		}
 		s := out[rm.VariantName]
@@ -355,7 +362,8 @@ func servedBounds(rows []domain.ReplicaMetrics, rolesByVariant map[string]string
 // completions of replicas at full KV read 0.90-1.07 over 24 scrape
 // intervals. 0.8 keeps that inside, and bounds what one slow replica can
 // over-order to 1.25x.
-const SiblingMuTolerance = 0.8
+// The default of analyzerTuning.admission.siblingMuTolerance.
+const SiblingMuTolerance = config.DefaultSiblingMuTolerance
 
 // siblingYield reports the rate a measured mu of the throughput key yields
 // to, and whether it does: the newest median its Ready, full siblings served
@@ -379,7 +387,8 @@ const SiblingMuTolerance = 0.8
 // give way to the slow figure again the cycle after. The yield holds until
 // newer sibling evidence moves or drops it, the measurement comes within the
 // tolerance of it, or the window starts over (recordSaturatedThroughputFrom).
-func (a *SaturationAnalyzer) siblingYield(key string, reading throughputReading, served servedRates) (float64, bool) {
+func (a *SaturationAnalyzer) siblingYield(key string, reading throughputReading, served servedRates, t tuning) (float64, bool) {
+	tol := t.Admission.SiblingMuTolerance
 	if !(reading.rate > 0) {
 		return 0, false
 	}
@@ -389,9 +398,9 @@ func (a *SaturationAnalyzer) siblingYield(key string, reading throughputReading,
 	if sibling := served.saturated; sibling > 0 {
 		open := c != nil && c.sibling > 0
 		switch {
-		case !open && (!served.unqueued || !(reading.rate < SiblingMuTolerance*sibling)):
+		case !open && (!served.unqueued || !(reading.rate < tol*sibling)):
 			return 0, false
-		case !served.unqueued && !(reading.rate < SiblingMuTolerance*sibling):
+		case !served.unqueued && !(reading.rate < tol*sibling):
 			c.sibling = 0 // the evidence is gone: the siblings read what it does
 			return 0, false
 		}
@@ -401,7 +410,7 @@ func (a *SaturationAnalyzer) siblingYield(key string, reading throughputReading,
 		}
 		c.sibling = sibling
 	}
-	if c == nil || !(reading.rate < SiblingMuTolerance*c.sibling) {
+	if c == nil || !(reading.rate < tol*c.sibling) {
 		return 0, false
 	}
 	return c.sibling, true
@@ -441,7 +450,7 @@ type lowRun struct {
 // MeasuredDerivedMaxRatio keeps the measurement fresh, accepted or not: the
 // bucket is still reading what it measured. One that disagrees does not, and
 // a filling replica's reading -- a fraction of the rate on record -- is one.
-func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, refusedLow bool, now time.Time) bool {
+func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, refusedLow bool, t tuning, now time.Time) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	c, ok := a.throughputMuChoice[key]
@@ -450,7 +459,7 @@ func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, r
 		a.throughputMuChoice[key] = c
 	}
 	if ra, ok := a.saturatedThroughput[key]; ok && ra.Len() > 0 {
-		if m := ra.Median(); m > 0 && mu <= m*MeasuredDerivedMaxRatio && mu >= m/MeasuredDerivedMaxRatio {
+		if m := ra.Median(); m > 0 && mu <= m*t.MuChoice.MaxRatio && mu >= m/t.MuChoice.MaxRatio {
 			c.saturatedAt = now
 			c.yielded = false
 		}
@@ -489,7 +498,8 @@ func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, r
 //     figure, or, once it has given way, still MeasuredDerivedReturnRatio
 //     above it; and when it sits as far under it, but only once it has been
 //     stale for MeasuredLowHoldFor -- until then the lower of the two prices.
-func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading throughputReading, derived derivedMu, served float64, now time.Time) bool {
+func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading throughputReading, derived derivedMu, served float64, t tuning, now time.Time) bool {
+	maxR, retR := t.MuChoice.MaxRatio, t.MuChoice.ReturnRatio
 	if !derived.ok || !(derived.rate > 0) || !(reading.rate > 0) {
 		return false
 	}
@@ -498,8 +508,8 @@ func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading through
 	c := a.throughputMuChoice[key]
 	latched := c != nil && c.yielded
 	ratio := reading.rate / derived.rate
-	if ratio < 1 && (served > MeasuredDerivedMaxRatio*reading.rate ||
-		(latched && served > MeasuredDerivedReturnRatio*reading.rate)) {
+	if ratio < 1 && (served > maxR*reading.rate ||
+		(latched && served > retR*reading.rate)) {
 		if c == nil {
 			c = &muChoice{}
 			a.throughputMuChoice[key] = c
@@ -515,7 +525,7 @@ func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading through
 	if c != nil && !c.saturatedAt.IsZero() {
 		fresh = c.saturatedAt
 	}
-	if !fresh.IsZero() && now.Sub(fresh) < MeasuredMuFreshFor {
+	if !fresh.IsZero() && now.Sub(fresh) < t.MuChoice.FreshFor.Duration() {
 		if c != nil {
 			c.yielded = false
 		}
@@ -523,11 +533,11 @@ func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading through
 	}
 	var yielded bool
 	if ratio >= 1 {
-		yielded = ratio > MeasuredDerivedMaxRatio || (latched && ratio > MeasuredDerivedReturnRatio)
+		yielded = ratio > maxR || (latched && ratio > retR)
 	} else {
 		// An unknown age is as stale as can be, as it is above.
-		heldOut := fresh.IsZero() || now.Sub(fresh) >= MeasuredLowHoldFor
-		yielded = heldOut && (ratio < 1/MeasuredDerivedMaxRatio || (latched && ratio < 1/MeasuredDerivedReturnRatio))
+		heldOut := fresh.IsZero() || now.Sub(fresh) >= t.MuChoice.LowHoldFor.Duration()
+		yielded = heldOut && (ratio < 1/maxR || (latched && ratio < 1/retR))
 	}
 	if c == nil {
 		if !yielded {

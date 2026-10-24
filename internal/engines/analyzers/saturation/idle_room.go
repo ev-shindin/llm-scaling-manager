@@ -40,12 +40,12 @@ import (
 // one-minute peak window: the first idle row may cover only the seconds since
 // the replica turned Ready, and a full window of idle readings after it is
 // what shows the minute was idle.
-const IdleSettledFor = 2 * time.Minute
+const IdleSettledFor = 2 * ThroughputSampleSpacing
 
 // IdleMaxGap is the longest gap between two idle readings of one replica that
 // still counts as one idle run. A reading is a one-minute peak, so readings
 // further apart than that leave a stretch no reading covered.
-const IdleMaxGap = time.Minute
+const IdleMaxGap = ThroughputSampleSpacing
 
 // idleRun is one replica's current run of idle readings.
 type idleRun struct {
@@ -60,8 +60,9 @@ func (a *SaturationAnalyzer) settledIdleDecode(
 	caps []capacity.ReplicaCapacity,
 	rows []domain.ReplicaMetrics,
 	rolesByVariant map[string]string,
+	t tuning,
 ) int {
-	settled := a.noteIdleRuns(namespace, modelID, caps, rows, rolesByVariant, a.now())
+	settled := a.noteIdleRuns(namespace, modelID, caps, rows, rolesByVariant, t, a.now())
 	n := 0
 	for i := range caps {
 		if settled[i] && domain.CanonicalRole(rolesByVariant[caps[i].VariantName]) == domain.RoleDecode {
@@ -80,11 +81,11 @@ func (a *SaturationAnalyzer) settledIdleDecode(
 // queues at 16 % KV), and one at its k2 with no queue for a minute is busy.
 // A row priced without a cache size has no k1 to measure against and is not
 // idle either.
-func pricedIdle(rm domain.ReplicaMetrics, rc capacity.ReplicaCapacity) bool {
-	if rm.TotalKvCapacityTokens <= 0 || rc.EffectiveCapacity <= 0 || !replicaIdle(rm) {
+func (t tuning) pricedIdle(rm domain.ReplicaMetrics, rc capacity.ReplicaCapacity) bool {
+	if rm.TotalKvCapacityTokens <= 0 || rc.EffectiveCapacity <= 0 || !t.replicaIdle(rm) {
 		return false
 	}
-	return float64(rm.BusiestRankTokens()) < idleKvUsage*float64(rc.EffectiveCapacity)
+	return float64(rm.BusiestRankTokens()) < t.idleKvUsage*float64(rc.EffectiveCapacity)
 }
 
 // noteIdleRuns records this cycle's idle readings of the model's decode
@@ -97,6 +98,7 @@ func (a *SaturationAnalyzer) noteIdleRuns(
 	caps []capacity.ReplicaCapacity,
 	rows []domain.ReplicaMetrics,
 	rolesByVariant map[string]string,
+	t tuning,
 	now time.Time,
 ) []bool {
 	settled := make([]bool, len(caps))
@@ -119,7 +121,7 @@ func (a *SaturationAnalyzer) noteIdleRuns(
 		rm := rows[i]
 		key := rm.VariantName + "/" + rm.PodName
 		if rm.FromWarmPool || domain.CanonicalRole(rolesByVariant[rm.VariantName]) != domain.RoleDecode ||
-			!pricedIdle(rm, caps[i]) {
+			!t.pricedIdle(rm, caps[i]) {
 			delete(memo.idle, key)
 			continue
 		}

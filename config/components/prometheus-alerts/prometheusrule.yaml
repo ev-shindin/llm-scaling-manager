@@ -425,7 +425,8 @@ spec:
     # Load imbalance: one replica of a role saturated while another is idle,
     # read by the controller every cycle (wva_load_imbalanced, which already
     # needs the imbalance to hold for 2 minutes and to read balanced for 2
-    # minutes before it drops). A routing diagnostic, not a capacity one.
+    # minutes before it drops, by default; loadImbalance.sustainFor and
+    # clearAfter in the scaling policy). A routing diagnostic, not a capacity one.
     # max by () so two controller pods, or a restarted one's overlapping
     # series, page once per model and role. keep_firing_for so a dip of the
     # gauge does not resolve the page and raise it again 10 minutes later.

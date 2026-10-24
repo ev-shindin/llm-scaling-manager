@@ -365,11 +365,11 @@ func TestTokensOutrunCompletions(t *testing.T) {
 	rm := func(rr, gps, avgOut float64) domain.ReplicaMetrics {
 		return domain.ReplicaMetrics{RequestRate: rr, GenerationTokenRate: gps, AvgOutputTokens: avgOut}
 	}
-	assert.False(t, tokensOutrunCompletions(rm(6.0, 6.0*500, 500), domain.RoleDecode, 500), "steady at 1.0x")
-	assert.False(t, tokensOutrunCompletions(rm(6.0, 1.07*6.0*500, 500), domain.RoleDecode, 500), "1.07x, the most a full replica read on E1")
-	assert.True(t, tokensOutrunCompletions(rm(5.076, 6.703*500, 500), domain.RoleDecode, 500), "1.32x, a replica filling")
-	assert.True(t, tokensOutrunCompletions(rm(5.076, 6.703*500, 0), domain.RoleDecode, 500), "the fleet's output length where the replica has none")
-	assert.False(t, tokensOutrunCompletions(rm(6.0, 6.0*2000, 2000), domain.RoleDecode, 500), "its own output length, not the fleet's")
-	assert.False(t, tokensOutrunCompletions(rm(5.076, 6.703*500, 500), domain.RolePrefill, 500), "prefill is not judged")
-	assert.False(t, tokensOutrunCompletions(rm(0, 6.703*500, 500), domain.RoleDecode, 500), "no completion is refused on its own")
+	assert.False(t, defaultTuning.tokensOutrunCompletions(rm(6.0, 6.0*500, 500), domain.RoleDecode, 500), "steady at 1.0x")
+	assert.False(t, defaultTuning.tokensOutrunCompletions(rm(6.0, 1.07*6.0*500, 500), domain.RoleDecode, 500), "1.07x, the most a full replica read on E1")
+	assert.True(t, defaultTuning.tokensOutrunCompletions(rm(5.076, 6.703*500, 500), domain.RoleDecode, 500), "1.32x, a replica filling")
+	assert.True(t, defaultTuning.tokensOutrunCompletions(rm(5.076, 6.703*500, 0), domain.RoleDecode, 500), "the fleet's output length where the replica has none")
+	assert.False(t, defaultTuning.tokensOutrunCompletions(rm(6.0, 6.0*2000, 2000), domain.RoleDecode, 500), "its own output length, not the fleet's")
+	assert.False(t, defaultTuning.tokensOutrunCompletions(rm(5.076, 6.703*500, 500), domain.RolePrefill, 500), "prefill is not judged")
+	assert.False(t, defaultTuning.tokensOutrunCompletions(rm(0, 6.703*500, 500), domain.RoleDecode, 500), "no completion is refused on its own")
 }

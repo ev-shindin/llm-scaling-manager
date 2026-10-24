@@ -93,9 +93,9 @@ when no variant of the model names a tier.
 - `shapeChangeHoldSeconds` below zero.
 - A number that is not finite (YAML `.inf`, `-.inf` or `.nan`) in `priority`,
   `kvCacheThreshold`, `queueLengthThreshold`, `scaleUpThreshold`,
-  `scaleDownBoundary`, `itlMinObservableK`, `itlMaxObservableK`,
-  `itlCapMaxPreemptionRate`, or an analyzer's `score`, `scaleUpThreshold` or
-  `scaleDownBoundary`. Do not use `.inf` to give a model precedence:
+  `scaleDownBoundary`, an analyzer's `score`, `scaleUpThreshold` or
+  `scaleDownBoundary`, or a number in `analyzerTuning` (the ITL band
+  included) or `loadImbalance`. Do not use `.inf` to give a model precedence:
   `priority` multiplies the model's weight in the fair share (priority x
   demand), so a finite value such as 5 weighs it five times as heavily.
 - An analyzer `score` below zero. It is read as 1, as before; the change is
@@ -1142,9 +1142,8 @@ These parameters apply when `analyzerName: "saturation"` is set or when the `ana
 | `analyzers` | list | Multi-analyzer pipeline registration — see [Multi-Analyzer Registration](#multi-analyzer-registration) | `[{name: "saturation", score: 1.0}]` |
 | `shapeChangeHoldSeconds` | int | How long the fleet is held back from scale-down after the workload's shape changes. Raise it for long generations (long context, long chain-of-thought). A tier or a per-model override can set it. A negative value is skipped and the layer below applies; see [a bad value is skipped](#scaletozero) for where it is reported. | `0` (5 minutes) |
 | `disableShapeChangeHold` | bool | Turns the shape-change hold off. A tier or a per-model override can turn it off. It cannot turn back on a hold that a lower layer (`default` or the tier) turned off. | `false` |
-| `itlMinObservableK` | float64 | Lowest KV fill (0-1) at which a replica's inter-token latency teaches its ITL line. Below it the engine barely batches and the latency is noise. Must be in (0, 1) and below `itlMaxObservableK`. A tier or a per-model override can set it. | `0.15` |
-| `itlMaxObservableK` | float64 | Highest KV fill (0-1) at which a replica's inter-token latency teaches its ITL line. Above it an engine short of memory preempts and its latency leaves the line. Must be in (0, 1). If a merge leaves it at or below `itlMinObservableK`, both edges fall back to their defaults. | `0.80` |
-| `itlCapMaxPreemptionRate` | float64 | A replica above `itlMaxObservableK` still teaches the line when it is at its sequence cap: its running batch is exactly `--max-num-seqs` (set on the engine, not defaulted) times its ranks, and requests are waiting. This key is the most preemptions per second it may show over the ITL window. vLLM only: SGLang publishes no preemption counter. Must be >= 0. | `0` |
+| `analyzerTuning` | object | Advanced. The analyzer's admission and pricing figures. Merged key by key. See [Advanced tuning](#advanced-tuning-analyzertuning-and-loadimbalance). | calibrated defaults |
+| `loadImbalance` | object | Advanced. The load-imbalance diagnostic's figures; its `idleKvUsage` is also the analyzer's idle test. Merged key by key. See [Advanced tuning](#advanced-tuning-analyzertuning-and-loadimbalance). | calibrated defaults |
 
 ### Expected output length
 
@@ -1426,6 +1425,153 @@ limits apply:
   [`throughput-demand-floor`](cycle-log.md#throughput-demand-floor) line, or
   `wva_service_rate_per_replica{source="lower-bound"}`.
 
+### Advanced tuning: `analyzerTuning` and `loadImbalance`
+
+**Leave these alone unless a measurement tells you otherwise.** The defaults are
+the values the analyzer was calibrated with, and an unset key behaves exactly as
+before the key existed. They are here so that no threshold, window or count is
+fixed in the code.
+
+Each key is optional. Zero or absent takes the default. Both blocks merge **key
+by key**: a tier or a per-model entry can change one figure and inherit the
+rest. Durations are Go duration strings (`90s`, `2m`); a bare number is an
+error. A value out of range drops the entry, like any invalid key; a value that
+is not finite (`.nan`, `.inf`) is skipped and reported.
+
+**Some keys come in pairs, and a pair must not cross.** The pairs are:
+
+| Pair | Rule |
+|------|------|
+| `itlBand.minObservableK`, `itlBand.maxObservableK` | minimum below maximum |
+| `steadyGate.steadyFor`, `steadyGate.carry` | `carry` at least `steadyFor` |
+| `muChoice.maxRatio`, `muChoice.returnRatio` | `returnRatio` at most `maxRatio` |
+| `muChoice.freshFor`, `muChoice.lowHoldFor` | `lowHoldFor` at least `freshFor` |
+| `floorTrust.lagFraction`, `floorTrust.trustFraction` | `trustFraction` above `lagFraction` |
+
+- An entry that sets **both** keys of a crossed pair is rejected.
+- An entry that sets **one** key is not checked against the other. The other
+  may come from a lower layer (the `default` entry or a tier), which the entry
+  cannot see.
+- After the merge, a crossed pair goes back to **both** defaults. The analyzer
+  never runs with a crossed pair.
+- When the controller reads the ConfigMap, it resolves each entry over the
+  `default` entry, as for a model with no tier. For each pair that would fall
+  back, it logs one line, once per read rather than every cycle:
+  `WARNING: tuning figure not used: analyzerTuning.steadyGate.steadyFor/carry = 10m0s/5m0s: carry must be at least steadyFor; using the defaults 2m0s/5m0s instead`,
+  with the entry's `key` and `resolvedFor: model with no tier`. The check does
+  not see tiers, in either direction: a pair crossed only through a named tier
+  is not warned, and a warning can name a pair that a tier's own keys make
+  valid for the models on that tier. The run-time merge, which does see the
+  tier, is what the analyzer uses.
+- So when you move one key past its partner's default, set both keys in the
+  same entry. For example, `steadyFor: 10m` on its own crosses the default
+  `carry` of `5m`, and both go back to `2m` and `5m`. Write
+  `{steadyFor: 10m, carry: 15m}` instead.
+
+**No value of these keys raises, floors, ages or resets k2** (the measured KV
+capacity). The `k2Settle` keys only decide which saturated readings k2 may learn
+from. A stricter value admits fewer readings; a looser one admits more, each of
+them a real measurement.
+
+```yaml
+long-context:
+  analyzerTuning:
+    backlogGrowth: {fraction: 0.05}
+    muChoice: {lowHoldFor: 1h}
+  loadImbalance:
+    sustainFor: 5m
+```
+
+#### `analyzerTuning.itlBand`: the KV band the ITL line is fitted over
+
+| Key | Default | Range | What it does |
+|-----|---------|-------|--------------|
+| `minObservableK` | `0.15` | (0, 1), below `maxObservableK` | Lowest KV fill at which a replica's inter-token latency teaches its ITL line. Below it the engine barely batches and the latency is noise. |
+| `maxObservableK` | `0.80` | (0, 1) | Highest KV fill at which the latency teaches the line. Above it an engine short of memory preempts and its latency leaves the line. If the merged policy leaves it at or below `minObservableK`, both edges go back to their defaults, and the controller logs a `WARNING: tuning figure not used` line when it reads the ConfigMap. |
+| `capMaxPreemptionRate` | `0` | >= 0 | A replica above `maxObservableK` still teaches the line when it is at its sequence cap: its running batch is exactly `--max-num-seqs` (set on the engine, not defaulted) times its ranks, and requests are waiting. This is the most preemptions per second it may show over the ITL window. An explicit `0` overrides a tier that raised it. vLLM only: SGLang publishes no preemption counter. |
+
+These three were top-level keys (`itlMinObservableK`, `itlMaxObservableK`,
+`itlCapMaxPreemptionRate`) before any release shipped them; the top-level
+spelling is reported as an unknown key and ignored.
+
+#### `analyzerTuning.steadyGate`: which ITL readings teach the line
+
+| Key | Default | Range | What it does |
+|-----|---------|-------|--------------|
+| `steadyFor` | `2m` | 1m to 24h | How long a replica's KV fill must hold still before its latency reading may teach the ITL line. The latency is a one-minute average, so a shorter wait pairs this moment's fill with last minute's latency. |
+| `maxKDrift` | `0.10` | (0, 1) | How far the KV fill may move within `steadyFor` and still count as steady. |
+| `carry` | `5m` | `steadyFor` to 24h | How long a steady reading is kept past the newest window, so a load step's old level is still there when the new one settles. If the merged policy has `carry` under `steadyFor`, both go back to `2m` and `5m`, and the controller logs a `WARNING: tuning figure not used` line when it reads the ConfigMap. |
+| `idleRows` | `2` | 1 to 1000 | How many cycles in a row with no latency and no KV fill make a replica idle rather than one missed scrape. An idle replica waits out `steadyFor` again when load returns. |
+| `minSettledSamples` | `3` | 1 to 1000 | The fewest readings from settled replicas the line is refitted from. Below it the last slope holds. |
+
+The slo analyzer reads the same gate, so both fit their lines from the same
+readings.
+
+#### `analyzerTuning.k2Settle`: is a saturated reading a limit or a load step
+
+A reading whose queue is deeper than the replica's whole batch is recorded only
+if it looks like a replica at its limit. The comparison window is the
+collector's one-minute rate window and is not configurable.
+
+| Key | Default | Range | What it does |
+|-----|---------|-------|--------------|
+| `rateFraction` | `0.7` | (0, 1] | The share of the service rate **and** of the k2 on record such a reading must reach to be recorded at once. Higher is stricter. |
+| `maxRise` | `0.25` | (0, 1) | How far, up or down, its resident KV may have moved over one window and still count as settled. Lower is stricter. |
+
+#### `analyzerTuning.muChoice`: measured or derived service rate
+
+| Key | Default | Range | What it does |
+|-----|---------|-------|--------------|
+| `minMeasuredOfDerived` | `0.5` | (0, 1] | A saturated reading under this share of the rate derived from the ITL line is not recorded at once (a filling or stalled replica). |
+| `maxRatio` | `2.0` | 1 to 100 | How far a measured rate may disagree with the derived one, or sit under what another replica served, before it gives way. |
+| `returnRatio` | `1.6` | 1 to `maxRatio` | How close a rate that gave way must come back before it prices again. The gap to `maxRatio` stops the price flipping on noise. If the merged policy has `returnRatio` over `maxRatio`, both go back to `2.0` and `1.6`, and the controller logs a `WARNING: tuning figure not used` line when it reads the ConfigMap. |
+| `freshFor` | `5m` | 1s to 24h | How long after its last agreeing reading a measured rate outranks a derived one that disagrees. |
+| `lowHoldFor` | `30m` | `freshFor` to 24h | How long a measured rate far **under** the derived one keeps pricing. The lower price orders more replicas, so it is held longer. If the merged policy has `lowHoldFor` under `freshFor`, both go back to `5m` and `30m`, and the controller logs a `WARNING: tuning figure not used` line when it reads the ConfigMap. |
+
+#### `analyzerTuning.admission`: which readings are service-rate samples
+
+| Key | Default | Range | What it does |
+|-----|---------|-------|--------------|
+| `maxTokensOverCompletions` | `1.15` | 1 to 10 | The most a replica's generated tokens may exceed what its completed requests account for. Above it the batch is still filling and the rate is not recorded. |
+| `siblingMuTolerance` | `0.8` | (0, 1] | A measured rate under this share of what the variant's full replicas serve yields to them: one slow replica does not price the whole fleet. |
+
+#### `analyzerTuning.floorTrust`: when the throughput floor may lower demand
+
+| Key | Default | Range | What it does |
+|-----|---------|-------|--------------|
+| `lagFraction` | `0.5` | (0, 1) | Below this share of the resident KV, the arrival rate is taken as lagging and the floor never lowers demand. |
+| `trustFraction` | `0.8` | (`lagFraction`, 1] | At or above this share, the floor's drain price is trusted in full. In between the two prices are blended. |
+
+If the merged policy has `trustFraction` at or under `lagFraction`, both go
+back to `0.5` and `0.8`, and the controller logs a `WARNING: tuning figure not
+used` line when it reads the ConfigMap.
+
+#### `analyzerTuning.backlogGrowth`: when a queue counts as growing
+
+A queue grows when it exceeds its size one rate window ago by more than
+`max(minRequests, fraction × that size)`. A growing queue is priced as new
+arrivals rather than a standing backlog.
+
+| Key | Default | Range | What it does |
+|-----|---------|-------|--------------|
+| `minRequests` | `2` | (0, 1e6] | The least growth, in requests, that counts. You cannot set `0`: zero means unset and takes the default `2`. |
+| `fraction` | `0.10` | (0, 1) | The least growth, as a share of the earlier queue, that counts. Lower reacts to slower growth, and to more noise. |
+
+#### `loadImbalance`: the load-imbalance diagnostic
+
+The diagnostic behind `wva_load_imbalanced` and the `WVALoadImbalanced` alert.
+It never changes a scaling decision.
+
+| Key | Default | Range | What it does |
+|-----|---------|-------|--------------|
+| `idleKvUsage` | `0.30` | (0, 1), below `kvCacheThreshold` | A Ready replica with nothing waiting is idle below this KV use. **The saturation analyzer reads the same key** for its own idle test, so the two cannot disagree. The idle figure is never above `kvCacheThreshold`. An entry that sets `idleKvUsage` at or above its `kvCacheThreshold` is rejected. An entry that leaves `idleKvUsage` unset is not checked: with `kvCacheThreshold: 0.3` or lower, it is valid, and the idle figure is `kvCacheThreshold`. When an `idleKvUsage` that is set (on the entry, or on the `default` entry it merges over) ends up at or above the entry's `kvCacheThreshold`, the controller logs a `WARNING: tuning figure not used` line for the entry when it reads the ConfigMap. With `idleKvUsage` unset there is no warning. |
+| `idleAfterReady` | `2m` | 1m to 24h | How long a replica must be Ready before it can count as idle. |
+| `sustainFor` | `2m` | 1m to 24h | How long a role must read imbalanced, every cycle, before it is reported. Also how long collection must fail before the series are dropped. |
+| `clearAfter` | `2m` | 1s to 24h | How long a reported role must read balanced, every cycle, before the report clears. |
+
+The `WARNING: load imbalanced` log line states the `idleAfterReady` and
+`sustainFor` in force.
+
 ### `slo` (observe only)
 
 Latency targets, and the analyzer that judges a model against them. **On this
@@ -1675,7 +1821,7 @@ not readings of the fleet:
   KV-cache fill, `ITL = A × fill + B`; *fill* is the share of physical KV cache in
   use. It is the same fit, with the same rules, the saturation analyzer makes.
 - `wva_slo_fill` is the fill at which the line meets the TPOT target, clamped to
-  the ITL band (`itlMinObservableK`, `itlMaxObservableK`; [0.15, 0.80] by
+  the ITL band (`analyzerTuning.itlBand.minObservableK`, `analyzerTuning.itlBand.maxObservableK`; [0.15, 0.80] by
   default); `wva_slo_predicted_itl_seconds` the ITL the fleet would show sized
   for it; `wva_slo_source` where the line came from (`own`: fitted; `pinned`: its
   intercept held at an earlier fit's; `pinned-default`: held at a default for no
@@ -2448,8 +2594,19 @@ The controller validates all configuration entries on load. Invalid entries are 
 8. **Limiters:** each `type` must be `gpu-inventory`/`inventory` or `quota`; a `gpu-inventory` entry
    must carry no quota fields; `quota` entries are validated end-to-end against the `QuotaLimiterConfig`
    schema (name uniqueness, scope, per-type ranges).
-9. **ITL band** (when set): `itlMinObservableK` and `itlMaxObservableK` must be in (0, 1), with
-   the minimum below the maximum. `itlCapMaxPreemptionRate` must be >= 0.
+9. **ITL band** (when set): `analyzerTuning.itlBand.minObservableK` and `analyzerTuning.itlBand.maxObservableK` must be in (0, 1), with
+   the minimum below the maximum. `analyzerTuning.itlBand.capMaxPreemptionRate` must be >= 0.
+10. **Other `analyzerTuning` keys** (when set): each must be in the range its table gives in
+    [Advanced tuning](#advanced-tuning-analyzertuning-and-loadimbalance). Durations take a unit
+    (`2m`); a bare number fails to decode.
+11. **`loadImbalance`** (when set): each key must be in its range. If the entry sets `idleKvUsage`, it must
+    be below the entry's `kvCacheThreshold` (or `0.80` when the entry sets none). If the entry does not set it,
+    nothing is checked; the idle figure in use is never above `kvCacheThreshold`.
+12. **Pairs** (only when the entry sets both keys): `minObservableK` below `maxObservableK`, `carry` at least
+    `steadyFor`, `returnRatio` at most `maxRatio`, `lowHoldFor` at least `freshFor`, and `trustFraction` above
+    `lagFraction`. A pair the merge crosses goes back to both defaults instead of being rejected, with a
+    `WARNING: tuning figure not used` log line; see
+    [Advanced tuning](#advanced-tuning-analyzertuning-and-loadimbalance).
 
 > Analyzer `type`/`name` values are **not** restricted to a fixed set — an unrecognized analyzer is
 > simply ignored at runtime, so externally-registered analyzers and newer built-ins do not fail validation.

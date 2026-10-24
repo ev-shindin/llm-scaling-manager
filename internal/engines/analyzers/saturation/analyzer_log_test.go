@@ -345,12 +345,12 @@ func TestLogContract_ITLWindowTakesTheCappedReplica(t *testing.T) {
 				CurrentReplicas: 1, GPUsPerReplica: 1},
 		})
 		cfg := *input.Config.(*config.ScalingPolicy)
-		cfg.ITLMaxObservableK = 0.90
+		cfg.AnalyzerTuning.ITLBand.MaxObservableK = 0.90
 		input.Config = &cfg
 		_, err := analyzer.Analyze(ctx, input)
 		require.NoError(t, err)
 		fields := requireLogged(t, logs, "itl-window")
-		assert.EqualValues(t, 0, fields["aboveBand"], "itlMaxObservableK must reach the window")
+		assert.EqualValues(t, 0, fields["aboveBand"], "analyzerTuning.itlBand.maxObservableK must reach the window")
 		assert.EqualValues(t, 1, fields["offered"])
 	})
 }
