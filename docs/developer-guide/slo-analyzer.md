@@ -93,9 +93,9 @@ instance and its own keys.
   (`Admission.atSequenceCap`): `RunningRequests` exactly
   `max_num_seqs` times its ranks, with `max_num_seqs` read from the
   engine's flag, `QueueLength` above zero, and a known `PreemptionRate`
-  at most `itlCapMaxPreemptionRate`. Its reading above the band is kept and
+  at most `analyzerTuning.itlBand.capMaxPreemptionRate`. Its reading above the band is kept and
   counted in `Capped` (issue #287). `Observe` takes an `itl.Admission`:
-  the policy's band (`itlMinObservableK`, `itlMaxObservableK`), the cap and
+  the policy's band (`analyzerTuning.itlBand.minObservableK`, `analyzerTuning.itlBand.maxObservableK`), the cap and
   the allowance. The zero value is the default band with no cap.
 - **The window** (`Window`) holds at most 20 readings for at most 30 minutes.
   Nothing clears it on a change of shape.

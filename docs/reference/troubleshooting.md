@@ -392,7 +392,7 @@ role has.
 The router (EPP) picks the replica for each request. When its scorers keep
 choosing one replica, that replica fills and queues while its siblings idle.
 A replica count is unlikely to fix this: the warning needs an idle replica
-that has been Ready for at least 2 minutes, so the role already has capacity
+that has been Ready for at least 2 minutes (by default; `loadImbalance.idleAfterReady`), so the role already has capacity
 the router is not using, and new replicas are routed to no more than the idle
 ones are. A scale-up in progress does not raise it: a replica is not counted
 idle until 2 minutes after it became Ready and the controller first saw it

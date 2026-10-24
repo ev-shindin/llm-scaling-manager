@@ -90,12 +90,12 @@ func (a *SaturationAnalyzer) StableAcceleratorFor(namespace, variantName, accele
 	return accelerator
 }
 
-// idleKvUsage is the busiest-rank KV utilization below which a Ready replica
-// with nothing waiting reads idle on one row: the load-imbalance diagnostic's
-// number (internal/signals/balance: IdleKvUsage = 0.30, busiest-rank KV under
-// it and nothing waiting). One row is not enough for the analyzer to act on;
+// idleKvUsage (tuning.idleKvUsage) is the busiest-rank KV utilization below
+// which a Ready replica with nothing waiting reads idle on one row. It is the
+// load-imbalance diagnostic's number, read from the same policy key
+// (loadImbalance.idleKvUsage, default balance.IdleKvUsage = 0.30), so the two
+// cannot disagree. One row is not enough for the analyzer to act on;
 // settledIdleDecode says what more it needs.
-const idleKvUsage = 0.30
 
 // replicaIdle reports whether rm reads idle on this cycle's row: Ready, its
 // busiest engine rank under idleKvUsage and nothing waiting.
@@ -108,7 +108,7 @@ const idleKvUsage = 0.30
 // KvCacheUsage times the cache), and where a row carries only one of them the
 // other cannot make it read idle. A reading that is not a finite fraction is
 // zero, as the balance package reads it.
-func replicaIdle(rm domain.ReplicaMetrics) bool {
+func (t tuning) replicaIdle(rm domain.ReplicaMetrics) bool {
 	if !rm.Ready || rm.QueueLength > 0 {
 		return false
 	}
@@ -119,7 +119,7 @@ func replicaIdle(rm domain.ReplicaMetrics) bool {
 	if rm.TotalKvCapacityTokens > 0 {
 		kv = max(kv, float64(rm.BusiestRankTokens())/float64(rm.TotalKvCapacityTokens))
 	}
-	return kv < idleKvUsage
+	return kv < t.idleKvUsage
 }
 
 // replicaRouting is what the cycle's routing says about how one replica's
@@ -157,10 +157,10 @@ func instantKv(rm domain.ReplicaMetrics) (float64, bool) {
 // everywhere, or a load that has just stopped -- keeps every peak, as does a
 // fleet whose instant reading is missing, which has no replica busy now
 // either.
-func rolesBusyNow(metrics []domain.ReplicaMetrics, rolesByVariant map[string]string) map[string]bool {
+func (t tuning) rolesBusyNow(metrics []domain.ReplicaMetrics, rolesByVariant map[string]string) map[string]bool {
 	out := map[string]bool{}
 	for _, rm := range metrics {
-		if k, ok := instantKv(rm); rm.Ready && ok && k >= idleKvUsage {
+		if k, ok := instantKv(rm); rm.Ready && ok && k >= t.idleKvUsage {
 			out[domain.CanonicalRole(rolesByVariant[rm.VariantName])] = true
 		}
 	}
@@ -180,9 +180,9 @@ func rolesBusyNow(metrics []domain.ReplicaMetrics, rolesByVariant map[string]str
 // replicas on four, against 5.84 with all four at 0.9; P/D prefill at
 // 0.4/0.1/0.1/0.1 read a scale-down). A missing series is not a reading of
 // zero: the peak stands.
-func kvFromInstant(rm domain.ReplicaMetrics, busyNow bool) bool {
+func (t tuning) kvFromInstant(rm domain.ReplicaMetrics, busyNow bool) bool {
 	k, ok := instantKv(rm)
-	return busyNow && rm.Ready && rm.QueueLength == 0 && ok && k < idleKvUsage
+	return busyNow && rm.Ready && rm.QueueLength == 0 && ok && k < t.idleKvUsage
 }
 
 // roleSaturated reports whether any replica of the given role is full and

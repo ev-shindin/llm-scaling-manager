@@ -242,7 +242,7 @@ that the fleet should move.
 ### The service rate, decode — `analyzers/saturation`
 
 ```
-kPrice   = clamp(kvCacheThreshold x scaleUpThreshold, itlMinObservableK, itlMaxObservableK)   # 0.15, 0.80 by default
+kPrice   = clamp(kvCacheThreshold x scaleUpThreshold, analyzerTuning.itlBand.minObservableK, analyzerTuning.itlBand.maxObservableK)   # 0.15, 0.80 by default
 seqs     = min(Sequences(kPrice, C, KVreq), S)
 tokenSec = seqs / ITL(kPrice)
 mu       = tokenSec / avgOutput

@@ -162,7 +162,7 @@ func TestK2Settle_ANoisyLimitStillLearns(t *testing.T) {
 		ok := make([]bool, len(rs))
 		for i, tok := range rs {
 			now := start.Add(time.Duration(i) * 15 * time.Second)
-			ok[i] = settledOverWindow(trace, now, tok, 5)
+			ok[i] = defaultTuning.settledOverWindow(trace, now, tok, 5)
 			trace = append(trace, settleReading{at: now, queue: 40, tokens: tok})
 			for len(trace) > 0 && now.Sub(trace[0].at) > K2SettleMaxGap {
 				trace = trace[1:]

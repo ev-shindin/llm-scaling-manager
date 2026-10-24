@@ -7,7 +7,7 @@ import (
 )
 
 // The fill a TPOT target is priced at is clamped to the range the ITL line is
-// fitted over -- the policy's band (itlMinObservableK, itlMaxObservableK),
+// fitted over -- the policy's band (analyzerTuning.itlBand.minObservableK, analyzerTuning.itlBand.maxObservableK),
 // which the window accepts readings inside -- the same clamp the saturation
 // analyzer's pricingK applies. A capped replica's reading above the band
 // teaches the line but does not widen the clamp. The line says nothing

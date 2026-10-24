@@ -7,6 +7,11 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 )
 
+// band is a policy that sets only analyzerTuning.itlBand.
+func band(b ITLBandTuning) ScalingPolicy {
+	return ScalingPolicy{AnalyzerTuning: AnalyzerTuning{ITLBand: b}}
+}
+
 // The policy's defaults are the ITL package's: an unset key must behave as
 // the code did before the key existed.
 func TestITLBandDefaultsMatchTheTracker(t *testing.T) {
@@ -16,11 +21,11 @@ func TestITLBandDefaultsMatchTheTracker(t *testing.T) {
 	}
 	var p ScalingPolicy
 	p.ApplyDefaults()
-	if p.ITLMinObservableK != DefaultITLMinObservableK || p.ITLMaxObservableK != DefaultITLMaxObservableK {
-		t.Errorf("ApplyDefaults band = [%g, %g]", p.ITLMinObservableK, p.ITLMaxObservableK)
+	if b := p.AnalyzerTuning.ITLBand; b.MinObservableK != DefaultITLMinObservableK || b.MaxObservableK != DefaultITLMaxObservableK {
+		t.Errorf("ApplyDefaults band = [%g, %g]", b.MinObservableK, b.MaxObservableK)
 	}
 	if got := p.ITLCapPreemptionRate(); got != DefaultITLCapMaxPreemptionRate {
-		t.Errorf("unset itlCapMaxPreemptionRate = %g, want %g", got, DefaultITLCapMaxPreemptionRate)
+		t.Errorf("unset capMaxPreemptionRate = %g, want %g", got, DefaultITLCapMaxPreemptionRate)
 	}
 	var none *ScalingPolicy
 	if lo, hi := none.ITLBand(); lo != DefaultITLMinObservableK || hi != DefaultITLMaxObservableK || none.ITLCapPreemptionRate() != 0 {
@@ -35,22 +40,20 @@ func TestITLKeysValidate(t *testing.T) {
 		ok bool
 	}{
 		"unset":                 {ScalingPolicy{}, true},
-		"a band":                {ScalingPolicy{ITLMinObservableK: 0.10, ITLMaxObservableK: 0.90}, true},
-		"one edge":              {ScalingPolicy{ITLMaxObservableK: 0.85}, true},
-		"min negative":          {ScalingPolicy{ITLMinObservableK: -0.1}, false},
-		"max at one":            {ScalingPolicy{ITLMaxObservableK: 1}, false},
-		"min at one":            {ScalingPolicy{ITLMinObservableK: 1}, false},
-		"inverted":              {ScalingPolicy{ITLMinObservableK: 0.5, ITLMaxObservableK: 0.4}, false},
-		"equal":                 {ScalingPolicy{ITLMinObservableK: 0.5, ITLMaxObservableK: 0.5}, false},
-		"zero preemption rate":  {ScalingPolicy{ITLCapMaxPreemptionRate: rate(0)}, true},
-		"some preemption":       {ScalingPolicy{ITLCapMaxPreemptionRate: rate(0.2)}, true},
-		"negative preemption":   {ScalingPolicy{ITLCapMaxPreemptionRate: rate(-0.1)}, false},
-		"band edge below other": {ScalingPolicy{ITLMinObservableK: 0.85}, false},
+		"a band":                {band(ITLBandTuning{MinObservableK: 0.10, MaxObservableK: 0.90}), true},
+		"one edge":              {band(ITLBandTuning{MaxObservableK: 0.85}), true},
+		"min negative":          {band(ITLBandTuning{MinObservableK: -0.1}), false},
+		"max at one":            {band(ITLBandTuning{MaxObservableK: 1}), false},
+		"min at one":            {band(ITLBandTuning{MinObservableK: 1}), false},
+		"inverted":              {band(ITLBandTuning{MinObservableK: 0.5, MaxObservableK: 0.4}), false},
+		"equal":                 {band(ITLBandTuning{MinObservableK: 0.5, MaxObservableK: 0.5}), false},
+		"zero preemption rate":  {band(ITLBandTuning{CapMaxPreemptionRate: rate(0)}), true},
+		"some preemption":       {band(ITLBandTuning{CapMaxPreemptionRate: rate(0.2)}), true},
+		"negative preemption":   {band(ITLBandTuning{CapMaxPreemptionRate: rate(-0.1)}), false},
+		"band edge below other": {band(ITLBandTuning{MinObservableK: 0.85}), false},
 	} {
-		// As resolved: an edge set alone meets the other's default.
-		p := tc.p
-		p.ApplyDefaults()
-		if err := p.Validate(); (err == nil) != tc.ok {
+		// As stored: an edge set alone meets the other's default.
+		if err := tc.p.ValidateEntry(); (err == nil) != tc.ok {
 			t.Errorf("%s: Validate = %v, want ok=%t", name, err, tc.ok)
 		}
 	}
@@ -62,17 +65,17 @@ func TestITLKeysValidate(t *testing.T) {
 func TestITLKeysMerge(t *testing.T) {
 	zero, some := 0.0, 0.3
 	set := ScalingPolicySet{
-		GlobalDefaultsKey: {ITLCapMaxPreemptionRate: &some},
-		"wide":            {ITLMinObservableK: 0.10, ITLMaxObservableK: 0.90},
-		"one-model":       {ModelID: "m", Namespace: "ns", ITLCapMaxPreemptionRate: &zero},
-		"low-top":         {ITLMaxObservableK: 0.12},
+		GlobalDefaultsKey: band(ITLBandTuning{CapMaxPreemptionRate: &some}),
+		"wide":            band(ITLBandTuning{MinObservableK: 0.10, MaxObservableK: 0.90}),
+		"one-model":       {ModelID: "m", Namespace: "ns", AnalyzerTuning: AnalyzerTuning{ITLBand: ITLBandTuning{CapMaxPreemptionRate: &zero}}},
+		"low-top":         band(ITLBandTuning{MaxObservableK: 0.12}),
 	}
 	tier := ResolveScalingPolicyForTier(set, "other", "ns", "wide")
 	if lo, hi := tier.ITLBand(); lo != 0.10 || hi != 0.90 {
 		t.Errorf("tier band = [%g, %g], want [0.10, 0.90]", lo, hi)
 	}
 	if got := tier.ITLCapPreemptionRate(); got != some {
-		t.Errorf("inherited itlCapMaxPreemptionRate = %g, want %g", got, some)
+		t.Errorf("inherited capMaxPreemptionRate = %g, want %g", got, some)
 	}
 	model := ResolveScalingPolicyForTier(set, "m", "ns", "wide")
 	if got := model.ITLCapPreemptionRate(); got != 0 {
@@ -82,9 +85,9 @@ func TestITLKeysMerge(t *testing.T) {
 	if lo, hi := inverted.ITLBand(); lo != DefaultITLMinObservableK || hi != DefaultITLMaxObservableK {
 		t.Errorf("an inverted merged band = [%g, %g], want the defaults", lo, hi)
 	}
-	if inverted.ITLMinObservableK != DefaultITLMinObservableK || inverted.ITLMaxObservableK != DefaultITLMaxObservableK {
+	if b := inverted.AnalyzerTuning.ITLBand; b.MinObservableK != DefaultITLMinObservableK || b.MaxObservableK != DefaultITLMaxObservableK {
 		t.Errorf("the resolved policy holds [%g, %g]; resolution must reset an inverted pair, as it does the scaling band",
-			inverted.ITLMinObservableK, inverted.ITLMaxObservableK)
+			b.MinObservableK, b.MaxObservableK)
 	}
 }
 
@@ -92,15 +95,15 @@ func TestITLKeysMerge(t *testing.T) {
 // range check as NaN does.
 func TestITLKeysNonFinite(t *testing.T) {
 	nan := math.NaN()
-	p := ScalingPolicy{ITLMinObservableK: math.Inf(1), ITLMaxObservableK: nan, ITLCapMaxPreemptionRate: &nan}
+	p := band(ITLBandTuning{MinObservableK: math.Inf(1), MaxObservableK: nan, CapMaxPreemptionRate: &nan})
 	ignored := p.ResetUnusableFields()
 	if len(ignored) != 3 {
 		t.Fatalf("ignored %v, want the three ITL keys", ignored)
 	}
-	if p.ITLMinObservableK != 0 || p.ITLMaxObservableK != 0 || p.ITLCapMaxPreemptionRate != nil {
-		t.Errorf("after reset: %+v", p)
+	if b := p.AnalyzerTuning.ITLBand; b.MinObservableK != 0 || b.MaxObservableK != 0 || b.CapMaxPreemptionRate != nil {
+		t.Errorf("after reset: %+v", b)
 	}
-	nanBand := ScalingPolicy{ITLMinObservableK: nan, ITLMaxObservableK: nan}
+	nanBand := band(ITLBandTuning{MinObservableK: nan, MaxObservableK: nan})
 	if lo, hi := nanBand.ITLBand(); lo != DefaultITLMinObservableK || hi != DefaultITLMaxObservableK {
 		t.Errorf("ITLBand of NaN edges = [%g, %g], want the defaults", lo, hi)
 	}

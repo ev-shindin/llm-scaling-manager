@@ -4,6 +4,7 @@ import (
 	"maps"
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
@@ -82,19 +83,21 @@ const (
 	// reading's own service rate must be for the reading to count. Below one
 	// because a saturated rate under-reads for the first minute a replica is
 	// full; far above the rate of the minute before a load step.
-	K2SettleRateFraction = 0.7
+	// The default of analyzerTuning.k2Settle.rateFraction.
+	K2SettleRateFraction = config.DefaultK2SettleRateFraction
 	// K2SettleMaxRise is how much a suspect reading's resident KV may have
 	// grown, or fallen, since its reading K2SettleLookback earlier and still
 	// count as settled.
-	K2SettleMaxRise = 0.25
+	// The default of analyzerTuning.k2Settle.maxRise.
+	K2SettleMaxRise = config.DefaultK2SettleMaxRise
 	// K2SettleLookback is how far back the settled test compares: one
 	// collector window (max_over_time[1m]), so the two readings share none
 	// of it.
-	K2SettleLookback = time.Minute
+	K2SettleLookback = ThroughputSampleSpacing
 	// K2SettleMaxGap is how long a replica's readings are kept: the lookback
 	// and a minute of slack for a late cycle. A replica unseen for longer is
 	// dropped from the memo.
-	K2SettleMaxGap = 2 * time.Minute
+	K2SettleMaxGap = 2 * ThroughputSampleSpacing
 )
 
 // k2ReasonObsUnsettled labels the diagnostic emitted when a saturated reading
@@ -173,6 +176,8 @@ type k2SettleInput struct {
 	rateOK bool
 	ref    float64
 	k2Ref  float64
+	// tune is the policy's tuning: k2Settle's fractions.
+	tune tuning
 }
 
 // k2Unsettled returns why a saturated reading is not a replica at its limit,
@@ -191,7 +196,7 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	}
 	joined := memo.noteReady(pod, in.ready, in.readyAt, now)
 	trace := memo.pods[pod]
-	settled := settledOverWindow(trace, now, in.tokens, in.threshold)
+	settled := in.tune.settledOverWindow(trace, now, in.tokens, in.threshold)
 	trace = append(trace, settleReading{at: now, queue: in.queue, tokens: in.tokens})
 	for len(trace) > 0 && now.Sub(trace[0].at) > K2SettleMaxGap {
 		trace = trace[1:]
@@ -223,8 +228,8 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	if !(float64(in.queue)*in.perRequest > perRank) {
 		return "" // the queue is the overflow of a batch at least as large
 	}
-	if in.ref > 0 && in.rateOK && in.rate >= K2SettleRateFraction*in.ref &&
-		in.k2Ref > 0 && float64(in.tokens) >= K2SettleRateFraction*in.k2Ref {
+	if in.ref > 0 && in.rateOK && in.rate >= in.tune.K2Settle.RateFraction*in.ref &&
+		in.k2Ref > 0 && float64(in.tokens) >= in.tune.K2Settle.RateFraction*in.k2Ref {
 		return ""
 	}
 	// Settled is FLAT over a window: within K2SettleMaxRise of the reading a
@@ -286,7 +291,7 @@ func (a *SaturationAnalyzer) serviceRateOnRecordLocked(throughputKey string) flo
 // either way, and it and every reading after it stood queued (queue at or
 // over threshold, tokens in use) with no two of them, nor the last and now,
 // more than K2SettleLookback apart.
-func settledOverWindow(trace []settleReading, now time.Time, tokens int64, threshold float64) bool {
+func (t tuning) settledOverWindow(trace []settleReading, now time.Time, tokens int64, threshold float64) bool {
 	ref := -1
 	for i := len(trace) - 1; i >= 0; i-- {
 		if now.Sub(trace[i].at) >= K2SettleLookback {
@@ -308,7 +313,8 @@ func settledOverWindow(trace []settleReading, now time.Time, tokens int64, thres
 		return false
 	}
 	base := float64(trace[ref].tokens)
-	return float64(tokens) <= base*(1+K2SettleMaxRise) && float64(tokens) >= base*(1-K2SettleMaxRise)
+	rise := t.K2Settle.MaxRise
+	return float64(tokens) <= base*(1+rise) && float64(tokens) >= base*(1-rise)
 }
 
 // k2OnRecordLocked is the mean of the bucket's k2 window, read without

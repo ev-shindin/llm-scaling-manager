@@ -27,7 +27,7 @@ func TestObservationWindowReadsThePolicyBand(t *testing.T) {
 	if got := count(nil); got != 0 {
 		t.Errorf("default band kept %d readings at k 0.10 and 0.85, want 0", got)
 	}
-	if got := count(&config.ScalingPolicy{ITLMinObservableK: 0.05, ITLMaxObservableK: 0.90}); got != 2 {
-		t.Errorf("a band of [0.05, 0.90] kept %d readings, want 2: itlMinObservableK and itlMaxObservableK must reach the window", got)
+	if got := count(&config.ScalingPolicy{AnalyzerTuning: config.AnalyzerTuning{ITLBand: config.ITLBandTuning{MinObservableK: 0.05, MaxObservableK: 0.90}}}); got != 2 {
+		t.Errorf("a band of [0.05, 0.90] kept %d readings, want 2: analyzerTuning.itlBand must reach the window", got)
 	}
 }
