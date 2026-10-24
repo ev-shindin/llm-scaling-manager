@@ -448,6 +448,7 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	staleShape bool,
 	logger logr.Logger,
 ) float64 {
+	tune := tuningOf(cfg)
 	roleOf := make(map[string]string, len(variants))
 	for _, vc := range variants {
 		roleOf[vc.VariantName] = domain.CanonicalRole(vc.Role)
@@ -539,7 +540,7 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	// Recorded every cycle, priced or not, so the next has this one to
 	// compare with. Uncapped: a queue that grows past what its replica
 	// drains in T is still arrivals above what the fleet drains.
-	grew := a.noteBacklogGrowth(input.Namespace, input.ModelID, queued)
+	grew := a.noteBacklogGrowth(input.Namespace, input.ModelID, queued, tune)
 	// The cap above is right for a STANDING queue only. Requests waiting in
 	// an engine can be served by that engine alone, but a queue that grows
 	// is arrivals above what the fleet serves, and those arrivals are still
@@ -667,7 +668,7 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		if term.MayOrder && !term.Held && !grew[role] {
 			trust := 1.0
 			if resident > 0 {
-				trust = floorTrust(term.ArrivalDemand / resident)
+				trust = tune.floorTrust(term.ArrivalDemand / resident)
 			}
 			want -= trust * (want - max(resident, tokens))
 		}
@@ -761,14 +762,16 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 // replica holds more -- and a fleet draining a backlog with lambda right reads
 // 0.8-0.9 of it. A load step whose lambda still reads the minute before reads
 // 0.13 (0.8 req/s against a replica holding 260 123 tokens at mu 6).
-const FloorLagFraction = 0.5
+// The default of analyzerTuning.floorTrust.lagFraction.
+const FloorLagFraction = config.DefaultFloorLagFraction
 
 // FloorTrustFraction is the share of the resident KV the arrival half must
 // account for before the floor's drain price replaces the queues' residency
 // charge in full. Between FloorLagFraction and it the two are blended in
 // proportion (floorTrust); 0.8 is the bottom of what a fleet draining a
 // backlog with lambda right reads (0.8-0.9), so such a fleet is fully trusted.
-const FloorTrustFraction = 0.8
+// The default of analyzerTuning.floorTrust.trustFraction.
+const FloorTrustFraction = config.DefaultFloorTrustFraction
 
 // A role's backlog has grown (noteBacklogGrowth) when it exceeds the backlog
 // BacklogGrowthLookback ago by more than max(BacklogGrowthMinRequests,
@@ -789,7 +792,8 @@ const (
 	// oldest on record stands in.
 	BacklogGrowthLookback = ThroughputSampleSpacing
 	// BacklogGrowthMinRequests is the least growth, in requests, that counts.
-	BacklogGrowthMinRequests = 2.0
+	// The default of analyzerTuning.backlogGrowth.minRequests.
+	BacklogGrowthMinRequests = config.DefaultBacklogGrowthMinRequests
 	// BacklogGrowthFraction is the least growth, as a share of the backlog it
 	// is compared with, that counts. A standing queue's one-minute max moves
 	// by a few percent from minute to minute; at 5 %, in review, four queues
@@ -799,7 +803,8 @@ const (
 	// cycle -- clears it within a cycle or two. What it costs is a queue that
 	// grows slower than 10 % a minute: the cap stays on it and the floor
 	// reads it as standing.
-	BacklogGrowthFraction = 0.10
+	// The default of analyzerTuning.backlogGrowth.fraction.
+	BacklogGrowthFraction = config.DefaultBacklogGrowthFraction
 )
 
 // maxBacklogReadings bounds the backlog readings a model's memo keeps, for a
@@ -816,7 +821,7 @@ type backlogReading struct {
 // model's memo and reports the roles whose backlog has grown past the band
 // above since BacklogGrowthLookback ago. A role with no earlier reading has
 // not grown: there is nothing to compare with.
-func (a *SaturationAnalyzer) noteBacklogGrowth(namespace, modelID string, backlog map[string]float64) map[string]bool {
+func (a *SaturationAnalyzer) noteBacklogGrowth(namespace, modelID string, backlog map[string]float64, t tuning) map[string]bool {
 	model := namespace + "|" + modelID
 	var now time.Time
 	if a.now != nil {
@@ -845,7 +850,7 @@ func (a *SaturationAnalyzer) noteBacklogGrowth(namespace, modelID string, backlo
 	if len(memo.backlogs) > 0 {
 		then := memo.backlogs[0].byRole
 		for role, b := range backlog {
-			if prev, seen := then[role]; seen && b > prev+max(BacklogGrowthMinRequests, BacklogGrowthFraction*prev) {
+			if prev, seen := then[role]; seen && b > prev+max(t.BacklogGrowth.MinRequests, t.BacklogGrowth.Fraction*prev) {
 				grew[role] = true
 			}
 		}
@@ -878,11 +883,12 @@ func localQueueBacklog(rc capacity.ReplicaCapacity, horizon float64) float64 {
 // 1 at FloorTrustFraction or more, given ratio = ArrivalDemand / resident.
 // Linear between, so the demand moves continuously with lambda rather than
 // dropping by the whole queue at one point.
-func floorTrust(ratio float64) float64 {
-	if !(ratio > FloorLagFraction) {
+func (t tuning) floorTrust(ratio float64) float64 {
+	lag, full := t.FloorTrust.LagFraction, t.FloorTrust.TrustFraction
+	if !(ratio > lag) {
 		return 0
 	}
-	return min((ratio-FloorLagFraction)/(FloorTrustFraction-FloorLagFraction), 1)
+	return min((ratio-lag)/(full-lag), 1)
 }
 
 // offeredArrivalRate is the model-level arrival rate: the scheduler's, or the

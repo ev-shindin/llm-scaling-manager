@@ -333,7 +333,7 @@ func admission(cfg *config.ScalingPolicy, params *capacity.EngineParams) itl.Adm
 	}
 	lo, hi := cfg.ITLBand()
 	return itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: params.ExplicitMaxNumSeqs(),
-		CapMaxPreemptionRate: cfg.ITLCapPreemptionRate()}
+		CapMaxPreemptionRate: cfg.ITLCapPreemptionRate(), Steady: steadinessOf(cfg)}
 }
 
 // newVariantReading is a variant's reading with every figure unknown: NaN,
@@ -343,6 +343,21 @@ func admission(cfg *config.ScalingPolicy, params *capacity.EngineParams) itl.Adm
 func newVariantReading(variant, source string) *metrics.SLOVariantReading {
 	nan := math.NaN()
 	return &metrics.SLOVariantReading{Variant: variant, Source: source, Fill: nan, PredictedITL: nan}
+}
+
+// steadinessOf is the ITL steady-state gate cfg sets
+// (analyzerTuning.steadyGate), the one the saturation analyzer fits with, so
+// the two analyzers read the same readings as steady. A nil cfg is the
+// defaults.
+func steadinessOf(cfg *config.ScalingPolicy) itl.Steadiness {
+	if cfg == nil {
+		return itl.DefaultSteadiness()
+	}
+	g := cfg.AnalyzerTuning.WithDefaults().SteadyGate
+	return itl.Steadiness{
+		For: g.SteadyFor.Duration(), MaxKDrift: g.MaxKDrift, Carry: g.Carry.Duration(),
+		IdleRows: g.IdleRows, MinSettledSamples: g.MinSettledSamples,
+	}
 }
 
 // fitLine fits one variant's ITL(k) = A*k + B with the shared itl.Tracker --

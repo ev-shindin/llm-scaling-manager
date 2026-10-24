@@ -14,6 +14,8 @@ import (
 // replica whose load just changed, the pair is this moment's k against the
 // last minute's latency, and a line through such pairs is not ITL(k) at all.
 // Two minutes covers the rate window and a couple of scrapes after it.
+// It is the default of the policy key analyzerTuning.steadyGate.steadyFor
+// (Steadiness.For).
 const DefaultSteadyFor = 2 * time.Minute
 
 // DefaultMaxKDrift is how far a replica's k may have moved within
@@ -22,6 +24,7 @@ const DefaultSteadyFor = 2 * time.Minute
 // Well under DefaultMinKSpread, so the spread the full fit requires cannot be
 // supplied by drift within one load level: it has to come from two levels the
 // replicas each settled at.
+// It is the default of analyzerTuning.steadyGate.maxKDrift.
 const DefaultMaxKDrift = 0.10
 
 // DefaultSteadyCarry is how long a steady reading may outlive the oldest
@@ -41,7 +44,57 @@ const DefaultMaxKDrift = 0.10
 // for the load to get there, and a cycle or two of margin. The old level is
 // kept that long and no longer, so a fit never rests on a level the fleet left
 // more than a few minutes before the main window's oldest reading.
+// It is the default of analyzerTuning.steadyGate.carry.
 const DefaultSteadyCarry = 5 * time.Minute
+
+// Steadiness is the steady-state gate's tuning: what Observe's full fit and
+// pinned fit read as steady. A zero field takes its default (DefaultSteadyFor,
+// DefaultMaxKDrift, DefaultSteadyCarry, idleRows, DefaultMinSettledSamples).
+type Steadiness struct {
+	// For is how long a replica's k must have held still (DefaultSteadyFor).
+	For time.Duration
+	// MaxKDrift is how far k may move within For and still be steady
+	// (DefaultMaxKDrift).
+	MaxKDrift float64
+	// Carry is how long a steady reading may outlive the main window's oldest
+	// (DefaultSteadyCarry).
+	Carry time.Duration
+	// IdleRows is how many rows in a row with neither an ITL nor a k make a
+	// replica idle (idleRows).
+	IdleRows int
+	// MinSettledSamples is the fewest settled readings the pinned fit takes
+	// (DefaultMinSettledSamples).
+	MinSettledSamples int
+}
+
+// DefaultSteadiness is the gate Observe applies when Admission.Steady is zero.
+func DefaultSteadiness() Steadiness {
+	return Steadiness{
+		For: DefaultSteadyFor, MaxKDrift: DefaultMaxKDrift, Carry: DefaultSteadyCarry,
+		IdleRows: idleRows, MinSettledSamples: DefaultMinSettledSamples,
+	}
+}
+
+// withDefaults returns s with every zero field at its default.
+func (s Steadiness) withDefaults() Steadiness {
+	d := DefaultSteadiness()
+	if s.For <= 0 {
+		s.For = d.For
+	}
+	if !(s.MaxKDrift > 0) {
+		s.MaxKDrift = d.MaxKDrift
+	}
+	if s.Carry <= 0 {
+		s.Carry = d.Carry
+	}
+	if s.IdleRows <= 0 {
+		s.IdleRows = d.IdleRows
+	}
+	if s.MinSettledSamples <= 0 {
+		s.MinSettledSamples = d.MinSettledSamples
+	}
+	return s
+}
 
 // DefaultSteadyWindowMaxSize is how many steady readings a key keeps: twice
 // the main window, so the old level's readings are not all displaced by the
@@ -80,6 +133,7 @@ type replicaTrace struct {
 // learned B = 77 ms against a true 12 ms and pinned it into every fit after.
 // Two rows, so that one scrape that read nothing on a replica serving either
 // side of it does not hold that replica out for DefaultSteadyFor.
+// It is the default of analyzerTuning.steadyGate.idleRows.
 const idleRows = 2
 
 // serving notes whether this row of the replica carried an ITL, and whether
@@ -93,14 +147,14 @@ const idleRows = 2
 // with kv_usage_instant read on both, restarted every replica of a busy fleet
 // and cost it DefaultSteadyFor of steady readings. Such a row leaves the count
 // as it was: it neither idles the replica nor says it served.
-func (rt *replicaTrace) serving(hasITL, hasK bool, now time.Time) {
+func (rt *replicaTrace) serving(hasITL, hasK bool, now time.Time, s Steadiness) {
 	if !hasITL {
 		if !hasK {
 			rt.idle++
 		}
 		return
 	}
-	if rt.idle >= idleRows {
+	if rt.idle >= s.IdleRows {
 		rt.since, rt.joined, rt.samples = now, true, rt.samples[:0]
 	}
 	rt.idle = 0
@@ -123,16 +177,16 @@ type keyTraces struct {
 // back from a rollout -- and its ITL covers its own warm-up, so it waits out
 // DefaultSteadyFor. So does one the load came back to after it idled: see
 // idleRows.
-func (rt *replicaTrace) steady(k float64, now time.Time) bool {
-	if rt.settling(now) {
+func (rt *replicaTrace) steady(k float64, now time.Time, s Steadiness) bool {
+	if rt.settling(now, s) {
 		return false
 	}
-	cutoff := now.Add(-DefaultSteadyFor)
-	for _, s := range rt.samples {
-		if !s.at.Before(now) || s.at.Before(cutoff) {
+	cutoff := now.Add(-s.For)
+	for _, sm := range rt.samples {
+		if !sm.at.Before(now) || sm.at.Before(cutoff) {
 			continue
 		}
-		if math.Abs(s.k-k) > DefaultMaxKDrift {
+		if math.Abs(sm.k-k) > s.MaxKDrift {
 			return false
 		}
 	}
@@ -144,17 +198,17 @@ func (rt *replicaTrace) steady(k float64, now time.Time) bool {
 // idled, less than DefaultSteadyFor ago. Its ITL still covers its warm-up --
 // on a two-namespace run, a first reading about 0.46 of k at 435 to 496 ms
 // against a line near 0.09 -- and nothing about its k says so.
-func (rt *replicaTrace) settling(now time.Time) bool {
-	return rt.joined && now.Sub(rt.since) < DefaultSteadyFor
+func (rt *replicaTrace) settling(now time.Time, s Steadiness) bool {
+	return rt.joined && now.Sub(rt.since) < s.For
 }
 
-// note records k at now and forgets what is older than DefaultSteadyFor.
-func (rt *replicaTrace) note(k float64, now time.Time) {
-	cutoff := now.Add(-DefaultSteadyFor)
+// note records k at now and forgets what is older than s.For.
+func (rt *replicaTrace) note(k float64, now time.Time, s Steadiness) {
+	cutoff := now.Add(-s.For)
 	kept := rt.samples[:0]
-	for _, s := range rt.samples {
-		if !s.at.Before(cutoff) {
-			kept = append(kept, s)
+	for _, sm := range rt.samples {
+		if !sm.at.Before(cutoff) {
+			kept = append(kept, sm)
 		}
 	}
 	kept = append(kept, kSample{at: now, k: k})

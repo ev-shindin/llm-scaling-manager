@@ -1788,7 +1788,7 @@ the pod itself):
 | class | test |
 | --- | --- |
 | saturated | KV cache at or over `kvCacheThreshold` (0.80 by default), the ceiling the saturation analyzer prices a replica as full at (a model set near 1.0 is barely ever saturated on KV, and decode of a model with a prefill variant, judged on KV alone, then hardly ever reads imbalanced), or a waiting queue at or over `queueLengthThreshold`. On a model with a prefill variant, decode is judged on KV alone: its waiting count also holds requests waiting for their remote KV. A decode variant with no prefill beside it serves whole requests, so its queue counts: a replica capped by `--max-num-seqs` can hold hundreds waiting with its KV under the threshold |
-| idle | KV cache under 0.30, nothing waiting, and Ready for at least 2 minutes. A replica that has just passed readiness has had no time to receive work, so a scale-up does not read as an idle replica. The 2 minutes run from the later of the Pod's Ready time and the cycle the controller first saw it Ready, so a node clock behind the controller's does not shorten them. A warm-pool Pod lent to the variant counts from when it was lent, not from its Ready time in the pool |
+| idle | KV cache under 0.30, nothing waiting, and Ready for at least 2 minutes (the defaults of `loadImbalance.idleKvUsage` and `loadImbalance.idleAfterReady`, see [Advanced tuning](scaling-policy.md#advanced-tuning-analyzertuning-and-loadimbalance)). A replica that has just passed readiness has had no time to receive work, so a scale-up does not read as an idle replica. The 2 minutes run from the later of the Pod's Ready time and the cycle the controller first saw it Ready, so a node clock behind the controller's does not shorten them. A warm-pool Pod lent to the variant counts from when it was lent, not from its Ready time in the pool |
 
 KV is the collector's one-minute peak, the same reading the saturation tests
 use. A replica whose KV figure is not a number is left out, like one that is
@@ -1803,7 +1803,7 @@ read from the waiting queue alone.
 | `wva_load_kv_max_to_mean_ratio` | gauge | max / mean KV: 1 when even, up to the replica count when one replica holds everything. Absent with fewer than two ready replicas or a mean of 0 |
 | `wva_load_queue_max_to_mean_ratio` | gauge | deepest waiting queue on one replica / mean queue, up to the replica count. Absent with fewer than two ready replicas or nothing waiting |
 | `wva_load_idle_replicas_while_saturated` | gauge | idle replicas while at least one other is saturated; 0 otherwise |
-| `wva_load_imbalanced` | gauge | 1 once the role has had an idle replica beside a saturated one on every cycle for 2 minutes, longer than the one-minute window the figures are peaks over. It returns to 0 only after the role has read balanced on every cycle for 2 minutes, so a one-cycle dip does not clear it |
+| `wva_load_imbalanced` | gauge | 1 once the role has had an idle replica beside a saturated one on every cycle for 2 minutes by default (`loadImbalance.sustainFor`), longer than the one-minute window the figures are peaks over. It returns to 0 only after the role has read balanced on every cycle for 2 minutes by default (`loadImbalance.clearAfter`), so a one-cycle dip does not clear it |
 
 The cycle `wva_load_imbalanced` turns to 1, the controller logs one line
 starting `WARNING: load imbalanced across a role's replicas`. The line names

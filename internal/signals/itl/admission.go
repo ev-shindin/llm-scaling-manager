@@ -24,6 +24,10 @@ type Admission struct {
 	// The policy key itlCapMaxPreemptionRate sets it; zero, the default,
 	// requires none.
 	CapMaxPreemptionRate float64
+	// Steady is the steady-state gate: which readings teach the full fit and
+	// the pinned one. The policy's analyzerTuning.steadyGate sets it; a zero
+	// field takes its default (DefaultSteadiness).
+	Steady Steadiness
 }
 
 // band is the admission's KV band, with the defaults for an edge left at zero.

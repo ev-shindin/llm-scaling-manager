@@ -1,10 +1,12 @@
 package steadystate
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/go-logr/logr"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/balance"
@@ -13,16 +15,35 @@ import (
 
 // loadImbalancedWarning is the line logged on the cycle a role is reported
 // imbalanced. Each claim in it holds by construction: the idle replica has
-// been Ready for balance.IdleAfterReady with nothing waiting, beside a
-// saturated one, on every cycle for balance.SustainFor. So the role already
-// has a replica the router is not sending work to; a new one would most
-// likely be passed over the same way. It says "unlikely", not "cannot": a
-// replica holding long-running requests can stay full while new ones go
-// elsewhere, and more replicas do then add room.
-const loadImbalancedWarning = "WARNING: load imbalanced across a role's replicas: one is saturated while another, " +
-	"Ready for at least 2m with nothing waiting, has sat idle beside it for 2m. The router is not using a replica " +
-	"the role already has, so adding replicas is unlikely to relieve it. Check the router's scorer weights " +
-	"(queue-scorer, active-request-scorer, kv-cache-utilization-scorer against prefix-cache-scorer)"
+// been Ready for th.IdleAfterReady with nothing waiting, beside a saturated
+// one, on every cycle for th.SustainFor. So the role already has a replica
+// the router is not sending work to; a new one would most likely be passed
+// over the same way. It says "unlikely", not "cannot": a replica holding
+// long-running requests can stay full while new ones go elsewhere, and more
+// replicas do then add room. The durations are the ones in force, never
+// retyped, so the line cannot claim a window the policy changed.
+func loadImbalancedWarning(th balance.Thresholds) string {
+	th = th.WithDefaults()
+	return fmt.Sprintf("WARNING: load imbalanced across a role's replicas: one is saturated while another, "+
+		"Ready for at least %v with nothing waiting, has sat idle beside it for %v. The router is not using a replica "+
+		"the role already has, so adding replicas is unlikely to relieve it. Check the router's scorer weights "+
+		"(queue-scorer, active-request-scorer, kv-cache-utilization-scorer against prefix-cache-scorer)",
+		th.IdleAfterReady, th.SustainFor)
+}
+
+// loadBalanceThresholds is what the load-balance diagnostic reads from the
+// model's resolved policy: the saturation thresholds the analyzer prices
+// with, and loadImbalance, whose idleKvUsage the analyzer's idle test shares.
+func loadBalanceThresholds(p config.ScalingPolicy) balance.Thresholds {
+	li := p.LoadImbalance.WithDefaults()
+	return balance.Thresholds{
+		KvUsage: p.KvCacheThreshold, Queue: p.QueueLengthThreshold,
+		IdleKvUsage:    li.IdleKvUsage,
+		IdleAfterReady: li.IdleAfterReady.Duration(),
+		SustainFor:     li.SustainFor.Duration(),
+		ClearAfter:     li.ClearAfter.Duration(),
+	}
+}
 
 // observeLoadBalance measures how evenly the router spreads this model's load
 // over each role's ready replicas, publishes it (wva_load_*), and logs a
@@ -55,7 +76,7 @@ func (e *Engine) observeLoadBalance(logger logr.Logger, namespace, modelID strin
 			"kvUsageMax", r.MaxKvUsage, "kvUsageMean", r.MeanKvUsage, "kvMaxToMean", kvRatio,
 			"queueMax", r.MaxQueue, "queueMean", r.MeanQueue}
 		if r.Sustained {
-			logger.Info(loadImbalancedWarning, fields...)
+			logger.Info(loadImbalancedWarning(th), fields...)
 			continue
 		}
 		logger.Info("load balanced again across a role's replicas", fields...)

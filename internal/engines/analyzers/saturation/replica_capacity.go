@@ -72,6 +72,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	routing replicaRouting,
 	logger logr.Logger,
 ) *capacity.ReplicaCapacity {
+	tune := tuningOf(config)
 	if rm.TotalKvCapacityTokens <= 0 {
 		// TODO: implement proper demand estimation when vllm:cache_config_info is absent.
 		// Currently we fall back to percentage-based demand using the deployment-derived
@@ -198,6 +199,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		queue: rm.BusiestRankQueue(), tokens: rm.BusiestRankTokens(), ranks: rm.Ranks(),
 		perRequest: k2SettlePerRequest(rm, role, shapeKeyInput, fleetOutput), threshold: config.QueueLengthThreshold,
 		rate: serviceRate, rateOK: serviceRateOK, ref: ref, k2Ref: k2Ref, ready: rm.Ready, readyAt: a.readySince(rm),
+		tune: tune,
 	})
 	d := a.computeK2(
 		historyKey,
@@ -277,13 +279,13 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 			// Nor is one under half of what a Ready replica of the variant
 			// served this cycle (served): a served rate is a lower bound on
 			// what one replica sustains.
-			why := throughputRefusal(rm.RequestRate, mu, derived, served.max,
-				tokensOutrunCompletions(rm, role, fleetOutput))
+			why := tune.throughputRefusal(rm.RequestRate, mu, derived, served.max,
+				tune.tokensOutrunCompletions(rm, role, fleetOutput))
 			// A low reading that repeats on every saturated cycle for
 			// MeasuredLowConfirmFor is a real low rate, not a fill -- unless
 			// a sibling's served rate contradicts it (refusedUnderServed),
 			// which no repetition confirms.
-			if a.noteSaturatedReading(throughputKey, rm.PodName, mu, why == refusedUnderDerived, a.now()) {
+			if a.noteSaturatedReading(throughputKey, rm.PodName, mu, why == refusedUnderDerived, tune, a.now()) {
 				logger.V(logging.DEFAULT).Info("saturated-throughput-low-confirmed",
 					"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
 					"pod", rm.PodName, "role", role, "rate", mu, "derivedRate", derived.rate,
@@ -351,19 +353,19 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// stale pair that disagrees prices the lower figure, latched so the
 	// choice does not flip with derived's noise (measuredYieldsToDerived).
 	throughputSamples := reading.samples
-	if useDerived(derived.ok, reading) || a.measuredYieldsToDerived(throughputKey, reading, derived, served.max, a.now()) {
+	if useDerived(derived.ok, reading) || a.measuredYieldsToDerived(throughputKey, reading, derived, served.max, tune, a.now()) {
 		saturatedThroughput = derived.rate
 		throughputBucket = derivedBucket
 		// Not the stale measured count, which describes a different figure
 		// entirely and only ever reached a log line as a confusing number.
 		throughputSamples = MinDerivedThroughputSamples
-	} else if rate, ok := a.siblingYield(throughputKey, reading, served); ok {
+	} else if rate, ok := a.siblingYield(throughputKey, reading, served, tune); ok {
 		// A measurement under what the variant's Ready, full replicas serve
 		// is one slow replica's, not the variant's (siblingYield).
 		logger.V(logging.DEFAULT).Info("saturated-throughput-yields-to-siblings",
 			"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
 			"pod", rm.PodName, "role", role, "measuredRate", reading.rate, "siblingRate", rate,
-			"siblingRateNow", served.saturated, "tolerance", SiblingMuTolerance)
+			"siblingRateNow", served.saturated, "tolerance", tune.Admission.SiblingMuTolerance)
 		saturatedThroughput = rate
 		throughputBucket = servedBucket
 	}

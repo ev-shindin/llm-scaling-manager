@@ -823,7 +823,7 @@ unchanged, so stored windows are still found.
 | `K2SettleMaxRise` | 0.25 | `saturation` |
 | `K2SettleLookback` | 1m | `saturation` |
 | `K2SettleMaxGap` | 2m | `saturation` |
-| `idleKvUsage` | 0.30 | `saturation` |
+| `balance.IdleKvUsage` (as `tuning.idleKvUsage`) | 0.30 | `internal/signals/balance` |
 | `IdleSettledFor` | 2m | `saturation` |
 | `IdleMaxGap` | 1m | `saturation` |
 | `JoinedReplicaWindow` | 1m | `saturation` |
@@ -847,6 +847,25 @@ unchanged, so stored windows are still found.
 | `HistoryEvictionTimeout` | 24h | `internal/signals/capacity` |
 | `HistoryRetention` | 7d | `internal/signals/capacity` |
 | `EvictionTimeout` | 7d | `internal/signals/capacity` |
+
+Most of the `saturation`, `itl` steady-gate and `balance` constants above are
+**defaults of policy keys**, `analyzerTuning` and `loadImbalance`
+(`internal/config/analyzer_tuning.go`; operator docs in
+[Advanced tuning](../reference/scaling-policy.md#advanced-tuning-analyzertuning-and-loadimbalance)).
+The `saturation` ones alias the `config.Default*` values, so they cannot drift.
+The values in force are read once per cycle: `tuningOf(cfg)` (`saturation/tuning.go`)
+fills the resolved policy's unset fields and is kept on `cycle.tune`;
+`computeReplicaCapacity` and `applyThroughputFloor` build it from the `cfg`
+they are handed. The judgements take it as a receiver or an argument, never from
+a package variable. The ITL gate reaches `itl.Tracker.ObserveWith` as an
+`itl.Steadiness`, from both the saturation and the slo analyzer. The
+diagnostic gets `balance.Thresholds` from `steadystate.loadBalanceThresholds`;
+`Tracker.Measure` keeps them per model for `Observe` and `Failed`. Window-tied
+values (`K2SettleLookback`, `K2SettleMaxGap`, `IdleSettledFor`, `IdleMaxGap`)
+are multiples of `ThroughputSampleSpacing`, and `balance.StaleAfter` is the
+model's `sustainFor`; none has a key of its own.
+`TestTuningDefaultsAreTheCalibratedConstants` pins every default to the value
+it had before it was configurable.
 
 The first three are **defaults, not the values in force**. They are assembled into a
 `capacity.Horizons` and handed to the analyzer by `WithHorizons`, which the engine

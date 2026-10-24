@@ -205,6 +205,14 @@ type ScalingPolicy struct {
 	// A pointer, because zero is the default and a meaningful setting: an
 	// entry must be able to set 0 over a tier that raised it.
 	ITLCapMaxPreemptionRate *float64 `yaml:"itlCapMaxPreemptionRate,omitempty"`
+	// AnalyzerTuning is the saturation analyzer's advanced tuning: the
+	// figures behind its admission and pricing judgements. Unset fields take
+	// the calibrated defaults. Merged field by field.
+	AnalyzerTuning AnalyzerTuning `yaml:"analyzerTuning,omitempty"`
+
+	// LoadImbalance tunes the load-imbalance diagnostic. Its idleKvUsage is
+	// also the saturation analyzer's idle test. Merged field by field.
+	LoadImbalance LoadImbalance `yaml:"loadImbalance,omitempty"`
 
 	// DefaultOutputTokens is the seeded generation length used to price a queued
 	// request while no replica has measured one. RESOLVED, not configured: it is
@@ -577,6 +585,8 @@ func (c *ScalingPolicy) ApplyDefaults() {
 	if c.ITLMaxObservableK == 0 {
 		c.ITLMaxObservableK = DefaultITLMaxObservableK
 	}
+	c.AnalyzerTuning = c.AnalyzerTuning.WithDefaults()
+	c.LoadImbalance = c.LoadImbalance.WithDefaults()
 	c.ApplyEntryDefaults()
 }
 
@@ -753,6 +763,10 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 		v := *override.ITLCapMaxPreemptionRate
 		c.ITLCapMaxPreemptionRate = &v
 	}
+	// Field by field, like ScaleToZero: an entry that tunes one figure
+	// inherits every other from the layer below.
+	c.AnalyzerTuning.merge(override.AnalyzerTuning)
+	c.LoadImbalance.merge(override.LoadImbalance)
 	// Not merged, each on purpose:
 	//   EnableRescale, AnalyzerDefinitions, DefaultPolicy -- read from the
 	//     "default" entry only (budget scope / fleet-wide fallback), never from a
@@ -885,6 +899,13 @@ func (c *ScalingPolicy) Validate() error {
 		return err
 	}
 
+	if err := c.AnalyzerTuning.validate(); err != nil {
+		return err
+	}
+	if err := c.LoadImbalance.validate(c.KvCacheThreshold); err != nil {
+		return err
+	}
+
 	if err := c.SLO.Validate(); err != nil {
 		return fmt.Errorf("slo: %w", err)
 	}
@@ -966,8 +987,8 @@ func (f IgnoredField) String() string {
 //     honour only positive values: the operator's hold was silently lost.
 //   - A number that is not finite (YAML .nan, .inf), in priority, the
 //     capacity thresholds, the scaling band, the ITL band and preemption
-//     rate, and each analyzer's score and
-//     band. NaN passes every range check in Validate, since each comparison
+//     rate, each analyzer's score and band, and the analyzerTuning and
+//     loadImbalance figures. NaN passes every range check in Validate, since each comparison
 //     is false, and an infinite priority or score put the model last in the
 //     greedy-by-score fair share, not first, and with rescale on drew
 //     replicas away from other models (#171).
@@ -1024,6 +1045,8 @@ func (c *ScalingPolicy) ResetUnusableFields() []IgnoredField {
 		nonFinitePtr(at+"scaleUpThreshold", &a.ScaleUpThreshold)
 		nonFinitePtr(at+"scaleDownBoundary", &a.ScaleDownBoundary)
 	}
+	c.AnalyzerTuning.resetNonFinite(nonFinite)
+	nonFinite("loadImbalance.idleKvUsage", &c.LoadImbalance.IdleKvUsage)
 	if c.ScaleToZero != nil && c.ScaleToZero.RetentionPeriod != "" {
 		if _, err := ValidateRetentionPeriod(c.ScaleToZero.RetentionPeriod); err != nil {
 			ignored = append(ignored, IgnoredField{

@@ -96,6 +96,8 @@ when no variant of the model names a tier.
   `scaleDownBoundary`, `itlMinObservableK`, `itlMaxObservableK`,
   `itlCapMaxPreemptionRate`, or an analyzer's `score`, `scaleUpThreshold` or
   `scaleDownBoundary`. Do not use `.inf` to give a model precedence:
+  `scaleDownBoundary`, an analyzer's `score`, `scaleUpThreshold` or
+  `scaleDownBoundary`, or a number in `analyzerTuning` or `loadImbalance`. Do not use `.inf` to give a model precedence:
   `priority` multiplies the model's weight in the fair share (priority x
   demand), so a finite value such as 5 weighs it five times as heavily.
 - An analyzer `score` below zero. It is read as 1, as before; the change is
@@ -1145,6 +1147,8 @@ These parameters apply when `analyzerName: "saturation"` is set or when the `ana
 | `itlMinObservableK` | float64 | Lowest KV fill (0-1) at which a replica's inter-token latency teaches its ITL line. Below it the engine barely batches and the latency is noise. Must be in (0, 1) and below `itlMaxObservableK`. A tier or a per-model override can set it. | `0.15` |
 | `itlMaxObservableK` | float64 | Highest KV fill (0-1) at which a replica's inter-token latency teaches its ITL line. Above it an engine short of memory preempts and its latency leaves the line. Must be in (0, 1). If a merge leaves it at or below `itlMinObservableK`, both edges fall back to their defaults. | `0.80` |
 | `itlCapMaxPreemptionRate` | float64 | A replica above `itlMaxObservableK` still teaches the line when it is at its sequence cap: its running batch is exactly `--max-num-seqs` (set on the engine, not defaulted) times its ranks, and requests are waiting. This key is the most preemptions per second it may show over the ITL window. vLLM only: SGLang publishes no preemption counter. Must be >= 0. | `0` |
+| `analyzerTuning` | object | Advanced. The analyzer's admission and pricing figures. Merged key by key. See [Advanced tuning](#advanced-tuning-analyzertuning-and-loadimbalance). | calibrated defaults |
+| `loadImbalance` | object | Advanced. The load-imbalance diagnostic's figures; its `idleKvUsage` is also the analyzer's idle test. Merged key by key. See [Advanced tuning](#advanced-tuning-analyzertuning-and-loadimbalance). | calibrated defaults |
 
 ### Expected output length
 
@@ -1425,6 +1429,110 @@ limits apply:
 - To see when the bound is in use, read `lowerBound` on the
   [`throughput-demand-floor`](cycle-log.md#throughput-demand-floor) line, or
   `wva_service_rate_per_replica{source="lower-bound"}`.
+
+### Advanced tuning: `analyzerTuning` and `loadImbalance`
+
+**Leave these alone unless a measurement tells you otherwise.** The defaults are
+the values the analyzer was calibrated with, and an unset key behaves exactly as
+before the key existed. They are here so that no threshold, window or count is
+fixed in the code.
+
+Each key is optional. Zero or absent takes the default. Both blocks merge **key
+by key**: a tier or a per-model entry can change one figure and inherit the
+rest. Durations are Go duration strings (`90s`, `2m`); a bare number is an
+error. A value out of range drops the entry, like any invalid key; a value that
+is not finite (`.nan`, `.inf`) is skipped and reported.
+
+**No value of these keys raises, floors, ages or resets k2** (the measured KV
+capacity). The `k2Settle` keys only decide which saturated readings k2 may learn
+from. A stricter value admits fewer readings; a looser one admits more, each of
+them a real measurement.
+
+```yaml
+long-context:
+  analyzerTuning:
+    backlogGrowth: {fraction: 0.05}
+    muChoice: {lowHoldFor: 1h}
+  loadImbalance:
+    sustainFor: 5m
+```
+
+#### `analyzerTuning.steadyGate`: which ITL readings teach the line
+
+| Key | Default | Range | What it does |
+|-----|---------|-------|--------------|
+| `steadyFor` | `2m` | 1m to 24h | How long a replica's KV fill must hold still before its latency reading may teach the ITL line. The latency is a one-minute average, so a shorter wait pairs this moment's fill with last minute's latency. |
+| `maxKDrift` | `0.10` | (0, 1) | How far the KV fill may move within `steadyFor` and still count as steady. |
+| `carry` | `5m` | `steadyFor` to 24h | How long a steady reading is kept past the newest window, so a load step's old level is still there when the new one settles. |
+| `idleRows` | `2` | 1 to 1000 | How many cycles in a row with no latency and no KV fill make a replica idle rather than one missed scrape. An idle replica waits out `steadyFor` again when load returns. |
+| `minSettledSamples` | `3` | 1 to 1000 | The fewest readings from settled replicas the line is refitted from. Below it the last slope holds. |
+
+The slo analyzer reads the same gate, so both fit their lines from the same
+readings.
+
+#### `analyzerTuning.k2Settle`: is a saturated reading a limit or a load step
+
+A reading whose queue is deeper than the replica's whole batch is recorded only
+if it looks like a replica at its limit. The comparison window is the
+collector's one-minute rate window and is not configurable.
+
+| Key | Default | Range | What it does |
+|-----|---------|-------|--------------|
+| `rateFraction` | `0.7` | (0, 1] | The share of the service rate **and** of the k2 on record such a reading must reach to be recorded at once. Higher is stricter. |
+| `maxRise` | `0.25` | (0, 1) | How far, up or down, its resident KV may have moved over one window and still count as settled. Lower is stricter. |
+
+#### `analyzerTuning.muChoice`: measured or derived service rate
+
+| Key | Default | Range | What it does |
+|-----|---------|-------|--------------|
+| `minMeasuredOfDerived` | `0.5` | (0, 1] | A saturated reading under this share of the rate derived from the ITL line is not recorded at once (a filling or stalled replica). |
+| `maxRatio` | `2.0` | 1 to 100 | How far a measured rate may disagree with the derived one, or sit under what another replica served, before it gives way. |
+| `returnRatio` | `1.6` | 1 to `maxRatio` | How close a rate that gave way must come back before it prices again. The gap to `maxRatio` stops the price flipping on noise. |
+| `freshFor` | `5m` | 1s to 24h | How long after its last agreeing reading a measured rate outranks a derived one that disagrees. |
+| `lowHoldFor` | `30m` | `freshFor` to 24h | How long a measured rate far **under** the derived one keeps pricing. The lower price orders more replicas, so it is held longer. |
+
+#### `analyzerTuning.admission`: which readings are service-rate samples
+
+| Key | Default | Range | What it does |
+|-----|---------|-------|--------------|
+| `maxTokensOverCompletions` | `1.15` | 1 to 10 | The most a replica's generated tokens may exceed what its completed requests account for. Above it the batch is still filling and the rate is not recorded. |
+| `siblingMuTolerance` | `0.8` | (0, 1] | A measured rate under this share of what the variant's full replicas serve yields to them: one slow replica does not price the whole fleet. |
+
+#### `analyzerTuning.floorTrust`: when the throughput floor may lower demand
+
+| Key | Default | Range | What it does |
+|-----|---------|-------|--------------|
+| `lagFraction` | `0.5` | (0, 1) | Below this share of the resident KV, the arrival rate is taken as lagging and the floor never lowers demand. |
+| `trustFraction` | `0.8` | (`lagFraction`, 1] | At or above this share, the floor's drain price is trusted in full. In between the two prices are blended. |
+
+If a merge pairs a `trustFraction` at or under the `lagFraction`, both go back
+to their defaults.
+
+#### `analyzerTuning.backlogGrowth`: when a queue counts as growing
+
+A queue grows when it exceeds its size one rate window ago by more than
+`max(minRequests, fraction × that size)`. A growing queue is priced as new
+arrivals rather than a standing backlog.
+
+| Key | Default | Range | What it does |
+|-----|---------|-------|--------------|
+| `minRequests` | `2` | 0 to 1e6 | The least growth, in requests, that counts. |
+| `fraction` | `0.10` | (0, 1) | The least growth, as a share of the earlier queue, that counts. Lower reacts to slower growth, and to more noise. |
+
+#### `loadImbalance`: the load-imbalance diagnostic
+
+The diagnostic behind `wva_load_imbalanced` and the `WVALoadImbalanced` alert.
+It never changes a scaling decision.
+
+| Key | Default | Range | What it does |
+|-----|---------|-------|--------------|
+| `idleKvUsage` | `0.30` | (0, 1), below `kvCacheThreshold` | A Ready replica with nothing waiting is idle below this KV use. **The saturation analyzer reads the same key** for its own idle test, so the two cannot disagree. |
+| `idleAfterReady` | `2m` | 1m to 24h | How long a replica must be Ready before it can count as idle. |
+| `sustainFor` | `2m` | 1m to 24h | How long a role must read imbalanced, every cycle, before it is reported. Also how long collection must fail before the series are dropped. |
+| `clearAfter` | `2m` | 1s to 24h | How long a reported role must read balanced, every cycle, before the report clears. |
+
+The `WARNING: load imbalanced` log line states the `idleAfterReady` and
+`sustainFor` in force.
 
 ### `slo` (observe only)
 

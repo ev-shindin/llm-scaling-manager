@@ -12,8 +12,9 @@ import (
 // before Tracker.Failed reports its figures stale. One failed cycle in a
 // persistent imbalance must not drop the series the alert's for: timer reads,
 // but a model whose collection stays broken must not keep a page standing on
-// figures nothing measures any more.
-const StaleAfter = 2 * time.Minute
+// figures nothing measures any more. It is SustainFor, and Tracker.Failed
+// reads the SustainFor of the thresholds the model was last measured with.
+const StaleAfter = SustainFor
 
 // DefaultInterval is the optimize interval a Tracker assumes until
 // SetInterval is called: the controller's default GLOBAL_OPT_INTERVAL.
@@ -52,6 +53,9 @@ type modelState struct {
 	// failedSince is the first cycle of the current run of failed
 	// collections, zero outside one.
 	failedSince time.Time
+	// th is the thresholds Measure last read the model with: its policy.
+	// Observe and Failed take their timings from it.
+	th Thresholds
 }
 
 // replicaKey names one replica of a model as Measure grades it. A warm-pool
@@ -136,6 +140,7 @@ func (t *Tracker) Measure(key string, rows []domain.ReplicaMetrics, rolesByVaria
 		}
 	}
 	m.seen = seen
+	m.th = th
 	t.mu.Unlock()
 	return measure(rows, rolesByVariant, th, now, func(rm domain.ReplicaMetrics) time.Time {
 		return graceFrom[replicaKey{pod: rm.PodName, variant: rm.VariantName, bridge: rm.FromWarmPool}]
@@ -151,7 +156,9 @@ func (t *Tracker) Measure(key string, rows []domain.ReplicaMetrics, rolesByVaria
 // Before a role is reported, one balanced cycle restarts its streak: an
 // imbalance has to hold for SustainFor without a break. Once reported, it
 // clears only after ClearAfter of balanced cycles, so a dip of one cycle in a
-// persistent imbalance does not clear and re-raise it.
+// persistent imbalance does not clear and re-raise it. SustainFor and
+// ClearAfter are those of the Thresholds Measure last read the model with
+// (Thresholds.SustainFor, Thresholds.ClearAfter), the constants before then.
 //
 // A streak is of consecutive readings. When the model was last read more than
 // one interval ago (SetInterval), with half an interval of slack, nothing
@@ -165,6 +172,7 @@ func (t *Tracker) Observe(key string, dists map[string]Distribution, now time.Ti
 	gap := !m.observedAt.IsZero() && now.Sub(m.observedAt) > t.maxGap()
 	m.observedAt = now
 	m.failedSince = time.Time{}
+	th := m.th.WithDefaults()
 	next := make(map[string]roleState, len(dists))
 	out := make([]Reading, 0, len(dists))
 	for role, d := range dists {
@@ -179,14 +187,14 @@ func (t *Tracker) Observe(key string, dists map[string]Distribution, now time.Ti
 			if s.imbalancedSince.IsZero() {
 				s.imbalancedSince = now
 			}
-			if now.Sub(s.imbalancedSince) >= SustainFor {
+			if now.Sub(s.imbalancedSince) >= th.SustainFor {
 				s.sustained = true
 			}
 		case s.sustained:
 			if s.balancedSince.IsZero() {
 				s.balancedSince = now
 			}
-			if now.Sub(s.balancedSince) >= ClearAfter {
+			if now.Sub(s.balancedSince) >= th.ClearAfter {
 				s = roleState{}
 			}
 		default:
@@ -212,7 +220,7 @@ func (t *Tracker) Failed(key string, now time.Time) bool {
 	if m.failedSince.IsZero() {
 		m.failedSince = now
 	}
-	return now.Sub(m.failedSince) >= StaleAfter
+	return now.Sub(m.failedSince) >= m.th.staleAfter()
 }
 
 // Forget drops what the tracker remembers about the model named by key.

@@ -189,7 +189,7 @@ func TestImbalanceReplicaIdleMatchesBalance(t *testing.T) {
 			return r
 		}(), false},
 	} {
-		if got := replicaIdle(c.rm); got != c.want {
+		if got := defaultTuning.replicaIdle(c.rm); got != c.want {
 			t.Errorf("%s: idle = %v, want %v", c.name, got, c.want)
 		}
 	}

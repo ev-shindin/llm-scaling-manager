@@ -88,11 +88,11 @@ func TestThroughputFloor_TheSwapIsContinuousInLambda(t *testing.T) {
 // floorTrust: nothing at or under FloorLagFraction, everything at or over
 // FloorTrustFraction, linear between.
 func TestFloorTrust(t *testing.T) {
-	assert.Zero(t, floorTrust(0.13))
-	assert.Zero(t, floorTrust(FloorLagFraction))
-	assert.InDelta(t, 0.5, floorTrust((FloorLagFraction+FloorTrustFraction)/2), 1e-12)
-	assert.InDelta(t, 1.0, floorTrust(FloorTrustFraction), 1e-12)
-	assert.InDelta(t, 1.0, floorTrust(1.4), 1e-12)
+	assert.Zero(t, defaultTuning.floorTrust(0.13))
+	assert.Zero(t, defaultTuning.floorTrust(FloorLagFraction))
+	assert.InDelta(t, 0.5, defaultTuning.floorTrust((FloorLagFraction+FloorTrustFraction)/2), 1e-12)
+	assert.InDelta(t, 1.0, defaultTuning.floorTrust(FloorTrustFraction), 1e-12)
+	assert.InDelta(t, 1.0, defaultTuning.floorTrust(1.4), 1e-12)
 }
 
 // Review probe (round 2, a step above fleet capacity). One replica of mu 6
