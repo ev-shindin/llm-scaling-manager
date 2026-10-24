@@ -47,7 +47,10 @@ var _ = Describe("Tracker", func() {
 			row("below-too", 0.10, 0.02),
 			row("nan-k", math.NaN(), 0.02),
 			row("nan-itl", 0.5, math.NaN()),
-		}, now)
+		}, Admission{},
+
+			now)
+
 		Expect(r.Considered).To(Equal(11), "another variant's row is not considered at all")
 		Expect(r.NotReady).To(Equal(2))
 		Expect(r.NoITL).To(Equal(3), "an infinite or NaN ITL is not a reading either")
@@ -61,7 +64,7 @@ var _ = Describe("Tracker", func() {
 	})
 
 	It("fits the full line once the window spans enough of k, and remembers its B", func() {
-		r := t.Observe("key", "v", onLine(10, 0.2, 0.7), now)
+		r := t.Observe("key", "v", onLine(10, 0.2, 0.7), Admission{}, now)
 		Expect(r.Ready).To(BeTrue())
 		Expect(r.Tier).To(Equal(TierOLS))
 		Expect(r.Model.A).To(BeNumerically("~", 0.02, 1e-9))
@@ -77,7 +80,7 @@ var _ = Describe("Tracker", func() {
 			k := 0.2 + 0.05*float64(i)
 			rows[i] = row("p", k, 0.05*k-0.005) // B < 0, positive at saturation
 		}
-		r := t.Observe("key", "v", rows, now)
+		r := t.Observe("key", "v", rows, Admission{}, now)
 		Expect(r.Tier).To(Equal(TierOLS))
 		Expect(r.Model.B).To(BeNumerically("<", 0))
 		_, ok := t.Baseline("key")
@@ -85,8 +88,8 @@ var _ = Describe("Tracker", func() {
 	})
 
 	It("pins B to the key's own last full fit when the spread is short", func() {
-		t.Observe("key", "v", onLine(10, 0.2, 0.7), now)
-		r := t.Observe("key", "v", onLine(10, 0.40, 0.45), now.Add(time.Hour))
+		t.Observe("key", "v", onLine(10, 0.2, 0.7), Admission{}, now)
+		r := t.Observe("key", "v", onLine(10, 0.40, 0.45), Admission{}, now.Add(time.Hour))
 		Expect(r.Ready).To(BeFalse(), "the old readings aged out; the new ones span 0.05")
 		Expect(r.Tier).To(Equal(TierPinnedB))
 		Expect(r.BaselineStored).To(BeTrue())
@@ -95,7 +98,7 @@ var _ = Describe("Tracker", func() {
 	})
 
 	It("pins B to the default before the key has a full fit of its own", func() {
-		r := t.Observe("key", "v", onLine(10, 0.40, 0.45), now)
+		r := t.Observe("key", "v", onLine(10, 0.40, 0.45), Admission{}, now)
 		Expect(r.Tier).To(Equal(TierPinnedB))
 		Expect(r.BaselineStored).To(BeFalse())
 		Expect(r.BaselineLearned).To(BeFalse())
@@ -104,14 +107,14 @@ var _ = Describe("Tracker", func() {
 
 	It("treats a stored intercept that is not positive as no intercept", func() {
 		t.SetBaseline("key", 0)
-		r := t.Observe("key", "v", onLine(10, 0.40, 0.45), now)
+		r := t.Observe("key", "v", onLine(10, 0.40, 0.45), Admission{}, now)
 		Expect(r.BaselineStored).To(BeTrue())
 		Expect(r.BaselineLearned).To(BeFalse())
 		Expect(r.Model.B).To(Equal(DefaultBaselineSec))
 	})
 
 	It("fits nothing from fewer than the minimum samples, spread or not", func() {
-		r := t.Observe("key", "v", onLine(DefaultMinSamples-1, 0.40, 0.45), now)
+		r := t.Observe("key", "v", onLine(DefaultMinSamples-1, 0.40, 0.45), Admission{}, now)
 		Expect(r.Tier).To(BeEmpty())
 		Expect(r.Declined).To(BeFalse())
 		Expect(r.Model.IsZero()).To(BeTrue())
@@ -122,23 +125,23 @@ var _ = Describe("Tracker", func() {
 		for i := range rows {
 			rows[i] = row("p", 0.40+0.005*float64(i), DefaultBaselineSec/2) // below the floor: A < 0
 		}
-		r := t.Observe("key", "v", rows, now)
+		r := t.Observe("key", "v", rows, Admission{}, now)
 		Expect(r.Tier).To(BeEmpty())
 		Expect(r.Declined).To(BeTrue())
 		Expect(r.Model.IsZero()).To(BeTrue())
 	})
 
 	It("keeps each key's window and intercept apart", func() {
-		t.Observe("a", "v", onLine(10, 0.2, 0.7), now)
-		t.Observe("b", "v", onLine(3, 0.2, 0.7), now)
+		t.Observe("a", "v", onLine(10, 0.2, 0.7), Admission{}, now)
+		t.Observe("b", "v", onLine(3, 0.2, 0.7), Admission{}, now)
 		Expect(t.WindowLens()).To(Equal(map[string]int{"a": 10, "b": 3}))
 		Expect(t.Baselines()).To(HaveKey("a"))
 		Expect(t.Baselines()).NotTo(HaveKey("b"))
 	})
 
 	It("sweeps what the caller calls stale, windows and intercepts apart", func() {
-		t.Observe("live", "v", onLine(10, 0.2, 0.7), now)
-		t.Observe("gone", "v", onLine(10, 0.2, 0.7), now)
+		t.Observe("live", "v", onLine(10, 0.2, 0.7), Admission{}, now)
+		t.Observe("gone", "v", onLine(10, 0.2, 0.7), Admission{}, now)
 		t.RestoreBaseline("restored-gone", 0.01) // an intercept with no window
 		w, b := t.Sweep(now, func(key string) bool { return key != "live" })
 		Expect(w).To(Equal(1))
@@ -149,13 +152,13 @@ var _ = Describe("Tracker", func() {
 	})
 
 	It("prunes aged readings on a sweep even from keys it keeps", func() {
-		t.Observe("live", "v", onLine(10, 0.2, 0.7), now)
+		t.Observe("live", "v", onLine(10, 0.2, 0.7), Admission{}, now)
 		t.Sweep(now.Add(DefaultObservationMaxAge+time.Minute), func(string) bool { return false })
 		Expect(t.WindowLens()["live"]).To(BeZero())
 	})
 
 	It("restores an intercept only where none was learned since", func() {
-		t.Observe("key", "v", onLine(10, 0.2, 0.7), now)
+		t.Observe("key", "v", onLine(10, 0.2, 0.7), Admission{}, now)
 		t.RestoreBaseline("key", 0.5)
 		t.RestoreBaseline("new", 0.5)
 		b, _ := t.Baseline("key")
@@ -245,7 +248,7 @@ var _ = Describe("Tracker", func() {
 			}
 			offset := time.Duration(at.Hour())*time.Hour + time.Duration(at.Minute())*time.Minute +
 				time.Duration(at.Second())*time.Second
-			r = t.Observe("key", "v", rows, now.Add(offset))
+			r = t.Observe("key", "v", rows, Admission{}, now.Add(offset))
 		}
 		Expect(r.Held).To(Equal(10+extra), "the run's window held 10 on this cycle too")
 		Expect(r.Tier).To(Equal(TierPinnedB))
@@ -261,7 +264,7 @@ var _ = Describe("Tracker", func() {
 	}, Entry("the run as it was", 0), Entry("one more joiner", 1), Entry("two more", 2), Entry("three more: a fleet of three growing to six", 3))
 
 	It("forgets intercepts and keeps the readings", func() {
-		t.Observe("key", "v", onLine(10, 0.2, 0.7), now)
+		t.Observe("key", "v", onLine(10, 0.2, 0.7), Admission{}, now)
 		t.ForgetBaselines()
 		Expect(t.Baselines()).To(BeEmpty())
 		Expect(t.WindowLens()["key"]).To(Equal(10))

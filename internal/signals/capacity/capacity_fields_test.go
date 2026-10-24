@@ -70,6 +70,10 @@ var (
 		// compared field goes; see TestCapacityCompatibilityStaysReflexive for
 		// why including it would make the equality non-reflexive.
 		"Unresolved": "provenance; including it breaks reflexivity",
+		// Provenance too: whether MaxNumSeqs, which is compared, came from the
+		// flag or the default. Only the ITL fit's sequence-cap exception reads
+		// it (ExplicitMaxNumSeqs).
+		"MaxNumSeqsSet": "provenance of the compared MaxNumSeqs",
 		// The engine's code. It can move capacity across a release, but a tag
 		// changes on every rebuild, and comparing it would refuse every record
 		// across a routine rollout -- for estimateStoredCapacity a refused

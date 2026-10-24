@@ -7,8 +7,10 @@ import (
 )
 
 // The fill a TPOT target is priced at is clamped to the range the ITL line is
-// fitted over -- the window accepts readings only inside it -- which is the
-// same clamp the saturation analyzer's pricingK applies. The line says nothing
+// fitted over -- the policy's band (itlMinObservableK, itlMaxObservableK),
+// which the window accepts readings inside -- the same clamp the saturation
+// analyzer's pricingK applies. A capped replica's reading above the band
+// teaches the line but does not widen the clamp. The line says nothing
 // useful outside the range it was fitted on, and above DefaultMaxObservableK
 // the engine preempts rather than slowing down.
 //
@@ -18,20 +20,20 @@ import (
 // fill sits below the priced one, each window's observed maximum pulls the
 // bound down, and the fill converges near 0.05*s/(1-s) -- 0.28 at a scale-up
 // threshold of 0.85. See docs/proposals/slo-tiers.md, "Bounds".
-var (
-	minFill = itl.DefaultMinObservableK
-	maxFill = itl.DefaultMaxObservableK
-)
+type fillBand struct{ lo, hi float64 }
+
+// defaultBand is the band of a policy that sets neither edge.
+var defaultBand = fillBand{lo: itl.DefaultMinObservableK, hi: itl.DefaultMaxObservableK}
 
 // pricing is the outcome of inverting a line at a mean-TPOT target.
 type pricing struct {
 	// fill is the KV fill, as a fraction of physical KV, at which the line's
-	// mean ITL equals the target, clamped to [minFill, maxFill].
+	// mean ITL equals the target, clamped to the band.
 	fill float64
-	// target is that fill before the clamp, for the log: above maxFill the
+	// target is that fill before the clamp, for the log: above the band the
 	// target is looser than the clamp lets the variant run.
 	target float64
-	// feasible is false when the line's ITL at minFill already reaches the
+	// feasible is false when the line's ITL at the band's bottom already reaches the
 	// target (equal counts): no fill in range meets it on this variant.
 	feasible bool
 	// ok is false when an input was missing or non-finite. Neither of the
@@ -45,7 +47,7 @@ type pricing struct {
 // TPOT is a MEAN, and the line is fitted on the mean inter-token latency
 // (vllm:inter_token_latency_seconds, sum over count), so no tail model stands
 // between the two.
-func priceTPOT(line itl.Model, targetSeconds float64) pricing {
+func priceTPOT(band fillBand, line itl.Model, targetSeconds float64) pricing {
 	if !finite(line.A) || !finite(line.B) || !finite(targetSeconds) {
 		return pricing{}
 	}
@@ -53,13 +55,13 @@ func priceTPOT(line itl.Model, targetSeconds float64) pricing {
 		return pricing{}
 	}
 	k := (targetSeconds - line.B) / line.A
-	if targetSeconds <= line.ITLAt(minFill) {
+	if targetSeconds <= line.ITLAt(band.lo) {
 		return pricing{target: k, ok: true}
 	}
 	if !finite(k) {
 		return pricing{}
 	}
-	return pricing{fill: min(max(k, minFill), maxFill), target: k, feasible: true, ok: true}
+	return pricing{fill: min(max(k, band.lo), band.hi), target: k, feasible: true, ok: true}
 }
 
 // replicaTokenRate is the generation tokens per second one replica sustains at
@@ -96,9 +98,9 @@ func replicaTokenRate(line itl.Model, k, capacityTokens, kvPerRequest float64, m
 // reachableFill is the fill a replica can actually reach at k: k itself, unless
 // the engine's max_num_seqs admits fewer sequences than k implies. Then the
 // cache never fills past maxNumSeqs*KVreq/C, and pricing the ITL of k would
-// charge the latency of a load the engine cannot carry. Never below minFill,
+// charge the latency of a load the engine cannot carry. Never below the band,
 // where the line was not fitted: the ITL there is the higher, safer reading.
-func reachableFill(k, capacityTokens, kvPerRequest float64, maxNumSeqs int64) float64 {
+func reachableFill(band fillBand, k, capacityTokens, kvPerRequest float64, maxNumSeqs int64) float64 {
 	if maxNumSeqs <= 0 || !(capacityTokens > 0) || !(kvPerRequest > 0) {
 		return k
 	}
@@ -106,7 +108,7 @@ func reachableFill(k, capacityTokens, kvPerRequest float64, maxNumSeqs int64) fl
 	if kCap >= k {
 		return k
 	}
-	return max(kCap, minFill)
+	return max(kCap, band.lo)
 }
 
 // realisedFill is the fill a replica actually runs at once the fleet carries
@@ -114,7 +116,7 @@ func reachableFill(k, capacityTokens, kvPerRequest float64, maxNumSeqs int64) fl
 // scaleUp times the token rate it was priced at. The rate is not linear in k,
 // so the fill that delivers it is found by bisection rather than by scaling k.
 // Returns k itself when the headroom is unusable, and NaN when the rate is.
-func realisedFill(line itl.Model, k, scaleUp, capacityTokens, kvPerRequest float64, maxNumSeqs int64) float64 {
+func realisedFill(band fillBand, line itl.Model, k, scaleUp, capacityTokens, kvPerRequest float64, maxNumSeqs int64) float64 {
 	priced := replicaTokenRate(line, k, capacityTokens, kvPerRequest, maxNumSeqs)
 	if !(priced > 0) {
 		return math.NaN()
@@ -134,7 +136,7 @@ func realisedFill(line itl.Model, k, scaleUp, capacityTokens, kvPerRequest float
 	}
 	// Below the fitted range the line says nothing; the ITL at its bottom is
 	// the higher, safer reading.
-	return max(hi, minFill)
+	return max(hi, band.lo)
 }
 
 func finite(x float64) bool {

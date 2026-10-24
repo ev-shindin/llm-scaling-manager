@@ -314,7 +314,7 @@ func RegisterAlwaysOnQueries(sourceRegistry *source.SourceRegistry) {
 		Description: "Instantaneous KV cache utilization per pod (0.0–1.0), used as k* in the ITL model",
 	})
 	registerSGLangThroughputAnalyzerQueries(registry)
-
+	registerSequenceCapQueries(registry)
 }
 
 // registerSGLangArrivalRateQueries registers the SGLang completion-rate variant.

@@ -84,6 +84,7 @@ var logContract = map[string][]string{
 		"namespace", "variant", "key", // join keys
 		"replicas", "offered", "held", // what arrived, what was taken, what is kept
 		"notReady", "noITL", "noK", "belowBand", "aboveBand", // and why the rest were not
+		"capped", "maxNumSeqs", // and which of those taken were above the band, at the sequence cap
 		"unsteady", "steadyHeld", // and how many of those kept may teach the full fit
 		"steadySpread", "minKSpread", "ready", "minSamples", // and whether that is enough to fit on
 	},
@@ -280,6 +281,78 @@ func TestLogContract_ITLWindowCountsEveryRow(t *testing.T) {
 		sum += n
 	}
 	assert.EqualValues(t, fields["replicas"], sum, "every row is counted under exactly one reason")
+}
+
+// The engine's max_num_seqs reaches the ITL window, so a replica at its
+// sequence cap teaches the line from above the band (issue #287), but only
+// when the engine's flag stated it. Without it the reading counts as
+// aboveBand and a fleet routed onto one capped replica never fits a line.
+func TestLogContract_ITLWindowTakesTheCappedReplica(t *testing.T) {
+	run := func(t *testing.T, params *capacity.EngineParams, running int) map[string]any {
+		t.Helper()
+		ctx, logs := observedCtx(t)
+		store := capacity.NewStore()
+		store.Update("test-ns", "test-model", "variant-d", capacity.Record{
+			GpuCount: 1, EngineParams: params, LearnedFrom: "deployment",
+		})
+		analyzer := NewSaturationAnalyzer(store)
+		capped := makeReplicaMetrics("pod-1", "variant-d", 14000, 16000, 768, 1000, 500)
+		capped.Ready = true
+		capped.KvUsageInstant, capped.AvgITL = 0.87, 0.079
+		capped.RunningRequests, capped.PreemptionRateKnown = running, true
+		input := makeAnalyzerInput(
+			[]domain.ReplicaMetrics{capped},
+			[]domain.VariantReplicaState{
+				{VariantName: "variant-d", Role: domain.RoleDecode, AcceleratorName: "H100",
+					CurrentReplicas: 1, GPUsPerReplica: 1},
+			},
+		)
+		_, err := analyzer.Analyze(ctx, input)
+		require.NoError(t, err)
+		return requireLogged(t, logs, "itl-window")
+	}
+
+	t.Run("a cap the flag stated", func(t *testing.T) {
+		params := deploymentParams()
+		params.MaxNumSeqsSet = true
+		fields := run(t, params, 256)
+		assert.EqualValues(t, 256, fields["maxNumSeqs"])
+		assert.EqualValues(t, 0, fields["aboveBand"], "the replica is at its cap: its reading is not above the band")
+		assert.EqualValues(t, 1, fields["capped"])
+		assert.EqualValues(t, 1, fields["offered"])
+	})
+
+	// No --max-num-seqs: the parser assumes 256, and vLLM V1 picks 1024 on
+	// large accelerators, so 300 running is a batch still growing.
+	t.Run("a cap only the parser's default states", func(t *testing.T) {
+		for _, running := range []int{256, 300} {
+			fields := run(t, deploymentParams(), running)
+			assert.EqualValues(t, 0, fields["maxNumSeqs"], "a default is not the engine's cap")
+			assert.EqualValues(t, 1, fields["aboveBand"], "running %d against a default of 256", running)
+			assert.EqualValues(t, 0, fields["capped"])
+		}
+	})
+
+	t.Run("the policy's band", func(t *testing.T) {
+		// A cap the flag did not state, inside a band raised to 0.90.
+		ctx, logs := observedCtx(t)
+		analyzer := NewSaturationAnalyzer(capacity.NewStore())
+		rm := makeReplicaMetrics("pod-1", "variant-d", 14000, 16000, 0, 1000, 500)
+		rm.Ready = true
+		rm.KvUsageInstant, rm.AvgITL = 0.87, 0.079
+		input := makeAnalyzerInput([]domain.ReplicaMetrics{rm}, []domain.VariantReplicaState{
+			{VariantName: "variant-d", Role: domain.RoleDecode, AcceleratorName: "H100",
+				CurrentReplicas: 1, GPUsPerReplica: 1},
+		})
+		cfg := *input.Config.(*config.ScalingPolicy)
+		cfg.ITLMaxObservableK = 0.90
+		input.Config = &cfg
+		_, err := analyzer.Analyze(ctx, input)
+		require.NoError(t, err)
+		fields := requireLogged(t, logs, "itl-window")
+		assert.EqualValues(t, 0, fields["aboveBand"], "itlMaxObservableK must reach the window")
+		assert.EqualValues(t, 1, fields["offered"])
+	})
 }
 
 // The divisor is the [5m] mean on a steady shape, and the short window only

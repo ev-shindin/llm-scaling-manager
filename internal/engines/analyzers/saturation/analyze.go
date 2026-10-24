@@ -436,7 +436,13 @@ func (c *cycle) fitLines() {
 		// logs two identical "variant" values, and their fits could not be
 		// told apart in the log (issue #271).
 		itlLogger := c.logger.WithValues("namespace", c.input.Namespace)
-		own := c.a.noteITL(variantKey, rows, variant, c.a.now(), itlLogger)
+		// The policy's band, and the sequence cap only when the engine's flag
+		// stated it, so a replica at it may teach the line from above the
+		// band (itl.Admission).
+		lo, hi := c.cfg.ITLBand()
+		adm := itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: params.ExplicitMaxNumSeqs(),
+			CapMaxPreemptionRate: c.cfg.ITLCapPreemptionRate()}
+		own := c.a.noteITL(variantKey, rows, variant, adm, c.a.now(), itlLogger)
 		// The variant's own window, by the same key noteITL just wrote, and
 		// before any borrow below: a borrowed line says nothing about how
 		// close this variant is to fitting one of its own.

@@ -38,7 +38,8 @@ hands the optimizer `namedResults[0]`, saturation's.
      - `fitLine` calls `Tracker.Observe` and names the source: `own`,
        `pinned`, `pinned-default`, or with no line `declined` or `no-line`;
      - `priceTPOT` inverts `ITL = A·k + B` at the target, clamps to
-       `[0.15, 0.80]`, or says `infeasible` when `ITL(0.15)` already reaches it;
+       the policy's band (`fillBand`, `[0.15, 0.80]` by default), or says
+       `infeasible` when the ITL at its bottom already reaches it;
      - `reachableFill` caps the fill where the replica's batch cap binds:
        `max_num_seqs` times the data-parallel ranks the rows report
        (`fleetReading.engineRanks`),
@@ -88,6 +89,14 @@ instance and its own keys.
   as `kept`), `BelowBand` those it dropped below `k = 0.15`. A variant whose
   replicas all run above 0.80 stops filling its window, and what it holds ages
   out within 30 minutes: then `no-line`, with `aboveBand` counting why.
+  The exception is a replica at its sequence cap
+  (`Admission.atSequenceCap`): `RunningRequests` exactly
+  `max_num_seqs` times its ranks, with `max_num_seqs` read from the
+  engine's flag, `QueueLength` above zero, and a known `PreemptionRate`
+  at most `itlCapMaxPreemptionRate`. Its reading above the band is kept and
+  counted in `Capped` (issue #287). `Observe` takes an `itl.Admission`:
+  the policy's band (`itlMinObservableK`, `itlMaxObservableK`), the cap and
+  the allowance. The zero value is the default band with no cap.
 - **The window** (`Window`) holds at most 20 readings for at most 30 minutes.
   Nothing clears it on a change of shape.
 - **The fit.** With 10 **steady** readings spanning 0.30 of `k`, a

@@ -74,6 +74,17 @@ var _ = Describe("pricingK", func() {
 		// range it was fitted over -- what this function exists to prevent.
 		Expect(pricingK(nil)).To(Equal(itl.DefaultMaxObservableK))
 	})
+
+	It("clamps to the band the policy sets, the one the line is fitted over", func() {
+		// 0.76 is inside the default band and above one that stops at 0.70.
+		Expect(pricingK(&config.ScalingPolicy{
+			KvCacheThreshold: 0.80, ScaleUpThreshold: 0.95, ITLMaxObservableK: 0.70,
+		})).To(Equal(0.70))
+		// 0.25 is inside the default band and below one that starts at 0.30.
+		Expect(pricingK(&config.ScalingPolicy{
+			KvCacheThreshold: 0.50, ScaleUpThreshold: 0.50, ITLMinObservableK: 0.30,
+		})).To(Equal(0.30))
+	})
 })
 
 var _ = Describe("deriveMu against run P", func() {
@@ -355,7 +366,7 @@ var _ = Describe("noteITL", func() {
 	}
 	fit := func(rms []domain.ReplicaMetrics) itl.Model {
 		a := NewSaturationAnalyzer(capacity.NewStore())
-		return a.noteITL("ns|model|"+variant, rms, variant, a.now(), logr.Discard())
+		return a.noteITL("ns|model|"+variant, rms, variant, itl.Admission{}, a.now(), logr.Discard())
 	}
 
 	It("fits the line its replicas are reporting", func() {
@@ -399,9 +410,9 @@ var _ = Describe("noteITL", func() {
 		// accumulates and `fit` builds a fresh one each call.
 		a := NewSaturationAnalyzer(capacity.NewStore())
 		key := "ns|model|" + variant
-		Expect(a.noteITL(key, rms, variant, a.now(), logr.Discard()).IsZero()).To(BeTrue(),
+		Expect(a.noteITL(key, rms, variant, itl.Admission{}, a.now(), logr.Discard()).IsZero()).To(BeTrue(),
 			"six readings is under DefaultMinSamples: nothing is derived yet")
-		got := a.noteITL(key, rms, variant, a.now(), logr.Discard())
+		got := a.noteITL(key, rms, variant, itl.Admission{}, a.now(), logr.Discard())
 		Expect(got.IsZero()).To(BeFalse(),
 			"a balanced fleet still gets a model, with B pinned")
 		Expect(got.B).To(Equal(itl.DefaultBaselineSec))
@@ -603,7 +614,7 @@ var _ = Describe("the learned ITL baseline", func() {
 		key := "ns|model|" + variant
 
 		// One spread cycle: OLS fits and its B is remembered.
-		ols := a.noteITL(key, spread(10), variant, a.now(), logr.Discard())
+		ols := a.noteITL(key, spread(10), variant, itl.Admission{}, a.now(), logr.Discard())
 		Expect(ols.IsZero()).To(BeFalse())
 		Expect(ols.B).To(BeNumerically("~", tracedModel.B, 5e-4),
 			"the fit has to recover the card's floor before it can be reused")
@@ -611,9 +622,9 @@ var _ = Describe("the learned ITL baseline", func() {
 		// The fleet balances. Two flat cycles clear DefaultMinSamples with no
 		// spread at all, so the fallback answers -- pinned to the learned B.
 		for i := 0; i < 2; i++ {
-			a.noteITL(key, flat(), variant, a.now(), logr.Discard())
+			a.noteITL(key, flat(), variant, itl.Admission{}, a.now(), logr.Discard())
 		}
-		pinned := a.noteITL(key, flat(), variant, a.now(), logr.Discard())
+		pinned := a.noteITL(key, flat(), variant, itl.Admission{}, a.now(), logr.Discard())
 		Expect(pinned.IsZero()).To(BeFalse())
 		Expect(pinned.B).To(BeNumerically("~", ols.B, 1e-9),
 			"the fallback pins the measured floor")
@@ -624,9 +635,9 @@ var _ = Describe("the learned ITL baseline", func() {
 	It("falls back to the constant only for a key that never fitted", func() {
 		a := NewSaturationAnalyzer(capacity.NewStore())
 		for i := 0; i < 2; i++ {
-			a.noteITL("fresh|key|"+variant, flat(), variant, a.now(), logr.Discard())
+			a.noteITL("fresh|key|"+variant, flat(), variant, itl.Admission{}, a.now(), logr.Discard())
 		}
-		got := a.noteITL("fresh|key|"+variant, flat(), variant, a.now(), logr.Discard())
+		got := a.noteITL("fresh|key|"+variant, flat(), variant, itl.Admission{}, a.now(), logr.Discard())
 		Expect(got.IsZero()).To(BeFalse())
 		Expect(got.B).To(BeNumerically("~", itl.DefaultBaselineSec, 1e-9),
 			"nothing has been measured for this key, so the bootstrap stands")
@@ -793,10 +804,10 @@ var _ = Describe("the one-parameter fallback's own floor", func() {
 		// replica on one cycle doing both.
 		a := NewSaturationAnalyzer(capacity.NewStore())
 		key := "boundary|" + variant
-		short := a.noteITL(key, flatN(itl.DefaultMinSamples-1), variant, a.now(), logr.Discard())
+		short := a.noteITL(key, flatN(itl.DefaultMinSamples-1), variant, itl.Admission{}, a.now(), logr.Discard())
 		Expect(short.IsZero()).To(BeTrue(), "one short of the floor is not an answer")
 
-		onMore := a.noteITL(key, flatN(1), variant, a.now(), logr.Discard())
+		onMore := a.noteITL(key, flatN(1), variant, itl.Admission{}, a.now(), logr.Discard())
 		Expect(onMore.IsZero()).To(BeFalse(), "the tenth reading is the one that makes it a fit")
 	})
 
@@ -817,7 +828,7 @@ var _ = Describe("the one-parameter fallback's own floor", func() {
 			rm.AvgITL = 0.030 - 0.01*k
 			rms = append(rms, rm)
 		}
-		got := a.noteITL("inverted|"+variant, rms, variant, a.now(), logr.Discard())
+		got := a.noteITL("inverted|"+variant, rms, variant, itl.Admission{}, a.now(), logr.Discard())
 		Expect(got.IsZero()).To(BeFalse(), "an inverted OLS line must not leave the cycle unpriced")
 		Expect(got.A).To(BeNumerically(">", 0), "the pinned fit answers with a positive slope")
 		Expect(got.B).To(BeNumerically("~", itl.DefaultBaselineSec, 1e-9),

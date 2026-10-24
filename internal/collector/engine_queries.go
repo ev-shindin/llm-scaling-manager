@@ -35,6 +35,7 @@ var engineSpecificReplicaQueries = []string{
 	registration.QueryGenerationTokenRate,
 	registration.QueryKvUsageInstant,
 	registration.QueryRequestRate,
+	registration.QueryRunningRequests,
 }
 
 // agnosticReplicaQueries are the logical query names collected per replica that
@@ -52,6 +53,9 @@ var agnosticReplicaQueries = []string{
 	// Putting it in EngineSpecificQueries instead would assert a variant that
 	// does not exist, and the parity test says so.
 	registration.QueryPrefillComputedTokenRate,
+	// vLLM publishes a preemption counter and SGLang none, so this is
+	// registered once as well (registration.QueryPreemptionRate).
+	registration.QueryPreemptionRate,
 }
 
 // unpartitionedReplicaQueries lists the logical replica queries whose series

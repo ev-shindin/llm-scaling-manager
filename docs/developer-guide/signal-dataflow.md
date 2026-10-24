@@ -216,6 +216,7 @@ TokenRate              = Sequences / ITL(k)
 | --- | --- | --- | --- |
 | `itl` = `AvgITL` | seconds/token | collector, `inter_token_latency_seconds_sum/count` | the gap between two generated tokens |
 | `k` = `KvUsageInstant` | fraction 0-1 | collector, **instantaneous** `gpu_cache_usage_perc` | the occupancy that sample was taken at |
+| `RunningRequests`, `PreemptionRate` | count, 1/s | collector, `num_requests_running` and `rate(num_preemptions_total[1m])` | whether a reading above `k` 0.80 is a replica at its sequence cap, which the window keeps (issue #287) |
 | `n` | count | the window | how many `(k, itl)` observations the fit is over; at least `DefaultMinSamples` |
 | `C` | tokens | **-> produced above**, [per-replica capacity](#per-replica-capacity--analyzerssaturation) | the replica's KV budget, `TotalKvCapacityTokens` or the override |
 | `KVreq` | tokens/request | **-> produced above**, [the shape](#the-shape--signalsshape) | what one resident request occupies |
@@ -241,7 +242,7 @@ that the fleet should move.
 ### The service rate, decode — `analyzers/saturation`
 
 ```
-kPrice   = clamp(kvCacheThreshold x scaleUpThreshold, 0.15, 0.80)
+kPrice   = clamp(kvCacheThreshold x scaleUpThreshold, itlMinObservableK, itlMaxObservableK)   # 0.15, 0.80 by default
 seqs     = min(Sequences(kPrice, C, KVreq), S)
 tokenSec = seqs / ITL(kPrice)
 mu       = tokenSec / avgOutput
@@ -511,7 +512,8 @@ The rules, the same in both:
 | KV capacity (`NumGpuBlocks`, `TotalKvCapacityTokens`) | the sum over the ranks. vLLM's API server already sums its engines' blocks into the `num_gpu_blocks` label of `vllm:cache_config_info`, so that label is read as is and never multiplied |
 | `EngineRanks` | the sum: the merge adds rows, the query counts the `cache_config_info` series (one per rank). `Ranks()` reads an unknown count as 1 |
 | `KvCacheUsage`, `KvUsageInstant` | used tokens over total capacity: the merge weighs by each row's capacity, the query takes the mean over ranks (ranks of a pod are alike), after a max per rank so a second scrape or a per-process copy of a rank's gauge counts once |
-| `QueueLength`, `RequestRate`, `GenerationTokenRate`, `PrefillComputedTokenRate` | the sum, after a max per rank in the query, so a target scraped twice (two PodMonitors on one pod) counts each rank once. Summed straight, a second scrape doubled the three rates: the generation-token rate is the measured mu's numerator and the derived line's check |
+| `QueueLength`, `RunningRequests`, `RequestRate`, `GenerationTokenRate`, `PrefillComputedTokenRate`, `PreemptionRate` | the sum, after a max per rank in the query, so a target scraped twice (two PodMonitors on one pod) counts each rank once. Summed straight, a second scrape doubled the three rates: the generation-token rate is the measured mu's numerator and the derived line's check |
+| `PreemptionRateKnown` | set only when every rank reported a preemption rate |
 | `MaxRankQueueLength`, `MaxRankKvCacheUsage` | the max: the busiest rank's queue and use. The merge takes the max over rows, the queries a max over ranks |
 | token lengths, `AvgTTFT`, `AvgServiceTime` | weighted by each rank's requests |
 | `AvgITL` | weighted by each rank's generated tokens |

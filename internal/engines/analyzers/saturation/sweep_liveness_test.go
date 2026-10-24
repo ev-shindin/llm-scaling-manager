@@ -59,7 +59,7 @@ var _ = Describe("the sweep's liveness test", func() {
 		rms := []domain.ReplicaMetrics{belowBand("pod-a", decodeV, 70)}
 
 		a.noteReplicaStart(key, ns, decodeV, rms, logr.Discard())
-		a.noteITL(key, rms, decodeV, base, logr.Discard())
+		a.noteITL(key, rms, decodeV, itl.Admission{}, base, logr.Discard())
 		a.itlTracker.SetBaseline(key, 0.011) // as an OLS fit would have left it earlier
 
 		measured := a.startSeconds[key]
@@ -77,7 +77,7 @@ var _ = Describe("the sweep's liveness test", func() {
 			a.now = func() time.Time { return at }
 			a.EvictStaleHistory()
 			a.noteReplicaStart(key, ns, decodeV, rms, logr.Discard())
-			a.noteITL(key, rms, decodeV, at, logr.Discard())
+			a.noteITL(key, rms, decodeV, itl.Admission{}, at, logr.Discard())
 		}
 
 		Expect(a.startSeconds).To(HaveKey(key),
@@ -101,7 +101,7 @@ var _ = Describe("the sweep's liveness test", func() {
 		rms := []domain.ReplicaMetrics{belowBand("pod-a", decodeV, 70)}
 
 		a.noteReplicaStart(key, ns, decodeV, rms, logr.Discard())
-		a.noteITL(key, rms, decodeV, base, logr.Discard())
+		a.noteITL(key, rms, decodeV, itl.Admission{}, base, logr.Discard())
 		a.itlTracker.SetBaseline(key, 0.011)
 		Expect(a.startSeconds).To(HaveKey(key))
 

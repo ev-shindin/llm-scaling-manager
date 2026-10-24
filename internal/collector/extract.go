@@ -60,6 +60,10 @@ type podMetricData struct {
 	kvUsageInstant      float64
 	kvUsageInstantOK    bool
 	requestRate         float64
+	// Sequence-cap fields (sequence_cap.go)
+	runningRequests  int
+	preemptionRate   float64
+	preemptionRateOK bool
 }
 
 // extractPodMetrics reads every series the replica queries returned into one
@@ -549,6 +553,8 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 			}
 		}
 	}
+
+	c.extractSequenceCap(ctx, modelID, namespace, results, podData)
 
 	return podData, nil
 }

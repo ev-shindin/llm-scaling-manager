@@ -38,6 +38,7 @@ var EngineSpecificQueries = []string{
 	QueryKvUsageInstant,
 	QueryRequestRate,
 	QueryModelRequestCount,
+	QueryRunningRequests,
 }
 
 var engineSpecificSet = func() map[string]bool {

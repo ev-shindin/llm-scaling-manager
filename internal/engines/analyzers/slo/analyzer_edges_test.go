@@ -135,7 +135,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 
 	It("treats a line no cycle ever stamped as stale", func() {
 		a := newAt(nil)
-		a.lines.Observe("ns|m|stray|H100|1", "agg", cycleRows("agg", 0), clock)
+		a.lines.Observe("ns|m|stray|H100|1", "agg", cycleRows("agg", 0), itl.Admission{}, clock)
 		Expect(a.EvictStale(clock).Lines).To(Equal(1), "a key with no stamp is not one anything still uses")
 	})
 
@@ -145,6 +145,33 @@ var _ = Describe("Analyzer state and inputs", func() {
 			s.Update("ns", "m", "agg", capacity.Record{EngineParams: &params})
 			return s
 		}
+
+		// Issue #287: the line takes a replica at its sequence cap above the
+		// band, so priceVariant must hand fitLine the engine's cap -- only
+		// when its flag stated it -- and the policy's band.
+		It("hands the line the policy's band and the cap the engine's flag stated", func() {
+			capped := func() []domain.ReplicaMetrics {
+				r := row("agg", "agg-hot", 0.87)
+				r.RunningRequests, r.QueueLength, r.PreemptionRateKnown = 64, 768, true
+				return []domain.ReplicaMetrics{r}
+			}
+			price := func(a *Analyzer, cfg *config.ScalingPolicy) itl.Reading {
+				in := domain.AnalyzerInput{Namespace: "ns", ModelID: "m", Config: cfg,
+					VariantStates: []domain.VariantReplicaState{agg}, ReplicaMetrics: capped()}
+				_, _, d := a.priceVariant(in, agg, windowKey("ns", "m", agg), readFleet(in), 0.044, 0.85, clock)
+				return d.line
+			}
+			stated := price(newAt(store(capacity.EngineParams{MaxNumSeqs: 64, MaxNumSeqsSet: true})), policy(44*time.Millisecond, 0))
+			Expect(stated.AboveBand).To(BeZero())
+			Expect(stated.Capped).To(Equal(1))
+			defaulted := price(newAt(store(capacity.EngineParams{MaxNumSeqs: 64})), policy(44*time.Millisecond, 0))
+			Expect(defaulted.AboveBand).To(Equal(1), "a parser default is not the engine's cap")
+			wide := policy(44*time.Millisecond, 0)
+			wide.ITLMaxObservableK = 0.90
+			banded := price(newAt(store(capacity.EngineParams{MaxNumSeqs: 64})), wide)
+			Expect(banded.AboveBand).To(BeZero(), "itlMaxObservableK must reach the line")
+			Expect(banded.Offered).To(Equal(1))
+		})
 
 		It("caps the resident sequences at max_num_seqs and prices the fill the engine can reach", func() {
 			res := warmWith(newAt(store(capacity.EngineParams{MaxNumSeqs: 64})), noop)
@@ -227,7 +254,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 			for j := range rows {
 				rows[j].AvgITL = steep(rows[j].KvUsageInstant)
 			}
-			_, src, _ = a.fitLine(key, rows, "agg", clock)
+			_, src, _ = a.fitLine(key, rows, "agg", itl.Admission{}, clock)
 			clock = clock.Add(15 * time.Second)
 		}
 		Expect(src).To(Equal(constants.SLOSourceOwn))
@@ -243,7 +270,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 			for j := range rows {
 				rows[j].AvgITL = steep(rows[j].KvUsageInstant)
 			}
-			m, src, _ = a.fitLine(key, rows, "agg", clock)
+			m, src, _ = a.fitLine(key, rows, "agg", itl.Admission{}, clock)
 			clock = clock.Add(15 * time.Second)
 		}
 		Expect(src).To(Equal(constants.SLOSourcePinned))

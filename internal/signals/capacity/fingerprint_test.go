@@ -61,10 +61,15 @@ var fingerprintHashed = []string{
 // All three are excluded on one rule: they exist only to resolve
 // EffectiveMaxBatchedTokens, which is hashed. Hashing an input beside the value
 // it produces would split a key on a distinction the engine has collapsed.
+//
+// MaxNumSeqsSet is excluded on another: it says where the hashed MaxNumSeqs
+// came from, the flag or the default, and the same value from either is the
+// same engine setting. Only the ITL fit's sequence-cap exception reads it.
 var fingerprintExcluded = []string{
 	"MaxNumBatchedTokens",
 	"IsV1Engine",
 	"ChunkedPrefillEnabled",
+	"MaxNumSeqsSet",
 }
 
 func TestFingerprintCoversEveryEngineParamsField(t *testing.T) {
@@ -201,6 +206,8 @@ func TestFingerprintIgnoresTheResolvedInputs(t *testing.T) {
 			p.IsV1Engine = !p.IsV1Engine
 		case "ChunkedPrefillEnabled":
 			p.ChunkedPrefillEnabled = !p.ChunkedPrefillEnabled
+		case "MaxNumSeqsSet":
+			p.MaxNumSeqsSet = !p.MaxNumSeqsSet
 		default:
 			t.Fatalf("no case for excluded field %s", name)
 		}

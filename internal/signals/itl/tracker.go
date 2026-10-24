@@ -69,8 +69,11 @@ type Reading struct {
 
 	// What the window was offered this cycle, by why a row was turned away.
 	// Offered counts the readings the window kept; BelowBand those it dropped
-	// for a k below DefaultMinObservableK (an idle replica).
+	// for a k below the band's lower edge (an idle replica).
 	Considered, NotReady, NoITL, NoK, AboveBand, BelowBand, Offered int
+	// Capped counts the Offered readings above the band's upper edge, taken
+	// because their replica was at its sequence cap (Admission.atSequenceCap).
+	Capped int
 	// Unsteady counts the Offered readings kept out of the full fit because
 	// their replica's load had moved within DefaultSteadyFor.
 	Unsteady int
@@ -98,8 +101,12 @@ type Reading struct {
 // fits ITL(k) = A*k + B over it.
 //
 // A row is a reading when it is the variant's, Ready and not lent by the warm
-// pool, with a finite positive ITL and a k in (0, DefaultMaxObservableK]; the window
-// itself drops a k below DefaultMinObservableK. A full fit is taken when the
+// pool, with a finite positive ITL and a k inside adm's band (by default
+// [DefaultMinObservableK, DefaultMaxObservableK]). A k above the band is a
+// reading too when the replica is at its sequence cap (Admission.atSequenceCap);
+// the zero Admission knows no cap and admits nothing above it. The band is
+// judged per call, so a key's window may hold readings from a band the policy
+// has since narrowed; they age out with the window. A full fit is taken when the
 // window is Ready, and its B is remembered when positive. Otherwise, with at
 // least DefaultMinSamples readings, A alone is fitted with B pinned to the
 // remembered intercept, or DefaultBaselineSec before there is one: a fleet the
@@ -130,19 +137,22 @@ type Reading struct {
 // inside its settle -- a joiner's, or one the load came back to -- whose ITL
 // covers its warm-up, and while fewer than DefaultMinSettledSamples remain it
 // holds the key's last A.
-func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now time.Time) Reading {
+func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm Admission, now time.Time) Reading {
 	var r Reading
+	lo, hi := adm.band()
 	t.mu.Lock()
 	w, ok := t.windows[key]
 	if !ok {
+		// The windows span the whole cache: the band is the Admission's,
+		// applied below, where a capped replica's reading may pass it.
 		w = NewWindow(DefaultWindowMaxSize, DefaultObservationMaxAge, DefaultMinSamples,
-			DefaultMinKSpread, DefaultMinObservableK, DefaultMaxObservableK)
+			DefaultMinKSpread, 0, 1)
 		t.windows[key] = w
 	}
 	sw, ok := t.steady[key]
 	if !ok {
 		sw = NewWindow(DefaultSteadyWindowMaxSize, DefaultObservationMaxAge, DefaultMinSamples,
-			DefaultMinKSpread, DefaultMinObservableK, DefaultMaxObservableK)
+			DefaultMinKSpread, 0, 1)
 		t.steady[key] = sw
 	}
 	traces, ok := t.traces[key]
@@ -185,14 +195,21 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 			r.NoITL++
 		case !(rm.KvUsageInstant > 0):
 			r.NoK++
-		case rm.KvUsageInstant > DefaultMaxObservableK:
+		case rm.KvUsageInstant < lo:
+			r.BelowBand++
+		case rm.KvUsageInstant > hi && !adm.atSequenceCap(rm):
 			r.AboveBand++
 		default:
-			// Add reports a reading it dropped: here, only a k below the band.
+			// Add drops nothing the cases above let through but a k above a
+			// full cache, which the collector never reports; counted as
+			// above the band all the same.
 			if w.add(Observation{K: rm.KvUsageInstant, ITLSec: rm.AvgITL, Timestamp: now, settling: settling}) {
-				r.BelowBand++
+				r.AboveBand++
 			} else {
 				r.Offered++
+				if rm.KvUsageInstant > hi {
+					r.Capped++
+				}
 				switch {
 				case steady:
 					sw.Add(rm.KvUsageInstant, rm.AvgITL, now)

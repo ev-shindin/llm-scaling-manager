@@ -56,6 +56,9 @@ const (
 	// not a replica's sustainable rate, and including them steepens A and
 	// pushes B below zero, which makes every mu derived from the line wrong.
 	//
+	// One reading above it is taken: a replica at its sequence cap with no
+	// preemption, which is not thrashing (Tracker, atSequenceCap; issue #287).
+	//
 	// This is the window's ceiling only. DefaultKSat (0.85) stays the point a
 	// fit is EVALUATED at, mirroring DefaultScaleUpThreshold in the saturation
 	// config; evaluating 0.05 above the fitted range costs ~2% against the

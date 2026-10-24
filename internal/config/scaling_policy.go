@@ -212,5 +212,11 @@ func ResolveScalingPolicyForTier(
 		base.ScaleUpThreshold = DefaultScaleUpThreshold
 		base.ScaleDownBoundary = DefaultScaleDownBoundary
 	}
+	// The same for the ITL band: each edge is validated per entry, and a
+	// merge can still invert the pair.
+	if base.ITLMinObservableK >= base.ITLMaxObservableK {
+		base.ITLMinObservableK = DefaultITLMinObservableK
+		base.ITLMaxObservableK = DefaultITLMaxObservableK
+	}
 	return base
 }

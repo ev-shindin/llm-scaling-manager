@@ -28,7 +28,7 @@ var _ = Describe("Tracker steady readings", func() {
 	// The line the engine really follows.
 	trueLine := Model{A: 0.1, B: 0.012}
 	observe := func(rows ...domain.ReplicaMetrics) Reading {
-		r := t.Observe("key", "v", rows, now)
+		r := t.Observe("key", "v", rows, Admission{}, now)
 		now = now.Add(cycle)
 		return r
 	}

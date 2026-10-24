@@ -149,7 +149,7 @@ var _ = Describe("borrowing a fitted ITL line", func() {
 		keyA := a.itlWindowKey(keyNS, keyModel, "decode-a", keyAccel, 1)
 		keyB := a.itlWindowKey(keyNS, keyModel, "decode-b", keyAccel, 1)
 
-		fitA := a.noteITL(keyA, tenOn("decode-a", 0.20), "decode-a", a.now(), logr.Discard())
+		fitA := a.noteITL(keyA, tenOn("decode-a", 0.20), "decode-a", itl.Admission{}, a.now(), logr.Discard())
 		Expect(fitA.IsZero()).To(BeFalse(), "ten readings over 0.36 of k must fit")
 		a.publishLine(physics, keyA, fitA, a.now())
 
@@ -166,7 +166,7 @@ var _ = Describe("borrowing a fitted ITL line", func() {
 		a := NewSaturationAnalyzer(capacity.NewStore())
 		keyA := a.itlWindowKey(keyNS, keyModel, "decode-a", keyAccel, 1)
 
-		fitA := a.noteITL(keyA, tenOn("decode-a", 0.20), "decode-a", a.now(), logr.Discard())
+		fitA := a.noteITL(keyA, tenOn("decode-a", 0.20), "decode-a", itl.Admission{}, a.now(), logr.Discard())
 		a.publishLine(physics, keyA, fitA, a.now())
 
 		_, _, ok := a.borrowLine(physics, keyA)
@@ -181,9 +181,9 @@ var _ = Describe("borrowing a fitted ITL line", func() {
 		keyA := a.itlWindowKey(keyNS, keyModel, "decode-a", keyAccel, 1)
 		keyB := a.itlWindowKey(keyNS, keyModel, "decode-b", keyAccel, 1)
 
-		Expect(a.noteITL(keyA, tenOn("decode-a", 0.20), "decode-a",
+		Expect(a.noteITL(keyA, tenOn("decode-a", 0.20), "decode-a", itl.Admission{},
 			a.now(), logr.Discard()).IsZero()).To(BeFalse())
-		Expect(a.noteITL(keyB, tenOn("decode-b", 0.22), "decode-b",
+		Expect(a.noteITL(keyB, tenOn("decode-b", 0.22), "decode-b", itl.Admission{},
 			a.now(), logr.Discard()).IsZero()).To(BeFalse())
 
 		Expect(a.itlWindowLens()).To(HaveLen(2), "one window per variant, not one shared")
@@ -203,7 +203,7 @@ var _ = Describe("borrowing a fitted ITL line", func() {
 		keyA := a.itlWindowKey(keyNS, keyModel, "decode-a", keyAccel, 1)
 		keyB := a.itlWindowKey(keyNS, keyModel, "decode-b", keyAccel, 1)
 
-		fitA := a.noteITL(keyA, tenOn("decode-a", 0.20), "decode-a", a.now(), logr.Discard())
+		fitA := a.noteITL(keyA, tenOn("decode-a", 0.20), "decode-a", itl.Admission{}, a.now(), logr.Discard())
 		a.publishLine(physics, keyA, fitA, a.now())
 
 		_, _, ok := a.borrowLine(physics, keyB)

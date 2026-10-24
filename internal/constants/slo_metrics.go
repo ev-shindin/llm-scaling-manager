@@ -22,7 +22,7 @@ const (
 	WVASLOObjectiveRatio = "wva_slo_objective_ratio"
 	// WVASLOFill is the KV fill, as a fraction of physical KV, a variant's SLO
 	// capacity is priced at: where its mean inter-token latency meets the TPOT
-	// target, clamped to [0.15, 0.80] and lowered where max_num_seqs binds
+	// target, clamped to the policy's ITL band ([0.15, 0.80] by default) and lowered where max_num_seqs binds
 	// first, so the line's ITL there is at or below the target. Before any
 	// scale-up headroom. Absent when the variant could not be priced.
 	// Labels: namespace, model_name, variant_name, objective.

@@ -83,6 +83,20 @@ func (a *ThroughputAnalyzer) Observe(
 	modelID, namespace string,
 	metrics []domain.ReplicaMetrics,
 ) map[string]SanityReport {
+	return a.observe(ctx, now, modelID, namespace, metrics, itl.DefaultMinObservableK, itl.DefaultMaxObservableK)
+}
+
+// observe is Observe with the KV band [lo, hi] a reading must fall in: the
+// policy's itlMinObservableK and itlMaxObservableK, which Analyze passes, as
+// the saturation and slo analyzers read them. This analyzer has no engine
+// configuration, so it takes no capped replica above the band (itl.Admission).
+func (a *ThroughputAnalyzer) observe(
+	ctx context.Context,
+	now time.Time,
+	modelID, namespace string,
+	metrics []domain.ReplicaMetrics,
+	lo, hi float64,
+) map[string]SanityReport {
 	if err := ctx.Err(); err != nil {
 		return nil
 	}
@@ -147,7 +161,9 @@ func (a *ThroughputAnalyzer) Observe(
 		// Collect one (k*, ITL) observation per healthy replica. Per-replica variation
 		// in k* provides the k-spread needed for a reliable OLS fit.
 		for _, m := range healthyMetrics {
-			if dropped := state.observationWindow.Add(m.KvUsageInstant, m.AvgITL, now); dropped {
+			// The window spans the whole cache; the band is applied here.
+			inBand := m.KvUsageInstant >= lo && m.KvUsageInstant <= hi
+			if dropped := !inBand || state.observationWindow.Add(m.KvUsageInstant, m.AvgITL, now); dropped {
 				ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("throughput analyzer: observation dropped (k out of range or ITL invalid)",
 					"namespace", namespace, "modelID", modelID, "variant", variantName,
 					"k", m.KvUsageInstant, "itl", m.AvgITL)
@@ -251,7 +267,14 @@ func (a *ThroughputAnalyzer) Analyze(
 	ownMetrics := ownReplicasOnly(input.ReplicaMetrics)
 
 	// Observe updates internal state (acquires/releases a.mu internally).
-	a.Observe(ctx, now, input.ModelID, input.Namespace, ownMetrics)
+	lo, hi := itl.DefaultMinObservableK, itl.DefaultMaxObservableK
+	// Read through an interface: internal/config's tests import this package,
+	// so importing config here would be a cycle. *config.ScalingPolicy
+	// implements it, nil included.
+	if cfg, ok := input.Config.(interface{ ITLBand() (float64, float64) }); ok {
+		lo, hi = cfg.ITLBand()
+	}
+	a.observe(ctx, now, input.ModelID, input.Namespace, ownMetrics, lo, hi)
 
 	byVariant := groupByVariant(ownMetrics)
 
@@ -528,8 +551,7 @@ func (a *ThroughputAnalyzer) getOrCreateVariantState(key string) *variantState {
 			itl.DefaultObservationMaxAge,
 			itl.DefaultMinSamples,
 			itl.DefaultMinKSpread,
-			itl.DefaultMinObservableK,
-			itl.DefaultMaxObservableK,
+			0, 1, // the band is the policy's, applied in observe
 		),
 	}
 	a.variantStates[key] = state

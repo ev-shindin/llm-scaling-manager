@@ -100,7 +100,7 @@ var _ = Describe("What Analyze publishes", func() {
 		Expect(fill).To(BeNumerically("~", 0.6, 1e-9))
 		itlAt, ok := gaugeIn(registry, constants.WVASLOPredictedITLSeconds, agg1)
 		Expect(ok).To(BeTrue())
-		realised := realisedFill(line, 0.6, 0.85, 100000, 500, 0)
+		realised := realisedFill(defaultBand, line, 0.6, 0.85, 100000, 500, 0)
 		Expect(itlAt).To(BeNumerically("~", line.ITLAt(realised), 1e-9))
 		Expect(itlAt).To(BeNumerically("<", line.ITLAt(0.6)), "the headroom must lower the ITL actually run at")
 	})

@@ -93,7 +93,8 @@ when no variant of the model names a tier.
 - `shapeChangeHoldSeconds` below zero.
 - A number that is not finite (YAML `.inf`, `-.inf` or `.nan`) in `priority`,
   `kvCacheThreshold`, `queueLengthThreshold`, `scaleUpThreshold`,
-  `scaleDownBoundary`, or an analyzer's `score`, `scaleUpThreshold` or
+  `scaleDownBoundary`, `itlMinObservableK`, `itlMaxObservableK`,
+  `itlCapMaxPreemptionRate`, or an analyzer's `score`, `scaleUpThreshold` or
   `scaleDownBoundary`. Do not use `.inf` to give a model precedence:
   `priority` multiplies the model's weight in the fair share (priority x
   demand), so a finite value such as 5 weighs it five times as heavily.
@@ -1141,6 +1142,9 @@ These parameters apply when `analyzerName: "saturation"` is set or when the `ana
 | `analyzers` | list | Multi-analyzer pipeline registration — see [Multi-Analyzer Registration](#multi-analyzer-registration) | `[{name: "saturation", score: 1.0}]` |
 | `shapeChangeHoldSeconds` | int | How long the fleet is held back from scale-down after the workload's shape changes. Raise it for long generations (long context, long chain-of-thought). A tier or a per-model override can set it. A negative value is skipped and the layer below applies; see [a bad value is skipped](#scaletozero) for where it is reported. | `0` (5 minutes) |
 | `disableShapeChangeHold` | bool | Turns the shape-change hold off. A tier or a per-model override can turn it off. It cannot turn back on a hold that a lower layer (`default` or the tier) turned off. | `false` |
+| `itlMinObservableK` | float64 | Lowest KV fill (0-1) at which a replica's inter-token latency teaches its ITL line. Below it the engine barely batches and the latency is noise. Must be in (0, 1) and below `itlMaxObservableK`. A tier or a per-model override can set it. | `0.15` |
+| `itlMaxObservableK` | float64 | Highest KV fill (0-1) at which a replica's inter-token latency teaches its ITL line. Above it an engine short of memory preempts and its latency leaves the line. Must be in (0, 1). If a merge leaves it at or below `itlMinObservableK`, both edges fall back to their defaults. | `0.80` |
+| `itlCapMaxPreemptionRate` | float64 | A replica above `itlMaxObservableK` still teaches the line when it is at its sequence cap: its running batch is exactly `--max-num-seqs` (set on the engine, not defaulted) times its ranks, and requests are waiting. This key is the most preemptions per second it may show over the ITL window. vLLM only: SGLang publishes no preemption counter. Must be >= 0. | `0` |
 
 ### Expected output length
 
@@ -1671,7 +1675,8 @@ not readings of the fleet:
   KV-cache fill, `ITL = A × fill + B`; *fill* is the share of physical KV cache in
   use. It is the same fit, with the same rules, the saturation analyzer makes.
 - `wva_slo_fill` is the fill at which the line meets the TPOT target, clamped to
-  [0.15, 0.80]; `wva_slo_predicted_itl_seconds` the ITL the fleet would show sized
+  the ITL band (`itlMinObservableK`, `itlMaxObservableK`; [0.15, 0.80] by
+  default); `wva_slo_predicted_itl_seconds` the ITL the fleet would show sized
   for it; `wva_slo_source` where the line came from (`own`: fitted; `pinned`: its
   intercept held at an earlier fit's; `pinned-default`: held at a default for no
   particular card). After a controller restart a line is `pinned-default` until
@@ -2426,6 +2431,8 @@ The controller validates all configuration entries on load. Invalid entries are 
 8. **Limiters:** each `type` must be `gpu-inventory`/`inventory` or `quota`; a `gpu-inventory` entry
    must carry no quota fields; `quota` entries are validated end-to-end against the `QuotaLimiterConfig`
    schema (name uniqueness, scope, per-type ranges).
+9. **ITL band** (when set): `itlMinObservableK` and `itlMaxObservableK` must be in (0, 1), with
+   the minimum below the maximum. `itlCapMaxPreemptionRate` must be >= 0.
 
 > Analyzer `type`/`name` values are **not** restricted to a fixed set — an unrecognized analyzer is
 > simply ignored at runtime, so externally-registered analyzers and newer built-ins do not fail validation.

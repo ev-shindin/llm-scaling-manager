@@ -163,8 +163,9 @@ func (a *SaturationAnalyzer) noteLineMismatch(model itl.Model, params *capacity.
 // memory-bound capacity, is KvCacheThreshold of physical KV, and the analyzer
 // scales out at ScaleUpThreshold of k1. On the defaults (0.80, 0.85) that is
 // 0.68 of physical; with ScaleUpThreshold at 0.95 it is 0.76. Both sit inside
-// the ITL window's [DefaultMinObservableK, DefaultMaxObservableK] range, so
-// the line is evaluated where it was fitted rather than beyond it.
+// the ITL window's band -- the policy's itlMinObservableK and
+// itlMaxObservableK, 0.15 and 0.80 by default -- so the line is evaluated
+// where it was fitted rather than beyond it.
 //
 // A configuration whose product falls outside that range is clamped to it: the
 // model says nothing useful outside the range it was fitted on, and a clamped
@@ -175,10 +176,14 @@ func pricingK(cfg *config.ScalingPolicy) float64 {
 		k = cfg.KvCacheThreshold * cfg.ScaleUpThreshold
 	}
 	// Clamped on every path, including the fallback. DefaultKSat is 0.85 and
-	// DefaultMaxObservableK is 0.80, so returning the fallback unclamped
+	// the default band tops out at 0.80, so returning the fallback unclamped
 	// evaluated the line 0.05 outside the range it was fitted over -- the
 	// exact thing this function exists to prevent.
-	return min(max(k, itl.DefaultMinObservableK), itl.DefaultMaxObservableK)
+	lo, hi := config.DefaultITLMinObservableK, config.DefaultITLMaxObservableK
+	if cfg != nil {
+		lo, hi = cfg.ITLBand()
+	}
+	return min(max(k, lo), hi)
 }
 
 // deriveMu prices one replica of this variant at saturation under the shape it
@@ -315,7 +320,7 @@ func (a *SaturationAnalyzer) itlUnderArgs(key, args string) {
 // a shape change -- so a fit made under one shape is still the right fit under
 // the next, and clearing it would reintroduce exactly the wait this replaces.
 func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetrics,
-	variantName string, now time.Time, logger logr.Logger) itl.Model {
+	variantName string, adm itl.Admission, now time.Time, logger logr.Logger) itl.Model {
 	// Stamped here as well as in noteReplicaStart, because this function
 	// CREATES learned state (the window, and the baseline the tracker writes
 	// on a full fit) and the sweep's rule is that an unstamped key counts as
@@ -337,7 +342,7 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	// Which rows are readings, the window's confidence gate (Ready: enough
 	// samples, far enough apart in k), and the two tiers below are the
 	// tracker's: the slo analyzer fits with the same rules.
-	r := a.itlTracker.Observe(key, variantName, replicas, now)
+	r := a.itlTracker.Observe(key, variantName, replicas, adm, now)
 
 	// Logged at DEFAULT, not DEBUG: the deployment passes no -v, so DEBUG (4)
 	// never prints and a diagnostic nobody can read is the problem it was
@@ -357,6 +362,10 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		"replicas", r.Considered, "offered", r.Offered, "held", r.Held,
 		"notReady", r.NotReady, "noITL", r.NoITL, "noK", r.NoK,
 		"belowBand", r.BelowBand, "aboveBand", r.AboveBand,
+		// Of the offered, the readings above the band taken because their
+		// replica was at its sequence cap (itl.Admission); maxNumSeqs is 0
+		// when the engine flag did not state it, which admits none.
+		"capped", r.Capped, "maxNumSeqs", adm.MaxNumSeqs,
 		// Kept, but not for the full fit: the replica's load had just moved,
 		// so its k and its ITL describe different moments (itl.DefaultSteadyFor).
 		"unsteady", r.Unsteady, "steadyHeld", r.SteadyHeld,

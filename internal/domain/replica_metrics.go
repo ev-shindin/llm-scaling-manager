@@ -331,6 +331,26 @@ type ReplicaMetrics struct {
 	// ranks did not all report one is not known.
 	KvUsageInstantKnown bool
 
+	// RunningRequests is how many sequences the replica's engines hold in
+	// their running batch now, summed over its ranks. Derived from
+	// vllm:num_requests_running (sglang:num_running_reqs), instantaneous like
+	// KvUsageInstant. Zero when the metric is unavailable.
+	//
+	// Compared with max_num_seqs times Ranks, it says whether the batch is at
+	// its sequence cap: a replica there cannot take another sequence however
+	// much KV is free, so its KV fill above the ITL band is the cap's and not
+	// memory pressure (itl.Tracker).
+	RunningRequests int
+
+	// PreemptionRate is how many sequences the replica's engines preempted
+	// per second over the last minute, summed over its ranks. Derived from
+	// rate(vllm:num_preemptions_total[1m]); SGLang publishes no such counter.
+	// PreemptionRateKnown is set when it was read from a series, so a zero
+	// means no preemption and not a missing reading. A pod whose ranks did
+	// not all report one is not known.
+	PreemptionRate      float64
+	PreemptionRateKnown bool
+
 	// RequestRate is the engine-side request completion rate on this replica (req/s).
 	// Engine-agnostic: derived per pod from rate(vllm:request_generation_tokens_count[1m])
 	// for vLLM and rate(sglang:generation_tokens_histogram_count[1m]) for SGLang.

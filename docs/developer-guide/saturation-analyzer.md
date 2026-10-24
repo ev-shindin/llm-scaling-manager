@@ -248,7 +248,7 @@ evidence:
 | `DefaultWindowMaxSize` | 20 | |
 | `DefaultObservationMaxAge` | 30m | |
 | `DefaultMinObservableK` | 0.15 | below this the engine is not batching |
-| `DefaultMaxObservableK` | 0.80 | above it, preemption makes ITL non-linear |
+| `DefaultMaxObservableK` | 0.80 | above it, preemption makes ITL non-linear; a replica at its sequence cap is still read (below) |
 | `DefaultSteadyFor` | 2m | a replica's `k` must have held still this long |
 | `DefaultMaxKDrift` | 0.10 | how far it may have moved and still count as still |
 | `DefaultSteadyCarry` | 5m | how long a steady reading may outlive the main window's oldest |
@@ -310,6 +310,25 @@ first run's two namespaces (worst 0.102) and 0.079 for the second.
 `itl-window` counts every row under one reason (`offered`, `notReady`,
 `noITL`, `noK`, `belowBand`, `aboveBand`), so they add up to `replicas`, and
 reports `steadySpread` beside `minKSpread`, the other half of `ready`.
+
+A reading above `DefaultMaxObservableK` is kept when its replica is at its
+sequence cap (`itl.Admission.atSequenceCap`): `RunningRequests`
+(`vllm:num_requests_running`) is exactly `max_num_seqs` times the replica's
+ranks, `max_num_seqs` was read from the engine's flag
+(`EngineParams.ExplicitMaxNumSeqs`; the parser's default of 256 is not vLLM
+V1's 1024 on large cards), requests are waiting, and `PreemptionRate`
+(`rate(vllm:num_preemptions_total[ITLWindow])`, the ITL mean's own window)
+was read and is at most `itlCapMaxPreemptionRate` (default 0). The band
+edges are the policy's `itlMinObservableK` and `itlMaxObservableK`
+(`ScalingPolicy.ITLBand`); `Observe` takes them, the cap and the allowance as
+one `itl.Admission`, built alike by both analyzers. `pricingK`, and the slo
+analyzer's fill, clamp to the same band. Such a replica is not short of memory, so the reason for the band does
+not apply to it. On one run a decode replica held 256 running and 768 waiting
+at `k` 0.85-0.89 for 20 minutes while three siblings sat below 0.15, and no line
+was ever fitted (issue #287). `itl-window` counts these readings as `capped`,
+a part of `offered`, and logs the `maxNumSeqs` it judged them by. An unknown
+cap or preemption rate (SGLang publishes no preemption counter) keeps the band
+closed.
 
 The steady readings are kept apart from the main window, and outlive its oldest
 reading by up to `DefaultSteadyCarry`. A load step is what gives a balanced

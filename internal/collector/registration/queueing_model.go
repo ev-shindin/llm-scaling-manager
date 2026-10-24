@@ -13,6 +13,13 @@ const (
 	// Source: vllm:inter_token_latency_seconds histogram
 	QueryAvgITL = "avg_itl"
 
+	// ITLWindow is the range the per-pod ITL mean is taken over
+	// (rate(...[ITLWindow])), and the preemption rate beside it
+	// (QueryPreemptionRate): the ITL fit asks whether any token in that mean
+	// came from a preempting engine, so the two cover the same interval.
+	// Change it here and both follow.
+	ITLWindow = "1m"
+
 	// QueryAvgServiceTime is the query name for how long a request occupies a
 	// replica, EXCLUDING time spent waiting in the queue (seconds).
 	//
@@ -92,7 +99,7 @@ func RegisterQueueingModelQueries(sourceRegistry *source.SourceRegistry) {
 	registry.MustRegister(source.QueryTemplate{
 		Name:     QueryAvgITL,
 		Type:     source.QueryTypePromQL,
-		Template: perPodMean("vllm:inter_token_latency_seconds_sum", "vllm:inter_token_latency_seconds_count", "1m"),
+		Template: perPodMean("vllm:inter_token_latency_seconds_sum", "vllm:inter_token_latency_seconds_count", ITLWindow),
 		Params:   []string{source.ParamNamespace},
 		Description: "Average inter-token latency per instance (seconds), " +
 			"used by queueing model tuner for parameter learning",
@@ -145,7 +152,7 @@ func registerSGLangQueueingModelQueries(registry *source.QueryList) {
 	registerForEngine(registry, inferenceengine.EngineSGLang, source.QueryTemplate{
 		Name:        QueryAvgITL,
 		Type:        source.QueryTypePromQL,
-		Template:    `max by (model_name, instance, pod) (rate(sglang:inter_token_latency_seconds_sum{namespace="{{.namespace}}"}[1m]) / rate(sglang:inter_token_latency_seconds_count{namespace="{{.namespace}}"}[1m]))`,
+		Template:    `max by (model_name, instance, pod) (rate(sglang:inter_token_latency_seconds_sum{namespace="{{.namespace}}"}[` + ITLWindow + `]) / rate(sglang:inter_token_latency_seconds_count{namespace="{{.namespace}}"}[` + ITLWindow + `]))`,
 		Params:      []string{source.ParamNamespace},
 		Description: "Average inter-token latency per instance (seconds) (SGLang)",
 	})

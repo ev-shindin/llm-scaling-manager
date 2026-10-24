@@ -109,6 +109,7 @@ func applySGLangParam(key, value string, params *EngineParams) applyResult {
 			return applyUnusable
 		}
 		params.MaxNumSeqs = v
+		params.MaxNumSeqsSet = true
 	case "max_total_tokens":
 		v, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
