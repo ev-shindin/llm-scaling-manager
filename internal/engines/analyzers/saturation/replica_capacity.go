@@ -391,13 +391,13 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		bound = "k2-compute"
 	}
 	// Per-replica, per-cycle diagnostics: two lines per replica per optimize
-	// cycle, the highest-volume logging in the controller. V(logging.DEFAULT) is
-	// the shipped verbosity (cmd/main.go defaults -v to logging.DEFAULT), so
-	// hack/benchmark/dump_k2_decisions.py still sees them out of the box, while an
-	// operator who does not want them can drop to -v=1 without losing the V(1)
-	// diagnostics elsewhere. replica-capacity-skipped is deliberately not among
-	// them: it reports a degradation rather than a decision.
-	logger.V(logging.DEFAULT).Info("replica-capacity-decision",
+	// cycle, the highest-volume logging in the controller, so they sit at
+	// perReplicaLogLevel, one above the shipped verbosity (replica_log.go).
+	// replica-capacity-summary says what each replica was priced at, per
+	// variant, at the default; hack/benchmark/dump_k2_decisions.py needs the
+	// controller at --v=3. replica-capacity-skipped is deliberately not among them: it reports a
+	// degradation rather than a decision.
+	logger.V(perReplicaLogLevel).Info("replica-capacity-decision",
 		"modelID", modelID, "namespace", namespace, "variant", rm.VariantName, "pod", rm.PodName,
 		"k1MemoryBound", k1, "k2ComputeBound", k2, "k2Source", k2Priority.String(),
 		"effectiveCapacity", effectiveCapacity, "boundBy", bound,
@@ -708,7 +708,7 @@ func (a *SaturationAnalyzer) unadmittedPrice(
 	if !adm.bridge {
 		why = "mid-rollout"
 	}
-	logger.V(logging.DEFAULT).Info("k2-decision",
+	logger.V(perReplicaLogLevel).Info("k2-decision",
 		"modelID", modelID, "namespace", namespace, "variant", variantName,
 		"priority", capacity.K2SrcUnadmitted.String(), "historyKey", historyKey,
 		"reason", "priced this cycle at the saturated reading, lower than the chain; not recorded ("+why+")",
@@ -845,28 +845,28 @@ func (a *SaturationAnalyzer) k2Chain(
 	saturatedReading := queueLen >= int(queueThreshold) && tokensInUse > 0
 	switch {
 	case saturatedReading && downstreamSaturated:
-		logger.V(logging.DEFAULT).Info("k2-decision",
+		logger.V(perReplicaLogLevel).Info("k2-decision",
 			"modelID", modelID, "namespace", namespace, "variant", variantName,
 			"priority", k2ReasonObsDownstream, "historyKey", historyKey,
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
 			"reason", "queue saturated while the decode role is; a prefill completes only when decode admits it, so this is decode's saturation seen from prefill; not recorded",
 			"tokensInUse", tokensInUse, "k1", k1)
 	case saturatedReading && !adm.admitted():
-		logger.V(logging.DEFAULT).Info("k2-decision",
+		logger.V(perReplicaLogLevel).Info("k2-decision",
 			"modelID", modelID, "namespace", namespace, "variant", variantName,
 			"priority", k2ReasonObsUnadmitted, "historyKey", historyKey,
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
 			"reason", adm.why+"; not recorded",
 			"tokensInUse", tokensInUse, "k1", k1)
 	case saturatedReading && adm.rollout:
-		logger.V(logging.DEFAULT).Info("k2-decision",
+		logger.V(perReplicaLogLevel).Info("k2-decision",
 			"modelID", modelID, "namespace", namespace, "variant", variantName,
 			"priority", k2ReasonObsRollout, "historyKey", historyKey,
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
 			"reason", "the variant is mid-rollout and this pod may run the old engine; not recorded",
 			"tokensInUse", tokensInUse, "k1", k1)
 	case saturatedReading && adm.unsettled != "":
-		logger.V(logging.DEFAULT).Info("k2-decision",
+		logger.V(perReplicaLogLevel).Info("k2-decision",
 			"modelID", modelID, "namespace", namespace, "variant", variantName,
 			"priority", k2ReasonObsUnsettled, "historyKey", historyKey,
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
@@ -875,7 +875,7 @@ func (a *SaturationAnalyzer) k2Chain(
 	case saturatedReading:
 		k2Observed := tokensInUse
 		if kvCeiling > 0 && k2Observed > kvCeiling {
-			logger.V(logging.DEFAULT).Info("k2-decision",
+			logger.V(perReplicaLogLevel).Info("k2-decision",
 				"modelID", modelID, "namespace", namespace, "variant", variantName,
 				"priority", k2ReasonObsImplausible, "historyKey", historyKey,
 				"queueLength", queueLen, "queueThreshold", queueThreshold,
@@ -908,7 +908,7 @@ func (a *SaturationAnalyzer) k2Chain(
 			k2Smoothed := int64(ra.Average())
 			historyLen := ra.Len()
 			a.mu.Unlock()
-			logger.V(logging.DEFAULT).Info("k2-decision",
+			logger.V(perReplicaLogLevel).Info("k2-decision",
 				"modelID", modelID, "namespace", namespace, "variant", variantName,
 				"priority", capacity.K2SrcObserved.String(), "historyKey", historyKey,
 				"queueLength", queueLen, "queueThreshold", queueThreshold,
@@ -959,7 +959,7 @@ func (a *SaturationAnalyzer) k2Chain(
 		// all, and Reason carries only "P2-hist" -- so without this field an
 		// operator chasing a replica count cannot tell a live measurement from
 		// a stale one. Same line, one more field, no new cardinality.
-		logger.V(logging.DEFAULT).Info("k2-decision",
+		logger.V(perReplicaLogLevel).Info("k2-decision",
 			"modelID", modelID, "namespace", namespace, "variant", variantName,
 			"priority", capacity.K2SrcHistorical.String(), "historyKey", historyKey,
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
@@ -1032,7 +1032,7 @@ func (a *SaturationAnalyzer) k2Chain(
 				logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, min(k1, k2Derived), capacity.K2SrcDerived)
 				return b.k2, b.source(), b
 			}
-			logger.V(logging.DEFAULT).Info("k2-decision",
+			logger.V(perReplicaLogLevel).Info("k2-decision",
 				"modelID", modelID, "namespace", namespace, "variant", variantName,
 				"priority", capacity.K2SrcDerived.String(), "historyKey", historyKey,
 				"avgInputTokens", avgInput, "avgOutputTokens", avgOutput,
@@ -1050,7 +1050,7 @@ func (a *SaturationAnalyzer) k2Chain(
 	if isPrefill {
 		reason = "prefill role: derived-from-args formula assumes decode-style output length; skipped"
 	}
-	logger.V(logging.DEFAULT).Info("k2-decision",
+	logger.V(perReplicaLogLevel).Info("k2-decision",
 		"modelID", modelID, "namespace", namespace, "variant", variantName,
 		"priority", capacity.K2SrcFallback.String(), "historyKey", historyKey,
 		"reason", reason,

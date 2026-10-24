@@ -46,10 +46,11 @@ Reads the following log lines:
                                     target replica count for the variant this
                                     cycle
 
-k2-decision, replica-capacity-decision and replica-capacity-store-fallback are
-logged at V(logging.DEFAULT), which is the verbosity the shipped deployment
-runs at (cmd/main.go defaults -v to logging.DEFAULT). Started with -v=1 or
-lower, the controller suppresses them and this report comes back empty.
+k2-decision, replica-capacity-decision and derived-mu are per replica per
+cycle, so they are logged at V(logging.VERBOSE), one level above the shipped
+-v=2 (cmd/main.go defaults -v to logging.DEFAULT). Run the controller with
+--v=3 or higher, or this report comes back empty.
+replica-capacity-store-fallback stays at V(logging.DEFAULT).
 replica-capacity-skipped is at Info and survives any -v, since it reports a
 replica contributing no capacity at all rather than a routine decision.
 
@@ -588,9 +589,9 @@ def render_report(events, start, stop, cycle_gap, workload_line=None):
 
     if not k2_events:
         lines.append("_No k1/k2 decision events found in the run window. The two per-replica "
-                     "lines are logged at V(logging.DEFAULT): check that the controller was not "
-                     "started with -v=1 or lower, and that its image includes the k1/k2 "
-                     "logging._")
+                     "lines are logged at V(logging.VERBOSE): check that the controller ran "
+                     "with --v=3 or higher (the shipped -v=2 leaves them out), and that its "
+                     "image includes the k1/k2 logging._")
         lines.append("")
 
     return "\n".join(lines)

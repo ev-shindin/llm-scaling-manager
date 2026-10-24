@@ -800,8 +800,12 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	e.observeUtilizationShareMode(ctx) // every cycle, even one with no model to plan
 	metrics.SweepSLO(time.Now())       // drop the SLO series of a model no longer published
 
+	// Per-cycle progress lines that repeat what scaling-decision and the
+	// applied-decision line already say sit at logging.VERBOSE: at the shipped
+	// verbosity they were written every cycle, per model or per variant, and
+	// carried nothing new. Blocked reasons and warnings are not among them.
 	if e.Config.ScaleToZeroEnabled() {
-		logger.Info("Scaling to zero is enabled")
+		logger.V(logging.VERBOSE).Info("Scaling to zero is enabled")
 	}
 
 	e.VariantEnricher.Refresh(ctx) // resolve the scale target of anything newly registered
@@ -900,7 +904,7 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	// Group VAs by model for per-model capacity analysis
 	modelGroups := utils.GroupVariantAutoscalingByModel(activeVAs)
 	modelsProcessed = len(modelGroups)
-	logger.Info("Grouped VAs by model",
+	logger.V(logging.VERBOSE).Info("Grouped VAs by model",
 		"modelCount", len(modelGroups),
 		"totalVAs", len(activeVAs))
 
@@ -951,7 +955,7 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	// This function also updates VA.Status.CurrentAlloc with collected metrics
 	// and emits HPA metrics, which must happen every reconciliation cycle.
 	if len(allDecisions) > 0 {
-		logger.Info("Applying scaling decisions",
+		logger.V(logging.VERBOSE).Info("Applying scaling decisions",
 			"totalDecisions", len(allDecisions))
 	} else {
 		logger.Info("No scaling decisions to apply, updating VA status with metrics")
@@ -1651,7 +1655,7 @@ func (e *Engine) optimizeV2(
 	draws := e.recordBorrowDraws(optimizer, allDecisions, borrowNow)
 	logScalingDecisions(ctx, requests, allDecisions, borrowedByModel(draws, constraints))
 
-	logger.Info("V2 optimizer produced decisions",
+	logger.V(logging.VERBOSE).Info("V2 optimizer produced decisions",
 		"optimizer", optimizer.Name(),
 		"decisionCount", len(allDecisions),
 		"modelCount", len(requests))
@@ -2211,7 +2215,7 @@ func (e *Engine) applySaturationDecisions(
 		}
 
 		if hasDecision {
-			logger.Info("Processing decision for VA",
+			logger.V(logging.VERBOSE).Info("Processing decision for VA",
 				"variant", vaName,
 				"action", decision.Action,
 				"current", decision.CurrentReplicas,
@@ -2423,7 +2427,7 @@ func (e *Engine) applySaturationDecisions(
 					e.recordEvent(va, corev1.EventTypeWarning, constants.K8SEventResourceConstrained, constrainedMessage(&decision))
 				}
 
-				logger.Info("Successfully emitted metrics",
+				logger.V(logging.VERBOSE).Info("Successfully emitted metrics",
 					"variant", updateVa.Name,
 					"target", targetReplicas,
 					"accelerator", acceleratorName)

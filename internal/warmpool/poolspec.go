@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -96,6 +97,12 @@ type RegistryPools struct {
 	// Fallback is the flag-derived config each pool's trigger is layered onto,
 	// and the whole config for an install that declares no pool at all.
 	Fallback policy.Config
+
+	// fallbackSaid is the last fallback report written at the default level,
+	// so it is written when what was seen changes and not on every pass. Empty
+	// while pools are declared.
+	mu           sync.Mutex
+	fallbackSaid string
 }
 
 // Pools lists the warm pools declared in this namespace.
@@ -151,11 +158,25 @@ func (r *RegistryPools) Pools(ctx context.Context) ([]PoolSpec, error) {
 			seen = append(seen, entry.Name+"["+strings.Join(keys, ",")+"]")
 		}
 		sort.Strings(seen)
-		logger.V(logging.DEFAULT).Info(
+		// Once per change at the default level: the reconciler asks on every
+		// pass, and the same line every pass was over a tenth of a run's log. A new
+		// entry, or one whose keys changed, is a change and is said again.
+		level := logging.DEFAULT
+		said := r.Namespace + "\x00" + strings.Join(seen, "\x00")
+		r.mu.Lock()
+		if r.fallbackSaid == said {
+			level = logging.DEBUG
+		}
+		r.fallbackSaid = said
+		r.mu.Unlock()
+		logger.V(level).Info(
 			"no ScaledObject declares a warm pool; falling back to the unnamed one",
 			"namespace", r.Namespace, "entriesSeen", seen)
 		return []PoolSpec{{Name: "", Config: r.Fallback}}, nil
 	}
+	r.mu.Lock()
+	r.fallbackSaid = ""
+	r.mu.Unlock()
 	// Ordered so two pools resolve the same way on every pass and every process.
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil

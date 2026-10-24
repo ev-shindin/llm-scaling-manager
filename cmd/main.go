@@ -249,9 +249,11 @@ func managerOptions(cfg *config.Config, metricsServerOptions metricsserver.Optio
 
 // defaultLogVerbosity is the -v the shipped deployment runs at: config/base/manager
 // passes no -v, so this value decides which V() levels reach the logs. The
-// saturation analyzer's per-replica capacity lines sit at V(logging.DEFAULT) and
-// hack/benchmark/dump_k2_decisions.py needs them, so lowering this silently empties
-// that report. TestDefaultVerbosityKeepsCapacityLogsVisible guards the relationship.
+// saturation analyzer's per-variant capacity lines (replica-capacity-summary,
+// itl-window, itl-fit) sit at V(logging.DEFAULT), so lowering this silently drops
+// them. TestDefaultVerbosityKeepsCapacityLogsVisible guards the relationship. Its
+// per-replica lines sit one level higher, at V(logging.VERBOSE): they grow with
+// the fleet, and hack/benchmark/dump_k2_decisions.py needs --v=3 to read them.
 const defaultLogVerbosity = logging.DEFAULT
 
 // nolint:gocyclo

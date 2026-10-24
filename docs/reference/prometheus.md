@@ -1716,7 +1716,7 @@ three join directly. `namespace` is the **model's** namespace and arrives in
 Prometheus as `exported_namespace` (see the note on namespaces above), plus
 `controller_instance` when `CONTROLLER_INSTANCE` is set. Every value here is a
 variant-level reading; the `derived-mu` log line carries the same quantities
-per pod.
+per pod, at `--v=3`.
 
 ### `wva_itl_line_slope`
 - **Type**: Gauge

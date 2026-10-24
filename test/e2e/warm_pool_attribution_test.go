@@ -371,11 +371,12 @@ var _ = Describe("Warm pool - a bridge is measured as the variant it serves", La
 		// perfectly. That is exactly how this spec failed first: everything
 		// downstream was right and the evidence simply was not being printed.
 		//
-		// replica-capacity-decision is V(2), names the variant AND the Pod, and
-		// is the row the whole fix exists to produce. Waiting for it proves the
-		// bridge was scraped, collected, attributed and priced.
+		// replica-capacity-summary is V(2), names the variant AND every Pod it
+		// priced, and carries the row the whole fix exists to produce. Waiting
+		// for it proves the bridge was scraped, collected, attributed and
+		// priced. (replica-capacity-decision says the same per Pod, at V(3).)
 		Eventually(func() []string {
-			return linesContaining("replica-capacity-decision", `"variant": "`+variantName+`"`, poolPod)
+			return linesContaining("replica-capacity-summary", `"variant": "`+variantName+`"`, `"`+poolPod+`=`)
 		}, settle, 10*time.Second).ShouldNot(BeEmpty(),
 			"the bridge's capacity never reached the analyzer under the variant's name")
 
@@ -387,7 +388,7 @@ var _ = Describe("Warm pool - a bridge is measured as the variant it serves", La
 		logs, err := readControllerLog()
 		Expect(err).NotTo(HaveOccurred(),
 			"could not read the controller log, so the absence of a phantom variant proves nothing")
-		Expect(linesIn(logs, "replica-capacity-decision", `"variant": "`+scaleTarget+`"`)).To(BeEmpty(),
+		Expect(linesIn(logs, "replica-capacity-summary", `"variant": "`+scaleTarget+`"`)).To(BeEmpty(),
 			"the analyzer keyed a row by the scale target, which is a variant nothing is scaling")
 
 		By("Attributing it under the VARIANT's name wherever the collector says so")

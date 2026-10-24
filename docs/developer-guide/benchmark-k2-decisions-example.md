@@ -14,9 +14,10 @@ ready replica, but already decided 7).
 
 Two things decide whether the report comes back populated:
 
-- **Controller verbosity.** The two per-replica lines are logged at `V(logging.DEFAULT)`, the
-  verbosity the shipped deployment runs at. A controller started with `-v=1` or lower
-  suppresses them and the report is empty.
+- **Controller verbosity.** The two per-replica lines are logged at `V(logging.VERBOSE)`,
+  one level above the shipped `-v=2` (`perReplicaLogLevel` in
+  `internal/engines/analyzers/saturation/replica_log.go`). Run the controller at `--v=3`
+  or higher, or the report is empty.
 - **`--cycle-gap`** (default 3s) is the silence that separates two optimize cycles. It must
   stay below `GLOBAL_OPT_INTERVAL`, which ships at 15s but may be configured as low as 1s —
   so the script detects a gap that spanned more than one cycle and narrows it automatically,

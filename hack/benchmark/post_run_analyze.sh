@@ -81,7 +81,7 @@ fi
 
 echo "[6/7] dump_k2_decisions.py (per-cycle k1/k2 priority decisions)"
 python3 "$SCRIPT_DIR/dump_k2_decisions.py" "$RESULTS_DIR" -n "$NS" || {
-    FAILED="${FAILED}  [6] dump_k2_decisions.py — no k2-decision report. Needs run_metadata.yaml in the results dir and the controller's log buffer to still cover the run window."$'\n'
+    FAILED="${FAILED}  [6] dump_k2_decisions.py — no k2-decision report. Needs run_metadata.yaml in the results dir, the controller run at --v=3 or higher, and its log buffer to still cover the run window."$'\n'
 }
 
 echo "[7/7] comparison_table.py (WVA-vs-arm TTFT/TPOT/GPU-time table)"

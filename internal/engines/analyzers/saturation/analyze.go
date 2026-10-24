@@ -576,12 +576,13 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			// whether the fault is the output length, the sequence count, the
 			// ITL line or the pricing point -- and that ambiguity cost four
 			// discarded diagnoses in one session. maxNumSeqs is reported
-			// separately from seqs so the cap is visible when it binds.
+			// separately from seqs so the cap is visible when it binds. One
+			// line per replica, so at perReplicaLogLevel.
 			var maxSeqs int64
 			if engineParams != nil {
 				maxSeqs = engineParams.MaxNumSeqs
 			}
-			c.logger.V(logging.DEFAULT).Info("derived-mu",
+			c.logger.V(perReplicaLogLevel).Info("derived-mu",
 				"namespace", c.input.Namespace, "variant", rm.VariantName, "pod", rm.PodName,
 				"ok", derived.ok,
 				"rate", derived.rate, "seqs", derived.seqs, "tokenSec", derived.tokenSec,
@@ -633,6 +634,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			pricedRows = append(pricedRows, raw)
 		}
 	}
+	logReplicaCapacitySummary(c.logger, c.input.ModelID, c.input.Namespace, replicaCapacities)
 	// Whether a decode replica is idle against what it can do needs its
 	// effective capacity, so every row priced first (idle_room.go).
 	c.settledIdleDecode = c.a.settledIdleDecode(c.input.Namespace, c.input.ModelID,
