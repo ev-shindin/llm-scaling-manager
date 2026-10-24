@@ -118,6 +118,9 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		HeldRoleDemand:    held,
 		HotRankDemand:     hotRank,
 		RoleStartSeconds:  a.slowestStartSecondsByRole(input, roleOf),
+		// The raw rows, deferred requests included: a queue read too deep
+		// here only keeps a replica (decodeCapacityView says which readers
+		// take the view).
 		VariantBusiestQueueLoad: busiestQueueLoadByVariant(input.ReplicaMetrics, c.rolesByVariant,
 			satConfig.QueueLengthThreshold, satConfig.KvCacheThreshold),
 		PricingK: pricingK(satConfig),
@@ -264,7 +267,9 @@ func (a *SaturationAnalyzer) newCycle(
 	// replica is priced -- the order the rows arrive in must not matter --
 	// and remembered for the collector's row window, because prefill's row
 	// is a one-minute max that can outlive decode's
-	// (rememberDecodeSaturation).
+	// (rememberDecodeSaturation). Read on the raw rows: a decode read
+	// saturated on a deferred queue only gates prefill's learning and holds
+	// its demand, the stricter side (decodeCapacityView).
 	c.decodeSaturated = a.rememberDecodeSaturation(input.Namespace, input.ModelID,
 		roleSaturated(input.ReplicaMetrics, c.rolesByVariant, domain.RoleDecode,
 			cfg.QueueLengthThreshold, cfg.KvCacheThreshold))
@@ -480,7 +485,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 	// Priced on the queue decode capacity drains: on decode of a P/D model,
 	// requests waiting for their KV from prefill are not one
 	// (decodeCapacityView). The idle tests below read the raw row.
-	rows := decodeCapacityViews(c.input.ReplicaMetrics, c.rolesByVariant, c.cfg.KvCacheThreshold)
+	rows := decodeCapacityViews(c.input.ReplicaMetrics, c.rolesByVariant)
 	served := servedBounds(rows, c.rolesByVariant, c.cfg.QueueLengthThreshold, c.cfg.KvCacheThreshold, c.fleetOutput,
 		c.stableInput, c.stableOutput, c.fleetHitRate)
 	for i, rm := range rows {

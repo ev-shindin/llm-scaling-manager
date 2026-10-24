@@ -1914,12 +1914,16 @@ the decode pod drains, so the queue there is read differently:
 
 - vLLM v0.20.0 and later: only the requests waiting for scheduling capacity
   (`vllm:num_requests_waiting_by_reason{reason="capacity"}`) count.
-- Older vLLM: the queue counts only while the pod's KV cache is at or over
-  `kvCacheThreshold`. Below that it reads zero.
+- Older vLLM: the whole queue counts, as before. The requests waiting for
+  prefill's KV cannot be told apart, and dropping a real queue would
+  under-provision. A P/D decode on older vLLM can therefore read busier than
+  it is; upgrade to v0.20.0 or later for the split.
 
 This applies to the saturation test, the per-replica demand above and the
 demand floor's backlog. Aggregated pods, prefill pods and decode pods of a
-model with no prefill variant keep the full queue.
+model with no prefill variant keep the full queue. vLLM also reports a
+request held back by its LoRA budget (`--max-loras`) as deferred, so on a
+P/D decode serving many adapters that wait is not charged either.
 
 An absent or empty role canonicalizes to `both`, so **non-disaggregated
 deployments take the decode-style charge** — correct for a replica serving the

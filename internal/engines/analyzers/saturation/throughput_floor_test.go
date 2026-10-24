@@ -538,12 +538,8 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 			{VariantName: decodeVariant, Role: domain.RoleDecode, AcceleratorName: "H200", CurrentReplicas: 3, GPUsPerReplica: 1},
 			{VariantName: "prefill-v", Role: domain.RolePrefill, AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1},
 		}
-		// The queues are read as waiting for capacity (withCapacityQueue):
-		// at 0.69 of the cache, a P/D decode's queue is otherwise read as KV
-		// in flight from prefill (#278).
 		in := makeAnalyzerInput([]domain.ReplicaMetrics{
-			withCapacityQueue(row("decode-0", 804_185, 17, 2.233333333333334)),
-			withCapacityQueue(row("decode-1", 791_127, 11, 2.2666666666666666)), prefill("prefill-0", 0)}, st)
+			row("decode-0", 804_185, 17, 2.233333333333334), row("decode-1", 791_127, 11, 2.2666666666666666), prefill("prefill-0", 0)}, st)
 		in.ArrivalRate = 6.2
 		result, err := analyzer.Analyze(ctx, in)
 		Expect(err).NotTo(HaveOccurred())
@@ -793,8 +789,7 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		// this variant's backlog to size for and its residency charge is not
 		// one the floor put there.
 		own := decode("decode-0", 300_000, 0, runMu)
-		// Its 600 wait for capacity (withCapacityQueue, #278).
-		bridge := withCapacityQueue(decode("bridge-0", 300_000, 600, runMu))
+		bridge := decode("bridge-0", 300_000, 600, runMu)
 		bridge.FromWarmPool = true
 		in := makeAnalyzerInput([]domain.ReplicaMetrics{own, bridge, prefill("prefill-0", 0)}, states(1, 1))
 		in.ArrivalRate = runLambda
