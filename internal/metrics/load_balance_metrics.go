@@ -49,7 +49,8 @@ func registerLoadBalanceMetrics(registry prometheus.Registerer) error {
 			"every waiting request is on one replica. Absent with fewer than two ready replicas or nothing waiting.")
 	loadIdleWhileSaturated = gauge(constants.WVALoadIdleReplicasWhileSaturated,
 		"Ready replicas of the role that are idle (KV under 0.30, nothing waiting, Ready for at least 2m) while another is saturated "+
-			"(KV at or over 0.90, or, on prefill and aggregated roles, a queue at queueLengthThreshold). 0 otherwise.")
+			"(KV at or over kvCacheThreshold, or a queue at queueLengthThreshold except on the decode role of a model "+
+			"with a prefill variant). 0 otherwise.")
 	loadImbalanced = gauge(constants.WVALoadImbalanced,
 		"1 once the role has had an idle replica beside a saturated one on every cycle for 2m, until it has read "+
 			"balanced on every cycle for 2m; else 0. "+

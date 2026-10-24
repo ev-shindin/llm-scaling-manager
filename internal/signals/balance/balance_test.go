@@ -20,6 +20,10 @@ func row(pod, variant string, kv float64, queue int) domain.ReplicaMetrics {
 
 var pd = map[string]string{"pre": domain.RolePrefill, "dec": domain.RoleDecode}
 
+// policy is the scaling policy's default thresholds (kvCacheThreshold 0.80,
+// queueLengthThreshold 5).
+var policy = Thresholds{KvUsage: 0.80, Queue: 5}
+
 // The measured case (docs/reference/router-configuration.md): 439 requests
 // queued on one prefill replica while three sit idle.
 func TestMeasureFlagsOneQueuedPrefillBesideIdleOnes(t *testing.T) {
@@ -28,7 +32,7 @@ func TestMeasureFlagsOneQueuedPrefillBesideIdleOnes(t *testing.T) {
 		row("pre-1", "pre", 0.01, 0),
 		row("pre-2", "pre", 0.00, 0),
 		row("pre-3", "pre", 0.02, 0),
-	}, pd, 5, t0)[domain.RolePrefill]
+	}, pd, policy, t0)[domain.RolePrefill]
 
 	if d.Ready != 4 || d.Saturated != 1 || d.Idle != 3 {
 		t.Fatalf("ready/saturated/idle = %d/%d/%d, want 4/1/3", d.Ready, d.Saturated, d.Idle)
@@ -55,7 +59,7 @@ func TestMeasureReadsAnEvenRoleAsBalanced(t *testing.T) {
 		row("pre-1", "pre", 0.06, 110),
 		row("pre-2", "pre", 0.06, 110),
 		row("pre-3", "pre", 0.06, 109),
-	}, pd, 5, t0)[domain.RolePrefill]
+	}, pd, policy, t0)[domain.RolePrefill]
 	if d.Imbalanced() || d.Idle != 0 {
 		t.Errorf("an evenly queued role read imbalanced: saturated %d idle %d", d.Saturated, d.Idle)
 	}
@@ -70,14 +74,14 @@ func TestMeasureJudgesDecodeOnKvAlone(t *testing.T) {
 	dists := Measure([]domain.ReplicaMetrics{
 		row("dec-0", "dec", 0.40, 50),
 		row("dec-1", "dec", 0.10, 0),
-	}, pd, 5, t0)
+	}, pd, policy, t0)
 	if d := dists[domain.RoleDecode]; d.Saturated != 0 || d.Imbalanced() {
 		t.Errorf("decode queued at 0.40 KV read saturated: %+v", d)
 	}
 	dists = Measure([]domain.ReplicaMetrics{
 		row("dec-0", "dec", 0.95, 0),
 		row("dec-1", "dec", 0.10, 0),
-	}, pd, 5, t0)
+	}, pd, policy, t0)
 	if d := dists[domain.RoleDecode]; d.Saturated != 1 || !d.Imbalanced() {
 		t.Errorf("decode at 0.95 KV beside an idle one not flagged: %+v", d)
 	}
@@ -88,7 +92,7 @@ func TestMeasureJudgesDecodeOnKvAlone(t *testing.T) {
 func TestMeasureReadsTheBusiestRank(t *testing.T) {
 	hot := row("agg-0", "agg", 0.15, 0)
 	hot.EngineRanks, hot.MaxRankKvCacheUsage = 8, 0.95
-	d := Measure([]domain.ReplicaMetrics{hot, row("agg-1", "agg", 0.05, 0)}, nil, 5, t0)[domain.RoleBoth]
+	d := Measure([]domain.ReplicaMetrics{hot, row("agg-1", "agg", 0.05, 0)}, nil, policy, t0)[domain.RoleBoth]
 	if d.Saturated != 1 || d.Idle != 1 || d.MaxKvUsage != 0.95 {
 		t.Errorf("busiest rank not read: %+v", d)
 	}
@@ -105,7 +109,7 @@ func TestMeasureSkipsUnreadyAndBadReadings(t *testing.T) {
 		row("agg-3", "agg", math.Inf(1), 0),
 		row("agg-4", "agg", -0.2, 0),
 		notReady,
-	}, nil, 5, t0)[domain.RoleBoth]
+	}, nil, policy, t0)[domain.RoleBoth]
 	if d.Ready != 1 {
 		t.Fatalf("ready %d, want 1 (not-Ready, NaN, Inf and negative left out)", d.Ready)
 	}
@@ -121,7 +125,7 @@ func TestMeasureDoesNotReadAnUnreadableKvAsIdle(t *testing.T) {
 	d := Measure([]domain.ReplicaMetrics{
 		row("d-0", "dec", 0.95, 0),
 		row("d-1", "dec", math.NaN(), 0),
-	}, pd, 5, t0)[domain.RoleDecode]
+	}, pd, policy, t0)[domain.RoleDecode]
 	if d.Imbalanced() || d.Idle != 0 || len(d.IdlePods) != 0 {
 		t.Errorf("an unreadable KV counted as idle: idle %d %v", d.Idle, d.IdlePods)
 	}
@@ -136,7 +140,7 @@ func TestMeasureNamesTheQueuedPodBusiest(t *testing.T) {
 		row("pre-0", "pre", 0.10, 439),
 		row("pre-1", "pre", 0.25, 0),
 		row("pre-2", "pre", 0.00, 0),
-	}, pd, 5, t0)[domain.RolePrefill]
+	}, pd, policy, t0)[domain.RolePrefill]
 	if d.Saturated != 1 || d.Idle != 2 {
 		t.Fatalf("saturated/idle = %d/%d, want 1/2", d.Saturated, d.Idle)
 	}
@@ -156,11 +160,11 @@ func TestMeasureBusiestFollowsTheRolesSignal(t *testing.T) {
 	d := Measure([]domain.ReplicaMetrics{
 		row("dec-0", "dec", 0.95, 0),
 		row("dec-1", "dec", 0.50, 30),
-	}, pd, 5, t0)[domain.RoleDecode]
+	}, pd, policy, t0)[domain.RoleDecode]
 	if d.BusiestPod != "dec-0" {
 		t.Errorf("decode busiest pod %q, want dec-0 (KV 0.95)", d.BusiestPod)
 	}
-	idle := Measure([]domain.ReplicaMetrics{row("a", "agg", 0, 0), row("b", "agg", 0.1, 0)}, nil, 5, t0)[domain.RoleBoth]
+	idle := Measure([]domain.ReplicaMetrics{row("a", "agg", 0, 0), row("b", "agg", 0.1, 0)}, nil, policy, t0)[domain.RoleBoth]
 	if idle.BusiestPod != "" {
 		t.Errorf("busiest pod %q among replicas that are all idle", idle.BusiestPod)
 	}
@@ -176,21 +180,21 @@ func TestMeasureDoesNotReadAJustReadyReplicaAsIdle(t *testing.T) {
 	unknown := row("d-3", "dec", 0, 0)
 	unknown.ReadySince = time.Time{}
 	rows := []domain.ReplicaMetrics{row("d-0", "dec", 0.95, 0), row("d-1", "dec", 0.93, 0), fresh, unknown}
-	if d := Measure(rows, pd, 5, t0)[domain.RoleDecode]; d.Imbalanced() || d.Idle != 0 {
+	if d := Measure(rows, pd, policy, t0)[domain.RoleDecode]; d.Imbalanced() || d.Idle != 0 {
 		t.Errorf("a replica Ready for 30s, or since an unknown time, read idle: %v", d.IdlePods)
 	}
-	d := Measure(rows, pd, 5, t0.Add(IdleAfterReady))[domain.RoleDecode]
+	d := Measure(rows, pd, policy, t0.Add(IdleAfterReady))[domain.RoleDecode]
 	if d.Idle != 1 || d.IdlePods[0] != "d-2" {
 		t.Errorf("once Ready for IdleAfterReady the empty replica is idle: idle %d %v", d.Idle, d.IdlePods)
 	}
 }
 
 func TestRatiosAbsentWhereTheySayNothing(t *testing.T) {
-	one := Measure([]domain.ReplicaMetrics{row("a", "agg", 0.5, 3)}, nil, 5, t0)[domain.RoleBoth]
+	one := Measure([]domain.ReplicaMetrics{row("a", "agg", 0.5, 3)}, nil, policy, t0)[domain.RoleBoth]
 	if _, ok := one.KvMaxToMean(); ok {
 		t.Error("a ratio over one replica was published")
 	}
-	idle := Measure([]domain.ReplicaMetrics{row("a", "agg", 0, 0), row("b", "agg", 0, 0)}, nil, 5, t0)[domain.RoleBoth]
+	idle := Measure([]domain.ReplicaMetrics{row("a", "agg", 0, 0), row("b", "agg", 0, 0)}, nil, policy, t0)[domain.RoleBoth]
 	if _, ok := idle.KvMaxToMean(); ok {
 		t.Error("a kv ratio over a mean of zero was published")
 	}
@@ -199,8 +203,25 @@ func TestRatiosAbsentWhereTheySayNothing(t *testing.T) {
 	}
 }
 
+// A replica is saturated on KV at the policy's kvCacheThreshold, the ceiling
+// the analyzer prices a replica as full at, not at a figure of this package's
+// own: a decode replica of a disaggregated model, judged on KV alone, at 0.85
+// beside an idle one is saturated under the default 0.80 and not under 0.90.
+func TestSaturatedOnKvAtThePolicysThreshold(t *testing.T) {
+	rows := []domain.ReplicaMetrics{row("dec-0", "dec", 0.85, 0), row("dec-1", "dec", 0.02, 0)}
+	if d := Measure(rows, pd, policy, t0)[domain.RoleDecode]; d.Saturated != 1 || !d.Imbalanced() {
+		t.Errorf("KV 0.85 at kvCacheThreshold 0.80 not saturated: %+v", d)
+	}
+	if d := Measure(rows, pd, Thresholds{KvUsage: 0.90, Queue: 5}, t0)[domain.RoleDecode]; d.Saturated != 0 {
+		t.Errorf("KV 0.85 at kvCacheThreshold 0.90 saturated: %+v", d)
+	}
+	if d := Measure(rows, pd, Thresholds{Queue: 5}, t0)[domain.RoleDecode]; d.Saturated != 0 {
+		t.Errorf("saturated on KV with no kvCacheThreshold: %+v", d)
+	}
+}
+
 func TestQueueThresholdOffDisablesTheQueueTest(t *testing.T) {
-	d := Measure([]domain.ReplicaMetrics{row("a", "agg", 0.2, 100), row("b", "agg", 0.0, 0)}, nil, 0, t0)[domain.RoleBoth]
+	d := Measure([]domain.ReplicaMetrics{row("a", "agg", 0.2, 100), row("b", "agg", 0.0, 0)}, nil, Thresholds{KvUsage: policy.KvUsage}, t0)[domain.RoleBoth]
 	if d.Saturated != 0 {
 		t.Errorf("saturated on its queue with queueLengthThreshold 0: %+v", d)
 	}

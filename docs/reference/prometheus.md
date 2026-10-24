@@ -1781,7 +1781,7 @@ the pod itself):
 
 | class | test |
 | --- | --- |
-| saturated | KV cache at or over 0.90, or a waiting queue at or over `queueLengthThreshold`. On a model with a prefill variant, decode is judged on KV alone: its waiting count also holds requests waiting for their remote KV. A decode variant with no prefill beside it serves whole requests, so its queue counts: a replica capped by `--max-num-seqs` can hold hundreds waiting with its KV under 0.90 |
+| saturated | KV cache at or over `kvCacheThreshold` (0.80 by default), the ceiling the saturation analyzer prices a replica as full at (a model set near 1.0 is barely ever saturated on KV, and decode of a model with a prefill variant, judged on KV alone, then hardly ever reads imbalanced), or a waiting queue at or over `queueLengthThreshold`. On a model with a prefill variant, decode is judged on KV alone: its waiting count also holds requests waiting for their remote KV. A decode variant with no prefill beside it serves whole requests, so its queue counts: a replica capped by `--max-num-seqs` can hold hundreds waiting with its KV under the threshold |
 | idle | KV cache under 0.30, nothing waiting, and Ready for at least 2 minutes. A replica that has just passed readiness has had no time to receive work, so a scale-up does not read as an idle replica. The 2 minutes run from the later of the Pod's Ready time and the cycle the controller first saw it Ready, so a node clock behind the controller's does not shorten them. A warm-pool Pod lent to the variant counts from when it was lent, not from its Ready time in the pool |
 
 KV is the collector's one-minute peak, the same reading the saturation tests

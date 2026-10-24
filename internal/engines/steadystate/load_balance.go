@@ -35,14 +35,14 @@ const loadImbalancedWarning = "WARNING: load imbalanced across a role's replicas
 // replica is fixed in the router's scorer configuration, not by a replica
 // count.
 func (e *Engine) observeLoadBalance(logger logr.Logger, namespace, modelID string,
-	rows []domain.ReplicaMetrics, states []domain.VariantReplicaState, queueThreshold float64) {
+	rows []domain.ReplicaMetrics, states []domain.VariantReplicaState, th balance.Thresholds) {
 	tracker, now := e.loadBalanceTracker(), e.loadBalanceClock()
 	roles := make(map[string]string, len(states))
 	for _, vs := range states {
 		roles[vs.VariantName] = vs.Role
 	}
 	key := utils.GetNamespacedKey(namespace, modelID)
-	readings := tracker.Observe(key, tracker.Measure(key, rows, roles, queueThreshold, now), now)
+	readings := tracker.Observe(key, tracker.Measure(key, rows, roles, th, now), now)
 	metrics.PublishLoadBalance(namespace, modelID, readings)
 	for _, r := range readings {
 		if !r.Changed {

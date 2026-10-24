@@ -115,7 +115,7 @@ func (t *Tracker) model(key string) *modelState {
 // rows is forgotten, so one that returns, a warm-pool Pod lent again among
 // them, starts its grace again.
 func (t *Tracker) Measure(key string, rows []domain.ReplicaMetrics, rolesByVariant map[string]string,
-	queueThreshold float64, now time.Time) map[string]Distribution {
+	th Thresholds, now time.Time) map[string]Distribution {
 	t.mu.Lock()
 	m := t.model(key)
 	seen := make(map[replicaKey]sighting, len(rows))
@@ -137,7 +137,7 @@ func (t *Tracker) Measure(key string, rows []domain.ReplicaMetrics, rolesByVaria
 	}
 	m.seen = seen
 	t.mu.Unlock()
-	return measure(rows, rolesByVariant, queueThreshold, now, func(rm domain.ReplicaMetrics) time.Time {
+	return measure(rows, rolesByVariant, th, now, func(rm domain.ReplicaMetrics) time.Time {
 		return graceFrom[replicaKey{pod: rm.PodName, variant: rm.VariantName, bridge: rm.FromWarmPool}]
 	})
 }

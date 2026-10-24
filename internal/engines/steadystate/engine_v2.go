@@ -25,6 +25,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/balance"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
@@ -153,7 +154,8 @@ func (e *Engine) runAnalyzers(
 	// Before the analyzers, so a failing analyzer does not leave the series at
 	// a value from a cycle that no longer stands: the rows are this cycle's
 	// whatever the analysis makes of them.
-	e.observeLoadBalance(logger, namespace, modelID, replicaMetrics, variantStates, config.QueueLengthThreshold)
+	e.observeLoadBalance(logger, namespace, modelID, replicaMetrics, variantStates,
+		balance.Thresholds{KvUsage: config.KvCacheThreshold, Queue: config.QueueLengthThreshold})
 
 	// Run saturation analyzer (always needed for PerReplicaCapacity).
 	baseResult, err := e.runV2AnalysisOnly(ctx, modelID, namespace, replicaMetrics, config,

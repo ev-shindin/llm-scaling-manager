@@ -2689,7 +2689,7 @@
           "id": 87,
           "title": "Load spread across replicas, by role (scaling manager)",
           "type": "timeseries",
-          "description": "How evenly the router spreads each role's load over its ready replicas, as the scaling manager reads it every cycle.\n\nmax/mean is 1 when even and approaches the replica count when one replica holds everything. 'idle while saturated' counts ready replicas under 30% KV with nothing waiting while another is at 90% KV or queued. 'imbalanced' is 1 once that has held for two cycles; WVALoadImbalanced fires after 10 minutes of it. A routing finding, not a capacity one: see the troubleshooting entry 'One replica is saturated while others idle'.",
+          "description": "How evenly the router spreads each role's load over its ready replicas, as the scaling manager reads it every cycle.\n\nmax/mean is 1 when even and approaches the replica count when one replica holds everything. 'idle while saturated' counts ready replicas under 30% KV with nothing waiting while another is at kvCacheThreshold KV (80% by default) or queued. 'imbalanced' is 1 once that has held for two cycles; WVALoadImbalanced fires after 10 minutes of it. A routing finding, not a capacity one: see the troubleshooting entry 'One replica is saturated while others idle'.",
           "gridPos": {
             "h": 8,
             "w": 24,

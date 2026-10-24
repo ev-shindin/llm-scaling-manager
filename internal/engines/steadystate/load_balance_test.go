@@ -97,7 +97,7 @@ func TestRunAnalyzersReportsLoadImbalanceOnce(t *testing.T) {
 		{PodName: "pre-3", VariantName: "pre", KvCacheUsage: 0.02, Ready: true, ReadySince: since},
 		{PodName: "dec-0", VariantName: "dec", KvCacheUsage: 0.40, Ready: true, ReadySince: since},
 	}
-	policy := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70, QueueLengthThreshold: 5}
+	policy := config.ScalingPolicy{KvCacheThreshold: 0.80, ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70, QueueLengthThreshold: 5}
 	ctx, logs := zapObserverCtx(t)
 	for cycle := 1; cycle <= sustainCycles+1; cycle++ {
 		if _, err := e.runAnalyzers(ctx, "m", "ns", rows, policy, states, nil, nil, nil, nil, 0); err != nil {
@@ -178,7 +178,7 @@ func TestFailingAnalysisDoesNotFreezeTheLoadSeries(t *testing.T) {
 		{PodName: "dec-0", VariantName: "dec", KvCacheUsage: 0.50, Ready: true, ReadySince: since},
 		{PodName: "dec-1", VariantName: "dec", KvCacheUsage: 0.50, Ready: true, ReadySince: since},
 	}
-	policy := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70, QueueLengthThreshold: 5}
+	policy := config.ScalingPolicy{KvCacheThreshold: 0.80, ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70, QueueLengthThreshold: 5}
 	ctx := context.Background()
 	for range sustainCycles {
 		if _, err := e.runAnalyzers(ctx, "m", "ns", uneven, policy, states, nil, nil, nil, nil, 0); err != nil {
@@ -223,7 +223,7 @@ func TestOneFailedCollectionDoesNotRestartTheLoadSeries(t *testing.T) {
 		{PodName: "dec-0", VariantName: "dec", KvCacheUsage: 0.95, Ready: true, ReadySince: since},
 		{PodName: "dec-1", VariantName: "dec", KvCacheUsage: 0.05, Ready: true, ReadySince: since},
 	}
-	policy := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70, QueueLengthThreshold: 5}
+	policy := config.ScalingPolicy{KvCacheThreshold: 0.80, ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70, QueueLengthThreshold: 5}
 	ctx := context.Background()
 	collect := func() {
 		t.Helper()
@@ -252,5 +252,37 @@ func TestOneFailedCollectionDoesNotRestartTheLoadSeries(t *testing.T) {
 	}
 	if _, _, total := loadSeries(t, reg); total != 0 {
 		t.Errorf("collection failing for StaleAfter kept %d load series", total)
+	}
+}
+
+// A replica is saturated on KV at the policy's kvCacheThreshold, the ceiling
+// the analyzer prices it as full at. The detector used a fixed 0.90 of its
+// own, so a replica the analyzer read as full at 0.82 was not saturated for
+// it, and its idle siblings never warned. 0.82 is under ScaleUpThreshold
+// 0.85 too, so passing that in its place would fail here.
+func TestLoadImbalanceReadsThePolicysKvThreshold(t *testing.T) {
+	reg := promclient.NewRegistry()
+	if err := metrics.InitMetrics(reg); err != nil {
+		t.Fatal(err)
+	}
+	sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{}}
+	e := &Engine{saturationV2Analyzer: sat, started: true,
+		analyzersSnapshot: []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: sat}}}
+	start := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	steppedLoadClock(e, start)
+	since := start.Add(-time.Hour)
+	states := []domain.VariantReplicaState{{VariantName: "dec", Role: domain.RoleDecode, CurrentReplicas: 2}}
+	rows := []domain.ReplicaMetrics{
+		{PodName: "dec-0", VariantName: "dec", KvCacheUsage: 0.82, Ready: true, ReadySince: since},
+		{PodName: "dec-1", VariantName: "dec", KvCacheUsage: 0.05, Ready: true, ReadySince: since},
+	}
+	policy := config.ScalingPolicy{KvCacheThreshold: 0.80, ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70, QueueLengthThreshold: 5}
+	for range sustainCycles {
+		if _, err := e.runAnalyzers(context.Background(), "m", "ns", rows, policy, states, nil, nil, nil, nil, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if v, _, _ := loadSeries(t, reg); v != 1 {
+		t.Errorf("wva_load_imbalanced = %v with one replica at KV 0.82 over kvCacheThreshold 0.80 beside an idle one, want 1", v)
 	}
 }

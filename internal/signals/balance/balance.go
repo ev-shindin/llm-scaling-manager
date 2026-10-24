@@ -18,14 +18,25 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
-// Thresholds that classify one replica. The KV figures are fractions of one
+// Thresholds are the scaling policy's per-replica saturation thresholds, the
+// ones the saturation analyzer reads, so a replica the analyzer prices as full
+// is the one this package reads as saturated.
+type Thresholds struct {
+	// KvUsage is the policy's kvCacheThreshold: a replica whose busiest-rank
+	// KV utilization is at or over it is saturated whatever its queue. At or
+	// below zero no replica is saturated on its KV.
+	KvUsage float64
+	// Queue is the policy's queueLengthThreshold: a replica judged on its
+	// queue is saturated when its busiest rank's queue is at or over it. At or
+	// below zero no replica is saturated on its queue.
+	Queue float64
+}
+
+// Constants that classify one replica. The KV figures are fractions of one
 // engine's KV cache, read on the replica's busiest engine rank
 // (domain.ReplicaMetrics.BusiestRankKvUsage), which for a pod of one rank is
 // the pod's own utilization.
 const (
-	// SaturatedKvUsage is the KV utilization at or above which a replica is
-	// saturated whatever its queue.
-	SaturatedKvUsage = 0.90
 	// IdleKvUsage is the KV utilization below which a replica with nothing
 	// waiting is idle.
 	IdleKvUsage = 0.30
@@ -50,7 +61,7 @@ const (
 	SustainFor = 2 * time.Minute
 	// ClearAfter is how long a role reported imbalanced must read balanced,
 	// on every cycle, before the report clears. One cycle on which the
-	// saturated replica's peak dips under SaturatedKvUsage does not clear it,
+	// saturated replica's peak dips under Thresholds.KvUsage does not clear it,
 	// so a persistent imbalance does not flap the gauge the alert reads.
 	ClearAfter = 2 * time.Minute
 )
@@ -74,14 +85,14 @@ type Distribution struct {
 	MaxQueue    float64
 	MeanQueue   float64
 
-	// Saturated counts ready replicas at or over SaturatedKvUsage, or with a
-	// busiest-rank queue at or over the policy's queueLengthThreshold. The
+	// Saturated counts ready replicas at or over Thresholds.KvUsage, or with
+	// a busiest-rank queue at or over Thresholds.Queue. The
 	// queue test is left out on decode of a disaggregated model (one with a
 	// prefill variant): there the decode replica's waiting count also holds
 	// requests waiting for their remote KV, so it is judged on KV alone. A
 	// decode variant with no prefill beside it serves whole requests, and its
 	// queue is a backlog: measured, one such replica at max-num-seqs held 768
-	// waiting at KV 0.86-0.89, under SaturatedKvUsage, while three idled.
+	// waiting at KV 0.86-0.89 while three idled.
 	Saturated int
 	// Idle counts ready replicas under IdleKvUsage with nothing waiting that
 	// have been Ready for at least IdleAfterReady.
@@ -154,8 +165,7 @@ func (k busiestKey) above(o busiestKey) bool {
 // (domain.RoleBoth), as domain.CanonicalRole reads an empty role. A model is
 // disaggregated when rolesByVariant names a prefill variant, whether or not
 // it has a ready replica, and only then is decode judged on KV alone.
-// queueThreshold is the policy's queueLengthThreshold; at or below zero no
-// replica is saturated on its queue.
+// th is the policy's saturation thresholds.
 //
 // A replica that is not Ready is left out: nothing routes to it, so its load
 // says nothing about routing. So is one whose KV reading is not a finite,
@@ -166,14 +176,14 @@ func (k busiestKey) above(o busiestKey) bool {
 // Tracker.Measure, which the engine calls, also runs it from the first cycle
 // it saw the replica Ready, which covers a lent warm-pool Pod and a node clock
 // behind the controller's.
-func Measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, queueThreshold float64, now time.Time) map[string]Distribution {
-	return measure(rows, rolesByVariant, queueThreshold, now,
+func Measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, th Thresholds, now time.Time) map[string]Distribution {
+	return measure(rows, rolesByVariant, th, now,
 		func(rm domain.ReplicaMetrics) time.Time { return rm.ReadySince })
 }
 
 // measure is Measure with the instant each replica's IdleAfterReady grace runs
 // from given by graceFrom; a zero instant is never idle.
-func measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, queueThreshold float64, now time.Time,
+func measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, th Thresholds, now time.Time,
 	graceFrom func(domain.ReplicaMetrics) time.Time) map[string]Distribution {
 	out := map[string]Distribution{}
 	sums := map[string]struct{ kv, queue float64 }{}
@@ -199,7 +209,7 @@ func measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, que
 		s.queue += queue
 		sums[role] = s
 		byQueue := role != domain.RoleDecode || !disaggregated
-		isSaturated := saturated(rm, byQueue, kv, queueThreshold)
+		isSaturated := saturated(rm, byQueue, kv, th)
 		switch {
 		case isSaturated:
 			d.Saturated++
@@ -233,17 +243,16 @@ func readyLongEnough(since, now time.Time) bool {
 	return !since.IsZero() && now.Sub(since) >= IdleAfterReady
 }
 
-// saturated reports whether rm is saturated: its KV at or over
-// SaturatedKvUsage, or, when byQueue, its busiest rank's queue at or over
-// queueThreshold.
-func saturated(rm domain.ReplicaMetrics, byQueue bool, kv, queueThreshold float64) bool {
-	if kv >= SaturatedKvUsage {
+// saturated reports whether rm is saturated: its KV at or over th.KvUsage, or,
+// when byQueue, its busiest rank's queue at or over th.Queue.
+func saturated(rm domain.ReplicaMetrics, byQueue bool, kv float64, th Thresholds) bool {
+	if th.KvUsage > 0 && kv >= th.KvUsage {
 		return true
 	}
-	if !byQueue || !(queueThreshold > 0) {
+	if !byQueue || !(th.Queue > 0) {
 		return false
 	}
-	return float64(rm.BusiestRankQueue()) >= queueThreshold
+	return float64(rm.BusiestRankQueue()) >= th.Queue
 }
 
 // hasPrefill reports whether rolesByVariant names a prefill variant: the

@@ -68,14 +68,19 @@ func (s e8Sample) rows(t *testing.T) []domain.ReplicaMetrics {
 }
 
 // Measured (E8): a decode variant with no prefill beside it, one replica
-// capped by max-num-seqs with 768 waiting at KV 0.86-0.89, under
-// SaturatedKvUsage, while three siblings idled for twenty minutes. Judged on
-// KV alone it read saturated on one cycle at KV 0.913 and never warned; a
+// capped by max-num-seqs with 768 waiting at KV 0.86-0.89 while three
+// siblings idled for twenty minutes. Judged on KV alone at a fixed 0.90 it
+// read saturated on one cycle at KV 0.913 and never warned; a
 // second run warned on that cycle and logged "load balanced again" two
 // minutes later with 768 still waiting. Its queue is a backlog, so it must
 // warn once the idle replicas' grace and the sustain have run, name 69x4l,
 // hold through phase 1, and clear in phase 2.
+//
+// The replay runs at kvCacheThreshold 0.90, which every sample after the
+// first is under, so phase 1 holds on the queue rule alone: under the default
+// 0.80 the KV would carry it and the queue rule would go untested.
 func TestMeasuredDecodeBacklogWithoutPrefillReadsImbalanced(t *testing.T) {
+	queueOnly := Thresholds{KvUsage: 0.90, Queue: policy.Queue}
 	roles := map[string]string{"qwen32b-decode": domain.RoleDecode}
 	tr := NewTracker()
 	tr.SetInterval(cycle)
@@ -87,7 +92,7 @@ func TestMeasuredDecodeBacklogWithoutPrefillReadsImbalanced(t *testing.T) {
 		phase2 := s.at >= e8Phase2
 		for i := range int(90 * time.Second / cycle) {
 			now := s.time(t).Add(time.Duration(i) * cycle)
-			rs := tr.Observe("evgensh-sg1/qwen", tr.Measure("evgensh-sg1/qwen", rows, roles, 5, now), now)
+			rs := tr.Observe("evgensh-sg1/qwen", tr.Measure("evgensh-sg1/qwen", rows, roles, queueOnly, now), now)
 			r := only(t, rs)
 			if r.Changed && r.Sustained {
 				warnedAt = now
@@ -120,25 +125,25 @@ func TestMeasuredDecodeBacklogWithoutPrefillReadsImbalanced(t *testing.T) {
 }
 
 // A decode replica of a disaggregated model counts requests waiting for their
-// remote KV among its waiting ones, so the same deep queue at KV under
-// SaturatedKvUsage is not saturated there, and the busiest pod is the fuller
+// remote KV among its waiting ones, so a deep queue at KV under the policy's
+// kvCacheThreshold is not saturated there, and the busiest pod is the fuller
 // one, not the one with more waiting. A prefill variant scaled to zero still
 // makes the model disaggregated: transfers it began can still be pending.
 func TestMeasureDisaggregatedDecodeIgnoresDeferredWaiting(t *testing.T) {
 	rows := []domain.ReplicaMetrics{
-		row("dec-0", "dec", 0.87, 768),
-		row("dec-1", "dec", 0.89, 0),
+		row("dec-0", "dec", 0.74, 768),
+		row("dec-1", "dec", 0.78, 0),
 		row("dec-2", "dec", 0.00, 0),
 	}
-	d := Measure(rows, pd, 5, t0)[domain.RoleDecode]
+	d := Measure(rows, pd, policy, t0)[domain.RoleDecode]
 	if d.Saturated != 0 || d.Imbalanced() {
 		t.Errorf("P/D decode queued for remote KV read saturated: %+v", d)
 	}
 	if d.BusiestPod != "dec-1" {
-		t.Errorf("P/D decode busiest pod %q, want dec-1 (KV 0.89)", d.BusiestPod)
+		t.Errorf("P/D decode busiest pod %q, want dec-1 (KV 0.78)", d.BusiestPod)
 	}
 	alone := map[string]string{"dec": domain.RoleDecode}
-	if d := Measure(rows, alone, 5, t0)[domain.RoleDecode]; d.Saturated != 1 || !d.Imbalanced() || d.BusiestPod != "dec-0" {
+	if d := Measure(rows, alone, policy, t0)[domain.RoleDecode]; d.Saturated != 1 || !d.Imbalanced() || d.BusiestPod != "dec-0" {
 		t.Errorf("decode with no prefill variant, 768 waiting, not judged on its queue: %+v", d)
 	}
 }

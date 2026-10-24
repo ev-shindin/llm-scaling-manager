@@ -25,8 +25,9 @@ const (
 	WVALoadQueueMaxToMeanRatio = "wva_load_queue_max_to_mean_ratio"
 	// WVALoadIdleReplicasWhileSaturated is a per-role gauge: the ready
 	// replicas that are idle (KV under 0.30, nothing waiting, Ready for 2m) while another
-	// replica of the role is saturated (KV at or over 0.90, or a queue at
-	// queueLengthThreshold on prefill and aggregated roles). 0 otherwise.
+	// replica of the role is saturated (KV at or over kvCacheThreshold, or a
+	// queue at queueLengthThreshold except on the decode role of a model with
+	// a prefill variant). 0 otherwise.
 	WVALoadIdleReplicasWhileSaturated = "wva_load_idle_replicas_while_saturated"
 	// WVALoadImbalanced is a per-role gauge: 1 once the role has had an idle
 	// replica beside a saturated one on every cycle for 2m, until it reads

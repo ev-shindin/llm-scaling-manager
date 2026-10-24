@@ -158,7 +158,7 @@ func replicaGraceCycles(empty domain.ReplicaMetrics, start time.Time) (idleAfter
 			first = now
 		}
 		rows := []domain.ReplicaMetrics{row("dec-0", "dec", 0.95, 0), empty}
-		r := tr.Observe("ns/m", tr.Measure("ns/m", rows, pd, 5, now), now)[0]
+		r := tr.Observe("ns/m", tr.Measure("ns/m", rows, pd, policy, now), now)[0]
 		if r.Idle > 0 && idleAfter < 0 {
 			idleAfter = now.Sub(first)
 		}
@@ -199,14 +199,14 @@ func TestTrackerRestartsTheGraceWhenAPodChangesHands(t *testing.T) {
 	now := t0
 	for range int(IdleAfterReady/cycle) + 1 {
 		now = now.Add(cycle)
-		tr.Measure("ns/m", []domain.ReplicaMetrics{row("dec-0", "dec", 0.95, 0), pod}, pd, 5, now)
+		tr.Measure("ns/m", []domain.ReplicaMetrics{row("dec-0", "dec", 0.95, 0), pod}, pd, policy, now)
 	}
-	if d := tr.Measure("ns/m", []domain.ReplicaMetrics{row("dec-0", "dec", 0.95, 0), pod}, pd, 5, now.Add(cycle)); d[domain.RoleDecode].Idle != 1 {
+	if d := tr.Measure("ns/m", []domain.ReplicaMetrics{row("dec-0", "dec", 0.95, 0), pod}, pd, policy, now.Add(cycle)); d[domain.RoleDecode].Idle != 1 {
 		t.Fatalf("a bridge lent for IdleAfterReady did not read idle")
 	}
 	pod.VariantName = "dec2"
 	roles := map[string]string{"dec": domain.RoleDecode, "dec2": domain.RoleDecode}
-	if d := tr.Measure("ns/m", []domain.ReplicaMetrics{row("dec-0", "dec", 0.95, 0), pod}, roles, 5, now.Add(2*cycle)); d[domain.RoleDecode].Idle != 0 {
+	if d := tr.Measure("ns/m", []domain.ReplicaMetrics{row("dec-0", "dec", 0.95, 0), pod}, roles, policy, now.Add(2*cycle)); d[domain.RoleDecode].Idle != 0 {
 		t.Error("a Pod lent to another variant kept the grace it had served on the first")
 	}
 }
