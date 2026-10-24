@@ -1544,7 +1544,7 @@ arrivals rather than a standing backlog.
 
 | Key | Default | Range | What it does |
 |-----|---------|-------|--------------|
-| `minRequests` | `2` | 0 to 1e6 | The least growth, in requests, that counts. |
+| `minRequests` | `2` | (0, 1e6] | The least growth, in requests, that counts. You cannot set `0`: zero means unset and takes the default `2`. |
 | `fraction` | `0.10` | (0, 1) | The least growth, as a share of the earlier queue, that counts. Lower reacts to slower growth, and to more noise. |
 
 #### `loadImbalance`: the load-imbalance diagnostic
@@ -2569,6 +2569,16 @@ The controller validates all configuration entries on load. Invalid entries are 
    schema (name uniqueness, scope, per-type ranges).
 9. **ITL band** (when set): `analyzerTuning.itlBand.minObservableK` and `analyzerTuning.itlBand.maxObservableK` must be in (0, 1), with
    the minimum below the maximum. `analyzerTuning.itlBand.capMaxPreemptionRate` must be >= 0.
+10. **Other `analyzerTuning` keys** (when set): each must be in the range its table gives in
+    [Advanced tuning](#advanced-tuning-analyzertuning-and-loadimbalance). Durations take a unit
+    (`2m`); a bare number fails to decode.
+11. **`loadImbalance`** (when set): each key must be in its range. If the entry sets `idleKvUsage`, it must
+    be below the entry's `kvCacheThreshold` (or `0.80` when the entry sets none). If the entry does not set it,
+    nothing is checked; the idle figure in use is never above `kvCacheThreshold`.
+12. **Pairs** (only when the entry sets both keys): `minObservableK` below `maxObservableK`, `carry` at least
+    `steadyFor`, `returnRatio` at most `maxRatio`, `lowHoldFor` at least `freshFor`, and `trustFraction` above
+    `lagFraction`. A pair the merge crosses goes back to both defaults instead of being rejected; see
+    [Advanced tuning](#advanced-tuning-analyzertuning-and-loadimbalance).
 
 > Analyzer `type`/`name` values are **not** restricted to a fixed set — an unrecognized analyzer is
 > simply ignored at runtime, so externally-registered analyzers and newer built-ins do not fail validation.

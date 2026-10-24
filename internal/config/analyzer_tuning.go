@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 )
 
 // PolicyDuration is a time.Duration read from a Go duration string ("2m",
@@ -238,6 +240,9 @@ const (
 	MaxTokensOverCompletionsLimit = 10.0
 	// MaxMeasuredDerivedRatio bounds maxRatio.
 	MaxMeasuredDerivedRatio = 100.0
+	// MaxBacklogGrowthMinRequests bounds backlogGrowth.minRequests: a band of
+	// a million requests is a typo, not a noise floor.
+	MaxBacklogGrowthMinRequests = 1e6
 )
 
 func defaultFloat(v *float64, d float64) {
@@ -452,7 +457,7 @@ func (t AnalyzerTuning) validate() error {
 		fraction(p+"admission.siblingMuTolerance", t.Admission.SiblingMuTolerance, true),
 		fraction(p+"floorTrust.lagFraction", t.FloorTrust.LagFraction, false),
 		fraction(p+"floorTrust.trustFraction", t.FloorTrust.TrustFraction, true),
-		within(p+"backlogGrowth.minRequests", t.BacklogGrowth.MinRequests, 0, 1e6),
+		within(p+"backlogGrowth.minRequests", t.BacklogGrowth.MinRequests, 0, MaxBacklogGrowthMinRequests),
 		fraction(p+"backlogGrowth.fraction", t.BacklogGrowth.Fraction, false),
 	)
 	if err != nil {
@@ -562,6 +567,27 @@ func (c *ScalingPolicy) ITLBand() (lo, hi float64) {
 	}
 	b := c.AnalyzerTuning.WithDefaults().ITLBand
 	return b.MinObservableK, b.MaxObservableK
+}
+
+// Steadiness is g as the ITL tracker takes it (itl.Admission.Steady). The one
+// place the two are mapped, so both analyzers that fit ITL lines build the
+// same gate from the same keys.
+func (g SteadyGateTuning) Steadiness() itl.Steadiness {
+	return itl.Steadiness{
+		For: g.SteadyFor.Duration(), MaxKDrift: g.MaxKDrift, Carry: g.Carry.Duration(),
+		IdleRows: g.IdleRows, MinSettledSamples: g.MinSettledSamples,
+	}
+}
+
+// ITLSteadiness is the ITL steady-state gate the policy sets
+// (analyzerTuning.steadyGate), defaults filled in and a crossed pair
+// repaired. A nil policy reads as the defaults.
+func (c *ScalingPolicy) ITLSteadiness() itl.Steadiness {
+	var t AnalyzerTuning
+	if c != nil {
+		t = c.AnalyzerTuning
+	}
+	return t.WithDefaults().SteadyGate.Steadiness()
 }
 
 // ITLCapPreemptionRate is analyzerTuning.itlBand.capMaxPreemptionRate, or its

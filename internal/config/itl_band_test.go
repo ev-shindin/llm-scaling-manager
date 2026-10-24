@@ -31,6 +31,13 @@ func TestITLBandDefaultsMatchTheTracker(t *testing.T) {
 	if lo, hi := none.ITLBand(); lo != DefaultITLMinObservableK || hi != DefaultITLMaxObservableK || none.ITLCapPreemptionRate() != 0 {
 		t.Errorf("a nil policy reads band [%g, %g], want the defaults", lo, hi)
 	}
+	// And the steady gate: unset or nil, it is the tracker's own.
+	if got := none.ITLSteadiness(); got != itl.DefaultSteadiness() {
+		t.Errorf("a nil policy's steady gate = %+v, want %+v", got, itl.DefaultSteadiness())
+	}
+	if got := p.ITLSteadiness(); got != itl.DefaultSteadiness() {
+		t.Errorf("a resolved empty policy's steady gate = %+v, want %+v", got, itl.DefaultSteadiness())
+	}
 }
 
 func TestITLKeysValidate(t *testing.T) {

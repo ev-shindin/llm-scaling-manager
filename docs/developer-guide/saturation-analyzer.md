@@ -854,11 +854,13 @@ Most of the `saturation`, `itl` steady-gate and `balance` constants above are
 [Advanced tuning](../reference/scaling-policy.md#advanced-tuning-analyzertuning-and-loadimbalance)).
 The `saturation` ones alias the `config.Default*` values, so they cannot drift.
 The values in force are read once per cycle: `tuningOf(cfg)` (`saturation/tuning.go`)
-fills the resolved policy's unset fields and is kept on `cycle.tune`;
-`computeReplicaCapacity` and `applyThroughputFloor` build it from the `cfg`
-they are handed. The judgements take it as a receiver or an argument, never from
-a package variable. The ITL gate reaches `itl.Tracker.ObserveWith` as an
-`itl.Steadiness`, from both the saturation and the slo analyzer. The
+fills the resolved policy's unset fields and is kept on `cycle.tune`, which
+`computeReplicaCapacity` is handed; `applyThroughputFloor`, called once per
+cycle, builds it from the `cfg` it is handed. The judgements take it as a
+receiver or an argument, never from a package variable. The ITL gate reaches
+`itl.Tracker.Observe` as `itl.Admission.Steady`, an `itl.Steadiness` mapped from
+the keys by one constructor, `config.SteadyGateTuning.Steadiness`, in both the
+saturation and the slo analyzer (`ScalingPolicy.ITLSteadiness`). The
 diagnostic gets `balance.Thresholds` from `steadystate.loadBalanceThresholds`;
 `Tracker.Measure` keeps them per model for `Observe` and `Failed`. Window-tied
 values (`K2SettleLookback`, `K2SettleMaxGap`, `IdleSettledFor`, `IdleMaxGap`)

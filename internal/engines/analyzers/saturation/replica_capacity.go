@@ -31,6 +31,9 @@ import (
 func (a *SaturationAnalyzer) computeReplicaCapacity(
 	rm domain.ReplicaMetrics,
 	config *config.ScalingPolicy,
+	// tune is config's tuning, the cycle's (tuningOf), built once per cycle
+	// rather than once per replica.
+	tune tuning,
 	modelID, namespace string,
 	gpuCount int,
 	role string,
@@ -72,7 +75,6 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	routing replicaRouting,
 	logger logr.Logger,
 ) *capacity.ReplicaCapacity {
-	tune := tuningOf(config)
 	if rm.TotalKvCapacityTokens <= 0 {
 		// TODO: implement proper demand estimation when vllm:cache_config_info is absent.
 		// Currently we fall back to percentage-based demand using the deployment-derived

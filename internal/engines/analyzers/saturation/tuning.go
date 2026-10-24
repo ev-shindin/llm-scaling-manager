@@ -31,11 +31,8 @@ func tuningOf(cfg *config.ScalingPolicy) tuning {
 	}
 }
 
-// steadiness is the ITL steady-state gate the tuning sets.
+// steadiness is the ITL steady-state gate the tuning sets, mapped by the
+// one constructor the slo analyzer uses too (config.SteadyGateTuning.Steadiness).
 func (t tuning) steadiness() itl.Steadiness {
-	g := t.SteadyGate
-	return itl.Steadiness{
-		For: g.SteadyFor.Duration(), MaxKDrift: g.MaxKDrift, Carry: g.Carry.Duration(),
-		IdleRows: g.IdleRows, MinSettledSamples: g.MinSettledSamples,
-	}
+	return t.SteadyGate.Steadiness()
 }
