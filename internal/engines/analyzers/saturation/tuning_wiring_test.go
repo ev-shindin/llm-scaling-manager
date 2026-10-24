@@ -44,8 +44,9 @@ func tunedE1(t *testing.T, a *SaturationAnalyzer, at time.Time, rows []e1Row,
 		f := e.ContextMap()
 		buckets[fmt.Sprint(f["pod"])] = fmt.Sprint(f["saturatedThroughputBucket"])
 	}
-	var reasons []string
-	for _, e := range logs.FilterMessage("saturated-throughput-refused").All() {
+	refused := logs.FilterMessage("saturated-throughput-refused").All()
+	reasons := make([]string, 0, len(refused))
+	for _, e := range refused {
 		reasons = append(reasons, fmt.Sprint(e.ContextMap()["reason"]))
 	}
 	return buckets, reasons
@@ -59,7 +60,7 @@ var e1Start = time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
 func recordsAfter(t *testing.T, rows []e1Row, tune func(*config.ScalingPolicy)) (bool, []string) {
 	t.Helper()
 	a := newE1Analyzer(t, false)
-	var reasons []string
+	reasons := make([]string, 0, 4)
 	for i := range 4 {
 		_, r := tunedE1(t, a, e1Start.Add(time.Duration(i)*time.Minute), rows, tune)
 		reasons = append(reasons, r...)
@@ -102,7 +103,8 @@ func TestTuningSiblingMuToleranceReachesAnalyze(t *testing.T) {
 		a := newE1Analyzer(t, false)
 		var b map[string]string
 		for i := range 20 {
-			rows := []e1Row{{"p0", 30, 330_000, 3.3, 3.3*498 + float64(i%3)}}
+			rows := make([]e1Row, 0, 4)
+			rows = append(rows, e1Row{"p0", 30, 330_000, 3.3, 3.3*498 + float64(i%3)})
 			for _, p := range []string{"p1", "p2", "p3"} {
 				rows = append(rows, e1Row{p, 0, 330_000, 3.6, 3.6*498 + float64(i%3)})
 			}
