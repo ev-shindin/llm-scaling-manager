@@ -118,6 +118,9 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		HeldRoleDemand:    held,
 		HotRankDemand:     hotRank,
 		RoleStartSeconds:  a.slowestStartSecondsByRole(input, roleOf),
+		// The raw rows, deferred requests included: a queue read too deep
+		// here only keeps a replica (decodeCapacityView says which readers
+		// take the view).
 		VariantBusiestQueueLoad: busiestQueueLoadByVariant(input.ReplicaMetrics, c.rolesByVariant,
 			satConfig.QueueLengthThreshold, satConfig.KvCacheThreshold),
 		PricingK: pricingK(satConfig),
@@ -264,7 +267,9 @@ func (a *SaturationAnalyzer) newCycle(
 	// replica is priced -- the order the rows arrive in must not matter --
 	// and remembered for the collector's row window, because prefill's row
 	// is a one-minute max that can outlive decode's
-	// (rememberDecodeSaturation).
+	// (rememberDecodeSaturation). Read on the raw rows: a decode read
+	// saturated on a deferred queue only gates prefill's learning and holds
+	// its demand, the stricter side (decodeCapacityView).
 	c.decodeSaturated = a.rememberDecodeSaturation(input.Namespace, input.ModelID,
 		roleSaturated(input.ReplicaMetrics, c.rolesByVariant, domain.RoleDecode,
 			cfg.QueueLengthThreshold, cfg.KvCacheThreshold))
@@ -483,9 +488,14 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 	replicaCapacities := make([]capacity.ReplicaCapacity, 0, len(c.input.ReplicaMetrics))
 	pricedRows := make([]domain.ReplicaMetrics, 0, len(c.input.ReplicaMetrics))
 	mixed := revisionsMixed(c.input.ReplicaMetrics)
-	served := servedBounds(c.input.ReplicaMetrics, c.rolesByVariant, c.cfg.QueueLengthThreshold, c.cfg.KvCacheThreshold, c.fleetOutput,
+	// Priced on the queue decode capacity drains: on decode of a P/D model,
+	// requests waiting for their KV from prefill are not one
+	// (decodeCapacityView). The idle tests below read the raw row.
+	rows := decodeCapacityViews(c.input.ReplicaMetrics, c.rolesByVariant)
+	served := servedBounds(rows, c.rolesByVariant, c.cfg.QueueLengthThreshold, c.cfg.KvCacheThreshold, c.fleetOutput,
 		c.stableInput, c.stableOutput, c.fleetHitRate)
-	for _, rm := range c.input.ReplicaMetrics {
+	for i, rm := range rows {
+		raw := c.input.ReplicaMetrics[i]
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -566,7 +576,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			role, c.accelByVariant[rm.VariantName], c.stableOutput, c.fleetOutput, c.stableInput,
 			c.fleetHitRate, derived, served[rm.VariantName], downstreamSaturated, mixed[rm.VariantName],
 			replicaRouting{
-				kvFromInstant: kvFromInstant(rm, c.busyNowRoles[domain.CanonicalRole(role)]),
+				kvFromInstant: kvFromInstant(raw, c.busyNowRoles[domain.CanonicalRole(role)]),
 			}, c.logger)
 		if rc != nil {
 			// A derived figure inherits the borrowed-ness of the line it came
@@ -581,7 +591,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			rc.SaturatedThroughputLineBorrowed =
 				rc.SaturatedThroughputDerived && c.itlBorrowedFrom[rm.VariantName] != ""
 			replicaCapacities = append(replicaCapacities, *rc)
-			pricedRows = append(pricedRows, rm)
+			pricedRows = append(pricedRows, raw)
 		}
 	}
 	// Whether a decode replica is idle against what it can do needs its

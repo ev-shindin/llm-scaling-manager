@@ -34,6 +34,8 @@ var engineGauges = map[string]bool{
 	"sglang:num_queue_reqs":       true,
 	"sglang:token_usage":          true,
 	"sglang:max_total_num_tokens": true,
+	// A gauge with a reason label, since vLLM v0.20.0.
+	"vllm:num_requests_waiting_by_reason": true,
 }
 
 // exposedAsDeclared reports whether name is one the engine actually exposes:

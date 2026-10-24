@@ -188,7 +188,7 @@ func measure(rows []domain.ReplicaMetrics, rolesByVariant map[string]string, th 
 	out := map[string]Distribution{}
 	sums := map[string]struct{ kv, queue float64 }{}
 	busiest := map[string]busiestKey{}
-	disaggregated := hasPrefill(rolesByVariant)
+	disaggregated := domain.HasPrefill(rolesByVariant)
 	for _, rm := range rows {
 		if !rm.Ready {
 			continue
@@ -253,18 +253,6 @@ func saturated(rm domain.ReplicaMetrics, byQueue bool, kv float64, th Thresholds
 		return false
 	}
 	return float64(rm.BusiestRankQueue()) >= th.Queue
-}
-
-// hasPrefill reports whether rolesByVariant names a prefill variant: the
-// model is disaggregated, and its decode replicas' waiting counts hold
-// requests waiting for their remote KV.
-func hasPrefill(rolesByVariant map[string]string) bool {
-	for _, role := range rolesByVariant {
-		if domain.CanonicalRole(role) == domain.RolePrefill {
-			return true
-		}
-	}
-	return false
 }
 
 // fraction is v clamped to at most 1, and false when v is not a finite,

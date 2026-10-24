@@ -183,7 +183,6 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 	if !data.hasQueue {
 		maxRankQueue = 0
 	}
-
 	if !data.hasKv {
 		logger.Info("Pod missing KV cache metrics, using 0",
 			"pod", podName,
@@ -439,6 +438,13 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 			Age:             freshnessAge,
 			FreshnessStatus: freshnessStatus,
 		},
+	}
+	// The part of the queue that waits for scheduling capacity, which is a
+	// part of a queue that was read.
+	if data.hasCapacityQueue && data.hasQueue {
+		metric.CapacityQueueKnown = true
+		metric.CapacityQueueLength = data.capacityQueue
+		metric.MaxRankCapacityQueueLength = data.maxRankCapacityQueue
 	}
 
 	return metric, pairedAs, true

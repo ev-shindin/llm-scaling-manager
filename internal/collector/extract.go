@@ -30,6 +30,13 @@ type podMetricData struct {
 	// (domain.ReplicaMetrics.MaxRankQueueLength).
 	maxRankKv    float64
 	maxRankQueue int
+	// capacityQueue and maxRankCapacityQueue are the two queues above
+	// counting only requests waiting for scheduling capacity
+	// (domain.ReplicaMetrics.CapacityQueueLength); hasCapacityQueue is set
+	// when the pod's sum series was read.
+	capacityQueue        int
+	maxRankCapacityQueue int
+	hasCapacityQueue     bool
 	// V2 fields for token-based capacity analysis
 	numGpuBlocks int64
 	blockSize    int64
@@ -167,6 +174,28 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 			if data := podData[instanceKey]; instanceKey != "" && data != nil &&
 				value.Value >= 0 && !math.IsInf(value.Value, 0) {
 				data.maxRankQueue = int(value.Value)
+			}
+		}
+	}
+	// The capacity part of the two queues, from vLLM v0.20.0 on.
+	// Supplementary in the same way: an instance without the series (an
+	// older vLLM, SGLang) keeps hasCapacityQueue false.
+	if result := results[registration.QueryCapacityQueueLength]; result != nil && !result.HasError() {
+		for _, value := range result.Values {
+			instanceKey, _, _ := c.buildInstanceKey(ctx, namespace, value.Labels)
+			if data := podData[instanceKey]; instanceKey != "" && data != nil &&
+				value.Value >= 0 && !math.IsInf(value.Value, 0) {
+				data.capacityQueue = int(value.Value)
+				data.hasCapacityQueue = true
+			}
+		}
+	}
+	if result := results[registration.QueryMaxRankCapacityQueueLength]; result != nil && !result.HasError() {
+		for _, value := range result.Values {
+			instanceKey, _, _ := c.buildInstanceKey(ctx, namespace, value.Labels)
+			if data := podData[instanceKey]; instanceKey != "" && data != nil &&
+				value.Value >= 0 && !math.IsInf(value.Value, 0) {
+				data.maxRankCapacityQueue = int(value.Value)
 			}
 		}
 	}
