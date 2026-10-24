@@ -120,6 +120,30 @@ var _ = Describe("Tracker", func() {
 		Expect(r.Model.IsZero()).To(BeTrue())
 	})
 
+	// Issue #284: a fleet that learned its line at load and then sat below the
+	// band for longer than the window keeps its readings lost every one of
+	// them, and with them the line, the derived mu and the throughput floor.
+	It("holds the key's last line through light load once its readings have aged out", func() {
+		learned := t.Observe("key", "v", onLine(10, 0.2, 0.7), Admission{}, now)
+		Expect(learned.Tier).To(Equal(TierOLS))
+
+		light := []domain.ReplicaMetrics{row("p", 0.06, 0.0115)}
+		r := t.Observe("key", "v", light, Admission{}, now.Add(DefaultObservationMaxAge+time.Minute))
+		Expect(r.BelowBand).To(Equal(1), "the replica is serving, below the band")
+		Expect(r.Held).To(BeZero(), "every reading the line was fitted from has aged out")
+		Expect(r.Tier).To(Equal(TierPinnedB))
+		Expect(r.SlopeHeld).To(BeTrue())
+		Expect(r.Model.A).To(BeNumerically("~", learned.Model.A, 1e-9))
+		Expect(r.Model.B).To(BeNumerically("~", learned.Model.B, 1e-9))
+	})
+
+	It("still fits nothing below the band for a key that never fitted", func() {
+		r := t.Observe("key", "v", []domain.ReplicaMetrics{row("p", 0.06, 0.0115)}, Admission{}, now)
+		Expect(r.BelowBand).To(Equal(1))
+		Expect(r.Tier).To(BeEmpty())
+		Expect(r.Model.IsZero()).To(BeTrue())
+	})
+
 	It("declines when the pinned fit refuses the readings", func() {
 		rows := make([]domain.ReplicaMetrics, 10)
 		for i := range rows {

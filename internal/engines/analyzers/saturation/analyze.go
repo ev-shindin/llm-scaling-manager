@@ -467,6 +467,18 @@ func (c *cycle) fitLines() {
 		// inflated to ~60.
 		borrowed, from, ok := c.a.borrowLine(physicsKey, variantKey)
 		if !ok {
+			// No line at all: none of its own -- a fresh variant whose
+			// replicas sit below the band offers the window nothing to fit
+			// -- and none to borrow. So no mu is derived, and unless a
+			// saturated reading is on record the throughput floor does not
+			// apply and the variant is sized by KV occupancy alone, which at
+			// light load reads far below the share of its throughput it is
+			// serving (issue #284). Said in so many words, because the
+			// itl-window line alone reads as a window that is broken.
+			itlLogger.V(logging.DEFAULT).Info("itl-line-none",
+				"variant", variant, "key", variantKey, "physicsKey", physicsKey,
+				"windowSamples", c.itlSamples[variant], "minSamples", itl.DefaultMinSamples,
+				"derivedMu", false)
 			continue
 		}
 		c.itlModels[variant] = borrowed

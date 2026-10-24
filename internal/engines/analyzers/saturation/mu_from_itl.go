@@ -402,7 +402,9 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		// and nothing in the case this exists for: once the shape lightens,
 		// an over-provisioned fleet sits at a k far below
 		// DefaultMinObservableK and is priced from the readings the window
-		// already holds from when it was working.
+		// already holds from when it was working -- and, once those have aged
+		// out, from the key's last slope (slopeHeld), so the line outlives a
+		// long light stretch (issue #284).
 		logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "pinned-B",
 			"a", r.Model.A, "b", r.Model.B, "held", r.Held, "baselineLearned", r.BaselineStored,
 			"slopeHeld", r.SlopeHeld)

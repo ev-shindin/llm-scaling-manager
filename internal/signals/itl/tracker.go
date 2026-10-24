@@ -82,7 +82,8 @@ type Reading struct {
 	// DefaultSteadyFor -- and which the pinned fit leaves out too.
 	Settling int
 	// SlopeHeld is set when the pinned fit had too few readings past their
-	// settle to fit and Model's A is the key's last one.
+	// settle to fit, or the window too few readings at all, and Model's A is
+	// the key's last one.
 	SlopeHeld bool
 	// Held is the window's size after pruning.
 	Held int
@@ -136,7 +137,10 @@ type Reading struct {
 // pinnedReadings. Taking every reading, it still leaves out those of a replica
 // inside its settle -- a joiner's, or one the load came back to -- whose ITL
 // covers its warm-up, and while fewer than DefaultMinSettledSamples remain it
-// holds the key's last A.
+// holds the key's last A. It holds the last A too once the window has fewer
+// than DefaultMinSamples readings left -- a fleet below the band ages its
+// readings out and offers none -- so a key that has fitted keeps a line through
+// light load (SlopeHeld says so).
 func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm Admission, now time.Time) Reading {
 	var r Reading
 	lo, hi := adm.band()
@@ -277,14 +281,27 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 	// fit answers from a single pair, and a line should not rest on one
 	// reading from one replica on one cycle.
 	pinned, settled := pinnedReadings(obs, steadyObs)
-	if !settled {
-		return r
-	}
-	if len(pinned) < DefaultMinSettledSamples {
+	if !settled || len(pinned) < DefaultMinSettledSamples {
+		// Too few readings to fit, for one of two reasons, and the last A
+		// holds through both.
+		//
 		// The window is full of replicas still settling: a scale-up's
 		// joiners, or a fleet the load just came back to. Their readings
 		// are the transient, and what remains is too little to price the
 		// fleet, so the last A holds until they settle.
+		//
+		// Or the window has run short: its readings aged out past
+		// DefaultObservationMaxAge and nothing replaced them. That is what
+		// light load does -- a replica below the band's lower edge offers no
+		// reading at all -- so a fleet that learned its line at load and
+		// then sat below the band for half an hour lost the line, the
+		// derived mu with it, and was sized by KV occupancy alone, which at
+		// light load reads far below the throughput share it serves
+		// (issue #284). The key's last A is the newest evidence of its line
+		// there is -- the mu derived from it is still priced at the shape
+		// arriving now -- and a fresh fit replaces it as soon as the window
+		// holds DefaultMinSamples again. A key that never fitted has no A
+		// and still gets no line.
 		t.mu.Lock()
 		a, have := t.slopes[key]
 		t.mu.Unlock()
