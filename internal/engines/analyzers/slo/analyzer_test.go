@@ -127,6 +127,29 @@ var _ = Describe("Analyzer", func() {
 		Expect(d.targetFill).To(BeNumerically(">", 0.50))
 	})
 
+	It("fits with the steady gate the policy sets", func() {
+		// A fill that moved 0.12 in 15 seconds is unsteady under the default
+		// maxKDrift of 0.10 and steady under 0.20: the policy's
+		// analyzerTuning.steadyGate reaches the tracker the line is fitted by.
+		unsteady := func(cfg *config.ScalingPolicy) int {
+			an := New(nil, nil)
+			var n int
+			for i, k := range []float64{0.30, 0.42} {
+				at := clock.Add(time.Duration(i) * 15 * time.Second)
+				rows := []domain.ReplicaMetrics{row("agg", "agg-a", k)}
+				in := domain.AnalyzerInput{Namespace: "ns", ModelID: "m", Config: cfg,
+					VariantStates: []domain.VariantReplicaState{agg}, ReplicaMetrics: rows}
+				_, _, d := an.priceVariant(in, agg, windowKey("ns", "m", agg), readFleet(in), 0.044, 0.85, at)
+				n = d.line.Unsteady
+			}
+			return n
+		}
+		Expect(unsteady(policy(44*time.Millisecond, 0))).To(Equal(1))
+		cfg := policy(44*time.Millisecond, 0)
+		cfg.AnalyzerTuning.SteadyGate.MaxKDrift = 0.20
+		Expect(unsteady(cfg)).To(Equal(0), "analyzerTuning.steadyGate must reach the slo analyzer's ITL tracker")
+	})
+
 	It("abstains on an infeasible target rather than capping the variant", func() {
 		cfg := policy(44*time.Millisecond, 0)
 		warm(cfg)
