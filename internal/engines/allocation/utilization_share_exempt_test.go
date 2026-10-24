@@ -158,7 +158,9 @@ func TestShareHardImbalanceKeepsTheOtherHolds(t *testing.T) {
 		hold func(l *ShareLedger, now time.Time)
 	}{
 		{"back-off", func(l *ShareLedger, now time.Time) { l.giveAfter["Q"] = now.Add(time.Hour) }},
-		{"busy", func(l *ShareLedger, now time.Time) { l.steadyUntil["Q"] = now.Add(time.Hour) }},
+		{"changing", func(l *ShareLedger, now time.Time) {
+			l.changing["Q"] = ShareChangingHold{Donor: "Q", Until: now.Add(time.Hour)}
+		}},
 		{"cancelled pair", func(l *ShareLedger, now time.Time) { l.noPair[sharePair{"Q", "L"}] = now.Add(time.Hour) }},
 	} {
 		if got := (burstReplay{lNeed: 8, qNeed: 2, lHeld: 3, qHeld: 7, hold: c.hold}).run(t); moved(got, "Q", "L") {

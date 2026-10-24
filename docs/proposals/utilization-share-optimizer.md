@@ -2289,6 +2289,7 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_model_scaling_blocked` | `reason="release-taken"` | GPUs released, then occupied by a pod WVA did not place (§6.3) |
 | `wva_model_scaling_blocked` | `reason="release-timeout"` | the role's last release was aborted; it backs off before giving again. Only an aborted release |
 | `wva_model_scaling_blocked` | `reason="donor-not-steerable"` | the role's pods could not be marked when it was asked to give (a Deployment pod not Ready or not scheduled, a Deployment mid-rollout, no deletion cost left between earlier live marks and the lowest unmarked sibling, an LWS whose next group to go is terminating or unscheduled, or the patch failed); it backs off as after an abort, and the reason lasts only the back-off. A donor whose every pod is already given to live transfers is only held (`HoldGiving`), with no reason |
+| `wva_model_scaling_blocked` | `reason="donor-changing"` | a donor is held because its workload is changing (rollout, a pod not yet created, scheduled or Ready); on the donor while it is not short, and on each role whose transfer it refused while that role is short, not receiving, and held by nothing else. Ends once the workload reads stable for the confirm cycles, or one release timeout at the latest |
 | `wva_model_scaling_blocked` | `reason="reversal-hold"` | short and actionable, but it gave within the reversal hold (§6.7 rule 4). Not reported when the role is at its threshold and another role would stay calm after giving it a replica: that move is a hard imbalance and the hold is lifted (§6.2). A cancelled pair sets it on neither role |
 | `wva_model_scaling_blocked` | `reason="swinging"` | planned on its mean need (§6.7 rule 5) |
 | `wva_model_scaling_blocked` | `reason="transfer-limit"` | short and actionable, while the group already has the most donor transfers in flight (2). Not for a role whose moves are unpaced: a hard imbalance from its second cycle, from a calm donor, whose model's burst is not expected to end within 1.25 move latencies (none is, with no completed burst on record) |
@@ -2689,9 +2690,14 @@ optimizer every cycle (§6.6).
        needed). The need is judged against `min(N_r, C_r)`: a role needing
        more than its ceiling counted in band one replica below it, and never
        took its last replica (7 of 8 in the cluster scenario).
-     - a donor whose workload is changing (`errDonorChanging`) is held one
-       release timeout (`ShareLedger.HoldChanging`) with no abort,
-       back-off, Warning or reason: a Deployment mid-rollout by its status
+     - a donor whose workload is changing (`errDonorChanging`) is held
+       (`ShareLedger.HoldChanging`) with no abort, back-off or Warning,
+       until `settleChangingDonors` reads its workload stable for the
+       confirm cycles (`ShareLedger.ObserveChanging`), or one release
+       timeout at the latest. Each held cycle logs the cause at Info and
+       sets `donor-changing` on the donor and on the receivers it
+       refused (`ShareLedger.ChangingBlocks`) (issue #290: a fixed hold kept a donor ten minutes after
+       its idle-fill pod was Ready, silently). Changing is: a Deployment mid-rollout by its status
        (`scaletarget.RollingOut`: updated replicas below replicas, or a
        spec not yet observed) or by pods of two ReplicaSets, with fewer
        active pods than `spec.replicas`, or with a pod not yet scheduled or

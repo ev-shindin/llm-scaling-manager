@@ -1586,14 +1586,18 @@ Work down the list in order.
    the cause and the end of the back-off, and is retried after it.
 
    Two donor states are holds, not failures. In both, the receiver tries another
-   donor, and the donor counts no abort, does not back off, and gets no Event or
-   blocked reason:
+   donor, and the donor counts no abort, does not back off, and gets no Event:
    - **Its workload is changing:** mid-rollout (by its status, pods of two
      ReplicaSets, or LWS groups of two revisions at or above its partition), a
      pod not yet created, scheduled or Ready, or an LWS group missing or being
-     replaced. At `--v=4`: `Utilization share: donor's workload is changing;
-     transfer not started`. A paused Deployment or a held LWS canary rollout
-     stays "changing", and does not give, until resumed or finished.
+     replaced. Logged as `Utilization share: donor's workload is changing;
+     transfer not started`, then `donor held while its workload is changing`
+     every cycle, with the cause. The donor and the model whose transfer it
+     refused show blocked reason `donor-changing`. The hold ends once the workload
+     reads stable for `stabilization.consecutiveCyclesBeforeMove` cycles, and
+     after one release timeout at the latest. A paused Deployment or a held LWS
+     canary rollout stays "changing", and does not give, until resumed or
+     finished.
    - **It has nothing left:** every pod (or LWS group) is already given to
      transfers in flight. It is held until one of those releases lands, or for
      one release timeout, and is not counted as `reversal-hold`. At `--v=4`:

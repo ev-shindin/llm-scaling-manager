@@ -117,6 +117,64 @@ func TestUtilizationShareBlockedReasonsForAHeldBackReceiver(t *testing.T) {
 			t.Fatalf("B could not be marked: want donor-not-steerable alone, got %v", got)
 		}
 	})
+
+	// donor-changing lands only where the hold blocks: on a held donor that
+	// would give, and on the receiver whose transfer it refused -- not on a
+	// short role it refused nothing, not on a receiver another reason already
+	// explains, and not on the donor once it is short itself.
+	t.Run("donor-changing", func(t *testing.T) {
+		all := func(l *allocation.ShareLedger, g allocation.ShareGroup, ev allocation.ShareEvaluation, now time.Time) map[string][]string {
+			return shareBlockedReasons(l, g, ev, nil, nil, allocation.ShareSkipWaits{}, now, tm)
+		}
+		has := func(got map[string][]string, model string) bool {
+			return slices.Contains(got[model], constants.ScalingBlockedDonorChanging)
+		}
+
+		l := allocation.NewShareLedger()
+		l.HoldChanging("ns/A/both", "A-v", "ns/B/both", "a pod is not ready", t0, tm)
+		if got := all(l, g, ev, t0); !has(got, "ns/A") || !has(got, "ns/B") || has(got, "ns/C") {
+			t.Fatalf("A refused B: want donor-changing on A and B only, got %v", got)
+		}
+
+		// Held for a transfer to C: B, short, is not what it refused.
+		l = allocation.NewShareLedger()
+		l.HoldChanging("ns/A/both", "A-v", "ns/C/both", "a pod is not ready", t0, tm)
+		if got := all(l, g, ev, t0); has(got, "ns/B") {
+			t.Fatalf("A refused C, not B: B carries donor-changing: %v", got)
+		}
+
+		// B's real block is the transfer limit: that is its reason.
+		l = allocation.NewShareLedger()
+		held := map[string]int{"ns/A/both": 14, "ns/C/both": 6}
+		for range allocation.ShareMaxConcurrentTransfers {
+			l.Start(allocation.ShareTransfer{Donor: "ns/A/both", Receiver: "ns/C/both", GPUs: 1, DonorGPUs: 1}, held, t0, tm)
+		}
+		l.HoldChanging("ns/C/both", "C-v", "ns/B/both", "a pod is not ready", t0, tm)
+		if got := all(l, g, ev, t0)["ns/B"]; !slices.Contains(got, constants.ScalingBlockedTransferLimit) ||
+			slices.Contains(got, constants.ScalingBlockedDonorChanging) {
+			t.Fatalf("B held by the transfer limit: want transfer-limit alone, got %v", got)
+		}
+
+		// A's own load rose: short, it is a receiver now, and the hold on
+		// it as a donor keeps nothing from it.
+		l = allocation.NewShareLedger()
+		l.HoldChanging("ns/A/both", "A-v", "ns/B/both", "a pod is not ready", t0, tm)
+		busy, _ := shortGroup()
+		busy.Roles[0].Need, busy.Roles[1].Need = 20, 2
+		busy.Committed = map[string]int{"ns/A/both": 4, "ns/B/both": 14, "ns/C/both": 6}
+		bev := allocation.EvaluateShare(busy.Roles, busy.Committed, busy.Thresholds, busy.Budget, 0.15)
+		if got := all(l, busy, bev, t0); has(got, "ns/A") || has(got, "ns/B") {
+			t.Fatalf("A short and B with plenty: want donor-changing on neither, got %v", got)
+		}
+
+		// Released: gone from both.
+		l = allocation.NewShareLedger()
+		l.HoldChanging("ns/A/both", "A-v", "ns/B/both", "a pod is not ready", t0, tm)
+		l.ObserveChanging("ns/A/both", true, "", 1)
+		if got := all(l, g, ev, t0); has(got, "ns/A") || has(got, "ns/B") {
+			t.Fatalf("after the hold ended: %v", got)
+		}
+	})
 }
 
 // The mode gauge says which mode the optimizer is in -- every mode published,

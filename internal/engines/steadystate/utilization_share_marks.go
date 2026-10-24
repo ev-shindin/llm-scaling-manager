@@ -224,11 +224,74 @@ func lwsDonorPods(name string, replicas, partition int, list []corev1.Pod, marke
 // donor, and it does not back off and is not reported as unsteerable.
 var errDonorExhausted = errors.New("every pod the donor could give is already given to a live transfer")
 
+// steerableDonorPods is donorPods, also refusing a Deployment with a pod that
+// is not Ready: the ReplicaSet removes a not-Ready pod before it consults the
+// cost, so such a donor cannot be steered. variant names the donor variant in
+// the refusal.
+func (e *Engine) steerableDonorPods(ctx context.Context, acc scaletarget.ScaleTargetAccessor, variant, namespace string,
+	marked func(*corev1.Pod) bool) ([]corev1.Pod, error) {
+	pods, err := e.donorPods(ctx, acc, namespace, marked)
+	if err != nil {
+		return nil, err
+	}
+	if !scaletarget.IsLeaderWorkerSet(acc) {
+		for _, p := range pods {
+			if !variantmeta.PodReady(&p) {
+				return nil, fmt.Errorf("donor variant %q has a pod that is not ready: %w", variant, errDonorChanging)
+			}
+		}
+	}
+	return pods, nil
+}
+
+// settleChangingDonors looks again, each cycle, at every donor held because its
+// workload was changing, and lifts the hold once that workload has read stable
+// for confirm cycles in a row (ShareLedger.ObserveChanging): its pods all
+// scheduled and Ready, no rollout. A donor still held is logged every cycle,
+// with why, so a short receiver that waits on it has a cause in the log as
+// well as in donor-changing. A workload that cannot be read this cycle counts
+// neither way; the hold still ends at the release timeout.
+func (e *Engine) settleChangingDonors(ctx context.Context, logger logr.Logger, l *allocation.ShareLedger,
+	g allocation.ShareGroup, accessor func(role, variant string) scaletarget.ScaleTargetAccessor, confirm int, now time.Time) {
+	for _, h := range l.ChangingHolds(now) {
+		acc := accessor(h.Donor, h.Variant)
+		if e.client == nil || acc == nil {
+			logger.Info("Utilization share: donor held while its workload is changing; its workload cannot be read",
+				"donor", h.Donor, "variant", h.Variant, "reason", h.Reason, "heldSince", h.Since, "heldUntil", h.Until)
+			continue
+		}
+		_, err := e.steerableDonorPods(ctx, acc, h.Variant, g.Origins[h.Donor].Namespace, shareMarkOwned(l, nil))
+		var cur allocation.ShareChangingHold
+		switch {
+		case err == nil, errors.Is(err, errDonorExhausted):
+			// Exhausted is no change: every pod is given to a live transfer,
+			// which GivingBusy holds on its own.
+			var released bool
+			if cur, released = l.ObserveChanging(h.Donor, true, "", confirm); released {
+				logger.Info("Utilization share: donor's workload is stable again; it may give",
+					"donor", h.Donor, "variant", h.Variant, "heldSince", h.Since, "held", now.Sub(h.Since).String())
+				continue
+			}
+		case errors.Is(err, errDonorChanging):
+			cur, _ = l.ObserveChanging(h.Donor, false, err.Error(), confirm)
+		default:
+			logger.Info("Utilization share: donor held while its workload is changing; its workload cannot be read",
+				"donor", h.Donor, "variant", h.Variant, "reason", h.Reason, "heldSince", h.Since, "heldUntil", h.Until,
+				"error", err.Error())
+			continue
+		}
+		logger.Info("Utilization share: donor held while its workload is changing; it gives nothing until it is stable",
+			"donor", cur.Donor, "variant", cur.Variant, "reason", cur.Reason, "heldSince", cur.Since,
+			"heldUntil", cur.Until, "stableCycles", cur.SteadyCycles, "confirmCycles", max(confirm, 1))
+	}
+}
+
 // errDonorChanging is a donor whose workload is changing -- a rollout, a pod
 // not yet created, scheduled or Ready, a group being replaced -- so which pod a
-// lower count removes cannot be steered. Routine, not a fault: it is held for
-// one release timeout (ShareLedger.HoldChanging), with no back-off, Warning or
-// blocked reason, so a rollout cannot ratchet the back-off.
+// lower count removes cannot be steered. Routine, not a fault: it is held
+// until its workload reads stable again, or for at most one release timeout
+// (ShareLedger.HoldChanging), with no back-off or Warning, so a rollout cannot
+// ratchet the back-off.
 var errDonorChanging = errors.New("its workload is changing, so the pod a lower count removes cannot be steered")
 
 // podDeletionCost is a pod's deletion cost, 0 when it has none or an invalid
@@ -268,16 +331,9 @@ func (e *Engine) markDonorPods(ctx context.Context, t allocation.ShareTransfer,
 	if e.client == nil || acc == nil {
 		return nil, fmt.Errorf("no client or scale target for donor variant %q", t.DonorVariant)
 	}
-	pods, err := e.donorPods(ctx, acc, namespace, marked)
+	pods, err := e.steerableDonorPods(ctx, acc, t.DonorVariant, namespace, marked)
 	if err != nil {
 		return nil, err
-	}
-	if !scaletarget.IsLeaderWorkerSet(acc) {
-		for _, p := range pods {
-			if !variantmeta.PodReady(&p) {
-				return nil, fmt.Errorf("donor variant %q has a pod that is not ready: %w", t.DonorVariant, errDonorChanging)
-			}
-		}
 	}
 	// A pod another transfer has marked is that transfer's: a second
 	// concurrent transfer from the same donor gives a different pod, or none.

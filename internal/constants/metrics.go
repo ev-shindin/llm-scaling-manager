@@ -834,6 +834,7 @@ var (
 		ScalingBlockedBurstEnding,
 		ScalingBlockedFastSwingCapped,
 		ScalingBlockedDonorNotSteerable,
+		ScalingBlockedDonorChanging,
 		ScalingBlockedQuietPeriod,
 		ScalingBlockedMarksUnreadable,
 		ScalingBlockedWholeReplicaShort,
@@ -923,6 +924,16 @@ const (
 	// marked when it was asked to give (one was not Ready or not scheduled, or
 	// the patch failed), and it is backing off before it is asked again.
 	ScalingBlockedDonorNotSteerable = "donor-not-steerable"
+	// ScalingBlockedDonorChanging indicates a donor is held because its
+	// workload is changing -- a rollout, or a pod not yet created, scheduled
+	// or Ready -- so the pod a lower count removes cannot be steered. Set on
+	// the held donor while it is not short itself, and on each role whose
+	// transfer from it was refused, while that role stays short, is not
+	// receiving, and no reversal-hold or transfer-limit holds it. The hold
+	// ends once the donor's workload reads stable for
+	// stabilization.consecutiveCyclesBeforeMove cycles, or after one release
+	// timeout at the latest. Routine, not a fault: no back-off follows.
+	ScalingBlockedDonorChanging = "donor-changing"
 )
 
 // Kueue cohort borrowing reasons (values for the `reason` label of

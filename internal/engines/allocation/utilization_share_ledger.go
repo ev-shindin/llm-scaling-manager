@@ -9,6 +9,7 @@ import (
 	"math"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
@@ -257,10 +258,11 @@ type ShareLedger struct {
 	// abort is counted, no blocked reason reads it, and the withheld count
 	// does not take it for a reversal hold.
 	busyUntil map[string]time.Time
-	// steadyUntil holds a donor whose workload is changing -- a rollout, a
-	// pod not yet created or scheduled or Ready -- for one release timeout
-	// (HoldChanging). Like busyUntil, not a back-off and not a fault.
-	steadyUntil map[string]time.Time
+	// changing holds a donor whose workload is changing -- a rollout, a pod
+	// not yet created or scheduled or Ready -- until it reads stable for the
+	// confirm cycles, or for at most one release timeout (HoldChanging,
+	// ObserveChanging). Like busyUntil, not a back-off and not a fault.
+	changing map[string]ShareChangingHold
 	// filled is the next Observe's per-role filled GPUs (ReceiverFilled).
 	filled map[string]int
 	// fillHeld holds a receiver whose last fill timed out from being funded
@@ -353,7 +355,7 @@ func NewShareLedger() *ShareLedger {
 		seen:        map[string]time.Time{},
 		unsteerable: map[string]bool{},
 		busyUntil:   map[string]time.Time{},
-		steadyUntil: map[string]time.Time{},
+		changing:    map[string]ShareChangingHold{},
 		fillHeld:    map[string]time.Time{},
 	}
 }
@@ -1567,7 +1569,7 @@ func (l *ShareLedger) MarkFailed(donor string, now time.Time, tm ShareTimings) {
 // release that landed, a cancel, an abort -- may have left it a pod to give,
 // so the hold ends with the last of them.
 func (l *ShareLedger) GivingBusy(role string, now time.Time) bool {
-	if now.Before(l.steadyUntil[role]) {
+	if l.Changing(role, now) {
 		return true
 	}
 	if !now.Before(l.busyUntil[role]) {
@@ -1600,18 +1602,105 @@ func (l *ShareLedger) FillHeld(receiver string, now time.Time) bool {
 	return now.Before(l.fillHeld[receiver])
 }
 
-// HoldChanging keeps donor from being asked again for one release timeout:
-// its workload is changing -- a rollout, a pod not yet created, scheduled or
-// Ready -- and which pod a lower count removes cannot be steered until it
-// settles. Routine, not a fault: no abort, no back-off, not unsteerable, so a
-// rollout cannot ratchet the back-off the next real abort starts from.
-func (l *ShareLedger) HoldChanging(donor string, now time.Time, tm ShareTimings) {
+// ShareChangingHold is a donor held by HoldChanging.
+type ShareChangingHold struct {
+	// Donor is the held role, and Variant the donor variant whose workload
+	// was changing.
+	Donor, Variant string
+	// Receivers are the roles whose transfers from it were refused while it
+	// holds (a spare return has none).
+	Receivers []string
+	// Reason is why its pods could not be steered, as the refusal said.
+	Reason string
+	// Since is when the hold began, and Until when it ends at the latest.
+	Since, Until time.Time
+	// SteadyCycles counts the cycles in a row its workload has read stable
+	// since (ObserveChanging).
+	SteadyCycles int
+}
+
+// HoldChanging keeps donor from being asked again until its workload is stable
+// (ObserveChanging), or for at most one release timeout: its workload is
+// changing -- a rollout, a pod not yet created, scheduled or Ready -- and which
+// pod a lower count removes cannot be steered until it settles. variant is the
+// donor variant that was refused, receiver the role the refused transfer was
+// for (empty for a spare return), and reason why. Routine, not a fault: no
+// abort, no back-off, not unsteerable, so a rollout cannot ratchet the
+// back-off the next real abort starts from.
+func (l *ShareLedger) HoldChanging(donor, variant, receiver, reason string, now time.Time, tm ShareTimings) {
 	if donor == "" {
 		return
 	}
-	if until := now.Add(tm.ReleaseTimeout); until.After(l.steadyUntil[donor]) {
-		l.steadyUntil[donor] = until
+	h, held := l.changing[donor]
+	if !held || !now.Before(h.Until) {
+		h = ShareChangingHold{Donor: donor, Since: now}
 	}
+	h.Variant, h.Reason, h.SteadyCycles = variant, reason, 0
+	if receiver != "" && !slices.Contains(h.Receivers, receiver) {
+		h.Receivers = append(slices.Clone(h.Receivers), receiver)
+	}
+	if until := now.Add(tm.ReleaseTimeout); until.After(h.Until) {
+		h.Until = until
+	}
+	l.changing[donor] = h
+}
+
+// Changing reports whether role is held by HoldChanging.
+func (l *ShareLedger) Changing(role string, now time.Time) bool {
+	h, ok := l.changing[role]
+	return ok && now.Before(h.Until)
+}
+
+// ChangingBlocks reports whether a donor HoldChanging holds now refused a
+// transfer to receiver.
+func (l *ShareLedger) ChangingBlocks(receiver string, now time.Time) bool {
+	for d, h := range l.changing {
+		if d != receiver && now.Before(h.Until) && slices.Contains(h.Receivers, receiver) {
+			return true
+		}
+	}
+	return false
+}
+
+// ChangingHolds lists the donors HoldChanging holds now, by donor.
+func (l *ShareLedger) ChangingHolds(now time.Time) []ShareChangingHold {
+	var out []ShareChangingHold
+	for _, h := range l.changing {
+		if now.Before(h.Until) {
+			out = append(out, h)
+		}
+	}
+	slices.SortFunc(out, func(a, b ShareChangingHold) int { return strings.Compare(a.Donor, b.Donor) })
+	return out
+}
+
+// ObserveChanging records one cycle's look at a held donor's workload: stable,
+// or still changing for reason. The hold ends once the workload has read
+// stable for confirm cycles in a row (at least one) -- a pod that became
+// Ready, a rollout that finished -- rather than at the release timeout, which
+// left a donor whose idle-fill pod became Ready in four minutes held for ten.
+// A changing reading starts the count again. It returns the hold as updated,
+// and whether it ended.
+func (l *ShareLedger) ObserveChanging(donor string, stable bool, reason string, confirm int) (ShareChangingHold, bool) {
+	h, ok := l.changing[donor]
+	if !ok {
+		return h, false
+	}
+	if !stable {
+		h.SteadyCycles = 0
+		if reason != "" {
+			h.Reason = reason
+		}
+		l.changing[donor] = h
+		return h, false
+	}
+	h.SteadyCycles++
+	if h.SteadyCycles >= max(confirm, 1) {
+		delete(l.changing, donor)
+		return h, true
+	}
+	l.changing[donor] = h
+	return h, false
 }
 
 // HoldGiving keeps donor from being asked again until one of its releases
@@ -1670,7 +1759,7 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		delete(l.aborts, r)
 		delete(l.unsteerable, r)
 		delete(l.busyUntil, r)
-		delete(l.steadyUntil, r)
+		delete(l.changing, r)
 		delete(l.fillHeld, r)
 		delete(l.giveAfter, r)
 		delete(l.fillBlocked, r)

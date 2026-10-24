@@ -118,7 +118,8 @@ falling model's whole scale-down window.
   within roughly 100 minutes
   ([proposal §6.7](../../proposals/utilization-share-optimizer.md#67-why-it-does-not-oscillate-and-what-it-cannot-follow)).
 - **The donors cannot be steered.** A Deployment often mid-rollout, or with
-  pods Pending or not Ready, is refused as a donor (`donor-not-steerable`).
+  pods Pending or not Ready, is held as a donor until it settles
+  (`donor-changing`).
 - **The real limit is something else.** If a Kubernetes `ResourceQuota` or
   unmanaged workloads stop pods, a donor's freed GPUs can be taken by a pod the
   scaling manager did not place (`release-taken`).

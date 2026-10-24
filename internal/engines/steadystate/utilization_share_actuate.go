@@ -298,6 +298,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		return out
 	}
 
+	e.settleChangingDonors(ctx, logger, l, g, accessor, us.Stabilization.ConsecutiveCyclesBeforeMove, now)
 	before := map[string]allocation.ShareTransfer{}
 	for _, t := range l.Transfers() {
 		before[t.ID] = t
@@ -342,7 +343,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		marked := map[string][]string{}
 		markedPods := map[string][]corev1.Pod{}
 		var failed error
-		failedDonor := ""
+		failedDonor, failedVariant, failedReceiver := "", "", ""
 		private := sharePrivate(set)
 		for _, t := range set {
 			pods, err := e.markDonorPods(ctx, t, accessor(t.Donor, t.DonorVariant), g.Origins[t.Donor].Namespace, ownedMark, private, written)
@@ -351,7 +352,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 				taken[p] = true
 			}
 			if err != nil {
-				failed, failedDonor = err, t.Donor
+				failed, failedDonor, failedVariant, failedReceiver = err, t.Donor, t.DonorVariant, t.Receiver
 				break
 			}
 		}
@@ -377,10 +378,13 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			// lands, any other backs off as after an abort.
 			if errors.Is(failed, errDonorChanging) {
 				// Routine: a rollout, a pod still starting. Not a fault, so
-				// no abort, no back-off, no Warning and no blocked reason.
-				l.HoldChanging(failedDonor, now, tm)
-				logger.V(logging.DEBUG).Info("Utilization share: donor's workload is changing; transfer not started",
-					"id", set[0].ID, "donor", failedDonor, "reason", failed.Error())
+				// no abort, no back-off and no Warning. Held until its
+				// workload reads stable (settleChangingDonors), and said
+				// every cycle it is: donor-changing and the log line there.
+				l.HoldChanging(failedDonor, failedVariant, failedReceiver, failed.Error(), now, tm)
+				logger.Info("Utilization share: donor's workload is changing; transfer not started",
+					"id", set[0].ID, "donor", failedDonor, "reason", failed.Error(),
+					"heldUntilStableOrBy", now.Add(tm.ReleaseTimeout))
 				continue
 			}
 			if errors.Is(failed, errDonorExhausted) {
@@ -913,6 +917,11 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 		if l.Swinging(r.Key, now) {
 			add(r.Key, constants.ScalingBlockedSwinging)
 		}
+		// On the held donor while it would give; short, it is a receiver
+		// now, and the hold keeps nothing from it.
+		if l.Changing(r.Key, now) && v.Headroom >= 0 {
+			add(r.Key, constants.ScalingBlockedDonorChanging)
+		}
 		if slices.Contains(meanCapped, r.Key) {
 			add(r.Key, constants.ScalingBlockedFastSwingCapped)
 		}
@@ -943,6 +952,10 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 			case l.InFlight() >= allocation.ShareMaxConcurrentTransfers &&
 				(!urgent || !calmDonor || !l.Unpaced(r.Key, peers, tm)):
 				add(r.Key, constants.ScalingBlockedTransferLimit)
+			// A donor held while its workload changes refused this role's
+			// transfer, the urgent too: its pods cannot be steered.
+			case l.ChangingBlocks(r.Key, now):
+				add(r.Key, constants.ScalingBlockedDonorChanging)
 			}
 		}
 		if reason := l.FillBlockedReason(r.Key, now); reason != "" {

@@ -498,7 +498,7 @@ utilizationShare:
 
 | Key (under `stabilization:`) | Default | Meaning |
 | --- | --- | --- |
-| `consecutiveCyclesBeforeMove` | `2` | How many controller cycles in a row a model must look short (or have GPUs to spare) before GPUs move. It is also how many cycles a model must hold more than its need plus its headroom before it starts giving the extra back to a contended quota (the release then waits its scale-down window). Raise it to ignore brief spikes; `1` acts on the first reading. |
+| `consecutiveCyclesBeforeMove` | `2` | How many controller cycles in a row a model must look short (or have GPUs to spare) before GPUs move. It is also how many cycles a model must hold more than its need plus its headroom before it starts giving the extra back to a contended quota (the release then waits its scale-down window). It also ends a `donor-changing` hold: a donor refused because its workload was changing gives again once its workload has read stable (pods Ready, no rollout) for this many cycles in a row. Raise it to ignore brief spikes; `1` acts on the first reading. |
 | `waitBeforeReverseMove` | `auto` | After a model gives GPUs it cannot receive any for this long, and after it receives it cannot give. A duration (`12m`) or `auto`: twice the time the group's donors take to release a replica (scale-down window, KEDA polling, pod drain, or the measured time once three releases have completed). `0s` turns the wait off. |
 | `flappingWindow` | `auto` | A model whose moves change direction `swingReversals` times (three by default: a swing and a half) within this window is planned on its average demand over the window, not its current one, so a load that swings faster than GPUs can follow stops chasing it. A transfer called off because demand reversed before anything moved counts as the move it would have made, so it is a change of direction only when it reverses the model's move before it; a spare return called off counts for nothing, as it moves no GPUs between models. A single swap and swap back is not a swing: counting the move that first raised the model, it changes direction twice, and with the default `swingReversals` the models follow their current demand. This ends early when the load moves for good: once the model's demand has stayed more than a quarter above its average, or a quarter below it, for as long as a move takes and for longer than any earlier swing in the window, it is planned on its current demand again. A load that keeps swinging stays on the average as long as it changes direction `swingReversals` times within the window; with the default three, one whose halves each last more than about a third of the window is followed move by move. A duration or `auto`: eight times the time a move takes from decision to serving. `0s` turns the rule off. |
 | `swingReversals` | `3` | How many changes of direction within `flappingWindow` make a model swinging, so that it is planned on its average demand. An integer from `2` to `20`. `2` holds a single swap and swap back on the average, as before this key existed: in the measured case two models sat halfway for eleven minutes after a swap back and reached their split after 28, against 9 with the rule off. Raise it to hold only a load that keeps swinging; with `flappingWindow` at `0s` it has no effect. |
@@ -940,9 +940,13 @@ When no cost fits strictly between them, or a sibling's cost is the int32
 minimum (`-2147483648`) so nothing fits below it, the donor is refused
 (`donor-not-steerable`).
 
-A Deployment whose workload is changing is not asked to give: it is held for
-one release timeout, as routine -- no back-off, no Warning, no blocked reason --
-and its receiver tries another donor. Changing means:
+A Deployment whose workload is changing is not asked to give: it is held, as
+routine -- no back-off, no Warning -- and its receiver tries another donor. The
+hold ends once its workload reads stable for
+`stabilization.consecutiveCyclesBeforeMove` cycles in a row (for example, the
+pod that was starting is Ready), and after one release timeout at the latest.
+While it holds, the donor and the model whose transfer it refused carry the
+blocked reason `donor-changing`. Changing means:
 
 - a pod is not Ready or not yet scheduled: the ReplicaSet removes such pods
   before it reads the cost;
