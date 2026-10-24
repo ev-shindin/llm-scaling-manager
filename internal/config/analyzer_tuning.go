@@ -263,18 +263,20 @@ func defaultDuration(v *PolicyDuration, d PolicyDuration) {
 	}
 }
 
-// WithDefaults returns t with every unset field at its default.
+// WithDefaults returns t with every unset field at its default, and every
+// crossed pair back at both defaults (repairCrossedPairs).
 func (t AnalyzerTuning) WithDefaults() AnalyzerTuning {
+	t.fillDefaults()
+	t.repairCrossedPairs()
+	return t
+}
+
+// fillDefaults sets every unset field of t to its default. CapMaxPreemptionRate
+// stays nil when unset (ITLCapPreemptionRate).
+func (t *AnalyzerTuning) fillDefaults() {
 	b := &t.ITLBand
 	defaultFloat(&b.MinObservableK, DefaultITLMinObservableK)
 	defaultFloat(&b.MaxObservableK, DefaultITLMaxObservableK)
-	// Each edge is checked alone, so a merge can invert the pair; an
-	// inverted or out-of-range band reads as the defaults, never as a band
-	// that admits nothing. CapMaxPreemptionRate stays nil when unset
-	// (ITLCapPreemptionRate).
-	if !(b.MinObservableK > 0 && b.MinObservableK < b.MaxObservableK && b.MaxObservableK < 1) {
-		b.MinObservableK, b.MaxObservableK = DefaultITLMinObservableK, DefaultITLMaxObservableK
-	}
 	g := &t.SteadyGate
 	defaultDuration(&g.SteadyFor, DefaultSteadyFor)
 	defaultFloat(&g.MaxKDrift, DefaultMaxKDrift)
@@ -295,15 +297,16 @@ func (t AnalyzerTuning) WithDefaults() AnalyzerTuning {
 	defaultFloat(&t.FloorTrust.TrustFraction, DefaultFloorTrustFraction)
 	defaultFloat(&t.BacklogGrowth.MinRequests, DefaultBacklogGrowthMinRequests)
 	defaultFloat(&t.BacklogGrowth.Fraction, DefaultBacklogGrowthFraction)
-	t.repairCrossedPairs()
-	return t
 }
 
 // repairCrossedPairs puts each pair whose two keys are crossed back to both
-// defaults, as the ITL band is. An entry's validate checks a pair only where
-// it sets both keys, so a key set alone, or merged over a partner from
-// another layer, can cross it; no consumer may see a crossed pair:
+// defaults, and returns one line per pair it reset, naming the keys, the
+// values it found and the defaults it used. An entry's validate checks a pair
+// only where it sets both keys, so a key set alone, or merged over a partner
+// from another layer, can cross it; no consumer may see a crossed pair:
 //
+//   - itlBand: minObservableK at or over maxObservableK (or an edge out of
+//     (0, 1)), a band that admits nothing;
 //   - floorTrust: trustFraction at or under lagFraction, which the ramp
 //     divides by the difference of;
 //   - steadyGate: carry under steadyFor, so a steady reading would age out
@@ -312,19 +315,75 @@ func (t AnalyzerTuning) WithDefaults() AnalyzerTuning {
 //     the latch exists for, so the choice flips with derived's noise;
 //   - muChoice: lowHoldFor under freshFor, so a low measurement would stop
 //     pricing before it is even stale.
-func (t *AnalyzerTuning) repairCrossedPairs() {
-	if !(t.FloorTrust.TrustFraction > t.FloorTrust.LagFraction) {
-		t.FloorTrust.LagFraction, t.FloorTrust.TrustFraction = DefaultFloorLagFraction, DefaultFloorTrustFraction
+func (t *AnalyzerTuning) repairCrossedPairs() []string {
+	const p = "analyzerTuning."
+	var reset []string
+	note := func(keys, rule string, found, used [2]any) {
+		reset = append(reset, fmt.Sprintf("%s%s = %v/%v: %s; using the defaults %v/%v instead",
+			p, keys, found[0], found[1], rule, used[0], used[1]))
+	}
+	if b := &t.ITLBand; !(b.MinObservableK > 0 && b.MinObservableK < b.MaxObservableK && b.MaxObservableK < 1) {
+		note("itlBand.minObservableK/maxObservableK", "the minimum must be below the maximum",
+			[2]any{b.MinObservableK, b.MaxObservableK}, [2]any{DefaultITLMinObservableK, DefaultITLMaxObservableK})
+		b.MinObservableK, b.MaxObservableK = DefaultITLMinObservableK, DefaultITLMaxObservableK
+	}
+	if f := &t.FloorTrust; !(f.TrustFraction > f.LagFraction) {
+		note("floorTrust.lagFraction/trustFraction", "trustFraction must be above lagFraction",
+			[2]any{f.LagFraction, f.TrustFraction}, [2]any{DefaultFloorLagFraction, DefaultFloorTrustFraction})
+		f.LagFraction, f.TrustFraction = DefaultFloorLagFraction, DefaultFloorTrustFraction
 	}
 	if g := &t.SteadyGate; g.Carry < g.SteadyFor {
+		note("steadyGate.steadyFor/carry", "carry must be at least steadyFor",
+			[2]any{g.SteadyFor.Duration(), g.Carry.Duration()}, [2]any{DefaultSteadyFor.Duration(), DefaultSteadyCarry.Duration()})
 		g.SteadyFor, g.Carry = DefaultSteadyFor, DefaultSteadyCarry
 	}
 	if m := &t.MuChoice; m.ReturnRatio > m.MaxRatio {
+		note("muChoice.maxRatio/returnRatio", "returnRatio must be at most maxRatio",
+			[2]any{m.MaxRatio, m.ReturnRatio}, [2]any{DefaultMeasuredDerivedMaxRatio, DefaultMeasuredDerivedReturn})
 		m.MaxRatio, m.ReturnRatio = DefaultMeasuredDerivedMaxRatio, DefaultMeasuredDerivedReturn
 	}
 	if m := &t.MuChoice; m.LowHoldFor < m.FreshFor {
+		note("muChoice.freshFor/lowHoldFor", "lowHoldFor must be at least freshFor",
+			[2]any{m.FreshFor.Duration(), m.LowHoldFor.Duration()},
+			[2]any{DefaultMeasuredMuFreshFor.Duration(), DefaultMeasuredLowHoldFor.Duration()})
 		m.FreshFor, m.LowHoldFor = DefaultMeasuredMuFreshFor, DefaultMeasuredLowHoldFor
 	}
+	return reset
+}
+
+// TuningFallbacks says which tuning figures entry, resolved over base as the
+// run-time merge resolves a model's policy, will not run with: each crossed
+// pair repairCrossedPairs resets, and an idleKvUsage at or over the
+// kvCacheThreshold, which ScalingPolicy.IdleKvUsage holds at the threshold.
+// base is the "default" entry, or nil when entry is the default entry itself.
+// One line per figure; none when the entry runs as written. Read at config
+// load, so an operator's setting that is ignored is said once, not every
+// cycle.
+func TuningFallbacks(base *ScalingPolicy, entry ScalingPolicy) []string {
+	var merged ScalingPolicy
+	if base != nil {
+		merged.AnalyzerTuning.merge(base.AnalyzerTuning)
+		merged.LoadImbalance.merge(base.LoadImbalance)
+		merged.KvCacheThreshold = base.KvCacheThreshold
+	}
+	merged.AnalyzerTuning.merge(entry.AnalyzerTuning)
+	merged.LoadImbalance.merge(entry.LoadImbalance)
+	if entry.KvCacheThreshold != 0 {
+		merged.KvCacheThreshold = entry.KvCacheThreshold
+	}
+	t := merged.AnalyzerTuning
+	t.fillDefaults()
+	out := t.repairCrossedPairs()
+	idle := merged.LoadImbalance.WithDefaults().IdleKvUsage
+	kv := merged.KvCacheThreshold
+	if kv == 0 {
+		kv = DefaultKvCacheThreshold
+	}
+	if idle >= kv {
+		out = append(out, fmt.Sprintf("loadImbalance.idleKvUsage = %v is not below kvCacheThreshold %v: "+
+			"a replica cannot be idle and full at once; using %v as the idle bound instead", idle, kv, min(idle, kv)))
+	}
+	return out
 }
 
 // WithDefaults returns l with every unset field at its default.

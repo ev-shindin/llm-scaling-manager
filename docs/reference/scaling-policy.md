@@ -1453,7 +1453,13 @@ is not finite (`.nan`, `.inf`) is skipped and reported.
   may come from a lower layer (the `default` entry or a tier), which the entry
   cannot see.
 - After the merge, a crossed pair goes back to **both** defaults. The analyzer
-  never runs with a crossed pair, and it does not log the fallback.
+  never runs with a crossed pair.
+- When the controller reads the ConfigMap, it resolves each entry over the
+  `default` entry, as for a model with no tier. For each pair that would fall
+  back, it logs one line, once per read rather than every cycle:
+  `WARNING: tuning figure not used: analyzerTuning.steadyGate.steadyFor/carry = 10m0s/5m0s: carry must be at least steadyFor; using the defaults 2m0s/5m0s instead`,
+  with the entry's `key`. A pair crossed only through a named tier is not
+  checked at that point.
 - So when you move one key past its partner's default, set both keys in the
   same entry. For example, `steadyFor: 10m` on its own crosses the default
   `carry` of `5m`, and both go back to `2m` and `5m`. Write
@@ -1478,7 +1484,7 @@ long-context:
 | Key | Default | Range | What it does |
 |-----|---------|-------|--------------|
 | `minObservableK` | `0.15` | (0, 1), below `maxObservableK` | Lowest KV fill at which a replica's inter-token latency teaches its ITL line. Below it the engine barely batches and the latency is noise. |
-| `maxObservableK` | `0.80` | (0, 1) | Highest KV fill at which the latency teaches the line. Above it an engine short of memory preempts and its latency leaves the line. If the merged policy leaves it at or below `minObservableK`, both edges go back to their defaults. |
+| `maxObservableK` | `0.80` | (0, 1) | Highest KV fill at which the latency teaches the line. Above it an engine short of memory preempts and its latency leaves the line. If the merged policy leaves it at or below `minObservableK`, both edges go back to their defaults, and the controller logs a `WARNING: tuning figure not used` line when it reads the ConfigMap. |
 | `capMaxPreemptionRate` | `0` | >= 0 | A replica above `maxObservableK` still teaches the line when it is at its sequence cap: its running batch is exactly `--max-num-seqs` (set on the engine, not defaulted) times its ranks, and requests are waiting. This is the most preemptions per second it may show over the ITL window. An explicit `0` overrides a tier that raised it. vLLM only: SGLang publishes no preemption counter. |
 
 These three were top-level keys (`itlMinObservableK`, `itlMaxObservableK`,
@@ -1491,7 +1497,7 @@ spelling is reported as an unknown key and ignored.
 |-----|---------|-------|--------------|
 | `steadyFor` | `2m` | 1m to 24h | How long a replica's KV fill must hold still before its latency reading may teach the ITL line. The latency is a one-minute average, so a shorter wait pairs this moment's fill with last minute's latency. |
 | `maxKDrift` | `0.10` | (0, 1) | How far the KV fill may move within `steadyFor` and still count as steady. |
-| `carry` | `5m` | `steadyFor` to 24h | How long a steady reading is kept past the newest window, so a load step's old level is still there when the new one settles. If the merged policy has `carry` under `steadyFor`, both go back to `2m` and `5m`. |
+| `carry` | `5m` | `steadyFor` to 24h | How long a steady reading is kept past the newest window, so a load step's old level is still there when the new one settles. If the merged policy has `carry` under `steadyFor`, both go back to `2m` and `5m`, and the controller logs a `WARNING: tuning figure not used` line when it reads the ConfigMap. |
 | `idleRows` | `2` | 1 to 1000 | How many cycles in a row with no latency and no KV fill make a replica idle rather than one missed scrape. An idle replica waits out `steadyFor` again when load returns. |
 | `minSettledSamples` | `3` | 1 to 1000 | The fewest readings from settled replicas the line is refitted from. Below it the last slope holds. |
 
@@ -1515,9 +1521,9 @@ collector's one-minute rate window and is not configurable.
 |-----|---------|-------|--------------|
 | `minMeasuredOfDerived` | `0.5` | (0, 1] | A saturated reading under this share of the rate derived from the ITL line is not recorded at once (a filling or stalled replica). |
 | `maxRatio` | `2.0` | 1 to 100 | How far a measured rate may disagree with the derived one, or sit under what another replica served, before it gives way. |
-| `returnRatio` | `1.6` | 1 to `maxRatio` | How close a rate that gave way must come back before it prices again. The gap to `maxRatio` stops the price flipping on noise. If the merged policy has `returnRatio` over `maxRatio`, both go back to `2.0` and `1.6`. |
+| `returnRatio` | `1.6` | 1 to `maxRatio` | How close a rate that gave way must come back before it prices again. The gap to `maxRatio` stops the price flipping on noise. If the merged policy has `returnRatio` over `maxRatio`, both go back to `2.0` and `1.6`, and the controller logs a `WARNING: tuning figure not used` line when it reads the ConfigMap. |
 | `freshFor` | `5m` | 1s to 24h | How long after its last agreeing reading a measured rate outranks a derived one that disagrees. |
-| `lowHoldFor` | `30m` | `freshFor` to 24h | How long a measured rate far **under** the derived one keeps pricing. The lower price orders more replicas, so it is held longer. If the merged policy has `lowHoldFor` under `freshFor`, both go back to `5m` and `30m`. |
+| `lowHoldFor` | `30m` | `freshFor` to 24h | How long a measured rate far **under** the derived one keeps pricing. The lower price orders more replicas, so it is held longer. If the merged policy has `lowHoldFor` under `freshFor`, both go back to `5m` and `30m`, and the controller logs a `WARNING: tuning figure not used` line when it reads the ConfigMap. |
 
 #### `analyzerTuning.admission`: which readings are service-rate samples
 
@@ -1534,7 +1540,8 @@ collector's one-minute rate window and is not configurable.
 | `trustFraction` | `0.8` | (`lagFraction`, 1] | At or above this share, the floor's drain price is trusted in full. In between the two prices are blended. |
 
 If the merged policy has `trustFraction` at or under `lagFraction`, both go
-back to `0.5` and `0.8`.
+back to `0.5` and `0.8`, and the controller logs a `WARNING: tuning figure not
+used` line when it reads the ConfigMap.
 
 #### `analyzerTuning.backlogGrowth`: when a queue counts as growing
 
@@ -1554,7 +1561,7 @@ It never changes a scaling decision.
 
 | Key | Default | Range | What it does |
 |-----|---------|-------|--------------|
-| `idleKvUsage` | `0.30` | (0, 1), below `kvCacheThreshold` | A Ready replica with nothing waiting is idle below this KV use. **The saturation analyzer reads the same key** for its own idle test, so the two cannot disagree. The idle figure is never above `kvCacheThreshold`. An entry that sets `idleKvUsage` at or above its `kvCacheThreshold` is rejected. An entry that leaves `idleKvUsage` unset is not checked: with `kvCacheThreshold: 0.3` or lower, it is valid, and the idle figure is `kvCacheThreshold`. |
+| `idleKvUsage` | `0.30` | (0, 1), below `kvCacheThreshold` | A Ready replica with nothing waiting is idle below this KV use. **The saturation analyzer reads the same key** for its own idle test, so the two cannot disagree. The idle figure is never above `kvCacheThreshold`. An entry that sets `idleKvUsage` at or above its `kvCacheThreshold` is rejected. An entry that leaves `idleKvUsage` unset is not checked: with `kvCacheThreshold: 0.3` or lower, it is valid, and the idle figure is `kvCacheThreshold`. Whenever the idle figure in force is at or above `kvCacheThreshold`, the controller logs a `WARNING: tuning figure not used` line for the entry when it reads the ConfigMap. |
 | `idleAfterReady` | `2m` | 1m to 24h | How long a replica must be Ready before it can count as idle. |
 | `sustainFor` | `2m` | 1m to 24h | How long a role must read imbalanced, every cycle, before it is reported. Also how long collection must fail before the series are dropped. |
 | `clearAfter` | `2m` | 1s to 24h | How long a reported role must read balanced, every cycle, before the report clears. |
@@ -2577,7 +2584,8 @@ The controller validates all configuration entries on load. Invalid entries are 
     nothing is checked; the idle figure in use is never above `kvCacheThreshold`.
 12. **Pairs** (only when the entry sets both keys): `minObservableK` below `maxObservableK`, `carry` at least
     `steadyFor`, `returnRatio` at most `maxRatio`, `lowHoldFor` at least `freshFor`, and `trustFraction` above
-    `lagFraction`. A pair the merge crosses goes back to both defaults instead of being rejected; see
+    `lagFraction`. A pair the merge crosses goes back to both defaults instead of being rejected, with a
+    `WARNING: tuning figure not used` log line; see
     [Advanced tuning](#advanced-tuning-analyzertuning-and-loadimbalance).
 
 > Analyzer `type`/`name` values are **not** restricted to a fixed set — an unrecognized analyzer is
