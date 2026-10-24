@@ -288,14 +288,38 @@ func (t AnalyzerTuning) WithDefaults() AnalyzerTuning {
 	defaultFloat(&t.Admission.SiblingMuTolerance, DefaultSiblingMuTolerance)
 	defaultFloat(&t.FloorTrust.LagFraction, DefaultFloorLagFraction)
 	defaultFloat(&t.FloorTrust.TrustFraction, DefaultFloorTrustFraction)
-	// Each figure is checked alone, so a policy merged from two entries can
-	// pair a trust under a lag; the ramp divides by their difference.
-	if !(t.FloorTrust.TrustFraction > t.FloorTrust.LagFraction) {
-		t.FloorTrust = FloorTrustTuning{LagFraction: DefaultFloorLagFraction, TrustFraction: DefaultFloorTrustFraction}
-	}
 	defaultFloat(&t.BacklogGrowth.MinRequests, DefaultBacklogGrowthMinRequests)
 	defaultFloat(&t.BacklogGrowth.Fraction, DefaultBacklogGrowthFraction)
+	t.repairCrossedPairs()
 	return t
+}
+
+// repairCrossedPairs puts each pair whose two keys are crossed back to both
+// defaults, as the ITL band is. An entry's validate checks a pair only where
+// it sets both keys, so a key set alone, or merged over a partner from
+// another layer, can cross it; no consumer may see a crossed pair:
+//
+//   - floorTrust: trustFraction at or under lagFraction, which the ramp
+//     divides by the difference of;
+//   - steadyGate: carry under steadyFor, so a steady reading would age out
+//     before it could be steady;
+//   - muChoice: returnRatio over maxRatio, which removes the hysteresis band
+//     the latch exists for, so the choice flips with derived's noise;
+//   - muChoice: lowHoldFor under freshFor, so a low measurement would stop
+//     pricing before it is even stale.
+func (t *AnalyzerTuning) repairCrossedPairs() {
+	if !(t.FloorTrust.TrustFraction > t.FloorTrust.LagFraction) {
+		t.FloorTrust.LagFraction, t.FloorTrust.TrustFraction = DefaultFloorLagFraction, DefaultFloorTrustFraction
+	}
+	if g := &t.SteadyGate; g.Carry < g.SteadyFor {
+		g.SteadyFor, g.Carry = DefaultSteadyFor, DefaultSteadyCarry
+	}
+	if m := &t.MuChoice; m.ReturnRatio > m.MaxRatio {
+		m.MaxRatio, m.ReturnRatio = DefaultMeasuredDerivedMaxRatio, DefaultMeasuredDerivedReturn
+	}
+	if m := &t.MuChoice; m.LowHoldFor < m.FreshFor {
+		m.FreshFor, m.LowHoldFor = DefaultMeasuredMuFreshFor, DefaultMeasuredLowHoldFor
+	}
 }
 
 // WithDefaults returns l with every unset field at its default.
@@ -399,12 +423,11 @@ func countWithin(key string, v int) error {
 	return nil
 }
 
-// validate checks each field the entry sets, and the relations between them
-// with an unset partner read at its default.
+// validate checks each field the entry sets, and each pair rule where the
+// entry sets both keys of the pair.
 func (t AnalyzerTuning) validate() error {
 	const p = "analyzerTuning."
 	g, m := t.SteadyGate, t.MuChoice
-	eff := t.WithDefaults()
 	var capRate error
 	if r := t.ITLBand.CapMaxPreemptionRate; r != nil && *r < 0 {
 		capRate = fmt.Errorf("%sitlBand.capMaxPreemptionRate must be >= 0, got %g", p, *r)
@@ -435,36 +458,27 @@ func (t AnalyzerTuning) validate() error {
 	if err != nil {
 		return err
 	}
-	// Relations, on the values the analyzer would run with. WithDefaults
-	// replaces a crossed floor-trust pair, so it is checked on the entry's.
-	lag, trust := t.FloorTrust.LagFraction, t.FloorTrust.TrustFraction
-	if lag == 0 {
-		lag = DefaultFloorLagFraction
-	}
-	if trust == 0 {
-		trust = DefaultFloorTrustFraction
-	}
-	lo, hi := t.ITLBand.MinObservableK, t.ITLBand.MaxObservableK
-	if lo == 0 {
-		lo = DefaultITLMinObservableK
-	}
-	if hi == 0 {
-		hi = DefaultITLMaxObservableK
-	}
+	// Relations, only where the entry sets both keys of the pair. One key set
+	// alone meets its partner from the layer below, which this entry cannot
+	// see; the resolved policy repairs a pair the merge crossed
+	// (repairCrossedPairs).
+	b, f := t.ITLBand, t.FloorTrust
 	switch {
-	case lo >= hi:
-		return fmt.Errorf("%sitlBand.minObservableK (%g) must be below itlBand.maxObservableK (%g)", p, lo, hi)
-	case eff.SteadyGate.Carry < eff.SteadyGate.SteadyFor:
+	case b.MinObservableK != 0 && b.MaxObservableK != 0 && b.MinObservableK >= b.MaxObservableK:
+		return fmt.Errorf("%sitlBand.minObservableK (%g) must be below itlBand.maxObservableK (%g)",
+			p, b.MinObservableK, b.MaxObservableK)
+	case g.SteadyFor != 0 && g.Carry != 0 && g.Carry < g.SteadyFor:
 		return fmt.Errorf("%ssteadyGate.carry (%v) must be at least steadyGate.steadyFor (%v)",
-			p, eff.SteadyGate.Carry.Duration(), eff.SteadyGate.SteadyFor.Duration())
-	case eff.MuChoice.ReturnRatio > eff.MuChoice.MaxRatio:
+			p, g.Carry.Duration(), g.SteadyFor.Duration())
+	case m.MaxRatio != 0 && m.ReturnRatio != 0 && m.ReturnRatio > m.MaxRatio:
 		return fmt.Errorf("%smuChoice.returnRatio (%g) must be at most muChoice.maxRatio (%g)",
-			p, eff.MuChoice.ReturnRatio, eff.MuChoice.MaxRatio)
-	case eff.MuChoice.LowHoldFor < eff.MuChoice.FreshFor:
+			p, m.ReturnRatio, m.MaxRatio)
+	case m.FreshFor != 0 && m.LowHoldFor != 0 && m.LowHoldFor < m.FreshFor:
 		return fmt.Errorf("%smuChoice.lowHoldFor (%v) must be at least muChoice.freshFor (%v)",
-			p, eff.MuChoice.LowHoldFor.Duration(), eff.MuChoice.FreshFor.Duration())
-	case !(trust > lag):
-		return fmt.Errorf("%sfloorTrust.trustFraction (%g) must be above floorTrust.lagFraction (%g)", p, trust, lag)
+			p, m.LowHoldFor.Duration(), m.FreshFor.Duration())
+	case f.LagFraction != 0 && f.TrustFraction != 0 && !(f.TrustFraction > f.LagFraction):
+		return fmt.Errorf("%sfloorTrust.trustFraction (%g) must be above floorTrust.lagFraction (%g)",
+			p, f.TrustFraction, f.LagFraction)
 	}
 	return nil
 }

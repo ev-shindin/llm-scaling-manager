@@ -1438,6 +1438,27 @@ rest. Durations are Go duration strings (`90s`, `2m`); a bare number is an
 error. A value out of range drops the entry, like any invalid key; a value that
 is not finite (`.nan`, `.inf`) is skipped and reported.
 
+**Some keys come in pairs, and a pair must not cross.** The pairs are:
+
+| Pair | Rule |
+|------|------|
+| `itlBand.minObservableK`, `itlBand.maxObservableK` | minimum below maximum |
+| `steadyGate.steadyFor`, `steadyGate.carry` | `carry` at least `steadyFor` |
+| `muChoice.maxRatio`, `muChoice.returnRatio` | `returnRatio` at most `maxRatio` |
+| `muChoice.freshFor`, `muChoice.lowHoldFor` | `lowHoldFor` at least `freshFor` |
+| `floorTrust.lagFraction`, `floorTrust.trustFraction` | `trustFraction` above `lagFraction` |
+
+- An entry that sets **both** keys of a crossed pair is rejected.
+- An entry that sets **one** key is not checked against the other. The other
+  may come from a lower layer (the `default` entry or a tier), which the entry
+  cannot see.
+- After the merge, a crossed pair goes back to **both** defaults. The analyzer
+  never runs with a crossed pair, and it does not log the fallback.
+- So when you move one key past its partner's default, set both keys in the
+  same entry. For example, `steadyFor: 10m` on its own crosses the default
+  `carry` of `5m`, and both go back to `2m` and `5m`. Write
+  `{steadyFor: 10m, carry: 15m}` instead.
+
 **No value of these keys raises, floors, ages or resets k2** (the measured KV
 capacity). The `k2Settle` keys only decide which saturated readings k2 may learn
 from. A stricter value admits fewer readings; a looser one admits more, each of
@@ -1457,7 +1478,7 @@ long-context:
 | Key | Default | Range | What it does |
 |-----|---------|-------|--------------|
 | `minObservableK` | `0.15` | (0, 1), below `maxObservableK` | Lowest KV fill at which a replica's inter-token latency teaches its ITL line. Below it the engine barely batches and the latency is noise. |
-| `maxObservableK` | `0.80` | (0, 1) | Highest KV fill at which the latency teaches the line. Above it an engine short of memory preempts and its latency leaves the line. If a merge leaves it at or below `minObservableK`, both edges go back to their defaults. |
+| `maxObservableK` | `0.80` | (0, 1) | Highest KV fill at which the latency teaches the line. Above it an engine short of memory preempts and its latency leaves the line. If the merged policy leaves it at or below `minObservableK`, both edges go back to their defaults. |
 | `capMaxPreemptionRate` | `0` | >= 0 | A replica above `maxObservableK` still teaches the line when it is at its sequence cap: its running batch is exactly `--max-num-seqs` (set on the engine, not defaulted) times its ranks, and requests are waiting. This is the most preemptions per second it may show over the ITL window. An explicit `0` overrides a tier that raised it. vLLM only: SGLang publishes no preemption counter. |
 
 These three were top-level keys (`itlMinObservableK`, `itlMaxObservableK`,
@@ -1470,7 +1491,7 @@ spelling is reported as an unknown key and ignored.
 |-----|---------|-------|--------------|
 | `steadyFor` | `2m` | 1m to 24h | How long a replica's KV fill must hold still before its latency reading may teach the ITL line. The latency is a one-minute average, so a shorter wait pairs this moment's fill with last minute's latency. |
 | `maxKDrift` | `0.10` | (0, 1) | How far the KV fill may move within `steadyFor` and still count as steady. |
-| `carry` | `5m` | `steadyFor` to 24h | How long a steady reading is kept past the newest window, so a load step's old level is still there when the new one settles. |
+| `carry` | `5m` | `steadyFor` to 24h | How long a steady reading is kept past the newest window, so a load step's old level is still there when the new one settles. If the merged policy has `carry` under `steadyFor`, both go back to `2m` and `5m`. |
 | `idleRows` | `2` | 1 to 1000 | How many cycles in a row with no latency and no KV fill make a replica idle rather than one missed scrape. An idle replica waits out `steadyFor` again when load returns. |
 | `minSettledSamples` | `3` | 1 to 1000 | The fewest readings from settled replicas the line is refitted from. Below it the last slope holds. |
 
@@ -1494,9 +1515,9 @@ collector's one-minute rate window and is not configurable.
 |-----|---------|-------|--------------|
 | `minMeasuredOfDerived` | `0.5` | (0, 1] | A saturated reading under this share of the rate derived from the ITL line is not recorded at once (a filling or stalled replica). |
 | `maxRatio` | `2.0` | 1 to 100 | How far a measured rate may disagree with the derived one, or sit under what another replica served, before it gives way. |
-| `returnRatio` | `1.6` | 1 to `maxRatio` | How close a rate that gave way must come back before it prices again. The gap to `maxRatio` stops the price flipping on noise. |
+| `returnRatio` | `1.6` | 1 to `maxRatio` | How close a rate that gave way must come back before it prices again. The gap to `maxRatio` stops the price flipping on noise. If the merged policy has `returnRatio` over `maxRatio`, both go back to `2.0` and `1.6`. |
 | `freshFor` | `5m` | 1s to 24h | How long after its last agreeing reading a measured rate outranks a derived one that disagrees. |
-| `lowHoldFor` | `30m` | `freshFor` to 24h | How long a measured rate far **under** the derived one keeps pricing. The lower price orders more replicas, so it is held longer. |
+| `lowHoldFor` | `30m` | `freshFor` to 24h | How long a measured rate far **under** the derived one keeps pricing. The lower price orders more replicas, so it is held longer. If the merged policy has `lowHoldFor` under `freshFor`, both go back to `5m` and `30m`. |
 
 #### `analyzerTuning.admission`: which readings are service-rate samples
 
@@ -1512,8 +1533,8 @@ collector's one-minute rate window and is not configurable.
 | `lagFraction` | `0.5` | (0, 1) | Below this share of the resident KV, the arrival rate is taken as lagging and the floor never lowers demand. |
 | `trustFraction` | `0.8` | (`lagFraction`, 1] | At or above this share, the floor's drain price is trusted in full. In between the two prices are blended. |
 
-If a merge pairs a `trustFraction` at or under the `lagFraction`, both go back
-to their defaults.
+If the merged policy has `trustFraction` at or under `lagFraction`, both go
+back to `0.5` and `0.8`.
 
 #### `analyzerTuning.backlogGrowth`: when a queue counts as growing
 

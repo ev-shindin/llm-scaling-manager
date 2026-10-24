@@ -89,11 +89,19 @@ func TestAnalyzerTuningValidateRanges(t *testing.T) {
 		"loadImbalance.idleAfterReady":                      func(p *ScalingPolicy) { p.LoadImbalance.IdleAfterReady = d(30 * time.Second) },
 		"loadImbalance.sustainFor":                          func(p *ScalingPolicy) { p.LoadImbalance.SustainFor = d(30 * time.Second) },
 		"loadImbalance.clearAfter":                          func(p *ScalingPolicy) { p.LoadImbalance.ClearAfter = d(-time.Second) },
-		// Relations, with the partner at its default.
-		"steadyGate.carry (1m0s) must be at least": func(p *ScalingPolicy) { p.AnalyzerTuning.SteadyGate.Carry = d(time.Minute) },
-		"returnRatio (2.5) must be at most":        func(p *ScalingPolicy) { p.AnalyzerTuning.MuChoice.ReturnRatio = 2.5 },
-		"lowHoldFor (4m0s) must be at least":       func(p *ScalingPolicy) { p.AnalyzerTuning.MuChoice.LowHoldFor = d(4 * time.Minute) },
-		"trustFraction (0.8) must be above":        func(p *ScalingPolicy) { p.AnalyzerTuning.FloorTrust.LagFraction = 0.8 },
+		// Relations, where the entry sets both keys of the pair.
+		"steadyGate.carry (1m0s) must be at least": func(p *ScalingPolicy) {
+			p.AnalyzerTuning.SteadyGate.SteadyFor, p.AnalyzerTuning.SteadyGate.Carry = d(2*time.Minute), d(time.Minute)
+		},
+		"returnRatio (2.5) must be at most": func(p *ScalingPolicy) {
+			p.AnalyzerTuning.MuChoice.MaxRatio, p.AnalyzerTuning.MuChoice.ReturnRatio = 2, 2.5
+		},
+		"lowHoldFor (4m0s) must be at least": func(p *ScalingPolicy) {
+			p.AnalyzerTuning.MuChoice.FreshFor, p.AnalyzerTuning.MuChoice.LowHoldFor = d(5*time.Minute), d(4*time.Minute)
+		},
+		"trustFraction (0.8) must be above": func(p *ScalingPolicy) {
+			p.AnalyzerTuning.FloorTrust.LagFraction, p.AnalyzerTuning.FloorTrust.TrustFraction = 0.8, 0.8
+		},
 		"idleKvUsage (0.5) must be below kvCacheThreshold (0.4)": func(p *ScalingPolicy) {
 			p.LoadImbalance.IdleKvUsage, p.KvCacheThreshold = 0.5, 0.4
 		},
@@ -169,6 +177,89 @@ func TestAnalyzerTuningCrossedFloorTrustFallsBack(t *testing.T) {
 	got := AnalyzerTuning{FloorTrust: FloorTrustTuning{LagFraction: 0.7, TrustFraction: 0.6}}.WithDefaults().FloorTrust
 	if got != (FloorTrustTuning{LagFraction: DefaultFloorLagFraction, TrustFraction: DefaultFloorTrustFraction}) {
 		t.Errorf("floorTrust = %+v, want the default pair", got)
+	}
+}
+
+// One key of a pair set alone is not judged against its partner's default:
+// the partner may come from the layer below, which the entry cannot see.
+func TestAnalyzerTuningOneKeyOfAPairIsAccepted(t *testing.T) {
+	d := func(x time.Duration) PolicyDuration { return PolicyDuration(x) }
+	for name, at := range map[string]AnalyzerTuning{
+		"steadyFor over the default carry":         {SteadyGate: SteadyGateTuning{SteadyFor: d(10 * time.Minute)}},
+		"carry under the default steadyFor":        {SteadyGate: SteadyGateTuning{Carry: d(time.Minute)}},
+		"lagFraction over the default trust":       {FloorTrust: FloorTrustTuning{LagFraction: 0.85}},
+		"trustFraction under the default lag":      {FloorTrust: FloorTrustTuning{TrustFraction: 0.4}},
+		"maxRatio under the default returnRatio":   {MuChoice: MuChoiceTuning{MaxRatio: 1.5}},
+		"returnRatio over the default maxRatio":    {MuChoice: MuChoiceTuning{ReturnRatio: 2.5}},
+		"freshFor over the default lowHoldFor":     {MuChoice: MuChoiceTuning{FreshFor: d(40 * time.Minute)}},
+		"lowHoldFor under the default freshFor":    {MuChoice: MuChoiceTuning{LowHoldFor: d(4 * time.Minute)}},
+		"minObservableK over the default maximum":  {ITLBand: ITLBandTuning{MinObservableK: 0.85}},
+		"maxObservableK under the default minimum": {ITLBand: ITLBandTuning{MaxObservableK: 0.12}},
+	} {
+		if err := (ScalingPolicy{AnalyzerTuning: at}).ValidateEntry(); err != nil {
+			t.Errorf("%s: rejected: %v", name, err)
+		}
+	}
+}
+
+// Each pair two valid entries cross in the merge is repaired on the resolved
+// policy, both keys back to their defaults, so no consumer reads a crossed
+// pair; and a pair the merge leaves uncrossed is kept.
+func TestAnalyzerTuningCrossedPairsResolveToTheDefaults(t *testing.T) {
+	d := func(x time.Duration) PolicyDuration { return PolicyDuration(x) }
+	set := ScalingPolicySet{
+		GlobalDefaultsKey: {AnalyzerTuning: AnalyzerTuning{
+			SteadyGate: SteadyGateTuning{SteadyFor: d(2 * time.Minute), Carry: d(3 * time.Minute)},
+			MuChoice: MuChoiceTuning{MaxRatio: 3, ReturnRatio: 2.5,
+				FreshFor: d(5 * time.Minute), LowHoldFor: d(10 * time.Minute)},
+			FloorTrust: FloorTrustTuning{LagFraction: 0.3, TrustFraction: 0.6},
+		}},
+		"crossing": {AnalyzerTuning: AnalyzerTuning{
+			SteadyGate: SteadyGateTuning{SteadyFor: d(4 * time.Minute)},
+			MuChoice:   MuChoiceTuning{MaxRatio: 2, FreshFor: d(15 * time.Minute)},
+			FloorTrust: FloorTrustTuning{LagFraction: 0.7},
+		}},
+		"keeping": {AnalyzerTuning: AnalyzerTuning{
+			SteadyGate: SteadyGateTuning{SteadyFor: d(3 * time.Minute)},
+			MuChoice:   MuChoiceTuning{MaxRatio: 2.6, FreshFor: d(8 * time.Minute)},
+			FloorTrust: FloorTrustTuning{LagFraction: 0.5},
+		}},
+	}
+	for name, p := range set {
+		if err := p.ValidateEntry(); err != nil {
+			t.Fatalf("premise: entry %s is valid alone: %v", name, err)
+		}
+	}
+	crossed := ResolveScalingPolicyForTier(set, "m", "ns", "crossing").AnalyzerTuning
+	if g := crossed.SteadyGate; g.SteadyFor != DefaultSteadyFor || g.Carry != DefaultSteadyCarry {
+		t.Errorf("steadyGate = %v/%v, want the defaults", g.SteadyFor.Duration(), g.Carry.Duration())
+	}
+	if m := crossed.MuChoice; m.MaxRatio != DefaultMeasuredDerivedMaxRatio || m.ReturnRatio != DefaultMeasuredDerivedReturn {
+		t.Errorf("muChoice ratios = %g/%g, want the defaults", m.MaxRatio, m.ReturnRatio)
+	}
+	if m := crossed.MuChoice; m.FreshFor != DefaultMeasuredMuFreshFor || m.LowHoldFor != DefaultMeasuredLowHoldFor {
+		t.Errorf("muChoice holds = %v/%v, want the defaults", m.FreshFor.Duration(), m.LowHoldFor.Duration())
+	}
+	if f := crossed.FloorTrust; f != (FloorTrustTuning{LagFraction: DefaultFloorLagFraction, TrustFraction: DefaultFloorTrustFraction}) {
+		t.Errorf("floorTrust = %+v, want the defaults", f)
+	}
+	resolved := ResolveScalingPolicyForTier(set, "m", "ns", "crossing")
+	if err := resolved.Validate(); err != nil {
+		t.Errorf("the resolved policy fails its own validation: %v", err)
+	}
+
+	kept := ResolveScalingPolicyForTier(set, "m", "ns", "keeping").AnalyzerTuning
+	want := AnalyzerTuning{
+		SteadyGate: SteadyGateTuning{SteadyFor: d(3 * time.Minute), Carry: d(3 * time.Minute)},
+		MuChoice: MuChoiceTuning{MaxRatio: 2.6, ReturnRatio: 2.5,
+			FreshFor: d(8 * time.Minute), LowHoldFor: d(10 * time.Minute)},
+		FloorTrust: FloorTrustTuning{LagFraction: 0.5, TrustFraction: 0.6},
+	}
+	if kept.SteadyGate.SteadyFor != want.SteadyGate.SteadyFor || kept.SteadyGate.Carry != want.SteadyGate.Carry ||
+		kept.MuChoice.MaxRatio != want.MuChoice.MaxRatio || kept.MuChoice.ReturnRatio != want.MuChoice.ReturnRatio ||
+		kept.MuChoice.FreshFor != want.MuChoice.FreshFor || kept.MuChoice.LowHoldFor != want.MuChoice.LowHoldFor ||
+		kept.FloorTrust != want.FloorTrust {
+		t.Errorf("an uncrossed merge was changed: %+v", kept)
 	}
 }
 

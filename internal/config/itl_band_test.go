@@ -39,20 +39,22 @@ func TestITLKeysValidate(t *testing.T) {
 		p  ScalingPolicy
 		ok bool
 	}{
-		"unset":                 {ScalingPolicy{}, true},
-		"a band":                {band(ITLBandTuning{MinObservableK: 0.10, MaxObservableK: 0.90}), true},
-		"one edge":              {band(ITLBandTuning{MaxObservableK: 0.85}), true},
-		"min negative":          {band(ITLBandTuning{MinObservableK: -0.1}), false},
-		"max at one":            {band(ITLBandTuning{MaxObservableK: 1}), false},
-		"min at one":            {band(ITLBandTuning{MinObservableK: 1}), false},
-		"inverted":              {band(ITLBandTuning{MinObservableK: 0.5, MaxObservableK: 0.4}), false},
-		"equal":                 {band(ITLBandTuning{MinObservableK: 0.5, MaxObservableK: 0.5}), false},
-		"zero preemption rate":  {band(ITLBandTuning{CapMaxPreemptionRate: rate(0)}), true},
-		"some preemption":       {band(ITLBandTuning{CapMaxPreemptionRate: rate(0.2)}), true},
-		"negative preemption":   {band(ITLBandTuning{CapMaxPreemptionRate: rate(-0.1)}), false},
-		"band edge below other": {band(ITLBandTuning{MinObservableK: 0.85}), false},
+		"unset":                {ScalingPolicy{}, true},
+		"a band":               {band(ITLBandTuning{MinObservableK: 0.10, MaxObservableK: 0.90}), true},
+		"one edge":             {band(ITLBandTuning{MaxObservableK: 0.85}), true},
+		"min negative":         {band(ITLBandTuning{MinObservableK: -0.1}), false},
+		"max at one":           {band(ITLBandTuning{MaxObservableK: 1}), false},
+		"min at one":           {band(ITLBandTuning{MinObservableK: 1}), false},
+		"inverted":             {band(ITLBandTuning{MinObservableK: 0.5, MaxObservableK: 0.4}), false},
+		"equal":                {band(ITLBandTuning{MinObservableK: 0.5, MaxObservableK: 0.5}), false},
+		"zero preemption rate": {band(ITLBandTuning{CapMaxPreemptionRate: rate(0)}), true},
+		"some preemption":      {band(ITLBandTuning{CapMaxPreemptionRate: rate(0.2)}), true},
+		"negative preemption":  {band(ITLBandTuning{CapMaxPreemptionRate: rate(-0.1)}), false},
+		"band edge past other": {band(ITLBandTuning{MinObservableK: 0.85}), true},
 	} {
-		// As stored: an edge set alone meets the other's default.
+		// As stored: an edge set alone is not judged against the other's
+		// default, which a layer below may replace; the resolved policy
+		// repairs a pair the merge inverts (TestITLKeysMerge).
 		if err := tc.p.ValidateEntry(); (err == nil) != tc.ok {
 			t.Errorf("%s: Validate = %v, want ok=%t", name, err, tc.ok)
 		}
