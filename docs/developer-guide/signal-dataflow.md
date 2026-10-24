@@ -350,7 +350,8 @@ TotalDemand    = SUM vc.TotalDemand + queue charge
 | in | unit | from | what it is |
 | --- | --- | --- | --- |
 | `TokensInUse` | tokens | collector, `kv_cache_usage x capacity` | the cache a replica is occupying now |
-| `QueueLength` | requests, 1m max | collector, `num_requests_waiting` | requests the engine accepted and has not started |
+| `QueueLength` | requests, 1m max | collector, `num_requests_waiting` | requests the engine accepted and has not started; on decode of a P/D model, replaced by `saturation.decodeCapacityView` before pricing |
+| `CapacityQueueLength` | requests, 1m max | collector, `num_requests_waiting_by_reason{reason="capacity"}` (vLLM v0.20.0+, `CapacityQueueKnown`) | the part of `QueueLength` waiting for scheduling capacity, not for KV from prefill |
 | `QueueSize` | requests | **EPP scheduler** | requests the router holds that **no pod has started** |
 | `QueueBytes` | bytes | EPP scheduler | an independent estimate of the same queue |
 | `BytesPerToken` | 4 | constant | the bytes-to-tokens conversion |

@@ -56,6 +56,16 @@ var agnosticReplicaQueries = []string{
 	// vLLM publishes a preemption counter and SGLang none, so this is
 	// registered once as well (registration.QueryPreemptionRate).
 	registration.QueryPreemptionRate,
+	// vLLM's waiting count split by reason; SGLang publishes no reason.
+	registration.QueryCapacityQueueLength,
+	registration.QueryMaxRankCapacityQueueLength,
+}
+
+// capacityQueueQueries are the agnostic queries partitioned by model_name like
+// the engine-specific ones (filterResultsToModel): their series carry it.
+var capacityQueueQueries = []string{
+	registration.QueryCapacityQueueLength,
+	registration.QueryMaxRankCapacityQueueLength,
 }
 
 // unpartitionedReplicaQueries lists the logical replica queries whose series

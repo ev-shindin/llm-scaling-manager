@@ -1127,7 +1127,7 @@ touched.
 | Parameter | Type | Description | Recommended |
 |-----------|------|-------------|-------------|
 | `kvCacheThreshold` | float64 | Ceiling on usable KV cache (0.0-1.0): a replica's capacity is its physical KV budget scaled by this, so utilization reaches 1.0 when KV occupancy reaches the ceiling. A capacity multiplier, not a saturation test: lower values scale out sooner. It compounds with `scaleUpThreshold` (scale-out at `kvCacheThreshold × scaleUpThreshold` of physical KV) | 0.80 |
-| `queueLengthThreshold` | float64 | Replica is considered saturated if queue length ≥ threshold | 5 |
+| `queueLengthThreshold` | float64 | Replica is considered saturated if queue length ≥ threshold. On decode of a P/D model, requests waiting for their KV from prefill do not count ([how](#per-replica-demand-and-the-role-aware-waiting-queue-charge)) | 5 |
 | `scaleUpThreshold` | float64 | Model-level utilization threshold above which scale-up is triggered (0.0-1.0). Applied by the engine post-step to every analyzer's result. | 0.85 |
 | `scaleDownBoundary` | float64 | Model-level utilization boundary below which scale-down is safe (0.0-1.0). Applied by the engine post-step to every analyzer's result. | 0.70 |
 
@@ -1916,6 +1916,23 @@ role, because a replica only pays for KV it actually materializes:
 | `prefill` | `AvgInputTokens` | Prompt KV only; output is generated on a decode pod |
 | `decode` | `AvgInputTokens + AvgOutputTokens` | Holds prompt KV and grows it per generated token |
 | `both` (default) | `AvgInputTokens + AvgOutputTokens` | Handles the full request lifecycle |
+
+On a decode pod of a P/D model (one with a prefill variant), vLLM also counts
+requests waiting for their KV from prefill as waiting. Those are not a backlog
+the decode pod drains, so the queue there is read differently:
+
+- vLLM v0.20.0 and later: only the requests waiting for scheduling capacity
+  (`vllm:num_requests_waiting_by_reason{reason="capacity"}`) count.
+- Older vLLM: the whole queue counts, as before. The requests waiting for
+  prefill's KV cannot be told apart, and dropping a real queue would
+  under-provision. A P/D decode on older vLLM can therefore read busier than
+  it is; upgrade to v0.20.0 or later for the split.
+
+This applies to the saturation test, the per-replica demand above and the
+demand floor's backlog. Aggregated pods, prefill pods and decode pods of a
+model with no prefill variant keep the full queue. vLLM also reports a
+request held back by its LoRA budget (`--max-loras`) as deferred, so on a
+P/D decode serving many adapters that wait is not charged either.
 
 An absent or empty role canonicalizes to `both`, so **non-disaggregated
 deployments take the decode-style charge** — correct for a replica serving the
