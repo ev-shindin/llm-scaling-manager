@@ -14,6 +14,13 @@ const (
 	// engine rank's figures, beside the pod's mean and sum above.
 	QueryMaxRankKvCacheUsage = "max_rank_kv_cache_usage"
 	QueryMaxRankQueueLength  = "max_rank_queue_length"
+	// QueryCapacityQueueLength and QueryMaxRankCapacityQueueLength are the
+	// two queue queries above restricted to requests waiting for scheduling
+	// capacity (vLLM's num_requests_waiting_by_reason{reason="capacity"},
+	// v0.20.0 and later). vLLM only: no SGLang series says why a request
+	// waits.
+	QueryCapacityQueueLength        = "capacity_queue_length"
+	QueryMaxRankCapacityQueueLength = "max_rank_capacity_queue_length"
 
 	// V2 queries (token-based capacity analysis)
 	QueryCacheConfigInfo = "cache_config_info"
@@ -148,6 +155,30 @@ func RegisterSaturationQueries(sourceRegistry *source.SourceRegistry) {
 		Template:    `max by (model_name, instance, pod) (max_over_time(vllm:num_requests_waiting{namespace="{{.namespace}}"}[1m]))`,
 		Params:      []string{source.ParamNamespace},
 		Description: "Peak queue length of the busiest engine rank per instance over last minute",
+	})
+
+	// The same two queues, counting only the requests that wait for
+	// scheduling capacity. vLLM (v0.20.0 and later) splits its waiting count
+	// by reason: "capacity" waits for KV blocks or a batch slot, "deferred"
+	// was skipped for a transient reason -- on a prefill/decode split, mostly
+	// a decode request whose KV is still in flight from prefill. The analyzer
+	// reads these on decode of a disaggregated model only
+	// (saturation.decodeCapacityView); everything else keeps the full count.
+	// An older vLLM publishes no such series and the collector leaves the
+	// replica's CapacityQueueKnown false.
+	registry.MustRegister(source.QueryTemplate{
+		Name:        QueryCapacityQueueLength,
+		Type:        source.QueryTypePromQL,
+		Template:    `sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (max_over_time(vllm:num_requests_waiting_by_reason{namespace="{{.namespace}}",reason="capacity"}[1m])))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "Peak queue length per instance over last minute, requests waiting for scheduling capacity only",
+	})
+	registry.MustRegister(source.QueryTemplate{
+		Name:        QueryMaxRankCapacityQueueLength,
+		Type:        source.QueryTypePromQL,
+		Template:    `max by (model_name, instance, pod) (max_over_time(vllm:num_requests_waiting_by_reason{namespace="{{.namespace}}",reason="capacity"}[1m]))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "Peak queue length of the busiest engine rank per instance over last minute, requests waiting for scheduling capacity only",
 	})
 
 	// --- V2 queries for token-based capacity analysis ---

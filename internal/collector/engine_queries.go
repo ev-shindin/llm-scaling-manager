@@ -52,6 +52,16 @@ var agnosticReplicaQueries = []string{
 	// Putting it in EngineSpecificQueries instead would assert a variant that
 	// does not exist, and the parity test says so.
 	registration.QueryPrefillComputedTokenRate,
+	// vLLM's waiting count split by reason; SGLang publishes no reason.
+	registration.QueryCapacityQueueLength,
+	registration.QueryMaxRankCapacityQueueLength,
+}
+
+// capacityQueueQueries are the agnostic queries partitioned by model_name like
+// the engine-specific ones (filterResultsToModel): their series carry it.
+var capacityQueueQueries = []string{
+	registration.QueryCapacityQueueLength,
+	registration.QueryMaxRankCapacityQueueLength,
 }
 
 // unpartitionedReplicaQueries lists the logical replica queries whose series

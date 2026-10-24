@@ -171,6 +171,7 @@ func (c *ReplicaMetricsCollector) queryReplicaSeries(
 	// on operates on model-scoped results, as it did when the model was a PromQL
 	// matcher.
 	filterResultsToModel(results, engineSpecificReplicaQueries, modelID)
+	filterResultsToModel(results, capacityQueueQueries, modelID)
 
 	return results, engines, nil
 }

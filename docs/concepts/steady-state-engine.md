@@ -361,6 +361,7 @@ model; check the health metrics below.
 | `vllm:cache_config_info` (`num_gpu_blocks`, `block_size`) | info gauge | KV token capacity → **memory ceiling** |
 | `vllm:kv_cache_usage_perc` | gauge | live tokens-in-use → **demand** |
 | `vllm:num_requests_waiting` | gauge | local queue → **compute-ceiling** trigger + demand |
+| `vllm:num_requests_waiting_by_reason` (`reason="capacity"`) | gauge | on decode of a P/D model, the local queue without requests waiting for their KV from prefill (vLLM v0.20.0 and later) — *optional*: without it that queue counts only while the KV cache is full |
 | `vllm:request_prompt_tokens_sum` / `_count` | histogram | average **input** tokens per request |
 | `vllm:request_generation_tokens_sum` / `_count` | histogram | average **output** tokens per request |
 | `vllm:prefix_cache_hits_total` / `vllm:prefix_cache_queries_total` | counters | prefix-cache hit rate (discounts input-token demand) — *optional* |

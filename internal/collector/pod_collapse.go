@@ -44,7 +44,9 @@ import (
 //     the plain mean.
 //   - The busiest rank's queue and utilization (MaxRankQueueLength,
 //     MaxRankKvCacheUsage) take the max over the instances: they describe one
-//     engine, the fullest, which the saturation guards judge.
+//     engine, the fullest, which the saturation guards judge. The capacity
+//     part of the queue (CapacityQueueLength, MaxRankCapacityQueueLength)
+//     merges the same way, and is known only if every instance reported it.
 //   - Request-shape ratios (input/output tokens, service time, TTFT) are
 //     weighted by RequestRate: they describe the average request, so the
 //     instance serving more of them should dominate. ITL is a mean per
@@ -121,6 +123,8 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	pod.QueueLength = 0
 	pod.MaxRankQueueLength = 0
 	pod.MaxRankKvCacheUsage = 0
+	pod.CapacityQueueLength = 0
+	pod.MaxRankCapacityQueueLength = 0
 	pod.RequestRate = 0
 	pod.GenerationTokenRate = 0
 
@@ -128,8 +132,14 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	// Known only if every rank reported it: a rank with no series would
 	// otherwise be averaged in as an empty cache.
 	pod.KvUsageInstantKnown = true
+	// The same for the capacity part of the queue: a rank without it would
+	// count none of its queue as waiting for capacity.
+	pod.CapacityQueueKnown = true
 	for _, m := range group {
 		pod.KvUsageInstantKnown = pod.KvUsageInstantKnown && m.KvUsageInstantKnown
+		pod.CapacityQueueKnown = pod.CapacityQueueKnown && m.CapacityQueueKnown
+		pod.CapacityQueueLength += m.CapacityQueueLength
+		pod.MaxRankCapacityQueueLength = max(pod.MaxRankCapacityQueueLength, m.BusiestRankCapacityQueue())
 		pod.NumGpuBlocks += m.NumGpuBlocks
 		pod.TotalKvCapacityTokens += m.TotalKvCapacityTokens
 		// Ranks(), not EngineRanks: a row without a cache_config_info series
@@ -148,6 +158,10 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 
 		weightedKvUsage += m.KvCacheUsage * float64(m.TotalKvCapacityTokens)
 		weightedKvInstant += m.KvUsageInstant * float64(m.TotalKvCapacityTokens)
+	}
+
+	if !pod.CapacityQueueKnown {
+		pod.CapacityQueueLength, pod.MaxRankCapacityQueueLength = 0, 0
 	}
 
 	// BlockSize is a per-instance config value, uniform across a pod's ranks;

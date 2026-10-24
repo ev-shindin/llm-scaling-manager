@@ -185,6 +185,19 @@ type ReplicaMetrics struct {
 	MaxRankQueueLength  int
 	MaxRankKvCacheUsage float64
 
+	// CapacityQueueLength and MaxRankCapacityQueueLength are the part of
+	// QueueLength and MaxRankQueueLength that waits for scheduling capacity:
+	// vLLM's num_requests_waiting_by_reason{reason="capacity"}, published
+	// since v0.20.0. The rest of the waiting count is "deferred": requests the
+	// scheduler skipped for a transient reason, which on the decode side of a
+	// prefill/decode split is mostly requests waiting for their KV to arrive
+	// from prefill. CapacityQueueKnown says the series was collected; without
+	// it (an older vLLM, SGLang) both are zero and mean nothing. Read the
+	// busiest rank's through BusiestRankCapacityQueue.
+	CapacityQueueLength        int
+	MaxRankCapacityQueueLength int
+	CapacityQueueKnown         bool
+
 	// TokensInUse is the derived current token demand on this replica.
 	// Computed as KvCacheUsage × TotalKvCapacityTokens.
 	// Zero when TotalKvCapacityTokens is unavailable.
@@ -356,14 +369,30 @@ func (m ReplicaMetrics) Ranks() int {
 // busiest-rank reading while requests wait, it is the queue's mean over the
 // ranks rounded up: the least the busiest rank can hold.
 func (m ReplicaMetrics) BusiestRankQueue() int {
-	if m.Ranks() <= 1 {
-		return m.QueueLength
+	return busiestRank(m.QueueLength, m.MaxRankQueueLength, m.Ranks())
+}
+
+// BusiestRankCapacityQueue is BusiestRankQueue for the part of the queue that
+// waits for scheduling capacity (see CapacityQueueLength). Zero when
+// CapacityQueueKnown is false.
+func (m ReplicaMetrics) BusiestRankCapacityQueue() int {
+	if !m.CapacityQueueKnown {
+		return 0
 	}
-	if m.MaxRankQueueLength > 0 || m.QueueLength <= 0 {
-		return m.MaxRankQueueLength
+	return busiestRank(m.CapacityQueueLength, m.MaxRankCapacityQueueLength, m.Ranks())
+}
+
+// busiestRank is the busiest rank's share of a queue summed over ranks
+// engines, given the busiest rank's own reading maxRank (zero when not
+// collected); see BusiestRankQueue.
+func busiestRank(sum, maxRank, ranks int) int {
+	if ranks <= 1 {
+		return sum
 	}
-	ranks := m.Ranks()
-	return (m.QueueLength + ranks - 1) / ranks
+	if maxRank > 0 || sum <= 0 {
+		return maxRank
+	}
+	return (sum + ranks - 1) / ranks
 }
 
 // BusiestRankKvUsage is the KV cache utilization of the record's busiest

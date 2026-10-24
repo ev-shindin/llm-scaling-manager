@@ -521,7 +521,9 @@ var _ = Describe("SaturationAnalyzer", func() {
 			_, err = analyzer.Analyze(ctx, makeAnalyzerInput(
 				[]domain.ReplicaMetrics{
 					makeReplicaMetrics("pod-p", "variant-p", 8000, 16000, 0, 100, 50),
-					makeReplicaMetrics("pod-d", "variant-d", 3000, 16000, 6, 100, 50),
+					// The 6 wait for capacity: a P/D decode's queue under a
+					// full cache is otherwise read as KV in flight (#278).
+					withCapacityQueue(makeReplicaMetrics("pod-d", "variant-d", 3000, 16000, 6, 100, 50)),
 				}, states))
 			Expect(err).NotTo(HaveOccurred())
 
@@ -2209,7 +2211,8 @@ var _ = Describe("Analyze per-replica waiting-queue demand by role", func() {
 			Namespace: "test-ns",
 			ReplicaMetrics: []domain.ReplicaMetrics{
 				replicaFor("prefill-variant"),
-				replicaFor("decode-variant"),
+				// Its 4 wait for capacity (withCapacityQueue, #278).
+				withCapacityQueue(replicaFor("decode-variant")),
 			},
 			VariantStates: []domain.VariantReplicaState{
 				{VariantName: "prefill-variant", CurrentReplicas: 1, GPUsPerReplica: 1, Role: domain.RolePrefill},

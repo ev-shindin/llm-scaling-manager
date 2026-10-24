@@ -18,7 +18,8 @@
 # --api-server-count 2, whose gauges are exported once per API server process
 # (a pid label); the process that did not receive a rank's stats holds 0.
 # dup-2 is a pod of two ranks whose target is scraped twice (job a and b).
-# Neither may count a rank twice.
+# Neither may count a rank twice. dup-2 also splits its waiting count by
+# reason, as vLLM v0.20.0 and later do (num_requests_waiting_by_reason).
 #
 # Each expected value is the rank figures combined by hand: the plain mean for
 # utilization, the sum for the queue, the count for the ranks, the max for the
@@ -338,6 +339,22 @@ tests:
         values: '5x15'
       - series: 'vllm:num_requests_waiting{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="b"}'
         values: '5x15'
+      - series: 'vllm:num_requests_waiting_by_reason{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="a",reason="capacity"}'
+        values: '1x15'
+      - series: 'vllm:num_requests_waiting_by_reason{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="a",reason="deferred"}'
+        values: '2x15'
+      - series: 'vllm:num_requests_waiting_by_reason{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="b",reason="capacity"}'
+        values: '1x15'
+      - series: 'vllm:num_requests_waiting_by_reason{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",model_name="glm",job="b",reason="deferred"}'
+        values: '2x15'
+      - series: 'vllm:num_requests_waiting_by_reason{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="a",reason="capacity"}'
+        values: '4x15'
+      - series: 'vllm:num_requests_waiting_by_reason{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="a",reason="deferred"}'
+        values: '1x15'
+      - series: 'vllm:num_requests_waiting_by_reason{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="b",reason="capacity"}'
+        values: '4x15'
+      - series: 'vllm:num_requests_waiting_by_reason{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="1",model_name="glm",job="b",reason="deferred"}'
+        values: '1x15'
       - series: 'vllm:cache_config_info{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",num_gpu_blocks="2000",block_size="16",cache_dtype="auto",job="a"}'
         values: '1x15'
       - series: 'vllm:cache_config_info{namespace="llm",pod="dup-2",instance="10.0.0.2:8000",engine="0",num_gpu_blocks="2000",block_size="16",cache_dtype="auto",job="b"}'
@@ -451,6 +468,18 @@ tests:
             value: 4
           - labels: '{model_name="glm",instance="10.0.0.2:8000",pod="dup-2"}'
             value: 5
+      # capacity_queue_length: the queue_length sum over reason="capacity" only (dup-2: 1 + 4 of its 3 + 5 waiting; the deferred ones are left out); a second scrape is not counted twice
+      - expr: 'sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (max_over_time(vllm:num_requests_waiting_by_reason{namespace="llm",reason="capacity"}[1m])))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.2:8000",pod="dup-2"}'
+            value: 5
+      # max_rank_capacity_queue_length: the busiest rank's capacity queue
+      - expr: 'max by (model_name, instance, pod) (max_over_time(vllm:num_requests_waiting_by_reason{namespace="llm",reason="capacity"}[1m]))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.2:8000",pod="dup-2"}'
+            value: 4
       # cache_config_info: the value counts the ranks; num_gpu_blocks is already the total and is kept as is; a second scrape (solo-0, dup-2) counts no rank twice
       - expr: 'count by (instance, pod, num_gpu_blocks, block_size) (max by (instance, pod, num_gpu_blocks, block_size, engine) (vllm:cache_config_info{namespace="llm"}))'
         eval_time: 10m
