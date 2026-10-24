@@ -19,7 +19,6 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/floor"
 )
@@ -144,14 +143,14 @@ var k2PriorityLabels = map[string]bool{
 	"P1-obs": true, "P2-hist": true, "P2-borrow": true, "P3-k2": true, "P4-k1": true,
 }
 
-// observedCtx returns a context carrying a logger that records everything the
-// shipped deployment would emit. The per-replica lines sit at
-// V(logging.DEFAULT), which zapr maps to zap level -logging.DEFAULT, so the
-// observer core has to be enabled that far down or they are dropped before
-// they are recorded.
+// observedCtx returns a context carrying a logger that records everything a
+// controller run for the report writes: the per-replica lines sit at
+// V(perReplicaLogLevel), one above the shipped verbosity, which zapr maps to
+// zap level -perReplicaLogLevel, so the observer core has to be enabled that
+// far down or they are dropped before they are recorded.
 func observedCtx(t *testing.T) (context.Context, *observer.ObservedLogs) {
 	t.Helper()
-	core, logs := observer.New(zapcore.Level(-logging.DEFAULT))
+	core, logs := observer.New(zapcore.Level(-perReplicaLogLevel))
 	return logr.NewContext(context.Background(), zapr.NewLogger(zap.New(core))), logs
 }
 

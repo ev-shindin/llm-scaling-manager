@@ -941,7 +941,11 @@ nothing — park one variant and leave another serving.
 
 ## Reading a decision from the logs
 
-Three lines carry the whole chain, all at `logging.DEFAULT`:
+Three lines carry the whole chain. `derived-mu` and `replica-capacity-decision`
+are written once per replica, so they sit at `perReplicaLogLevel`
+(`logging.VERBOSE`, `--v=3`; `replica_log.go`); at the shipped `logging.DEFAULT`
+the per-variant `replica-capacity-summary` stands in for them.
+`throughput-demand-floor` is at Info:
 
 - `derived-mu` — every term of the mu derivation, because a mu wrong by 8x
   looks identical in the log whether the fault is the output length, the

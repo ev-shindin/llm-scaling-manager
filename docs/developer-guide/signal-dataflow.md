@@ -655,7 +655,8 @@ The contracts worth knowing, because each has been broken at least once:
 
 ## Reading one decision
 
-Three log lines, in this order, all at `logging.DEFAULT`:
+Three log lines, in this order. The first two are per replica, at
+`logging.VERBOSE` (`--v=3`); the third is at Info:
 
 1. `derived-mu` — every term of the service rate, because the result alone
    cannot be attributed to one of them. `kvReqPerSeq` is the priced shape,

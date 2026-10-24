@@ -196,6 +196,26 @@ and recovers reports the pod's age as its start time, which is the usual cause.
 After three rejections in a row the next sample is accepted, so a variant that
 really got slower moves its estimate.
 
+### `replica-capacity-summary`
+
+One line per variant per cycle: which replicas the saturation analyzer priced,
+and what each was priced at. `replicas` lists them as
+`<pod>=<capacity>/<bound>/<k2 source>`, where `bound` is `k1` (the KV cache
+binds) or `k2` (compute binds) and the k2 source is one of the values below. A
+warm-pool Pod lent to the variant ends in `/bridge`.
+
+```text
+2026-10-14T09:12:03.510Z  INFO  replica-capacity-summary  {"modelID": "my-model",
+  "namespace": "default", "variant": "primary", "priced": 2,
+  "replicas": ["decode-0=1152000/k2/P1-obs", "decode-1=1152000/k2/P2-hist"]}
+```
+
+The full per-replica detail is at `--v=3`: `replica-capacity-decision` (k1, k2,
+demand and queue terms), `k2-decision` (the k2 priority chain, with its donor
+when borrowed) and `derived-mu` (every term of a decode replica's service rate).
+They are written once per replica per cycle, about 1.9 KB a replica, so the
+default leaves them out. See [Enabling the log](#enabling-the-log).
+
 ---
 
 ## Reason values (`reason` field)
@@ -317,3 +337,8 @@ Filter by `modelID` and `namespace` to match them up.
 ## Enabling the log
 
 Both lines are INFO and appear in the default controller log. Nothing to enable.
+
+The per-replica lines (`replica-capacity-decision`, `k2-decision`,
+`derived-mu`) need `--v=3` in the controller container's `args`. So does
+`hack/benchmark/dump_k2_decisions.py`, which reads them. At `--v=3` a cycle
+writes about 1.9 KB more per replica.

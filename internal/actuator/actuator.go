@@ -8,6 +8,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -93,7 +94,9 @@ func (a *Actuator) EmitMetrics(ctx context.Context, variantAutoscaling *llmdOptv
 		// Metrics are critical for HPA, but emission failures shouldn't break core functionality
 		return nil
 	}
-	logger.Info("EmitReplicaMetrics completed",
+	// Every cycle, per variant, and the same numbers as the engine's
+	// applied-decision line: at logging.VERBOSE, not the shipped default.
+	logger.V(logging.VERBOSE).Info("EmitReplicaMetrics completed",
 		"variantName", variantAutoscaling.Name,
 		"currentReplicas", currentReplicas,
 		"desiredReplicas", desiredReplicas,
