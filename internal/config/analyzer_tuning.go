@@ -353,8 +353,10 @@ func (t *AnalyzerTuning) repairCrossedPairs() []string {
 
 // TuningFallbacks says which tuning figures entry, resolved over base as the
 // run-time merge resolves a model's policy, will not run with: each crossed
-// pair repairCrossedPairs resets, and an idleKvUsage at or over the
-// kvCacheThreshold, which ScalingPolicy.IdleKvUsage holds at the threshold.
+// pair repairCrossedPairs resets, and an idleKvUsage the entry or the
+// default entry sets at or over the kvCacheThreshold, which
+// ScalingPolicy.IdleKvUsage holds at the threshold. A pair can only cross
+// when at least one of its keys is set, since the defaults do not cross.
 // base is the "default" entry, or nil when entry is the default entry itself.
 // One line per figure; none when the entry runs as written. Read at config
 // load, so an operator's setting that is ignored is said once, not every
@@ -379,7 +381,10 @@ func TuningFallbacks(base *ScalingPolicy, entry ScalingPolicy) []string {
 	if kv == 0 {
 		kv = DefaultKvCacheThreshold
 	}
-	if idle >= kv {
+	// Only an idleKvUsage someone set: with it unset, a low kvCacheThreshold
+	// bounds the default idle figure, and no setting of the operator's is
+	// being ignored.
+	if merged.LoadImbalance.IdleKvUsage != 0 && idle >= kv {
 		out = append(out, fmt.Sprintf("loadImbalance.idleKvUsage = %v is not below kvCacheThreshold %v: "+
 			"a replica cannot be idle and full at once; using %v as the idle bound instead", idle, kv, min(idle, kv)))
 	}
