@@ -14,6 +14,7 @@ func TestAnalyzerTuningDecodes(t *testing.T) {
 	entry := `
 kvCacheThreshold: 0.8
 analyzerTuning:
+  itlBand: {minObservableK: 0.10, maxObservableK: 0.85, capMaxPreemptionRate: 0}
   steadyGate: {steadyFor: 3m, maxKDrift: 0.05, carry: 6m, idleRows: 3, minSettledSamples: 4}
   k2Settle: {rateFraction: 0.8, maxRise: 0.2}
   muChoice: {minMeasuredOfDerived: 0.6, maxRatio: 2.5, returnRatio: 2.0, freshFor: 4m, lowHoldFor: 20m}
@@ -30,6 +31,7 @@ loadImbalance: {idleKvUsage: 0.25, idleAfterReady: 3m, sustainFor: 4m, clearAfte
 		t.Fatal(err)
 	}
 	want := AnalyzerTuning{
+		ITLBand: ITLBandTuning{MinObservableK: 0.10, MaxObservableK: 0.85},
 		SteadyGate: SteadyGateTuning{SteadyFor: PolicyDuration(3 * time.Minute), MaxKDrift: 0.05,
 			Carry: PolicyDuration(6 * time.Minute), IdleRows: 3, MinSettledSamples: 4},
 		K2Settle: K2SettleTuning{RateFraction: 0.8, MaxRise: 0.2},
@@ -39,7 +41,12 @@ loadImbalance: {idleKvUsage: 0.25, idleAfterReady: 3m, sustainFor: 4m, clearAfte
 		FloorTrust:    FloorTrustTuning{LagFraction: 0.4, TrustFraction: 0.9},
 		BacklogGrowth: BacklogGrowthTuning{MinRequests: 3, Fraction: 0.2},
 	}
-	if p.AnalyzerTuning != want {
+	if r := p.AnalyzerTuning.ITLBand.CapMaxPreemptionRate; r == nil || *r != 0 {
+		t.Errorf("capMaxPreemptionRate = %v, want an explicit 0", r)
+	}
+	got := p.AnalyzerTuning
+	got.ITLBand.CapMaxPreemptionRate = nil
+	if got != want {
 		t.Errorf("analyzerTuning = %+v, want %+v", p.AnalyzerTuning, want)
 	}
 	wantLI := LoadImbalance{IdleKvUsage: 0.25, IdleAfterReady: PolicyDuration(3 * time.Minute),

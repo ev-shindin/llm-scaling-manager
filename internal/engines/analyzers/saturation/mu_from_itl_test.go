@@ -78,11 +78,13 @@ var _ = Describe("pricingK", func() {
 	It("clamps to the band the policy sets, the one the line is fitted over", func() {
 		// 0.76 is inside the default band and above one that stops at 0.70.
 		Expect(pricingK(&config.ScalingPolicy{
-			KvCacheThreshold: 0.80, ScaleUpThreshold: 0.95, ITLMaxObservableK: 0.70,
+			KvCacheThreshold: 0.80, ScaleUpThreshold: 0.95,
+			AnalyzerTuning: config.AnalyzerTuning{ITLBand: config.ITLBandTuning{MaxObservableK: 0.70}},
 		})).To(Equal(0.70))
 		// 0.25 is inside the default band and below one that starts at 0.30.
 		Expect(pricingK(&config.ScalingPolicy{
-			KvCacheThreshold: 0.50, ScaleUpThreshold: 0.50, ITLMinObservableK: 0.30,
+			KvCacheThreshold: 0.50, ScaleUpThreshold: 0.50,
+			AnalyzerTuning: config.AnalyzerTuning{ITLBand: config.ITLBandTuning{MinObservableK: 0.30}},
 		})).To(Equal(0.30))
 	})
 })

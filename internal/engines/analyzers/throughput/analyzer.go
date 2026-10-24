@@ -87,7 +87,7 @@ func (a *ThroughputAnalyzer) Observe(
 }
 
 // observe is Observe with the KV band [lo, hi] a reading must fall in: the
-// policy's itlMinObservableK and itlMaxObservableK, which Analyze passes, as
+// policy band (analyzerTuning.itlBand), which Analyze passes, as
 // the saturation and slo analyzers read them. This analyzer has no engine
 // configuration, so it takes no capped replica above the band (itl.Admission).
 func (a *ThroughputAnalyzer) observe(

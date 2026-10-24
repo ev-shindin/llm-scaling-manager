@@ -163,8 +163,8 @@ func (a *SaturationAnalyzer) noteLineMismatch(model itl.Model, params *capacity.
 // memory-bound capacity, is KvCacheThreshold of physical KV, and the analyzer
 // scales out at ScaleUpThreshold of k1. On the defaults (0.80, 0.85) that is
 // 0.68 of physical; with ScaleUpThreshold at 0.95 it is 0.76. Both sit inside
-// the ITL window's band -- the policy's itlMinObservableK and
-// itlMaxObservableK, 0.15 and 0.80 by default -- so the line is evaluated
+// the ITL window's band -- the policy's analyzerTuning.itlBand.minObservableK and
+// analyzerTuning.itlBand.maxObservableK, 0.15 and 0.80 by default -- so the line is evaluated
 // where it was fitted rather than beyond it.
 //
 // A configuration whose product falls outside that range is clamped to it: the

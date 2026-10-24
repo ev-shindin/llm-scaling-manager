@@ -44,6 +44,9 @@ func (d PolicyDuration) MarshalYAML() (any, error) {
 // None of these keys raises, floors, ages or resets k2. The k2 settle figures
 // only decide which saturated readings k2 may learn from.
 type AnalyzerTuning struct {
+	// ITLBand is the KV band inside which a replica's (k, ITL) readings teach
+	// the ITL line, and the sequence-cap exception above it.
+	ITLBand ITLBandTuning `yaml:"itlBand,omitempty"`
 	// SteadyGate decides which (k, ITL) readings the ITL line is fitted from.
 	SteadyGate SteadyGateTuning `yaml:"steadyGate,omitempty"`
 	// K2Settle decides when a saturated reading whose queue is deeper than its
@@ -59,6 +62,26 @@ type AnalyzerTuning struct {
 	// BacklogGrowth is the noise band a role's backlog must grow past to
 	// count as growing.
 	BacklogGrowth BacklogGrowthTuning `yaml:"backlogGrowth,omitempty"`
+}
+
+// ITLBandTuning is the KV band the ITL line is fitted over
+// (internal/signals/itl, Admission).
+type ITLBandTuning struct {
+	// MinObservableK and MaxObservableK are the band's edges, as fractions of
+	// a replica's cache. Below the lower edge the engine is barely batching
+	// and its latency is noise. Above the upper edge an engine short of
+	// memory preempts, and its latency leaves the line: on a benchmark run,
+	// fitting up to 0.85 instead of 0.80 pushed the intercept below zero
+	// (itl.DefaultMaxObservableK has the table). Validated 0 < min < max < 1.
+	MinObservableK float64 `yaml:"minObservableK,omitempty"`
+	MaxObservableK float64 `yaml:"maxObservableK,omitempty"`
+	// CapMaxPreemptionRate is the most preemptions per second, over the
+	// inter-token latency's window, a replica at its sequence cap may show
+	// and still have its reading above MaxObservableK teach the line (issue
+	// #287). Nil takes DefaultITLCapMaxPreemptionRate, zero: no preemption at
+	// all. A pointer, because zero is the default and a meaningful setting:
+	// an entry must be able to set 0 over a tier that raised it.
+	CapMaxPreemptionRate *float64 `yaml:"capMaxPreemptionRate,omitempty"`
 }
 
 // SteadyGateTuning is the ITL steady-state gate (internal/signals/itl).
@@ -169,6 +192,11 @@ type LoadImbalance struct {
 // same figures as their own constants, and a test in the saturation package
 // checks the two agree.
 const (
+	// The ITL band equals itl.DefaultMinObservableK and
+	// itl.DefaultMaxObservableK; a test holds them equal.
+	DefaultITLMinObservableK        = 0.15
+	DefaultITLMaxObservableK        = 0.80
+	DefaultITLCapMaxPreemptionRate  = 0.0
 	DefaultSteadyFor                = PolicyDuration(2 * time.Minute)
 	DefaultMaxKDrift                = 0.10
 	DefaultSteadyCarry              = PolicyDuration(5 * time.Minute)
@@ -232,6 +260,16 @@ func defaultDuration(v *PolicyDuration, d PolicyDuration) {
 
 // WithDefaults returns t with every unset field at its default.
 func (t AnalyzerTuning) WithDefaults() AnalyzerTuning {
+	b := &t.ITLBand
+	defaultFloat(&b.MinObservableK, DefaultITLMinObservableK)
+	defaultFloat(&b.MaxObservableK, DefaultITLMaxObservableK)
+	// Each edge is checked alone, so a merge can invert the pair; an
+	// inverted or out-of-range band reads as the defaults, never as a band
+	// that admits nothing. CapMaxPreemptionRate stays nil when unset
+	// (ITLCapPreemptionRate).
+	if !(b.MinObservableK > 0 && b.MinObservableK < b.MaxObservableK && b.MaxObservableK < 1) {
+		b.MinObservableK, b.MaxObservableK = DefaultITLMinObservableK, DefaultITLMaxObservableK
+	}
 	g := &t.SteadyGate
 	defaultDuration(&g.SteadyFor, DefaultSteadyFor)
 	defaultFloat(&g.MaxKDrift, DefaultMaxKDrift)
@@ -289,6 +327,12 @@ func mergeDuration(dst *PolicyDuration, v PolicyDuration) {
 
 // merge overlays the fields o sets onto t.
 func (t *AnalyzerTuning) merge(o AnalyzerTuning) {
+	mergeFloat(&t.ITLBand.MinObservableK, o.ITLBand.MinObservableK)
+	mergeFloat(&t.ITLBand.MaxObservableK, o.ITLBand.MaxObservableK)
+	if o.ITLBand.CapMaxPreemptionRate != nil {
+		v := *o.ITLBand.CapMaxPreemptionRate
+		t.ITLBand.CapMaxPreemptionRate = &v
+	}
 	mergeDuration(&t.SteadyGate.SteadyFor, o.SteadyGate.SteadyFor)
 	mergeFloat(&t.SteadyGate.MaxKDrift, o.SteadyGate.MaxKDrift)
 	mergeDuration(&t.SteadyGate.Carry, o.SteadyGate.Carry)
@@ -361,7 +405,14 @@ func (t AnalyzerTuning) validate() error {
 	const p = "analyzerTuning."
 	g, m := t.SteadyGate, t.MuChoice
 	eff := t.WithDefaults()
+	var capRate error
+	if r := t.ITLBand.CapMaxPreemptionRate; r != nil && *r < 0 {
+		capRate = fmt.Errorf("%sitlBand.capMaxPreemptionRate must be >= 0, got %g", p, *r)
+	}
 	err := errors.Join(
+		fraction(p+"itlBand.minObservableK", t.ITLBand.MinObservableK, false),
+		fraction(p+"itlBand.maxObservableK", t.ITLBand.MaxObservableK, false),
+		capRate,
 		durationWithin(p+"steadyGate.steadyFor", g.SteadyFor, MinSteadyFor),
 		fraction(p+"steadyGate.maxKDrift", g.MaxKDrift, false),
 		durationWithin(p+"steadyGate.carry", g.Carry, MinSteadyFor),
@@ -393,7 +444,16 @@ func (t AnalyzerTuning) validate() error {
 	if trust == 0 {
 		trust = DefaultFloorTrustFraction
 	}
+	lo, hi := t.ITLBand.MinObservableK, t.ITLBand.MaxObservableK
+	if lo == 0 {
+		lo = DefaultITLMinObservableK
+	}
+	if hi == 0 {
+		hi = DefaultITLMaxObservableK
+	}
 	switch {
+	case lo >= hi:
+		return fmt.Errorf("%sitlBand.minObservableK (%g) must be below itlBand.maxObservableK (%g)", p, lo, hi)
 	case eff.SteadyGate.Carry < eff.SteadyGate.SteadyFor:
 		return fmt.Errorf("%ssteadyGate.carry (%v) must be at least steadyGate.steadyFor (%v)",
 			p, eff.SteadyGate.Carry.Duration(), eff.SteadyGate.SteadyFor.Duration())
@@ -433,9 +493,13 @@ func (l LoadImbalance) validate(kvCacheThreshold float64) error {
 }
 
 // resetNonFinite clears each tuning number that is NaN or infinite, through
-// the caller's nonFinite.
-func (t *AnalyzerTuning) resetNonFinite(nonFinite func(field string, v *float64)) {
+// the caller's nonFinite and nonFinitePtr.
+func (t *AnalyzerTuning) resetNonFinite(nonFinite func(field string, v *float64),
+	nonFinitePtr func(field string, v **float64)) {
 	const p = "analyzerTuning."
+	nonFinite(p+"itlBand.minObservableK", &t.ITLBand.MinObservableK)
+	nonFinite(p+"itlBand.maxObservableK", &t.ITLBand.MaxObservableK)
+	nonFinitePtr(p+"itlBand.capMaxPreemptionRate", &t.ITLBand.CapMaxPreemptionRate)
 	nonFinite(p+"steadyGate.maxKDrift", &t.SteadyGate.MaxKDrift)
 	nonFinite(p+"k2Settle.rateFraction", &t.K2Settle.RateFraction)
 	nonFinite(p+"k2Settle.maxRise", &t.K2Settle.MaxRise)
@@ -448,4 +512,29 @@ func (t *AnalyzerTuning) resetNonFinite(nonFinite func(field string, v *float64)
 	nonFinite(p+"floorTrust.trustFraction", &t.FloorTrust.TrustFraction)
 	nonFinite(p+"backlogGrowth.minRequests", &t.BacklogGrowth.MinRequests)
 	nonFinite(p+"backlogGrowth.fraction", &t.BacklogGrowth.Fraction)
+}
+
+// ITLBand is the KV band the ITL fit reads inside (analyzerTuning.itlBand),
+// with the defaults for an edge left unset. An inverted or out-of-range pair
+// reads as the defaults, never as a band that admits nothing. A nil policy
+// reads as the defaults.
+func (c *ScalingPolicy) ITLBand() (lo, hi float64) {
+	if c == nil {
+		return DefaultITLMinObservableK, DefaultITLMaxObservableK
+	}
+	b := c.AnalyzerTuning.WithDefaults().ITLBand
+	return b.MinObservableK, b.MaxObservableK
+}
+
+// ITLCapPreemptionRate is analyzerTuning.itlBand.capMaxPreemptionRate, or its
+// default when unset or the policy is nil.
+func (c *ScalingPolicy) ITLCapPreemptionRate() float64 {
+	if c == nil {
+		return DefaultITLCapMaxPreemptionRate
+	}
+	r := c.AnalyzerTuning.ITLBand.CapMaxPreemptionRate
+	if r == nil || !(*r >= 0) || isNonFinite(*r) {
+		return DefaultITLCapMaxPreemptionRate
+	}
+	return *r
 }

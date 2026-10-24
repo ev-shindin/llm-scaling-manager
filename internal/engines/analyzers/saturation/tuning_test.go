@@ -26,6 +26,7 @@ var defaultTuning = tuningOf(nil)
 func TestTuningDefaultsAreTheCalibratedConstants(t *testing.T) {
 	want := tuning{
 		AnalyzerTuning: config.AnalyzerTuning{
+			ITLBand: config.ITLBandTuning{MinObservableK: 0.15, MaxObservableK: 0.80},
 			SteadyGate: config.SteadyGateTuning{
 				SteadyFor: config.PolicyDuration(2 * time.Minute), MaxKDrift: 0.10,
 				Carry: config.PolicyDuration(5 * time.Minute), IdleRows: 2, MinSettledSamples: 3,

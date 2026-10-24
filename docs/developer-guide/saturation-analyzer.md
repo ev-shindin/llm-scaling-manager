@@ -318,8 +318,8 @@ ranks, `max_num_seqs` was read from the engine's flag
 (`EngineParams.ExplicitMaxNumSeqs`; the parser's default of 256 is not vLLM
 V1's 1024 on large cards), requests are waiting, and `PreemptionRate`
 (`rate(vllm:num_preemptions_total[ITLWindow])`, the ITL mean's own window)
-was read and is at most `itlCapMaxPreemptionRate` (default 0). The band
-edges are the policy's `itlMinObservableK` and `itlMaxObservableK`
+was read and is at most `analyzerTuning.itlBand.capMaxPreemptionRate` (default 0). The band
+edges are the policy's `analyzerTuning.itlBand.minObservableK` and `analyzerTuning.itlBand.maxObservableK`
 (`ScalingPolicy.ITLBand`); `Observe` takes them, the cap and the allowance as
 one `itl.Admission`, built alike by both analyzers. `pricingK`, and the slo
 analyzer's fill, clamp to the same band. Such a replica is not short of memory, so the reason for the band does

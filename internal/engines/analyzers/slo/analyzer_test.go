@@ -116,14 +116,14 @@ var _ = Describe("Analyzer", func() {
 	It("clamps the priced fill to the band the policy sets", func() {
 		warm(policy(44*time.Millisecond, 0))
 		cfg := policy(44*time.Millisecond, 0)
-		cfg.ITLMaxObservableK = 0.50
+		cfg.AnalyzerTuning.ITLBand.MaxObservableK = 0.50
 		// A loose target prices at the top of the band: 0.80 by default.
 		_, reading, d := a.priceVariant(domain.AnalyzerInput{Namespace: "ns", ModelID: "m", Config: cfg}, agg,
 			windowKey("ns", "m", agg), readFleet(domain.AnalyzerInput{VariantStates: []domain.VariantReplicaState{agg},
 				ReplicaMetrics: cycleRows("agg", 5)}),
 			1.0, 0.85, clock)
 		Expect(reading).NotTo(BeNil())
-		Expect(reading.Fill).To(Equal(0.50), "itlMaxObservableK must reach the fill clamp")
+		Expect(reading.Fill).To(Equal(0.50), "analyzerTuning.itlBand.maxObservableK must reach the fill clamp")
 		Expect(d.targetFill).To(BeNumerically(">", 0.50))
 	})
 

@@ -182,29 +182,6 @@ type ScalingPolicy struct {
 	// rather than inherit a figure measured somewhere else.
 	ShapeChangeHoldSeconds int `yaml:"shapeChangeHoldSeconds,omitempty"`
 
-	// ITLMinObservableK and ITLMaxObservableK are the KV band, as fractions
-	// of a replica's cache, inside which its (KV, inter-token latency)
-	// readings teach the ITL line. Zero takes DefaultITLMinObservableK and
-	// DefaultITLMaxObservableK. Validated 0 < min < max < 1.
-	//
-	// Below the lower edge the engine is barely batching and its latency is
-	// noise. Above the upper edge an engine short of memory preempts, and its
-	// latency leaves the line: on a benchmark run, fitting up to 0.85 instead
-	// of 0.80 pushed the intercept below zero (itl.DefaultMaxObservableK has
-	// the table). A replica at its sequence cap is still read above it; see
-	// ITLCapMaxPreemptionRate.
-	ITLMinObservableK float64 `yaml:"itlMinObservableK,omitempty"`
-	ITLMaxObservableK float64 `yaml:"itlMaxObservableK,omitempty"`
-
-	// ITLCapMaxPreemptionRate is the most preemptions per second, over the
-	// inter-token latency's window, a replica at its sequence cap may show and
-	// still have its reading above ITLMaxObservableK teach the ITL line
-	// (issue #287). Nil takes DefaultITLCapMaxPreemptionRate, zero: no
-	// preemption at all. Must be >= 0.
-	//
-	// A pointer, because zero is the default and a meaningful setting: an
-	// entry must be able to set 0 over a tier that raised it.
-	ITLCapMaxPreemptionRate *float64 `yaml:"itlCapMaxPreemptionRate,omitempty"`
 	// AnalyzerTuning is the saturation analyzer's advanced tuning: the
 	// figures behind its admission and pricing judgements. Unset fields take
 	// the calibrated defaults. Merged field by field.
@@ -531,15 +508,6 @@ const (
 	DefaultQueueLengthThreshold = 5.0
 )
 
-// ITL fit defaults, applied when fields are omitted from YAML config. The band
-// equals itl.DefaultMinObservableK and itl.DefaultMaxObservableK; a test holds
-// them equal.
-const (
-	DefaultITLMinObservableK       = 0.15
-	DefaultITLMaxObservableK       = 0.80
-	DefaultITLCapMaxPreemptionRate = 0.0
-)
-
 // V2 analyzer default thresholds, applied when fields are omitted from YAML config.
 const (
 	DefaultScaleUpThreshold  = 0.85
@@ -578,12 +546,6 @@ func (c *ScalingPolicy) ApplyDefaults() {
 	}
 	if c.QueueLengthThreshold == 0 {
 		c.QueueLengthThreshold = DefaultQueueLengthThreshold
-	}
-	if c.ITLMinObservableK == 0 {
-		c.ITLMinObservableK = DefaultITLMinObservableK
-	}
-	if c.ITLMaxObservableK == 0 {
-		c.ITLMaxObservableK = DefaultITLMaxObservableK
 	}
 	c.AnalyzerTuning = c.AnalyzerTuning.WithDefaults()
 	c.LoadImbalance = c.LoadImbalance.WithDefaults()
@@ -750,19 +712,6 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	if override.ShapeChangeHoldSeconds != 0 {
 		c.ShapeChangeHoldSeconds = override.ShapeChangeHoldSeconds
 	}
-	// Per-workload too: the band is a property of the engine and the card.
-	// Each edge on its own, so an entry can move one; a pair that ends up
-	// inverted is reset in ResolveScalingPolicyForTier.
-	if override.ITLMinObservableK != 0 {
-		c.ITLMinObservableK = override.ITLMinObservableK
-	}
-	if override.ITLMaxObservableK != 0 {
-		c.ITLMaxObservableK = override.ITLMaxObservableK
-	}
-	if override.ITLCapMaxPreemptionRate != nil {
-		v := *override.ITLCapMaxPreemptionRate
-		c.ITLCapMaxPreemptionRate = &v
-	}
 	// Field by field, like ScaleToZero: an entry that tunes one figure
 	// inherits every other from the layer below.
 	c.AnalyzerTuning.merge(override.AnalyzerTuning)
@@ -785,37 +734,6 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	}
 }
 
-// ITLBand is the KV band the ITL fit reads inside, with the defaults for an
-// edge left unset. A resolved policy holds a valid pair
-// (ResolveScalingPolicyForTier); for any other, an inverted or out-of-range
-// pair reads as the defaults, never as a band that admits nothing. A nil
-// policy reads as the defaults.
-func (c *ScalingPolicy) ITLBand() (lo, hi float64) {
-	if c == nil {
-		return DefaultITLMinObservableK, DefaultITLMaxObservableK
-	}
-	lo, hi = c.ITLMinObservableK, c.ITLMaxObservableK
-	if lo == 0 {
-		lo = DefaultITLMinObservableK
-	}
-	if hi == 0 {
-		hi = DefaultITLMaxObservableK
-	}
-	if !(lo > 0 && lo < hi && hi < 1) {
-		return DefaultITLMinObservableK, DefaultITLMaxObservableK
-	}
-	return lo, hi
-}
-
-// ITLCapPreemptionRate is ITLCapMaxPreemptionRate, or its default when unset
-// or the policy is nil.
-func (c *ScalingPolicy) ITLCapPreemptionRate() float64 {
-	if c == nil || c.ITLCapMaxPreemptionRate == nil || !(*c.ITLCapMaxPreemptionRate >= 0) {
-		return DefaultITLCapMaxPreemptionRate
-	}
-	return *c.ITLCapMaxPreemptionRate
-}
-
 // Validate checks for invalid threshold values.
 // Returns error with descriptive message if validation fails.
 // Call ApplyDefaults() before Validate() to handle zero-valued omitempty fields.
@@ -828,19 +746,6 @@ func (c *ScalingPolicy) Validate() error {
 	}
 	if c.Priority < 0 {
 		return fmt.Errorf("priority must be >= 0, got %.2f", c.Priority)
-	}
-	// Zero is unset (defaulted elsewhere), as for the band below.
-	if c.ITLMinObservableK != 0 && !(c.ITLMinObservableK > 0 && c.ITLMinObservableK < 1) {
-		return fmt.Errorf("itlMinObservableK must be in (0, 1), got %.2f", c.ITLMinObservableK)
-	}
-	if c.ITLMaxObservableK != 0 && !(c.ITLMaxObservableK > 0 && c.ITLMaxObservableK < 1) {
-		return fmt.Errorf("itlMaxObservableK must be in (0, 1), got %.2f", c.ITLMaxObservableK)
-	}
-	if c.ITLMinObservableK != 0 && c.ITLMaxObservableK != 0 && c.ITLMinObservableK >= c.ITLMaxObservableK {
-		return fmt.Errorf("itlMinObservableK (%.2f) must be < itlMaxObservableK (%.2f)", c.ITLMinObservableK, c.ITLMaxObservableK)
-	}
-	if c.ITLCapMaxPreemptionRate != nil && *c.ITLCapMaxPreemptionRate < 0 {
-		return fmt.Errorf("itlCapMaxPreemptionRate must be >= 0, got %g", *c.ITLCapMaxPreemptionRate)
 	}
 
 	// V2 threshold range/consistency checks apply whenever the fields are set,
@@ -1028,9 +933,6 @@ func (c *ScalingPolicy) ResetUnusableFields() []IgnoredField {
 	nonFinite("queueLengthThreshold", &c.QueueLengthThreshold)
 	nonFinite("scaleUpThreshold", &c.ScaleUpThreshold)
 	nonFinite("scaleDownBoundary", &c.ScaleDownBoundary)
-	nonFinite("itlMinObservableK", &c.ITLMinObservableK)
-	nonFinite("itlMaxObservableK", &c.ITLMaxObservableK)
-	nonFinitePtr("itlCapMaxPreemptionRate", &c.ITLCapMaxPreemptionRate)
 	for i := range c.Analyzers {
 		a := &c.Analyzers[i]
 		at := fmt.Sprintf("analyzers[%d].", i)
@@ -1045,7 +947,7 @@ func (c *ScalingPolicy) ResetUnusableFields() []IgnoredField {
 		nonFinitePtr(at+"scaleUpThreshold", &a.ScaleUpThreshold)
 		nonFinitePtr(at+"scaleDownBoundary", &a.ScaleDownBoundary)
 	}
-	c.AnalyzerTuning.resetNonFinite(nonFinite)
+	c.AnalyzerTuning.resetNonFinite(nonFinite, nonFinitePtr)
 	nonFinite("loadImbalance.idleKvUsage", &c.LoadImbalance.IdleKvUsage)
 	if c.ScaleToZero != nil && c.ScaleToZero.RetentionPeriod != "" {
 		if _, err := ValidateRetentionPeriod(c.ScaleToZero.RetentionPeriod); err != nil {

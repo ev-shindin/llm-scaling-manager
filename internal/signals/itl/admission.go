@@ -11,8 +11,8 @@ import (
 // defaults with no cap known, which admits nothing above the band.
 type Admission struct {
 	// MinK and MaxK are the band's edges; zero takes DefaultMinObservableK
-	// and DefaultMaxObservableK. The policy keys itlMinObservableK and
-	// itlMaxObservableK set them (config.ScalingPolicy.ITLBand), which
+	// and DefaultMaxObservableK. The policy keys analyzerTuning.itlBand.minObservableK and
+	// analyzerTuning.itlBand.maxObservableK set them (config.ScalingPolicy.ITLBand), which
 	// validates 0 < MinK < MaxK < 1.
 	MinK, MaxK float64
 	// MaxNumSeqs is the engine's max_num_seqs, per rank, when it was read
@@ -21,7 +21,7 @@ type Admission struct {
 	MaxNumSeqs int64
 	// CapMaxPreemptionRate is the most preemptions per second a capped
 	// replica may show over the ITL's window and still be read above MaxK.
-	// The policy key itlCapMaxPreemptionRate sets it; zero, the default,
+	// The policy key analyzerTuning.itlBand.capMaxPreemptionRate sets it; zero, the default,
 	// requires none.
 	CapMaxPreemptionRate float64
 	// Steady is the steady-state gate: which readings teach the full fit and
