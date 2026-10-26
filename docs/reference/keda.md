@@ -11,8 +11,12 @@ when it installs one.
   CVE-2026-77524 fix (below), and it does not leave a ScaledObject
   [unwired](#unwired-hpa-before-keda-220) after the controller restarts. The
   kind e2e suites pass on it. It supports Kubernetes 1.34 to 1.36.
-- **KEDA 2.19**: supported. It supports Kubernetes 1.32 to 1.34.
-- **KEDA 2.18**: supported. The benchmarks have run on 2.18.1.
+- **KEDA 2.19**: supported; affected by the
+  [unwired-HPA bug](#unwired-hpa-before-keda-220). It supports Kubernetes 1.32
+  to 1.34.
+- **KEDA 2.18**: supported; affected by the
+  [unwired-HPA bug](#unwired-hpa-before-keda-220). The benchmarks have run on
+  2.18.1.
 - **Which one CI tests**: the installer's default `KEDA_CHART_VERSION`. The
   kind e2e suites install chart `kedacore/keda` at that version, and
   `make check-prereqs` prints it, as `CI tests <version>`.
@@ -41,16 +45,20 @@ changes.
 
 ### Unwired HPA before KEDA 2.20
 
-On KEDA 2.19 and older, a ScaledObject created soon after the controller
-restarts, rolls out or is unreachable can keep its HPA on the CPU default. KEDA
-keeps a failed connection to the scaler for up to two minutes, builds the HPA
-from the empty metric spec that failed call returns, and does not try again.
+On KEDA 2.19 and older, a ScaledObject created or changed within about two
+minutes of a controller restart, rollout or outage can keep its HPA on the CPU
+default. KEDA keeps a failed connection to the controller's scaler for up to
+two minutes, builds the HPA from the empty metric spec a failed call returns,
+and does not try again. ScaledObjects already wired stay wired.
 
 KEDA 2.20 fixes it ([kedacore/keda#7777](https://github.com/kedacore/keda/pull/7777)).
-Upgrade KEDA to 2.21, which also fixes the CVE above. Until then, after every
-controller restart or rollout run `make scaledobjects-rewire`
+Upgrade KEDA to 2.21, which also fixes the CVE above. Until then, run
+`make scaledobjects-rewire` after every controller restart, with the same
+`NAMESPACE`, `WVA_NS` and `SCOPE` as the install
 ([re-wiring](#the-scalers-tls-in-kedas-namespace)), or restart the KEDA
-operator. On a KEDA below 2.20 the installer says so in its CVE warning.
+operator. On a KEDA below 2.20 the installer says so in its CVE warning, and
+`make verify-deployment` names this cause when it finds an unwired HPA. A
+controller-side repair for older KEDA is tracked in [#340](https://github.com/ev-shindin/llm-scaling-manager/issues/340).
 
 ### Upgrading a KEDA the cluster already has
 
