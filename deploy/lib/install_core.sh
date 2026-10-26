@@ -318,6 +318,13 @@ wva_run_prereqs_phase() {
         wva_apply_llmd_monitors
     fi
 
+    # The EPPs of the managed pools authenticate /metrics scrapes as their own
+    # ServiceAccount; without the cluster-scoped grant they answer 500
+    # (deploy/lib/epp_auth.sh).
+    if [ "$DEPLOY_WVA" = "true" ]; then
+        wva_apply_epp_metrics_auth
+    fi
+
     deploy_scaler_backend
 
     # Environment-specific WVA prerequisites (on OpenShift: the SA token
@@ -487,6 +494,9 @@ main() {
         # registration is the step AFTER this one -- objects to scale are WVA's
         # premise, ScaledObjects are its own output. This reports what is already
         # registered, so the reader knows whether 'adopt' will come up in the plan.
+        # The EPPs of the managed pools must be able to authenticate a /metrics
+        # scrape, or they answer 500. Never fatal: setup-prereqs grants it.
+        wva_report_epp_metrics_auth
         wva_report_scaledobjects
         log_success "Preflight passed for ENVIRONMENT=$ENVIRONMENT, WVA_SCOPE=${WVA_SCOPE:-<platform default>}, WVA_LIMITER=${WVA_LIMITER:-<unset: keeps the live limiter>}"
         exit 0

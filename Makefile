@@ -706,7 +706,7 @@ check-prereqs: ## Phase 1, read-only: tools, permissions, the namespace and the 
 .PHONY: verify-deployment
 verify-deployment: ## Is the controller running, and are metrics flowing? Read-only. WVA_NS=<ns>, NAMESPACE=<ns>.
 	@$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) $(if $(ENVIRONMENT_INSTALL),ENVIRONMENT=$(ENVIRONMENT_INSTALL),) \
-		bash -c 'source deploy/lib/common.sh; source deploy/lib/constants.sh; source deploy/lib/infra_monitoring.sh; source deploy/lib/verify.sh; source deploy/lib/scaler_tls.sh; \
+		bash -c 'source deploy/lib/common.sh; source deploy/lib/constants.sh; source deploy/lib/infra_monitoring.sh; source deploy/lib/verify.sh; source deploy/lib/scaler_tls.sh; source deploy/lib/epp_auth.sh; \
 			export DEPLOY_PROMETHEUS=$${DEPLOY_PROMETHEUS:-true}; export DEPLOY_OPERATIONAL_DASHBOARD=$${DEPLOY_OPERATIONAL_DASHBOARD:-true}; export SCALER_BACKEND=$${SCALER_BACKEND:-keda}; export MONITORING_NAMESPACE=$${MONITORING_NAMESPACE:-workload-variant-autoscaler-monitoring}; \
 			KEDA_NAMESPACE_EXPLICIT=false; [ -z "$${KEDA_NAMESPACE:-}" ] || KEDA_NAMESPACE_EXPLICIT=true; \
 			[ -n "$${ENVIRONMENT:-}" ] || ! wva_is_openshift || ENVIRONMENT=openshift; \
@@ -977,6 +977,24 @@ scaledobjects-rewire: ## Re-wire ScaledObjects whose HPA KEDA left on the CPU de
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/constants.sh; source deploy/lib/verify.sh; source deploy/lib/scaler_tls.sh; \
 			KEDA_NAMESPACE_EXPLICIT=false; [ -z "$${KEDA_NAMESPACE:-}" ] || KEDA_NAMESPACE_EXPLICIT=true; \
 			wva_bootstrap_env; wva_rewire_scaledobjects'
+
+## CLUSTER ADMIN. Let the EPP of every InferencePool this install manages
+## authenticate scrapes of its /metrics. The EPP checks each scrape with a
+## TokenReview and a SubjectAccessReview made as its OWN ServiceAccount; when
+## that ServiceAccount may not create them, /metrics answers 500 to WVA and to
+## Prometheus. Binds each such ServiceAccount to ClusterRole
+## wva-epp-metrics-auth (create tokenreviews and subjectaccessreviews only),
+## one labelled binding per ServiceAccount, which undeploy-wva removes. The
+## default ServiceAccount only with WVA_EPP_METRICS_AUTH_DEFAULT_SA=true.
+## setup-prereqs runs it too (WVA_EPP_METRICS_AUTH=false skips it there).
+## Exits 1 while one is left ungranted, 2 when the pools cannot be listed or
+## DRY_RUN is not true or false, 3 when one could not be checked. Same WVA_NS,
+## NAMESPACE and SCOPE as verify-deployment.
+.PHONY: epp-metrics-auth
+epp-metrics-auth: ## CLUSTER ADMIN: let the managed EPPs authenticate /metrics scrapes (fixes /metrics HTTP 500). DRY_RUN=true prints the plan and commands. WVA_NS=<ns>, NAMESPACE=<ns>.
+	@$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) $(if $(DRY_RUN),DRY_RUN=$(DRY_RUN),) $(if $(WVA_EPP_METRICS_AUTH_DEFAULT_SA),WVA_EPP_METRICS_AUTH_DEFAULT_SA=$(WVA_EPP_METRICS_AUTH_DEFAULT_SA),) \
+		bash -c 'source deploy/lib/common.sh; source deploy/lib/epp_auth.sh; \
+			wva_bootstrap_env; wva_grant_epp_metrics_auth'
 
 ## Review the list in $EDITOR, then apply what you confirm. Needs a terminal;
 ## use scaledobjects-plan + scaledobjects-apply where there is none.
@@ -3015,6 +3033,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# patches a paused ScaledObject, another scaler's trigger, or reads an
 	@# unreadable HPA as wired all parse, and all exit 0.
 	@bash hack/check-scaledobject-rewire.sh
+	@echo "Checking the EPP /metrics authentication grant..."
+	@# Runs epp-metrics-auth against a stubbed kubectl. A grant that binds the
+	@# wrong ServiceAccount, reads a Forbidden list as no pools, or binds twice
+	@# all parse, and all exit 0.
+	@bash hack/check-epp-metrics-auth.sh
 	@echo "Checking which Prometheus address the installer picks, and that it verifies it..."
 	@# Runs the detection, the CA copy and the TLS check against a stubbed
 	@# kubectl and real certificates. prometheus-operated, which a

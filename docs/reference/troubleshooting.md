@@ -33,6 +33,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | scaled past nominal | a model holds more GPUs than its ClusterQueue's `nominalQuota`; `used` above `guaranteed` in `limiterBudgets`; `wva_kueue_borrowed_gpus > 0` | expected: borrowing is on by default for a Kueue-backed namespace quota | [past nominal](#a-model-runs-past-its-kueue-nominal-quota) |
 | a Kueue borrowing alert fires | `WVAKueueReaderStale`, `WVAKueueReaderStaleNamespace`, `WVAKueueControllerDown`, `WVAKueueBorrowDrift`, `WVAKueueVersionUnknown`, `WVAKueueVersionUntested`, `WVAKueueLenderWaitingPastCooldown` | a read is failing, the Kueue controller is not running, Kueue accounts differently, its version cannot be read or is untested, a lender is not getting its capacity back | [Kueue borrowing alerts](#kueue-borrowing-alerts) |
 | GPUs held / quota spent | `ResourceConstrained` Event; `wva_decisions_limited_total` rising; `wva_model_scaling_blocked{reason="quota-short"}` | the quota or GPU inventory is used up, unresolved accelerators, a lowered quota (it does not evict) | [GPUs held](#gpus-held-or-quota-spent) |
+| EPP `/metrics` answers 500 | `returned status 500` for an EPP pod in the controller log; `tokenreviews.authentication.k8s.io is forbidden` in the EPP's log | the EPP's own ServiceAccount may not create tokenreviews and subjectaccessreviews | [EPP 500](#epp-metrics-returns-500) |
 | metrics stale or missing | `MetricsUnavailable` Event; `wva_metrics_freshness_status{status!="fresh"} > 0`; `WVAMetricsCollectionFailing`; `wva_unmeasured_queue > 0` | ServiceMonitor or PodMonitor not selecting the pods, Prometheus unreachable, FMA launcher pods not scraped | [metrics](#metrics-stale-or-missing) |
 | controller not Ready or crash-looping | pod `0/1` or `CrashLoopBackOff`; log `refusing to start unbounded`; readiness check `gpu-policy` failing | cluster policy unreadable, an invalid `default` entry in the ConfigMap the limiters come from, a `gpu-inventory` limiter declared alone with no node read, a Prometheus setting it refuses, an image older than the manifests | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
 | `x509: certificate is valid for ..., not ...` | the controller log at startup | a Prometheus address its certificate does not name | [certificate name mismatch](#prometheus-certificate-name-mismatch) |
@@ -202,8 +203,8 @@ EPP metrics scrape failing on every pod; logged once until a scrape succeeds
 
 The error quotes the first 200 bytes of the EPP's answer. A `500` with body
 `Authentication failed` or `Authorization for user ... failed` comes from the
-EPP's own TokenReview or SubjectAccessReview call: check its tokenreview RBAC
-(step 2 below). While every pod keeps failing, the scaling manager does not
+EPP's own TokenReview or SubjectAccessReview call: see
+[EPP /metrics returns 500](#epp-metrics-returns-500). While every pod keeps failing, the scaling manager does not
 repeat the failure as `Optimization error` on every retry. It still does when
 the Prometheus fallback below fails too, and when another model fails in the
 same cycle.
@@ -241,11 +242,9 @@ Check, in order:
    ```
    A count of `0` means the token controller never filled the Secret; an
    empty second line means the volume is missing from the Deployment.
-2. **The EPP's tokenreview RBAC** (cluster admin). It is bound per EPP release
-   name, so a renamed or reinstalled EPP release leaves it pointing at nothing.
-   ```bash
-   kubectl get clusterrolebinding | grep epp-tokenreview
-   ```
+2. **The EPP's own ServiceAccount** (cluster admin). A `500` means it may not
+   create tokenreviews or subjectaccessreviews; see
+   [EPP /metrics returns 500](#epp-metrics-returns-500).
 3. **Network reachability to the EPP pod IP.** A NetworkPolicy that admits the
    monitoring namespace but not the controller's breaks this path only.
 
@@ -951,6 +950,73 @@ ScaledObject, or set `countBorrowable: false` on the quota entry. For a lender
 on `Never` or a `LowerPriority` lender below the model, the opt-in
 `releaseToNonReclaimingLenders: true` does it for you
 ([quota limiter](quota-limiter.md#lenders-kueue-does-not-reclaim-for)).
+
+## EPP /metrics returns 500
+
+**Symptom**: the controller log names an EPP pod that `returned status 500,
+body "Authentication failed"`, every cycle. The EPP's own log says why:
+
+```text
+Failed to make webhook authenticator request: tokenreviews.authentication.k8s.io is forbidden:
+User "system:serviceaccount:<ns>:<epp-sa>" cannot create resource "tokenreviews" ...
+```
+
+**Cause**: the EPP checks every `/metrics` scrape by asking the API server who
+the caller is (a TokenReview) and whether it may read `/metrics` (a
+SubjectAccessReview). It asks as its **own** ServiceAccount. When that
+ServiceAccount may not create those reviews, the EPP cannot answer and returns
+500, to the scaling manager and to Prometheus alike. A caller without the right
+gets 401 or 403, never 500. llm-d's router chart grants this; an EPP installed
+another way may not have it.
+
+**Check** (`make check-prereqs` and `make verify-deployment` warn about it too):
+
+```bash
+kubectl auth can-i create tokenreviews.authentication.k8s.io --as=system:serviceaccount:<ns>:<epp-sa>
+kubectl auth can-i create subjectaccessreviews.authorization.k8s.io --as=system:serviceaccount:<ns>:<epp-sa>
+```
+
+**Fix (cluster admin)**: grant it to the EPP of every InferencePool the
+scaling manager manages. `DRY_RUN=true` prints the plan and the commands and
+changes nothing.
+
+```bash
+make epp-metrics-auth NAMESPACE=<ns> DRY_RUN=true
+make epp-metrics-auth NAMESPACE=<ns>
+```
+
+The EPP caches review results, so the 500 can last up to about 5 minutes after
+the grant. Restarting the EPP pod clears it at once.
+
+It finds each pool's endpoint picker Service, the Deployment behind it and the
+ServiceAccount that Deployment runs as. It binds the ServiceAccounts that are
+not already allowed, and those allowed only through another install's binding,
+which that install's uninstall would remove. `make setup-prereqs` does the same
+(`WVA_EPP_METRICS_AUTH=false` skips it), and `make undeploy-wva` removes what
+either made.
+
+- An EPP running as the namespace's `default` ServiceAccount is not bound: every
+  pod there that names none would get the grant too. Give the EPP its own
+  ServiceAccount, or pass `WVA_EPP_METRICS_AUTH_DEFAULT_SA=true`.
+- A pool whose endpoint picker is not a Service is skipped with a warning;
+  check its EPP by hand.
+
+The script exits 1 while an EPP is left ungranted (for example, a pool whose
+Service does not exist), including a `DRY_RUN=true` run that has something to
+grant, as `scaledobjects-rewire` does. It exits 2 when the pools cannot be
+listed, and 3 when one could not be checked. `make` reports any of these as
+`Error <code>` and itself exits 2.
+
+By hand, the same grant:
+
+```bash
+kubectl create clusterrole wva-epp-metrics-auth --verb=create \
+  --resource=tokenreviews.authentication.k8s.io,subjectaccessreviews.authorization.k8s.io
+kubectl create clusterrolebinding wva-epp-metrics-auth-<ns>-<epp-sa> \
+  --clusterrole=wva-epp-metrics-auth --serviceaccount=<ns>:<epp-sa>
+```
+
+A binding made by hand has no label, so `make undeploy-wva` leaves it.
 
 ## Metrics stale or missing
 
