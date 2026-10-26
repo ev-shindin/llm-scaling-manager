@@ -17,7 +17,7 @@ source docs/guides/env.sh
 | [Install a small llm-d model](install-small-model/) | **first, if nothing is serving yet.** One 0.6B model on ONE GPU — llm-d's own guides start at 16 |
 | [Install the scaling manager in a namespace](install-in-namespace/) | **start here** when llm-d already serves. One team, one namespace |
 | [Install the scaling manager for the whole cluster](install-cluster-wide/) | one controller for every namespace |
-| [Coming from llm-d's workload-variant-autoscaler](from-upstream-wva/) | you run upstream WVA (up to v0.9.x) and want to switch: freeze, replace the controller, adopt the ScaledObjects |
+| [Coming from llm-d's workload-variant-autoscaler](from-upstream-wva/) | you run llm-d's workload-variant-autoscaler and want to switch: freeze, replace the controller, adopt the ScaledObjects |
 
 ## Cluster administration
 

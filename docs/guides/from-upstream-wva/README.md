@@ -2,8 +2,9 @@
 
 ## Overview
 
-This guide moves a cluster from llm-d's workload-variant-autoscaler (WVA, up to
-its `v0.9.x` releases) to the scaling manager (llm-scaling-manager).
+If you run llm-d's workload-variant-autoscaler (WVA), this guide moves your
+cluster to the scaling manager (llm-scaling-manager). It was checked against
+WVA's `v0.8.0` and `v0.9.0` tags.
 
 The scaling manager is an independently developed fork of WVA. It is not
 affiliated with or endorsed by llm-d. It was forked from upstream commit
@@ -29,13 +30,14 @@ Prometheus Adapter path. The rest of this guide converts what you have.
   guides](#4-install-the-scaling-manager).
 - [ ] **A short window.** Between steps 3 and 5 no controller sizes your
   workloads; frozen ones hold their replica count.
+- [ ] **`yq`** (v4), only if you need [Going back](#going-back).
 
 Find the upstream install and what it scales:
 
 <!-- guide:prerequisites start -->
 ```bash
 # Find the upstream controller. ARGS without --watch-namespace means it manages every namespace.
-kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler,control-plane=controller-manager -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image,ARGS:.spec.template.spec.containers[0].args
+kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler,control-plane=controller-manager -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image,ARGS:.spec.template.spec.containers[0].args'
 
 # Installed with Helm? A release with a workload-variant-autoscaler chart means yes.
 helm list -A | grep workload-variant-autoscaler
@@ -52,12 +54,16 @@ workloads are scaled by a ScaledObject and which by a plain HPA (an HPA with no
 
 ## Installation Instructions
 
-### 1. Save the upstream settings
+### 1. Save what you will change
 
 <!-- guide:migrate.save start -->
 ```bash
-# Save the upstream ConfigMaps. Your scaling settings are in the one named *saturation-scaling-config.
+# Save what step 3 removes and step 5 changes. Going back needs these files.
 kubectl get configmap -n <upstream-namespace> -o yaml > upstream-configmaps.yaml
+kubectl get deployment wva-controller-manager -n <upstream-namespace> -o yaml > upstream-controller.yaml
+kubectl get scaledobject,hpa -A -o yaml > upstream-autoscalers.yaml
+# Installed with Helm: save the release values instead of the Deployment
+#   helm get values <release> -n <upstream-namespace> > upstream-values.yaml
 ```
 <!-- guide:migrate.save end -->
 
@@ -79,6 +85,8 @@ trigger sets `ignoreNullValues: "false"`. An unfrozen workload then scales down
 to its `minReplicaCount`, which is `0` when the ScaledObject does not set it.
 
 Workloads scaled by a plain HPA need nothing here; you replace the HPA in step 5.
+Keep `upstream-autoscalers.yaml` from step 1: adopting replaces each trigger, so
+it is the only copy of the upstream ones.
 
 ### 3. Remove the upstream controller
 
@@ -97,6 +105,15 @@ kubectl delete deployment wva-controller-manager -n <upstream-namespace>
 helm uninstall <release> -n <upstream-namespace>
 ```
 <!-- guide:migrate.removehelm end -->
+
+The chart also deleted with the release:
+
+- **The model server's Service and ServiceMonitor** (`vllmService`, on by
+  default). Nothing scrapes the model server until step 4: `make setup-prereqs`
+  adds PodMonitor `wva-modelserver-metrics` where nothing scrapes the model
+  servers, for pods with an llm-d serving label (see step 5).
+- **The chart's HPA** (`hpa`, on by default). The workload keeps its replica
+  count, and step 5 has no HPA to delete for it.
 
 Why first: the scaling manager's installer refuses to install beside a
 controller that manages every namespace. Both would also publish the same
@@ -136,16 +153,27 @@ kubectl edit configmap wva-scaling-policy-config -n <controller-namespace>
 <!-- guide:migrate.policy end -->
 
 - Thresholds (`scaleUpThreshold`, `scaleDownBoundary`, `kvCacheThreshold`,
-  `queueLengthThreshold`), `analyzers`, tiers and per-model entries keep their
-  keys.
+  `queueLengthThreshold`), `analyzers` and per-model entries keep their keys.
 - `enableLimiter: true` turns nothing on. Declare the limiter in the `default`
   entry's `limiters:` list ([limiters](../../reference/scaling-policy.md#limiters-cluster-default-only-live)).
 - `kvSpareTrigger` and `queueSpareTrigger` are gone. Delete them.
 - A key the scaling manager does not know is ignored and reported, not
   rejected.
 - Re-running `make deploy-wva` resets the `default` entry. Keep lasting
-  changes in a tier or a per-model entry ([Changing policy
-  safely](../../reference/operations.md#changing-policy-safely)).
+  changes in a tier or a per-model entry ([re-running the installer resets the
+  default entry](../../reference/scaling-policy.md#re-running-the-installer-resets-the-default-entry)).
+- A namespace-local `wva-saturation-scaling-config` in the namespace the
+  scaling manager now runs in is ignored, because the install creates
+  `wva-scaling-policy-config` there. Merge its entries into the new one.
+
+Settings outside that ConfigMap do not carry over:
+
+| upstream | here |
+| --- | --- |
+| `PROMETHEUS_BASE_URL` in `wva-manager-config` | `PROMETHEUS_URL=<url>` on the install ([Prometheus](../../reference/configuration.md#pointing-at-an-existing-prometheus)) |
+| `WVA_SCALE_TO_ZERO` in `wva-manager-config` (`"false"`) | `ENABLE_SCALE_TO_ZERO` on the install, default `true` |
+| `GLOBAL_OPT_INTERVAL` in `wva-manager-config` | edit it in `wva-manager-config` after each install, then restart the controller ([what a change needs](../../reference/configuration.md#what-a-change-needs-a-restart-or-not)) |
+| `wva-model-scale-to-zero-config` | not read. Put `scaleToZero:` on the model's entry ([scaleToZero](../../reference/scaling-policy.md#scaletozero)) |
 
 ### 5. Register the workloads
 
@@ -153,7 +181,8 @@ kubectl edit configmap wva-scaling-policy-config -n <controller-namespace>
 ```bash
 # Write the plan, edit it, apply it. Cluster-wide install: add SCOPE=cluster to both.
 make scaledobjects-plan WVA_DEFAULT_SO_PLAN=wva-plan.yaml
-# edit wva-plan.yaml: for each upstream ScaledObject, change apply: no to apply: adopt
+# edit wva-plan.yaml: change apply: no to apply: adopt for each upstream ScaledObject
+# delete the plain HPAs (step 5), then apply
 make scaledobjects-apply WVA_DEFAULT_SO_PLAN=wva-plan.yaml
 ```
 <!-- guide:migrate.register end -->
@@ -165,11 +194,29 @@ In `wva-plan.yaml`:
   trigger with the scaler's trigger and keeps the polling interval, cooldown,
   `fallback` and `behavior` ([what adopt
   keeps](../../reference/configuration.md#default-scaledobjects)).
-- **Check `minReplicas` on each adopt entry.** It is read from the
-  ScaledObject, and one without `minReplicaCount` reads as `0`.
-- **Plain HPAs**: delete the HPA first (`kubectl delete hpa <name> -n
-  <namespace>`), then set the workload's entry to `apply: yes`. Two autoscalers
-  on one workload fight over its replica count.
+- **Set `minReplicas` on each adopt entry before you apply.** It is read from
+  the ScaledObject, and one without `minReplicaCount` reads as `0`. This
+  install allows scale to zero by default, so an idle model would be parked,
+  and without the EPP's `flowControl` gate it never wakes. Set
+  `minReplicas: 1` unless you want that ([scale to zero](../scale-to-zero/)),
+  or install with `ENABLE_SCALE_TO_ZERO=false`.
+- **Plain HPAs**: the workload's entry is already `apply: yes`. Delete the HPA
+  (`kubectl delete hpa <name> -n <namespace>`) before you run
+  `scaledobjects-apply`. Two autoscalers on one workload fight over its replica
+  count. Its new ScaledObject is named `<workload>-wva`, so its
+  `variant_name` series change from the HPA's name to that.
+- **A workload missing from the plan** has no llm-d serving label
+  (`llm-d.ai/role=decode` or `prefill`, or `llm-d.ai/inferenceServing=true`).
+  Upstream did not need one. Label it and plan again, or write its trigger by
+  hand ([trigger keys](../../reference/scaledobject-trigger.md)). Leave it
+  frozen until it is registered.
+
+<!-- guide:migrate.unlisted start -->
+```bash
+# A workload missing from the plan has no llm-d serving label. Label the Deployment itself (its pods do not restart), then plan again.
+kubectl label deployment <name> -n <namespace> llm-d.ai/role=decode
+```
+<!-- guide:migrate.unlisted end -->
 
 Then unfreeze each adopted ScaledObject:
 
@@ -184,21 +231,76 @@ kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused-
 
 <!-- guide:verify.deployment start -->
 ```bash
-# Check the controller and the ScaledObjects. Use the NAMESPACE you installed with.
+# Check the controller and the ScaledObjects, with the NAMESPACE you installed with.
 make verify-deployment
 make verify-scaledobjects
+# cluster-wide install:
+#   make verify-deployment SCOPE=cluster WVA_NS=<controller-namespace>
+#   make verify-scaledobjects SCOPE=cluster WVA_NS=<controller-namespace>
 ```
 <!-- guide:verify.deployment end -->
 
 <!-- guide:verify.rewire start -->
 ```bash
-# A ScaledObject whose HPA shows only cpu is unwired. Re-wire it.
+# A ScaledObject whose HPA shows only cpu is unwired. Re-wire it. Cluster-wide install, add SCOPE=cluster.
 make scaledobjects-rewire
+# cluster-wide install:
+#   make scaledobjects-rewire SCOPE=cluster WVA_NS=<controller-namespace>
 ```
 <!-- guide:verify.rewire end -->
 
 Then check that decisions arrive, as in [Check KEDA received the
 decision](../install-in-namespace/README.md#1-check-keda-received-the-decision).
+
+## Going back
+
+Before step 5, re-apply the controller (step 1's file, or `helm install` with
+`upstream-values.yaml`) and unfreeze. After step 5, in this order:
+
+1. Freeze the adopted ScaledObjects:
+
+<!-- guide:rollback.freeze start -->
+```bash
+# Freeze the adopted ScaledObjects again, so nothing scales while the controllers change.
+kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused=true --overwrite
+```
+<!-- guide:rollback.freeze end -->
+
+2. Remove the scaling manager:
+
+<!-- guide:rollback.undeploy start -->
+```bash
+# Remove the scaling manager, with the same SCOPE and NAMESPACE you installed with. It also deletes the ScaledObjects it created.
+make undeploy-wva NAMESPACE=<namespace>
+```
+<!-- guide:rollback.undeploy end -->
+
+   Cluster-wide install: `make undeploy-wva SCOPE=cluster WVA_NS=<controller-namespace>`.
+   If it ran in the upstream namespace, the uninstall also deletes the objects
+   that share names (ConfigMaps, ServiceAccount, Service); reinstall upstream
+   from its release instead of the next step.
+
+3. Restore the upstream controller and the saved ScaledObjects and HPAs:
+
+<!-- guide:rollback.controller start -->
+```bash
+# Restore the upstream controller. yq drops the fields the API server sets.
+yq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status)' upstream-controller.yaml | kubectl apply -f -
+```
+<!-- guide:rollback.controller end -->
+
+<!-- guide:rollback.autoscalers start -->
+```bash
+# Restore the saved ScaledObjects and plain HPAs. HPAs that KEDA owns are skipped; KEDA recreates them.
+yq '.items[] | select(.metadata.ownerReferences == null) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-autoscalers.yaml | kubectl apply -f -
+```
+<!-- guide:rollback.autoscalers end -->
+
+4. Unfreeze each ScaledObject once the upstream controller is ready
+   (`kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused-`).
+
+Do this before the cleanup below, which deletes what the upstream controller
+needs.
 
 ## Cleanup
 
@@ -215,11 +317,24 @@ kubectl delete clusterrole wva-manager-role wva-metrics-auth-role \
 ```
 <!-- guide:cleanup.clusterrbac end -->
 
-- Skip it while another upstream install on the cluster still runs: they share
-  these names.
-- On OpenShift, upstream's bindings carry a suffix, the same one the scaling
-  manager uses for its own. Delete them by hand only if the scaling manager does
-  not run in the upstream namespace.
+Skip it while another upstream install on the cluster still runs: they share
+these names.
+
+On OpenShift, upstream's six bindings carry a suffix, the same one the scaling
+manager uses for its own:
+
+<!-- guide:cleanup.openshift start -->
+```bash
+# OpenShift only. Upstream suffixed its bindings with a hash of its namespace. List them; delete them only if the scaling manager does not run in that namespace.
+SUFFIX=$(printf '%s' "<upstream-namespace>" | sha256sum | cut -c1-8)
+kubectl get clusterrolebinding -o name | grep -- "-${SUFFIX}$"
+```
+<!-- guide:cleanup.openshift end -->
+
+- **The scaling manager runs in the upstream namespace**: five of them are now
+  its own; keep them. Its installer removes the sixth,
+  `wva-prometheus-cluster-monitoring-view-<suffix>`, when it may.
+- **It runs elsewhere**: delete all six with `kubectl delete clusterrolebinding <name>`.
 
 *Up to v0.8*:
 
@@ -238,7 +353,7 @@ kubectl delete crd variantautoscalings.llmd.ai --ignore-not-found
 - **Metric names**: every `wva_` series upstream `v0.9.0` publishes, with the
   same labels on the replica gauges, except `wva_config_kv_spare_threshold`
   and `wva_config_queue_spare_threshold`, which are removed. `variant_name` is
-  the ScaledObject's name. [All metrics](../../reference/prometheus.md).
+  the ScaledObject's name, as before. [All metrics](../../reference/prometheus.md).
 - **Alerts**: the five upstream alerts keep their names.
   `DEPLOY_ALERTING_RULES=true` installs them, as before.
 - **Defaults**: the cluster-scope controller namespace is still
@@ -253,7 +368,8 @@ kubectl delete crd variantautoscalings.llmd.ai --ignore-not-found
 | Install scope | cluster-wide on Kubernetes, one namespace on OpenShift | one namespace unless `SCOPE=cluster` ([which namespace is which](../../reference/configuration.md#which-namespace-is-which)) |
 | Scaling-policy ConfigMap | `wva-saturation-scaling-config` | `wva-scaling-policy-config`. The old name is read only while the new one does not exist; the installer creates the new one |
 | Turning on a limiter | `enableLimiter: true` | a `limiters:` entry |
-| Prometheus TLS | not verified (`PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "true"`) | verified, except for a Prometheus the installer deploys ([TLS](../../reference/prometheus.md#tls-configuration)) |
+| Scale to zero | off (`WVA_SCALE_TO_ZERO: "false"`) | allowed (`ENABLE_SCALE_TO_ZERO=true`); a model parks only if its `minReplicaCount` is `0` |
+| Prometheus TLS | not verified on Kubernetes (`PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "true"`); verified on OpenShift | verified, except for a Prometheus the installer deploys ([TLS](../../reference/prometheus.md#tls-configuration)) |
 | Scaler port | none | `:9090`, mutual TLS on a new install ([external scaler TLS](../../reference/configuration.md#external-scaler-mutual-tls)) |
 | Image | `ghcr.io/llm-d/llm-d-workload-variant-autoscaler` | `ghcr.io/ev-shindin/llm-scaling-manager` |
 
