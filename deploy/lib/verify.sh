@@ -261,6 +261,11 @@ verify_deployment() {
             (WVA_WATCH_NS="$epp_ns"; wva_report_epp_flowcontrol) || true
         done
     fi
+    # An EPP whose ServiceAccount may not create tokenreviews and
+    # subjectaccessreviews answers 500 to every /metrics scrape. Warns only.
+    if declare -F wva_report_epp_metrics_auth >/dev/null; then
+        wva_report_epp_metrics_auth
+    fi
 
     # --- Monitoring
     # Keyed on what is actually there, not on DEPLOY_PROMETHEUS. That flag is the

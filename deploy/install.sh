@@ -218,6 +218,8 @@ source "$DEPLOY_LIB_DIR/scaler_tls.sh"
 source "$DEPLOY_LIB_DIR/infra_epp.sh"
 # shellcheck source=lib/infra_monitoring.sh
 source "$DEPLOY_LIB_DIR/infra_monitoring.sh"
+# shellcheck source=lib/epp_auth.sh
+source "$DEPLOY_LIB_DIR/epp_auth.sh"
 # shellcheck source=lib/single_install.sh
 source "$DEPLOY_LIB_DIR/single_install.sh"
 # shellcheck source=lib/scaledobject.sh

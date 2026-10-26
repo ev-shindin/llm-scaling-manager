@@ -367,6 +367,10 @@ cleanup() {
         if declare -F wva_remove_llmd_monitors >/dev/null; then
             wva_remove_llmd_monitors
         fi
+        # The EPP /metrics authentication bindings setup made, by their labels.
+        if declare -F wva_remove_epp_metrics_auth >/dev/null; then
+            wva_remove_epp_metrics_auth
+        fi
         # After the ScaledObjects are gone, so nothing dials the old address.
         if declare -F wva_scaler_keda_restart_after_undeploy >/dev/null; then
             wva_scaler_keda_restart_after_undeploy
