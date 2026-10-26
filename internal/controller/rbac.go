@@ -55,7 +55,7 @@ package controller
 // target and min/max envelope (registry.Enricher, and the external scaler's own
 // lookups).
 //
-// GET ONLY, deliberately. The markers that used to grant this rule belonged to
+// get and patch only. The markers that used to grant this rule belonged to
 // the ScaledObject and HPA reconcilers and went with them, leaving the checked-in
 // ClusterRole correct only because nothing had regenerated it — the next
 // `make manifests` silently drops the permission, and enrichment then fails for
@@ -63,9 +63,22 @@ package controller
 //
 // list and watch are NOT granted and must not be: a cached/listing read is served
 // by a cluster-wide informer, the very LIST+WATCH this design exists to remove.
-// Every read goes through mgr.GetAPIReader(). Nothing writes them — KEDA owns
-// these objects.
-// +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects,verbs=get
+// Every read goes through mgr.GetAPIReader().
+//
+// patch is for one write, registry.Rewirer: when KEDA left a ScaledObject's
+// HPA without the scaler's External metric (its one metric-spec call failed,
+// and KEDA does not retry), the controller changes the trigger metadata key
+// wvaRewire so KEDA asks again. It is a JSON patch guarded by a test of the
+// trigger's scalerAddress, on ScaledObjects that call this scaler. Without
+// patch the controller logs it once and make scaledobjects-rewire does it by
+// hand; --scaledobject-rewire=false turns the write off.
+// +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects,verbs=get;patch
+
+// HPAs, read one at a time by registry.Rewirer to see whether KEDA wired the
+// scaler's External metric onto a ScaledObject's HPA. GET ONLY, uncached, for
+// the same reason as ScaledObjects. KEDA owns these objects; nothing writes
+// them.
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get
 
 // Kueue quotas, read by the quota limiter when a quota entry sets
 // `kueue.enabled` (internal/kueue.Reader): ClusterQueues carry the nominal

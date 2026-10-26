@@ -89,6 +89,7 @@ var (
 	podMappingMissTotal                 *prometheus.CounterVec
 	scalerUndecidedAnswersTotal         *prometheus.CounterVec
 	scalerPanicsTotal                   *prometheus.CounterVec
+	scaledObjectRewiresTotal            *prometheus.CounterVec
 
 	// Saturation and capacity metrics
 	saturationUtilization *prometheus.GaugeVec
@@ -804,9 +805,11 @@ func InitMetrics(registry prometheus.Registerer) error {
 
 	scalerUndecidedLabels := []string{constants.LabelNamespace, constants.LabelReason}
 	scalerPanicLabels := []string{constants.LabelMethod}
+	scaledObjectRewireLabels := []string{constants.LabelNamespace}
 	if controllerInstance != "" {
 		scalerUndecidedLabels = append(scalerUndecidedLabels, constants.LabelControllerInstance)
 		scalerPanicLabels = append(scalerPanicLabels, constants.LabelControllerInstance)
+		scaledObjectRewireLabels = append(scaledObjectRewireLabels, constants.LabelControllerInstance)
 	}
 	scalerUndecidedAnswersTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -821,6 +824,13 @@ func InitMetrics(registry prometheus.Registerer) error {
 			Help: "Total number of panics recovered in the KEDA external scaler's gRPC handlers",
 		},
 		scalerPanicLabels,
+	)
+	scaledObjectRewiresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: constants.WVAScaledObjectRewiresTotal,
+			Help: "Total number of ScaledObjects re-wired because KEDA left their HPA without the scaler's External metric",
+		},
+		scaledObjectRewireLabels,
 	)
 
 	// Register metrics with the registry
@@ -946,6 +956,9 @@ func InitMetrics(registry prometheus.Registerer) error {
 	}
 	if err := registry.Register(scalerPanicsTotal); err != nil {
 		return fmt.Errorf("failed to register scalerPanicsTotal metric: %w", err)
+	}
+	if err := registry.Register(scaledObjectRewiresTotal); err != nil {
+		return fmt.Errorf("failed to register scaledObjectRewiresTotal metric: %w", err)
 	}
 	if err := registry.Register(newScalerUndecidedTargetsCollector(controllerInstance)); err != nil {
 		return fmt.Errorf("failed to register scalerUndecidedTargets metric: %w", err)
@@ -1903,6 +1916,19 @@ func IncScalerPanic(method string) {
 		labels[constants.LabelControllerInstance] = controllerInstance
 	}
 	scalerPanicsTotal.With(labels).Inc()
+}
+
+// RecordScaledObjectRewire counts one ScaledObject in namespace re-wired
+// because KEDA left its HPA without the scaler's External metric.
+func RecordScaledObjectRewire(namespace string) {
+	if scaledObjectRewiresTotal == nil {
+		return
+	}
+	labels := prometheus.Labels{constants.LabelNamespace: namespace}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	scaledObjectRewiresTotal.With(labels).Inc()
 }
 
 // SetMetricsPodsDiscovered sets the number of pods discovered in a namespace.

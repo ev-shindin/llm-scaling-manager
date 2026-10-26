@@ -31,10 +31,12 @@
 #
 # Everything else — pods, services, configmaps, deployments, replicasets,
 # statefulsets, deployments/scale, jobs, resourcequotas, inferencepools,
-# scaledobjects, leaderworkersets, servicemonitors, events — is namespaced and works identically
-# through a Role. The grant is read-only apart from Events and Pods: KEDA
-# performs the scaling actuation, so WVA writes nothing to reach a replica
-# count, but lending a warm Pod is WVA's own action and needs patch on pods.
+# scaledobjects, horizontalpodautoscalers, leaderworkersets, servicemonitors,
+# events — is namespaced and works identically through a Role. The grant is
+# read-only apart from Events, Pods and ScaledObjects: KEDA performs the scaling
+# actuation, so WVA writes nothing to reach a replica count, but lending a warm
+# Pod is WVA's own action and needs patch on pods, and re-wiring a ScaledObject
+# KEDA left without the scaler's metric needs patch on scaledobjects.
 #
 # This file is maintained BY HAND while manager-clusterrole.yaml is GENERATED
 # from kubebuilder markers, so it does not move when the controller gains a
@@ -128,11 +130,18 @@ rules:
   - list
   - watch
 - apiGroups:
+  - autoscaling
+  resources:
+  - horizontalpodautoscalers
+  verbs:
+  - get
+- apiGroups:
   - keda.sh
   resources:
   - scaledobjects
   verbs:
   - get
+  - patch
 - apiGroups:
   - kueue.x-k8s.io
   resources:

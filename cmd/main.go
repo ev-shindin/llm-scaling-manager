@@ -344,6 +344,11 @@ func main() {
 			"of waiting for each to miss. Popularity is share of desired replicas, which "+
 			"tracks share of requests. 0 disables preloading, leaving admission to parking "+
 			"and the frequency filter.")
+	scaledObjectRewire := flag.Bool("scaledobject-rewire", true,
+		"Re-wire ScaledObjects whose HPA KEDA left without the scaler's External metric (a failed "+
+			"first metric-spec call, which KEDA does not retry) by changing trigger metadata "+
+			registry.RewireKey+". Needs patch on scaledobjects.keda.sh and get on "+
+			"horizontalpodautoscalers. false leaves it to make scaledobjects-rewire.")
 
 	// Leader election timeout configuration flags
 	// These can be overridden in manager.yaml to tune for different environments
@@ -679,6 +684,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// One Rewirer for both enrichers, so a ScaledObject's backoff is shared
+	// whichever loop reads it. The HPA read is uncached for the same reason
+	// the ScaledObject read is: a cached one is a cluster-wide informer.
+	var soRewirer *registry.Rewirer
+	if *scaledObjectRewire {
+		soRewirer = registry.NewRewirer(mgr.GetAPIReader(), mgr.GetClient())
+		soRewirer.Nudged = metrics.RecordScaledObjectRewire
+	}
+
 	configMapReconciler := &controller.ConfigMapReconciler{
 		Reader:    mgr.GetAPIReader(),
 		Scheme:    mgr.GetScheme(),
@@ -904,6 +918,7 @@ func main() {
 		// watch was a cluster-wide informer; the registry knows the same thing for a
 		// better reason — these are the namespaces WVA has actually been called about.
 		engine.VariantEnricher.Tracker = ds
+		engine.VariantEnricher.Rewirer = soRewirer
 		// Rebuild the limiter live when the saturation ConfigMap's limiters: list
 		// changes — no restart required. The builder re-reads the effective config.
 		engine.SetLimiterBuilder(func() (allocation.Limiter, error) {
@@ -946,6 +961,7 @@ func main() {
 		engine.Variants = registry.Default
 		engine.VariantEnricher = registry.NewEnricher(mgr.GetAPIReader(), registry.Default, registry.DefaultTargetMaxAge)
 		engine.VariantEnricher.Recorder = mgr.GetEventRecorderFor("workload-variant-autoscaler-registry") //nolint:staticcheck // SA1019: core/v1 events; see the configmap reconciler
+		engine.VariantEnricher.Rewirer = soRewirer
 		// Let the engine bring the usage picture up to date immediately before it
 		// places a wake. The periodic observation alone can be a full interval old
 		// at the moment it is consulted, and a workload that has just started

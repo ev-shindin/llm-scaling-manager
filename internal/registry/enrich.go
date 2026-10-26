@@ -54,6 +54,9 @@ type Enricher struct {
 	// namespace-scoped configuration loads for exactly the namespaces WVA has
 	// workloads in. Optional.
 	Tracker NamespaceTracker
+	// Rewirer, if set, checks each ScaledObject read here for an HPA KEDA left
+	// without the scaler's metric, and re-wires it. Optional.
+	Rewirer *Rewirer
 	// tracked remembers what was handed to Tracker last pass, so entries that go
 	// away can be untracked. Only touched from Refresh.
 	tracked map[string]string
@@ -160,6 +163,7 @@ func (e *Enricher) Refresh(ctx context.Context) {
 		default:
 			e.Registry.SetTarget(entry.Namespace, entry.Name, target)
 			e.reportMetadata(ctx, entry, so)
+			e.Rewirer.Check(ctx, entry, so)
 			read++
 		}
 	}

@@ -733,6 +733,13 @@ across a restart, are otherwise visible only in the logs.
   - `method`: the full gRPC method, for example `/externalscaler.ExternalScaler/GetMetrics`
 - **Use Case**: Alert on any increase.
 
+### `wva_scaledobject_rewires_total`
+- **Type**: Counter
+- **Description**: ScaledObjects the controller re-wired because KEDA left their HPA without the scaler's External metric (KEDA's one metric-spec call failed, and it does not retry). Each re-wire changes the trigger key `wvaRewire`, so KEDA asks again.
+- **Labels**:
+  - `namespace`: the ScaledObject's namespace (scraped as `exported_namespace`)
+- **Use Case**: An occasional increase after a controller restart is the re-wire doing its job. A steady rise for the same namespace means KEDA keeps failing the call: check KEDA's log for `got empty metric spec` and run `make scaledobjects-rewire`, which also names a KEDA operator restart when that is the cause.
+
 ### Optimization metrics
 
 ### `wva_optimization_duration_seconds`

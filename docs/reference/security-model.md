@@ -114,7 +114,8 @@ in both).
 | get, list | resourcequotas | managed namespace | a GPU ResourceQuota as the bound for cohort borrowing |
 | get | jobs (batch) | managed namespace | the owner of a Kueue-managed GPU pod, for cohort borrowing |
 | get, list, watch | inferencepools (both InferencePool API groups) | managed namespace | which EPP queue a workload sits behind |
-| get | scaledobjects (keda.sh) | managed namespace | the scale target behind a KEDA call |
+| get, **patch** | scaledobjects (keda.sh) | managed namespace | the scale target behind a KEDA call; re-wiring one whose HPA KEDA left without the scaler's metric — see [What it writes](#what-it-writes) |
+| get | horizontalpodautoscalers (autoscaling) | managed namespace | whether KEDA put the scaler's External metric on a ScaledObject's HPA |
 | get, list | localqueues (kueue.x-k8s.io) | managed namespace | the Kueue quota source |
 | get, list, watch | workloads (kueue.x-k8s.io) | managed namespace | cohort borrowing; granted cluster-wide below only when a policy counts borrowing |
 | get, list, watch | leaderworkersets; get leaderworkersets/scale | managed namespace | LWS scale targets |
@@ -189,6 +190,7 @@ cluster-wide. The differences that matter for review:
 | get, list | **events** | **every namespace** | read for the cluster autoscaler's `TriggeredScaleUp` on a borrowed pod; the grant reaches every Event in the cluster, whose messages can name objects and carry error text |
 | get, list | resourcequotas | **every namespace** | the GPU bound Kueue borrowing checks in each managed namespace |
 | get, list, watch | **deployments**, replicasets, statefulsets | **every namespace** | scale targets, the owners of GPU pods for the Kueue managed check, and the `kueue-controller-manager` Deployment (Kueue's version and whether it runs) |
+| get, **patch** | **scaledobjects** | **every namespace** | `patch` re-wires a ScaledObject KEDA left without the scaler's metric. The grant is not narrowed to that one key: it can change any ScaledObject's spec. `get` on horizontalpodautoscalers comes with it, read only |
 | get | leases, by name: `c1f6bfd2.kueue.x-k8s.io` | **every namespace** | Kueue's leader-election Lease, whether Kueue runs. `resourceNames` narrows the name, not the namespace |
 
 `node-reader` and `kueue-reader` are not rendered at this scope; `manager-role`
@@ -215,11 +217,13 @@ a quota: the Kueue controller read and the cluster-wide borrowing read.
 
 ## What it writes
 
-The controller **never writes Deployments, StatefulSets, LeaderWorkerSets,
-ScaledObjects or HPAs**. KEDA does the scaling. What it does write:
+The controller **never writes Deployments, StatefulSets, LeaderWorkerSets
+or HPAs**, and writes one trigger metadata key on ScaledObjects. KEDA does the
+scaling. What it does write:
 
 | Object | What | When |
 | --- | --- | --- |
+| ScaledObjects (trigger metadata) | the key `wvaRewire`, on a trigger that calls this scaler, guarded by a test of that trigger's `scalerAddress` | when KEDA left the ScaledObject's HPA without the scaler's External metric; at most once per backoff (1 minute, doubling to 30). `--scaledobject-rewire=false` turns it off |
 | Pods (annotation) | `controller.kubernetes.io/pod-deletion-cost` | the utilization-share optimizer, to steer which pod a scale-down removes; and the warm pool, on pods it is lending |
 | Pods (annotation) | `llm-d.ai/utilization-share-transfer` — a transfer mark, restoring the previous deletion cost when removed | utilization-share optimizer only |
 | Pods (labels) | the labels in an **InferencePool's selector**, added to and removed from warm-pool pods | warm pool only. **This moves live traffic**: a labelled pool pod joins the InferencePool and the EPP routes requests to it. The selector is the tenant's; the controller refuses to write the three labels that make a pod part of its own Deployment and its NetworkPolicy (`app.kubernetes.io/component`, `app.kubernetes.io/name`, `control-plane`) |

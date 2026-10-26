@@ -56,6 +56,12 @@ rules:
   verbs:
   - get
 - apiGroups:
+  - autoscaling
+  resources:
+  - horizontalpodautoscalers
+  verbs:
+  - get
+- apiGroups:
   - batch
   resources:
   - jobs
@@ -84,6 +90,7 @@ rules:
   - scaledobjects
   verbs:
   - get
+  - patch
 - apiGroups:
   - kueue.x-k8s.io
   resources:

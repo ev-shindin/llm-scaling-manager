@@ -566,6 +566,12 @@ const (
 	// Labels: method (the full gRPC method name)
 	WVAScalerPanicsTotal = "wva_scaler_panics_total"
 
+	// WVAScaledObjectRewiresTotal counts ScaledObjects the controller re-wired
+	// because KEDA left their HPA without the scaler's External metric (a
+	// failed first metric-spec call, which KEDA does not retry).
+	// Labels: namespace
+	WVAScaledObjectRewiresTotal = "wva_scaledobject_rewires_total"
+
 	// WVAUnmeasuredQueue is a gauge carrying the number of requests queued for a
 	// model that WVA has NO attributed replica to act on.
 	//

@@ -184,10 +184,6 @@ runs per arm on one cluster type (the P/D pair repeated once).
   and caps at nominal
   ([cohort borrowing](reference/quota-limiter.md#cohort-borrowing);
   [#214](https://github.com/ev-shindin/llm-scaling-manager/issues/214)).
-- A new ScaledObject can stay unwired when KEDA's first call for its metric
-  spec fails: its HPA keeps only the CPU default and never scales. Run
-  `make scaledobjects-rewire`
-  ([#315](https://github.com/ev-shindin/llm-scaling-manager/issues/315)).
 
 Planned work, with its issues, is on the [roadmap](roadmap.md).
 
