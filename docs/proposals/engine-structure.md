@@ -1,6 +1,8 @@
 # Engine structure: scope, layering, and what to do before the next feature
 
-**Status:** proposal, 2026-09-21, revised after review. Decisions in this
+**Status:** partly built: stages 1, 2 and 5 done, stage 3 partial, stage 4
+merged in another place and shape (see [Status by stage](#status-by-stage)).
+Proposed 2026-09-21, revised after review. Decisions in this
 document are the repository owner's; each one is marked **Decision** where
 the text asks for it. A prerequisite for the shape-shift proposal
 ([PR #86](https://github.com/ev-shindin/llm-scaling-manager/pull/86)), whose items 1
@@ -10,7 +12,33 @@ stay consistent with, the plan already on `main`:
 whose phases 1-3 (discovery metadata, the capacity builder overlay,
 analyzers emitting pure `(D, P)`) are done.
 
-## What the code looks like today
+## Status by stage
+
+Checked on `main` at `11f0afee9` (2026-10-26). The body below is the
+proposal as written; this table is what happened to each stage.
+
+| stage | status | today |
+|---|---|---|
+| 1 — `signals` | done (#89, #91) | `internal/signals/{balance,capacity,fleet,floor,itl,shape}`. `engines/aggregation` has not moved under `signals` yet. |
+| 2 — import direction | done (#88) | `hack/check-import-direction.sh`, run by `make test`. |
+| 3 — split the engine, one registry, input builder first | partial | `internal/scalingpolicy` holds sticky scale-down, the inventory gate, blocked reasons and the policy report. Not done: `engine.go` (2,657 lines) and `engine_v2.go` (2,030) are still two files; there are still two registries (`analyzersSnapshot` and `externalAnalyzers`); `buildCapacities` still runs after `Analyze`; `AnalyzerInput` has no `Capacity`. |
+| 4 — merge the composite, move it to `analyze/combine` | merged, not moved | The composite landed as #167 and #197 in `steadystate/composite.go` and `allocation/composite_*.go`, not `analyze/combine`. `plan/optimize` and `plan/limit` were not split out of `allocation`. |
+| 5 — collector by concern | done | `query.go`, `extract.go`, `attribute.go`, `freshness.go`. |
+| 6 — comment policy | not tracked | `docs/developer-guide/analyzer-evidence.md` exists; no file-by-file record. |
+
+Two outcomes differ from what the text below expects:
+
+- **D1 was kept, not retired.** Saturation is still the composite's identity
+  source, and is now also its unit: every analyzer's need is converted into
+  saturation's units. Retiring it now waits on stage 3 and on the replay
+  harness from #341; it is tracked as
+  [#345](https://github.com/ev-shindin/llm-scaling-manager/issues/345).
+- **The composite took a different shape** from the branch reviewed below:
+  no saturation fallback (saturation contributes only when listed), roles
+  priced in one analyzer's frame, and holds and a grace veto. See
+  [the composite analyzer](composite-analyzer.md).
+
+## What the code looked like when proposed
 
 Measured on `main` at `2a4270e7` (after #85; `internal/`, non-test lines of
 the package's own directory):

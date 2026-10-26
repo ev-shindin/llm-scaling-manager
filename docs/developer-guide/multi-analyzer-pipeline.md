@@ -3,11 +3,13 @@
 llm-scaling-manager's scaling engine runs multiple **analyzers**
 in series each cycle. Each analyzer consumes the same per-replica metrics
 and produces an `*domain.AnalyzerResult` carrying per-variant capacity,
-model-level totals, and (for P/D disaggregated models) per-role capacity.
-The engine post-step calibrates `RequiredCapacity` / `SpareCapacity` at
-every scope using a uniform threshold formula. The optimizer reads a
-per-analyzer slice (`[]NamedAnalyzerResult`) and decides scaling actions
-over it via shared free functions in `internal/engines/allocation/`.
+model-level totals, and (for P/D disaggregated models) per-role demand.
+The engine builds each analyzer's capacities, then combines every listed
+analyzer into **one** result, the composite (`CompositeSignal`). The
+optimizer reads only that one entry and decides scaling actions over it via
+shared free functions in `internal/engines/allocation/`. Why it combines
+this way, and where it is going, is in the design record:
+[the composite analyzer](../proposals/composite-analyzer.md).
 
 ---
 
@@ -36,40 +38,44 @@ over it via shared free functions in `internal/engines/allocation/`.
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────┐
-│ Engine: run analyzers, build per-analyzer slice          │
-│ Saturation (always first), then each registered          │
-│ non-saturation analyzer in registration order:           │
-│   • skip if Enabled:false                                │
+│ Engine: run analyzers (runAnalyzers)                     │
+│ Saturation always runs, listed or not; then each         │
+│ registered analyzer the policy enables:                  │
 │   • Analyze(ctx, input) → *AnalyzerResult                │
-│   • buildCapacities(nr, ...) → supply from capacities,   │
-│     then applyUniversalThreshold(nr, scaleUp, scaleDown) │
-│     → writes RC/SC on nr at model + each role scope      │
-│   • append NamedAnalyzerResult{                          │
-│       Name, Result,                                      │
-│       Score     ← config.Analyzers[name].Score,          │
-│       Remaining ← RC,   Spare ← SC,                      │
-│     } to []NamedAnalyzerResult                           │
+│   • buildNamedResult → buildCapacities (supply) and      │
+│     applyUniversalThreshold at its own band              │
+│   • published as wva_analyzer_* under its own name       │
+└──────────────────────────┬───────────────────────────────┘
+                           │ []NamedAnalyzerResult
+                           ▼
+┌──────────────────────────────────────────────────────────┐
+│ Engine: build the composite (buildComposite)             │
+│   • need per variant = max over listed analyzers of D/P  │
+│   • each role priced in one analyzer's frame, in         │
+│     saturation's units                                   │
+│   • RC/SC at saturation's band; spare capped by every    │
+│     frame; holds applied                                 │
 └──────────────────────────┬───────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────┐
 │ Engine: build ModelScalingRequest                        │
-│   AnalyzerResults  ← per-analyzer slice (above)          │
-│   VariantStates    ← prepared above                      │
-│   Priority         ← config.Priority                     │
-│   Disaggregated    ← any variant has a non-"both" Role   │
+│   CompositeSignal  ← the composite (one entry)           │
+│   VariantStates, Variants ← discovery                    │
+│   Priority, Disaggregated, Weight                        │
 └──────────────────────────┬───────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────┐
-│ Optimizer (CostAware or GreedyByScore)                   │
+│ Optimizer (CostAware or GreedyByScore; the               │
+│ utilization-share optimizer reads the same one entry)    │
 │   • initRoleState → RolePairedState + RoleSpare          │
 │   • Scale-up: allocateForModelPaired                     │
 │       pick(role) → variant; joint Δ_util commit          │
 │       applyAllocation → decrement Remaining              │
 │   • Scale-down: scaleDownRoleIterated                    │
-│       needsScaleDownForRole → saturation spare, if live  │
-│       safeRemovalReplicasForRole → saturation only       │
+│       needsScaleDownForRole → composite live, spare > 0  │
+│       safeRemovalReplicasForRole → composite spare       │
 │       applyDeallocationForRole → decrement RoleSpare     │
 └──────────────────────────┬───────────────────────────────┘
                            │
@@ -81,12 +87,12 @@ over it via shared free functions in `internal/engines/allocation/`.
 
 | Concept | Definition |
 |---|---|
-| **Analyzer** | Implementation of `domain.Analyzer`. Built in: saturation (kv-token capacity, package `saturation`), which sizes the fleet, and `slo` (package `slo`, [its page](slo-analyzer.md)), which observes. External: throughput (RPS/ITL-derived). |
+| **Analyzer** | Implementation of `domain.Analyzer`. Built in: saturation (kv-token capacity, package `saturation`), which always runs and sizes the model when listed, and `slo` (package `slo`, [its page](slo-analyzer.md)), which observes. Registered in `cmd/main.go`: throughput (RPS/ITL-derived). External: PromQL definitions under `analyzerDefinitions` (package `external`). |
 | **`VariantCapacity`** | Per-variant primitives: `ReplicaCount`, `PendingReplicas`, `PerReplicaCapacity` (analyzer-specific units), `Role`, `TotalDemand`, and the warm-pool trio `WarmPoolReplicas` / `WarmPoolPerReplicaCapacity` / `WarmPoolCapacity`. `Cost` and `AcceleratorName` are **not** on this struct — the optimizer reads them from `VariantMetadata`. |
 | **`AnalyzerResult`** | Per-(model, analyzer) output: the pure (D, P) signal — `VariantCapacities[]`, `TotalDemand`, `RoleDemand`. It has **no** supply or scaling-signal fields; those live on `NamedAnalyzerResult` and are the builder's. |
 | **`RoleCapacity`** | Per-role aggregate within an `AnalyzerResult`: `TotalSupply`, `TotalDemand`, `TotalAnticipatedSupply`, `RequiredCapacity` / `SpareCapacity` (engine-written). Used for P/D disaggregated models only. |
-| **`NamedAnalyzerResult`** | Optimizer-side wrapper: `{Name, Result, Score, Remaining, Spare, RoleSpare, Live}`. Working `Remaining`/`Spare`/`RoleSpare` are decremented by helpers during allocation; `Result` is never mutated. `Live` is set by the engine each cycle and gates scale-down participation (see "How results combine"). |
-| **Linearity invariant** | Adding *n* replicas of variant *v* reduces analyzer *i*'s working `Remaining` by exactly *n × PRC_i[v]*. Holds at model scope (non-disaggregated) and at role scope (disaggregated). |
+| **`NamedAnalyzerResult`** | Optimizer-side wrapper: `{Name, Result, Score, Remaining, Spare, RoleSpare, Live}`, and on the composite `Holds`, `ReleaseBound` and `OtherFrames`. Working `Remaining`/`Spare`/`RoleSpare` are decremented by helpers during allocation; `Result` is never mutated. `Live` is set by the engine each cycle and gates scale-down participation (see "How results combine"). |
+| **Linearity invariant** | Adding *n* replicas of variant *v* reduces an entry's working `Remaining` (the composite's, in the optimizer) by exactly *n × PRC[v]*. Holds at model scope (non-disaggregated) and at role scope (disaggregated). |
 
 ### The three layers
 
@@ -165,7 +171,7 @@ type.
 | Per-role `RoleCapacities[role].Total*` | **Builder** (`buildRoleCapacities`), pairing analyzer `RoleDemand` with supply it groups by role | Engine post-step, optimizer |
 | `RequiredCapacity`, `SpareCapacity` (model + role scope) | **Engine post-step only** — analyzer-written values are overwritten | Optimizer |
 | `NamedAnalyzerResult.Remaining`, `Spare`, `RoleSpare` | Optimizer helpers (`applyAllocation`, `applyDeallocationForRole`) | Optimizer allocation loop |
-| `NamedAnalyzerResult.Live` | Engine (`runAnalyzersAndScore`, each cycle) | Scale-down gate on saturation's entry (`needsScaleDownForRole`, `safeRemovalReplicasForRole`); other analyzers' liveness is recorded, not forwarded |
+| `NamedAnalyzerResult.Live` | Engine (`updateLivenessAndSetLive` in `runAnalyzers`, each cycle) | Eligibility for the composite (`allocation.Eligible`) and the grace veto; the composite's own `Live` gates scale-down (`needsScaleDownForRole`, `safeRemovalReplicasForRole`) |
 
 ---
 
@@ -194,10 +200,15 @@ type.
   `AggregateByRole` over `[]VariantCapacity`. Used by the **builder** to assemble
   per-scope totals without reimplementing the math; analyzers do not call them to
   publish supply, because they have nowhere to publish it to.
-- **Optimizer slice flow** — `internal/engines/allocation/`:
-  `NamedAnalyzerResult` slice carries each analyzer's calibrated result plus
-  working scratch state for the allocation loop. `CostAwareOptimizer` and
-  `GreedyByScoreOptimizer` consume the slice via shared free functions
+- **Composite** — `internal/engines/steadystate/composite.go`
+  (`buildComposite`) and `internal/engines/allocation/composite_*.go`
+  (`ResolveSO`, `Eligible`, `CompositeHasSignal`): reduces every analyzer
+  that ran to the one entry the optimizer reads. See
+  [How results combine](#how-results-combine).
+- **Optimizer flow** — `internal/engines/allocation/`:
+  `ModelScalingRequest.CompositeSignal` carries the composite plus working
+  scratch state for the allocation loop. `CostAwareOptimizer` and
+  `GreedyByScoreOptimizer` consume it via shared free functions
   (single-variant, paired P/D, and role-iterated helpers).
 
 ---
@@ -236,19 +247,15 @@ analyzers:
     score: 2.0
 ```
 
-When `enabled` is false the analyzer is neither called nor included in the
-result slice: it is not run at all.
+When `enabled` is false the analyzer is not run at all.
 
 **Participation is opt-in.** An analyzer registered in code
-(`Engine.RegisterAnalyzer`) participates in a cycle only when it has an
-explicit entry in `analyzers` with `enabled` `true` or unset. An analyzer with
-no entry at all does not run and is not included in the result slice,
-exactly as if `enabled: false` had been set. This prevents a
-registered-but-unconfigured analyzer out of the cycle. Only saturation's
-result reaches the optimizer today (see [How results combine](#how-results-combine)),
-so no other analyzer can block scale-down either way. Saturation is exempt from this gate —
-it is always run, independent of `analyzers` config, because the engine
-identifies it by name before this check applies.
+(`Engine.RegisterAnalyzer`), or declared in `analyzerDefinitions`, runs in a
+cycle only when it has an entry in `analyzers` with `enabled` `true` or
+unset. With no entry it does not run, exactly as if `enabled: false` had been
+set. Saturation is the exception: it always runs, because the composite takes
+its variant list and units from it. It sizes the model only when listed
+(`ScalingPolicy.SaturationListed`).
 
 ---
 
@@ -319,21 +326,21 @@ analyzer's; an analyzer normally has no reason to call them.
 2. `StartOptimizeLoop` snapshots the registry into `analyzersSnapshot`
    (frozen, race-safe). The snapshot is the ordered set of analyzers that
    every optimize cycle iterates.
-3. Per cycle, for each model: `runAnalyzersAndScore` runs the saturation
-   analyzer unconditionally (it drives variant metadata), then iterates
-   `analyzersSnapshot` in registration order for non-saturation analyzers.
-4. Analyzers with `Enabled: false` are skipped entirely — neither called nor
-   appended to the result slice.
-5. For each analyzer that runs, `applyUniversalThreshold` is applied to its
-   result using resolved thresholds (per-analyzer override beats global):
-   `RC = max(0, TotalDemand/scaleUp − TotalAnticipatedSupply)`,
-   `SC = max(0, TotalSupply − TotalDemand/scaleDown)`.
-6. Each result is wrapped in a `NamedAnalyzerResult{Name, Result, Score,
-   Remaining, Spare}` and appended to the `[]NamedAnalyzerResult` slice.
-   `Remaining = RC` and `Spare = SC` after the post-step.
-7. Saturation is always first. Its `VariantCapacities` entries carry `Cost`,
-   `AcceleratorName`, and `Role` used downstream by the optimizer and
-   enforcer.
+3. Each cycle, `reconcileExternalAnalyzers` rebuilds the external analyzers
+   from `analyzerDefinitions`.
+4. Per cycle, for each model: `runAnalyzers` runs the saturation analyzer
+   unconditionally, then every other analyzer (`analyzerRunEntries`: the
+   snapshot, then the external ones by name) that the policy enables.
+5. For each analyzer that runs, `buildNamedResult` builds its capacities and
+   applies `applyUniversalThreshold` at its own resolved band (per-analyzer
+   override beats global). This shapes that analyzer's own result and its
+   published series only.
+6. `buildComposite` combines the results into one `NamedAnalyzerResult`,
+   judged at saturation's band. That one entry is
+   `ModelScalingRequest.CompositeSignal`.
+7. Cost, accelerator and role reach the optimizer from discovery
+   (`ModelScalingRequest.Variants`, joined in `allocation.buildVariantRecords`),
+   not from any analyzer.
 
 ---
 
@@ -377,7 +384,7 @@ it, the PRC of each variant another analyzer decided, and the holds:
     (or is the role's demand, aggregated), the role's variants share it in
     saturation's proportions (evenly when it attributed none), their
     utilization follows, and `HeldRoleDemand` is dropped.
-  - *Scale-down* is bounded by every frame (`boundSpare`): shedding X of the
+  - *Scale-down* is bounded by every frame (`boundAllSpare`, `otherFrames`): shedding X of the
     chosen frame's capacity sheds at most `X x r` of frame f's, `r` the largest
     `PRC_f / PRC_chosen` over the running variants, so the role's spare (the
     model's on an aggregated model) is capped at `spare_f / r` for each f. The
@@ -399,20 +406,31 @@ it, the PRC of each variant another analyzer decided, and the holds:
     another frame short for one cycle, until the new replicas are read.
   - With one variant per role every frame gives saturation's PRC. A need
     whose demand at saturation's PRC overflows is no reading. A need on a
-    variant saturation has no PRC for is carried only in the others' frame;
-    in saturation's it is logged as dropped.
-- **Holds** (`compositeHolds`, `allocation.RoleHold`, per role). With
-  saturation unlisted, a role none of whose variants has a need is held both
-  ways, and on P/D every other role is held against growth too, as the share
-  optimizer already froze such a model whole. A listed analyzer other than saturation that is live but not eligible
-  -- inside its staleness grace with no reading, or returned nothing this
-  cycle (`listedInGrace` adds an entry with no `Result`) -- blocks scale-down
-  of the roles it reports variants for, or of every role when it reports
-  none. A role saturation holds (`HeldRoleDemand`) whose held figure the
-  pricing dropped -- another frame prices it, or another analyzer's demand
-  replaced it -- is held against scale-down too (`keepSaturationHolds`):
-  read as demand, the held figure let the share optimizer release part of a
-  role saturation would keep. `applyHolds` zeroes the forbidden `RequiredCapacity`/`SpareCapacity`
+    variant saturation has no PRC for counts only when its own analyzer's
+    frame is chosen; under any other frame it is logged as dropped. An
+    analyzer whose needs are all on such variants gets no frame
+    (`roleFrames` keys demand on `PRC_sat > 0`), so they are always
+    dropped.
+- **Holds** (`compositeHolds`, `keepSaturationHolds`, `allocation.RoleHold`,
+  per role). Three rules:
+  - *Unsized.* With saturation unlisted, a role none of whose variants has a
+    need is held both ways, and on P/D every other role is held against
+    growth too, as the share optimizer already froze such a model whole.
+  - *Grace veto.* A listed analyzer other than saturation that is live but
+    not eligible -- inside its staleness grace with no reading, or returned
+    nothing this cycle (`listedInGrace` adds an entry with no `Result`) --
+    blocks scale-down of the roles it reports variants for, or of every role
+    when it reports none. An entry from `listedInGrace` has no `Result`, so
+    it always holds every role: a model-level analyzer whose query fails
+    holds a P/D model it could never size
+    ([#343](https://github.com/ev-shindin/llm-scaling-manager/issues/343)).
+  - *Saturation's hold kept.* A role saturation holds (`HeldRoleDemand`)
+    whose held figure the pricing dropped -- another frame prices it, or
+    another analyzer's demand replaced it -- is held against scale-down:
+    read as demand, the held figure let the share optimizer release part of
+    a role saturation would keep.
+
+  `applyHolds` zeroes the forbidden `RequiredCapacity`/`SpareCapacity`
   (per role, and model-level when every role is held that way); the share
   optimizer reads `Holds` itself, freezing the model on `NoScaleUp` and
   raising the role's floor to what it has on `NoScaleDown` -- and on a role
@@ -422,39 +440,8 @@ it, the PRC of each variant another analyzer decided, and the holds:
   the model there, as in the share optimizer, and `rescaleInputsForGroup` gives
   such a model exactly its current GPUs in the water-fill, so the rest of the
   budget goes to the others; no role is reclaimed or filled in a direction it
-  is held against. A role held against scale-down keeps its GPUs both in
-  the water-fill and in the model's split across its roles. A model's
-  water-fill cap is each role's demand in GPUs capped at that role's
-  `maxReplicas` GPUs, summed: counted uncapped, prefill at its maximum of 16
-  GPUs sized the cap on 560, and the GPUs that share left free stayed free
-  while another model was short. The water-fill weight is priority times the
-  same raised demand the cap reads (`modelWeightDemand`: each role's demand,
-  or what another frame keeps at full utilization when that is more), not the
-  model's own `TotalDemand`. A group is contended, and rescale runs, only
-  when what its models can take exceeds the budget: each cap before the
-  budget bounds it, so a role at its `maxReplicas` does not set off rescale
-  in a group that fits. A model with a variant that has no accelerator name
-  is left to the additive path whole, since the budget, the floors and the
-  demand count none of that variant's GPUs: the additive path may shrink it
-  and finds no budget to grow it. A growing role's share is lowered to what `fillRole` can
-  place as whole replicas, on a trial copy (cost order, `maxReplicas`, each
-  variant's own pod size), and what that leaves goes to the roles cut most
-  (`roundFillsToReplicas`): split in GPUs, 8 more GPUs went +1 and +7 to a
-  model's two roles on 8-GPU pods, neither a pod, and stayed free. No role's
-  share exceeds what its `maxReplicas` allow, and what a role at its maximum
-  cannot hold re-splits over the others, each up to the larger of its demand
-  and its uncapped share (`roleShareCeilings`): uncapped, prefill at its
-  maximum took its share and decode was reclaimed to pay for it. Reclaims are
-  whole replicas of the model's summed cut (`reclaimWholeReplicas`): each
-  role's own cut first, then what is left from the role cut most, never more
-  than the summed cut. A role counts toward the sum only what it can give:
-  not a cut no replica can meet (a variant with no capacity reading, the
-  cheapest held at one), and, while it has a share, not its last replica, so
-  the second pass never takes a role with demand to zero. The second pass
-  runs only when every role cut has one replica size; with mixed sizes the
-  two passes disagreed between adjacent targets, and a larger target left
-  fewer GPUs. Cut 4 GPUs from each of two roles on 8-GPU pods, each role
-  alone shed nothing.
+  is held against. How rescale sizes a held model is in
+  [Rescale under holds](#rescale-under-holds).
 - **Warm-pool pressure** (`publishVariantPressure`) is published from the
   composite, after it is built, with saturation's scale-up threshold; a role
   held against growth never reports `NeedsScaleUp`. Warm-pool supply
@@ -487,89 +474,95 @@ composite.
 the composite is live and its `RoleSpare` for the role is above zero;
 `safeRemovalReplicasForRole` reads the same entry. Because the composite's
 need is the largest analyzer need, scale-down requires every contributing
-analyzer to agree. A version in which every live analyzer votes separately is
-kept in `internal/engines/allocation/multi_backup/` behind `//go:build ignore`;
-the "vote" and "veto" wording below describes that design.
+analyzer to agree. A version in which every live analyzer voted separately is
+kept in `internal/engines/allocation/multi_backup/` behind `//go:build ignore`.
 
-**Liveness.** An analyzer is live for the current cycle iff it produced a
-non-error, capacity-bearing result within the staleness window (a fixed
-multiple of the optimization interval, `analyzerLivenessStaleCycles` in
-`internal/engines/steadystate/engine_v2.go`). The resolved interval falls back
-to a 30s default whenever `Config` is absent **or** reports a non-positive
-value, so a misconfigured interval can never zero the staleness window and
-latch every analyzer non-live. An informative result with a zero-valued
-`AnalyzedAt` is treated as current (recorded as "now") rather than
-instantly-stale, so a forgotten timestamp on a future analyzer cannot
-silently disarm the veto. A non-live analyzer — one that
-has never produced a usable result, is currently erroring, or whose last
-usable result has aged past the staleness window — is excluded from the
-scale-down vote entirely: it neither vetoes nor constrains the safe-removal
-minimum. This prevents a registered-but-uninformative analyzer (no metrics
-yet, an error state, or a stale result) from silently blocking scale-down
-for every model it's registered against. Recovery is automatic: once the
-analyzer produces a fresh capacity-bearing result, it becomes live again on
-the next cycle. Liveness is tracked per model, not just per analyzer name,
-so one model's freshness never masks another's staleness.
+**Liveness.** An analyzer is live for the current cycle when it produced a
+non-error, capacity-bearing result within the staleness window:
+`analyzerLivenessStaleCycles` (3) times the optimization interval, with a 30s
+interval when `Config` is absent or reports a non-positive one
+(`livenessThreshold`). An informative result with a zero `AnalyzedAt` is
+recorded as "now", not as stale. Liveness is tracked per model and analyzer
+(`updateLivenessAndSetLive`), with no exemption for saturation.
 
-An analyzer reporting no usable capacity (`no-data`) does not become
-non-live immediately — it becomes non-live only once its last informative
-result ages out of the staleness window. This distinguishes three cases: an
-analyzer that never had good data (e.g. a mislabelled metric at startup)
-never sets its timestamp and is non-live from the start; a transient
-no-data blip on an analyzer with a recent good result stays live and still
-participates in the vote (the intended "uncertain, err toward not scaling
-down" behavior); and an analyzer whose good data has aged past the window
-becomes non-live. A mislabelled or broken metrics query is not treated as
-an *error* — it still returns a well-formed result, just one with no usable
-capacity — so this reason-based check, not an engine-level error signal, is
-what actually detects a durably-broken analyzer.
+What liveness decides:
 
-Within the multi-analyzer engine path (`runAnalyzersAndScore`), this
-liveness filter applies uniformly to every registered analyzer, including
-saturation's own token-capacity signal — there is no name-based exemption
-inside the scale-down gate. (Saturation's separate role as the shared
-metrics-collection layer — cache size, replica cost, etc., feeding every
-analyzer and the cost optimizer — is unaffected; that collection either
-succeeds for everyone or, if it fails, every analyzer ends up non-live and
-the safety floor below applies.)
+- **Eligibility.** Only a live, informative analyzer with a result
+  contributes a need (`allocation.Eligible`). A stale or erroring one stops
+  counting once its last good reading leaves the window.
+- **Grace veto.** A listed analyzer that is still live but has no reading
+  this cycle (`listedInGrace` adds an entry with no `Result`) holds the roles
+  it covers against scale-down (`compositeHolds`). A no-data blip on an
+  analyzer with a recent good result therefore errs toward not scaling down.
+- **The composite's own liveness.** The composite is live when any analyzer
+  contributed a need, and as live as saturation otherwise. A non-live
+  composite never scales down. This also makes leader failover safe: a new
+  leader has no liveness history, so nothing scales down until an analyzer
+  produces a fresh result.
 
-Liveness reflects whether an analyzer has a current *capacity* (supply-side)
-signal — it does not gate on the *demand* signal. A falsely-low demand value
-only biases toward scale-down, never toward a spurious veto, so it never
-affects the veto gate; demand robustness is handled upstream by other
-mechanisms (metric sanity checks on calibration inputs, request-rate /
-local-demand fallbacks).
+An analyzer reporting `no-data` does not become non-live at once; it does so
+when its last informative result ages out. One that never had good data (a
+mislabelled metric at startup) is non-live from the start. A broken query is
+not an *error*: it returns a well-formed result with no usable capacity, so
+this reason-based check is what detects a durably broken analyzer. Liveness
+reads the capacity (supply) signal, not demand.
 
-**Demand-liveness telemetry (warn-only).** As an observability aid, the engine
-separately watches for the throughput analyzer having a live capacity signal
-while reporting no demand (`TotalDemand == 0`) for at least the staleness
-window. This usually means the request-arrival query is misconfigured or EPP
-is not reporting arrivals — supply is being measured but no load is observed,
-so scale-up will never trigger. When detected, the engine logs a warning; it
-never sets `Live`, never touches `RoleSpare`, and never gates any scaling
-decision. The signal is a timestamp gap rather than a boolean so a cold-start
-scrape lag (supply resolving a cycle or two before the first arrival scrape)
-does not false-positive: the gap only reaches the staleness window after
-demand has genuinely been absent for that long.
+**Demand-liveness telemetry (warn-only).** The engine separately watches for
+the throughput analyzer having a live capacity signal while reporting no
+demand (`TotalDemand == 0`) for at least the staleness window
+(`detectDemandLiveness`). This usually means the request-arrival query is
+misconfigured or EPP is not reporting arrivals. It logs a warning and gates
+nothing.
 
-**Safety floor.** If every analyzer in the slice is non-live for a role,
-`needsScaleDownForRole` returns false rather than falling through to "no
-vetoes, so scale down" — with zero live analyzers there is no current basis
-to scale down. This also makes leader failover safe: a freshly-elected
-leader starts with no liveness history, so scale-down for every role is
-withheld until at least one analyzer produces a fresh result (typically
-within a cycle or two).
+**Scale-up gate** (`anyRoleNeedsScaleUp`): a role grows when the composite's
+remaining required capacity for it is above zero. Liveness does not gate
+scale-up; a role the composite holds against growth has its required
+capacity zeroed (`applyHolds`).
 
-**Scale-up gate** (`anyRoleNeedsScaleUp`): ANY analyzer having `Remaining > 0`
-triggers scale-up for the corresponding role. The liveness gate does not
-apply to scale-up — a non-live analyzer contributes `Remaining == 0`
-(from `RequiredCapacity == 0`), which is already harmless to the max-across-
-analyzers formula.
+Cost, accelerator and role are not read from any analyzer: the optimizer
+takes them from discovery (`ModelScalingRequest.Variants`).
 
-The saturation entry in the slice is also the keeper of per-variant metadata
-(`Cost`, `AcceleratorName`, `Role`) that the optimizer reads from
-`VariantCapacities`. Future work will extract per-variant metadata collection
-out of the saturation result so each analyzer owns only its own signals.
+### Rescale under holds
+
+A role held against scale-down keeps its GPUs both in
+the water-fill and in the model's split across its roles. A model's
+water-fill cap is each role's demand in GPUs capped at that role's
+`maxReplicas` GPUs, summed: counted uncapped, prefill at its maximum of 16
+GPUs sized the cap on 560, and the GPUs that share left free stayed free
+while another model was short. The water-fill weight is priority times the
+same raised demand the cap reads (`modelWeightDemand`: each role's demand,
+or what another frame keeps at full utilization when that is more), not the
+model's own `TotalDemand`.
+
+A group is contended, and rescale runs, only
+when what its models can take exceeds the budget: each cap before the
+budget bounds it, so a role at its `maxReplicas` does not set off rescale
+in a group that fits. A model with a variant that has no accelerator name
+is left to the additive path whole, since the budget, the floors and the
+demand count none of that variant's GPUs: the additive path may shrink it
+and finds no budget to grow it.
+
+A growing role's share is lowered to what `fillRole` can
+place as whole replicas, on a trial copy (cost order, `maxReplicas`, each
+variant's own pod size), and what that leaves goes to the roles cut most
+(`roundFillsToReplicas`): split in GPUs, 8 more GPUs went +1 and +7 to a
+model's two roles on 8-GPU pods, neither a pod, and stayed free. No role's
+share exceeds what its `maxReplicas` allow, and what a role at its maximum
+cannot hold re-splits over the others, each up to the larger of its demand
+and its uncapped share (`roleShareCeilings`): uncapped, prefill at its
+maximum took its share and decode was reclaimed to pay for it.
+
+Reclaims are
+whole replicas of the model's summed cut (`reclaimWholeReplicas`): each
+role's own cut first, then what is left from the role cut most, never more
+than the summed cut. A role counts toward the sum only what it can give:
+not a cut no replica can meet (a variant with no capacity reading, the
+cheapest held at one), and, while it has a share, not its last replica, so
+the second pass never takes a role with demand to zero. The second pass
+runs only when every role cut has one replica size; with mixed sizes the
+two passes disagreed between adjacent targets, and a larger target left
+fewer GPUs. Cut 4 GPUs from each of two roles on 8-GPU pods, each role
+alone shed nothing.
 
 ---
 
@@ -603,17 +596,19 @@ Its fields fall into three categories:
 | `Remaining`, `Spare` | Mutable scalars | Model-scope working counters; decremented by `applyAllocation` during scale-up |
 | `RoleSpare` | Mutable per-role map | Populated by `initRoleState`; decremented by `applyDeallocationForRole` during scale-down |
 
-`Remaining` and `Spare` are seeded from `Result.RequiredCapacity` and
-`Result.SpareCapacity`. `RoleSpare` is seeded from
-`Result.RoleCapacities[role].SpareCapacity`. None of this flows back into
-`Result`.
+`Remaining` and `Spare` are seeded from the entry's `RequiredCapacity` and
+`SpareCapacity`. `RoleSpare` is seeded from
+`RoleCapacities[role].SpareCapacity`. None of this flows back into `Result`.
 
-**`RolePairedState`** (`[]map[string]float64`, indexed as
-`[analyzer-index][role]`) is picker-local demand created per call to
-`initRoleState`. It holds per-role required capacity for the scale-up loop and
-is decremented by the joint-commit step inside `allocateForModelPaired`. It is
-not stored on `NamedAnalyzerResult` and is discarded after each model's
-allocation pass.
+The optimizer receives one such entry per model, the composite
+(`ModelScalingRequest.CompositeSignal`); the per-analyzer entries stop at the
+composite.
+
+**`RolePairedState`** (`map[string]float64`, keyed by role) is picker-local
+demand created per call to `initRoleState`. It holds per-role required
+capacity for the scale-up loop and is decremented by the joint-commit step
+inside `allocateForModelPaired`. It is not stored on `NamedAnalyzerResult`
+and is discarded after each model's allocation pass.
 
 ---
 
@@ -622,7 +617,8 @@ allocation pass.
 Both optimizers share the same allocation and scale-down primitives from
 `internal/engines/allocation/analyzer_helpers.go` and
 `internal/engines/allocation/cost_aware_optimizer.go`. The optimizers own the
-*when* and *which model*; the helpers own the *how*.
+*when* and *which model*; the helpers own the *how*. Every helper reads the
+one composite entry.
 
 ### Scale-up path
 
@@ -632,10 +628,10 @@ All scale-up goes through `allocateForModelPaired`:
 initRoleState(s)               → roles, RolePairedState (per-role demand + RoleSpare)
 anyRoleNeedsScaleUp(ps, roles) → loop gate: any role still has demand?
   pick(role, ...)              → (variant, capN): optimizer-specific variant selector
-  roleBottleneckReplicas       → max_i ceil(state[i][role] / PRC_i[v]): cross-analyzer replica sizing
-  roleAggRemaining             → max demand across analyzers for this role
+  roleBottleneckReplicas       → ceil(state[role] / PRC[v]): replicas for the role's remaining demand
+  roleAggRemaining             → the role's remaining demand
   Δ_util = min_role util_role  → joint commit bound: trim to the least-served role
-  applyAllocation(s, v, k)     → decrement Remaining on all NamedAnalyzerResults
+  applyAllocation(s, v, k)     → decrement Remaining
 ```
 
 `pick` is a `RolePickFn` — the only part that differs between optimizers:
@@ -657,16 +653,12 @@ synthetic role for non-disaggregated):
 
 ```text
 for each role (sorted for determinism):
-  needsScaleDownForRole(s, role)           → gate: ALL live analyzers have RoleSpare > 0
-                                              (no live analyzer → false; see "How results combine")
-  sortVariantsForScaleDown(s, vcs)         → cost-desc; tie-break: Score-weighted PRC asc
+  needsScaleDownForRole(s, role)           → gate: composite live and RoleSpare[role] > 0
+  sortVariantsForScaleDown(s, vcs)         → cost-desc; tie-break: Score x PRC asc
   scaleDownVariantSet(...)
-    safeRemovalReplicasForRole(s, v, role) → min over live i of floor(RoleSpare[i][role] / PRC_i[v])
-    applyDeallocationForRole(s, v, role, n)→ decrement RoleSpare on all entries
+    safeRemovalReplicasForRole(s, v, role) → floor(max(RoleSpare, RoleReleasable)[role] / PRC[v])
+    applyDeallocationForRole(s, v, role, n)→ decrement RoleSpare and RoleReleasable
 ```
-
-`sortVariantsForScaleDown` uses a Score-weighted PRC tie-break. With a single
-analyzer (Score=1) this reduces to plain cost-descending / PRC-ascending order.
 
 ### Fair-share iteration (GreedyByScoreOptimizer only)
 
@@ -682,32 +674,31 @@ analyzer (Score=1) this reduces to plain cost-descending / PRC-ascending order.
    post-allocation working state.
 5. Repeat until no active models remain or no GPUs are left.
 
-`fairShareValue = priority × Σᵢ Score_i × Σ_role pickerState[i][role]`.
-A higher `Score` on a high-demand analyzer increases a model's priority value
-and therefore how many GPUs it attracts in a constrained environment.
+`fairShareValue = priority × Score × Σ_role pickerState[role]`, capped, where
+`Score` is the composite's: the largest score among the analyzers that sized
+the model this cycle. The only other reader is `sortVariantsForScaleDown`'s
+tie-break (`Score x PRC`), which with one entry reorders nothing unless
+`Score` is 0 or less. Scores are not on a common scale across analyzers
+([#226](https://github.com/ev-shindin/llm-scaling-manager/issues/226)).
 
 ---
 
 ## Optimizer consumption
 
-The `[]NamedAnalyzerResult` slice is passed to one of two optimizers depending
-on whether the `config.ScalingPolicy` declares any `limiters:` entry:
+The composite is passed to one of two optimizers depending on whether the
+cluster `default` policy declares any `limiters:` entry:
 
-- **`CostAwareOptimizer`** (no limiters declared): operates
-  on the saturation entry's `VariantCapacities` for cost and role data; scales
-  up the cheapest variant that covers the required capacity, scales down the
-  most expensive variant with spare capacity.
+- **`CostAwareOptimizer`** (no limiters declared): reads cost and role from
+  discovery and capacity from the composite; scales up the cheapest variant
+  that covers the required capacity, scales down the most expensive variant
+  with spare capacity.
 - **`GreedyByScoreOptimizer`** (a limiter declared): respects
   `ResourceConstraints` (GPU budgets per accelerator type). Models are ordered
-  by fair-share priority value:
-  `fsv = Priority × Σᵢ Score_i × Σ_role pickerState[i][role]`,
-  where the sum over `i` runs across all `NamedAnalyzerResult` entries and
-  `pickerState` is seeded from each entry's `Remaining`. Higher `Score` on a
-  high-demand analyzer increases a model's allocation priority in constrained
-  environments.
+  by the fair-share value above.
 
 Both optimizers are stateless and selected per-cycle from the engine's
-`optimizer` field.
+`optimizer` field. The utilization-share optimizer and rescale read the same
+composite, including its `Holds` and `OtherFrames`.
 
 ## Observability
 

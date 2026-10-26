@@ -35,8 +35,13 @@ kind: ConfigMap
 # treat editing it as a privileged operation. Definitions are cluster-scope for
 # this reason: a policy tier selects and weights analyzers by name, but cannot
 # define one (docs/proposals/wva-keda-external-scaler.md §7.6). The interpolated {{.modelID}}/{{.namespace}} are escaped
-# by the controller before substitution, and a failed/empty query yields zero
-# demand (no scaling action), so a bad definition cannot drive runaway scaling.
+# by the controller before substitution.
+#
+# A query that FAILS is an error: the analyzer reports nothing that cycle, and
+# for up to three cycles the roles it covers (every role, when it reports none)
+# do not scale down. A query that returns NO SERIES reads as zero demand, a
+# real reading: listed alone, the analyzer then lets the model scale down.
+# Treating an empty result as missing is planned (issue #344).
 metadata:
   name: scaling-policy-config
   # Definitions are cluster-scope: they must live in the controller's namespace.

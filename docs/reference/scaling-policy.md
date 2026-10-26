@@ -1902,9 +1902,9 @@ reviewable.
 
 ## Multi-Analyzer Registration
 
-The V2 engine carries an analyzer registry so external analyzers (e.g.
-throughput) can be plugged in without the engine package knowing the concrete
-type. The built-in `slo` analyzer is registered by the engine itself, and the
+The V2 engine carries an analyzer registry so additional built-in analyzers
+(throughput, registered in `cmd/main.go`) can be plugged in without the engine
+package knowing the concrete type. The built-in `slo` analyzer is registered by the engine itself, and the
 name is reserved. Each cycle the engine iterates every registered analyzer in
 registration order and invokes its `Analyze` method.
 
@@ -1937,10 +1937,14 @@ registration order and invokes its `Analyze` method.
 Pre-registered:
 
 - The V2 saturation analyzer is pre-registered by `NewEngine` under
-  `interfaces.SaturationAnalyzerName`. It always runs and drives the
-  optimizer.
+  `interfaces.SaturationAnalyzerName`. It always runs; it sizes the model
+  only when listed (see [Saturation Always Runs](#saturation-always-runs)).
 
-External analyzers are registered from `cmd/main.go` via:
+External analyzers, declared in config, are covered in
+[External analyzers](#external-analyzers-analyzerdefinitions). The Go
+registration below is for analyzers compiled into the controller.
+
+Additional built-in analyzers (throughput) are registered from `cmd/main.go` via:
 
 ```go
 if err := engine.RegisterAnalyzer(name, analyzer); err != nil {
@@ -2005,6 +2009,71 @@ post-merge. Either way saturation alone sizes the model.
 > To keep the old behaviour, list `saturation`, and remove the other entries
 > or set `enabled: false` on them.
 
+### External analyzers (`analyzerDefinitions`)
+
+An external analyzer is a PromQL query you declare in config, with no Go
+code. It works like a KEDA Prometheus scaler: a demand query `D` and a
+per-replica `threshold` `P`, so the analyzer asks for `D / P` replicas.
+
+To add one:
+
+1. Declare it under `analyzerDefinitions` on the `default` entry of the
+   scaling-policy ConfigMap in the controller's namespace.
+2. List it by name in a policy's `analyzers:`, like any built-in analyzer.
+
+```yaml
+data:
+  default: |
+    analyzerDefinitions:
+      queue-depth:                  # the analyzer's name
+        query: sum(my_queue_depth{namespace="{{.namespace}}",model_name="{{.modelID}}"})
+        threshold: "5"              # what ONE replica can serve, as a string
+  interactive: |
+    analyzers:
+      - name: saturation
+      - name: queue-depth
+```
+
+A full example, with a body per inference engine, is
+[`config/samples/analyzers/external-analyzers.yaml`](../../config/samples/analyzers/external-analyzers.yaml).
+
+| Field | Meaning |
+|---|---|
+| `query` | PromQL for the model's **total** demand. Every series it returns is summed, after series of Pods that are gone are dropped. `{{.namespace}}` and `{{.modelID}}` are escaped and filled in. |
+| `threshold` | What one scale-target replica (a Pod, or an LWS group) can serve, in the query's unit. A string, greater than 0. |
+| `engines` | Optional: a `query`/`threshold` pair per inference engine (`vllm`, `sglang`). The model's engine picks the body; the top-level pair is ignored when `engines` is set. A model whose engine has no body is not sized by this analyzer. |
+
+What to know before you rely on one:
+
+- **Units are yours to get right.** Use a `sum(...)` query. `count()` and
+  `avg()` count engine instances, not Pods; collapse them by Pod first
+  (`count(count by (pod) (...))`).
+- **Model-level only** ([#343](https://github.com/ev-shindin/llm-scaling-manager/issues/343)). It reports demand for the whole
+  model, not per role, so it **cannot size a P/D model**; the log says
+  `listed analyzer reports no per-role demand`. It can still hold one: when
+  its query fails, no role of the model scales down for up to three cycles.
+- **The threshold is a constant.** It does not learn per-replica capacity;
+  a target query is planned ([#344](https://github.com/ev-shindin/llm-scaling-manager/issues/344)).
+- **An empty result is 0 demand.** If the query matches nothing, the
+  analyzer asks for 0 replicas. Listed alone, that lets the model scale
+  down; beside saturation, saturation's larger need wins. Treating an empty
+  result as missing is planned ([#344](https://github.com/ev-shindin/llm-scaling-manager/issues/344)). A query that
+  **fails** is no reading instead: for three cycles no role of the model
+  scales down, then it stops counting.
+- **Its own `scaleUpThreshold`/`scaleDownBoundary` decide nothing**, as for
+  every analyzer other than saturation (see
+  [Per-analyzer threshold overrides](#engine-post-step-formula)).
+- **Where it is read.** Only from the `default` entry in the controller's
+  namespace. On any other entry, or in a namespace-local ConfigMap, it is
+  logged and ignored; a policy there can still list it by name.
+- **Bad definitions are skipped.** An empty query, a threshold that does not
+  parse or is 0 or less, or a name a built-in analyzer already uses is logged
+  and skipped; the other definitions still run. A threshold of `"NaN"` is
+  accepted and then sizes nothing, so check the value. Changes apply on the next cycle,
+  with no restart.
+- **Who may edit it.** The query runs as written against the shared
+  Prometheus, so treat write access to that ConfigMap as privileged.
+
 ### AnalyzerScoreConfig Fields
 
 | Field | Type | Description | Default |
@@ -2012,8 +2081,8 @@ post-merge. Either way saturation alone sizes the model.
 | `name` | string | Analyzer name (must match a `RegisterAnalyzer` call) | required |
 | `enabled` | bool | `false` keeps the entry but stops the analyzer running and sizing the model; on `saturation` it makes saturation unlisted (it still runs, for units and variants, and sizes nothing) | `true` |
 | `score` | float64 | Weight in the cross-model fair share under a GPU limiter: the combined decision takes the largest score among the analyzers that sized the model this cycle (saturation's when none did). It does not change one model's replica count | `1.0` |
-| `scaleUpThreshold` | float64 | Per-analyzer override for the scale-up threshold. Only saturation's decides what is scaled; on any other analyzer it shapes only that analyzer's own result, and the config read logs a warning (see Per-analyzer threshold overrides below) | global `scaleUpThreshold` |
-| `scaleDownBoundary` | float64 | Per-analyzer override for the scale-down boundary. Only saturation's decides what is scaled; on any other analyzer it shapes only that analyzer's own result, and the config read logs a warning (see Per-analyzer threshold overrides below) | global `scaleDownBoundary` |
+| `scaleUpThreshold` | float64 | Per-analyzer override for the scale-up threshold. Only saturation's decides what is scaled; on any other analyzer it shapes only that analyzer's own result, and the config read logs a warning (see [Per-analyzer threshold overrides](#engine-post-step-formula)) | global `scaleUpThreshold` |
+| `scaleDownBoundary` | float64 | Per-analyzer override for the scale-down boundary. Only saturation's decides what is scaled; on any other analyzer it shapes only that analyzer's own result, and the config read logs a warning (see [Per-analyzer threshold overrides](#engine-post-step-formula)) | global `scaleDownBoundary` |
 
 ### Analyzer responsibilities and the universal threshold post-step
 
@@ -2023,10 +2092,11 @@ post-merge. Either way saturation alone sizes the model.
 
 | Field | Written by | Read by |
 |---|---|---|
-| `ReplicaCount`, `PendingReplicas`, `PerReplicaCapacity`, `Cost`, `Role`, `AcceleratorName` | Analyzer | Optimizer (per-variant scaling math + picker) |
-| `TotalCapacity`, `TotalDemand`, `Utilization` | Analyzer | Sat_v2 internal aggregation; `Utilization` passed through to `VariantDecision.Utilization` for metric emission |
-| `r.TotalSupply`, `r.TotalAnticipatedSupply`, `r.TotalDemand` | Analyzer (via shared helpers) | Engine post-step |
-| `r.RoleCapacities[role].TotalSupply/TotalAnticipatedSupply/TotalDemand` | Analyzer (via shared helpers) | Engine post-step |
+| `ReplicaCount`, `PendingReplicas`, `PerReplicaCapacity`, `Role` | Analyzer (`Role` and the `ReplicaCount` cap overlaid from discovery) | Optimizer (per-variant scaling math + picker) |
+| `Cost`, `AcceleratorName` | Discovery (`VariantMetadata`), not the analyzer | Optimizer (variant choice, GPU accounting) |
+| `TotalDemand`, `Utilization` | Analyzer | Sat_v2 internal aggregation; `Utilization` passed through to `VariantDecision.Utilization` for metric emission |
+| `r.TotalDemand`, `r.RoleDemand` | Analyzer | Builder, engine post-step |
+| `TotalSupply`, `TotalAnticipatedSupply`, `RoleCapacities[role].Total*` | **Builder** (`buildCapacities`), on `NamedAnalyzerResult`; an analyzer has no such fields | Engine post-step |
 | `r.RequiredCapacity`, `r.SpareCapacity` | **Engine post-step only** | Optimizer |
 | `r.RoleCapacities[role].RequiredCapacity/SpareCapacity` | **Engine post-step only** | Optimizer (P/D disaggregation) |
 
@@ -2172,7 +2242,7 @@ RC = max(0, TotalDemand / scaleUpThreshold − TotalAnticipatedSupply)
 SC = max(0, TotalSupply  − TotalDemand / scaleDownBoundary)
 ```
 
-`TotalAnticipatedSupply` is read as-is — **zero is a literal value, not a sentinel**. For a model scaled to zero with positive demand, RC = TotalDemand/scaleUp (the correct "this much capacity needed" answer). Analyzers must populate `TotalAnticipatedSupply` via `SumTotalAnticipatedSupply`; the engine does not walk `VariantCapacities` as a fallback.
+`TotalAnticipatedSupply` is read as-is — **zero is a literal value, not a sentinel**. For a model scaled to zero with positive demand, RC = TotalDemand/scaleUp (the correct "this much capacity needed" answer). The capacity builder (`buildCapacities`) sums `TotalAnticipatedSupply` from `VariantCapacities`; analyzers do not set it.
 
 The asymmetry — anticipated supply for scale-up, steady-state `TotalSupply` for scale-down — preserves the conservative "don't double-scale while replicas are launching, don't count pending as removable" stance.
 
@@ -2193,9 +2263,10 @@ To scale earlier or later, set the model-level band, or saturation's override. J
 ### Saturation Always Runs
 
 The saturation analyzer executes on every cycle, listed or not, and
-`enabled: false` does not stop it: its `VariantCapacities` carry the variants,
-`Cost` and `AcceleratorName` the optimizer needs for variant selection and GPU
-accounting, and its demand is the unit every analyzer's need is converted into.
+`enabled: false` does not stop it: the combined decision takes its variant
+list from saturation, and saturation's demand is the unit every analyzer's need
+is converted into. Cost and accelerator come from discovery, not from any
+analyzer.
 The optimizer consumes one combined decision (`CompositeSignal`): the largest
 need among the listed analyzers, saturation included only when listed. `slo`
 never contributes to it.

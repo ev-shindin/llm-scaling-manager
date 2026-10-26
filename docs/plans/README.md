@@ -12,8 +12,10 @@ behaviour. For that, use the [reference](../reference/) and
 ## analyzers
 
 - **[Analyzer architecture refactor](analyzers/analyzer-architecture-refactor.md)**
-  — implemented. Metadata discovery and a pure `(demand, priority)` contract
-  between an analyzer and the optimizer.
+  — implemented. Metadata discovery, and a pure contract for each analyzer:
+  demand and a per-replica target. Its "After this plan" section records what
+  changed since: analyzers now combine in the
+  [composite](../proposals/composite-analyzer.md) before the optimizer.
 - **[What `k2` measures, and why it has to persist](analyzers/k2-capacity-model.md)**
   — the design call on the capacity anchor. Over-estimating it breaks TTFT
   irrecoverably; under-estimating only costs money, which is why it never ages

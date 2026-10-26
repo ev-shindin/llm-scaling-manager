@@ -1,9 +1,40 @@
 # Proposal: A Metric-Based Analyzer Interface for WVA
 
 **Authors:** Dean Lorenz
-**Status:** Draft
+**Status:** Partly built (phase 1, and phase 2 as an MVP). How analyzers
+combine is superseded by [the composite analyzer](composite-analyzer.md).
 **Created:** 2026-07-21
-**Last Updated:** 2026-07-21
+**Last Updated:** 2026-10-26 (status and "What was built" only; the body below
+is the original proposal)
+
+---
+
+## What was built
+
+- **Built as proposed:** each analyzer reports demand `D` (per model, and per
+  role on P/D) and a per-replica target `P` per variant, so `D / P` is
+  replicas. The series are `wva_analyzer_demand` and `wva_analyzer_target`,
+  with the labels `analyzer_name`, `namespace`, `model_name`, and `role` or
+  `variant_name`; a series the engine stops publishing is deleted, not set to
+  0.
+- **Replaced:** analyzers are combined in the engine, before the optimizer, by
+  [the composite analyzer](composite-analyzer.md): the largest `D / P` per
+  variant, converted into saturation's units and judged at saturation's band.
+  Per-analyzer tolerances do not decide anything yet
+  ([#305](https://github.com/ev-shindin/llm-scaling-manager/issues/305)), and
+  units still have to be converted into saturation's.
+- **External analyzer, as an MVP:** a demand query and a constant `P`, with a
+  query body per inference engine (not in this proposal), escaped
+  `{{.namespace}}`/`{{.modelID}}`, declared under `analyzerDefinitions` on the
+  cluster `default` scaling entry
+  ([reference](../reference/scaling-policy.md#external-analyzers-analyzerdefinitions)).
+  Missing: role `match` rules, so it cannot size a P/D model
+  ([#343](https://github.com/ev-shindin/llm-scaling-manager/issues/343)); a
+  target query, ordered fallbacks and `e:` tokens, `targetReduce`, `orZero`,
+  and "an empty result is missing": today an empty result reads as 0 demand
+  ([#344](https://github.com/ev-shindin/llm-scaling-manager/issues/344)).
+- **Not built:** the `wva_analyzer_info` series and the provenance series
+  (phase 3, [#346](https://github.com/ev-shindin/llm-scaling-manager/issues/346)).
 
 ---
 

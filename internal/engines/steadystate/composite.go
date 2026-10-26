@@ -296,7 +296,7 @@ func coverage(vs []variantNeed, f pricingFrame) float64 {
 }
 
 // rolePricing is how priceRole priced one role: every frame that sizes it and
-// the one chosen, for the scale-down bound (boundSpare).
+// the one chosen, for the scale-down bound (boundAllSpare).
 type rolePricing struct {
 	role   string
 	vs     []variantNeed
@@ -335,7 +335,7 @@ type rolePricing struct {
 // Scale-up follows the chosen frame alone: when the analyzers rate a role's
 // accelerators differently, a variant the chosen frame grows may leave another
 // frame short for a cycle, until the next cycle reads the new replicas.
-// Scale-down is bounded by every frame (boundSpare).
+// Scale-down is bounded by every frame (boundAllSpare).
 func priceRole(result *domain.AnalyzerResult, role string, dSat float64, vs []variantNeed) (
 	pricing rolePricing, sized bool, dropped []int) {
 	pricing = rolePricing{role: role, vs: vs, frames: roleFrames(dSat, vs), chosen: -1}
