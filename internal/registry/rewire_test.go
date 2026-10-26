@@ -88,12 +88,12 @@ func newRewireFixture(t *testing.T, now time.Time, objs ...client.Object) *rewir
 }
 
 // check reads rewireSO back from the fake cluster, as the Enricher does, and
-// hands it to the Rewirer with an entry whose metadata dials addr.
-func (f *rewireFixture) check(t *testing.T, addr string) {
+// hands it to the Rewirer with an entry whose metadata dials rewireAddr.
+func (f *rewireFixture) check(t *testing.T) {
 	t.Helper()
 	so := f.read(t)
 	entry := Entry{Namespace: testNamespace, Name: rewireSO,
-		Metadata: map[string]string{ScalerAddressKey: addr, ModelIDKey: testModel}}
+		Metadata: map[string]string{ScalerAddressKey: rewireAddr, ModelIDKey: testModel}}
 	f.r.Check(context.Background(), entry, so)
 }
 
@@ -122,7 +122,7 @@ func (f *rewireFixture) rewireValues(t *testing.T) []string {
 func TestRewireLeavesAWiredHPAAlone(t *testing.T) {
 	now := time.Now()
 	f := newRewireFixture(t, now, unwiredSO(now.Add(-10*time.Minute), rewireAddr), kedaHPA("s0-wva"))
-	f.check(t, rewireAddr)
+	f.check(t)
 	if v := f.rewireValues(t); v[0] != "" || f.nudges != 0 {
 		t.Fatalf("a wired HPA was re-wired: %s=%q, %d nudges", RewireKey, v[0], f.nudges)
 	}
@@ -133,7 +133,7 @@ func TestRewireLeavesAWiredHPAAlone(t *testing.T) {
 func TestRewirePatchesAnUnwiredHPA(t *testing.T) {
 	now := time.Now()
 	f := newRewireFixture(t, now, unwiredSO(now.Add(-10*time.Minute), otherAddr, rewireAddr), kedaHPA())
-	f.check(t, rewireAddr)
+	f.check(t)
 	v := f.rewireValues(t)
 	if v[1] == "" {
 		t.Fatalf("the trigger naming this scaler was not re-wired: %v", v)
@@ -151,7 +151,7 @@ func TestRewirePatchesAnUnwiredHPA(t *testing.T) {
 func TestRewirePatchesOnlyTheUnwiredTrigger(t *testing.T) {
 	now := time.Now()
 	f := newRewireFixture(t, now, unwiredSO(now.Add(-10*time.Minute), rewireAddr, rewireAddr), kedaHPA("s0-wva"))
-	f.check(t, rewireAddr)
+	f.check(t)
 	if v := f.rewireValues(t); v[0] != "" || v[1] == "" {
 		t.Fatalf("want only trigger 1 re-wired, have %v", v)
 	}
@@ -162,12 +162,12 @@ func TestRewirePatchesOnlyTheUnwiredTrigger(t *testing.T) {
 func TestRewireWaitsOutTheGrace(t *testing.T) {
 	now := time.Now()
 	f := newRewireFixture(t, now, unwiredSO(now.Add(-rewireGrace/2), rewireAddr), kedaHPA())
-	f.check(t, rewireAddr)
+	f.check(t)
 	if v := f.rewireValues(t); v[0] != "" || f.nudges != 0 {
 		t.Fatalf("a ScaledObject inside the grace was re-wired: %v, %d nudges", v, f.nudges)
 	}
 	f.now = now.Add(rewireGrace)
-	f.check(t, rewireAddr)
+	f.check(t)
 	if v := f.rewireValues(t); v[0] == "" {
 		t.Fatalf("past the grace it should be re-wired: %v", v)
 	}
@@ -195,7 +195,7 @@ func TestRewireBacksOff(t *testing.T) {
 	}
 	for i, s := range steps {
 		f.now = now.Add(s.at)
-		f.check(t, rewireAddr)
+		f.check(t)
 		if f.nudges != s.want {
 			t.Fatalf("step %d (at +%s): %d nudges, want %d", i, s.at, f.nudges, s.want)
 		}
@@ -206,7 +206,7 @@ func TestRewireBacksOff(t *testing.T) {
 func TestRewireForgetsTheBackoffOnceWired(t *testing.T) {
 	now := time.Now()
 	f := newRewireFixture(t, now, unwiredSO(now.Add(-10*time.Minute), rewireAddr), kedaHPA())
-	f.check(t, rewireAddr)
+	f.check(t)
 	if f.nudges != 1 {
 		t.Fatalf("nudges: have %d, want 1", f.nudges)
 	}
@@ -222,13 +222,13 @@ func TestRewireForgetsTheBackoffOnceWired(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.now = now.Add(10 * time.Second)
-	f.check(t, rewireAddr)
+	f.check(t)
 	hpa.Spec.Metrics = kedaHPA().Spec.Metrics
 	if err := f.c.Update(context.Background(), hpa); err != nil {
 		t.Fatal(err)
 	}
 	f.now = now.Add(20 * time.Second)
-	f.check(t, rewireAddr)
+	f.check(t)
 	if f.nudges != 2 {
 		t.Fatalf("a ScaledObject unwired again after being wired should be re-wired at once: %d nudges, want 2", f.nudges)
 	}
@@ -239,7 +239,7 @@ func TestRewireForgetsTheBackoffOnceWired(t *testing.T) {
 func TestRewireLeavesAnotherScalersScaledObjectAlone(t *testing.T) {
 	now := time.Now()
 	f := newRewireFixture(t, now, unwiredSO(now.Add(-10*time.Minute), otherAddr), kedaHPA())
-	f.check(t, rewireAddr)
+	f.check(t)
 	if v := f.rewireValues(t); v[0] != "" || f.nudges != 0 {
 		t.Fatalf("a ScaledObject of another scaler was patched: %v, %d nudges", v, f.nudges)
 	}
@@ -250,7 +250,7 @@ func TestRewireLeavesAnotherScalersScaledObjectAlone(t *testing.T) {
 func TestRewireWithoutAnHPA(t *testing.T) {
 	now := time.Now()
 	f := newRewireFixture(t, now, unwiredSO(now.Add(-10*time.Minute), rewireAddr))
-	f.check(t, rewireAddr)
+	f.check(t)
 	if v := f.rewireValues(t); v[0] != "" || f.nudges != 0 {
 		t.Fatalf("re-wired without an HPA: %v, %d nudges", v, f.nudges)
 	}
@@ -262,7 +262,7 @@ func TestRewireSkipsAPausedScaledObject(t *testing.T) {
 	so := unwiredSO(now.Add(-10*time.Minute), rewireAddr)
 	so.Annotations = map[string]string{kedav1alpha1.PausedReplicasAnnotation: "0"}
 	f := newRewireFixture(t, now, so, kedaHPA())
-	f.check(t, rewireAddr)
+	f.check(t)
 	if v := f.rewireValues(t); v[0] != "" || f.nudges != 0 {
 		t.Fatalf("a paused ScaledObject was re-wired: %v, %d nudges", v, f.nudges)
 	}
