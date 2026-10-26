@@ -18,7 +18,8 @@ import (
 // GreedyByScoreOptimizer is a multi-model optimizer for GPU-constrained
 // environments. It uses iterative mean-based fair-sharing to distribute scarce
 // GPUs across competing models, ordered by fair-share priority value
-// (priority × Σᵢ(Remainingᵢ × Scoreᵢ) across analyzers).
+// (priority × Score × Σ_role remaining demand, on the one composite entry; see
+// fairShareValue).
 //
 // Key differences from CostAwareOptimizer:
 //   - Respects ResourceConstraints (GPU budgets per accelerator type)

@@ -213,8 +213,9 @@ cluster `wva-analyzers` ConfigMap; a policy entry's `name` resolves **built-in r
 (internal), then catalog (external)**.
 
 > **As built** (§10): a demand query and a constant `P`, per inference engine, model-level demand
-> only. No target query, pod→ScaledObject reduction, fallbacks or `orZero`, and an empty result
-> reads as 0 demand. The catalog is `analyzerDefinitions` on the cluster `default` scaling entry,
+> only ([#343](https://github.com/ev-shindin/llm-scaling-manager/issues/343)). No target query,
+> pod→ScaledObject reduction, fallbacks or `orZero`, and an empty result reads as 0 demand
+> ([#344](https://github.com/ev-shindin/llm-scaling-manager/issues/344)). The catalog is `analyzerDefinitions` on the cluster `default` scaling entry,
 > not a ConfigMap of its own.
 
 ---
@@ -617,7 +618,8 @@ with one addition we already have:
   holds the roles it covers against scale-down. A query that returns an **empty** result reads as
   **0 demand**, which is a present reading of zero need. Listed alone, that votes for scale-down;
   beside another analyzer, the larger need wins. So a bad definition cannot drive runaway scale-up,
-  but an empty one can shrink a model it sizes alone. Heavy expressions should be precomputed as
+  but an empty one can shrink a model it sizes alone; treating empty as missing is
+  [#344](https://github.com/ev-shindin/llm-scaling-manager/issues/344). Heavy expressions should be precomputed as
   Prometheus recording rules.
 - **Load-time validation is deliberately minimal** — `external.New` rejects an empty query or a
   non-positive threshold (bad def skipped, logged); we do **not** pull in the full

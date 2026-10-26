@@ -28,11 +28,13 @@ is the original proposal)
   `{{.namespace}}`/`{{.modelID}}`, declared under `analyzerDefinitions` on the
   cluster `default` scaling entry
   ([reference](../reference/scaling-policy.md#external-analyzers-analyzerdefinitions)).
-  Missing: role `match` rules (so it cannot size a P/D model), a target query,
-  ordered fallbacks and `e:` tokens, `targetReduce`, `orZero`, and "an empty
-  result is missing": today an empty result reads as 0 demand.
+  Missing: role `match` rules, so it cannot size a P/D model
+  ([#343](https://github.com/ev-shindin/llm-scaling-manager/issues/343)); a
+  target query, ordered fallbacks and `e:` tokens, `targetReduce`, `orZero`,
+  and "an empty result is missing": today an empty result reads as 0 demand
+  ([#344](https://github.com/ev-shindin/llm-scaling-manager/issues/344)).
 - **Not built:** the `wva_analyzer_info` series and the provenance series
-  (phase 3).
+  (phase 3, [#346](https://github.com/ev-shindin/llm-scaling-manager/issues/346)).
 
 ---
 

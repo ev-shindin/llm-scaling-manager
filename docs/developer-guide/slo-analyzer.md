@@ -27,7 +27,7 @@ hands the optimizer `namedResults[0]`, saturation's.
 1. `optimize` (`engine.go`) calls `beginSLOCycle` once it is past its error
    returns: on the no-model return, and after the inventory check. A failed
    cycle and its retry are one cycle.
-2. Per model, `resolveModelPolicy`, then `runAnalyzersAndScore`. The analyzer
+2. Per model, `resolveModelPolicy`, then `runAnalyzers`. The analyzer
    runs only where the policy lists it (`AnalyzerEnabled`).
 3. `Analyze`:
    - `readFleet`: Ready, not warm-pool rows; the request-weighted shape

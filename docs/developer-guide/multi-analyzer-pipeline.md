@@ -87,12 +87,12 @@ this way, and where it is going, is in the design record:
 
 | Concept | Definition |
 |---|---|
-| **Analyzer** | Implementation of `domain.Analyzer`. Built in: saturation (kv-token capacity, package `saturation`), which sizes the fleet, and `slo` (package `slo`, [its page](slo-analyzer.md)), which observes. External: throughput (RPS/ITL-derived). |
+| **Analyzer** | Implementation of `domain.Analyzer`. Built in: saturation (kv-token capacity, package `saturation`), which always runs and sizes the model when listed, and `slo` (package `slo`, [its page](slo-analyzer.md)), which observes. Registered in `cmd/main.go`: throughput (RPS/ITL-derived). External: PromQL definitions under `analyzerDefinitions` (package `external`). |
 | **`VariantCapacity`** | Per-variant primitives: `ReplicaCount`, `PendingReplicas`, `PerReplicaCapacity` (analyzer-specific units), `Role`, `TotalDemand`, and the warm-pool trio `WarmPoolReplicas` / `WarmPoolPerReplicaCapacity` / `WarmPoolCapacity`. `Cost` and `AcceleratorName` are **not** on this struct — the optimizer reads them from `VariantMetadata`. |
 | **`AnalyzerResult`** | Per-(model, analyzer) output: the pure (D, P) signal — `VariantCapacities[]`, `TotalDemand`, `RoleDemand`. It has **no** supply or scaling-signal fields; those live on `NamedAnalyzerResult` and are the builder's. |
 | **`RoleCapacity`** | Per-role aggregate within an `AnalyzerResult`: `TotalSupply`, `TotalDemand`, `TotalAnticipatedSupply`, `RequiredCapacity` / `SpareCapacity` (engine-written). Used for P/D disaggregated models only. |
-| **`NamedAnalyzerResult`** | Optimizer-side wrapper: `{Name, Result, Score, Remaining, Spare, RoleSpare, Live}`. Working `Remaining`/`Spare`/`RoleSpare` are decremented by helpers during allocation; `Result` is never mutated. `Live` is set by the engine each cycle and gates scale-down participation (see "How results combine"). |
-| **Linearity invariant** | Adding *n* replicas of variant *v* reduces analyzer *i*'s working `Remaining` by exactly *n × PRC_i[v]*. Holds at model scope (non-disaggregated) and at role scope (disaggregated). |
+| **`NamedAnalyzerResult`** | Optimizer-side wrapper: `{Name, Result, Score, Remaining, Spare, RoleSpare, Live}`, and on the composite `Holds`, `ReleaseBound` and `OtherFrames`. Working `Remaining`/`Spare`/`RoleSpare` are decremented by helpers during allocation; `Result` is never mutated. `Live` is set by the engine each cycle and gates scale-down participation (see "How results combine"). |
+| **Linearity invariant** | Adding *n* replicas of variant *v* reduces an entry's working `Remaining` (the composite's, in the optimizer) by exactly *n × PRC[v]*. Holds at model scope (non-disaggregated) and at role scope (disaggregated). |
 
 ### The three layers
 
@@ -406,20 +406,31 @@ it, the PRC of each variant another analyzer decided, and the holds:
     another frame short for one cycle, until the new replicas are read.
   - With one variant per role every frame gives saturation's PRC. A need
     whose demand at saturation's PRC overflows is no reading. A need on a
-    variant saturation has no PRC for is carried only in the others' frame;
-    in saturation's it is logged as dropped.
-- **Holds** (`compositeHolds`, `allocation.RoleHold`, per role). With
-  saturation unlisted, a role none of whose variants has a need is held both
-  ways, and on P/D every other role is held against growth too, as the share
-  optimizer already froze such a model whole. A listed analyzer other than saturation that is live but not eligible
-  -- inside its staleness grace with no reading, or returned nothing this
-  cycle (`listedInGrace` adds an entry with no `Result`) -- blocks scale-down
-  of the roles it reports variants for, or of every role when it reports
-  none. A role saturation holds (`HeldRoleDemand`) whose held figure the
-  pricing dropped -- another frame prices it, or another analyzer's demand
-  replaced it -- is held against scale-down too (`keepSaturationHolds`):
-  read as demand, the held figure let the share optimizer release part of a
-  role saturation would keep. `applyHolds` zeroes the forbidden `RequiredCapacity`/`SpareCapacity`
+    variant saturation has no PRC for counts only when its own analyzer's
+    frame is chosen; under any other frame it is logged as dropped. An
+    analyzer whose needs are all on such variants gets no frame
+    (`roleFrames` keys demand on `PRC_sat > 0`), so they are always
+    dropped.
+- **Holds** (`compositeHolds`, `keepSaturationHolds`, `allocation.RoleHold`,
+  per role). Three rules:
+  - *Unsized.* With saturation unlisted, a role none of whose variants has a
+    need is held both ways, and on P/D every other role is held against
+    growth too, as the share optimizer already froze such a model whole.
+  - *Grace veto.* A listed analyzer other than saturation that is live but
+    not eligible -- inside its staleness grace with no reading, or returned
+    nothing this cycle (`listedInGrace` adds an entry with no `Result`) --
+    blocks scale-down of the roles it reports variants for, or of every role
+    when it reports none. An entry from `listedInGrace` has no `Result`, so
+    it always holds every role: a model-level analyzer whose query fails
+    holds a P/D model it could never size
+    ([#343](https://github.com/ev-shindin/llm-scaling-manager/issues/343)).
+  - *Saturation's hold kept.* A role saturation holds (`HeldRoleDemand`)
+    whose held figure the pricing dropped -- another frame prices it, or
+    another analyzer's demand replaced it -- is held against scale-down:
+    read as demand, the held figure let the share optimizer release part of
+    a role saturation would keep.
+
+  `applyHolds` zeroes the forbidden `RequiredCapacity`/`SpareCapacity`
   (per role, and model-level when every role is held that way); the share
   optimizer reads `Holds` itself, freezing the model on `NoScaleUp` and
   raising the role's floor to what it has on `NoScaleDown` -- and on a role
@@ -429,39 +440,8 @@ it, the PRC of each variant another analyzer decided, and the holds:
   the model there, as in the share optimizer, and `rescaleInputsForGroup` gives
   such a model exactly its current GPUs in the water-fill, so the rest of the
   budget goes to the others; no role is reclaimed or filled in a direction it
-  is held against. A role held against scale-down keeps its GPUs both in
-  the water-fill and in the model's split across its roles. A model's
-  water-fill cap is each role's demand in GPUs capped at that role's
-  `maxReplicas` GPUs, summed: counted uncapped, prefill at its maximum of 16
-  GPUs sized the cap on 560, and the GPUs that share left free stayed free
-  while another model was short. The water-fill weight is priority times the
-  same raised demand the cap reads (`modelWeightDemand`: each role's demand,
-  or what another frame keeps at full utilization when that is more), not the
-  model's own `TotalDemand`. A group is contended, and rescale runs, only
-  when what its models can take exceeds the budget: each cap before the
-  budget bounds it, so a role at its `maxReplicas` does not set off rescale
-  in a group that fits. A model with a variant that has no accelerator name
-  is left to the additive path whole, since the budget, the floors and the
-  demand count none of that variant's GPUs: the additive path may shrink it
-  and finds no budget to grow it. A growing role's share is lowered to what `fillRole` can
-  place as whole replicas, on a trial copy (cost order, `maxReplicas`, each
-  variant's own pod size), and what that leaves goes to the roles cut most
-  (`roundFillsToReplicas`): split in GPUs, 8 more GPUs went +1 and +7 to a
-  model's two roles on 8-GPU pods, neither a pod, and stayed free. No role's
-  share exceeds what its `maxReplicas` allow, and what a role at its maximum
-  cannot hold re-splits over the others, each up to the larger of its demand
-  and its uncapped share (`roleShareCeilings`): uncapped, prefill at its
-  maximum took its share and decode was reclaimed to pay for it. Reclaims are
-  whole replicas of the model's summed cut (`reclaimWholeReplicas`): each
-  role's own cut first, then what is left from the role cut most, never more
-  than the summed cut. A role counts toward the sum only what it can give:
-  not a cut no replica can meet (a variant with no capacity reading, the
-  cheapest held at one), and, while it has a share, not its last replica, so
-  the second pass never takes a role with demand to zero. The second pass
-  runs only when every role cut has one replica size; with mixed sizes the
-  two passes disagreed between adjacent targets, and a larger target left
-  fewer GPUs. Cut 4 GPUs from each of two roles on 8-GPU pods, each role
-  alone shed nothing.
+  is held against. How rescale sizes a held model is in
+  [Rescale under holds](#rescale-under-holds).
 - **Warm-pool pressure** (`publishVariantPressure`) is published from the
   composite, after it is built, with saturation's scale-up threshold; a role
   held against growth never reports `NeedsScaleUp`. Warm-pool supply
@@ -541,6 +521,48 @@ capacity zeroed (`applyHolds`).
 
 Cost, accelerator and role are not read from any analyzer: the optimizer
 takes them from discovery (`ModelScalingRequest.Variants`).
+
+### Rescale under holds
+
+A role held against scale-down keeps its GPUs both in
+the water-fill and in the model's split across its roles. A model's
+water-fill cap is each role's demand in GPUs capped at that role's
+`maxReplicas` GPUs, summed: counted uncapped, prefill at its maximum of 16
+GPUs sized the cap on 560, and the GPUs that share left free stayed free
+while another model was short. The water-fill weight is priority times the
+same raised demand the cap reads (`modelWeightDemand`: each role's demand,
+or what another frame keeps at full utilization when that is more), not the
+model's own `TotalDemand`.
+
+A group is contended, and rescale runs, only
+when what its models can take exceeds the budget: each cap before the
+budget bounds it, so a role at its `maxReplicas` does not set off rescale
+in a group that fits. A model with a variant that has no accelerator name
+is left to the additive path whole, since the budget, the floors and the
+demand count none of that variant's GPUs: the additive path may shrink it
+and finds no budget to grow it.
+
+A growing role's share is lowered to what `fillRole` can
+place as whole replicas, on a trial copy (cost order, `maxReplicas`, each
+variant's own pod size), and what that leaves goes to the roles cut most
+(`roundFillsToReplicas`): split in GPUs, 8 more GPUs went +1 and +7 to a
+model's two roles on 8-GPU pods, neither a pod, and stayed free. No role's
+share exceeds what its `maxReplicas` allow, and what a role at its maximum
+cannot hold re-splits over the others, each up to the larger of its demand
+and its uncapped share (`roleShareCeilings`): uncapped, prefill at its
+maximum took its share and decode was reclaimed to pay for it.
+
+Reclaims are
+whole replicas of the model's summed cut (`reclaimWholeReplicas`): each
+role's own cut first, then what is left from the role cut most, never more
+than the summed cut. A role counts toward the sum only what it can give:
+not a cut no replica can meet (a variant with no capacity reading, the
+cheapest held at one), and, while it has a share, not its last replica, so
+the second pass never takes a role with demand to zero. The second pass
+runs only when every role cut has one replica size; with mixed sizes the
+two passes disagreed between adjacent targets, and a larger target left
+fewer GPUs. Cut 4 GPUs from each of two roles on 8-GPU pods, each role
+alone shed nothing.
 
 ---
 
@@ -654,7 +676,9 @@ for each role (sorted for determinism):
 
 `fairShareValue = priority × Score × Σ_role pickerState[role]`, capped, where
 `Score` is the composite's: the largest score among the analyzers that sized
-the model this cycle. Scores are not on a common scale across analyzers
+the model this cycle. The only other reader is `sortVariantsForScaleDown`'s
+tie-break (`Score x PRC`), which with one entry reorders nothing unless
+`Score` is 0 or less. Scores are not on a common scale across analyzers
 ([#226](https://github.com/ev-shindin/llm-scaling-manager/issues/226)).
 
 ---

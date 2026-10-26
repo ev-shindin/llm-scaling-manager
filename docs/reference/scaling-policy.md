@@ -1899,9 +1899,9 @@ reviewable.
 
 ## Multi-Analyzer Registration
 
-The V2 engine carries an analyzer registry so external analyzers (e.g.
-throughput) can be plugged in without the engine package knowing the concrete
-type. The built-in `slo` analyzer is registered by the engine itself, and the
+The V2 engine carries an analyzer registry so additional built-in analyzers
+(throughput, registered in `cmd/main.go`) can be plugged in without the engine
+package knowing the concrete type. The built-in `slo` analyzer is registered by the engine itself, and the
 name is reserved. Each cycle the engine iterates every registered analyzer in
 registration order and invokes its `Analyze` method.
 
@@ -1937,11 +1937,11 @@ Pre-registered:
   `interfaces.SaturationAnalyzerName`. It always runs; it sizes the model
   only when listed (see [Saturation Always Runs](#saturation-always-runs)).
 
-External analyzers declared in config are covered in
+External analyzers, declared in config, are covered in
 [External analyzers](#external-analyzers-analyzerdefinitions). The Go
 registration below is for analyzers compiled into the controller.
 
-External analyzers are registered from `cmd/main.go` via:
+Additional built-in analyzers (throughput) are registered from `cmd/main.go` via:
 
 ```go
 if err := engine.RegisterAnalyzer(name, analyzer); err != nil {
@@ -2032,11 +2032,11 @@ data:
 ```
 
 A full example, with a body per inference engine, is
-`config/samples/analyzers/external-analyzers.yaml`.
+[`config/samples/analyzers/external-analyzers.yaml`](../../config/samples/analyzers/external-analyzers.yaml).
 
 | Field | Meaning |
 |---|---|
-| `query` | PromQL for the model's **total** demand. Every series it returns is summed. `{{.namespace}}` and `{{.modelID}}` are escaped and filled in. |
+| `query` | PromQL for the model's **total** demand. Every series it returns is summed, after series of Pods that are gone are dropped. `{{.namespace}}` and `{{.modelID}}` are escaped and filled in. |
 | `threshold` | What one scale-target replica (a Pod, or an LWS group) can serve, in the query's unit. A string, greater than 0. |
 | `engines` | Optional: a `query`/`threshold` pair per inference engine (`vllm`, `sglang`). The model's engine picks the body; the top-level pair is ignored when `engines` is set. A model whose engine has no body is not sized by this analyzer. |
 
@@ -2045,13 +2045,16 @@ What to know before you rely on one:
 - **Units are yours to get right.** Use a `sum(...)` query. `count()` and
   `avg()` count engine instances, not Pods; collapse them by Pod first
   (`count(count by (pod) (...))`).
-- **Model-level only.** It reports demand for the whole model, not per role,
-  so it **cannot size a P/D model**: it is listed and has no effect, and the
-  log says `listed analyzer reports no per-role demand`.
-- **The threshold is a constant.** It does not learn per-replica capacity.
+- **Model-level only** ([#343](https://github.com/ev-shindin/llm-scaling-manager/issues/343)). It reports demand for the whole
+  model, not per role, so it **cannot size a P/D model**; the log says
+  `listed analyzer reports no per-role demand`. It can still hold one: when
+  its query fails, no role of the model scales down for up to three cycles.
+- **The threshold is a constant.** It does not learn per-replica capacity;
+  a target query is planned ([#344](https://github.com/ev-shindin/llm-scaling-manager/issues/344)).
 - **An empty result is 0 demand.** If the query matches nothing, the
   analyzer asks for 0 replicas. Listed alone, that lets the model scale
-  down; beside saturation, saturation's larger need wins. A query that
+  down; beside saturation, saturation's larger need wins. Treating an empty
+  result as missing is planned ([#344](https://github.com/ev-shindin/llm-scaling-manager/issues/344)). A query that
   **fails** is no reading instead: for three cycles the roles it covers do
   not scale down, then it stops counting.
 - **Its own `scaleUpThreshold`/`scaleDownBoundary` decide nothing**, as for
@@ -2060,9 +2063,10 @@ What to know before you rely on one:
 - **Where it is read.** Only from the `default` entry in the controller's
   namespace. On any other entry, or in a namespace-local ConfigMap, it is
   logged and ignored; a policy there can still list it by name.
-- **Bad definitions are skipped.** An empty query, a threshold that is not
-  a number above 0, or a name a built-in analyzer already uses is logged and
-  skipped; the other definitions still run. Changes apply on the next cycle,
+- **Bad definitions are skipped.** An empty query, a threshold that does not
+  parse or is 0 or less, or a name a built-in analyzer already uses is logged
+  and skipped; the other definitions still run. A threshold of `"NaN"` is
+  accepted and then sizes nothing, so check the value. Changes apply on the next cycle,
   with no restart.
 - **Who may edit it.** The query runs as written against the shared
   Prometheus, so treat write access to that ConfigMap as privileged.
@@ -2074,8 +2078,8 @@ What to know before you rely on one:
 | `name` | string | Analyzer name (must match a `RegisterAnalyzer` call) | required |
 | `enabled` | bool | `false` keeps the entry but stops the analyzer running and sizing the model; on `saturation` it makes saturation unlisted (it still runs, for units and variants, and sizes nothing) | `true` |
 | `score` | float64 | Weight in the cross-model fair share under a GPU limiter: the combined decision takes the largest score among the analyzers that sized the model this cycle (saturation's when none did). It does not change one model's replica count | `1.0` |
-| `scaleUpThreshold` | float64 | Per-analyzer override for the scale-up threshold. Only saturation's decides what is scaled; on any other analyzer it shapes only that analyzer's own result, and the config read logs a warning (see Per-analyzer threshold overrides below) | global `scaleUpThreshold` |
-| `scaleDownBoundary` | float64 | Per-analyzer override for the scale-down boundary. Only saturation's decides what is scaled; on any other analyzer it shapes only that analyzer's own result, and the config read logs a warning (see Per-analyzer threshold overrides below) | global `scaleDownBoundary` |
+| `scaleUpThreshold` | float64 | Per-analyzer override for the scale-up threshold. Only saturation's decides what is scaled; on any other analyzer it shapes only that analyzer's own result, and the config read logs a warning (see [Per-analyzer threshold overrides](#engine-post-step-formula)) | global `scaleUpThreshold` |
+| `scaleDownBoundary` | float64 | Per-analyzer override for the scale-down boundary. Only saturation's decides what is scaled; on any other analyzer it shapes only that analyzer's own result, and the config read logs a warning (see [Per-analyzer threshold overrides](#engine-post-step-formula)) | global `scaleDownBoundary` |
 
 ### Analyzer responsibilities and the universal threshold post-step
 

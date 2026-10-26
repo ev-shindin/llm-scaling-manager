@@ -562,8 +562,9 @@ func (e *Engine) analyzerRunEntries() []analyzerEntry {
 }
 
 // reconcileExternalAnalyzers rebuilds the runtime external-analyzer registry from
-// the current catalog (Config.ExternalAnalyzerCatalog, which the ConfigMap
-// reconciler refreshes when wva-analyzers changes). Called once per optimize
+// the current catalog (Config.ExternalAnalyzerCatalog: analyzerDefinitions on
+// the cluster "default" scaling entry, which the ConfigMap reconciler
+// refreshes when the scaling-policy ConfigMap changes). Called once per optimize
 // cycle, so a catalog edit takes effect without a restart. A catalog label that
 // collides with a built-in analyzer is skipped (built-in wins name resolution); a
 // definition that fails to build (bad threshold, empty query) is skipped and
