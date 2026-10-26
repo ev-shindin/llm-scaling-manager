@@ -7,9 +7,10 @@ when it installs one.
 
 ## Supported versions
 
-- **KEDA 2.21**: supported. It is the first release with the
-  CVE-2026-77524 fix (below). The kind e2e suites pass on it. It supports
-  Kubernetes 1.34 to 1.36.
+- **KEDA 2.21**: supported and recommended. It is the first release with the
+  CVE-2026-77524 fix (below), and it does not leave a ScaledObject
+  [unwired](#unwired-hpa-before-keda-220) after the controller restarts. The
+  kind e2e suites pass on it. It supports Kubernetes 1.34 to 1.36.
 - **KEDA 2.19**: supported. It supports Kubernetes 1.32 to 1.34.
 - **KEDA 2.18**: supported. The benchmarks have run on 2.18.1.
 - **Which one CI tests**: the installer's default `KEDA_CHART_VERSION`. The
@@ -38,6 +39,19 @@ prints this as advice and does not stop. From 2.21.0 on it prints nothing. Read
 KEDA 2.21's upgrade notes before you upgrade: the release lists breaking
 changes.
 
+### Unwired HPA before KEDA 2.20
+
+On KEDA 2.19 and older, a ScaledObject created soon after the controller
+restarts, rolls out or is unreachable can keep its HPA on the CPU default. KEDA
+keeps a failed connection to the scaler for up to two minutes, builds the HPA
+from the empty metric spec that failed call returns, and does not try again.
+
+KEDA 2.20 fixes it ([kedacore/keda#7777](https://github.com/kedacore/keda/pull/7777)).
+Upgrade KEDA to 2.21, which also fixes the CVE above. Until then, after every
+controller restart or rollout run `make scaledobjects-rewire`
+([re-wiring](#the-scalers-tls-in-kedas-namespace)), or restart the KEDA
+operator. On a KEDA below 2.20 the installer says so in its CVE warning.
+
 ### Upgrading a KEDA the cluster already has
 
 Re-running the installer never upgrades a KEDA that is already there, even
@@ -60,7 +74,9 @@ version line. None of these lines stops the install.
 - `KEDA 2.21.0: supported (KEDA 2.18, 2.19 and 2.21; CI tests <version>).`
 - `KEDA 2.20.2: untested, and not refused.` It names the supported versions.
 - `KEDA 2.19.0 carries CVE-2026-77524 ... Advice only: consider upgrading KEDA
-  to 2.21.0 or later.` It also prints the `helm upgrade` command above.
+  to 2.21.0 or later.` It also prints the `helm upgrade` command above. Below
+  2.20 the same line names the [unwired-HPA bug](#unwired-hpa-before-keda-220)
+  and `make scaledobjects-rewire`.
 - `KEDA: could not check its version (...)`. The version is unknown, which is
   not a pass. The reason is one of these:
   - Listing Deployments cluster-wide is not permitted for you.

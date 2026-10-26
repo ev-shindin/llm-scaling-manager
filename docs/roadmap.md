@@ -52,11 +52,12 @@ state. The gaps themselves are summarized in [known gaps](why.md#known-gaps).
 
 ## Resilience
 
-- **Re-wire an unwired ScaledObject without an operator.** When KEDA's first
-  call for a new ScaledObject's metric spec fails, its HPA stays on the CPU
-  default and never scales. Today `make scaledobjects-rewire` fixes it
-  ([KEDA](reference/keda.md#the-scalers-tls-in-kedas-namespace)). Planned: the
-  controller detects and re-wires it on its own.
+- **Re-wire an unwired ScaledObject without an operator.** On KEDA 2.19 and
+  older, a ScaledObject created soon after the controller restarts can keep its
+  HPA on the CPU default. It is a KEDA bug, fixed in KEDA 2.20; upgrade KEDA to
+  2.21. On older KEDA, `make scaledobjects-rewire` fixes it
+  ([KEDA](reference/keda.md#unwired-hpa-before-keda-220)). Considered: the
+  controller re-wires it on its own on older KEDA.
   [#315](https://github.com/ev-shindin/llm-scaling-manager/issues/315)
 - **Make surviving a restart the default.** By default what the controller
   learns about a model's capacity lives in memory, so a restart or a leader
