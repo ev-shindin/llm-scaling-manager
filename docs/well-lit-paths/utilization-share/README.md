@@ -14,9 +14,12 @@ used or not (on-prem, a reservation, a team allotment).
 - There is nothing to share: one model per quota gains only headroom.
 - You want idle GPUs given back. It holds headroom on purpose
   ([What it costs](#what-it-costs)).
-- The model that rises when load swaps cannot wait about 5.5 minutes longer
-  than today, or load swings back faster than a move lands (about twelve
-  minutes).
+- Load swings back faster than a move lands (a donor's scale-down window,
+  then the receiver's start), or a small imbalance has to be corrected at
+  once: unless a short model is at 0.9 or more of its scale-up threshold and
+  a donor at 0.6 or less, the move first waits two confirmation cycles, and a
+  model that just gave GPUs waits about twelve minutes before it takes them
+  back.
 - More cases are in [Details](#more-cases-where-it-does-not-fit).
 
 ## Start here
