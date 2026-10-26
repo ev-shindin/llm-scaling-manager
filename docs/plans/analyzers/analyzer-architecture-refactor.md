@@ -1,6 +1,8 @@
 # Design & Plan: Analyzer Architecture Refactor — Metadata Discovery + a Pure `(D, P)` Contract
 
-**Status:** Implemented — all six phases landed (see §5 for what deviated from this plan)
+**Status:** Implemented — all six phases landed (see §5 for what deviated from this plan). Later
+work changed part of the result; see [§12 After this plan](#12-after-this-plan) before trusting the
+optimizer and saturation sections.
 **Area:** engines/analyzers
 **Related:** `docs/proposals/analyzer-metric-interface.md` (the `(demand, target)` contract & external analyzers), issue #1455 (external analyzers), #1444 (proposal, docs-only)
 
@@ -76,6 +78,7 @@ the analyzer's output. This substantially de-risks it.
 - No change to the **optimizer's coordination math** (sum-over-variants / min-over-roles in
   utilization space). We change *where identity comes from* and *the shape analyzers emit*, not how
   replicas are chosen. `applyUniversalThreshold` + `roleBottleneckReplicas` stay the `⌈D/P⌉` engine.
+  (Held for this plan; later work changed it — §12.)
 - No hard KEDA dependency. WVA stays KEDA-*shaped*.
 
 ---
@@ -209,6 +212,11 @@ discovery, **the wrapper supplies no metadata** — only `D` and `P` per variant
 cluster `wva-analyzers` ConfigMap; a policy entry's `name` resolves **built-in registry first
 (internal), then catalog (external)**.
 
+> **As built** (§10): a demand query and a constant `P`, per inference engine, model-level demand
+> only. No target query, pod→ScaledObject reduction, fallbacks or `orZero`, and an empty result
+> reads as 0 demand. The catalog is `analyzerDefinitions` on the cluster `default` scaling entry,
+> not a ConfigMap of its own.
+
 ---
 
 ## 4. Data-model changes (summary)
@@ -223,8 +231,8 @@ cluster `wva-analyzers` ConfigMap; a policy entry's `name` resolves **built-in r
 >    **keeps `ReplicaCount`/`PendingReplicas`** (engine-instance units — see the boxed note
 >    under §5 increment 2; taking these from `VariantMetadata` would undercount supply on
 >    DP>1 deployments).
-> 3. `ReplicaMetrics` still carries `Cost`/`AcceleratorName`; the analyzer stopped reading
->    them, but removing the fields is collector-side work outside this plan.
+> 3. `ReplicaMetrics` kept `Cost`/`AcceleratorName` when this plan closed; the analyzer had
+>    stopped reading them. **Since done:** `domain.ReplicaMetrics` carries neither field.
 
 | Type | Change |
 |---|---|
@@ -233,10 +241,10 @@ cluster `wva-analyzers` ConfigMap; a policy entry's `name` resolves **built-in r
 | `domain.AnalyzerResult` | ✅ trimmed to `{AnalyzerName, ModelID, Namespace, AnalyzedAt, VariantCapacities, TotalDemand, RoleDemand}` — the pure `(D, P)` |
 | `domain.VariantCapacity` | ✅ identity removed (`Cost`, `AcceleratorName`) and `TotalCapacity` deleted; kept the name, and kept `ReplicaCount`/`PendingReplicas` (instance units — deviation 2 above) |
 | `domain.RoleCapacity` / `RoleCapacities` | ✅ analyzers emit `RoleDemand map[string]float64`; the per-role RC/SC live on `NamedAnalyzerResult.RoleCapacities`, built by the engine |
-| `domain.ReplicaMetrics` | ⏳ *not done* (deviation 3) — would lose `Cost` and `AcceleratorName`. Both are variant-level facts, resolved once per variant (`replica_metrics.go:983-1003`) and laundered onto every pod; discovery owns them. `ReplicaMetrics` becomes purely per-pod *signal* (KV usage, tokens, rates) + attribution keys (`PodName`/`VariantName`/`ModelID`/`Namespace`). Capacity-store keying already resolves accelerator directly (`engine_v2.go:48`), not from `ReplicaMetrics`. |
+| `domain.ReplicaMetrics` | ✅ done after this plan (deviation 3) — lost `Cost` and `AcceleratorName`. Both are variant-level facts, resolved once per variant (`replica_metrics.go:983-1003`) and laundered onto every pod; discovery owns them. `ReplicaMetrics` becomes purely per-pod *signal* (KV usage, tokens, rates) + attribution keys (`PodName`/`VariantName`/`ModelID`/`Namespace`). Capacity-store keying already resolves accelerator directly (`engine_v2.go:48`), not from `ReplicaMetrics`. |
 | `NamedAnalyzerResult` (`optimizer_interfaces.go`) | ✅ gained `TotalSupply`, `TotalAnticipatedSupply`, `Utilization`, `RequiredCapacity`, `SpareCapacity`, `RoleCapacities` |
-| `saturationEntry` | ✅ **deleted**; `saturationNamedEntry` remains, special only in that its `P` sizes replicas |
-| `variantRecord` (new, `pipeline/variant_records.go`) | ✅ the optimizer's per-variant view: embedded `VariantMetadata` (identity) + the analyzer's `PerReplicaCapacity`/`Utilization`. Built by `buildVariantRecords`, the single join point. |
+| `saturationEntry` | ✅ **deleted**. `saturationNamedEntry` remained when this plan closed and is gone too: the optimizer now reads one `CompositeSignal` (§12) |
+| `variantRecord` (new, `allocation/variant_records.go`) | ✅ the optimizer's per-variant view: embedded `VariantMetadata` (identity) + the analyzer's `PerReplicaCapacity`/`Utilization`. Built by `buildVariantRecords`, the single join point. |
 
 ---
 
@@ -316,6 +324,9 @@ the same fixture problem.
   optimizer sites need it (`cost_aware_optimizer.go` decision loop, `rescale.go`
   `roleDemandGPUs`/`modelDemandGPUs`/`rescaleInputsForGroup`). `roleDemandGPUs` and
   `modelDemandGPUs` change signature to take the named result.
+
+> Names as they were then. `runAnalyzersAndScore` is now `runAnalyzers` in `engine_v2.go` (a
+> test-only helper keeps the old name), and `saturationNamedEntry` is gone (§12).
 
 **The hard part is the fixtures, not the code.** ~160 field sites across six
 `internal/engines/allocation/*_test.go` files set these fields inside
@@ -416,9 +427,9 @@ describes that accurately.
 > increment 3 has re-keyed the optimizer, which is why 3 now comes first.
 
 **Increment 3 — delete `saturationEntry`. ✅ DONE.** The only increment that changed
-optimizer *logic*. `saturationEntry` is gone; `saturationNamedEntry` remains, and what is
-still special about that entry is only that its `P` sizes replicas — the coordination
-math, deliberately unchanged per §2.
+optimizer *logic*. `saturationEntry` is gone; `saturationNamedEntry` remained, and what was
+still special about that entry was only that its `P` sized replicas — the coordination
+math, deliberately unchanged per §2. (Both are gone since; §12.)
 
 **What made it a small diff.** Rather than thread `[]domain.VariantMetadata` and look `P`
 up separately at every site, the engine now *builds* the optimizer's per-variant view:
@@ -567,10 +578,14 @@ The external-analyzer wrapper is wired through the **ScalingPolicy configuration
 across ConfigMaps exactly as §7.6 of the KEDA-external-scaler proposal describes — not collapsed into
 a single policy entry:
 
-- **Catalog** (cluster CM **`wva-analyzers`**) — external analyzer *definitions*: `label →
+- **Catalog** (`analyzerDefinitions` on the cluster `default` entry of the scaling-policy
+  ConfigMap in the system namespace; it was first a ConfigMap of its own, `wva-analyzers`) —
+  external analyzer *definitions*: `label →
   {engines: {vllm:{query,threshold}, sglang:{…}} | query,threshold}` (per-engine bodies, mirroring
-  the collector's `registerForEngine`; an engine-agnostic body has no `engines:` map). Parsed by
-  `config.ParseAnalyzerCatalogConfigMap`, stored on `Config`, refreshed by the ConfigMap reconciler.
+  the collector's `registerForEngine`; an engine-agnostic body has no `engines:` map). Parsed with
+  the rest of the scaling policy, read through `Config.ExternalAnalyzerCatalog`
+  (`internal/config/analyzer_catalog.go`), refreshed by the ConfigMap reconciler. On any other
+  entry, or in a namespace-local ConfigMap, it is logged and ignored.
 - **Policy** (tier CM) — *selects/weights* by name (`analyzers: [{name, enabled, score}]`). A policy
   entry's `name` resolves **built-in registry first, then catalog**; because a plain `{name: ttft-slo}`
   entry has `EffectiveType() == Name`, the existing `effectiveEnabled`/`scoreForAnalyzer`/
@@ -581,7 +596,7 @@ a single policy entry:
   and returns a nil result (not-defined → skipped) when no body matches.
 - **Runtime add/remove** — the engine holds a lock-guarded, name-keyed external registry
   (`UpsertExternalAnalyzer`/`RemoveExternalAnalyzer`) separate from the frozen built-in snapshot, and
-  `reconcileExternalAnalyzers` syncs it with the catalog **each optimize cycle**, so a `wva-analyzers`
+  `reconcileExternalAnalyzers` syncs it with the catalog **each optimize cycle**, so a catalog
   edit takes effect **without a restart**.
 
 ## 11. Security — PromQL trust model
@@ -591,16 +606,43 @@ with one addition we already have:
 
 - **The query body is trusted config.** Like KEDA's ScaledObject `query`, the catalog PromQL is run
   as-is — WVA does **not** semantically sanitize or whitelist it (infeasible, and KEDA doesn't). The
-  trust boundary is **RBAC on the `wva-analyzers` ConfigMap**: editing it is a privileged operation.
+  trust boundary is **RBAC on the system namespace's scaling-policy ConfigMap**, which holds
+  `analyzerDefinitions`: editing it is a privileged operation.
 - **Interpolated identity is escaped.** Unlike KEDA, WVA interpolates `{{.modelID}}`/`{{.namespace}}`
   (from a less-trusted ScaledObject annotation) into the query — and `PrometheusSource.executeQuery`
   runs both through `EscapePromQLValue` before substitution (`prometheus_source.go:121-123`), so a
   crafted `modelID` cannot break out of a label matcher. This is the genuine injection defense.
-- **Bounded cost + fail-safe.** Each query has a 10s timeout (`prometheus_source.go:35,140`); a
-  failed/empty/malformed query yields **0 demand → no scaling action**, so a bad definition cannot
-  drive runaway scaling — it simply contributes nothing. Heavy expressions should be precomputed as
+- **Bounded cost.** Each query has a 10s timeout. A query that **fails** is an error: the
+  analyzer reports nothing for the model that cycle, and inside its grace window the composite
+  holds the roles it covers against scale-down. A query that returns an **empty** result reads as
+  **0 demand**, which is a present reading of zero need. Listed alone, that votes for scale-down;
+  beside another analyzer, the larger need wins. So a bad definition cannot drive runaway scale-up,
+  but an empty one can shrink a model it sizes alone. Heavy expressions should be precomputed as
   Prometheus recording rules.
 - **Load-time validation is deliberately minimal** — `external.New` rejects an empty query or a
   non-positive threshold (bad def skipped, logged); we do **not** pull in the full
-  `github.com/prometheus/prometheus` PromQL parser just to syntax-check, since the timeout + fail-safe
-  already contain a bad query's blast radius.
+  `github.com/prometheus/prometheus` PromQL parser just to syntax-check, since the timeout and the
+  error path contain a bad query's blast radius.
+
+## 12. After this plan
+
+This plan kept the optimizer's coordination math unchanged and removed saturation as the source
+of identity. Later work changed both:
+
+- **One signal to the optimizer (#34).** The engine hands the optimizer one `CompositeSignal`
+  (`ModelScalingRequest.CompositeSignal`), not a slice of per-analyzer results.
+  `roleBottleneckReplicas` takes that single entry. The multi-entry helpers are kept, unbuilt, in
+  `internal/engines/allocation/multi_backup/` (`//go:build ignore`).
+- **The composite (#167, #197).** Every listed analyzer's `D / P` is combined per variant, the
+  largest wins, and the result is converted into saturation's units and judged at saturation's
+  band. See [the composite analyzer](../../proposals/composite-analyzer.md).
+- **Saturation is privileged again, in a new form.** Identity still comes from discovery. But
+  saturation always runs, listed or not, and it is the composite's variant list and unit; its side
+  fields are copied through only from saturation.
+- **`AnalyzerResult` grew.** Beyond the seven fields in §4 it now carries `HeldRoleDemand`,
+  `HotRankDemand`, `RoleStartSeconds`, `VariantBusiestQueueLoad` and `PricingK`, and
+  `VariantCapacity` carries saturation's diagnostics and warm-pool figures (`StuckReplicas`,
+  `PendingAges`, `ObservedReplicas`, `Borrowed`, the `K2*` fields, `WarmPool*`, `ServiceRate`).
+  Only saturation sets them.
+- **The external catalog moved** from the `wva-analyzers` ConfigMap to `analyzerDefinitions`
+  (§10).

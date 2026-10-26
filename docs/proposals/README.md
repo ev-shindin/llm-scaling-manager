@@ -100,7 +100,14 @@ Read the review first; the implementation design says what was built.
   deployment cannot re-role a replica (the role label is in an immutable
   selector), a deployment shape that can, and an
   [evaluation plan](pd-role-switch/evaluation.md) for what switchability costs.
-- **[Analyzer metric interface](analyzer-metric-interface.md)**
+- **[Analyzer metric interface](analyzer-metric-interface.md)** — partly
+  built: the per-analyzer `(D, P)` contract, the `wva_analyzer_*` series and
+  an external PromQL analyzer. How analyzers combine was replaced by the
+  composite below.
+- **[The composite analyzer](composite-analyzer.md)** — built, still moving.
+  How listed analyzers combine into the one signal the optimizer reads, the
+  decisions behind it, its known limits (#305, #226) and the target: each
+  analyzer at its own band, and no dependence on saturation's units.
 - **[SGLang backend](sglang-backend.md)**
 - **[Sizing a backlog](backlog-sizing.md)** — what the shape-swap P/D run
   showed: peaks of 7 and 9 decode replicas against a need of 2, troughs of 1

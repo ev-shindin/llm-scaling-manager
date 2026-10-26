@@ -127,9 +127,10 @@ const analyzerLivenessStaleCycles = 3
 //
 // Saturation always runs; every other registered analyzer runs only if
 // config.AnalyzerEnabled. The capacity-build step (buildNamedResult) runs
-// once per analyzer. Saturation is the keeper of per-variant metadata
-// (Cost, AcceleratorName, Role) until a future pre-analysis-extraction PR
-// separates that concern.
+// once per analyzer. Per-variant identity (cost, accelerator, role) comes
+// from discovery (variantMetadata), not from any analyzer. Saturation runs
+// unlisted too because buildComposite takes its variant list and its units
+// from saturation's result.
 func (e *Engine) runAnalyzers(
 	ctx context.Context,
 	modelID, namespace string,

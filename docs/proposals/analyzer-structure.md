@@ -1,19 +1,35 @@
 # Structuring the analyzers
 
-**Status:** stages 1-4 built, stage 5 concluded, stage 6 dropped. No stage
-changed a decision; every one was verified against unchanged spec counts.
+**Status:** stages 1-4 built, stage 5 concluded, stage 6 dropped. Stages 1
+and 2 have since regrown (table below). No stage changed a decision; every
+one was verified against unchanged spec counts.
 
 | stage | | |
 | --- | --- | --- |
 | 3 — one weighted mean | **built** | `internal/signals/fleet.Mean`, three copies collapsed |
-| 1 — split the grab-bag | **built** | `analyzer.go` 2380 -> 259 lines, eight files |
-| 2 — named stages | **built** | `Analyze` is fifteen lines over eight named stages |
+| 1 — split the grab-bag | **built, regrown** | `analyzer.go` 2380 -> 259 lines, eight files; 1035 lines today |
+| 2 — named stages | **built, regrown** | `Analyze` was fifteen lines over eight named stages; about 94 today |
 | 4 — rename the package | **built** | `saturation_v2` -> `saturation` |
 | 5 — move the run narratives | **concluded, mostly declined** | see below; the 35% target was wrong |
 | 6 — shared analyzer skeleton | **dropped** | see below |
 
 `steadystate/engine.go` (2214 lines, 43 declarations) was NOT split. It is the
 same fault as stage 1 and wants the same treatment, as its own change.
+
+**Since then (checked on `main` at `11f0afee9`, 2026-10-26): stages 1 and 2
+have regrown.** The stages above were true when built; the files grew back
+with later features.
+
+| file | when built | today |
+| --- | --- | --- |
+| `saturation/analyzer.go` | 259 lines | 1035 lines |
+| `saturation/analyze.go`: `Analyze` | fifteen lines | about 94 lines |
+| other `saturation` files over ~500 lines | none | `learned_snapshot.go` 1475, `replica_capacity.go` 1302, `throughput_floor.go` 941, `analyze.go` 925, `k2_borrow.go` 651, `shape_change.go` 651, `throughput_admission.go` 551 |
+| `steadystate/engine.go` | 2214 lines | 2657 lines |
+| `steadystate/engine_v2.go` | 1365 lines | 2030 lines |
+
+Re-splitting is pure moves again. It waits for the in-flight learner PRs
+(#341) so the moves do not conflict with them.
 
 The analyzers work. The problem is that reading them is expensive, and that
 cost is now showing up as real defects: three doc comments silently attached to
