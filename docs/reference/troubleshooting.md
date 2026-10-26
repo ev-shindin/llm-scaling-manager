@@ -985,6 +985,9 @@ make epp-metrics-auth NAMESPACE=<ns> DRY_RUN=true
 make epp-metrics-auth NAMESPACE=<ns>
 ```
 
+The EPP caches review results, so the 500 can last up to about 5 minutes after
+the grant. Restarting the EPP pod clears it at once.
+
 It finds each pool's endpoint picker Service, the Deployment behind it and the
 ServiceAccount that Deployment runs as. It binds the ServiceAccounts that are
 not already allowed, and those allowed only through another install's binding,
@@ -999,9 +1002,10 @@ either made.
   check its EPP by hand.
 
 The script exits 1 while an EPP is left ungranted (for example, a pool whose
-Service does not exist), 2 when the pools cannot be listed, and 3 when one
-could not be checked. `make` reports any of these as `Error <code>` and itself
-exits 2.
+Service does not exist), including a `DRY_RUN=true` run that has something to
+grant, as `scaledobjects-rewire` does. It exits 2 when the pools cannot be
+listed, and 3 when one could not be checked. `make` reports any of these as
+`Error <code>` and itself exits 2.
 
 By hand, the same grant:
 

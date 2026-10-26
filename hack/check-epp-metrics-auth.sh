@@ -44,7 +44,7 @@ PASS=0
 CASES=0
 # EXPECTED_CASES is how many cases this file runs. A case that silently stops
 # running (a renamed function, an early exit) must fail the check.
-EXPECTED_CASES=16
+EXPECTED_CASES=18
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -83,7 +83,7 @@ pool() {
     [ "$1" = x ] && ref=extensionRef
     [ -f "$f" ] || echo '{"items":[]}' >"$f"
     jq --arg ns "$2" --arg n "$3" --arg s "$4" --arg r "$ref" --arg k "${5:-}" \
-        '.items += [{metadata: {namespace: $ns, name: $n}, spec: {($r): ({name: $s} + (if $k == "" then {} else {kind: $k} end))}}]' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+        '.items += [{metadata: {namespace: $ns, name: $n}, spec: (if $s == "-" then {} else {($r): ({name: $s} + (if $k == "" then {} else {kind: $k} end))} end)}]' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
 }
 
 # epp <ns> <service> <app label> <serviceaccount|-> [kind]: the Service a pool
@@ -189,6 +189,13 @@ stub_kubectl() {
         "get clusterrolebindings -o jsonpath="*)
             [ -f "$WORK/crbs.json" ] && jq -r '.items[].roleRef.name' "$WORK/crbs.json"
             echo other-role
+            ;;
+        "delete clusterrolebinding "*)
+            set -- $a
+            shift 2
+            printf '%s\n' "$@" | grep -v -- '^--' >"$WORK/deleted"
+            jq --slurpfile d <(jq -R . "$WORK/deleted" | jq -s .) '.items |= map(select(.metadata.name as $n | $d[0] | index($n) | not))' \
+                "$WORK/crbs.json" >"$WORK/crbs.tmp" && mv "$WORK/crbs.tmp" "$WORK/crbs.json"
             ;;
         "delete clusterrolebindings -l "*)
             set -- $a
@@ -376,7 +383,7 @@ begin "undeploy deletes by this install's label; the make target, setup-prereqs 
 reset
 crb wva-epp-metrics-auth-apps-1111bbbb "$NS" apps chat-sa
 run wva_remove_epp_metrics_auth
-ok '[ "$RC" = 0 ] && grep -q "^delete clusterrolebindings -l $MARK,llm-d.ai/applied-for=$NS " "$WORK/kubectl.log" && grep -q "^delete clusterrole wva-epp-metrics-auth " "$WORK/kubectl.log"' "undeploy: exit $RC, kubectl $(tr '\n' ';' <"$WORK/kubectl.log")"
+ok '[ "$RC" = 0 ] && grep -q "^delete clusterrolebinding wva-epp-metrics-auth-apps-1111bbbb " "$WORK/kubectl.log" && grep -q "^delete clusterrole wva-epp-metrics-auth " "$WORK/kubectl.log"' "undeploy: exit $RC, kubectl $(tr '\n' ';' <"$WORK/kubectl.log")"
 MK="$(tr -d '\r' <"$ROOT/Makefile")"
 TARGET="$(printf '%s\n' "$MK" | awk '/^epp-metrics-auth:/ { on = 1; next } on && /^[^\t]/ { exit } on')"
 ok 'printf "%s\n" "$MK" | grep -q "^epp-metrics-auth: ## " && printf "%s" "$TARGET" | grep -q "wva_grant_epp_metrics_auth" && printf "%s" "$TARGET" | grep -q "DRY_RUN=\$(DRY_RUN)"' "epp-metrics-auth missing, without help, or not passing DRY_RUN: $TARGET"
@@ -387,10 +394,28 @@ reset
 crb wva-epp-metrics-auth-apps-1111bbbb "$NS" apps chat-sa
 crb wva-epp-metrics-auth-apps-2222cccc other-wva apps chat-sa
 run wva_remove_epp_metrics_auth
-ok '[ "$RC" = 0 ] && grep -q "^delete clusterrolebindings -l $MARK,llm-d.ai/applied-for=$NS " "$WORK/kubectl.log" && ! grep -q "^delete clusterrole wva-epp-metrics-auth" "$WORK/kubectl.log"' "role in use: kubectl $(tr '\n' ';' <"$WORK/kubectl.log")"
+ok '[ "$RC" = 0 ] && grep -q "^delete clusterrolebinding wva-epp-metrics-auth-apps-1111bbbb " "$WORK/kubectl.log" && ! grep -q "2222cccc" "$WORK/deleted" && ! grep -q "^delete clusterrole wva-epp-metrics-auth" "$WORK/kubectl.log"' "role in use: kubectl $(tr '\n' ';' <"$WORK/kubectl.log")"
 reset
 run wva_remove_epp_metrics_auth STUB_CRB=FORBIDDEN
 ok '[ "$RC" = 0 ] && [ ! -s "$WORK/warnings" ] && ! grep -q "^delete " "$WORK/kubectl.log" && grep -q "cluster admin removes them" "$WORK/info"' "unreadable: warnings $(cat "$WORK/warnings"), kubectl $(tr '\n' ';' <"$WORK/kubectl.log"), info $(cat "$WORK/info")"
+
+begin "undeploy removes only bindings named wva-epp-metrics-auth-* that point at its ClusterRole, label or not"
+reset
+crb wva-epp-metrics-auth-apps-1111bbbb "$NS" apps chat-sa
+crb wva-epp-metrics-auth-apps-3333dddd "$NS" apps chat-sa cluster-admin
+crb someone-elses-binding "$NS" apps chat-sa
+run wva_remove_epp_metrics_auth
+ok '[ "$RC" = 0 ] && grep -qx "wva-epp-metrics-auth-apps-1111bbbb" "$WORK/deleted" && ! grep -q "3333dddd" "$WORK/deleted" && ! grep -q "someone-elses-binding" "$WORK/deleted" && ! grep -q "^delete clusterrolebindings -l" "$WORK/kubectl.log"' "label only: deleted $(cat "$WORK/deleted" 2>/dev/null), kubectl $(tr '\n' ';' <"$WORK/kubectl.log")"
+
+begin "a pool that names no endpoint picker: reported as such, not as a non-Service picker; a dry run still warns about what is left ungranted"
+reset
+pool v1 apps nopick -
+pool v1 apps chat chat-epp
+pool v1 apps gone gone-epp
+epp apps chat-epp chat chat-sa
+run wva_grant_epp_metrics_auth DRY_RUN=true
+ok '[ "$RC" = 1 ] && grep -q "no EPP .*apps/nopick: the pool names no endpoint picker" "$WORK/stdout" && ! grep -q "not a Service" "$WORK/stdout" "$WORK/warnings"' "no picker: exit $RC (want 1), stdout $(cat "$WORK/stdout"), warnings $(cat "$WORK/warnings")"
+ok 'grep -q "would bind .*apps/chat-sa" "$WORK/stdout" && grep -q "1 EPP(s) left ungranted" "$WORK/warnings" && [ ! -s "$WORK/applied" ]' "dry run, unresolved: stdout $(cat "$WORK/stdout"), warnings $(cat "$WORK/warnings")"
 
 echo ""
 echo "EPP metrics auth: $CASES cases, $PASS assertions passed, $FAIL failed"

@@ -111,6 +111,8 @@ answers 500 to `/metrics` ([why](troubleshooting.md#epp-metrics-returns-500)),
 `make deploy-wva` alone does not fix it. A cluster admin runs
 `make epp-metrics-auth` (or re-runs `make setup-prereqs`) with the same
 variables as the install. `make verify-deployment` names the EPPs that need it.
+The EPP caches review results, so the 500 can last up to about 5 minutes after
+the grant; restarting the EPP pod clears it at once.
 
 ### Upgrading from v0.10.0-rc4 to v0.10.0
 

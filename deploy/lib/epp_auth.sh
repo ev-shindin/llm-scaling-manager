@@ -120,7 +120,7 @@ wva_epp_auth_plan() {
             rc=0
             found="$(printf '%s' "$json" | jq -r '.items[]
                 | ((.spec.endpointPickerRef // .spec.extensionRef // {})) as $r
-                | [.metadata.namespace, .metadata.name, ($r.name // ""), ($r.kind // "Service")]
+                | [.metadata.namespace, .metadata.name, (($r.name // "") | if . == "" then "-" else . end), ($r.kind // "Service")]
                 | @tsv' 2>/dev/null)" || rc=$?
             if [ "$rc" -ne 0 ]; then
                 printf 'unknown\t%s\t-\tcould not read the %s list (not JSON with .items)\n' "$ns" "$kind"
@@ -130,7 +130,7 @@ wva_epp_auth_plan() {
         done
         while IFS=$'\t' read -r pns pool svc refkind; do
             [ -n "$pns" ] || continue
-            if [ -z "$svc" ]; then
+            if [ "$svc" = - ]; then
                 printf 'nopicker\t%s\t%s\tthe pool names no endpoint picker\n' "$pns" "$pool"
                 continue
             fi
@@ -423,15 +423,15 @@ wva_grant_epp_metrics_auth() {
         log_warning "Could not list the InferencePools above, so their EPPs were not checked or granted. Run this as a cluster admin."
         return 2
     fi
+    if [ "$ungranted" -gt 0 ]; then
+        log_warning "$ungranted EPP(s) left ungranted: their /metrics answers 500 to every scrape until their ServiceAccount may create tokenreviews and subjectaccessreviews."
+    fi
     if [ "$dry" = true ] && [ "$todo" -gt 0 ]; then
         log_info "DRY_RUN=true: nothing was changed. To grant, run  $(wva_make_cmd epp-metrics-auth)  or:"
         printf '%s' "$todo_cmds" | awk 'NF && !seen[$0]++'
         return 1
     fi
-    if [ "$ungranted" -gt 0 ]; then
-        log_warning "$ungranted EPP(s) left ungranted: their /metrics answers 500 to every scrape until their ServiceAccount may create tokenreviews and subjectaccessreviews."
-        return 1
-    fi
+    [ "$ungranted" -eq 0 ] || return 1
     [ "$unknown" -eq 0 ] || return 3
     return 0
 }
@@ -493,15 +493,21 @@ wva_report_epp_metrics_auth() {
 # uninstall) it says what a cluster admin runs, without a warning: this install
 # may never have made any.
 wva_remove_epp_metrics_auth() {
-    local sel="${WVA_EPP_AUTH_MARK_KEY}=${WVA_EPP_AUTH_MARK_VAL},${WVA_EPP_AUTH_OWNER_KEY}=${WVA_NS}" mine out
-    if ! mine="$(kubectl get clusterrolebindings -l "$sel" -o name 2>&1)"; then
+    local sel="${WVA_EPP_AUTH_MARK_KEY}=${WVA_EPP_AUTH_MARK_VAL},${WVA_EPP_AUTH_OWNER_KEY}=${WVA_NS}" json mine out
+    if ! json="$(kubectl get clusterrolebindings -l "$sel" -o json 2>/dev/null)"; then
         log_info "EPP /metrics authentication bindings are cluster-scoped and could not be read here. If setup-prereqs made any for this install, a cluster admin removes them with: kubectl delete clusterrolebindings -l $sel"
         return 0
     fi
+    # The label alone is not enough: only a binding with this tool's name
+    # prefix that points at its ClusterRole is one it made.
+    mine="$(printf '%s' "$json" | jq -r --arg role "$WVA_EPP_AUTH_ROLE" '.items[]?
+        | select(.roleRef.name == $role and (.metadata.name | startswith($role + "-")))
+        | .metadata.name' 2>/dev/null)"
     [ -n "$mine" ] || return 0
-    if ! out="$(kubectl delete clusterrolebindings -l "$sel" --ignore-not-found 2>&1)"; then
+    # shellcheck disable=SC2086
+    if ! out="$(kubectl delete clusterrolebinding $mine --ignore-not-found 2>&1)"; then
         log_warning "Could not remove the EPP /metrics authentication bindings this install made: $(printf '%s' "$out" | head -1)"
-        log_warning "  A cluster admin removes them with: kubectl delete clusterrolebindings -l $sel"
+        log_warning "  A cluster admin removes them with: kubectl delete clusterrolebinding $(printf '%s' "$mine" | paste -sd' ' -)"
         return 0
     fi
     local bound
