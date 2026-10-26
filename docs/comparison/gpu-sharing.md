@@ -5,7 +5,8 @@
 Several models share a fixed GPU budget: a quota, or a fixed fleet. Load moves
 between them during the day. When one model's load drops and another's rises,
 the GPUs the first one holds should go to the second, without dropping requests
-in flight and without taking the first model below what its own load needs.
+in flight and, while the budget covers every model, without taking the first
+model below what its own load needs.
 
 llm-scaling-manager does this with the experimental
 [utilization-share optimizer](../well-lit-paths/utilization-share/):
@@ -35,14 +36,14 @@ llm-scaling-manager does this with the experimental
   on a cluster-scoped install, the physical GPUs.
 
 It costs headroom held ahead of need (36% to 43% more GPU-seconds in the P/D
-runs). A move takes minutes: two confirmation cycles, the donor's scale-down
-window and drain, then the receiver's own start (image, weights, engine
-ready). Kueue sharing waits for the same scale-down and start when a quieter
-model's HPA gives GPUs up, but preemption skips the window. The headroom that
-serves a first burst at once also has to be released before another model can
-grow: in one run the model rising at the swap started about 5.5 minutes later
-than without sharing. The evidence is one or two runs per configuration, on
-1-GPU pods of 8B models. See
+runs). A move takes minutes: the donor's scale-down window and drain, then
+the receiver's own start (image, weights, engine ready), the same wait Kueue
+sharing has when a quieter model's HPA gives GPUs up. Kueue preemption skips
+the window; nothing here does. When the imbalance is large (the busier model at 0.9 or more of
+its scale-up threshold), the move skips every extra wait of its own; a smaller
+imbalance first waits two confirmation cycles. In the latest runs the model
+rising second was not held back by the first model's headroom. The evidence
+is one or two runs per configuration, on 1-GPU pods of 8B models. See
 [what it costs](../well-lit-paths/utilization-share/README.md#what-it-costs)
 and the [evidence](../well-lit-paths/utilization-share/README.md#evidence).
 
@@ -101,7 +102,7 @@ In detail:
 | How GPUs move | The HPA deletes pods, or Kueue preempts one; a waiting pod is then admitted. | A planned move: the donor gives first, and the receiver grows once those GPUs are free. The donor gives through an ordinary scale-down, choosing which pod goes first; it drains as any deleted pod does. |
 | Placement | GPUs counted against each ClusterQueue's quota, as the guide configures it; node placement is left to the scheduler. | Node-aware on a cluster-scoped install: the receiver's replica must fit in the holes the donors open, node by node, and multi-pod replicas are funded whole. Tested on kind only. A namespace-scoped install counts GPUs only. |
 | Signal | The pods each HPA requests. | Each model's demand against its share, with confirmation cycles, a tolerance band and a reversal hold. |
-| Time until the busier model serves more | The busier model waits for GPUs to come free: with the guide's floors, until the quieter model's own HPA scales down (its scale-down window), then for its new pod to start (image pull, weights load, vLLM engine ready), which is minutes for a large model. Preemption skips the scale-down window: with floors only for a model returning to its floor; with fair sharing for any model under its weighted share. A preempted pod drains for its `terminationGracePeriodSeconds`, as a scale-down does. | The same, plus two confirmation cycles before a move starts. Headroom held ahead of need serves the model that rises first at once (median TTFT 0.07 s against 25.6 s); the same headroom has to be released before the model rising second can grow, which in one run made it start about 5.5 minutes later than without sharing. A model that just gave GPUs waits out the reversal hold (about 12 minutes) before it can take them back. |
+| Time until the busier model serves more | The busier model waits for GPUs to come free: with the guide's floors, until the quieter model's own HPA scales down (its scale-down window), then for its new pod to start (image pull, weights load, vLLM engine ready), which is minutes for a large model. Preemption skips the scale-down window: with floors only for a model returning to its floor; with fair sharing for any model under its weighted share. A preempted pod drains for its `terminationGracePeriodSeconds`, as a scale-down does. | The donor's scale-down window and the new pod's start, as with the guide's floors; there is no preemption shortcut. When the imbalance is large (on by default: the busier model at 0.9 or more of its scale-up threshold, the donor at 0.6 or less after giving), nothing else is added: the move skips the confirmation cycles and the reversal hold, and from the next cycle the busier model takes every replica it is short at once. A smaller imbalance first waits two confirmation cycles, and a model that just gave GPUs waits out the reversal hold (about twice a release time, 12 minutes with a 300 s scale-down window). Headroom held ahead of need serves the model that rises first at once; in one run, median TTFT 0.07 s for the first burst and 87 s for the second, against 41 s and 144 s without sharing. |
 | Cost and maturity | Experimental. Holds no headroom: idle GPUs stay unused until a model's HPA asks for them. | Experimental. Headroom held ahead of need (36% to 43% more GPU-seconds in the P/D runs). A group freezes for about three minutes when it starts acting, after every restart or upgrade. One or two runs per configuration, 1-GPU pods of 8B models; whole-node, multi-GPU pods and a cluster-wide quota not measured. |
 
 ## With Kueue
