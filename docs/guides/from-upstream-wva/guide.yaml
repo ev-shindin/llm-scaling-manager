@@ -43,7 +43,7 @@ migrate:
     run: |
       git clone https://github.com/ev-shindin/llm-scaling-manager.git
       cd llm-scaling-manager
-      git checkout v0.10.0
+      git checkout v0.10.1
   policy:
     note: Carry over the settings you tuned. Edit the new ConfigMap, not the old one.
     run: kubectl edit configmap wva-scaling-policy-config -n <controller-namespace>

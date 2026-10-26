@@ -21,18 +21,18 @@ release. An image older than the manifests crash-loops on flags it does not
 know. Releases are listed on the
 [Releases page](https://github.com/ev-shindin/llm-scaling-manager/releases);
 the first full release is `v0.10.0`, after release candidates `-rc1` to
-`-rc4`. A checked-out release deploys its own tag, so `IMG_TAG` below only
-makes that explicit. Each release's notes list its image
+`-rc4`, and the latest is `v0.10.1`. A checked-out release deploys its own tag,
+so `IMG_TAG` below only makes that explicit. Each release's notes list its image
 digest; a digest names one build, and a tag could in principle be re-pushed.
 
 ```bash
-git checkout v0.10.0
-make deploy-wva NAMESPACE=<namespace> IMG_TAG=v0.10.0
-# or by digest (v0.10.0's, from its release notes)
+git checkout v0.10.1
+make deploy-wva NAMESPACE=<namespace> IMG_TAG=v0.10.1
+# or by digest (v0.10.1's, from its release notes)
 make deploy-wva NAMESPACE=<namespace> \
-  IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:39de69a24a19680895a9bbe7ab6282a93aac9abc8301c834dc441be8f2009424
+  IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:DIGEST_V0101
 # out-of-reach shape (the cluster admin runs it): the controller runs in wva-<namespace>
-NAMESPACE=<namespace> make deploy-wva WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace> IMG_TAG=v0.10.0
+NAMESPACE=<namespace> make deploy-wva WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace> IMG_TAG=v0.10.1
 ```
 
 `IMG_TAG` sets the tag of the default `IMG`; `IMG` replaces the whole reference.
@@ -106,13 +106,29 @@ only to change it. Limiters an admin published in a policy namespace
 
 ### Upgrading from v0.10.0 to v0.10.1
 
-Follow [Upgrade](#upgrade) above. One cluster-admin step, once: if an EPP
-answers 500 to `/metrics` ([why](troubleshooting.md#epp-metrics-returns-500)),
-`make deploy-wva` alone does not fix it. A cluster admin runs
-`make epp-metrics-auth` (or re-runs `make setup-prereqs`) with the same
-variables as the install. `make verify-deployment` names the EPPs that need it.
-The EPP caches review results, so the 500 can last up to about 5 minutes after
-the grant; restarting the EPP pod clears it at once.
+Follow [Upgrade](#upgrade) above: back up the policy first, check out
+`v0.10.1`, and re-run the same `make deploy-wva` command. Also:
+
+1. **Let the EPPs authenticate `/metrics`, once (cluster admin).** If an EPP
+   answers 500 to `/metrics` ([why](troubleshooting.md#epp-metrics-returns-500)),
+   `make deploy-wva` alone does not fix it. A cluster admin runs
+   `make epp-metrics-auth` (or re-runs `make setup-prereqs`, which now includes
+   it; `WVA_EPP_METRICS_AUTH=false` skips it) with the same variables as the
+   install. `make verify-deployment` names the EPPs that need it. The EPP
+   caches review results, so the 500 can last up to about 5 minutes after the
+   grant; restarting the EPP pod clears it at once.
+2. **Upgrade KEDA 2.19 or older to 2.21.** On KEDA before 2.20 a controller
+   restart or outage can leave ScaledObjects unwired
+   ([Unwired HPA before KEDA 2.20](keda.md#unwired-hpa-before-keda-220)). The
+   installer now warns about it.
+3. **Log parsers.** The `itl-window` log line's `maxNumSeqs` field is now
+   `batchCap`: `max_num_seqs`, lowered by `--max-num-active-seqs` when the
+   engine sets it.
+4. **Utilization-share optimizer.** If you set it up, re-run its steps after
+   `make deploy-wva`: the install drops the optimizer block.
+
+The full list is in the
+[v0.10.1 release notes](https://github.com/ev-shindin/llm-scaling-manager/releases/tag/v0.10.1).
 
 ### Upgrading from v0.10.0-rc4 to v0.10.0
 
