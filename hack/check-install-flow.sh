@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=88
+EXPECT_CASES=94
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -239,6 +239,43 @@ else
         fail "KEDA 2.21.0 must be supported with rc 0 and no CVE advice (rc=$rc)" "$out"
     fi
 
+    # Before 2.20 KEDA can leave a new ScaledObject's HPA on the CPU default
+    # after any scaler restart or outage (kedacore/keda#7777). One warning
+    # carries both that and the CVE, and names the remedies; 2.20 gets only the
+    # CVE advice, 2.21 neither.
+    for v in 2.18.1 2.19.0; do
+        OP_IMAGE=ghcr.io/kedacore/keda:$v; keda_case
+        if [ "$rc" -eq 0 ] && [ "$(printf '%s\n' "$out" | grep -c '\[WARNING\]')" -eq 1 ] \
+            && printf '%s' "$out" | grep -q "KEDA $v carries CVE-2026-77524.*bug fixed in 2.20.0: a ScaledObject created or changed within about two minutes of a WVA controller restart, rollout or outage can stay unwired, its HPA left on the CPU default" \
+            && printf '%s' "$out" | grep -q "run  NAMESPACE=wva-system make scaledobjects-rewire  after every WVA controller restart (or restart the KEDA operator).*consider upgrading KEDA to 2.21.0"; then
+            ok "VERSION: KEDA $v gets one warning: unwired after a scaler restart, the rewire remedy, and the CVE"
+        else
+            fail "KEDA $v must get one warning naming the unwired-HPA bug, make scaledobjects-rewire, a KEDA restart and the upgrade (rc=$rc)" "$out"
+        fi
+    done
+    OP_IMAGE=ghcr.io/kedacore/keda:2.20.0; keda_case
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "KEDA 2.20.0 carries CVE-2026-77524" \
+        && ! printf '%s' "$out" | grep -qi "unwired"; then
+        ok "VERSION: KEDA 2.20.0 gets the CVE advice and no unwired-HPA warning"
+    else
+        fail "KEDA 2.20.0 must get the CVE advice and no unwired-HPA warning (rc=$rc)" "$out"
+    fi
+    OP_IMAGE=ghcr.io/kedacore/keda:2.21.0; keda_case
+    if [ "$rc" -eq 0 ] && ! printf '%s' "$out" | grep -qi "unwired" \
+        && ! printf '%s' "$out" | grep -q "CVE-2026-77524"; then
+        ok "VERSION: KEDA 2.21.0 gets neither the unwired-HPA warning nor the CVE advice"
+    else
+        fail "KEDA 2.21.0 must get no unwired-HPA warning and no CVE advice (rc=$rc)" "$out"
+    fi
+    # The rewire command carries this install's shape: a bare one finds no
+    # ScaledObject on a cluster-scoped install and exits 0.
+    WVA_SCOPE=cluster; OP_IMAGE=ghcr.io/kedacore/keda:2.19.0; keda_case; unset WVA_SCOPE
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "run  make scaledobjects-rewire SCOPE=cluster WVA_NS=wva-system  after every WVA controller restart"; then
+        ok "VERSION: on a cluster-scoped install the rewire remedy names SCOPE=cluster and WVA_NS"
+    else
+        fail "the rewire remedy must carry SCOPE=cluster WVA_NS=wva-system on a cluster-scoped install (rc=$rc)" "$out"
+    fi
+
     # The advice says how to upgrade a KEDA that is there: re-running the
     # installer never does.
     OP_IMAGE=ghcr.io/kedacore/keda:2.20.2; keda_case
@@ -323,11 +360,20 @@ else
     else
         fail "a pinned 2.19.0 chart must be reported with the CVE advice (rc=$rc)" "$out"
     fi
+    # A v-prefixed chart version is judged as the version it names, not as
+    # something too odd to compare (and so new enough).
+    KEDA_CHART_VERSION=v2.19.0; keda_case; KEDA_CHART_VERSION=2.21.0
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'KEDA chart v2.19.0 (this run installs it) carries CVE-2026-77524.*can stay unwired'; then
+        ok "VERSION: a v-prefixed chart (v2.19.0) gets the unwired-HPA and CVE warning"
+    else
+        fail "KEDA_CHART_VERSION=v2.19.0 must be judged as 2.19.0 (rc=$rc)" "$out"
+    fi
     KEDA_HELM_INSTALL=false; CRD_MODE=new
 
     # OpenShift: the Custom Metrics Autoscaler's own version, not compared.
     ENVIRONMENT=openshift; CSV_MODE=ok; keda_case
-    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'Custom Metrics Autoscaler 2.17.2-1, untested'; then
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'Custom Metrics Autoscaler 2.17.2-1, untested' \
+        && printf '%s' "$out" | grep -q 'If it bundles a KEDA below 2.20.0, upgrade the operator; until then run  NAMESPACE=wva-system make scaledobjects-rewire  after every WVA controller restart (or restart its KEDA operator)'; then
         ok "VERSION: OpenShift reports the Custom Metrics Autoscaler version, untested"
     else
         fail "OpenShift must report the CMA version (rc=$rc)" "$out"

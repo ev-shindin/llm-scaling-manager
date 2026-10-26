@@ -20,8 +20,10 @@ discovered and may not hold model servers yet.
 - [ ] llm-d model servers somewhere on the cluster.
 - [ ] **KEDA.** On Kubernetes, add `KEDA_HELM_INSTALL=true` to the deploy
   command to install it. On OpenShift, install the Custom Metrics Autoscaler
-  operator first. Supported versions, and what happens with an existing KEDA:
-  [KEDA reference](../../reference/keda.md).
+  operator first. KEDA 2.21 is recommended: older KEDA can leave a new
+  ScaledObject [unwired](../../reference/keda.md#unwired-hpa-before-keda-220)
+  after the controller restarts. Supported versions, and what happens with an
+  existing KEDA: [KEDA reference](../../reference/keda.md).
 - [ ] A Prometheus with the Prometheus Operator. Where nothing scrapes the
   model servers or the EPP yet, `make setup-prereqs` adds the monitors.
 - [ ] **For scale-from-zero only: the `flowControl` feature gate on every

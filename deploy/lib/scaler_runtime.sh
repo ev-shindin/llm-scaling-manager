@@ -37,6 +37,14 @@ wva_keda_supported_text() {
 KEDA_CVE_ID="CVE-2026-77524"
 KEDA_CVE_FIXED_VERSION="2.21.0"
 
+# KEDA_UNWIRED_FIXED_VERSION is the first KEDA that does not leave a new
+# ScaledObject's HPA on the CPU default when the scaler is unreachable. Before
+# it, KEDA built the HPA from the empty metric spec a failed call returned
+# (kedacore/keda#7777 defers it) and kept a broken gRPC connection to the
+# scaler for up to two minutes after a restart or outage, so any ScaledObject
+# created in that window stayed unwired.
+KEDA_UNWIRED_FIXED_VERSION="2.20.0"
+
 # The namespace OpenShift's Custom Metrics Autoscaler runs in, where its
 # ClusterServiceVersion carries the version.
 KEDA_CMA_NAMESPACE="${KEDA_CMA_NAMESPACE:-openshift-keda}"
@@ -86,9 +94,11 @@ wva_keda_operator_version() {
 }
 
 # wva_keda_version_judge <version> <what> <advice> reports a KEDA version:
-# supported, or untested; too old for a fallback; carrying KEDA_CVE_ID. It is
-# information only and always returns 0: KEDA's external-push trigger is far
-# older than any of these, so no version is refused.
+# supported, or untested; too old for a fallback; carrying KEDA_CVE_ID, and,
+# before KEDA_UNWIRED_FIXED_VERSION, the bug that leaves a ScaledObject unwired
+# (one warning for both). It is information only and always returns 0: KEDA's
+# external-push trigger is far older than any of these, so no version is
+# refused.
 wva_keda_version_judge() {
     local v="$1" what="$2" advice="$3" minor
     minor="$(printf '%s' "$v" | cut -d. -f1-2)"
@@ -102,7 +112,9 @@ wva_keda_version_judge() {
         WVA_KEDA_FALLBACK_WARNED=true
         wva_keda_old_warning "the operator is ${v}"
     fi
-    if ! version_at_least "$v" "$KEDA_CVE_FIXED_VERSION"; then
+    if ! version_at_least "$v" "$KEDA_UNWIRED_FIXED_VERSION"; then
+        log_warning "${what} carries ${KEDA_CVE_ID}: a tenant who may write a TriggerAuthentication can obtain the KEDA operator's ServiceAccount token. It also has a KEDA bug fixed in ${KEDA_UNWIRED_FIXED_VERSION}: a ScaledObject created or changed within about two minutes of a WVA controller restart, rollout or outage can stay unwired, its HPA left on the CPU default. Until KEDA is upgraded, run  $(wva_make_cmd scaledobjects-rewire)  after every WVA controller restart (or restart the KEDA operator). Advice only: ${advice}"
+    elif ! version_at_least "$v" "$KEDA_CVE_FIXED_VERSION"; then
         log_warning "${what} carries ${KEDA_CVE_ID}: a tenant who may write a TriggerAuthentication can obtain the KEDA operator's ServiceAccount token. Advice only: ${advice}"
     fi
     return 0
@@ -128,7 +140,7 @@ wva_keda_cma_version_report() {
         log_warning "KEDA: could not check the Custom Metrics Autoscaler version (no custom-metrics-autoscaler ClusterServiceVersion in $KEDA_CMA_NAMESPACE)."
         return 0
     fi
-    log_warning "KEDA: Custom Metrics Autoscaler ${v}, untested: CI pins no version of it, and this install does not map it to a KEDA version. Check its release notes for fallback.behavior (KEDA ${KEDA_FALLBACK_MIN_VERSION}) and ${KEDA_CVE_ID} (fixed in KEDA ${KEDA_CVE_FIXED_VERSION})."
+    log_warning "KEDA: Custom Metrics Autoscaler ${v}, untested: CI pins no version of it, and this install does not map it to a KEDA version. Check its release notes for fallback.behavior (KEDA ${KEDA_FALLBACK_MIN_VERSION}), the unwired-HPA fix (KEDA ${KEDA_UNWIRED_FIXED_VERSION}) and ${KEDA_CVE_ID} (fixed in KEDA ${KEDA_CVE_FIXED_VERSION}). If it bundles a KEDA below ${KEDA_UNWIRED_FIXED_VERSION}, upgrade the operator; until then run  $(wva_make_cmd scaledobjects-rewire)  after every WVA controller restart (or restart its KEDA operator)."
 }
 
 # wva_keda_version_report reports the version of a KEDA that is already on the
@@ -143,18 +155,21 @@ wva_keda_version_report() {
     fi
     wva_keda_operator_version
     if [ -z "$WVA_KEDA_VERSION" ]; then
-        log_warning "KEDA: could not check its version (${WVA_KEDA_VERSION_WHY}). The install goes on. Supported: KEDA $(wva_keda_supported_text) (CI tests ${KEDA_TESTED_VERSION}); a fallback needs ${KEDA_FALLBACK_MIN_VERSION} or later, and ${KEDA_CVE_ID} is fixed in ${KEDA_CVE_FIXED_VERSION}. Check by hand: kubectl get deploy -A -l ${KEDA_OPERATOR_LABEL_SELECTOR} -o wide"
+        log_warning "KEDA: could not check its version (${WVA_KEDA_VERSION_WHY}). The install goes on. Supported: KEDA $(wva_keda_supported_text) (CI tests ${KEDA_TESTED_VERSION}); a fallback needs ${KEDA_FALLBACK_MIN_VERSION} or later, before ${KEDA_UNWIRED_FIXED_VERSION} a ScaledObject can stay unwired after a WVA controller restart, and ${KEDA_CVE_ID} is fixed in ${KEDA_CVE_FIXED_VERSION}. Check by hand: kubectl get deploy -A -l ${KEDA_OPERATOR_LABEL_SELECTOR} -o wide"
         return 0
     fi
     wva_keda_version_judge "$WVA_KEDA_VERSION" "KEDA ${WVA_KEDA_VERSION}" "consider upgrading KEDA to ${KEDA_CVE_FIXED_VERSION} or later. Re-running this installer never upgrades a KEDA that is there; a Helm-installed one upgrades with: helm upgrade ${KEDA_RELEASE_NAME:-keda} kedacore/keda -n ${KEDA_NAMESPACE:-keda-system} --version ${KEDA_CVE_FIXED_VERSION} --reuse-values"
 }
 
 # wva_keda_chart_version_report is the same judgement for the chart this run
-# installs, once per run.
+# installs, once per run. A leading v (v2.19.0, as Helm also accepts) is
+# dropped before judging: version_at_least reads it as no version at all, and
+# so as new enough.
 wva_keda_chart_version_report() {
     [ "${WVA_KEDA_VERSION_REPORTED:-false}" = true ] && return 0
     WVA_KEDA_VERSION_REPORTED=true
-    wva_keda_version_judge "${KEDA_CHART_VERSION:-}" "KEDA chart ${KEDA_CHART_VERSION:-} (this run installs it)" \
+    local chart="${KEDA_CHART_VERSION:-}"
+    wva_keda_version_judge "${chart#v}" "KEDA chart ${KEDA_CHART_VERSION:-} (this run installs it)" \
         "consider KEDA_CHART_VERSION=${KEDA_CVE_FIXED_VERSION} or later."
 }
 

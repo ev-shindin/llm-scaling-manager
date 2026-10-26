@@ -1512,6 +1512,12 @@ put_deploy openssl
 so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAuthentication\"}"
 run wva_verify_scaler_wiring STUB_UNWIRED=hpa
 ok '[ "$RC" = 1 ] && grep -q "did not wire the scaler.s metric onto the HPA" "$WORK/warnings" && grep -q "apps/app-so" "$WORK/stderr" && grep -q "kubectl patch scaledobject app-so -n apps --type json" "$WORK/stderr"' "verify, HPA on the CPU default: exit $RC (want 1), warnings $(cat "$WORK/warnings") stderr $(cat "$WORK/stderr")"
+# The likely cause on older KEDA, and the one command that re-wires them all,
+# in this install's shape.
+# Nothing is glued to the command, so a copy of it is just the command.
+ok 'grep -q "Or re-wire them all:  NAMESPACE=wva-check make scaledobjects-rewire  On KEDA 2.19 and older this follows a WVA controller restart or outage, a KEDA bug fixed in 2.20: upgrade KEDA to 2.21 (docs/reference/keda.md#unwired-hpa-before-keda-220)" "$WORK/warnings"' "verify, HPA on the CPU default: no line naming KEDA below 2.20 and make scaledobjects-rewire: $(cat "$WORK/warnings")"
+run wva_verify_scaler_wiring STUB_UNWIRED=hpa WVA_SCOPE=cluster
+ok '[ "$RC" = 1 ] && grep -q "Or re-wire them all:  make scaledobjects-rewire SCOPE=cluster WVA_NS=wva-check  On KEDA 2.19" "$WORK/warnings"' "verify, cluster scope: the re-wire command must carry SCOPE=cluster WVA_NS=wva-check: exit $RC (want 1), warnings $(cat "$WORK/warnings")"
 run wva_verify_scaler_wiring STUB_UNWIRED=always
 ok '[ "$RC" = 1 ] && grep -q "apps/app-so" "$WORK/stderr"' "verify, empty externalMetricNames: exit $RC (want 1)"
 run wva_verify_scaler_wiring

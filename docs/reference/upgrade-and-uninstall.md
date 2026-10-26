@@ -1016,12 +1016,15 @@ A new controller pod starts with no decision in memory. Until it has one:
   runs for one fill timeout, about three minutes with default timings, and
   shows the blocked reason `quiet-period`. Expect it on every upgrade and leader
   change.
-- **A ScaledObject KEDA created or changed during the outage can stay
-  unwired**: Ready, but its HPA carries only `cpu`. Run
+- **On KEDA 2.19 and older, a ScaledObject created or changed during the
+  outage, or within about two minutes after it, can stay unwired**: Ready, but
+  its HPA carries only `cpu`. It is a KEDA bug fixed in 2.20
+  ([details](keda.md#unwired-hpa-before-keda-220)); upgrading KEDA to 2.21
+  stops it. On older KEDA run
   `NAMESPACE=<namespace> make scaledobjects-rewire`, adding
   `WVA_NS=wva-<namespace>` in the out-of-reach shape; without it the command
   finds nothing and exits 0
-  ([#315](https://github.com/ev-shindin/llm-scaling-manager/issues/315)).
+  ([#340](https://github.com/ev-shindin/llm-scaling-manager/issues/340)).
 - **What it learned is held in memory by default.** Learned capacity and
   throughput are re-learned after every restart or leader change, so a request
   shape it had already priced is sized from occupancy again until it saturates

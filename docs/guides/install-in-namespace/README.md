@@ -16,8 +16,10 @@ After that, the namespace owner installs and upgrades the controller.
   namespace. No model yet? [Install a small llm-d model](../install-small-model/).
 - [ ] **KEDA.** On OpenShift, install the Custom Metrics Autoscaler operator. On
   Kubernetes, `KEDA_HELM_INSTALL=true make setup-prereqs` installs it if missing.
-  Supported versions, and what happens with an existing KEDA: [KEDA
-  reference](../../reference/keda.md).
+  KEDA 2.21 is recommended: older KEDA can leave a new ScaledObject
+  [unwired](../../reference/keda.md#unwired-hpa-before-keda-220) after the
+  controller restarts. Supported versions, and what happens with an existing
+  KEDA: [KEDA reference](../../reference/keda.md).
 - [ ] **A Prometheus** with the Prometheus Operator. Where nothing scrapes the
   model servers or their EPP yet, step 1 (`make setup-prereqs`) adds the
   monitors.
