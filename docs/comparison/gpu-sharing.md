@@ -35,8 +35,10 @@ llm-scaling-manager does this with the experimental
   on a cluster-scoped install, the physical GPUs.
 
 It costs headroom held ahead of need (36% to 43% more GPU-seconds in the P/D
-runs) and minutes per move: the receiver waits for the donor's scale-down
-window, its drain, then its own start. The evidence is one or two runs per
+runs). A move takes minutes: the receiver waits for the donor's scale-down
+window and drain, then its own start (image, weights, engine ready). That is
+the same wait Kueue sharing has when the budget is full, since GPUs only come
+free when a model scales down. The evidence is one or two runs per
 configuration, on 1-GPU pods. See
 [what it costs](../well-lit-paths/utilization-share/README.md#what-it-costs)
 and the [evidence](../well-lit-paths/utilization-share/README.md#evidence).
@@ -96,7 +98,8 @@ In detail:
 | How GPUs move | The HPA deletes pods, or Kueue preempts one; a waiting pod is then admitted. | A planned move: the donor gives first, and the receiver grows once those GPUs are free. The donor drains through scale-down. |
 | Placement | GPUs counted against each ClusterQueue's quota, as the guide configures it. | Node-aware on a cluster-scoped install: the receiver's replica must fit in the holes the donors open, node by node; multi-pod replicas are funded whole (kind only so far). |
 | Signal | The pods each HPA requests. | Each model's demand against its share, with confirmation cycles, a tolerance band and a reversal hold. |
-| Cost and maturity | Experimental. Admission and preemption act within seconds, but GPUs an HPA releases wait for its scale-down window; a preempted pod drains only for its `terminationGracePeriodSeconds`. | Experimental. Minutes per move, and headroom held ahead of need (36% to 43% more GPU-seconds in the P/D runs). One or two runs per configuration. |
+| Time until the busier model serves more | The same on both sides: the quieter model gives its GPUs up through its scale-down window, then the new pod starts (image pull, weights load, vLLM engine ready), which is minutes for a large model. Preemption skips the scale-down window, but only up to a model's floor, and it drains the preempted pod only for its `terminationGracePeriodSeconds`, so in-flight requests can be cut. | The same. Headroom spread ahead of need means some capacity is often already running when load rises. |
+| Cost and maturity | Experimental. | Experimental. Headroom held ahead of need (36% to 43% more GPU-seconds in the P/D runs). One or two runs per configuration. |
 
 ## With Kueue
 
