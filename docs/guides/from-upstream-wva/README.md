@@ -62,8 +62,9 @@ workloads are scaled by a ScaledObject and which by a plain HPA (an HPA with no
 kubectl get configmap -n <upstream-namespace> -o yaml > upstream-configmaps.yaml
 kubectl get deployment wva-controller-manager -n <upstream-namespace> -o yaml > upstream-controller.yaml
 kubectl get scaledobject,hpa -A -o yaml > upstream-autoscalers.yaml
-# Installed with Helm: save the release values instead of the Deployment
+# Installed with Helm: save the release, its values and the chart version instead of the Deployment
 #   helm get values <release> -n <upstream-namespace> > upstream-values.yaml
+#   helm list -A | grep workload-variant-autoscaler > upstream-release.txt
 ```
 <!-- guide:migrate.save end -->
 
@@ -97,7 +98,16 @@ kubectl delete deployment wva-controller-manager -n <upstream-namespace>
 ```
 <!-- guide:migrate.remove end -->
 
-*Up to v0.8*, installed with Helm:
+*Up to v0.8*, installed with Helm. The uninstall also deletes the chart's
+model-server Service and ServiceMonitor (`vllmService`, on by default), the
+scrape the controller reads engine metrics from. Save them first:
+
+<!-- guide:migrate.savescrape start -->
+```bash
+# Helm only. Save the chart's model-server Service and ServiceMonitor; the uninstall deletes them.
+kubectl get service,servicemonitor -n <model-namespace> -l app.kubernetes.io/instance=<release> -o yaml > upstream-scrape.yaml
+```
+<!-- guide:migrate.savescrape end -->
 
 <!-- guide:migrate.removehelm start -->
 ```bash
@@ -106,14 +116,25 @@ helm uninstall <release> -n <upstream-namespace>
 ```
 <!-- guide:migrate.removehelm end -->
 
-The chart also deleted with the release:
+Then decide who scrapes the model server:
 
-- **The model server's Service and ServiceMonitor** (`vllmService`, on by
-  default). Nothing scrapes the model server until step 4: `make setup-prereqs`
-  adds PodMonitor `wva-modelserver-metrics` where nothing scrapes the model
-  servers, for pods with an llm-d serving label (see step 5).
-- **The chart's HPA** (`hpa`, on by default). The workload keeps its replica
-  count, and step 5 has no HPA to delete for it.
+- **The pod template carries `llm-d.ai/role=decode` (or `prefill`) and names a
+  container port `modelserver`**: let the chart's scrape go. `make
+  setup-prereqs` in step 4 adds PodMonitor `wva-modelserver-metrics`, which
+  selects exactly those pods and that port.
+- **Otherwise**: re-create the chart's scrape now. Do not add the role label to
+  the pod template later while it exists: the setup would add its own PodMonitor
+  as well, and every series would be counted twice.
+
+<!-- guide:migrate.restorescrape start -->
+```bash
+# Helm only, pods without the role label and modelserver port. Re-create the saved scrape; yq drops what the API server set.
+yq '.items[] | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status, .spec.clusterIP, .spec.clusterIPs, .spec.ports[].nodePort) | split_doc' upstream-scrape.yaml | kubectl apply -f -
+```
+<!-- guide:migrate.restorescrape end -->
+
+The chart's HPA (`hpa`, on by default) goes with the release too. The workload
+keeps its replica count, and step 5 has no HPA to delete for it.
 
 Why first: the scaling manager's installer refuses to install beside a
 controller that manages every namespace. Both would also publish the same
@@ -177,17 +198,14 @@ Settings outside that ConfigMap do not carry over:
 
 ### 5. Register the workloads
 
-<!-- guide:migrate.register start -->
+<!-- guide:migrate.plan start -->
 ```bash
-# Write the plan, edit it, apply it. Cluster-wide install: add SCOPE=cluster to both.
+# Write the plan. It applies nothing. Cluster-wide install: add SCOPE=cluster.
 make scaledobjects-plan WVA_DEFAULT_SO_PLAN=wva-plan.yaml
-# edit wva-plan.yaml: change apply: no to apply: adopt for each upstream ScaledObject
-# delete the plain HPAs (step 5), then apply
-make scaledobjects-apply WVA_DEFAULT_SO_PLAN=wva-plan.yaml
 ```
-<!-- guide:migrate.register end -->
+<!-- guide:migrate.plan end -->
 
-In `wva-plan.yaml`:
+Edit `wva-plan.yaml` before you apply anything:
 
 - **Upstream ScaledObjects** appear as `apply: no`, with a note naming the
   ScaledObject. Change it to `apply: adopt`. Adopt replaces the `prometheus`
@@ -207,9 +225,10 @@ In `wva-plan.yaml`:
   `variant_name` series change from the HPA's name to that.
 - **A workload missing from the plan** has no llm-d serving label
   (`llm-d.ai/role=decode` or `prefill`, or `llm-d.ai/inferenceServing=true`).
-  Upstream did not need one. Label it and plan again, or write its trigger by
-  hand ([trigger keys](../../reference/scaledobject-trigger.md)). Leave it
-  frozen until it is registered.
+  Upstream did not need one. Label the Deployment and plan again, or write its
+  trigger by hand ([trigger keys](../../reference/scaledobject-trigger.md)).
+  Leave it frozen until it is registered. The object label is for the plan
+  only; the scrape needs the pod-template label (step 3).
 
 <!-- guide:migrate.unlisted start -->
 ```bash
@@ -217,6 +236,15 @@ In `wva-plan.yaml`:
 kubectl label deployment <name> -n <namespace> llm-d.ai/role=decode
 ```
 <!-- guide:migrate.unlisted end -->
+
+Then apply the edited plan:
+
+<!-- guide:migrate.apply start -->
+```bash
+# Only after editing the plan and deleting the plain HPAs. Cluster-wide install: add SCOPE=cluster.
+make scaledobjects-apply WVA_DEFAULT_SO_PLAN=wva-plan.yaml
+```
+<!-- guide:migrate.apply end -->
 
 Then unfreeze each adopted ScaledObject:
 
@@ -254,10 +282,10 @@ decision](../install-in-namespace/README.md#1-check-keda-received-the-decision).
 
 ## Going back
 
-Before step 5, re-apply the controller (step 1's file, or `helm install` with
-`upstream-values.yaml`) and unfreeze. After step 5, in this order:
+The same steps work before and after step 5. Skip the ones marked *after step 5*
+if you have not registered anything yet.
 
-1. Freeze the adopted ScaledObjects:
+1. *After step 5*: freeze the adopted ScaledObjects.
 
 <!-- guide:rollback.freeze start -->
 ```bash
@@ -266,7 +294,8 @@ kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused=t
 ```
 <!-- guide:rollback.freeze end -->
 
-2. Remove the scaling manager:
+2. Remove the scaling manager. Do this first: the upstream image must never run
+   on the scaling manager's `wva-manager-config`.
 
 <!-- guide:rollback.undeploy start -->
 ```bash
@@ -276,11 +305,17 @@ make undeploy-wva NAMESPACE=<namespace>
 <!-- guide:rollback.undeploy end -->
 
    Cluster-wide install: `make undeploy-wva SCOPE=cluster WVA_NS=<controller-namespace>`.
-   If it ran in the upstream namespace, the uninstall also deletes the objects
-   that share names (ConfigMaps, ServiceAccount, Service); reinstall upstream
-   from its release instead of the next step.
 
-3. Restore the upstream controller and the saved ScaledObjects and HPAs:
+3. Restore the upstream controller, one of three ways:
+   - **The scaling manager ran in another namespace**: apply the saved
+     Deployment.
+   - **It ran in the upstream namespace**: the uninstall deleted the whole
+     same-named install there (ConfigMaps, ServiceAccounts, the token Secret,
+     Service, ServiceMonitor, the leader-election Role and RoleBinding).
+     Reinstall upstream from its release, then put back the ConfigMaps you
+     tuned.
+   - **Helm**: `helm install` the same chart and version (`upstream-release.txt`)
+     with `-f upstream-values.yaml`.
 
 <!-- guide:rollback.controller start -->
 ```bash
@@ -289,6 +324,18 @@ yq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .
 ```
 <!-- guide:rollback.controller end -->
 
+<!-- guide:rollback.configmaps start -->
+```bash
+# After a reinstall from the release, put back the ConfigMaps you tuned.
+yq '.items[] | select(.metadata.name | test("wva-")) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
+```
+<!-- guide:rollback.configmaps end -->
+
+4. *After step 5*: restore the saved ScaledObjects and plain HPAs. `error: no
+   objects passed to apply` means there was nothing to restore. The restore
+   puts the `prometheus` trigger back; a `minReplicaCount` or `fallback` that
+   adopting added stays.
+
 <!-- guide:rollback.autoscalers start -->
 ```bash
 # Restore the saved ScaledObjects and plain HPAs. HPAs that KEDA owns are skipped; KEDA recreates them.
@@ -296,8 +343,9 @@ yq '.items[] | select(.metadata.ownerReferences == null) | del(.metadata.resourc
 ```
 <!-- guide:rollback.autoscalers end -->
 
-4. Unfreeze each ScaledObject once the upstream controller is ready
-   (`kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused-`).
+5. Unfreeze each ScaledObject once `wva_desired_replicas` for it is back in
+   Prometheus. Before that, its trigger reads `0`.
+   (`kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused-`)
 
 Do this before the cleanup below, which deletes what the upstream controller
 needs.

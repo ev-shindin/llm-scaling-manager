@@ -20,17 +20,24 @@ migrate:
       kubectl get configmap -n <upstream-namespace> -o yaml > upstream-configmaps.yaml
       kubectl get deployment wva-controller-manager -n <upstream-namespace> -o yaml > upstream-controller.yaml
       kubectl get scaledobject,hpa -A -o yaml > upstream-autoscalers.yaml
-      # Installed with Helm: save the release values instead of the Deployment
+      # Installed with Helm: save the release, its values and the chart version instead of the Deployment
       #   helm get values <release> -n <upstream-namespace> > upstream-values.yaml
+      #   helm list -A | grep workload-variant-autoscaler > upstream-release.txt
   freeze:
     note: Freeze every ScaledObject with a prometheus trigger that upstream scales. It holds its current replica count.
     run: kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused=true
   remove:
     note: Stop the upstream controller. Your workloads, KEDA and Prometheus stay.
     run: kubectl delete deployment wva-controller-manager -n <upstream-namespace>
+  savescrape:
+    note: Helm only. Save the chart's model-server Service and ServiceMonitor; the uninstall deletes them.
+    run: kubectl get service,servicemonitor -n <model-namespace> -l app.kubernetes.io/instance=<release> -o yaml > upstream-scrape.yaml
   removehelm:
     note: Installed with Helm? Remove the release instead.
     run: helm uninstall <release> -n <upstream-namespace>
+  restorescrape:
+    note: Helm only, pods without the role label and modelserver port. Re-create the saved scrape; yq drops what the API server set.
+    run: yq '.items[] | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status, .spec.clusterIP, .spec.clusterIPs, .spec.ports[].nodePort) | split_doc' upstream-scrape.yaml | kubectl apply -f -
   checkout:
     note: Get a release of this project. The install guides run from this checkout.
     run: |
@@ -40,13 +47,12 @@ migrate:
   policy:
     note: Carry over the settings you tuned. Edit the new ConfigMap, not the old one.
     run: kubectl edit configmap wva-scaling-policy-config -n <controller-namespace>
-  register:
-    note: "Write the plan, edit it, apply it. Cluster-wide install: add SCOPE=cluster to both."
-    run: |
-      make scaledobjects-plan WVA_DEFAULT_SO_PLAN=wva-plan.yaml
-      # edit wva-plan.yaml: change apply: no to apply: adopt for each upstream ScaledObject
-      # delete the plain HPAs (step 5), then apply
-      make scaledobjects-apply WVA_DEFAULT_SO_PLAN=wva-plan.yaml
+  plan:
+    note: "Write the plan. It applies nothing. Cluster-wide install: add SCOPE=cluster."
+    run: make scaledobjects-plan WVA_DEFAULT_SO_PLAN=wva-plan.yaml
+  apply:
+    note: "Only after editing the plan and deleting the plain HPAs. Cluster-wide install: add SCOPE=cluster."
+    run: make scaledobjects-apply WVA_DEFAULT_SO_PLAN=wva-plan.yaml
   unlisted:
     note: A workload missing from the plan has no llm-d serving label. Label the Deployment itself (its pods do not restart), then plan again.
     run: kubectl label deployment <name> -n <namespace> llm-d.ai/role=decode
@@ -80,6 +86,9 @@ rollback:
   controller:
     note: Restore the upstream controller. yq drops the fields the API server sets.
     run: yq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status)' upstream-controller.yaml | kubectl apply -f -
+  configmaps:
+    note: After a reinstall from the release, put back the ConfigMaps you tuned.
+    run: yq '.items[] | select(.metadata.name | test("wva-")) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
   autoscalers:
     note: Restore the saved ScaledObjects and plain HPAs. HPAs that KEDA owns are skipped; KEDA recreates them.
     run: yq '.items[] | select(.metadata.ownerReferences == null) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-autoscalers.yaml | kubectl apply -f -
