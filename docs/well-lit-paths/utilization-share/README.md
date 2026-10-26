@@ -16,9 +16,10 @@ used or not (on-prem, a reservation, a team allotment).
   ([What it costs](#what-it-costs)).
 - Load swings back faster than a move lands (a donor's scale-down window,
   then the receiver's start), or a small imbalance has to be corrected at
-  once: below 0.9 of its scale-up threshold a short model first waits two
-  confirmation cycles, and a model that just gave GPUs waits about twelve
-  minutes before it takes them back.
+  once: unless a short model is at 0.9 or more of its scale-up threshold and
+  a donor at 0.6 or less, the move first waits two confirmation cycles, and a
+  model that just gave GPUs waits about twelve minutes before it takes them
+  back.
 - More cases are in [Details](#more-cases-where-it-does-not-fit).
 
 ## Start here
