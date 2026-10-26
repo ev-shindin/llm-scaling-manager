@@ -2055,8 +2055,8 @@ What to know before you rely on one:
   analyzer asks for 0 replicas. Listed alone, that lets the model scale
   down; beside saturation, saturation's larger need wins. Treating an empty
   result as missing is planned ([#344](https://github.com/ev-shindin/llm-scaling-manager/issues/344)). A query that
-  **fails** is no reading instead: for three cycles the roles it covers do
-  not scale down, then it stops counting.
+  **fails** is no reading instead: for three cycles no role of the model
+  scales down, then it stops counting.
 - **Its own `scaleUpThreshold`/`scaleDownBoundary` decide nothing**, as for
   every analyzer other than saturation (see
   [Per-analyzer threshold overrides](#engine-post-step-formula)).
