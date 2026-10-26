@@ -621,7 +621,7 @@ wva_verify_scaler_wiring() {
     done
     # The common cause, said statically: verify-deployment does not read
     # KEDA's version (scaler_runtime.sh does, at install).
-    log_warning "  Or re-wire them all:  $(wva_make_cmd scaledobjects-rewire). On KEDA 2.19 and older this follows a WVA controller restart or outage, a KEDA bug fixed in 2.20: upgrade KEDA to 2.21 (docs/reference/keda.md#unwired-hpa-before-keda-220)."
+    log_warning "  Or re-wire them all:  $(wva_make_cmd scaledobjects-rewire)  On KEDA 2.19 and older this follows a WVA controller restart or outage, a KEDA bug fixed in 2.20: upgrade KEDA to 2.21 (docs/reference/keda.md#unwired-hpa-before-keda-220)."
     log_warning "=================================================================="
     return 1
 }

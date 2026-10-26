@@ -185,9 +185,9 @@ runs per arm on one cluster type (the P/D pair repeated once).
   ([cohort borrowing](reference/quota-limiter.md#cohort-borrowing);
   [#214](https://github.com/ev-shindin/llm-scaling-manager/issues/214)).
 - On KEDA 2.19 and older, a ScaledObject created or changed within about two
-  minutes of a controller restart can stay unwired: its HPA keeps only the CPU default and never
-  scales. It is a KEDA bug fixed in 2.20; upgrade KEDA to 2.21, or on older
-  KEDA run `make scaledobjects-rewire`
+  minutes of a controller restart can stay unwired: its HPA keeps only the
+  CPU default and never scales. It is a KEDA bug fixed in 2.20; upgrade KEDA
+  to 2.21, or on older KEDA run `make scaledobjects-rewire`
   ([KEDA](reference/keda.md#unwired-hpa-before-keda-220);
   [#340](https://github.com/ev-shindin/llm-scaling-manager/issues/340)).
 
