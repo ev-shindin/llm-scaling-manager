@@ -986,12 +986,22 @@ make epp-metrics-auth NAMESPACE=<ns>
 ```
 
 It finds each pool's endpoint picker Service, the Deployment behind it and the
-ServiceAccount that Deployment runs as, and binds only the ServiceAccounts that
-are not already allowed. `make setup-prereqs` does the same
+ServiceAccount that Deployment runs as. It binds the ServiceAccounts that are
+not already allowed, and those allowed only through another install's binding,
+which that install's uninstall would remove. `make setup-prereqs` does the same
 (`WVA_EPP_METRICS_AUTH=false` skips it), and `make undeploy-wva` removes what
-either made. It exits 1 while an EPP is left ungranted (for example, a pool
-whose Service does not exist), 2 when the pools cannot be listed, and 3 when
-one could not be checked.
+either made.
+
+- An EPP running as the namespace's `default` ServiceAccount is not bound: every
+  pod there that names none would get the grant too. Give the EPP its own
+  ServiceAccount, or pass `WVA_EPP_METRICS_AUTH_DEFAULT_SA=true`.
+- A pool whose endpoint picker is not a Service is skipped with a warning;
+  check its EPP by hand.
+
+The script exits 1 while an EPP is left ungranted (for example, a pool whose
+Service does not exist), 2 when the pools cannot be listed, and 3 when one
+could not be checked. `make` reports any of these as `Error <code>` and itself
+exits 2.
 
 By hand, the same grant:
 

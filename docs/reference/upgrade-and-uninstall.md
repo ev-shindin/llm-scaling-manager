@@ -104,6 +104,14 @@ only to change it. Limiters an admin published in a policy namespace
    NAMESPACE=<namespace> WVA_NS=wva-<namespace> make scaledobjects-rewire
    ```
 
+### Upgrading from v0.10.0 to v0.10.1
+
+Follow [Upgrade](#upgrade) above. One cluster-admin step, once: if an EPP
+answers 500 to `/metrics` ([why](troubleshooting.md#epp-metrics-returns-500)),
+`make deploy-wva` alone does not fix it. A cluster admin runs
+`make epp-metrics-auth` (or re-runs `make setup-prereqs`) with the same
+variables as the install. `make verify-deployment` names the EPPs that need it.
+
 ### Upgrading from v0.10.0-rc4 to v0.10.0
 
 Follow [Upgrade](#upgrade) above: back up the policy first, because the re-run
@@ -1055,6 +1063,7 @@ make undeploy-wva NAMESPACE=<namespace> WVA_NS=wva-<namespace>
 | `wva-manager-config` and `wva-scaling-policy-config` | back up your policy first |
 | the install's ClusterRoles and ClusterRoleBindings | suffixed per install, so other installs keep theirs. Cluster-scoped: a namespace owner gets Forbidden on these, and the uninstall says which are left for a cluster admin |
 | the controller's Role and RoleBinding in a namespace it managed from outside (`WVA_WATCH_NS`) | |
+| the EPP `/metrics` authentication ClusterRoleBindings this install made (`llm-d.ai/applied-for=$NS`), and ClusterRole `wva-epp-metrics-auth` with the last of them | cluster-scoped: a namespace owner cannot read them, and the uninstall prints the cluster admin's `kubectl delete` command |
 | RoleBinding `wva-pod-writer-<suffix>` in every workload namespace, and Role `wva-pod-writer` where no other controller's binding uses it | made by `deploy/warmpool.sh create`, utilization-share activate, and the upgrade to this release |
 | `wva-utilization-share-history`, `wva-controller-status` and `wva-learned-state` | written by the controller, not rendered, so deleted by name. An uninstall and reinstall therefore starts learned state cold; upgrade in place to keep it |
 | the ScaledObjects **this installer created** | KEDA restores each workload to its pre-autoscaling replica count as they go. Keep them with `UNDEPLOY_SCALEDOBJECTS=false` |

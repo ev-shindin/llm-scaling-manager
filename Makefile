@@ -981,14 +981,15 @@ scaledobjects-rewire: ## Re-wire ScaledObjects whose HPA KEDA left on the CPU de
 ## that ServiceAccount may not create them, /metrics answers 500 to WVA and to
 ## Prometheus. Binds each such ServiceAccount to ClusterRole
 ## wva-epp-metrics-auth (create tokenreviews and subjectaccessreviews only),
-## one labelled binding per ServiceAccount, which undeploy-wva removes.
+## one labelled binding per ServiceAccount, which undeploy-wva removes. The
+## default ServiceAccount only with WVA_EPP_METRICS_AUTH_DEFAULT_SA=true.
 ## setup-prereqs runs it too (WVA_EPP_METRICS_AUTH=false skips it there).
 ## Exits 1 while one is left ungranted, 2 when the pools cannot be listed or
 ## DRY_RUN is not true or false, 3 when one could not be checked. Same WVA_NS,
 ## NAMESPACE and SCOPE as verify-deployment.
 .PHONY: epp-metrics-auth
 epp-metrics-auth: ## CLUSTER ADMIN: let the managed EPPs authenticate /metrics scrapes (fixes /metrics HTTP 500). DRY_RUN=true prints the plan and commands. WVA_NS=<ns>, NAMESPACE=<ns>.
-	@$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) $(if $(DRY_RUN),DRY_RUN=$(DRY_RUN),) \
+	@$(wva_ns_arg) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) $(if $(DRY_RUN),DRY_RUN=$(DRY_RUN),) $(if $(WVA_EPP_METRICS_AUTH_DEFAULT_SA),WVA_EPP_METRICS_AUTH_DEFAULT_SA=$(WVA_EPP_METRICS_AUTH_DEFAULT_SA),) \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/epp_auth.sh; \
 			wva_bootstrap_env; wva_grant_epp_metrics_auth'
 

@@ -21,7 +21,10 @@
 # cluster-scoped grant, so a namespace owner cannot make it; this is the admin
 # step that does, for exactly the ServiceAccounts the managed pools run as.
 #
-# What it writes, and only when the ServiceAccount is not already allowed:
+# What it writes, when the ServiceAccount is not already allowed (or is
+# allowed only through another install's binding), and never for the default
+# ServiceAccount without WVA_EPP_METRICS_AUTH_DEFAULT_SA=true. The ClusterRole
+# grants what the built-in system:auth-delegator grants:
 #
 #   ClusterRole        wva-epp-metrics-auth: create tokenreviews and
 #                      subjectaccessreviews, nothing else. Shared.
@@ -82,18 +85,25 @@ wva_epp_auth_err_kind() {
 # namespaces in $1 (wva_epp_auth_namespaces):
 #
 #   sa       <ns> <serviceaccount> <pool>  an EPP of <pool> runs as it
-#   nopicker <ns> <pool> -                 the pool names no endpoint picker
+#   nopicker <ns> <pool> <why>             the pool names no endpoint picker
+#                                          Service (none, or another kind)
 #   missing  <ns> <pool> <why>             the EPP cannot be resolved (left ungranted)
 #   unknown  <ns> <pool> <why>             it could not be read
 #   nolist   <ns> - <why>                  the pools could not be listed
 #
 # Both InferencePool API groups are read. A group the cluster does not serve
 # is skipped; a list that is refused is nolist, never "no pools": forbidden is
-# not absent.
+# not absent. Neither is an answer that does not parse: that is unknown.
+#
+# The namespaces are read one per line, never word-split: "*" (every
+# namespace) in a `for` loop expanded to the file names of the current
+# directory, so a cluster-scoped run listed pools in namespaces named after
+# files, found none, and reported success.
 wva_epp_auth_plan() {
-    local namespaces="$1" ns kind errf json rc where pools row pns pool svc
+    local namespaces="$1" ns kind errf json rc where pools found pns pool svc refkind
     errf="$(mktemp)"
-    for ns in $namespaces; do
+    while IFS= read -r ns; do
+        [ -n "$ns" ] || continue
         if [ "$ns" = '*' ]; then where=(-A); else where=(-n "$ns"); fi
         pools=""
         for kind in $WVA_EPP_AUTH_POOL_KINDS; do
@@ -107,20 +117,30 @@ wva_epp_auth_plan() {
                 esac
                 continue
             fi
-            pools="${pools}$(printf '%s' "$json" | jq -r '.items[]?
-                | [.metadata.namespace, .metadata.name,
-                   ((.spec.endpointPickerRef // .spec.extensionRef // {}).name // "")]
-                | @tsv' 2>/dev/null)"$'\n'
+            rc=0
+            found="$(printf '%s' "$json" | jq -r '.items[]
+                | ((.spec.endpointPickerRef // .spec.extensionRef // {})) as $r
+                | [.metadata.namespace, .metadata.name, ($r.name // ""), ($r.kind // "Service")]
+                | @tsv' 2>/dev/null)" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+                printf 'unknown\t%s\t-\tcould not read the %s list (not JSON with .items)\n' "$ns" "$kind"
+                continue
+            fi
+            pools="${pools}${found}"$'\n'
         done
-        while IFS=$'\t' read -r pns pool svc; do
+        while IFS=$'\t' read -r pns pool svc refkind; do
             [ -n "$pns" ] || continue
             if [ -z "$svc" ]; then
-                printf 'nopicker\t%s\t%s\t-\n' "$pns" "$pool"
+                printf 'nopicker\t%s\t%s\tthe pool names no endpoint picker\n' "$pns" "$pool"
+                continue
+            fi
+            if [ "$refkind" != Service ]; then
+                printf 'nopicker\t%s\t%s\tits endpoint picker is a %s, not a Service, so its EPP is not resolved here\n' "$pns" "$pool" "$refkind"
                 continue
             fi
             wva_epp_auth_pool_sas "$pns" "$pool" "$svc" "$errf"
         done <<< "$(printf '%s' "$pools" | sort -u)"
-    done
+    done <<< "$namespaces"
     rm -f "$errf"
 }
 
@@ -140,7 +160,10 @@ wva_epp_auth_pool_sas() {
         esac
         return 0
     fi
-    sel="$(printf '%s' "$json" | jq -c '.spec.selector // {}' 2>/dev/null)"
+    if ! sel="$(printf '%s' "$json" | jq -c '.spec.selector // {}' 2>/dev/null)"; then
+        printf 'unknown\t%s\t%s\tcould not read Service %s (not JSON)\n' "$ns" "$pool" "$svc"
+        return 0
+    fi
     if [ -z "$sel" ] || [ "$sel" = '{}' ]; then
         printf 'missing\t%s\t%s\tService %s has no selector, so its EPP cannot be found\n' "$ns" "$pool" "$svc"
         return 0
@@ -151,10 +174,14 @@ wva_epp_auth_pool_sas() {
         printf 'unknown\t%s\t%s\tcould not list Deployments: %s\n' "$ns" "$pool" "$(head -1 "$errf")"
         return 0
     fi
-    sas="$(printf '%s' "$json" | jq -r --argjson sel "$sel" '.items[]?
+    if ! sas="$(printf '%s' "$json" | jq -r --argjson sel "$sel" '.items[]
         | select((.spec.template.metadata.labels // {}) as $l
                  | $sel | to_entries | all(.value == $l[.key]))
-        | .spec.template.spec.serviceAccountName // .spec.template.spec.serviceAccount // "default"' 2>/dev/null | sort -u)"
+        | .spec.template.spec.serviceAccountName // .spec.template.spec.serviceAccount // "default"' 2>/dev/null)"; then
+        printf 'unknown\t%s\t%s\tcould not read the Deployment list (not JSON with .items)\n' "$ns" "$pool"
+        return 0
+    fi
+    sas="$(printf '%s\n' "$sas" | grep -v '^$' | sort -u)"
     if [ -z "$sas" ]; then
         # Not a Deployment (a StatefulSet, a bare Pod): the running Pods say.
         rc=0
@@ -163,7 +190,11 @@ wva_epp_auth_pool_sas() {
             printf 'unknown\t%s\t%s\tcould not list Pods: %s\n' "$ns" "$pool" "$(head -1 "$errf")"
             return 0
         fi
-        sas="$(printf '%s' "$json" | jq -r '.items[]? | .spec.serviceAccountName // .spec.serviceAccount // "default"' 2>/dev/null | sort -u)"
+        if ! sas="$(printf '%s' "$json" | jq -r '.items[] | .spec.serviceAccountName // .spec.serviceAccount // "default"' 2>/dev/null)"; then
+            printf 'unknown\t%s\t%s\tcould not read the Pod list (not JSON with .items)\n' "$ns" "$pool"
+            return 0
+        fi
+        sas="$(printf '%s\n' "$sas" | grep -v '^$' | sort -u)"
     fi
     if [ -z "$sas" ]; then
         printf 'missing\t%s\t%s\tno Deployment or Pod matches the selector of Service %s\n' "$ns" "$pool" "$svc"
@@ -252,19 +283,49 @@ wva_epp_auth_manual_cmds() {
     printf '    kubectl label clusterrolebinding %s %s=%s %s=%s\n' "$name" "$WVA_EPP_AUTH_MARK_KEY" "$WVA_EPP_AUTH_MARK_VAL" "$WVA_EPP_AUTH_OWNER_KEY" "$WVA_NS"
 }
 
+
+# wva_epp_auth_wva_owners echoes, one per line, the controller namespace
+# (llm-d.ai/applied-for) of every binding this tool made for ServiceAccount $2
+# in namespace $1, whichever install made it. Returns 1 when the bindings
+# cannot be read.
+wva_epp_auth_wva_owners() {
+    local json
+    json="$(kubectl get clusterrolebindings -l "${WVA_EPP_AUTH_MARK_KEY}=${WVA_EPP_AUTH_MARK_VAL}" -o json 2>/dev/null)" || return 1
+    printf '%s' "$json" | jq -r --arg ns "$1" --arg sa "$2" --arg ok "$WVA_EPP_AUTH_OWNER_KEY" '.items[]
+        | select(any(.subjects[]?; .kind == "ServiceAccount" and .name == $sa and .namespace == $ns))
+        | .metadata.labels[$ok] // ""' 2>/dev/null || return 1
+}
+
+# wva_epp_auth_default_ok reports whether the default ServiceAccount may be
+# bound: only with WVA_EPP_METRICS_AUTH_DEFAULT_SA=true. Every pod in the
+# namespace that names no ServiceAccount runs as default (the model servers,
+# typically), so binding it gives all of them the reviews, not just the EPP.
+wva_epp_auth_default_ok() {
+    [ "${WVA_EPP_METRICS_AUTH_DEFAULT_SA:-false}" = true ]
+}
+
 # wva_grant_epp_metrics_auth is make epp-metrics-auth, and a step of the admin
 # phase (setup-prereqs). For every InferencePool this install manages it finds
 # the ServiceAccount the pool's EPP runs as (wva_epp_auth_plan) and binds it to
-# wva-epp-metrics-auth when it may not already create tokenreviews and
-# subjectaccessreviews. One binding per ServiceAccount, however many pools
-# share it; applying it again changes nothing.
+# wva-epp-metrics-auth with this install's own binding, unless it may already
+# create tokenreviews and subjectaccessreviews through a grant this tool did
+# not make, or through this install's binding. One allowed only through ANOTHER
+# install's binding gets this install's too: that install's undeploy removes
+# its own, and would otherwise put this EPP back on 500 without a word. One
+# binding per ServiceAccount, however many pools share it; applying it again
+# changes nothing.
+#
+# The default ServiceAccount is bound only with
+# WVA_EPP_METRICS_AUTH_DEFAULT_SA=true (wva_epp_auth_default_ok); otherwise it
+# is left ungranted, with a warning naming the EPP.
 #
 # DRY_RUN=true writes nothing and prints the plan and the commands; any value
 # other than true or false is refused before anything is read. Returns 0 when
 # every EPP is allowed (or there is none), 1 when one is left ungranted (a dry
-# run with work to do, an EPP that cannot be resolved, an apply that failed),
-# 2 when DRY_RUN is not true or false or the pools cannot be listed, 3 when an
-# EPP or its permission could not be checked.
+# run with work to do, an EPP that cannot be resolved, the default
+# ServiceAccount without the opt-in, an apply that failed), 2 when DRY_RUN is
+# not true or false or the pools cannot be listed, 3 when an EPP or its
+# permission could not be checked.
 wva_grant_epp_metrics_auth() {
     local dry="${DRY_RUN:-false}"
     case "$dry" in
@@ -272,8 +333,8 @@ wva_grant_epp_metrics_auth() {
         *) log_warning "DRY_RUN must be true or false, got $dry: nothing was read or changed."
            return 2 ;;
     esac
-    local namespaces plan kind ns a b seen="" st role_applied=false
-    local nolist=0 ungranted=0 unknown=0 todo=0 report="" todo_cmds=""
+    local namespaces plan kind ns a b seen="" st owners why role_applied=false
+    local nolist=0 ungranted=0 unknown=0 todo=0 report="" todo_cmds="" defaults="" others=""
     namespaces="$(wva_epp_auth_namespaces)"
     plan="$(wva_epp_auth_plan "$namespaces")"
 
@@ -283,7 +344,8 @@ wva_grant_epp_metrics_auth() {
                 nolist=$((nolist + 1))
                 report="${report}    could not list  $([ "$ns" = '*' ] && echo 'all namespaces' || echo "$ns"): $b"$'\n' ;;
             nopicker)
-                report="${report}    no EPP          $ns/$a: the pool names no endpoint picker"$'\n' ;;
+                report="${report}    no EPP          $ns/$a: $b"$'\n'
+                case "$b" in *"not a Service"*) others="${others}${ns}/${a}: ${b}"$'\n' ;; esac ;;
             missing)
                 ungranted=$((ungranted + 1))
                 report="${report}    unresolved      $ns/$a: $b"$'\n' ;;
@@ -294,14 +356,36 @@ wva_grant_epp_metrics_auth() {
                 case " $seen " in *" $ns/$a "*) continue ;; esac
                 seen="$seen $ns/$a"
                 st="$(wva_epp_auth_can "$ns" "$a")"
+                why="may create the reviews: $st"
                 if [ "$st" = yes ]; then
-                    report="${report}    allowed         $ns/$a (EPP of $b)"$'\n'
+                    if ! owners="$(wva_epp_auth_wva_owners "$ns" "$a")"; then
+                        # Cannot tell whose grant it is: binding our own as
+                        # well costs nothing and cannot be undone by another.
+                        why="allowed, but whose grant could not be read"
+                    elif printf '%s\n' "$owners" | grep -qxF -- "$WVA_NS"; then
+                        report="${report}    allowed         $ns/$a (EPP of $b; this install's binding)"$'\n'
+                        continue
+                    elif [ -z "$owners" ]; then
+                        report="${report}    allowed         $ns/$a (EPP of $b)"$'\n'
+                        continue
+                    else
+                        why="allowed only through the binding of the install in $(printf '%s' "$owners" | grep -v '^$' | paste -sd, -), which its undeploy removes"
+                    fi
+                fi
+                if [ "$a" = default ] && ! wva_epp_auth_default_ok; then
+                    if [ "$st" = yes ]; then
+                        report="${report}    allowed         $ns/$a (EPP of $b; $why; not adding this install's own for the default ServiceAccount)"$'\n'
+                    else
+                        ungranted=$((ungranted + 1))
+                        defaults="${defaults}${ns} (EPP of ${b})"$'\n'
+                        report="${report}    not bound       $ns/$a (EPP of $b): the default ServiceAccount, see below"$'\n'
+                    fi
                     continue
                 fi
                 if [ "$dry" = true ]; then
                     todo=$((todo + 1))
                     todo_cmds="${todo_cmds}$(wva_epp_auth_manual_cmds "$ns" "$a")"$'\n'
-                    report="${report}    would bind      $ns/$a (EPP of $b; may create the reviews: $st)"$'\n'
+                    report="${report}    would bind      $ns/$a (EPP of $b; $why)"$'\n'
                     continue
                 fi
                 if [ "$role_applied" = false ]; then
@@ -312,7 +396,7 @@ wva_grant_epp_metrics_auth() {
                     fi
                 fi
                 if [ "$role_applied" = true ] && wva_epp_auth_binding_doc "$ns" "$a" | kubectl apply -f - >/dev/null; then
-                    report="${report}    granted         $ns/$a (EPP of $b): ClusterRoleBinding $(wva_epp_auth_binding_name "$ns" "$a")"$'\n'
+                    report="${report}    granted         $ns/$a (EPP of $b; $why): ClusterRoleBinding $(wva_epp_auth_binding_name "$ns" "$a")"$'\n'
                 else
                     ungranted=$((ungranted + 1))
                     report="${report}    failed          $ns/$a (EPP of $b): the binding could not be applied"$'\n'
@@ -321,11 +405,20 @@ wva_grant_epp_metrics_auth() {
     done <<< "$plan"
 
     if [ -z "$report" ]; then
-        log_info "No InferencePool in $(printf '%s' "$namespaces" | sed 's/^\*$/any namespace/' | paste -sd' ' -): no EPP to grant."
+        log_info "No InferencePool in $(printf '%s\n' "$namespaces" | sed 's/^\*$/any namespace/' | paste -sd' ' -): no EPP to grant."
         return 0
     fi
     echo "EPP ServiceAccounts and their /metrics authentication (create tokenreviews, subjectaccessreviews):"
     printf '%s' "$report"
+    if [ -n "$others" ]; then
+        log_warning "These pools name an endpoint picker that is not a Service, so their EPP was not resolved or granted; check its ServiceAccount by hand (docs/reference/troubleshooting.md#epp-metrics-returns-500):"
+        printf '%s' "$others" | sed 's/^/    /' >&2
+    fi
+    if [ -n "$defaults" ]; then
+        log_warning "Not bound: the EPP in these namespaces runs as the default ServiceAccount, and every pod there that names none (the model servers, typically) runs as it too. Binding it would give all of them the reviews:"
+        printf '%s' "$defaults" | sed 's/^/    /' >&2
+        log_warning "  Give the EPP its own ServiceAccount (serviceAccountName in its Deployment) and re-run, or accept the wider grant: $(wva_make_cmd epp-metrics-auth WVA_EPP_METRICS_AUTH_DEFAULT_SA=true)"
+    fi
     if [ "$nolist" -gt 0 ]; then
         log_warning "Could not list the InferencePools above, so their EPPs were not checked or granted. Run this as a cluster admin."
         return 2
@@ -384,6 +477,9 @@ wva_report_epp_metrics_auth() {
         log_warning "EPP /metrics authentication: these EPP ServiceAccounts may not create tokenreviews or subjectaccessreviews, so each EPP answers 500 to every /metrics scrape, from WVA and from Prometheus:"
         printf '%s' "$missing" | sed 's/^/    /' >&2
         log_warning "  A cluster admin grants it with  $(wva_make_cmd epp-metrics-auth)  (setup-prereqs does it too). See docs/reference/troubleshooting.md#epp-metrics-returns-500."
+        if printf '%s' "$missing" | grep -q '/default$'; then
+            log_warning "  An EPP running as the default ServiceAccount is not bound without WVA_EPP_METRICS_AUTH_DEFAULT_SA=true: give it its own ServiceAccount instead."
+        fi
     fi
     if [ "$unchecked" -gt 0 ]; then
         log_info "EPP /metrics authentication: $unchecked EPP(s) could not be checked (listing them, or asking as their ServiceAccount, is not permitted for you). Not a pass; $(wva_make_cmd epp-metrics-auth "DRY_RUN=true") shows them as a cluster admin."
@@ -391,16 +487,21 @@ wva_report_epp_metrics_auth() {
     return 0
 }
 
-# wva_remove_epp_metrics_auth deletes the bindings this install
-# (WVA_NS) made, by their labels, and the shared ClusterRole once no binding
-# uses it. Called by undeploy-wva.
+# wva_remove_epp_metrics_auth deletes the bindings this install (WVA_NS) made,
+# by their labels, and the shared ClusterRole once no binding uses it. Called
+# by undeploy-wva. When the bindings cannot be read (a namespace owner's
+# uninstall) it says what a cluster admin runs, without a warning: this install
+# may never have made any.
 wva_remove_epp_metrics_auth() {
-    local out
-    if ! out="$(kubectl delete clusterrolebindings \
-        -l "${WVA_EPP_AUTH_MARK_KEY}=${WVA_EPP_AUTH_MARK_VAL},${WVA_EPP_AUTH_OWNER_KEY}=${WVA_NS}" \
-        --ignore-not-found 2>&1)"; then
+    local sel="${WVA_EPP_AUTH_MARK_KEY}=${WVA_EPP_AUTH_MARK_VAL},${WVA_EPP_AUTH_OWNER_KEY}=${WVA_NS}" mine out
+    if ! mine="$(kubectl get clusterrolebindings -l "$sel" -o name 2>&1)"; then
+        log_info "EPP /metrics authentication bindings are cluster-scoped and could not be read here. If setup-prereqs made any for this install, a cluster admin removes them with: kubectl delete clusterrolebindings -l $sel"
+        return 0
+    fi
+    [ -n "$mine" ] || return 0
+    if ! out="$(kubectl delete clusterrolebindings -l "$sel" --ignore-not-found 2>&1)"; then
         log_warning "Could not remove the EPP /metrics authentication bindings this install made: $(printf '%s' "$out" | head -1)"
-        log_warning "  A cluster admin removes them with: kubectl delete clusterrolebindings -l ${WVA_EPP_AUTH_MARK_KEY}=${WVA_EPP_AUTH_MARK_VAL},${WVA_EPP_AUTH_OWNER_KEY}=${WVA_NS}"
+        log_warning "  A cluster admin removes them with: kubectl delete clusterrolebindings -l $sel"
         return 0
     fi
     local bound

@@ -11,20 +11,30 @@
 # each of which parses cleanly and is wrong on a cluster:
 #
 #   two pools, two ServiceAccounts   one binding each, to the pool's own one
-#   no serviceAccountName            bound as default
+#   no serviceAccountName            default is NOT bound without
+#                                    WVA_EPP_METRICS_AUTH_DEFAULT_SA=true, exit 1
 #   EPP Service missing              left ungranted, exit 1; the others still bound
 #   pools list Forbidden             exit 2, never "no InferencePool"
 #   already allowed                  nothing applied, and a second run applies nothing
+#   allowed via another install      this install's own binding is applied too
 #   DRY_RUN                          nothing applied, the commands printed, exit 1;
 #                                    a value other than true or false is refused
 #   both InferencePool API groups    endpointPickerRef and extensionRef both read,
 #                                    a group the cluster does not serve skipped
+#   cluster scope                    lists with -A, run from a directory holding
+#                                    files (a glob of "*" found none and exited 0)
+#   a picker that is not a Service   skipped with a warning
+#   unreadable                       a Service read Forbidden, or a pool list that
+#                                    is not JSON: exit 3, never "no pools"
 #   the check                        warns on a denied ServiceAccount, and says
 #                                    "could not be checked" when impersonation is refused
-#   undeploy                         deletes by this install's label only
+#   undeploy                         deletes by this install's label only; keeps the
+#                                    ClusterRole another binding uses; says nothing
+#                                    alarming when the bindings cannot be read
 #
-# Every case asserts something that a missing function also fails, so a run
-# against code without this feature fails rather than passes empty.
+# Every case runs from the repository root, which holds files. Every case
+# asserts something that a missing function also fails, so a run against code
+# without this feature fails rather than passes empty.
 
 set -u
 
@@ -34,7 +44,7 @@ PASS=0
 CASES=0
 # EXPECTED_CASES is how many cases this file runs. A case that silently stops
 # running (a renamed function, an early exit) must fail the check.
-EXPECTED_CASES=11
+EXPECTED_CASES=16
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -62,17 +72,18 @@ done
 NS=wva-check
 V1=inferencepools.inference.networking.k8s.io
 VX=inferencepools.inference.networking.x-k8s.io
+MARK=llm-d.ai/applied-by=wva-epp-metrics-auth
 
 forbidden() { echo "Error from server (Forbidden): $1 is forbidden: User \"tenant\" cannot list resource \"$1\"" >&2; }
 
-# pool <api> <ns> <name> <service>: one InferencePool. v1 names its picker in
-# endpointPickerRef, x-k8s in extensionRef.
+# pool <api> <ns> <name> <service> [kind]: one InferencePool. v1 names its
+# picker in endpointPickerRef, x-k8s in extensionRef; kind is left out unless given.
 pool() {
     local f="$WORK/pools.$1.json" ref=endpointPickerRef
     [ "$1" = x ] && ref=extensionRef
     [ -f "$f" ] || echo '{"items":[]}' >"$f"
-    jq --arg ns "$2" --arg n "$3" --arg s "$4" --arg r "$ref" \
-        '.items += [{metadata: {namespace: $ns, name: $n}, spec: {($r): {name: $s}}}]' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+    jq --arg ns "$2" --arg n "$3" --arg s "$4" --arg r "$ref" --arg k "${5:-}" \
+        '.items += [{metadata: {namespace: $ns, name: $n}, spec: {($r): ({name: $s} + (if $k == "" then {} else {kind: $k} end))}}]' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
 }
 
 # epp <ns> <service> <app label> <serviceaccount|-> [kind]: the Service a pool
@@ -95,13 +106,32 @@ epp() {
 # allowed <ns>:<sa>: already may create the reviews (granted by its chart).
 allowed() { echo "$1" >>"$WORK/allowed"; }
 
+# crb <name> <owner|-> <ns> <sa> [role]: a ClusterRoleBinding already on the
+# cluster. With an owner it is one this tool made for that install.
+crb() {
+    [ -f "$WORK/crbs.json" ] || echo '{"items":[]}' >"$WORK/crbs.json"
+    jq --arg n "$1" --arg o "$2" --arg ns "$3" --arg sa "$4" --arg r "${5:-wva-epp-metrics-auth}" '.items += [{
+        metadata: {name: $n, labels: (if $o == "-" then {} else {"llm-d.ai/applied-by": "wva-epp-metrics-auth", "llm-d.ai/applied-for": $o} end)},
+        roleRef: {name: $r}, subjects: [{kind: "ServiceAccount", name: $sa, namespace: $ns}]}]' \
+        "$WORK/crbs.json" >"$WORK/crbs.tmp" && mv "$WORK/crbs.tmp" "$WORK/crbs.json"
+    [ "${5:-wva-epp-metrics-auth}" != wva-epp-metrics-auth ] || allowed "$3:$4"
+}
+
+# crbs_matching <selector>: the stored bindings carrying every k=v of it.
+crbs_matching() {
+    [ -f "$WORK/crbs.json" ] || echo '{"items":[]}' >"$WORK/crbs.json"
+    jq --arg sel "$1" '($sel | split(",") | map(split("=") | {(.[0]): .[1]}) | add) as $want
+        | .items |= map(select((.metadata.labels // {}) as $l | $want | to_entries | all(.value == $l[.key])))' "$WORK/crbs.json"
+}
+
 stub_kubectl() {
     printf '%s\n' "$*" >>"$WORK/kubectl.log"
-    local a="$*" api ns name who
+    local a="$*" api ns name who owner
     case "$a" in
         "get $V1 "*|"get $VX "*)
             api=v1; case "$a" in "get $VX "*) api=x ;; esac
             if [ "${STUB_POOLS:-}" = FORBIDDEN ]; then forbidden inferencepools; return 1; fi
+            if [ "${STUB_POOLS:-}" = GARBAGE ]; then echo 'this is not json'; return 0; fi
             if [ "$api" = v1 ] && [ "${STUB_V1:-}" = NORES ]; then
                 echo "error: the server doesn't have a resource type \"inferencepools\"" >&2; return 1
             fi
@@ -113,6 +143,7 @@ stub_kubectl() {
             fi
             ;;
         "get service "*)
+            [ "${STUB_SVC:-}" != FORBIDDEN ] || { forbidden services; return 1; }
             set -- $a
             name="$3"; ns="$5"
             if [ -f "$WORK/svc.$ns.$name.json" ]; then cat "$WORK/svc.$ns.$name.json"
@@ -141,20 +172,40 @@ stub_kubectl() {
             case "$doc" in
                 *"kind: ClusterRoleBinding"*)
                     ns="$(printf '%s\n' "$doc" | sed -n 's/^  namespace: //p')"
-                    name="$(printf '%s\n' "$doc" | sed -n 's/^  name: //p' | tail -1)"
-                    allowed "$ns:$name" ;;
+                    who="$(printf '%s\n' "$doc" | sed -n 's/^  name: //p' | tail -1)"
+                    name="$(printf '%s\n' "$doc" | sed -n 's/^  name: //p' | head -1)"
+                    owner="$(printf '%s\n' "$doc" | sed -n 's/^    llm-d.ai\/applied-for: //p')"
+                    crb "$name" "$owner" "$ns" "$who" ;;
             esac
             ;;
-        "delete "*) : ;;
-        "get clusterrolebindings "*) echo "other-role" ;;
+        "get clusterrolebindings -l "*)
+            [ "${STUB_CRB:-}" != FORBIDDEN ] || { forbidden clusterrolebindings; return 1; }
+            set -- $a
+            case "$a" in
+                *"-o name") crbs_matching "$4" | jq -r '.items[] | "clusterrolebinding.rbac.authorization.k8s.io/" + .metadata.name' ;;
+                *) crbs_matching "$4" ;;
+            esac
+            ;;
+        "get clusterrolebindings -o jsonpath="*)
+            [ -f "$WORK/crbs.json" ] && jq -r '.items[].roleRef.name' "$WORK/crbs.json"
+            echo other-role
+            ;;
+        "delete clusterrolebindings -l "*)
+            set -- $a
+            crbs_matching "$4" | jq -r '.items[].metadata.name' >"$WORK/deleted"
+            jq --slurpfile d <(jq -R . "$WORK/deleted" | jq -s .) '.items |= map(select(.metadata.name as $n | $d[0] | index($n) | not))' \
+                "$WORK/crbs.json" >"$WORK/crbs.tmp" && mv "$WORK/crbs.tmp" "$WORK/crbs.json"
+            ;;
         "get clusterroles "*) echo "clusterrole.rbac.authorization.k8s.io/wva-epp-metrics-auth" ;;
+        "delete "*) : ;;
         *) return 0 ;;
     esac
 }
 
 # run <function> [VAR=value...]: runs the function in a subshell with the
-# libraries sourced and kubectl stubbed. stdout lands in $WORK/stdout,
-# warnings in $WORK/warnings, info in $WORK/info. Sets RC.
+# libraries sourced and kubectl stubbed, from the repository root (a directory
+# that holds files). stdout lands in $WORK/stdout, warnings in $WORK/warnings,
+# info in $WORK/info. Sets RC.
 run() {
     local fn="$1"
     shift
@@ -164,6 +215,7 @@ run() {
     : >"$WORK/applied"
     : >"$WORK/stdout"
     (
+        cd "$ROOT" || exit 9
         # shellcheck disable=SC1091
         . "$WORK/common.sh"
         # shellcheck disable=SC1091
@@ -176,7 +228,7 @@ run() {
         WVA_NS=$NS
         WVA_SCOPE=namespace
         WVA_WATCH_NS=apps
-        unset DRY_RUN NAMESPACE_EXPLICIT STUB_POOLS STUB_V1 STUB_IMPERSONATE
+        unset DRY_RUN NAMESPACE_EXPLICIT STUB_POOLS STUB_V1 STUB_IMPERSONATE STUB_SVC STUB_CRB WVA_EPP_METRICS_AUTH_DEFAULT_SA
         local kv
         for kv in "$@"; do eval "$kv"; done
         declare -F "$fn" >/dev/null || { echo "$fn is not defined" >>"$WORK/warnings"; exit 3; }
@@ -185,10 +237,11 @@ run() {
     RC=$?
 }
 
-reset() { rm -f "$WORK"/pools.*.json "$WORK"/svc.*.json "$WORK"/deploy.*.json "$WORK"/pod.*.json "$WORK/allowed"; }
-# bound <ns> <sa>: a ClusterRoleBinding applied for it, to wva-epp-metrics-auth.
+reset() { rm -f "$WORK"/pools.*.json "$WORK"/svc.*.json "$WORK"/deploy.*.json "$WORK"/pod.*.json "$WORK/allowed" "$WORK/crbs.json" "$WORK/deleted"; }
+# bound <ns> <sa>: a ClusterRoleBinding applied in this run for it, to
+# wva-epp-metrics-auth, labelled for this install.
 bound() {
-    awk -v RS='---' -v ns="$1" -v sa="$2" '/kind: ClusterRoleBinding/ && /name: wva-epp-metrics-auth\n/ && index($0, "  name: " sa "\n  namespace: " ns) { found = 1 } END { exit !found }' "$WORK/applied"
+    awk -v RS='---' -v ns="$1" -v sa="$2" -v own="$NS" '/kind: ClusterRoleBinding/ && /name: wva-epp-metrics-auth\n/ && index($0, "llm-d.ai/applied-for: " own "\n") && index($0, "  name: " sa "\n  namespace: " ns) { found = 1 } END { exit !found }' "$WORK/applied"
 }
 bindings() { grep -c '^kind: ClusterRoleBinding' "$WORK/applied"; }
 roles() { grep -c '^kind: ClusterRole$' "$WORK/applied"; }
@@ -201,14 +254,16 @@ epp apps chat-epp chat chat-sa
 epp apps code-epp code code-sa
 run wva_grant_epp_metrics_auth
 ok '[ "$RC" = 0 ] && bound apps chat-sa && bound apps code-sa && [ "$(bindings)" = 2 ] && [ "$(roles)" = 1 ]' "two pools: exit $RC (want 0), $(bindings) bindings, $(roles) roles, applied $(cat "$WORK/applied")"
-ok 'grep -q "llm-d.ai/applied-for: $NS" "$WORK/applied" && grep -q "granted .*apps/chat-sa" "$WORK/stdout" && grep -q "granted .*apps/code-sa" "$WORK/stdout"' "two pools: label or report missing: $(cat "$WORK/stdout")"
+ok 'grep -q "granted .*apps/chat-sa" "$WORK/stdout" && grep -q "granted .*apps/code-sa" "$WORK/stdout"' "two pools: report missing: $(cat "$WORK/stdout")"
 
-begin "a Deployment naming no ServiceAccount runs as default, and is bound as default"
+begin "the default ServiceAccount: not bound without the opt-in (exit 1, named), bound with it"
 reset
 pool v1 apps chat chat-epp
 epp apps chat-epp chat -
 run wva_grant_epp_metrics_auth
-ok '[ "$RC" = 0 ] && bound apps default && [ "$(bindings)" = 1 ]' "default: exit $RC (want 0), applied $(cat "$WORK/applied")"
+ok '[ "$RC" = 1 ] && [ "$(bindings)" = 0 ] && grep -q "not bound .*apps/default" "$WORK/stdout" && grep -q "WVA_EPP_METRICS_AUTH_DEFAULT_SA=true" "$WORK/warnings" && grep -q "apps (EPP of chat)" "$WORK/warnings"' "default, no opt-in: exit $RC (want 1), applied $(cat "$WORK/applied"), warnings $(cat "$WORK/warnings")"
+run wva_grant_epp_metrics_auth WVA_EPP_METRICS_AUTH_DEFAULT_SA=true
+ok '[ "$RC" = 0 ] && bound apps default && [ "$(bindings)" = 1 ]' "default, opt-in: exit $RC (want 0), applied $(cat "$WORK/applied")"
 
 begin "a pool whose EPP Service is missing: left ungranted, exit 1; the other pool still bound"
 reset
@@ -236,7 +291,15 @@ run wva_grant_epp_metrics_auth
 ok '[ "$RC" = 0 ] && ! bound apps chat-sa && bound apps code-sa && [ "$(bindings)" = 1 ] && grep -q "allowed .*apps/chat-sa" "$WORK/stdout"' "already allowed: exit $RC (want 0), applied $(cat "$WORK/applied"), stdout $(cat "$WORK/stdout")"
 # The stub remembers the binding it applied, as a cluster would.
 run wva_grant_epp_metrics_auth
-ok '[ "$RC" = 0 ] && [ ! -s "$WORK/applied" ] && grep -q "allowed .*apps/code-sa" "$WORK/stdout"' "second run: exit $RC (want 0), applied $(cat "$WORK/applied")"
+ok '[ "$RC" = 0 ] && [ ! -s "$WORK/applied" ] && grep -q "allowed .*apps/code-sa (EPP of code; this install" "$WORK/stdout"' "second run: exit $RC (want 0), applied $(cat "$WORK/applied"), stdout $(cat "$WORK/stdout")"
+
+begin "allowed only through another install's binding: this install's own is applied too"
+reset
+pool v1 apps chat chat-epp
+epp apps chat-epp chat chat-sa
+crb wva-epp-metrics-auth-apps-0000aaaa other-wva apps chat-sa
+run wva_grant_epp_metrics_auth
+ok '[ "$RC" = 0 ] && bound apps chat-sa && [ "$(bindings)" = 1 ] && grep -q "granted .*apps/chat-sa .*install in other-wva" "$WORK/stdout"' "other install: exit $RC (want 0), applied $(cat "$WORK/applied"), stdout $(cat "$WORK/stdout")"
 
 begin "one ServiceAccount behind two pools: one binding"
 reset
@@ -262,6 +325,36 @@ epp apps old-epp old old-sa pod
 run wva_grant_epp_metrics_auth STUB_V1=NORES
 ok '[ "$RC" = 0 ] && bound apps old-sa && [ "$(bindings)" = 1 ]' "x-k8s: exit $RC (want 0), stdout $(cat "$WORK/stdout"), warnings $(cat "$WORK/warnings"), applied $(cat "$WORK/applied")"
 
+begin "cluster scope, run from a directory holding files: lists with -A, binds, and the check sees it too"
+reset
+pool v1 apps chat chat-epp
+pool x team-b old old-epp
+epp apps chat-epp chat chat-sa
+epp team-b old-epp old old-sa
+run wva_grant_epp_metrics_auth WVA_SCOPE=cluster "unset WVA_WATCH_NS"
+ok '[ "$RC" = 0 ] && grep -q "^get $V1 -A -o json$" "$WORK/kubectl.log" && ! grep -q "^get $V1 -n " "$WORK/kubectl.log" && bound apps chat-sa && bound team-b old-sa' "cluster scope: exit $RC (want 0), pool calls $(grep inferencepools "$WORK/kubectl.log" | head -3 | tr '\n' ';'), stdout $(cat "$WORK/stdout"), info $(cat "$WORK/info")"
+reset
+pool v1 apps chat chat-epp
+epp apps chat-epp chat chat-sa
+run wva_report_epp_metrics_auth WVA_SCOPE=cluster "unset WVA_WATCH_NS"
+ok '[ "$RC" = 0 ] && grep -q "apps/chat-sa" "$WORK/warnings"' "cluster scope check: exit $RC, warnings $(cat "$WORK/warnings")"
+
+begin "an endpoint picker that is not a Service: skipped with a warning, nothing bound"
+reset
+pool v1 apps chat chat-epp Backend
+epp apps chat-epp chat chat-sa
+run wva_grant_epp_metrics_auth
+ok '[ "$RC" = 0 ] && [ "$(bindings)" = 0 ] && grep -q "no EPP .*apps/chat: its endpoint picker is a Backend, not a Service" "$WORK/stdout" && grep -q "not a Service" "$WORK/warnings" && ! grep -q "^get service " "$WORK/kubectl.log"' "non-Service: exit $RC (want 0), stdout $(cat "$WORK/stdout"), warnings $(cat "$WORK/warnings")"
+
+begin "unreadable: a Service read Forbidden, or a pool list that is not JSON, exits 3, never no pools"
+reset
+pool v1 apps chat chat-epp
+epp apps chat-epp chat chat-sa
+run wva_grant_epp_metrics_auth STUB_SVC=FORBIDDEN
+ok '[ "$RC" = 3 ] && [ ! -s "$WORK/applied" ] && grep -q "unknown .*apps/chat: could not read Service chat-epp" "$WORK/stdout"' "service forbidden: exit $RC (want 3), stdout $(cat "$WORK/stdout")"
+run wva_grant_epp_metrics_auth STUB_POOLS=GARBAGE
+ok '[ "$RC" = 3 ] && ! grep -q "No InferencePool" "$WORK/info" && grep -q "could not read the" "$WORK/stdout"' "garbage list: exit $RC (want 3), stdout $(cat "$WORK/stdout"), info $(cat "$WORK/info")"
+
 begin "the check warns on a denied ServiceAccount and names the fix, applies nothing, never fails"
 reset
 pool v1 apps chat chat-epp
@@ -281,12 +374,23 @@ ok '[ "$RC" = 0 ] && ! grep -q "apps/chat-sa" "$WORK/warnings" && grep -q "could
 
 begin "undeploy deletes by this install's label; the make target, setup-prereqs and undeploy are wired"
 reset
+crb wva-epp-metrics-auth-apps-1111bbbb "$NS" apps chat-sa
 run wva_remove_epp_metrics_auth
-ok '[ "$RC" = 0 ] && grep -q "^delete clusterrolebindings -l llm-d.ai/applied-by=wva-epp-metrics-auth,llm-d.ai/applied-for=$NS " "$WORK/kubectl.log" && grep -q "^delete clusterrole wva-epp-metrics-auth " "$WORK/kubectl.log"' "undeploy: exit $RC, kubectl $(tr '\n' ';' <"$WORK/kubectl.log")"
+ok '[ "$RC" = 0 ] && grep -q "^delete clusterrolebindings -l $MARK,llm-d.ai/applied-for=$NS " "$WORK/kubectl.log" && grep -q "^delete clusterrole wva-epp-metrics-auth " "$WORK/kubectl.log"' "undeploy: exit $RC, kubectl $(tr '\n' ';' <"$WORK/kubectl.log")"
 MK="$(tr -d '\r' <"$ROOT/Makefile")"
 TARGET="$(printf '%s\n' "$MK" | awk '/^epp-metrics-auth:/ { on = 1; next } on && /^[^\t]/ { exit } on')"
 ok 'printf "%s\n" "$MK" | grep -q "^epp-metrics-auth: ## " && printf "%s" "$TARGET" | grep -q "wva_grant_epp_metrics_auth" && printf "%s" "$TARGET" | grep -q "DRY_RUN=\$(DRY_RUN)"' "epp-metrics-auth missing, without help, or not passing DRY_RUN: $TARGET"
 ok 'tr -d "\r" <"$ROOT/deploy/lib/install_core.sh" | grep -q "^        wva_apply_epp_metrics_auth$" && tr -d "\r" <"$ROOT/deploy/lib/cleanup.sh" | grep -q "^            wva_remove_epp_metrics_auth$" && tr -d "\r" <"$ROOT/deploy/install.sh" | grep -q "lib/epp_auth.sh"' "setup-prereqs, undeploy or install.sh not wired"
+
+begin "undeploy keeps the ClusterRole another binding uses, and does not alarm when it cannot read the bindings"
+reset
+crb wva-epp-metrics-auth-apps-1111bbbb "$NS" apps chat-sa
+crb wva-epp-metrics-auth-apps-2222cccc other-wva apps chat-sa
+run wva_remove_epp_metrics_auth
+ok '[ "$RC" = 0 ] && grep -q "^delete clusterrolebindings -l $MARK,llm-d.ai/applied-for=$NS " "$WORK/kubectl.log" && ! grep -q "^delete clusterrole wva-epp-metrics-auth" "$WORK/kubectl.log"' "role in use: kubectl $(tr '\n' ';' <"$WORK/kubectl.log")"
+reset
+run wva_remove_epp_metrics_auth STUB_CRB=FORBIDDEN
+ok '[ "$RC" = 0 ] && [ ! -s "$WORK/warnings" ] && ! grep -q "^delete " "$WORK/kubectl.log" && grep -q "cluster admin removes them" "$WORK/info"' "unreadable: warnings $(cat "$WORK/warnings"), kubectl $(tr '\n' ';' <"$WORK/kubectl.log"), info $(cat "$WORK/info")"
 
 echo ""
 echo "EPP metrics auth: $CASES cases, $PASS assertions passed, $FAIL failed"
