@@ -1,0 +1,111 @@
+name: from-upstream-wva
+
+prerequisites:
+  controller:
+    note: Find the upstream controller. ARGS without --watch-namespace means it manages every namespace.
+    run: kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler,control-plane=controller-manager -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image,ARGS:.spec.template.spec.containers[0].args'
+  helm:
+    note: Installed with Helm? A release with a workload-variant-autoscaler chart means yes.
+    run: helm list -A | grep workload-variant-autoscaler
+  workloads:
+    note: List what it scales. MANAGED true marks the ones upstream discovered. OWNER ScaledObject marks an HPA that KEDA owns.
+    run: |
+      kubectl get scaledobject -A -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,MANAGED:.metadata.annotations.llm-d\.ai/managed,TRIGGERS:.spec.triggers[*].type,MIN:.spec.minReplicaCount'
+      kubectl get hpa -A -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,MANAGED:.metadata.annotations.llm-d\.ai/managed,OWNER:.metadata.ownerReferences[0].kind'
+
+migrate:
+  save:
+    note: Save what step 3 removes and step 5 changes. Going back needs these files.
+    run: |
+      kubectl get configmap -n <upstream-namespace> -o yaml > upstream-configmaps.yaml
+      kubectl get deployment wva-controller-manager -n <upstream-namespace> -o yaml > upstream-controller.yaml
+      kubectl get scaledobject,hpa -A -o yaml > upstream-autoscalers.yaml
+      # Installed with Helm: save the release, its values and the chart version instead of the Deployment
+      #   helm get values <release> -n <upstream-namespace> > upstream-values.yaml
+      #   helm list -A | grep workload-variant-autoscaler > upstream-release.txt
+  freeze:
+    note: Freeze every ScaledObject with a prometheus trigger that upstream scales. It holds its current replica count.
+    run: kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused=true
+  remove:
+    note: Stop the upstream controller. Your workloads, KEDA and Prometheus stay.
+    run: kubectl delete deployment wva-controller-manager -n <upstream-namespace>
+  savescrape:
+    note: Helm only. Save the chart's model-server Service and ServiceMonitor; the uninstall deletes them.
+    run: kubectl get service,servicemonitor -n <model-namespace> -l app.kubernetes.io/instance=<release> -o yaml > upstream-scrape.yaml
+  removehelm:
+    note: Installed with Helm? Remove the release instead.
+    run: helm uninstall <release> -n <upstream-namespace>
+  restorescrape:
+    note: Helm only, pods without the role label and modelserver port. Re-create the saved scrape; yq drops what the API server set.
+    run: yq '.items[] | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status, .spec.clusterIP, .spec.clusterIPs, .spec.ports[].nodePort) | split_doc' upstream-scrape.yaml | kubectl apply -f -
+  checkout:
+    note: Get a release of this project. The install guides run from this checkout.
+    run: |
+      git clone https://github.com/ev-shindin/llm-scaling-manager.git
+      cd llm-scaling-manager
+      git checkout v0.10.0
+  policy:
+    note: Carry over the settings you tuned. Edit the new ConfigMap, not the old one.
+    run: kubectl edit configmap wva-scaling-policy-config -n <controller-namespace>
+  plan:
+    note: "Write the plan. It applies nothing. Cluster-wide install: add SCOPE=cluster."
+    run: make scaledobjects-plan WVA_DEFAULT_SO_PLAN=wva-plan.yaml
+  apply:
+    note: "Only after editing the plan and deleting the plain HPAs. Cluster-wide install: add SCOPE=cluster."
+    run: make scaledobjects-apply WVA_DEFAULT_SO_PLAN=wva-plan.yaml
+  unlisted:
+    note: A workload missing from the plan has no llm-d serving label. Label the Deployment itself (its pods do not restart), then plan again.
+    run: kubectl label deployment <name> -n <namespace> llm-d.ai/role=decode
+  unfreeze:
+    note: Unfreeze each adopted ScaledObject. The scaling manager now sizes it.
+    run: kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused-
+
+verify:
+  deployment:
+    note: Check the controller and the ScaledObjects, with the NAMESPACE you installed with.
+    run: |
+      make verify-deployment
+      make verify-scaledobjects
+      # cluster-wide install:
+      #   make verify-deployment SCOPE=cluster WVA_NS=<controller-namespace>
+      #   make verify-scaledobjects SCOPE=cluster WVA_NS=<controller-namespace>
+  rewire:
+    note: A ScaledObject whose HPA shows only cpu is unwired. Re-wire it. Cluster-wide install, add SCOPE=cluster.
+    run: |
+      make scaledobjects-rewire
+      # cluster-wide install:
+      #   make scaledobjects-rewire SCOPE=cluster WVA_NS=<controller-namespace>
+
+rollback:
+  freeze:
+    note: Freeze the adopted ScaledObjects again, so nothing scales while the controllers change.
+    run: kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused=true --overwrite
+  undeploy:
+    note: Remove the scaling manager, with the same SCOPE and NAMESPACE you installed with. It also deletes the ScaledObjects it created.
+    run: make undeploy-wva NAMESPACE=<namespace>
+  controller:
+    note: Restore the upstream controller. yq drops the fields the API server sets.
+    run: yq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status)' upstream-controller.yaml | kubectl apply -f -
+  configmaps:
+    note: After a reinstall from the release, put back the ConfigMaps you tuned.
+    run: yq '.items[] | select(.metadata.name | test("wva-")) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
+  autoscalers:
+    note: Restore the saved ScaledObjects and plain HPAs. HPAs that KEDA owns are skipped; KEDA recreates them.
+    run: yq '.items[] | select(.metadata.ownerReferences == null) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-autoscalers.yaml | kubectl apply -f -
+
+cleanup:
+  clusterrbac:
+    note: Remove the upstream cluster-wide RBAC. These names have no suffix; this project's own all do.
+    run: |
+      kubectl delete clusterrolebinding wva-manager-rolebinding wva-metrics-auth-rolebinding \
+        wva-metrics-reader-rolebinding wva-epp-metrics-reader-role-binding --ignore-not-found
+      kubectl delete clusterrole wva-manager-role wva-metrics-auth-role \
+        wva-metrics-reader wva-epp-metrics-reader-role --ignore-not-found
+  openshift:
+    note: OpenShift only. Upstream suffixed its bindings with a hash of its namespace. List them; delete them only if the scaling manager does not run in that namespace.
+    run: |
+      SUFFIX=$(printf '%s' "<upstream-namespace>" | sha256sum | cut -c1-8)
+      kubectl get clusterrolebinding -o name | grep -- "-${SUFFIX}$"
+  crd:
+    note: Releases up to v0.8 installed the VariantAutoscaling CRD. This project does not read it.
+    run: kubectl delete crd variantautoscalings.llmd.ai --ignore-not-found
