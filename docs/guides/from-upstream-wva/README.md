@@ -166,9 +166,12 @@ admin) and `make deploy-wva`. The cluster-wide guide runs
 version](../../reference/upgrade-and-uninstall.md#pin-the-version) shows.
 
 To run a cluster-wide install in the upstream namespace, name it:
-`make deploy-wva SCOPE=cluster WVA_NS=<upstream-namespace>`. Then pass the same
-`SCOPE=cluster WVA_NS=<upstream-namespace>` to every `make` command below;
-without `WVA_NS` they look in `workload-variant-autoscaler-system`.
+`make deploy-wva SCOPE=cluster WVA_NS=<upstream-namespace>`. Then
+`<controller-namespace>` below is `<upstream-namespace>`: pass
+`SCOPE=cluster WVA_NS=<upstream-namespace>` to every `make` command; without
+`WVA_NS` they look in `workload-variant-autoscaler-system`. A namespace-scope
+install there also works:
+`NAMESPACE=<model-namespace> WVA_NS=<upstream-namespace> WVA_WATCH_NS=<model-namespace>`.
 
 Then carry over the settings you tuned, from `upstream-configmaps.yaml`:
 
@@ -224,13 +227,13 @@ Edit `wva-plan.yaml` before you apply anything:
   and without the EPP's `flowControl` gate it never wakes. Set
   `minReplicas: 1` unless you want that ([scale to zero](../scale-to-zero/)),
   or install with `ENABLE_SCALE_TO_ZERO=false`.
-- **Plain HPAs**: the workload's entry is already `apply: yes`. Delete the HPA
+- **Plain HPAs**: the workload's entry is already `apply: yes`, with the plan's
+  bounds (1 and 10), not the HPA's: copy the HPA's `minReplicas` and
+  `maxReplicas` into the entry. Then delete the HPA
   (`kubectl delete hpa <name> -n <namespace>`) before you run
   `scaledobjects-apply`. Two autoscalers on one workload fight over its replica
   count. Its new ScaledObject is named `<workload>-wva`, so its
-  `variant_name` series change from the HPA's name to that. The plan does not
-  read the HPA's bounds (it writes 1 and 10): copy its `minReplicas` and `maxReplicas` into the
-  entry before you delete it.
+  `variant_name` series change from the HPA's name to that.
 - **A workload missing from the plan** has no llm-d serving label
   (`llm-d.ai/role=decode` or `prefill`, or `llm-d.ai/inferenceServing=true`).
   Upstream did not need one. Label the Deployment and plan again, or write its
@@ -278,7 +281,7 @@ make verify-scaledobjects
 
 <!-- guide:verify.rewire start -->
 ```bash
-# A ScaledObject whose HPA shows only cpu is unwired. Re-wire it. Cluster-wide install, add SCOPE=cluster WVA_NS=<controller-namespace>.
+# A ScaledObject whose HPA shows only cpu is unwired. Re-wire it.
 make scaledobjects-rewire
 # cluster-wide install:
 #   make scaledobjects-rewire SCOPE=cluster WVA_NS=<controller-namespace>
@@ -307,7 +310,7 @@ kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused=t
 
 <!-- guide:rollback.undeploy start -->
 ```bash
-# Remove the scaling manager, with the same SCOPE and NAMESPACE you installed with. It also deletes the ScaledObjects it created.
+# Remove the scaling manager, with the same SCOPE and NAMESPACE (cluster-wide, WVA_NS) you installed with. It also deletes the ScaledObjects it created.
 make undeploy-wva NAMESPACE=<namespace>
 ```
 <!-- guide:rollback.undeploy end -->
@@ -318,8 +321,8 @@ make undeploy-wva NAMESPACE=<namespace>
    - **The scaling manager ran in another namespace**: apply the saved
      Deployment.
    - **It ran in the upstream namespace**: the uninstall deleted the whole
-     same-named install there (ConfigMaps except `wva-saturation-scaling-config`,
-     ServiceAccounts, the token Secret,
+     same-named install there (ConfigMaps except
+     `wva-saturation-scaling-config`, ServiceAccounts, the token Secret,
      Service, ServiceMonitor, the leader-election Role and RoleBinding).
      Reinstall upstream from its release, then put back the ConfigMaps you
      tuned.

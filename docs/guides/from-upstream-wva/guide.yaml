@@ -71,7 +71,7 @@ verify:
       #   make verify-deployment SCOPE=cluster WVA_NS=<controller-namespace>
       #   make verify-scaledobjects SCOPE=cluster WVA_NS=<controller-namespace>
   rewire:
-    note: A ScaledObject whose HPA shows only cpu is unwired. Re-wire it. Cluster-wide install, add SCOPE=cluster WVA_NS=<controller-namespace>.
+    note: A ScaledObject whose HPA shows only cpu is unwired. Re-wire it.
     run: |
       make scaledobjects-rewire
       # cluster-wide install:
@@ -82,7 +82,7 @@ rollback:
     note: Freeze the adopted ScaledObjects again, so nothing scales while the controllers change.
     run: kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused=true --overwrite
   undeploy:
-    note: Remove the scaling manager, with the same SCOPE and NAMESPACE you installed with. It also deletes the ScaledObjects it created.
+    note: Remove the scaling manager, with the same SCOPE and NAMESPACE (cluster-wide, WVA_NS) you installed with. It also deletes the ScaledObjects it created.
     run: make undeploy-wva NAMESPACE=<namespace>
   controller:
     note: Restore the upstream controller. yq drops the fields the API server sets.
