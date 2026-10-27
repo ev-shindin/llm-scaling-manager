@@ -23,6 +23,7 @@ migrate:
       # Installed with Helm: save the release, its values and the chart version instead of the Deployment
       #   helm get values <release> -n <upstream-namespace> > upstream-values.yaml
       #   helm list -A | grep workload-variant-autoscaler > upstream-release.txt
+      #   helm list does not record where the chart came from: add its repo or path to upstream-release.txt
   freeze:
     note: Freeze every ScaledObject with a prometheus trigger that upstream scales. It holds its current replica count.
     run: kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused=true
@@ -48,10 +49,10 @@ migrate:
     note: Carry over the settings you tuned. Edit the new ConfigMap, not the old one.
     run: kubectl edit configmap wva-scaling-policy-config -n <controller-namespace>
   plan:
-    note: "Write the plan. It applies nothing. Cluster-wide install: add SCOPE=cluster."
+    note: "Write the plan. It applies nothing. Cluster-wide install: add SCOPE=cluster WVA_NS=<controller-namespace>."
     run: make scaledobjects-plan WVA_DEFAULT_SO_PLAN=wva-plan.yaml
   apply:
-    note: "Only after editing the plan and deleting the plain HPAs. Cluster-wide install: add SCOPE=cluster."
+    note: "Only after editing the plan and deleting the plain HPAs. Cluster-wide install: add SCOPE=cluster WVA_NS=<controller-namespace>."
     run: make scaledobjects-apply WVA_DEFAULT_SO_PLAN=wva-plan.yaml
   unlisted:
     note: A workload missing from the plan has no llm-d serving label. Label the Deployment itself (its pods do not restart), then plan again.
@@ -70,7 +71,7 @@ verify:
       #   make verify-deployment SCOPE=cluster WVA_NS=<controller-namespace>
       #   make verify-scaledobjects SCOPE=cluster WVA_NS=<controller-namespace>
   rewire:
-    note: A ScaledObject whose HPA shows only cpu is unwired. Re-wire it. Cluster-wide install, add SCOPE=cluster.
+    note: A ScaledObject whose HPA shows only cpu is unwired. Re-wire it. Cluster-wide install, add SCOPE=cluster WVA_NS=<controller-namespace>.
     run: |
       make scaledobjects-rewire
       # cluster-wide install:

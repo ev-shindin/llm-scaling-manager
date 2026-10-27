@@ -65,6 +65,7 @@ kubectl get scaledobject,hpa -A -o yaml > upstream-autoscalers.yaml
 # Installed with Helm: save the release, its values and the chart version instead of the Deployment
 #   helm get values <release> -n <upstream-namespace> > upstream-values.yaml
 #   helm list -A | grep workload-variant-autoscaler > upstream-release.txt
+#   helm list does not record where the chart came from: add its repo or path to upstream-release.txt
 ```
 <!-- guide:migrate.save end -->
 
@@ -164,6 +165,11 @@ admin) and `make deploy-wva`. The cluster-wide guide runs
 `make deploy-wva SCOPE=cluster`, which does both. Pin the release as [Pin the
 version](../../reference/upgrade-and-uninstall.md#pin-the-version) shows.
 
+To run a cluster-wide install in the upstream namespace, name it:
+`make deploy-wva SCOPE=cluster WVA_NS=<upstream-namespace>`. Then pass the same
+`SCOPE=cluster WVA_NS=<upstream-namespace>` to every `make` command below;
+without `WVA_NS` they look in `workload-variant-autoscaler-system`.
+
 Then carry over the settings you tuned, from `upstream-configmaps.yaml`:
 
 <!-- guide:migrate.policy start -->
@@ -200,7 +206,7 @@ Settings outside that ConfigMap do not carry over:
 
 <!-- guide:migrate.plan start -->
 ```bash
-# Write the plan. It applies nothing. Cluster-wide install: add SCOPE=cluster.
+# Write the plan. It applies nothing. Cluster-wide install: add SCOPE=cluster WVA_NS=<controller-namespace>.
 make scaledobjects-plan WVA_DEFAULT_SO_PLAN=wva-plan.yaml
 ```
 <!-- guide:migrate.plan end -->
@@ -222,7 +228,9 @@ Edit `wva-plan.yaml` before you apply anything:
   (`kubectl delete hpa <name> -n <namespace>`) before you run
   `scaledobjects-apply`. Two autoscalers on one workload fight over its replica
   count. Its new ScaledObject is named `<workload>-wva`, so its
-  `variant_name` series change from the HPA's name to that.
+  `variant_name` series change from the HPA's name to that. The plan does not
+  read the HPA's bounds (it writes 1 and 10): copy its `minReplicas` and `maxReplicas` into the
+  entry before you delete it.
 - **A workload missing from the plan** has no llm-d serving label
   (`llm-d.ai/role=decode` or `prefill`, or `llm-d.ai/inferenceServing=true`).
   Upstream did not need one. Label the Deployment and plan again, or write its
@@ -241,7 +249,7 @@ Then apply the edited plan:
 
 <!-- guide:migrate.apply start -->
 ```bash
-# Only after editing the plan and deleting the plain HPAs. Cluster-wide install: add SCOPE=cluster.
+# Only after editing the plan and deleting the plain HPAs. Cluster-wide install: add SCOPE=cluster WVA_NS=<controller-namespace>.
 make scaledobjects-apply WVA_DEFAULT_SO_PLAN=wva-plan.yaml
 ```
 <!-- guide:migrate.apply end -->
@@ -270,7 +278,7 @@ make verify-scaledobjects
 
 <!-- guide:verify.rewire start -->
 ```bash
-# A ScaledObject whose HPA shows only cpu is unwired. Re-wire it. Cluster-wide install, add SCOPE=cluster.
+# A ScaledObject whose HPA shows only cpu is unwired. Re-wire it. Cluster-wide install, add SCOPE=cluster WVA_NS=<controller-namespace>.
 make scaledobjects-rewire
 # cluster-wide install:
 #   make scaledobjects-rewire SCOPE=cluster WVA_NS=<controller-namespace>
@@ -310,7 +318,8 @@ make undeploy-wva NAMESPACE=<namespace>
    - **The scaling manager ran in another namespace**: apply the saved
      Deployment.
    - **It ran in the upstream namespace**: the uninstall deleted the whole
-     same-named install there (ConfigMaps, ServiceAccounts, the token Secret,
+     same-named install there (ConfigMaps except `wva-saturation-scaling-config`,
+     ServiceAccounts, the token Secret,
      Service, ServiceMonitor, the leader-election Role and RoleBinding).
      Reinstall upstream from its release, then put back the ConfigMaps you
      tuned.
