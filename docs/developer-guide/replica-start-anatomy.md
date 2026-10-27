@@ -8,6 +8,15 @@ Measured on an H200 cluster, 2026-10: Qwen3-32B bf16 (61 GiB), one H200,
 `--max-model-len 8192 --gpu-memory-utilization 0.90`, vLLM v0.26.0, in-pod
 timestamps, median of 2 to 3 starts after one start that fills the caches.
 
+## Measurement conditions
+
+- **The AOT row ran on another node**, whose own start with the bytecode cache
+  was 49.5 s: the one-file AOT compile took it from 49.5 to 44.2 s. The v0.32.0
+  rows ran on that same node.
+- **The image pull (67-80 s) is a lower bound.** It was measured with a sibling
+  tag of the engine image, which shares base layers with images already on the
+  node.
+
 ## Phases of the 59.8 s prepared start
 
 "Prepared" is `make prepull`, `make weights` on the node's disk and a seeded

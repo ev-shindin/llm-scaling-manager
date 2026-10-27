@@ -24,9 +24,12 @@ Preparation is never the wrong first step: it costs disk, not accelerators.
 | GLM class, one node or more | preparation (the JIT cache is not optional) + a retained pool or a floor | whole nodes held; host RAM may rule warming out |
 
 **One-time setup per node.** Measured for Qwen3-32B: `make weights` downloaded
-the 62 GB in ~25 s on that cluster's network; the engine-cache fill start and
-publish took ~2.5 min more. Allow 3-4.5 min per node in all, once. How to run
-each is in [Preparing a workload](workload-preparation.md#the-rest-of-the-start-path).
+the 62 GB in ~25 s on that cluster's network; the first start that fills the
+engine cache, and copying it to the seed, took ~2.5 min more. Allow 3-4.5 min
+per node in all, once. How to run each:
+[`make prepull`](workload-preparation.md#holding-the-image-on-the-nodes),
+[`make weights`](workload-preparation.md#weights-on-the-nodes-disk),
+[`make engine-cache`](workload-preparation.md#engine-caches-on-the-nodes-disk).
 
 ## Words used here
 
@@ -42,6 +45,8 @@ each is in [Preparing a workload](workload-preparation.md#the-rest-of-the-start-
 | floor | `minReplicaCount` held above zero, so a replica is always running |
 | lend / bridge | a warm-pool Pod serving for a model while that model's own new replica starts |
 | warming | loading a model into a pool Pod and putting it to sleep, ready to lend |
+| parked | a model scaled to zero, held asleep in a pool Pod |
+| retained pool | a pool that keeps what it lends: several large models loaded on one set of GPUs (a Pod or a whole group), one awake at a time ([retained pool](../well-lit-paths/retained-pool/)) |
 
 ## Qwen3-32B on one H200
 
@@ -64,10 +69,8 @@ already in the node's page cache; a fresh node adds ~10 s (see below).
 | The same preparation on a newer engine, defaults | v0.32.0 | 50.4 s | nothing more |
 | v0.32.0 + `--kv-cache-memory-bytes` from a previous start (`make workload-patch` proposes it, never applies it) | v0.32.0 | 42.3 s | a value you must derive again after any model, GPU, flag or version change |
 
-- **The AOT row ran on another node**, whose own start with the bytecode cache
-  was 49.5 s: the AOT compile took it from 49.5 to 44.2 s.
-- **The image pull is a lower bound.** It was measured with a sibling tag, which
-  shares base layers with images already on the node.
+- **Not every row ran on the same node, and the pull is a lower bound**; see
+  [measurement conditions](../developer-guide/replica-start-anatomy.md#measurement-conditions).
 - **Why v0.32 is slower by default.** Model Runner V2 sizes the KV cache by
   recording every CUDA graph once more (~9 s). A fixed KV size skips that, with
   the same KV cache, output and decode speed. Too large a value runs out of
