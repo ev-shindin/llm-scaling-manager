@@ -51,7 +51,7 @@ Read the review first; the implementation design says what was built.
   — proposed. A background reader, started by the engine container's command
   before it execs the engine, reads the pod's weight files into the page cache
   while the engine imports: same container, UID and memory cgroup, no new
-  object. Measured 19.9 s to 10.0 s of weight load on a 32B model; estimated
+  container. Measured 19.9 s to 10.0 s of weight load on a 32B model; estimated
   60-90 s on a GLM-class node with one disk and ~0 with striped NVMe. Reads
   every file, because vLLM does. Off by default.
 
