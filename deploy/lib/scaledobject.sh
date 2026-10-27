@@ -1597,8 +1597,14 @@ so_workload_gaps() {
     local ns="$1" resource="$2" name="$3" pod="$4" out
     out=$(kubectl get "$resource" "$name" -n "$ns" -o json 2>/dev/null) || return 1
     [ -n "$out" ] || return 1
+    # An LWS with no leaderTemplate builds its leader from workerTemplate, so a
+    # question about the leader is answered from that one -- the rule the patch
+    # path follows. Without it the plan notes read {} and said nothing.
     printf '%s' "$out" | jq -r --argjson p "$pod" --arg emount "${WVA_ENGINE_CACHE_PATH:-/engine-cache}" '
-        (getpath($p) // {}) as $t
+        ( getpath($p)
+          // (if $p == ["spec", "leaderWorkerTemplate", "leaderTemplate"]
+              then getpath(["spec", "leaderWorkerTemplate", "workerTemplate"]) else null end)
+          // {} ) as $t
         | ([ $t.spec.containers[]?
              | ((.command // []) + (.args // []) | join(" ") | ascii_downcase) as $cmd
              | select(((.image // "") | ascii_downcase | test("vllm|sglang|llm-d-inference-sim"))

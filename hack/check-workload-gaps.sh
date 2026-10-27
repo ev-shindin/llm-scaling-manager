@@ -2609,6 +2609,18 @@ assert_eq "$(lws_get "$doc" '.spec.leaderWorkerTemplate.workerTemplate.spec.cont
 assert_contains "$doc" "workerTemplate (leader and workers), engine container vllm: weights, engine-cache, bytecode"
 [ "$FAILED" -eq "$before" ] && ok
 
+CASE="LWS: without a leaderTemplate the plan notes read workerTemplate"
+reset; f_lws_worker_only
+before=$FAILED
+assert_contains "$(so_workload_gaps ns leaderworkersets w "$POD_LWS")" "vllm"
+assert_contains "$(so_weights_note ns leaderworkersets w "$POD_LWS")" "Weights do not persist"
+assert_contains "$(so_enginecache_note ns leaderworkersets w "$POD_LWS")" "Every start compiles from nothing"
+assert_contains "$(so_drain_note ns leaderworkersets w "$POD_LWS")" "Scale-down will cut in-flight requests"
+# A leaderTemplate that IS there is still the one read (anchor: its own container).
+reset; f_lws_two
+assert_contains "$(so_workload_gaps ns leaderworkersets w "$POD_LWS")" "vllm-leader"
+[ "$FAILED" -eq "$before" ] && ok
+
 CASE="LWS: a template with no engine container is skipped; the other still gets its halves"
 reset; f_lws_two
 before=$FAILED
