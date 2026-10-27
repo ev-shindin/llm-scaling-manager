@@ -49,7 +49,10 @@ not pin `newTag: ${VERSION}`.
 - [ ] 4. Reset PR to `main`: `newTag: main` again, only after the run succeeded.
 - [ ] 5. Publish the GitHub Release with the release notes ([new release]);
       mark a release candidate as a pre-release. Verify the signature.
-- [ ] 6. Run the [install guide](https://github.com/ev-shindin/llm-scaling-manager/tree/main/docs/guides/install-in-namespace)
+- [ ] 6. Docs PR to `main`: point the install, upgrade and benchmark docs at
+      `${VERSION}` and its digest
+      ([step 5](https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/developer-guide/release-process.md#5-point-the-docs-at-the-release)).
+- [ ] 7. Run the [install guide](https://github.com/ev-shindin/llm-scaling-manager/tree/main/docs/guides/install-in-namespace)
       against the released image.
 
 If the run fails, see

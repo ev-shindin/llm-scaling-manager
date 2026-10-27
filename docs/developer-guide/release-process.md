@@ -5,7 +5,7 @@ to tag it, and what to do when the release workflow fails.
 
 ## Quick reference
 
-Every release, `-rc` ones included, takes **two PRs to `main`** and one tag:
+Every release, `-rc` ones included, takes **three PRs to `main`** and one tag:
 
 | Step | Where | What |
 |------|--------|------|
@@ -14,6 +14,7 @@ Every release, `-rc` ones included, takes **two PRs to `main`** and one tag:
 | 3. Wait | GitHub Actions | The release run must succeed |
 | 4. Reset PR | PR to `main` | `newTag: main` again, only after the run succeeded |
 | 5. Publish | GitHub | Publish the GitHub Release with the release notes; verify the signature |
+| 6. Docs PR | PR to `main` | Point the install, upgrade and benchmark docs at the release and its digest |
 
 ---
 
@@ -105,6 +106,13 @@ the pin check.
 
 In **Releases**, choose the tag, paste the release notes, mark it as a
 pre-release if the tag has a prerelease suffix, and publish.
+
+### 5. Point the docs at the release
+
+Open a docs PR to `main` that replaces the previous version with the new one in
+the install, upgrade and benchmark docs, pins the new multi-arch index digest
+from the run's summary where the docs pin one, and adds the upgrade section for
+this release to `docs/reference/upgrade-and-uninstall.md`.
 
 ### If the release fails
 
