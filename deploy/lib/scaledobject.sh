@@ -865,7 +865,8 @@ so_pycache_key() {
 # ---------------------------------------------------------------------------
 
 # so_workload_patch_index lists the documents in an emitted patch file as
-# "<namespace> <name>", one per line.
+# "<namespace> <name> <kind>", one per line. The kind, because a Deployment and
+# a LeaderWorkerSet may share a name in one namespace.
 #
 # A SPACE, not the \037 used elsewhere in this file. Both fields are RFC 1123
 # labels -- lowercase alphanumerics and hyphens -- so a space cannot appear in
@@ -880,7 +881,7 @@ so_pycache_key() {
 # reviewers found it independently and it was invisible in testing because the
 # default benchmark scenario runs one decode Deployment.
 so_workload_patch_index() {
-    yq eval '[.metadata.namespace, .metadata.name] | join(" ")' "$1" 2>/dev/null \
+    yq eval '[.metadata.namespace, .metadata.name, .kind] | join(" ")' "$1" 2>/dev/null \
         | grep -v '^$' || true
 }
 
@@ -926,13 +927,18 @@ so_workload_patch_index() {
 # for. So the test is the collision, not the operation.
 #
 # $1 the live object JSON, $2 the volume name, $3 the mount path, $4 the claim.
+#
+# $6, optional, the pod templates to look in, as a JSON array of jq paths
+# (so_workload_doc_shape's d_paths); a Deployment's spec.template by default.
 so_workload_weights_safe() {
-    local live="$1" volname="$2" mountpath="$3" claim="$4" ns="$5" reason pvc
-    reason="$(printf '%s' "$live" | jq -r --arg v "$volname" --arg m "$mountpath" '
-        (.spec.template.spec // {}) as $t
-        | [ ($t.volumes[]? | select(.name == $v) | "a volume named \($v) already exists"),
-            ($t.containers[]?.volumeMounts[]? | select(.mountPath == $m) | "something is already mounted at \($m)")
-          ] | first // ""' 2>/dev/null)" || return 1
+    local live="$1" volname="$2" mountpath="$3" claim="$4" ns="$5" paths="${6:-}" reason pvc
+    [ -n "$paths" ] || paths='[["spec","template"]]'
+    reason="$(printf '%s' "$live" | jq -r --arg v "$volname" --arg m "$mountpath" --argjson ps "$paths" '
+        [ $ps[] as $p
+          | (getpath($p).spec // {}) as $t
+          | ( ($t.volumes[]? | select(.name == $v) | "a volume named \($v) already exists"),
+              ($t.containers[]?.volumeMounts[]? | select(.mountPath == $m) | "something is already mounted at \($m)") )
+        ] | first // ""' 2>/dev/null)" || return 1
     if [ -n "$reason" ]; then
         printf '%s' "$reason"
         return 1
@@ -972,16 +978,38 @@ so_workload_weights_safe() {
 # volume is for, in words, $6 the opt-in that asked for it.
 so_workload_volume_can_apply() {
     local ns="$1" name="$2" doc="$3" volname="$4" what="$5" optin="$6" live mountpath claim why
-    claim="$(yq eval ".spec.template.spec.volumes[] | select(.name == \"$volname\") | .persistentVolumeClaim.claimName // \"\"" "$doc" 2>/dev/null)"
+    local d_resource d_spec d_paths
+    so_workload_doc_shape "$doc" || return 1
+    claim="$(yq eval "[$d_spec.volumes[] | select(.name == \"$volname\") | .persistentVolumeClaim.claimName // \"\"] | .[0] // \"\"" "$doc" 2>/dev/null)"
     [ -n "$claim" ] || return 1          # no such half in this document
-    mountpath="$(yq eval ".spec.template.spec.containers[0].volumeMounts[] | select(.name == \"$volname\") | .mountPath // \"\"" "$doc" 2>/dev/null)"
-    live="$(kubectl get deployments "$name" -n "$ns" -o json 2>/dev/null)" || return 1
-    if why="$(so_workload_weights_safe "$live" "$volname" "$mountpath" "$claim" "$ns")"; then
+    mountpath="$(yq eval "[$d_spec.containers[].volumeMounts[] | select(.name == \"$volname\") | .mountPath // \"\"] | .[0] // \"\"" "$doc" 2>/dev/null)"
+    live="$(kubectl get "$d_resource" "$name" -n "$ns" -o json 2>/dev/null)" || return 1
+    if why="$(so_workload_weights_safe "$live" "$volname" "$mountpath" "$claim" "$ns" "$d_paths")"; then
         log_info "  $ns/$name: applying the $what volume too ($optin=true)."
         return 0
     fi
     log_warning "  $ns/$name: the $what volume is emitted, NOT applied -- $why."
     return 1
+}
+
+# so_workload_doc_shape reads which kind patch document $1 is and sets the
+# caller's d_resource (what kubectl calls it), d_spec (its pod specs, as a yq
+# path, iterating a LeaderWorkerSet's templates) and d_paths (the same
+# templates as a JSON array of jq paths into the live object). A document
+# naming no kind is a Deployment's.
+so_workload_doc_shape() {
+    local kind
+    kind="$(yq eval '.kind // ""' "$1" 2>/dev/null)" || return 1
+    if [ "$kind" = "LeaderWorkerSet" ]; then
+        d_resource=leaderworkersets
+        d_spec='.spec.leaderWorkerTemplate[].spec'
+        d_paths="$(yq eval -o=json -I=0 '[.spec.leaderWorkerTemplate | keys | .[] | ["spec", "leaderWorkerTemplate", .]]' "$1" 2>/dev/null)" || return 1
+        [ -n "$d_paths" ] || return 1
+    else
+        d_resource=deployments
+        d_spec='.spec.template.spec'
+        d_paths='[["spec","template"]]'
+    fi
 }
 
 so_workload_weights_can_apply() {
@@ -1012,7 +1040,7 @@ so_workload_weights_can_apply() {
 # (0 of 0, the seconds after `make engine-cache`) is not "every node
 # prepared" either.
 so_workload_enginecache_can_apply() {
-    local ns="$1" name="$2" doc="$3" claim ds ready want
+    local ns="$1" name="$2" doc="$3" claim ds ready want d_resource d_spec d_paths
     so_workload_volume_can_apply "$ns" "$name" "$doc" "${WVA_ENGINE_CACHE_VOLUME_NAME:-engine-cache}" engine-cache WVA_WORKLOAD_PATCH_APPLY_ENGINE_CACHE || return 1
     claim="${WVA_ENGINE_CACHE_CLAIM:-engine-cache}"; claim="${claim%%:*}"
     if [ "$claim" = "engine-cache" ]; then
@@ -1032,7 +1060,8 @@ so_workload_enginecache_can_apply() {
     # caches lose the replica; the bytecode alone makes the start slower than
     # no prefix, because Python then reads bytecode only from the prefix and
     # ignores the image's own __pycache__ directories.
-    if [ "$(yq eval '[.spec.template.spec.containers[].env[]? | select(.name == "VLLM_CACHE_ROOT")] | length' "$doc" 2>/dev/null)" != 0 ]; then
+    so_workload_doc_shape "$doc" || return 1
+    if [ "$(yq eval "[$d_spec.containers[].env[]? | select(.name == \"VLLM_CACHE_ROOT\")] | length" "$doc" 2>/dev/null)" != 0 ]; then
         log_warning "  $ns/$name: the engine-cache guard is NOT applied with it -- the command belongs to the chart. A node where the cache stops being writable then loses the replica, not a compile; the emitted file has the guard."
     else
         log_warning "  $ns/$name: the engine-cache guard is NOT applied with it -- the command belongs to the chart. A node where the bytecode directory is not writable then starts slower than with no PYTHONPYCACHEPREFIX at all; the emitted file has the guard."
@@ -1041,10 +1070,11 @@ so_workload_enginecache_can_apply() {
 }
 
 so_workload_patch_one() {
-    local file="$1" ns="$2" name="$3" doc rc=0 keep_w=0 keep_e=0
+    local file="$1" ns="$2" name="$3" kind="${4:-Deployment}" doc rc=0 keep_w=0 keep_e=0
+    local d_resource d_spec d_paths ops
     doc="$(mktemp)" || return 1
     # shellcheck disable=SC2016
-    yq eval-all "select(.metadata.namespace == \"$ns\" and .metadata.name == \"$name\")" \
+    yq eval-all "select(.metadata.namespace == \"$ns\" and .metadata.name == \"$name\" and .kind == \"$kind\")" \
         "$file" > "$doc" 2>/dev/null
     if [ ! -s "$doc" ]; then
         rm -f "$doc"
@@ -1064,13 +1094,33 @@ so_workload_patch_one() {
        && so_workload_enginecache_can_apply "$ns" "$name" "$doc"; then
         keep_e=1
     fi
-    if ! so_workload_patch_trim "$doc" "$keep_w" "$keep_e"; then
+    if ! so_workload_doc_shape "$doc"; then
+        rm -f "$doc"
+        log_warning "  Could not read the kind of the patch for $ns/$name."
+        return 1
+    fi
+    if ! so_workload_patch_trim "$doc" "$keep_w" "$keep_e" "$d_spec"; then
         rm -f "$doc"
         # 2, not 1: a DELIBERATE skip. Counting it as a failure made every re-run
         # of the standup announce "scale-downs in this run will truncate
         # in-flight requests" about a workload that already had its drain hook.
+        # A LeaderWorkerSet has no drain half, so without a storage opt-in it
+        # always lands here.
         log_info "  $ns/$name needs only a volume or a cache variable -- emitted, not applied."
         return 2
+    fi
+    if [ "$d_resource" = "leaderworkersets" ]; then
+        # A JSON patch, built against the live object: the API server refuses a
+        # strategic merge on a custom resource, and a merge patch replaces
+        # whole lists.
+        if ! ops="$(so_workload_lws_json_patch "$ns" "$name" "$doc")"; then
+            rm -f "$doc"
+            return 1
+        fi
+        printf '%s\n' "$ops" > "$doc"
+        kubectl patch leaderworkersets "$name" -n "$ns" --type=json --patch-file="$doc" || rc=$?
+        rm -f "$doc"
+        return "$rc"
     fi
     # `kubectl patch --type=strategic`, never `kubectl apply`. These objects were
     # created by Helm and carry no last-applied-configuration annotation, so apply
@@ -1091,8 +1141,11 @@ so_workload_patch_one() {
 # other survives: the document carries one env list, one mount list and one
 # volume list for both. A list emptied by that goes too; an `env: []` left
 # behind is a field the patch would still write.
+#
+# $4, optional, is where the document keeps its pod specs (so_workload_doc_shape's
+# d_spec); a Deployment's by default.
 so_workload_patch_trim() {
-    local doc="$1" keep_w="${2:-0}" keep_e="${3:-0}" stripped keep prog
+    local doc="$1" keep_w="${2:-0}" keep_e="${3:-0}" s="${4:-.spec.template.spec}" stripped keep prog
     local wvol="${WVA_MODEL_VOLUME_NAME:-model-storage}" evol="${WVA_ENGINE_CACHE_VOLUME_NAME:-engine-cache}"
     local vols="false" envs="false"
     stripped="$(mktemp)" || return 1
@@ -1107,27 +1160,95 @@ so_workload_patch_trim() {
     # removed half leaves its explanation behind as a comment on the document,
     # so the body sent to the API server still spoke of a volume it no longer
     # carried -- harmless to the server, misleading in a log of what was sent.
-    prog="(.spec.template.spec.volumes | select(. != null)) |= map(select(($vols) | not))
-          | (.spec.template.spec.containers[].volumeMounts | select(. != null)) |= map(select(($vols) | not))
-          | (.spec.template.spec.containers[].env | select(. != null)) |= map(select(($envs) | not))
-          | del(.spec.template.spec.volumes | select(length == 0))
-          | del(.spec.template.spec.containers[].volumeMounts | select(length == 0))
-          | del(.spec.template.spec.containers[].env | select(length == 0))
+    prog="($s.volumes | select(. != null)) |= map(select(($vols) | not))
+          | ($s.containers[].volumeMounts | select(. != null)) |= map(select(($vols) | not))
+          | ($s.containers[].env | select(. != null)) |= map(select(($envs) | not))
+          | del($s.volumes | select(length == 0))
+          | del($s.containers[].volumeMounts | select(length == 0))
+          | del($s.containers[].env | select(length == 0))
           | ... comments=\"\""
     yq eval "$prog" "$doc" > "$stripped" 2>/dev/null
     # What remains is worth applying only if it still carries a change. A
     # container entry reduced to its own name patches nothing, and sending it
     # would report a success that changed no field.
-    keep="$(yq eval '[.spec.template.spec.terminationGracePeriodSeconds,
-                      .spec.template.spec.containers[].lifecycle,
-                      .spec.template.spec.volumes]
-                     | map(select(. != null)) | length' "$stripped" 2>/dev/null)"
+    keep="$(yq eval "[$s.terminationGracePeriodSeconds,
+                      $s.containers[].lifecycle,
+                      $s.volumes]
+                     | map(select(. != null)) | length" "$stripped" 2>/dev/null)"
     if [ ! -s "$stripped" ] || [ "${keep:-0}" -eq 0 ]; then
         rm -f "$stripped"
         return 1
     fi
     mv "$stripped" "$doc" || { rm -f "$stripped"; return 1; }
     return 0
+}
+
+# so_workload_lws_json_patch prints, for LeaderWorkerSet $2 in $1, the JSON
+# patch (RFC 6902) that applies trimmed document $3 to the live object.
+#
+# Add operations only, so nothing already in the pod spec is replaced: a list
+# that is absent is created whole, one that is present is appended to with
+# /-. The one exception is an env entry of the same name, which is replaced in
+# place rather than listed twice. Each container is found by name in the live
+# template and pinned with a test operation, so a template that changed
+# between the read and the patch fails the patch rather than writing into
+# another container.
+#
+# A variable goes only with its volume, per template: HF_HOME with the weights
+# volume, the vLLM and bytecode variables with the engine-cache volume. So a
+# template whose bytecode lives under a mount it already has -- emitted, never
+# applied, as on a Deployment -- is not applied because the OTHER template
+# carries a volume.
+so_workload_lws_json_patch() {
+    local ns="$1" name="$2" doc="$3" live body
+    if ! live="$(kubectl get leaderworkersets "$name" -n "$ns" -o json 2>/dev/null)" || [ -z "$live" ]; then
+        log_warning "  $ns/$name: could not read the live LeaderWorkerSet, so nothing was applied."
+        return 1
+    fi
+    body="$(yq eval -o=json -I=0 '.' "$doc" 2>/dev/null)" || return 1
+    if ! printf '%s' "$body" | jq -c --argjson live "$live" \
+            --arg wvol "${WVA_MODEL_VOLUME_NAME:-model-storage}" \
+            --arg evol "${WVA_ENGINE_CACHE_VOLUME_NAME:-engine-cache}" '
+        def ptr: "/" + (map(tostring | gsub("~"; "~0") | gsub("/"; "~1")) | join("/"));
+        def half: if . == "HF_HOME" then $wvol
+                  elif . == "VLLM_CACHE_ROOT" or . == "FLASHINFER_WORKSPACE_DIR"
+                       or . == "TRITON_CACHE_DIR" or . == "PYTHONPYCACHEPREFIX" then $evol
+                  else null end;
+        [ (.spec.leaderWorkerTemplate // {}) | to_entries[]
+          | .key as $t
+          | (.value.spec // {}) as $s
+          | ([ $s.volumes[]?.name ]) as $vnames
+          | select(($vnames | length) > 0)
+          | ["spec", "leaderWorkerTemplate", $t, "spec"] as $base
+          | ($live | getpath($base)) as $ls
+          | if $ls == null then error("the live object has no \($t)") else . end
+          | ( ( ($s.containers // [])[] as $c
+                | ([ ($ls.containers // []) | to_entries[] | select(.value.name == $c.name) | .key ] | first) as $i
+                | if $i == null then error("its live \($t) has no container named \($c.name)") else . end
+                | ($base + ["containers", $i]) as $cp
+                | ($ls.containers[$i]) as $lc
+                | {op: "test", path: ($cp + ["name"]), value: $c.name},
+                  ( ["env", "volumeMounts"][] as $f
+                    | [ ($c[$f] // [])[]
+                        | select(if $f == "env" then ((.name | half) as $h | $h == null or ($vnames | any(. == $h)))
+                                 else true end) ] as $items
+                    | select(($items | length) > 0)
+                    | ($lc | .[$f]) as $have
+                    | if $have == null then {op: "add", path: ($cp + [$f]), value: $items}
+                      else ( $items[] as $it
+                             | ([ $have | to_entries[] | select($f == "env" and .value.name == $it.name) | .key ] | last) as $j
+                             | if $j != null then {op: "replace", path: ($cp + [$f, $j]), value: $it}
+                               else {op: "add", path: ($cp + [$f, "-"]), value: $it} end )
+                      end ) ),
+              ( if $ls.volumes == null then {op: "add", path: ($base + ["volumes"]), value: $s.volumes}
+                else ($s.volumes[] | {op: "add", path: ($base + ["volumes", "-"]), value: .}) end ) )
+        ] | map(.path |= ptr)
+        | if length == 0 then error("nothing to apply") else . end' 2>"$doc.err"; then
+        log_warning "  $ns/$name: could not build the JSON patch -- $(head -1 "$doc.err" 2>/dev/null | sed 's/^jq: error (at [^)]*): //'). Nothing was applied."
+        rm -f "$doc.err"
+        return 1
+    fi
+    rm -f "$doc.err"
 }
 
 # so_workload_patch_drop_cache is the trim that keeps the drain half only.
@@ -1146,7 +1267,9 @@ so_workload_patch_header() {
 # Generated by `make workload-patch`. Regenerate rather than editing in place.
 # wva-workload-patch: generated
 #
-# These are STRATEGIC MERGE PATCHES, not manifests.
+# These are STRATEGIC MERGE PATCHES, not manifests. A LeaderWorkerSet document
+# is not one either: the API server refuses a strategic merge on it, and its own
+# comment says how it is applied.
 #
 # Do NOT `kubectl apply -f` this file. These objects belong to a Helm release and
 # carry no last-applied-configuration annotation; apply writes one, adopting a
@@ -1226,7 +1349,7 @@ wva_workload_patch() {
     local apply="${WVA_WORKLOAD_PATCH_APPLY:-false}"
     local ns resource pod kind name found=0 tmp rc=0
     local unreadable=0 skipped=0 scanned=0 patched=0 failed=0 deferred=0 needs_cache=0 needs_engine=0 needs_pyc=0
-    local listing names doc_rc index_lines tool doc_ns doc_name write_rc
+    local listing names doc_rc index_lines tool doc_ns doc_name doc_kind write_rc
 
     # The tool check this path never had. `make workload-patch` sources the
     # libraries directly instead of going through deploy/install.sh, so
@@ -1311,7 +1434,7 @@ wva_workload_patch() {
                 so_workload_patch_doc "$ns" "$resource" "$name" "$pod" >> "$tmp" || doc_rc=$?
                 case "$doc_rc" in
                     0) : ;;
-                    2) skipped=$((skipped + 1)) ;;      # LWS, or no engine to name
+                    2) skipped=$((skipped + 1)) ;;      # no engine to name, or an LWS with no cache half
                     *) unreadable=1 ;;                  # could not be read
                 esac
             done <<< "$names"
@@ -1391,11 +1514,11 @@ wva_workload_patch() {
             log_info "  The engine-cache half is emitted only -- see $out. Add WVA_WORKLOAD_PATCH_APPLY_ENGINE_CACHE=true to apply it."
         fi
         index_lines=0
-        while read -r doc_ns doc_name; do
+        while read -r doc_ns doc_name doc_kind; do
             [ -n "$doc_name" ] || continue
             index_lines=$((index_lines + 1))
             doc_rc=0
-            so_workload_patch_one "$tmp" "$doc_ns" "$doc_name" || doc_rc=$?
+            so_workload_patch_one "$tmp" "$doc_ns" "$doc_name" "$doc_kind" || doc_rc=$?
             case "$doc_rc" in
                 0) patched=$((patched + 1)) ;;
                 2) deferred=$((deferred + 1)) ;;
@@ -1820,47 +1943,14 @@ so_model_claim() {
         | if ($named | length) == 1 then $named[0] else "" end' 2>/dev/null || true
 }
 
-so_workload_patch_doc() {
-    local ns="$1" resource="$2" name="$3" pod="$4"
-    local gaps engine prestop grace pvcs onvol argv cachevol image pyc model
-    local want_drain=0 want_cache=0 want_engine=0 grace_want mountpath claim claim_found=0
-    local emount evol eclaim esub eclaim_found=0
-    # want_pyc: emit PYTHONPYCACHEPREFIX; want_evol: emit the engine-cache
-    # volume, for the vLLM caches or for the bytecode alone; pycdir: the mount
-    # the bytecode goes under; pyckey: the image key under pycache/.
-    local want_pyc=0 want_evol=0 pycdir="" pyckey="" pycwhy=""
-
-    # LWS is skipped, deliberately and loudly. Three things would each have to be
-    # solved and none is: the pod template is spec.leaderWorkerTemplate, not
-    # spec.template, so a Deployment-shaped patch writes a field the type does not
-    # have; the API server does not accept a strategic merge for a custom
-    # resource, so applying it is an unconditional 415; and draining a multi-node
-    # group means the WORKER template too, since killing a worker aborts the
-    # leader's in-flight generations whatever hook the leader carries. Emitting a
-    # confident, wrong document is worse than emitting nothing.
-    if [ "$resource" = "leaderworkersets" ]; then
-        log_warning "  Skipping LeaderWorkerSet $ns/$name: draining a multi-node group needs the worker template too, and is not implemented."
-        return 2
-    fi
-
-    # 3, not 0. Returning 0 here meant the caller counted an object it could not
-    # read as one with nothing wrong, printed the all-clear two lines below this
-    # very warning, and exited 0.
-    if ! gaps="$(so_workload_gaps "$ns" "$resource" "$name" "$pod")"; then
-        log_warning "  Could not read $resource/$name in $ns -- skipped. It is not being reported as healthy; it was not readable."
-        return 3
-    fi
-    IFS=$'\037' read -r engine prestop grace pvcs onvol argv cachevol image pyc <<< "$gaps"
-
-    # No identifiable engine means no idea which container to patch, and the
-    # fallback that guessed container 0 is what put hooks on routing proxies.
-    if [ -z "$engine" ]; then
-        log_warning "  No vLLM or SGLang container found in $resource/$name ($ns) -- skipped rather than guessing which one serves."
-        return 2
-    fi
-
-    [ "${prestop:-0}" -eq 0 ] && want_drain=1
-
+# so_workload_patch_plan decides which cache halves one pod template needs,
+# from the so_workload_gaps fields its caller has read (engine, onvol, argv,
+# cachevol, image, pyc). It sets the caller's want_cache, want_engine,
+# want_pyc, want_evol, pycdir, pyckey, pycwhy and model, and logs each gap
+# against $who. A template whose command names no model (a Ray worker, say)
+# takes $model_hint, the model its leader serves, since it loads the same
+# weights; an empty argv (the simulator) takes nothing.
+so_workload_patch_plan() {
     # The cache half asks whether WEIGHTS LAND ON A VOLUME, not whether a volume
     # exists. so_model_source reads where the weights COME FROM -- which is not
     # the same as the name the workload advertises, and only the source answers
@@ -1868,6 +1958,7 @@ so_workload_patch_doc() {
     # alone, because a confidently wrong answer here mounts a PVC into a workload
     # that had no use for one.
     model="$(so_model_source "$argv")" || model=""
+    [ -n "$model" ] || [ -z "$argv" ] || model="${model_hint:-}"
     case "$model" in
         ""|/*) : ;;
         *) if [ "${onvol:-0}" -eq 0 ]; then
@@ -1875,7 +1966,7 @@ so_workload_patch_doc() {
                # NOT just a line in the emitted file. This is the single largest
                # avoidable cost in a scale-up, it is invisible until the moment a
                # replica is added, and it looks like the autoscaler being slow.
-               log_warning "  $ns/$name RE-DOWNLOADS ITS WEIGHTS on every scale-up: $engine fetches $model from Hugging Face, outside every volume it mounts."
+               log_warning "  $who RE-DOWNLOADS ITS WEIGHTS on every scale-up: $engine fetches $model from Hugging Face, outside every volume it mounts."
            fi ;;
     esac
 
@@ -1899,13 +1990,13 @@ so_workload_patch_doc() {
             setkey="${setkey%/}"
             if [[ "$setkey" =~ /pycache/([0-9a-f]{12})$ ]] && pyckey="$(so_pycache_key "$image")" \
                && [ "${BASH_REMATCH[1]}" != "$pyckey" ]; then
-                log_warning "  $ns/$name: PYTHONPYCACHEPREFIX=${pyc#set:} is keyed for another image than $image (key $pyckey); left as set. A key shared by two images can load one's bytecode for the other's source -- point it at .../pycache/$pyckey."
+                log_warning "  $who: PYTHONPYCACHEPREFIX=${pyc#set:} is keyed for another image than $image (key $pyckey); left as set. A key shared by two images can load one's bytecode for the other's source -- point it at .../pycache/$pyckey."
             fi
             pyckey="" ;;
         rootfrom)
             # Reported, not patched: the caches live where this cannot read.
             if pyckey="$(so_pycache_key "$image")"; then
-                log_warning "  $ns/$name RECOMPILES ITS PYTHON BYTECODE on every start: $engine sets no PYTHONPYCACHEPREFIX. Its VLLM_CACHE_ROOT comes from a ConfigMap or Secret, so no volume is proposed: set PYTHONPYCACHEPREFIX=<your cache volume>/pycache/$pyckey beside it, with the guard."
+                log_warning "  $who RECOMPILES ITS PYTHON BYTECODE on every start: $engine sets no PYTHONPYCACHEPREFIX. Its VLLM_CACHE_ROOT comes from a ConfigMap or Secret, so no volume is proposed: set PYTHONPYCACHEPREFIX=<your cache volume>/pycache/$pyckey beside it, with the guard."
             fi
             pyckey="" ;;
     esac
@@ -1913,13 +2004,13 @@ so_workload_patch_doc() {
     case "$cachevol" in
         unset)
             want_engine=1
-            log_warning "  $ns/$name COMPILES FROM NOTHING on every start: $engine keeps its torch.compile, FlashInfer and Triton caches under /tmp (VLLM_CACHE_ROOT is unset)${pycwhy}." ;;
+            log_warning "  $who COMPILES FROM NOTHING on every start: $engine keeps its torch.compile, FlashInfer and Triton caches under /tmp (VLLM_CACHE_ROOT is unset)${pycwhy}." ;;
         ephemeral:*)
             want_engine=1
-            log_warning "  $ns/$name COMPILES FROM NOTHING on every start: $engine keeps its compile caches at ${cachevol#ephemeral:}, on no volume that outlives the pod${pycwhy}." ;;
+            log_warning "  $who COMPILES FROM NOTHING on every start: $engine keeps its compile caches at ${cachevol#ephemeral:}, on no volume that outlives the pod${pycwhy}." ;;
         *)
             [ "$want_pyc" -eq 0 ] \
-                || log_warning "  $ns/$name RECOMPILES ITS PYTHON BYTECODE on every start: $engine sets no PYTHONPYCACHEPREFIX, so every container compiles its imports again (measured on vLLM: ~11 s of every start)." ;;
+                || log_warning "  $who RECOMPILES ITS PYTHON BYTECODE on every start: $engine sets no PYTHONPYCACHEPREFIX, so every container compiles its imports again (measured on vLLM: ~11 s of every start)." ;;
     esac
     # Where the bytecode goes: with the vLLM half, under its new mount; else
     # under the durable mount the engine already has (no new volume); else
@@ -1932,82 +2023,14 @@ so_workload_patch_doc() {
     if [ "$want_engine" -eq 1 ] || { [ "$want_pyc" -eq 1 ] && [ -z "$pycdir" ]; }; then
         want_evol=1
     fi
+}
 
-    [ "$want_drain" -eq 1 ] || [ "$want_cache" -eq 1 ] || [ "$want_engine" -eq 1 ] || [ "$want_pyc" -eq 1 ] || return 0
-
-    cat <<HDR
----
-# ${resource}/${name} in ${ns}   (engine container: ${engine})
-HDR
-    if [ "$want_drain" -eq 1 ]; then
-        # Never LOWER an existing grace period. A long grace with no hook is
-        # exactly the configuration not to shorten, and the emitted document used
-        # to print the old value in a comment while quietly reducing it.
-        grace_want="${WVA_DRAIN_GRACE_SECONDS:-120}"
-        [ "${grace:-30}" -gt "$grace_want" ] && grace_want="$grace"
-        cat <<DRAINWHY
-#   drain: ${engine} declares no preStop hook; terminationGracePeriodSeconds is ${grace:-30}.
-#          A replica removed mid-stream cuts the responses it is still writing.
-DRAINWHY
-    fi
-    if [ "$want_cache" -eq 1 ]; then
-        cat <<CACHEWHY
-#   cache: ${model} is a repository id and the engine downloads outside any
-#          mounted volume, so every scale-up fetches the weights again.
-CACHEWHY
-    fi
-    if [ "$want_engine" -eq 1 ]; then
-        cat <<ENGINEWHY
-#   engine-cache: the compile caches (torch.compile, FlashInfer, Triton) are on
-#          no volume that outlives the pod, so every start compiles from nothing.
-ENGINEWHY
-    fi
-    if [ "$want_pyc" -eq 1 ]; then
-        cat <<PYCWHY
-#   bytecode: ${engine} sets no PYTHONPYCACHEPREFIX, so every container compiles
-#          its Python imports again (measured on vLLM: ~11 s of every start).
-PYCWHY
-    fi
-    cat <<HEAD
-#
-# Apply where the pod spec is OWNED -- your modelservice values, or the chart that
-# produced this object. Applying it directly works until the next
-# \`helm upgrade\` reverts it.
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: ${name}
-  namespace: ${ns}
-spec:
-  template:
-    spec:
-HEAD
-    if [ "$want_drain" -eq 1 ]; then
-        cat <<GRACE
-      # The kubelet sends SIGKILL when this expires, hook or not, so it is the
-      # total budget rather than the drain window. The drain window is the
-      # preStop sleep below; this only has to be comfortably larger.
-      terminationGracePeriodSeconds: ${grace_want}
-GRACE
-    fi
-    cat <<CONTAINERS
-      containers:
-      - name: ${engine}
-CONTAINERS
-    if [ "$want_drain" -eq 1 ]; then
-        cat <<PRESTOP
-        lifecycle:
-          preStop:
-            exec:
-              # Two things share this window, which is why it is not merely "long
-              # enough to finish a request": the endpoint's removal from the
-              # Service propagates asynchronously through kube-proxy and the EPP,
-              # so part of it is covering arrivals that are still being routed
-              # here, and the rest is letting what is already in flight finish.
-              command: ["/bin/sh", "-c", "sleep ${WVA_DRAIN_SLEEP_SECONDS:-45}"]
-PRESTOP
-    fi
-    if [ "$want_cache" -eq 1 ]; then
+# so_workload_patch_claims resolves the claims the emitted volumes name: the
+# weights claim when $1 is 1, the engine-cache claim when $2 is 1. It sets
+# the caller's mountpath, claim, claim_found, emount, evol, eclaim, esub and
+# eclaim_found.
+so_workload_patch_claims() {
+    if [ "$1" -eq 1 ]; then
         mountpath="${WVA_MODEL_CACHE_PATH:-/model-cache}"
         # An existing shared claim beats the default name. WVA_MODEL_PVC_NAME
         # still wins over both when it is set explicitly: an operator naming a
@@ -2023,10 +2046,9 @@ PRESTOP
             if [ -n "$claim" ]; then claim_found=1; else claim="model-pvc"; fi
         fi
     fi
-    if [ "$want_evol" -eq 1 ]; then
+    if [ "$2" -eq 1 ]; then
         emount="${WVA_ENGINE_CACHE_PATH:-/engine-cache}"
         evol="${WVA_ENGINE_CACHE_VOLUME_NAME:-engine-cache}"
-        [ -n "$pycdir" ] || pycdir="$emount"
         # The claim `make engine-cache` makes, unless the operator names one --
         # a shared RWX claim they already have, with an optional subPath, for a
         # cluster where no node directory is on offer.
@@ -2034,6 +2056,16 @@ PRESTOP
         esub=""
         case "$eclaim" in *:*) esub="${eclaim#*:}"; eclaim="${eclaim%%:*}" ;; esac
         kubectl get pvc "$eclaim" -n "$ns" >/dev/null 2>&1 && eclaim_found=1
+    fi
+}
+
+# so_workload_patch_cache_body prints the env, volumeMounts and volumes of one
+# pod template's cache halves, indented for a Deployment's
+# spec.template.spec (the caller re-indents it for a LeaderWorkerSet). It reads
+# the caller's plan and claims.
+so_workload_patch_cache_body() {
+    if [ "$want_evol" -eq 1 ] && [ -z "$pycdir" ]; then
+        pycdir="$emount"
     fi
     # env, volumeMounts and volumes are each ONE list, filled from whichever
     # halves want them. Two `env:` keys in one mapping is a document yq reads as
@@ -2117,6 +2149,12 @@ CACHEVOL
 ENGINEVOL
         fi
     fi
+}
+
+# so_workload_patch_notes prints the comments that follow a document: whether
+# each claim exists and how to make it, and the guard. It reads the caller's
+# want_cache, want_evol, want_engine and want_pyc and its claims.
+so_workload_patch_notes() {
     if [ "$want_cache" -eq 1 ]; then
         # Two different situations, and the file used to print the second one in
         # both: with a claim discovered, it still said "create model-pvc" -- the
@@ -2261,6 +2299,273 @@ ENGINENEED
 #       fi
 #     done
 ENGINEGUARD
+    fi
+}
+
+so_workload_patch_doc() {
+    local ns="$1" resource="$2" name="$3" pod="$4"
+    local gaps engine prestop grace pvcs onvol argv cachevol image pyc model
+    local want_drain=0 want_cache=0 want_engine=0 grace_want mountpath claim claim_found=0
+    local emount evol eclaim esub eclaim_found=0
+    # want_pyc: emit PYTHONPYCACHEPREFIX; want_evol: emit the engine-cache
+    # volume, for the vLLM caches or for the bytecode alone; pycdir: the mount
+    # the bytecode goes under; pyckey: the image key under pycache/.
+    local want_pyc=0 want_evol=0 pycdir="" pyckey="" pycwhy="" who model_hint=""
+
+    # A LeaderWorkerSet has two pod templates and no drain half; it has its own
+    # emitter.
+    if [ "$resource" = "leaderworkersets" ]; then
+        so_workload_patch_doc_lws "$ns" "$name"
+        return $?
+    fi
+
+    # 3, not 0. Returning 0 here meant the caller counted an object it could not
+    # read as one with nothing wrong, printed the all-clear two lines below this
+    # very warning, and exited 0.
+    if ! gaps="$(so_workload_gaps "$ns" "$resource" "$name" "$pod")"; then
+        log_warning "  Could not read $resource/$name in $ns -- skipped. It is not being reported as healthy; it was not readable."
+        return 3
+    fi
+    IFS=$'\037' read -r engine prestop grace pvcs onvol argv cachevol image pyc <<< "$gaps"
+
+    # No identifiable engine means no idea which container to patch, and the
+    # fallback that guessed container 0 is what put hooks on routing proxies.
+    if [ -z "$engine" ]; then
+        log_warning "  No vLLM or SGLang container found in $resource/$name ($ns) -- skipped rather than guessing which one serves."
+        return 2
+    fi
+
+    [ "${prestop:-0}" -eq 0 ] && want_drain=1
+
+    who="$ns/$name"
+    so_workload_patch_plan
+
+    [ "$want_drain" -eq 1 ] || [ "$want_cache" -eq 1 ] || [ "$want_engine" -eq 1 ] || [ "$want_pyc" -eq 1 ] || return 0
+
+    cat <<HDR
+---
+# ${resource}/${name} in ${ns}   (engine container: ${engine})
+HDR
+    if [ "$want_drain" -eq 1 ]; then
+        # Never LOWER an existing grace period. A long grace with no hook is
+        # exactly the configuration not to shorten, and the emitted document used
+        # to print the old value in a comment while quietly reducing it.
+        grace_want="${WVA_DRAIN_GRACE_SECONDS:-120}"
+        [ "${grace:-30}" -gt "$grace_want" ] && grace_want="$grace"
+        cat <<DRAINWHY
+#   drain: ${engine} declares no preStop hook; terminationGracePeriodSeconds is ${grace:-30}.
+#          A replica removed mid-stream cuts the responses it is still writing.
+DRAINWHY
+    fi
+    if [ "$want_cache" -eq 1 ]; then
+        cat <<CACHEWHY
+#   cache: ${model} is a repository id and the engine downloads outside any
+#          mounted volume, so every scale-up fetches the weights again.
+CACHEWHY
+    fi
+    if [ "$want_engine" -eq 1 ]; then
+        cat <<ENGINEWHY
+#   engine-cache: the compile caches (torch.compile, FlashInfer, Triton) are on
+#          no volume that outlives the pod, so every start compiles from nothing.
+ENGINEWHY
+    fi
+    if [ "$want_pyc" -eq 1 ]; then
+        cat <<PYCWHY
+#   bytecode: ${engine} sets no PYTHONPYCACHEPREFIX, so every container compiles
+#          its Python imports again (measured on vLLM: ~11 s of every start).
+PYCWHY
+    fi
+    cat <<HEAD
+#
+# Apply where the pod spec is OWNED -- your modelservice values, or the chart that
+# produced this object. Applying it directly works until the next
+# \`helm upgrade\` reverts it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${name}
+  namespace: ${ns}
+spec:
+  template:
+    spec:
+HEAD
+    if [ "$want_drain" -eq 1 ]; then
+        cat <<GRACE
+      # The kubelet sends SIGKILL when this expires, hook or not, so it is the
+      # total budget rather than the drain window. The drain window is the
+      # preStop sleep below; this only has to be comfortably larger.
+      terminationGracePeriodSeconds: ${grace_want}
+GRACE
+    fi
+    cat <<CONTAINERS
+      containers:
+      - name: ${engine}
+CONTAINERS
+    if [ "$want_drain" -eq 1 ]; then
+        cat <<PRESTOP
+        lifecycle:
+          preStop:
+            exec:
+              # Two things share this window, which is why it is not merely "long
+              # enough to finish a request": the endpoint's removal from the
+              # Service propagates asynchronously through kube-proxy and the EPP,
+              # so part of it is covering arrivals that are still being routed
+              # here, and the rest is letting what is already in flight finish.
+              command: ["/bin/sh", "-c", "sleep ${WVA_DRAIN_SLEEP_SECONDS:-45}"]
+PRESTOP
+    fi
+    so_workload_patch_claims "$want_cache" "$want_evol"
+    so_workload_patch_cache_body
+    so_workload_patch_notes
+}
+
+# so_workload_patch_doc_lws writes the cache halves of LeaderWorkerSet $2 in
+# namespace $1, for its leader template and its worker template, and returns
+# what so_workload_patch_doc returns.
+#
+# Each template is judged as a Deployment's would be -- its own engine
+# container, its own gaps, its own image and so its own bytecode key -- since
+# the leader commonly runs the API server and the worker something else. An LWS
+# with no leaderTemplate builds its leader from workerTemplate, so there is one
+# template and the document carries only that.
+#
+# There is no drain half, and that is said every time. Draining a multi-node
+# group is not a hook on each pod: a worker that goes first aborts the
+# generations its leader is still writing, whatever hook either pod carries, so
+# a document with a preStop on each would be a confident, wrong answer.
+#
+# The document is the LWS fields to copy into whatever owns the object. It is
+# not a strategic merge patch -- the API server refuses one on a custom
+# resource (415) -- and so_workload_patch_one applies it, when asked, as a JSON
+# patch.
+so_workload_patch_doc_lws() {
+    local ns="$1" name="$2" obj tmpls t pod gaps label halves summary="" i n=0
+    local engine prestop grace pvcs onvol argv cachevol image pyc model
+    local who model_hint="" want_cache=0 want_engine=0 want_pyc=0 want_evol=0 pycdir="" pyckey="" pycwhy=""
+    local mountpath claim claim_found=0 emount evol eclaim esub eclaim_found=0
+    local any_cache=0 any_engine=0 any_pyc=0 any_evol=0 first_model=""
+    local -a t_name=() t_engine=() t_image=() t_cache=() t_eng=() t_pyc=() t_evol=() t_pycdir=() t_pyckey=()
+
+    if ! obj="$(kubectl get leaderworkersets "$name" -n "$ns" -o json 2>/dev/null)" || [ -z "$obj" ] \
+       || ! tmpls="$(printf '%s' "$obj" | jq -r '(.spec.leaderWorkerTemplate // {}) as $w
+            | [ (if $w.leaderTemplate then "leaderTemplate" else empty end),
+                (if $w.workerTemplate then "workerTemplate" else empty end) ] | join(" ")' 2>/dev/null)"; then
+        log_warning "  Could not read leaderworkersets/$name in $ns -- skipped. It is not being reported as healthy; it was not readable."
+        return 3
+    fi
+    log_warning "  LeaderWorkerSet $ns/$name: no drain half -- a worker that stops first aborts the leader's in-flight generations whatever hook either pod has; see docs/reference/workload-preparation.md#on-a-leaderworkerset."
+    if [ -z "$tmpls" ]; then
+        log_warning "  LeaderWorkerSet $ns/$name has no pod template under spec.leaderWorkerTemplate -- skipped."
+        return 2
+    fi
+
+    # Leader first, so a worker whose command names no model takes the
+    # leader's.
+    for t in $tmpls; do
+        pod="[\"spec\",\"leaderWorkerTemplate\",\"$t\"]"
+        if ! gaps="$(so_workload_gaps "$ns" leaderworkersets "$name" "$pod")"; then
+            log_warning "  Could not read leaderworkersets/$name in $ns -- skipped. It is not being reported as healthy; it was not readable."
+            return 3
+        fi
+        IFS=$'\037' read -r engine prestop grace pvcs onvol argv cachevol image pyc <<< "$gaps"
+        if [ -z "$engine" ]; then
+            log_warning "  No vLLM or SGLang container found in the $t of LeaderWorkerSet $ns/$name -- that template is skipped rather than guessing which one serves."
+            continue
+        fi
+        want_cache=0 want_engine=0 want_pyc=0 want_evol=0 pycdir="" pyckey="" pycwhy="" model=""
+        who="$ns/$name ($t)"
+        so_workload_patch_plan
+        [ -n "$model_hint" ] || model_hint="$model"
+        [ "$want_cache" -eq 1 ] && [ -z "$first_model" ] && first_model="$model"
+        t_name[n]="$t" t_engine[n]="$engine" t_image[n]="$image"
+        t_cache[n]="$want_cache" t_eng[n]="$want_engine" t_pyc[n]="$want_pyc" t_evol[n]="$want_evol"
+        t_pycdir[n]="$pycdir" t_pyckey[n]="$pyckey"
+        [ "$want_cache" -eq 1 ] && any_cache=1
+        [ "$want_engine" -eq 1 ] && any_engine=1
+        [ "$want_pyc" -eq 1 ] && any_pyc=1
+        [ "$want_evol" -eq 1 ] && any_evol=1
+        halves=""
+        [ "$want_cache" -eq 1 ] && halves="$halves, weights"
+        [ "$want_engine" -eq 1 ] && halves="$halves, engine-cache"
+        [ "$want_pyc" -eq 1 ] && halves="$halves, bytecode"
+        [ -n "$halves" ] || halves=", nothing"
+        label="$t"
+        [ "$tmpls" = "workerTemplate" ] && label="workerTemplate (leader and workers)"
+        summary="${summary}#     ${label}, engine container ${engine}: ${halves#, }"$'\n'
+        n=$((n + 1))
+    done
+
+    [ "$n" -gt 0 ] || return 2
+    [ "$any_cache" -eq 1 ] || [ "$any_engine" -eq 1 ] || [ "$any_pyc" -eq 1 ] || return 2
+
+    so_workload_patch_claims "$any_cache" "$any_evol"
+
+    cat <<HDR
+---
+# leaderworkersets/${name} in ${ns}   (LeaderWorkerSet; per template below)
+HDR
+    if [ "$any_cache" -eq 1 ]; then
+        cat <<CACHEWHY
+#   cache: ${first_model} is a repository id and the engine downloads outside any
+#          mounted volume, so every scale-up fetches the weights again.
+CACHEWHY
+    fi
+    if [ "$any_engine" -eq 1 ]; then
+        cat <<ENGINEWHY
+#   engine-cache: the compile caches (torch.compile, FlashInfer, Triton) are on
+#          no volume that outlives the pod, so every start compiles from nothing.
+ENGINEWHY
+    fi
+    if [ "$any_pyc" -eq 1 ]; then
+        cat <<PYCWHY
+#   bytecode: the engine sets no PYTHONPYCACHEPREFIX, so every container compiles
+#          its Python imports again (measured on vLLM: ~11 s of every start).
+PYCWHY
+    fi
+    printf '%s\n' "#   templates:"
+    printf '%s' "$summary"
+    cat <<HEAD
+#   No drain half: a worker that stops first aborts the leader's in-flight
+#   generations whatever hook either pod has, so a preStop on each pod does not
+#   drain the group (docs/reference/workload-preparation.md#on-a-leaderworkerset).
+#
+# Apply where the LeaderWorkerSet is OWNED -- the manifest or chart that made it.
+# This is NOT a strategic merge patch: the API server refuses one on a custom
+# resource, and a --type=merge patch replaces whole lists (containers, env,
+# volumes). To patch the live object, WVA_WORKLOAD_PATCH_APPLY=true with
+# WVA_WORKLOAD_PATCH_APPLY_WEIGHTS / _ENGINE_CACHE sends it as a JSON patch of
+# add operations, which appends to what is there; the next \`helm upgrade\`
+# reverts it.
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: ${name}
+  namespace: ${ns}
+spec:
+  leaderWorkerTemplate:
+HEAD
+    for ((i = 0; i < n; i++)); do
+        want_cache="${t_cache[i]}" want_engine="${t_eng[i]}" want_pyc="${t_pyc[i]}" want_evol="${t_evol[i]}"
+        pycdir="${t_pycdir[i]}" pyckey="${t_pyckey[i]}" image="${t_image[i]}"
+        [ "$want_cache" -eq 1 ] || [ "$want_engine" -eq 1 ] || [ "$want_pyc" -eq 1 ] || continue
+        cat <<TEMPLATE
+    ${t_name[i]}:
+      spec:
+        containers:
+        - name: ${t_engine[i]}
+TEMPLATE
+        so_workload_patch_cache_body | sed 's/^/  /'
+    done
+    want_cache="$any_cache" want_engine="$any_engine" want_pyc="$any_pyc" want_evol="$any_evol"
+    so_workload_patch_notes
+    if [ "$any_engine" -eq 1 ] || [ "$any_pyc" -eq 1 ]; then
+        cat <<'LWSGUARD'
+#
+#   On a LeaderWorkerSet the guard goes in the leader command AND the worker
+#   command. Each pod reads its own node's cache, so every node the group can
+#   land on needs `make engine-cache`; `make engine-cache-publish` after the
+#   first start gives every node every rank's compile cache and the bytecode.
+LWSGUARD
     fi
 }
 
