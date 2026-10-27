@@ -123,24 +123,33 @@ there, and a dense model skips the `ll_bf16` warmup. What `make workload-patch` 
 |---|---|---|---|
 | **Bytecode cache** (`PYTHONPYCACHEPREFIX`) | helps, ~11 s | helps, ~11 s | no gain: the image ships its bytecode. The guard sees it and unsets the variable. |
 | **One-file AOT compile** (`VLLM_USE_MEGA_AOT_ARTIFACT=1`) | the guard sets it: compile 5.1 s to 0.8 s, start ~5 s shorter, same output | already the default | already the default |
-| **`ll_bf16` warmup** (~7.5 s) | every model | MoE models with a bf16 router only | MoE models with a bf16 router only |
-| **`--kv-cache-memory-bytes`** | proposed when the replica runs Model Runner V2 (a few architectures) | the same; from 0.29 V2 is the default for every model | proposed (V2 is the default) |
+| **`ll_bf16` warmup** (~7.5 s) | every model | MoE models with a bf16 router only (from source, not measured: `_ll_bf16_router_shapes_from_model` in `vllm/model_executor/warmup/kernel_warmup.py`, first in v0.27.0) | the same; a dense model measured on 0.32 logs no warmup |
+| **`--kv-cache-memory-bytes`** | proposed when the replica runs Model Runner V2 (a few architectures) | the same; from 0.29 V2 is the default for every model (from source, not measured: `use_v2_model_runner` in `vllm/config/vllm.py` drops the architecture list in v0.29.0) | proposed (V2 is the default) |
 
-- **The guard decides at container start**, from the installed package, not
-  the image tag: the version in vLLM's `dist-info/METADATA`, and whether every
-  top-level module of `vllm` (or `sglang`) has a `.pyc` for the running Python.
-  One `python3` call lists the search path; nothing imports the engine. A
-  `VLLM_USE_MEGA_AOT_ARTIFACT` you set yourself, even empty, is left alone.
-  `WVA_ENGINE_CACHE_AOT=false` leaves that part out of the emitted guard. Below
-  0.26 the AOT setting was never measured, so it is not set there.
+- **The guard decides at container start**, from the install, not the image
+  tag. One `python3` call finds the `vllm` (or `sglang`) package and the
+  version of the distribution installed beside it, without importing the
+  engine; without `python3`, or on any error, the guard changes nothing.
+- **AOT only on a released 0.26.x**, a local build such as `0.26.0+cu130`
+  included; a `dev`, `rc`, `a` or `b` build is left alone, and below 0.26 it
+  was never measured. A `VLLM_USE_MEGA_AOT_ARTIFACT` you set yourself, even
+  empty, is kept. `WVA_ENGINE_CACHE_AOT=false` leaves that part out.
+- **Shipped bytecode** means every top-level module of the engine package
+  and of `torch` has a `.pyc` for the running Python. That is presence, not
+  validity: a `.pyc` that no longer matches its source (another timestamp) is
+  recompiled, and in a read-only image on every start. A
+  partial set keeps the prefix.
 - **`--kv-cache-memory-bytes` is a proposal, never applied.** With Model
   Runner V2, vLLM measures its memory by capturing every CUDA graph once more
   (~8 s per start, measured on vLLM 0.32 with Qwen3-32B). A fixed KV size skips
   that: 50.4 s to 42.3 s, same KV cache, same speed. `make workload-patch` reads
   `Available KV cache memory: <n> GiB` from the log of a Ready replica, and
   prints the flag with its value, on the console and as a comment in the
-  emitted file. No Ready replica, or no such line in its log (rotated), means
-  no proposal. **The value is only right for that model, GPU type, engine flags
+  emitted file. It reads the newest Ready pod of the current ReplicaSet and
+  the first 16 MiB of its log. No Ready replica, no such line (rotated), or a
+  read that fails (it then says why) means no proposal. It does not see a KV
+  size set through `--config` or an environment variable, and it does not
+  cover a LeaderWorkerSet. **The value is only right for that model, GPU type, engine flags
   and vLLM version.** Derive it again after any change: too large runs out of
   memory, too small wastes KV cache.
 
@@ -681,42 +690,47 @@ LeaderWorkerSet, the leader's and the worker's):
 
 ```bash
 for v in VLLM_CACHE_ROOT FLASHINFER_WORKSPACE_DIR TRITON_CACHE_DIR PYTHONPYCACHEPREFIX; do
-  eval "d=\${$v}"
+  eval "d=\${$v:-}"
   [ -n "$d" ] || continue
   if ! mkdir -p "$d" 2>/dev/null || ! touch "$d/.writable" 2>/dev/null; then
     echo "engine cache $v=$d is not writable; using the engine default instead"
     unset $v
   fi
 done
-# What the installed engine does by itself, read from its package files
-# without importing it: an image tag can lie, the package cannot.
-tag= ver= pkg=
-for p in $(python3 -c 'import sys; print(sys.implementation.cache_tag, *sys.path)' 2>/dev/null); do
-  [ -n "$tag" ] || { tag=$p; continue; }
-  for m in "$p"/vllm-*.dist-info/METADATA; do
-    [ -n "$ver" ] || [ ! -f "$m" ] || ver=$(sed -n '/^$/q; s/^Version: *//p' "$m")
-  done
-  for d in "$p"/vllm "$p"/sglang; do
-    [ -n "$pkg" ] || [ ! -f "$d/__init__.py" ] || pkg=$d
-  done
-done
+# What the installed engine does by itself, asked of the interpreter
+# without importing the engine: an image tag can lie, the install cannot.
+# The package directory (vllm, else sglang) and the version of the
+# distribution installed beside it, so a stale dist-info elsewhere on the
+# path does not decide; any failure leaves all four empty.
+out=$(python3 -c 'import sys, os, importlib.util as u, importlib.metadata as m; s = [(n, u.find_spec(n)) for n in ("vllm", "sglang")]; n, x = [(n, x) for n, x in s if x and x.origin][0]; p = os.path.dirname(x.origin); v = [d.version for d in m.distributions(name=n, path=[os.path.dirname(p)])] or [m.version(n)]; t = u.find_spec("torch"); print(sys.implementation.cache_tag, v[0], p, os.path.dirname(t.origin) if t and t.origin else "", sep="|")' 2>/dev/null) || out=
+tag=${out%%|*}; out=${out#*|}; ver=${out%%|*}; out=${out#*|}
+pkg=${out%%|*}; tpkg=${out#*|}
 # An image that ships its bytecode (vLLM 0.32 does): with a prefix,
 # Python ignores it and compiles a second copy, so the prefix only costs.
-if [ -n "${PYTHONPYCACHEPREFIX:-}" ] && [ -n "$pkg" ]; then
-  shipped=1
-  for f in "$pkg"/*.py; do
-    b=${f##*/}
-    [ -f "$pkg/__pycache__/${b%.py}.$tag.pyc" ] || { shipped=0; break; }
+# Shipped means every top-level module of the engine AND of torch has a
+# .pyc for this interpreter; an empty directory is not shipped.
+if [ -n "${PYTHONPYCACHEPREFIX:-}" ] && [ -n "$pkg" ] && [ -n "$tpkg" ]; then
+  shipped=yes
+  for d in "$pkg" "$tpkg"; do
+    n=0
+    for f in "$d"/*.py; do
+      [ -f "$f" ] || continue
+      b=${f##*/}
+      [ -f "$d/__pycache__/${b%.py}.$tag.pyc" ] || { n=-1; break; }
+      n=$((n + 1))
+    done
+    [ "$n" -gt 0 ] || { shipped=no; break; }
   done
-  if [ "$shipped" = 1 ]; then
+  if [ "$shipped" = yes ]; then
     echo "engine cache PYTHONPYCACHEPREFIX: $pkg ships its bytecode; using that instead"
     unset PYTHONPYCACHEPREFIX
   fi
 fi
 # vLLM 0.26 loads its compile as one AOT artefact only when asked (the
-# default from 0.27). WVA_ENGINE_CACHE_AOT=false leaves this out.
+# default from 0.27). Released 0.26.x only, a +local suffix included;
+# no dev or rc build. WVA_ENGINE_CACHE_AOT=false leaves this out.
 case $ver in
-  0.26.*)
+  0.26.[0-9]|0.26.[0-9][0-9]|0.26.[0-9]+*|0.26.[0-9][0-9]+*)
     if [ -n "${VLLM_CACHE_ROOT:-}" ] && [ -z "${VLLM_USE_MEGA_AOT_ARTIFACT+x}" ]; then
       echo "engine cache: vLLM $ver, VLLM_USE_MEGA_AOT_ARTIFACT=1 (the default from 0.27)"
       export VLLM_USE_MEGA_AOT_ARTIFACT=1

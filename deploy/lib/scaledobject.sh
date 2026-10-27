@@ -2384,34 +2384,38 @@ ENGINENEED
 #   chart, so it is not patched here):
 #
 #     for v in VLLM_CACHE_ROOT FLASHINFER_WORKSPACE_DIR TRITON_CACHE_DIR PYTHONPYCACHEPREFIX; do
-#       eval "d=\${$v}"
+#       eval "d=\${$v:-}"
 #       [ -n "$d" ] || continue
 #       if ! mkdir -p "$d" 2>/dev/null || ! touch "$d/.writable" 2>/dev/null; then
 #         echo "engine cache $v=$d is not writable; using the engine default instead"
 #         unset $v
 #       fi
 #     done
-#     # What the installed engine does by itself, read from its package files
-#     # without importing it: an image tag can lie, the package cannot.
-#     tag= ver= pkg=
-#     for p in $(python3 -c 'import sys; print(sys.implementation.cache_tag, *sys.path)' 2>/dev/null); do
-#       [ -n "$tag" ] || { tag=$p; continue; }
-#       for m in "$p"/vllm-*.dist-info/METADATA; do
-#         [ -n "$ver" ] || [ ! -f "$m" ] || ver=$(sed -n '/^$/q; s/^Version: *//p' "$m")
-#       done
-#       for d in "$p"/vllm "$p"/sglang; do
-#         [ -n "$pkg" ] || [ ! -f "$d/__init__.py" ] || pkg=$d
-#       done
-#     done
+#     # What the installed engine does by itself, asked of the interpreter
+#     # without importing the engine: an image tag can lie, the install cannot.
+#     # The package directory (vllm, else sglang) and the version of the
+#     # distribution installed beside it, so a stale dist-info elsewhere on the
+#     # path does not decide; any failure leaves all four empty.
+#     out=$(python3 -c 'import sys, os, importlib.util as u, importlib.metadata as m; s = [(n, u.find_spec(n)) for n in ("vllm", "sglang")]; n, x = [(n, x) for n, x in s if x and x.origin][0]; p = os.path.dirname(x.origin); v = [d.version for d in m.distributions(name=n, path=[os.path.dirname(p)])] or [m.version(n)]; t = u.find_spec("torch"); print(sys.implementation.cache_tag, v[0], p, os.path.dirname(t.origin) if t and t.origin else "", sep="|")' 2>/dev/null) || out=
+#     tag=${out%%|*}; out=${out#*|}; ver=${out%%|*}; out=${out#*|}
+#     pkg=${out%%|*}; tpkg=${out#*|}
 #     # An image that ships its bytecode (vLLM 0.32 does): with a prefix,
 #     # Python ignores it and compiles a second copy, so the prefix only costs.
-#     if [ -n "${PYTHONPYCACHEPREFIX:-}" ] && [ -n "$pkg" ]; then
-#       shipped=1
-#       for f in "$pkg"/*.py; do
-#         b=${f##*/}
-#         [ -f "$pkg/__pycache__/${b%.py}.$tag.pyc" ] || { shipped=0; break; }
+#     # Shipped means every top-level module of the engine AND of torch has a
+#     # .pyc for this interpreter; an empty directory is not shipped.
+#     if [ -n "${PYTHONPYCACHEPREFIX:-}" ] && [ -n "$pkg" ] && [ -n "$tpkg" ]; then
+#       shipped=yes
+#       for d in "$pkg" "$tpkg"; do
+#         n=0
+#         for f in "$d"/*.py; do
+#           [ -f "$f" ] || continue
+#           b=${f##*/}
+#           [ -f "$d/__pycache__/${b%.py}.$tag.pyc" ] || { n=-1; break; }
+#           n=$((n + 1))
+#         done
+#         [ "$n" -gt 0 ] || { shipped=no; break; }
 #       done
-#       if [ "$shipped" = 1 ]; then
+#       if [ "$shipped" = yes ]; then
 #         echo "engine cache PYTHONPYCACHEPREFIX: $pkg ships its bytecode; using that instead"
 #         unset PYTHONPYCACHEPREFIX
 #       fi
@@ -2424,9 +2428,10 @@ ENGINEGUARD
         if [ "$want_engine" -eq 1 ] && [ "${WVA_ENGINE_CACHE_AOT:-true}" != "false" ]; then
             cat <<'AOTGUARD'
 #     # vLLM 0.26 loads its compile as one AOT artefact only when asked (the
-#     # default from 0.27). WVA_ENGINE_CACHE_AOT=false leaves this out.
+#     # default from 0.27). Released 0.26.x only, a +local suffix included;
+#     # no dev or rc build. WVA_ENGINE_CACHE_AOT=false leaves this out.
 #     case $ver in
-#       0.26.*)
+#       0.26.[0-9]|0.26.[0-9][0-9]|0.26.[0-9]+*|0.26.[0-9][0-9]+*)
 #         if [ -n "${VLLM_CACHE_ROOT:-}" ] && [ -z "${VLLM_USE_MEGA_AOT_ARTIFACT+x}" ]; then
 #           echo "engine cache: vLLM $ver, VLLM_USE_MEGA_AOT_ARTIFACT=1 (the default from 0.27)"
 #           export VLLM_USE_MEGA_AOT_ARTIFACT=1
@@ -2455,27 +2460,83 @@ AOTGUARD
 # tensor parallelism every rank logs one; the smallest is the per-GPU value.
 # The V2 runner is read from "Using V2 Model Runner" in the same log.
 so_kv_bytes_proposal() {
-    local ns="$1" name="$2" engine="$3" argv="$4" sel pod log gib bytes
+    local errf
     kvnote="" kvsay=""
+    errf="$(mktemp)" || errf=/dev/null
+    so_kv_bytes_read "$@"
+    [ "$errf" = /dev/null ] || rm -f "$errf"
+}
+
+# so_kv_bytes_read is so_kv_bytes_proposal, with $errf for the stderr of each
+# read: a failed read is said as a failure, with its reason, never as an
+# answer (Forbidden on pods/log is not a rotated log).
+so_kv_bytes_read() {
+    local ns="$1" name="$2" engine="$3" argv="$4" obj sel hash pods pod log gib bytes
     case "$argv" in *--kv-cache-memory*) return 0 ;; esac
-    sel="$(kubectl get deployments "$name" -n "$ns" -o json 2>/dev/null \
-        | jq -r '[(.spec.selector.matchLabels // {}) | to_entries[] | "\(.key)=\(.value)"] | join(",")' 2>/dev/null)" || sel=""
-    pod=""
-    if [ -n "$sel" ]; then
-        pod="$(kubectl get pods -n "$ns" -l "$sel" -o json 2>/dev/null \
-            | jq -r '[.items[]? | select(.metadata.deletionTimestamp == null)
-                     | select([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length > 0)
-                     | .metadata.name] | sort | first // empty' 2>/dev/null)" || pod=""
-    fi
-    if [ -z "$pod" ]; then
-        kvsay="  $ns/$name: no Ready pod to read its KV cache size from, so no --kv-cache-memory-bytes is proposed."
+    if [ -z "$engine" ]; then
+        kvsay="  $ns/$name: no engine container identified, so no --kv-cache-memory-bytes is proposed."
         return 0
     fi
-    log="$(kubectl logs "$pod" -n "$ns" -c "$engine" --limit-bytes=16777216 2>/dev/null)" || log=""
-    gib="$(printf '%s\n' "$log" | sed -n 's/.*Available KV cache memory: \([0-9][0-9.]*\) GiB.*/\1/p' \
-        | awk 'NR == 1 || $1 < m { m = $1 } END { if (NR) print m }')"
+    if ! obj="$(kubectl get deployments "$name" -n "$ns" -o json 2>"$errf")"; then
+        kvsay="  $ns/$name: could not read the Deployment ($(head -n 1 "$errf" 2>/dev/null)), so no --kv-cache-memory-bytes is proposed."
+        return 0
+    fi
+    sel="$(printf '%s' "$obj" | jq -r '[(.spec.selector.matchLabels // {}) | to_entries[] | "\(.key)=\(.value)"] | join(",")' 2>/dev/null)" || sel=""
+    if [ -z "$sel" ]; then
+        kvsay="  $ns/$name: its selector has no matchLabels (matchExpressions only, or none), so its pods were not looked up and no --kv-cache-memory-bytes is proposed."
+        return 0
+    fi
+    # The current ReplicaSet: of those this Deployment owns, the highest
+    # revision. Its pod-template-hash narrows the pods to the running
+    # template; unreadable, every pod of the selector is a candidate.
+    hash="$(kubectl get replicasets -n "$ns" -l "$sel" -o json 2>/dev/null \
+        | jq -r --arg d "$name" '[.items[]?
+                | select(any(.metadata.ownerReferences[]?; .kind == "Deployment" and .name == $d))
+                | {r: ((.metadata.annotations["deployment.kubernetes.io/revision"] // "0") | (tonumber? // 0)),
+                   h: (.metadata.labels["pod-template-hash"] // "")}]
+            | sort_by(.r) | last | .h // empty' 2>/dev/null)" || hash=""
+    if ! pods="$(kubectl get pods -n "$ns" -l "$sel" -o json 2>"$errf")"; then
+        kvsay="  $ns/$name: could not list its pods ($(head -n 1 "$errf" 2>/dev/null)), so no --kv-cache-memory-bytes is proposed."
+        return 0
+    fi
+    # The newest Ready pod of that template: the one most likely to have
+    # started with the flags and version the template has now.
+    pod="$(printf '%s' "$pods" | jq -r --arg h "$hash" '[.items[]?
+                | select(.metadata.deletionTimestamp == null)
+                | select($h == "" or .metadata.labels["pod-template-hash"] == $h)
+                | select([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length > 0)]
+            | sort_by(.metadata.creationTimestamp // "") | last | .metadata.name // empty' 2>/dev/null)" || pod=""
+    if [ -z "$pod" ]; then
+        kvsay="  $ns/$name: no Ready pod${hash:+ of its current ReplicaSet} to read its KV cache size from, so no --kv-cache-memory-bytes is proposed."
+        return 0
+    fi
+    # --limit-bytes keeps the FIRST 16 MiB of the log, which is where the
+    # start lines are; a long-running replica can log far more after them.
+    if ! log="$(kubectl logs "$pod" -n "$ns" -c "$engine" --limit-bytes=16777216 2>"$errf")"; then
+        kvsay="  $ns/$name: could not read the logs of $pod ($(head -n 1 "$errf" 2>/dev/null)), so no --kv-cache-memory-bytes is proposed."
+        return 0
+    fi
+    # One value per rank, keyed by the process tag vLLM puts first on each
+    # line ("(Worker_TP0 pid=210)"): the LAST value of each rank (an engine
+    # that restarted inside this container logged the line again), then the
+    # smallest rank, which is the per-GPU value every rank can hold.
+    gib="$(printf '%s\n' "$log" | awk '
+        /Available KV cache memory: [0-9.]+ GiB/ {
+            r = ""
+            if (match($0, /^\([^ )]+/)) r = substr($0, 2, RLENGTH - 1)
+            v = $0
+            sub(/.*Available KV cache memory: /, "", v)
+            sub(/ GiB.*/, "", v)
+            if (v ~ /^[0-9]*[.]?[0-9]+$/) { last[r] = v + 0; seen = 1 }
+        }
+        END {
+            if (!seen) exit
+            m = -1
+            for (r in last) if (m < 0 || last[r] < m) m = last[r]
+            print m
+        }')"
     if [ -z "$gib" ]; then
-        kvsay="  $ns/$name: $pod logged no \"Available KV cache memory\" line (log rotated, or no vLLM start in it), so no --kv-cache-memory-bytes is proposed."
+        kvsay="  $ns/$name: $pod logged no \"Available KV cache memory\" line in the first 16 MiB of its log (rotated, or no vLLM start in it), so no --kv-cache-memory-bytes is proposed."
         return 0
     fi
     if ! printf '%s\n' "$log" | grep -q 'Using V2 Model Runner'; then
