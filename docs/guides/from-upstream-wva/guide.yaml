@@ -87,8 +87,11 @@ rollback:
     note: Restore the upstream controller. yq drops the fields the API server sets.
     run: yq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status)' upstream-controller.yaml | kubectl apply -f -
   configmaps:
-    note: After a reinstall from the release, put back the ConfigMaps you tuned.
-    run: yq '.items[] | select(.metadata.name | test("wva-")) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
+    note: After a reinstall from the release, put back the ConfigMaps you tuned, then restart the controller. It reads wva-manager-config only at startup.
+    run: |
+      yq '.items[] | select(.metadata.name | test("^wva-")) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
+      kubectl rollout restart deployment wva-controller-manager -n <upstream-namespace>
+      # Helm: restart the Deployment the chart created
   autoscalers:
     note: Restore the saved ScaledObjects and plain HPAs. HPAs that KEDA owns are skipped; KEDA recreates them.
     run: yq '.items[] | select(.metadata.ownerReferences == null) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-autoscalers.yaml | kubectl apply -f -

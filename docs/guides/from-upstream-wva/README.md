@@ -315,7 +315,9 @@ make undeploy-wva NAMESPACE=<namespace>
      Reinstall upstream from its release, then put back the ConfigMaps you
      tuned.
    - **Helm**: `helm install` the same chart and version (`upstream-release.txt`)
-     with `-f upstream-values.yaml`.
+     with `-f upstream-values.yaml`. The chart renders its ConfigMaps from the
+     values only, so changes made with `kubectl edit` are lost; put those back
+     with the ConfigMap step below, as in the previous option.
 
 <!-- guide:rollback.controller start -->
 ```bash
@@ -326,8 +328,10 @@ yq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .
 
 <!-- guide:rollback.configmaps start -->
 ```bash
-# After a reinstall from the release, put back the ConfigMaps you tuned.
-yq '.items[] | select(.metadata.name | test("wva-")) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
+# After a reinstall from the release, put back the ConfigMaps you tuned, then restart the controller. It reads wva-manager-config only at startup.
+yq '.items[] | select(.metadata.name | test("^wva-")) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
+kubectl rollout restart deployment wva-controller-manager -n <upstream-namespace>
+# Helm: restart the Deployment the chart created
 ```
 <!-- guide:rollback.configmaps end -->
 
