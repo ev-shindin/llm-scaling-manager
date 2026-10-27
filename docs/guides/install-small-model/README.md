@@ -166,7 +166,7 @@ replicas, each new pod fetches them again unless there is a shared cache.
 llm-d's modelservice chart mounts one at `/model-cache` by default. Confirm it:
 
 ```bash
-# Report the model cache, drain hook and vLLM engine caches, and write a patch for what is missing
+# Report the model cache, drain hook and engine caches, and write a patch for what is missing
 make workload-patch NAMESPACE=${NAMESPACE}
 ```
 

@@ -207,7 +207,7 @@ wva_serving_workload_count() {
         n=$(kubectl get "$resource" -n "$ns" -o json 2>/dev/null \
             | jq --argjson p "$pod" --argjson markers "$markers" '
                 [ .items[]?
-                  | (getpath($p + ["metadata","labels"]) // {})
+                  | ((getpath($p) // (if $p == ["spec", "leaderWorkerTemplate", "leaderTemplate"] then getpath(["spec", "leaderWorkerTemplate", "workerTemplate"]) else null end) // {}) | .metadata.labels // {})
                   | select(to_entries
                            | any((.key + "=" + (.value|tostring)) as $kv
                                  | ($markers | index($kv)) != null))

@@ -637,27 +637,13 @@ prepared.
 **Turning it off.** Remove the variable; the files left behind are not read.
 Delete `<dir>/engine-cache/pycache` on the nodes to get the space back.
 
-**On a LeaderWorkerSet** (`make workload-patch` skips them), add it by hand to
-the leader AND the worker template: the `engine-cache` volume and its mount, the
-variable, and the guard in each command. The leader and each worker read their
-own node's copy.
+**On a LeaderWorkerSet** `make workload-patch` writes it for the leader and the
+worker template, each keyed by its own image
+([On a LeaderWorkerSet](#on-a-leaderworkerset)). Each pod reads its own node's
+copy.
 
-```yaml
-volumes:
-  - name: engine-cache
-    persistentVolumeClaim:
-      claimName: engine-cache
-containers:
-  - name: vllm
-    volumeMounts:
-      - name: engine-cache
-        mountPath: /engine-cache
-    env:
-      - {name: PYTHONPYCACHEPREFIX, value: /engine-cache/pycache/<image key>}
-```
-
-`<image key>` is `printf '%s' '<image reference>' | sha256sum | cut -c1-12`.
-The guard goes in each container command, before the engine starts:
+The guard goes in each container command, before the engine starts (on a
+LeaderWorkerSet, the leader's and the worker's):
 
 ```bash
 for v in VLLM_CACHE_ROOT FLASHINFER_WORKSPACE_DIR TRITON_CACHE_DIR PYTHONPYCACHEPREFIX; do
@@ -1023,11 +1009,50 @@ preStop hook. It ignores the grace period (`so_drain_note` in
 
 ### On a LeaderWorkerSet
 
-`make workload-patch` skips LeaderWorkerSets and says so. The pod templates are
-under `spec.leaderWorkerTemplate`, the API server refuses a strategic merge on a
-custom resource, and the **worker** template must drain too: killing a worker
-aborts the leader's in-flight generations whatever hook the leader has. Do it by
-hand, in the manifest or chart that owns the LWS:
+`make workload-patch` writes the cache halves of a LeaderWorkerSet, not its
+drain half.
+
+- **What it writes.** One `LeaderWorkerSet` document: the weights volume, and
+  the engine-cache volume with its variables (`PYTHONPYCACHEPREFIX` included),
+  under `spec.leaderWorkerTemplate.leaderTemplate` and `.workerTemplate`. Each
+  template is judged on its own, with its own engine container and image key.
+  With no `leaderTemplate` the leader is built from `workerTemplate`, so only
+  that one is written. A worker whose command names no model (a Ray worker)
+  takes the leader's model for the weights half. A model passed in a variable
+  (`vllm serve $(MODEL)`) is not read; the console says so for each template.
+- **Applying it.** `WVA_WORKLOAD_PATCH_APPLY=true` with
+  `WVA_WORKLOAD_PATCH_APPLY_WEIGHTS=true` or `WVA_WORKLOAD_PATCH_APPLY_ENGINE_CACHE=true`
+  sends it as a JSON patch (`--type=json`), after the same checks as a
+  Deployment, in both templates. It only adds: `env`, `volumeMounts` and
+  `volumes` are appended to where they exist. (The API server refuses a
+  strategic merge on a custom resource, and `--type=merge` replaces whole
+  lists.) With `APPLY` alone nothing is sent; there is no drain half.
+- **Applying it restarts every group.** A new template replaces each group
+  whole, one group at a time, and by default the old group goes before the new
+  one starts. At `replicas: 1` the model serves nothing for one multi-node
+  start; with more groups it runs one group short for each. The console names
+  the replicas and the group size when it applies.
+- **It is applied only to an LWS nothing else controls.** One with an
+  `ownerReferences` entry marked `controller: true` is refused, naming the
+  owner: the owner would put its own spec back. Put the change there.
+- **It cannot land on a changed object.** The checks and the patch use one
+  read of the LWS, and the patch tests its `resourceVersion` first. If the LWS
+  changed in between, the API server refuses the whole patch and nothing is
+  applied; run `make workload-patch` again.
+- **The preparer check counts the preparer's nodes**, not the nodes the LWS can
+  land on: it does not read the LWS's node selector, tolerations or affinity.
+  Make sure the preparer's `WEIGHTS_NODE_SELECTOR` covers them.
+- **The guard** goes in the leader command and in the worker command.
+- **Every node needs the cache.** Each pod reads its own node's copy. Run
+  `make engine-cache` on every node the group can land on, and
+  `make engine-cache-publish` after the first start: it gives every node every
+  rank's compile cache, and the bytecode.
+
+**Drain is not covered.** Killing a worker aborts the leader's in-flight
+generations whatever hook the leader has, so a preStop on each pod does not
+drain the group. The console says so for every LWS until both templates have a
+preStop and the worker's grace period is at least the leader's. Do it by hand,
+in the manifest or chart that owns the LWS:
 
 ```yaml
 spec:
@@ -1177,8 +1202,8 @@ value or from a ConfigMap or Secret, is left as it is. If its value ends in
 names the right key. A workload that sets `PYTHONDONTWRITEBYTECODE` gets no
 bytecode half. A vLLM workload whose `VLLM_CACHE_ROOT` comes from a ConfigMap or
 Secret is reported but gets no half either: set `PYTHONPYCACHEPREFIX` beside
-your own cache root. LeaderWorkerSets are skipped, as for the other halves; set it by
-hand ([Python bytecode](#python-bytecode)).
+your own cache root. On a LeaderWorkerSet it is written for the leader and the
+worker, each with its own image key ([On a LeaderWorkerSet](#on-a-leaderworkerset)).
 
 `WVA_WORKLOAD_PATCH_APPLY=true` also applies the **drain half** to the live
 objects. Read what it prints first:
@@ -1263,10 +1288,11 @@ What it will and will not do:
   leave a terabyte behind. That is the operator's call. The emitted patch also
   carries the claim as a commented manifest, for anyone who prefers to apply
   their own.
-- **It skips LeaderWorkerSets, loudly.** A multi-node group must drain the
-  worker template too (killing a worker aborts the leader's in-flight
-  generations), and the API server refuses a strategic merge on a custom
-  resource. A confident, wrong document is worse than none.
+- **It writes no drain half for a LeaderWorkerSet, and says so.** A multi-node
+  group must drain the worker template too (killing a worker aborts the
+  leader's in-flight generations), so a hook on each pod would be a confident,
+  wrong answer. The cache halves are written
+  ([On a LeaderWorkerSet](#on-a-leaderworkerset)).
 - **It never reports a workload it could not read as healthy.** A failed listing
   or `get` is reported and makes the run exit non-zero, as does a missing `jq`
   (or `yq`, needed only when applying). "Nothing to patch" is never said about
