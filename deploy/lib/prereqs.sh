@@ -594,7 +594,7 @@ wva_model_server_count() {
         n="$(kubectl get "$resource" -n "$ns" -o json 2>/dev/null \
             | jq --argjson p "$pod" --argjson markers "$(so_serving_markers_json)" '
                 [ .items[]
-                  | ((getpath($p + ["metadata","labels"]) // {}) + (.metadata.labels // {}))
+                  | (((getpath($p) // (if $p == ["spec", "leaderWorkerTemplate", "leaderTemplate"] then getpath(["spec", "leaderWorkerTemplate", "workerTemplate"]) else null end) // {}) | .metadata.labels // {}) + (.metadata.labels // {}))
                   | select(to_entries
                            | any((.key + "=" + (.value|tostring)) as $kv
                                  | ($markers | index($kv)) != null))

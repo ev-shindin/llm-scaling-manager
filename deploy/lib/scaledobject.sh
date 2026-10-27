@@ -1101,6 +1101,19 @@ so_workload_patch_one() {
             log_warning "  $ns/$name: could not read the live LeaderWorkerSet, so nothing was applied."
             return 1
         fi
+        # A controller that owns the LWS (an operator, a higher-level CR) puts
+        # its own spec back, so a patch here is undone on its next reconcile --
+        # or fights it. The change belongs in the owner. Asked before any half
+        # is judged, so no line says a volume is being applied; and only when
+        # a storage half was asked for, since without one nothing is sent.
+        if [ "${WVA_WORKLOAD_PATCH_APPLY_WEIGHTS:-false}" = "true" ] || [ "${WVA_WORKLOAD_PATCH_APPLY_ENGINE_CACHE:-false}" = "true" ]; then
+            owner="$(printf '%s' "$patch_live" | jq -r '[.metadata.ownerReferences[]? | select(.controller == true) | "\(.kind)/\(.name)"] | first // ""' 2>/dev/null)"
+            if [ -n "$owner" ]; then
+                rm -f "$doc"
+                log_warning "  $ns/$name: NOT applied -- it is controlled by $owner, which would put its own spec back. Put the change in $owner; the emitted file has it."
+                return 4
+            fi
+        fi
     fi
     # WVA_WORKLOAD_PATCH_APPLY_WEIGHTS and _ENGINE_CACHE are their own opt-ins,
     # separate from APPLY and from each other. Adding a hook cannot conflict
@@ -1131,15 +1144,6 @@ so_workload_patch_one() {
         return 2
     fi
     if [ "$d_resource" = "leaderworkersets" ]; then
-        # A controller that owns the LWS (an operator, a higher-level CR) puts
-        # its own spec back, so a patch here is undone on its next reconcile --
-        # or fights it. The change belongs in the owner.
-        owner="$(printf '%s' "$patch_live" | jq -r '[.metadata.ownerReferences[]? | select(.controller == true) | "\(.kind)/\(.name)"] | first // ""' 2>/dev/null)"
-        if [ -n "$owner" ]; then
-            rm -f "$doc"
-            log_warning "  $ns/$name: NOT applied -- it is controlled by $owner, which would put its own spec back. Put the change in $owner; the emitted file has it."
-            return 4
-        fi
         # A JSON patch, built against the live object: the API server refuses a
         # strategic merge on a custom resource, and a merge patch replaces
         # whole lists.
@@ -1147,12 +1151,26 @@ so_workload_patch_one() {
             rm -f "$doc"
             return 1
         fi
-        read -r groups size <<< "$(printf '%s' "$patch_live" | jq -r '"\(.spec.replicas // 1) \(.spec.leaderWorkerTemplate.size // 1)"' 2>/dev/null)"
-        if [ "${groups:-1}" -le 1 ]; then
-            log_warning "  $ns/$name: this REPLACES THE GROUP (replicas: ${groups:-1}, size: ${size:-1}). The LeaderWorkerSet controller recreates a group whole, by default removing the old one before the new one starts, so the model serves nothing for one multi-node start."
-        else
-            log_warning "  $ns/$name: this REPLACES EVERY GROUP (replicas: ${groups}, size: ${size:-1}). The LeaderWorkerSet controller recreates them one whole group at a time, by default removing the old one before the new one starts, so the model runs one group short for ${groups} multi-node starts in a row."
-        fi
+        # The rollout this starts is the one the LWS declares: maxUnavailable
+        # and maxSurge, 1 and 0 when unset (the LWS defaults).
+        read -r groups size unavail surge <<< "$(printf '%s' "$patch_live" | jq -r '
+            (.spec.rolloutStrategy.rollingUpdateConfiguration // {}) as $r
+            | "\(.spec.replicas // 1) \(.spec.leaderWorkerTemplate.size // 1) \($r.maxUnavailable // 1) \($r.maxSurge // 0)"' 2>/dev/null)"
+        groups="${groups:-1}" size="${size:-1}" unavail="${unavail:-1}" surge="${surge:-0}"
+        case "$surge" in
+            0|0%)
+                if [ "$groups" -le 1 ]; then
+                    log_warning "  $ns/$name: this REPLACES THE GROUP (replicas: $groups, size: $size). The LeaderWorkerSet controller recreates a group whole, and with maxSurge: 0 (maxUnavailable: $unavail) it removes the old group before the new one starts, so the model serves nothing for one multi-node start."
+                else
+                    log_warning "  $ns/$name: this REPLACES EVERY GROUP (replicas: $groups, size: $size). The LeaderWorkerSet controller recreates whole groups, up to $unavail at a time (maxUnavailable: $unavail, maxSurge: 0), removing each old group before its replacement starts, so the model runs short by that many groups until all $groups have started again."
+                fi ;;
+            *)
+                if [ "$groups" -le 1 ]; then
+                    log_warning "  $ns/$name: this REPLACES THE GROUP (replicas: $groups, size: $size). The LeaderWorkerSet controller recreates a group whole, and with maxSurge: $surge (maxUnavailable: $unavail) it starts the new group first: that needs room for a second group of $size pod(s) while the old one serves."
+                else
+                    log_warning "  $ns/$name: this REPLACES EVERY GROUP (replicas: $groups, size: $size). The LeaderWorkerSet controller recreates whole groups (maxUnavailable: $unavail, maxSurge: $surge), starting surge groups first: that needs room for them while the old groups serve."
+                fi ;;
+        esac
         printf '%s\n' "$ops" > "$doc"
         if ! kubectl patch leaderworkersets "$name" -n "$ns" --type=json --patch-file="$doc"; then
             rc=1
@@ -1549,11 +1567,15 @@ wva_workload_patch() {
 
     if [ "$apply" = "true" ]; then
         log_warning "WVA_WORKLOAD_PATCH_APPLY=true: patching $found workload(s) directly."
-        log_warning "  This REPLACES PODS. Each patch is a new pod template, so every model server"
-        log_warning "  patched here rolls -- and it rolls BEFORE it has the hook, so requests in"
-        log_warning "  flight during that first rollout are still cut. With the default strategy at"
-        log_warning "  replicas: 1 the new pod must schedule before the old one goes, so on a full"
-        log_warning "  GPU cluster the rollout can stall with the old pod still serving."
+        # A Deployment rollout, said only when a Deployment is among them. A
+        # LeaderWorkerSet replaces whole groups instead, and says so itself.
+        if so_workload_patch_index "$tmp" | grep -q ' Deployment$'; then
+            log_warning "  This REPLACES PODS. Each patch is a new pod template, so every Deployment"
+            log_warning "  patched here rolls -- and it rolls BEFORE it has the hook, so requests in"
+            log_warning "  flight during that first rollout are still cut. With the default strategy at"
+            log_warning "  replicas: 1 the new pod must schedule before the old one goes, so on a full"
+            log_warning "  GPU cluster the rollout can stall with the old pod still serving."
+        fi
         log_warning "  These fields belong to the model server's chart. The next \`helm upgrade\` reverts them,"
         log_warning "  silently, and the workload goes back to what it was. Put them in your chart values to keep them."
         if [ "${WVA_WORKLOAD_PATCH_APPLY_WEIGHTS:-false}" = "true" ]; then
@@ -1592,7 +1614,11 @@ wva_workload_patch() {
         # "Patched 3" with yq missing and zero patch calls made.
         [ "$patched" -gt 0 ] && log_success "Patched $patched of $found workload(s)."
         [ "$deferred" -gt 0 ] && log_info "$deferred workload(s) need only a volume or a cache variable, which is emitted rather than applied."
-        [ "$refused" -gt 0 ] && log_warning "$refused workload(s) were NOT applied because a controller owns them; put the change in the owner."
+        # Non-zero, as a failure is: asked to apply, the run did not.
+        if [ "$refused" -gt 0 ]; then
+            log_warning "$refused workload(s) were NOT applied because a controller owns them; put the change in the owner."
+            rc=1
+        fi
         if [ "$failed" -gt 0 ]; then
             log_warning "$failed of $found workload(s) were NOT patched."
             rc=1

@@ -2783,9 +2783,12 @@ reset; lws_scene; f_lws_two
 before=$FAILED
 FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.metadata.ownerReferences = [{"kind":"ModelService","name":"glm","controller":true}]')"
 lws_driver true true
-assert_eq "$DRIVER_RC" "0" "return code"
+# Asked to apply and refused: the run says so in its exit code, as a failure does.
+assert_eq "$DRIVER_RC" "1" "return code"
 assert_eq "$PATCH_CALLS" "0" "kubectl patch calls"
 assert_contains "$(cat "$DRIVER_LOG")" "NOT applied -- it is controlled by ModelService/glm"
+# Refused before any half is judged: no line says a volume is being applied.
+assert_not_contains "$(cat "$DRIVER_LOG")" "applying the engine-cache volume too"
 assert_contains "$(cat "$DRIVER_LOG")" "1 workload(s) were NOT applied because a controller owns them"
 assert_contains "$(cat "$DRIVER_OUT")" "kind: LeaderWorkerSet"
 # An owner that is not the controller (a garbage-collection parent) does not refuse.
@@ -2826,6 +2829,7 @@ reset; lws_scene; f_lws_two
 FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.replicas = 3 | .spec.leaderWorkerTemplate.size = 4')"
 lws_driver true true
 assert_contains "$(cat "$DRIVER_LOG")" "this REPLACES EVERY GROUP (replicas: 3, size: 4)"
+assert_contains "$(cat "$DRIVER_LOG")" "up to 1 at a time (maxUnavailable: 1, maxSurge: 0)"
 after="$(json_patch_apply "$FIXTURE" "$PATCH_BODY")" || fail "the patch does not apply at size 4"
 assert_eq "$(jq -r '.spec.leaderWorkerTemplate.size' <<< "$after")" "4" "size kept"
 assert_eq "$(jq -r '.spec.leaderWorkerTemplate.workerTemplate.spec.volumes[0].name' <<< "$after")" "engine-cache" "worker volume at size 4"
@@ -2853,6 +2857,44 @@ assert_eq "$(jq -c '.spec.leaderWorkerTemplate.workerTemplate.spec.containers[1]
     '{"name":"metrics","image":"quay.io/x/exporter:1","env":[{"name":"PORT","value":"9400"}]}' "sidecar"
 assert_eq "$(jq -r '.spec.leaderWorkerTemplate.workerTemplate.spec.containers[0].env | map(.name) | join(",")' <<< "$after")" \
     "VLLM_CACHE_ROOT,FLASHINFER_WORKSPACE_DIR,TRITON_CACHE_DIR,PYTHONPYCACHEPREFIX" "engine env"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="LWS apply: the warning reads the rollout strategy the LWS declares"
+reset; lws_scene; f_lws_two
+before=$FAILED
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.rolloutStrategy = {"type":"RollingUpdate","rollingUpdateConfiguration":{"maxUnavailable":0,"maxSurge":1}}')"
+lws_driver true true
+assert_contains "$(cat "$DRIVER_LOG")" "with maxSurge: 1 (maxUnavailable: 0) it starts the new group first"
+assert_not_contains "$(cat "$DRIVER_LOG")" "serves nothing"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="LWS apply: an LWS-only run does not describe a Deployment rollout"
+reset; lws_scene; f_lws_two
+before=$FAILED
+lws_driver true true
+assert_contains "$(cat "$DRIVER_LOG")" "this REPLACES THE GROUP"          # anchor
+assert_not_contains "$(cat "$DRIVER_LOG")" "the new pod must schedule before the old one goes"
+# ...while a Deployment run still does.
+reset; LIST_FIXTURE="$(serving_list)"; f_vllm_plain
+lws_driver true
+assert_contains "$(cat "$DRIVER_LOG")" "the new pod must schedule before the old one goes"
+[ "$FAILED" -eq "$before" ] && ok
+
+# The two serving-workload counters outside this library read the pod template
+# the same way, so a worker-only LWS counts there too. Loaded one function at a
+# time: their libraries need more than this harness sources.
+load_fn() { eval "$(tr -d '' < "$ROOT/deploy/lib/$1" | sed -n "/^$2() {/,/^}/p")"; }
+load_fn infra_monitoring.sh wva_serving_workload_count
+load_fn prereqs.sh wva_model_server_count
+
+CASE="LWS: a worker-only LWS marked on its pod labels is counted by both counters"
+reset
+before=$FAILED
+LIST_FIXTURE='{"items":[]}'
+f_lws_worker_only
+LIST_FIXTURE_LWS="$(printf '%s' "$FIXTURE" | jq -c '{items: [.spec.leaderWorkerTemplate.workerTemplate.metadata = {"labels":{"llm-d.ai/role":"decode"}}]}')"
+assert_eq "$(wva_serving_workload_count ns1)" "1" "wva_serving_workload_count"
+assert_eq "$(wva_model_server_count ns1)" "1" "wva_model_server_count"
 [ "$FAILED" -eq "$before" ] && ok
 
 # ----------------------------------------------------------------------------
