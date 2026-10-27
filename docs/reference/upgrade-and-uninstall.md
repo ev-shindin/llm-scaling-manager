@@ -21,18 +21,18 @@ release. An image older than the manifests crash-loops on flags it does not
 know. Releases are listed on the
 [Releases page](https://github.com/ev-shindin/llm-scaling-manager/releases);
 the first full release is `v0.10.0`, after release candidates `-rc1` to
-`-rc4`. A checked-out release deploys its own tag, so `IMG_TAG` below only
-makes that explicit. Each release's notes list its image
+`-rc4`, and the latest is `v0.10.1`. A checked-out release deploys its own tag,
+so `IMG_TAG` below only makes that explicit. Each release's notes list its image
 digest; a digest names one build, and a tag could in principle be re-pushed.
 
 ```bash
-git checkout v0.10.0
-make deploy-wva NAMESPACE=<namespace> IMG_TAG=v0.10.0
-# or by digest (v0.10.0's, from its release notes)
+git checkout v0.10.1
+make deploy-wva NAMESPACE=<namespace> IMG_TAG=v0.10.1
+# or by digest (v0.10.1's, from its release notes)
 make deploy-wva NAMESPACE=<namespace> \
-  IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:39de69a24a19680895a9bbe7ab6282a93aac9abc8301c834dc441be8f2009424
+  IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:c791e71b6e5098d7fc7c4067d6920306f91b2e3ba1cff473187e849b8b6919d4
 # out-of-reach shape (the cluster admin runs it): the controller runs in wva-<namespace>
-NAMESPACE=<namespace> make deploy-wva WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace> IMG_TAG=v0.10.0
+NAMESPACE=<namespace> make deploy-wva WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace> IMG_TAG=v0.10.1
 ```
 
 `IMG_TAG` sets the tag of the default `IMG`; `IMG` replaces the whole reference.
@@ -106,13 +106,36 @@ only to change it. Limiters an admin published in a policy namespace
 
 ### Upgrading from v0.10.0 to v0.10.1
 
-Follow [Upgrade](#upgrade) above. One cluster-admin step, once: if an EPP
-answers 500 to `/metrics` ([why](troubleshooting.md#epp-metrics-returns-500)),
-`make deploy-wva` alone does not fix it. A cluster admin runs
-`make epp-metrics-auth` (or re-runs `make setup-prereqs`) with the same
-variables as the install. `make verify-deployment` names the EPPs that need it.
-The EPP caches review results, so the 500 can last up to about 5 minutes after
-the grant; restarting the EPP pod clears it at once.
+Follow [Upgrade](#upgrade) above: back up the policy first, check out
+`v0.10.1`, and re-run the same `make deploy-wva` command. Also:
+
+1. **Let the EPPs authenticate `/metrics`, once (cluster admin).** If an EPP
+   answers 500 to `/metrics` ([why](troubleshooting.md#epp-metrics-returns-500)),
+   `make deploy-wva` alone does not fix it. A cluster admin runs
+   `make epp-metrics-auth` (or re-runs `make setup-prereqs`, which now includes
+   it; `WVA_EPP_METRICS_AUTH=false` skips it) with the same variables as the
+   install. `make verify-deployment` names the EPPs that need it. The EPP
+   caches review results, so the 500 can last up to about 5 minutes after the
+   grant; restarting the EPP pod clears it at once.
+2. **Upgrade KEDA older than 2.21 to 2.21, before `make deploy-wva` if you
+   can.** On KEDA before 2.20 a controller restart, such as the upgrade's own
+   rollout, or an outage can leave ScaledObjects unwired
+   ([Unwired HPA before KEDA 2.20](keda.md#unwired-hpa-before-keda-220)); if
+   KEDA is upgraded after the deploy, run `make scaledobjects-rewire` once it
+   is. KEDA 2.20 carries CVE-2026-77524, fixed in 2.21.0. The installer now
+   warns about both.
+3. **Log parsers.** The `itl-window` log line's `maxNumSeqs` field is now
+   `batchCap`: `max_num_seqs`, lowered by `--max-num-active-seqs` when the
+   engine sets it. Only that line changed: the saturation and SLO analyzers'
+   capacity lines still log `maxNumSeqs`.
+4. **Utilization-share optimizer.** If you set it up, re-run its steps after
+   `make deploy-wva`: the install drops the optimizer block. Cluster-wide:
+   [steps 15 and 16](../guides/utilization-share-cluster-wide/README.md#step-15-turn-on-shadow);
+   namespaced:
+   [steps 15 and 17](../guides/utilization-share-namespaced/README.md#step-15-turn-on-shadow).
+
+The full list is in the
+[v0.10.1 release notes](https://github.com/ev-shindin/llm-scaling-manager/releases/tag/v0.10.1).
 
 ### Upgrading from v0.10.0-rc4 to v0.10.0
 
