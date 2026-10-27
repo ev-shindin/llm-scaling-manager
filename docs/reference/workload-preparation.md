@@ -657,6 +657,22 @@ containers:
 ```
 
 `<image key>` is `printf '%s' '<image reference>' | sha256sum | cut -c1-12`.
+The guard goes in each container command, before the engine starts:
+
+```bash
+for v in VLLM_CACHE_ROOT FLASHINFER_WORKSPACE_DIR TRITON_CACHE_DIR PYTHONPYCACHEPREFIX; do
+  eval "d=\${$v}"
+  [ -n "$d" ] || continue
+  if ! mkdir -p "$d" 2>/dev/null || ! touch "$d/.writable" 2>/dev/null; then
+    echo "engine cache $v=$d is not writable; using the engine default instead"
+    unset $v
+  fi
+done
+```
+
+The loop also covers a `PYTHONPYCACHEPREFIX` you set yourself: it is unset only
+when its directory is not writable (then the faster choice), and the check
+leaves an empty `.writable` file in that directory.
 
 #### Check the cache without a second start
 
@@ -1159,7 +1175,9 @@ put it in the command. A workload that already sets `PYTHONPYCACHEPREFIX`, by
 value or from a ConfigMap or Secret, is left as it is. If its value ends in
 `pycache/<key>` and the key belongs to another image, the console says so and
 names the right key. A workload that sets `PYTHONDONTWRITEBYTECODE` gets no
-bytecode half. LeaderWorkerSets are skipped, as for the other halves; set it by
+bytecode half. A vLLM workload whose `VLLM_CACHE_ROOT` comes from a ConfigMap or
+Secret is reported but gets no half either: set `PYTHONPYCACHEPREFIX` beside
+your own cache root. LeaderWorkerSets are skipped, as for the other halves; set it by
 hand ([Python bytecode](#python-bytecode)).
 
 `WVA_WORKLOAD_PATCH_APPLY=true` also applies the **drain half** to the live

@@ -2397,6 +2397,21 @@ FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.template.spec.containers[0].env
 assert_field 9 "unset"
 [ "$FAILED" -eq "$before" ] && ok
 
+CASE="bytecode: VLLM_CACHE_ROOT from a ConfigMap is reported, with no volume proposed"
+reset; f_engine_cache_only_gap
+before=$FAILED
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.template.spec.containers[0].env += [{"name":"VLLM_CACHE_ROOT","valueFrom":{"configMapKeyRef":{"name":"c","key":"k"}}}]')"
+assert_field 7 ""
+assert_field 9 "rootfrom"
+out="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>&1)"
+assert_contains "$out" "RECOMPILES ITS PYTHON BYTECODE"
+assert_contains "$out" "PYTHONPYCACHEPREFIX=<your cache volume>/pycache/${KEY_VLLM}"
+assert_not_contains "$out" "claimName: engine-cache"
+assert_not_contains "$out" "- name: PYTHONPYCACHEPREFIX"
+assert_not_contains "$out" "apiVersion:"            # nothing else is wanted: no document at all
+assert_contains "$(so_enginecache_note ns deployments w "$POD_DEPLOY")" "no volume is proposed"
+[ "$FAILED" -eq "$before" ] && ok
+
 CASE="bytecode: a tag and a digest of one image get two keys through the patch"
 reset; f_engine_cache_only_gap
 before=$FAILED

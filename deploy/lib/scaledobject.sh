@@ -807,7 +807,12 @@ so_enginecache_note() {
     IFS=$'\037' read -r engine prestop grace pvcs onvol argv cachevol image pyc <<< "$gaps"
     [ -n "$engine" ] || return 0
     local also=""
-    case "$pyc" in unset|mount:*) also=" Its Python bytecode is compiled again in every container too (PYTHONPYCACHEPREFIX is unset)." ;; esac
+    case "$pyc" in
+        unset|mount:*) also=" Its Python bytecode is compiled again in every container too (PYTHONPYCACHEPREFIX is unset)." ;;
+        rootfrom)
+            printf '%s' "Every start recompiles its Python bytecode: ${engine} sets no PYTHONPYCACHEPREFIX (measured on vLLM: ~11 s of every start). Its VLLM_CACHE_ROOT comes from a ConfigMap or Secret, so no volume is proposed: set PYTHONPYCACHEPREFIX=<your cache volume>/pycache/<image key> beside it; see docs/reference/workload-preparation.md#python-bytecode."
+            return 0 ;;
+    esac
     case "$cachevol" in
         unset)
             printf '%s' "Every start compiles from nothing: ${engine} keeps its torch.compile, FlashInfer and Triton caches under /tmp (VLLM_CACHE_ROOT is unset), so no replica finds what the previous one compiled -- tens of seconds on every scale-up.${also} \`make workload-patch\` writes the fix; see docs/reference/workload-preparation.md#engine-caches-on-the-nodes-disk." ;;
@@ -1546,6 +1551,9 @@ so_workload_gaps() {
         # PYTHONDONTWRITEBYTECODE in the pod spec (any value but empty, or a
         # valueFrom) is "dontwrite": Python would then read bytecode only from
         # the prefix and never write it, which is slower than no prefix.
+        # VLLM_CACHE_ROOT from a ConfigMap or Secret is "rootfrom": the owner
+        # keeps the caches somewhere this cannot read, so the bytecode is
+        # reported but no volume is proposed beside it.
         | ( [ $e.env[]? | select(.name == "PYTHONPYCACHEPREFIX") ] | last ) as $pycent
         | ( [ $e.env[]? | select(.name == "PYTHONDONTWRITEBYTECODE") ] | last ) as $nowrite
         | ([ $dmounts[] | select(. != null and . != "/") ]) as $pmounts
@@ -1557,6 +1565,7 @@ so_workload_gaps() {
         | ( if ($e | not) or $issim then ""
             elif $pycent != null then "set:" + ($pycent.value // "")
             elif $nowrite != null and (($nowrite.valueFrom != null) or (($nowrite.value // "") != "")) then "dontwrite"
+            elif ($cacheent != null) and ($cacheent.valueFrom != null) then "rootfrom"
             elif $byroot != null then "mount:" + $byroot
             elif $byemount != null then "mount:" + $byemount
             else "unset" end ) as $pyc
@@ -1891,6 +1900,12 @@ so_workload_patch_doc() {
             if [[ "$setkey" =~ /pycache/([0-9a-f]{12})$ ]] && pyckey="$(so_pycache_key "$image")" \
                && [ "${BASH_REMATCH[1]}" != "$pyckey" ]; then
                 log_warning "  $ns/$name: PYTHONPYCACHEPREFIX=${pyc#set:} is keyed for another image than $image (key $pyckey); left as set. A key shared by two images can load one's bytecode for the other's source -- point it at .../pycache/$pyckey."
+            fi
+            pyckey="" ;;
+        rootfrom)
+            # Reported, not patched: the caches live where this cannot read.
+            if pyckey="$(so_pycache_key "$image")"; then
+                log_warning "  $ns/$name RECOMPILES ITS PYTHON BYTECODE on every start: $engine sets no PYTHONPYCACHEPREFIX. Its VLLM_CACHE_ROOT comes from a ConfigMap or Secret, so no volume is proposed: set PYTHONPYCACHEPREFIX=<your cache volume>/pycache/$pyckey beside it, with the guard."
             fi
             pyckey="" ;;
     esac
