@@ -1018,7 +1018,8 @@ drain half.
   template is judged on its own, with its own engine container and image key.
   With no `leaderTemplate` the leader is built from `workerTemplate`, so only
   that one is written. A worker whose command names no model (a Ray worker)
-  takes the leader's model for the weights half.
+  takes the leader's model for the weights half. A model passed in a variable
+  (`vllm serve $(MODEL)`) is not read; the console says so for each template.
 - **Applying it.** `WVA_WORKLOAD_PATCH_APPLY=true` with
   `WVA_WORKLOAD_PATCH_APPLY_WEIGHTS=true` or `WVA_WORKLOAD_PATCH_APPLY_ENGINE_CACHE=true`
   sends it as a JSON patch (`--type=json`), after the same checks as a
@@ -1026,16 +1027,32 @@ drain half.
   `volumes` are appended to where they exist. (The API server refuses a
   strategic merge on a custom resource, and `--type=merge` replaces whole
   lists.) With `APPLY` alone nothing is sent; there is no drain half.
+- **Applying it restarts every group.** A new template replaces each group
+  whole, one group at a time, and by default the old group goes before the new
+  one starts. At `replicas: 1` the model serves nothing for one multi-node
+  start; with more groups it runs one group short for each. The console names
+  the replicas and the group size when it applies.
+- **It is applied only to an LWS nothing else controls.** One with an
+  `ownerReferences` entry marked `controller: true` is refused, naming the
+  owner: the owner would put its own spec back. Put the change there.
+- **It cannot land on a changed object.** The checks and the patch use one
+  read of the LWS, and the patch tests its `resourceVersion` first. If the LWS
+  changed in between, the API server refuses the whole patch and nothing is
+  applied; run `make workload-patch` again.
+- **The preparer check counts the preparer's nodes**, not the nodes the LWS can
+  land on: it does not read the LWS's node selector, tolerations or affinity.
+  Make sure the preparer's `WEIGHTS_NODE_SELECTOR` covers them.
 - **The guard** goes in the leader command and in the worker command.
 - **Every node needs the cache.** Each pod reads its own node's copy. Run
   `make engine-cache` on every node the group can land on, and
   `make engine-cache-publish` after the first start: it gives every node every
   rank's compile cache, and the bytecode.
 
-**Drain is not covered**, and every run says so. Killing a worker aborts the
-leader's in-flight generations whatever hook the leader has, so a preStop on
-each pod does not drain the group. Do it by hand, in the manifest or chart that
-owns the LWS:
+**Drain is not covered.** Killing a worker aborts the leader's in-flight
+generations whatever hook the leader has, so a preStop on each pod does not
+drain the group. The console says so for every LWS until both templates have a
+preStop and the worker's grace period is at least the leader's. Do it by hand,
+in the manifest or chart that owns the LWS:
 
 ```yaml
 spec:

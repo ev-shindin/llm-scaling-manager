@@ -2466,7 +2466,7 @@ KEY_WORKER="$(so_pycache_key "$LWS_WORKER_IMAGE")"
 # Leader serves the API; the worker joins it over Ray and names no model. No
 # env, volumeMounts or volumes anywhere: every list is absent.
 f_lws_two() {
-    FIXTURE='{"spec":{"leaderWorkerTemplate":{
+    FIXTURE='{"metadata":{"name":"w","resourceVersion":"7"},"spec":{"leaderWorkerTemplate":{
         "leaderTemplate":{"spec":{"containers":[{"name":"vllm-leader","image":"'"$LWS_LEADER_IMAGE"'",
             "command":["/bin/sh","-c"],"args":["vllm serve Qwen/Qwen3-0.6B --tensor-parallel-size 2"]}]}},
         "workerTemplate":{"spec":{"containers":[{"name":"vllm-worker","image":"'"$LWS_WORKER_IMAGE"'",
@@ -2475,7 +2475,7 @@ f_lws_two() {
 
 # No leaderTemplate: the LWS controller builds the leader from workerTemplate.
 f_lws_worker_only() {
-    FIXTURE='{"spec":{"leaderWorkerTemplate":{
+    FIXTURE='{"metadata":{"name":"w","resourceVersion":"7"},"spec":{"leaderWorkerTemplate":{
         "workerTemplate":{"spec":{"containers":[{"name":"vllm","image":"'"$LWS_LEADER_IMAGE"'",
             "args":["vllm","serve","Qwen/Qwen3-0.6B"]}]}}}}}'
 }
@@ -2483,7 +2483,7 @@ f_lws_worker_only() {
 # Every list present: a sidecar ahead of the engine, env, mounts and a volume
 # in each template, and the leader keeps VLLM_CACHE_ROOT under /tmp.
 f_lws_lists_present() {
-    FIXTURE='{"spec":{"leaderWorkerTemplate":{
+    FIXTURE='{"metadata":{"name":"w","resourceVersion":"7"},"spec":{"leaderWorkerTemplate":{
         "leaderTemplate":{"spec":{
             "volumes":[{"name":"dshm","emptyDir":{"medium":"Memory"}}],
             "containers":[{"name":"proxy","image":"quay.io/x/proxy:1"},
@@ -2501,7 +2501,7 @@ f_lws_lists_present() {
 
 # Nothing missing in either template.
 f_lws_converged() {
-    FIXTURE='{"spec":{"leaderWorkerTemplate":{
+    FIXTURE='{"metadata":{"name":"w","resourceVersion":"7"},"spec":{"leaderWorkerTemplate":{
         "leaderTemplate":{"spec":{
             "volumes":[{"name":"engine-cache","persistentVolumeClaim":{"claimName":"engine-cache"}}],
             "containers":[{"name":"vllm","image":"'"$LWS_LEADER_IMAGE"'",
@@ -2630,12 +2630,12 @@ assert_contains "$(cat "$WORK/lws.err")" "No vLLM or SGLang container found in t
 assert_eq "$(lws_get "$doc" '.spec.leaderWorkerTemplate | keys | join(",")')" "leaderTemplate" "templates"
 [ "$FAILED" -eq "$before" ] && ok
 
-CASE="LWS: drain is still skipped -- no hook emitted, the reason printed once, and rc 2 with nothing else to do"
+CASE="LWS: drain is still skipped -- no hook emitted, the reason printed once, and rc 0 with nothing else to do"
 reset; f_lws_converged
 before=$FAILED
 doc_rc=0
 doc="$(so_workload_patch_doc ns leaderworkersets w "$POD_LWS" 2>"$WORK/lws.err")" || doc_rc=$?
-assert_eq "$doc_rc" "2" "return code"
+assert_eq "$doc_rc" "0" "return code"
 assert_eq "$doc" "" "document"
 assert_eq "$(grep -c 'no drain half' "$WORK/lws.err")" "1" "drain reason lines"
 assert_contains "$(cat "$WORK/lws.err")" "a worker that stops first aborts the leader"
@@ -2711,6 +2711,148 @@ lws_driver true true
 assert_eq "$DRIVER_RC" "1" "return code"
 assert_eq "$PATCH_CALLS" "1" "kubectl patch calls"
 assert_contains "$(cat "$DRIVER_LOG")" "1 of 1 workload(s) were NOT patched"
+[ "$FAILED" -eq "$before" ] && ok
+
+# --- LeaderWorkerSets: review round -----------------------------------------
+
+# f_lws_hooked: converged caches, and a preStop on leader and worker; $1 the
+# leader grace, $2 the worker grace.
+f_lws_hooked() {
+    f_lws_converged
+    FIXTURE="$(printf '%s' "$FIXTURE" | jq -c --argjson lg "$1" --argjson wg "$2" '
+        .spec.leaderWorkerTemplate.leaderTemplate.spec.terminationGracePeriodSeconds = $lg
+        | .spec.leaderWorkerTemplate.workerTemplate.spec.terminationGracePeriodSeconds = $wg
+        | .spec.leaderWorkerTemplate[].spec.containers[0].lifecycle = {"preStop":{"exec":{"command":["sleep","45"]}}}')"
+}
+
+CASE="LWS: the drain line is quiet once both templates hook and the worker outlasts the leader"
+reset; f_lws_hooked 120 120
+before=$FAILED
+doc_rc=0
+doc="$(so_workload_patch_doc ns leaderworkersets w "$POD_LWS" 2>"$WORK/lws.err")" || doc_rc=$?
+assert_eq "$doc_rc" "0" "return code"
+assert_eq "$(grep -c 'no drain half' "$WORK/lws.err")" "0" "drain reason lines"
+# A worker that leaves before the leader still cuts the group: the line, with the action.
+reset; f_lws_hooked 600 120
+so_workload_patch_doc ns leaderworkersets w "$POD_LWS" >/dev/null 2>"$WORK/lws.err"
+assert_contains "$(cat "$WORK/lws.err")" "Add a preStop to the leader AND the worker, with the worker terminationGracePeriodSeconds at least the leader one"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="LWS: a healthy LWS beside a healthy Deployment is an all-clear, nothing skipped"
+reset
+before=$FAILED
+LIST_FIXTURE='{"items":[{"metadata":{"name":"w","labels":{"llm-d.ai/role":"decode"}}}]}'
+LIST_FIXTURE_LWS='{"items":[{"metadata":{"name":"l","labels":{"llm-d.ai/role":"decode"}}}]}'
+CRD_RC=0
+f_cached_properly; FIXTURE_MAP[w]="$FIXTURE"
+f_lws_hooked 120 120; FIXTURE_MAP[l]="$FIXTURE"
+run_driver
+assert_eq "$DRIVER_RC" "0" "return code"
+assert_contains "$(cat "$DRIVER_LOG")" "2 model server(s) already drain on scale-down"
+assert_not_contains "$(cat "$DRIVER_LOG")" "skipped"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="LWS: a worker-only LWS marked serving on its pod labels is found"
+reset
+before=$FAILED
+CRD_RC=0; LIST_FIXTURE='{"items":[]}'
+f_lws_worker_only
+# The marker only on the workerTemplate pod labels, none on the object.
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.metadata.name = "l" | .spec.leaderWorkerTemplate.workerTemplate.metadata = {"labels":{"llm-d.ai/role":"decode"}}')"
+LIST_FIXTURE_LWS="$(printf '%s' "$FIXTURE" | jq -c '{items: [.]}')"
+run_driver
+assert_contains "$(cat "$DRIVER_OUT" 2>/dev/null)" "leaderworkersets/l in ns1"
+# The cluster-wide namespace walk reads the same labels.
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '{items: [.metadata.namespace = "ns9"]}')"
+assert_eq "$(so_namespaces_of leaderworkersets "$POD_LWS")" "ns9" "namespaces"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="LWS: a model passed in a variable is reported, and no weights half is guessed"
+reset; f_lws_two
+before=$FAILED
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.leaderWorkerTemplate.leaderTemplate.spec.containers[0].args = ["vllm serve $(MODEL) --tensor-parallel-size 2"]')"
+doc="$(so_workload_patch_doc ns leaderworkersets w "$POD_LWS" 2>"$WORK/lws.err")"
+assert_contains "$(cat "$WORK/lws.err")" "ns/w (leaderTemplate): the model could not be identified"
+assert_contains "$(cat "$WORK/lws.err")" "ns/w (workerTemplate): the model could not be identified"
+assert_contains "$doc" "- name: VLLM_CACHE_ROOT"                 # anchor: the engine cache still goes
+assert_not_contains "$doc" "HF_HOME"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="LWS apply: a controller-owned LWS is emitted, not applied, and the owner is named"
+reset; lws_scene; f_lws_two
+before=$FAILED
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.metadata.ownerReferences = [{"kind":"ModelService","name":"glm","controller":true}]')"
+lws_driver true true
+assert_eq "$DRIVER_RC" "0" "return code"
+assert_eq "$PATCH_CALLS" "0" "kubectl patch calls"
+assert_contains "$(cat "$DRIVER_LOG")" "NOT applied -- it is controlled by ModelService/glm"
+assert_contains "$(cat "$DRIVER_LOG")" "1 workload(s) were NOT applied because a controller owns them"
+assert_contains "$(cat "$DRIVER_OUT")" "kind: LeaderWorkerSet"
+# An owner that is not the controller (a garbage-collection parent) does not refuse.
+reset; lws_scene; f_lws_two
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.metadata.ownerReferences = [{"kind":"ConfigMap","name":"x"}]')"
+lws_driver true true
+assert_eq "$PATCH_CALLS" "1" "kubectl patch calls without a controller"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="LWS apply: the patch tests the resourceVersion it was built from, and a changed object takes none of it"
+reset; lws_scene; f_lws_two
+before=$FAILED
+lws_driver true true
+assert_eq "$(jq -c '.[0]' <<< "$PATCH_BODY")" '{"op":"test","path":"/metadata/resourceVersion","value":"7"}' "first op"
+moved="$(printf '%s' "$FIXTURE" | jq -c '.metadata.resourceVersion = "8"')"
+json_patch_apply "$moved" "$PATCH_BODY" >/dev/null 2>&1 && fail "the patch applied to a changed object"
+# What the operator reads when the API server refuses it.
+reset; lws_scene; f_lws_two; PATCH_RC=1
+lws_driver true true
+assert_contains "$(cat "$DRIVER_LOG")" "the API server refused the JSON patch, so NOTHING was applied"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="LWS apply: an env entry is replaced only after a test of its name at that index"
+reset; lws_scene; f_lws_lists_present
+before=$FAILED
+lws_driver true true
+assert_eq "$(jq -c '[.[] | select(.path | test("/containers/1/env/1"))]' <<< "$PATCH_BODY")" \
+    '[{"op":"test","path":"/spec/leaderWorkerTemplate/leaderTemplate/spec/containers/1/env/1/name","value":"VLLM_CACHE_ROOT"},{"op":"replace","path":"/spec/leaderWorkerTemplate/leaderTemplate/spec/containers/1/env/1","value":{"name":"VLLM_CACHE_ROOT","value":"/engine-cache/vllm"}}]' "ops at env/1"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="LWS apply: the warning names the groups it replaces (replicas 1, and 3 of size 4)"
+reset; lws_scene; f_lws_two
+before=$FAILED
+lws_driver true true
+assert_contains "$(cat "$DRIVER_LOG")" "this REPLACES THE GROUP (replicas: 1, size: 1)"
+assert_contains "$(cat "$DRIVER_LOG")" "the model serves nothing for one multi-node start"
+reset; lws_scene; f_lws_two
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.replicas = 3 | .spec.leaderWorkerTemplate.size = 4')"
+lws_driver true true
+assert_contains "$(cat "$DRIVER_LOG")" "this REPLACES EVERY GROUP (replicas: 3, size: 4)"
+after="$(json_patch_apply "$FIXTURE" "$PATCH_BODY")" || fail "the patch does not apply at size 4"
+assert_eq "$(jq -r '.spec.leaderWorkerTemplate.size' <<< "$after")" "4" "size kept"
+assert_eq "$(jq -r '.spec.leaderWorkerTemplate.workerTemplate.spec.volumes[0].name' <<< "$after")" "engine-cache" "worker volume at size 4"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="LWS apply: a worker-only LWS is patched at workerTemplate alone"
+reset; lws_scene; f_lws_worker_only
+before=$FAILED
+lws_driver true true
+assert_eq "$PATCH_CALLS" "1" "kubectl patch calls"
+assert_eq "$(jq -r '[.[] | select(.path | contains("leaderTemplate"))] | length' <<< "$PATCH_BODY")" "0" "leaderTemplate ops"
+after="$(json_patch_apply "$FIXTURE" "$PATCH_BODY")" || fail "the patch does not apply: $PATCH_BODY"
+assert_eq "$(jq -r '.spec.leaderWorkerTemplate.workerTemplate.spec.containers[0].env | map(.name) | join(",")' <<< "$after")" \
+    "VLLM_CACHE_ROOT,FLASHINFER_WORKSPACE_DIR,TRITON_CACHE_DIR,PYTHONPYCACHEPREFIX" "worker env"
+assert_eq "$(jq -r '.spec.leaderWorkerTemplate | has("leaderTemplate")' <<< "$after")" "false" "no leaderTemplate created"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="LWS apply: two containers in one template -- only the engine is touched"
+reset; lws_scene; f_lws_two
+before=$FAILED
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.leaderWorkerTemplate.workerTemplate.spec.containers += [{"name":"metrics","image":"quay.io/x/exporter:1","env":[{"name":"PORT","value":"9400"}]}]')"
+lws_driver true true
+after="$(json_patch_apply "$FIXTURE" "$PATCH_BODY")" || fail "the patch does not apply: $PATCH_BODY"
+assert_eq "$(jq -c '.spec.leaderWorkerTemplate.workerTemplate.spec.containers[1]' <<< "$after")" \
+    '{"name":"metrics","image":"quay.io/x/exporter:1","env":[{"name":"PORT","value":"9400"}]}' "sidecar"
+assert_eq "$(jq -r '.spec.leaderWorkerTemplate.workerTemplate.spec.containers[0].env | map(.name) | join(",")' <<< "$after")" \
+    "VLLM_CACHE_ROOT,FLASHINFER_WORKSPACE_DIR,TRITON_CACHE_DIR,PYTHONPYCACHEPREFIX" "engine env"
 [ "$FAILED" -eq "$before" ] && ok
 
 # ----------------------------------------------------------------------------

@@ -463,7 +463,7 @@ so_serving_workload_for_model() {
                  --argjson markers "$(so_serving_markers_json)" '
               .items[]
               | . as $o
-              | (getpath($p) // {}) as $t
+              | (getpath($p) // (if $p == ["spec", "leaderWorkerTemplate", "leaderTemplate"] then getpath(["spec", "leaderWorkerTemplate", "workerTemplate"]) else null end) // {}) as $t
               | (($t.metadata.labels // {}) + ($o.metadata.labels // {})) as $l
               | select($l | to_entries
                        | any((.key + "=" + (.value|tostring)) as $kv
@@ -983,7 +983,13 @@ so_workload_volume_can_apply() {
     claim="$(yq eval "[$d_spec.volumes[] | select(.name == \"$volname\") | .persistentVolumeClaim.claimName // \"\"] | .[0] // \"\"" "$doc" 2>/dev/null)"
     [ -n "$claim" ] || return 1          # no such half in this document
     mountpath="$(yq eval "[$d_spec.containers[].volumeMounts[] | select(.name == \"$volname\") | .mountPath // \"\"] | .[0] // \"\"" "$doc" 2>/dev/null)"
-    live="$(kubectl get "$d_resource" "$name" -n "$ns" -o json 2>/dev/null)" || return 1
+    # patch_live, when the caller set it, is the one read the patch itself is
+    # built against, so the checks and the patch see the same object.
+    if [ -n "${patch_live:-}" ]; then
+        live="$patch_live"
+    else
+        live="$(kubectl get "$d_resource" "$name" -n "$ns" -o json 2>/dev/null)" || return 1
+    fi
     if why="$(so_workload_weights_safe "$live" "$volname" "$mountpath" "$claim" "$ns" "$d_paths")"; then
         log_info "  $ns/$name: applying the $what volume too ($optin=true)."
         return 0
@@ -1069,9 +1075,13 @@ so_workload_enginecache_can_apply() {
     return 0
 }
 
+# so_workload_patch_one applies one document of patch file $1 -- namespace $2,
+# name $3, kind $4 -- and returns 0 when it was applied, 2 when there was
+# nothing it may apply (a storage half without its opt-in), 4 when it refused
+# (a LeaderWorkerSet a controller owns), and anything else on a failure.
 so_workload_patch_one() {
     local file="$1" ns="$2" name="$3" kind="${4:-Deployment}" doc rc=0 keep_w=0 keep_e=0
-    local d_resource d_spec d_paths ops
+    local d_resource d_spec d_paths ops patch_live="" owner groups size
     doc="$(mktemp)" || return 1
     # shellcheck disable=SC2016
     yq eval-all "select(.metadata.namespace == \"$ns\" and .metadata.name == \"$name\" and .kind == \"$kind\")" \
@@ -1080,6 +1090,17 @@ so_workload_patch_one() {
         rm -f "$doc"
         log_warning "  Could not isolate the patch for $ns/$name."
         return 1
+    fi
+    # A LeaderWorkerSet is read ONCE, and the collision, claim and preparer
+    # checks and the JSON patch all use that read. The patch then tests its
+    # resourceVersion, so an object that changed in between refuses the whole
+    # patch rather than taking one built for another version of it.
+    if [ "$kind" = "LeaderWorkerSet" ]; then
+        if ! patch_live="$(kubectl get leaderworkersets "$name" -n "$ns" -o json 2>/dev/null)" || [ -z "$patch_live" ]; then
+            rm -f "$doc"
+            log_warning "  $ns/$name: could not read the live LeaderWorkerSet, so nothing was applied."
+            return 1
+        fi
     fi
     # WVA_WORKLOAD_PATCH_APPLY_WEIGHTS and _ENGINE_CACHE are their own opt-ins,
     # separate from APPLY and from each other. Adding a hook cannot conflict
@@ -1110,15 +1131,33 @@ so_workload_patch_one() {
         return 2
     fi
     if [ "$d_resource" = "leaderworkersets" ]; then
+        # A controller that owns the LWS (an operator, a higher-level CR) puts
+        # its own spec back, so a patch here is undone on its next reconcile --
+        # or fights it. The change belongs in the owner.
+        owner="$(printf '%s' "$patch_live" | jq -r '[.metadata.ownerReferences[]? | select(.controller == true) | "\(.kind)/\(.name)"] | first // ""' 2>/dev/null)"
+        if [ -n "$owner" ]; then
+            rm -f "$doc"
+            log_warning "  $ns/$name: NOT applied -- it is controlled by $owner, which would put its own spec back. Put the change in $owner; the emitted file has it."
+            return 4
+        fi
         # A JSON patch, built against the live object: the API server refuses a
         # strategic merge on a custom resource, and a merge patch replaces
         # whole lists.
-        if ! ops="$(so_workload_lws_json_patch "$ns" "$name" "$doc")"; then
+        if ! ops="$(so_workload_lws_json_patch "$ns" "$name" "$doc" "$patch_live")"; then
             rm -f "$doc"
             return 1
         fi
+        read -r groups size <<< "$(printf '%s' "$patch_live" | jq -r '"\(.spec.replicas // 1) \(.spec.leaderWorkerTemplate.size // 1)"' 2>/dev/null)"
+        if [ "${groups:-1}" -le 1 ]; then
+            log_warning "  $ns/$name: this REPLACES THE GROUP (replicas: ${groups:-1}, size: ${size:-1}). The LeaderWorkerSet controller recreates a group whole, by default removing the old one before the new one starts, so the model serves nothing for one multi-node start."
+        else
+            log_warning "  $ns/$name: this REPLACES EVERY GROUP (replicas: ${groups}, size: ${size:-1}). The LeaderWorkerSet controller recreates them one whole group at a time, by default removing the old one before the new one starts, so the model runs one group short for ${groups} multi-node starts in a row."
+        fi
         printf '%s\n' "$ops" > "$doc"
-        kubectl patch leaderworkersets "$name" -n "$ns" --type=json --patch-file="$doc" || rc=$?
+        if ! kubectl patch leaderworkersets "$name" -n "$ns" --type=json --patch-file="$doc"; then
+            rc=1
+            log_warning "  $ns/$name: the API server refused the JSON patch, so NOTHING was applied (a JSON patch applies whole or not at all). If the LeaderWorkerSet changed since it was read, its resourceVersion no longer matches: run make workload-patch again."
+        fi
         rm -f "$doc"
         return "$rc"
     fi
@@ -1199,12 +1238,13 @@ so_workload_patch_trim() {
 # template whose bytecode lives under a mount it already has -- emitted, never
 # applied, as on a Deployment -- is not applied because the OTHER template
 # carries a volume.
+#
+# $4 is the live object, read once by the caller. The patch opens with a test
+# of its resourceVersion, and an env entry is replaced only after a test of
+# its name at that index: if the object changed after that read, the whole
+# patch is refused rather than written into a spec it was not built for.
 so_workload_lws_json_patch() {
-    local ns="$1" name="$2" doc="$3" live body
-    if ! live="$(kubectl get leaderworkersets "$name" -n "$ns" -o json 2>/dev/null)" || [ -z "$live" ]; then
-        log_warning "  $ns/$name: could not read the live LeaderWorkerSet, so nothing was applied."
-        return 1
-    fi
+    local ns="$1" name="$2" doc="$3" live="$4" body
     body="$(yq eval -o=json -I=0 '.' "$doc" 2>/dev/null)" || return 1
     if ! printf '%s' "$body" | jq -c --argjson live "$live" \
             --arg wvol "${WVA_MODEL_VOLUME_NAME:-model-storage}" \
@@ -1214,7 +1254,9 @@ so_workload_lws_json_patch() {
                   elif . == "VLLM_CACHE_ROOT" or . == "FLASHINFER_WORKSPACE_DIR"
                        or . == "TRITON_CACHE_DIR" or . == "PYTHONPYCACHEPREFIX" then $evol
                   else null end;
-        [ (.spec.leaderWorkerTemplate // {}) | to_entries[]
+        ($live.metadata.resourceVersion // null) as $rv
+        | if $rv == null then error("the live object carries no resourceVersion") else . end
+        | [ (.spec.leaderWorkerTemplate // {}) | to_entries[]
           | .key as $t
           | (.value.spec // {}) as $s
           | ([ $s.volumes[]?.name ]) as $vnames
@@ -1237,13 +1279,16 @@ so_workload_lws_json_patch() {
                     | if $have == null then {op: "add", path: ($cp + [$f]), value: $items}
                       else ( $items[] as $it
                              | ([ $have | to_entries[] | select($f == "env" and .value.name == $it.name) | .key ] | last) as $j
-                             | if $j != null then {op: "replace", path: ($cp + [$f, $j]), value: $it}
+                             | if $j != null then {op: "test", path: ($cp + [$f, $j, "name"]), value: $it.name},
+                                                  {op: "replace", path: ($cp + [$f, $j]), value: $it}
                                else {op: "add", path: ($cp + [$f, "-"]), value: $it} end )
                       end ) ),
               ( if $ls.volumes == null then {op: "add", path: ($base + ["volumes"]), value: $s.volumes}
                 else ($s.volumes[] | {op: "add", path: ($base + ["volumes", "-"]), value: .}) end ) )
-        ] | map(.path |= ptr)
-        | if length == 0 then error("nothing to apply") else . end' 2>"$doc.err"; then
+        ] as $ops
+        | if ($ops | length) == 0 then error("nothing to apply") else . end
+        | [ {op: "test", path: ["metadata", "resourceVersion"], value: $rv} ] + $ops
+        | map(.path |= ptr)' 2>"$doc.err"; then
         log_warning "  $ns/$name: could not build the JSON patch -- $(head -1 "$doc.err" 2>/dev/null | sed 's/^jq: error (at [^)]*): //'). Nothing was applied."
         rm -f "$doc.err"
         return 1
@@ -1349,6 +1394,11 @@ wva_workload_patch() {
     local apply="${WVA_WORKLOAD_PATCH_APPLY:-false}"
     local ns resource pod kind name found=0 tmp rc=0
     local unreadable=0 skipped=0 scanned=0 patched=0 failed=0 deferred=0 needs_cache=0 needs_engine=0 needs_pyc=0
+    # refused: documents not applied because a controller owns the object.
+    # lws_undrained: LeaderWorkerSets so_workload_patch_doc_lws found without a
+    # preStop on every template, which it cannot fix and the all-clear must
+    # not claim.
+    local refused=0 lws_undrained=0
     local listing names doc_rc index_lines tool doc_ns doc_name doc_kind write_rc
 
     # The tool check this path never had. `make workload-patch` sources the
@@ -1420,7 +1470,7 @@ wva_workload_patch() {
                               | ($markers | index($kv)) != null);
                     .items[]?
                     | . as $o
-                    | (getpath($p) // {}) as $t
+                    | (getpath($p) // (if $p == ["spec", "leaderWorkerTemplate", "leaderTemplate"] then getpath(["spec", "leaderWorkerTemplate", "workerTemplate"]) else null end) // {}) as $t
                     | select((($t.metadata.labels // {}) + ($o.metadata.labels // {})) | serving_labels)
                     | $o.metadata.name')"; then
                 log_warning "  Could not read the $resource listing in $ns -- it is not being reported as clean."
@@ -1434,7 +1484,7 @@ wva_workload_patch() {
                 so_workload_patch_doc "$ns" "$resource" "$name" "$pod" >> "$tmp" || doc_rc=$?
                 case "$doc_rc" in
                     0) : ;;
-                    2) skipped=$((skipped + 1)) ;;      # no engine to name, or an LWS with no cache half
+                    2) skipped=$((skipped + 1)) ;;      # no engine to name, or an LWS with no pod template
                     *) unreadable=1 ;;                  # could not be read
                 esac
             done <<< "$names"
@@ -1459,7 +1509,10 @@ wva_workload_patch() {
             log_warning "Nothing was written: all $scanned workload(s) were skipped (see above)."
             return 0
         fi
-        log_success "$((scanned - skipped)) model server(s) already drain on scale-down and keep their weights on a volume; no vLLM among them compiles from nothing, and none recompiles its Python bytecode."
+        if [ "$((scanned - skipped - lws_undrained))" -gt 0 ]; then
+            log_success "$((scanned - skipped - lws_undrained)) model server(s) already drain on scale-down and keep their weights on a volume; no vLLM among them compiles from nothing, and none recompiles its Python bytecode."
+        fi
+        [ "$lws_undrained" -gt 0 ] && log_warning "  $lws_undrained LeaderWorkerSet(s) keep their caches but do not drain on scale-down (see above); that is set by hand."
         [ "$skipped" -gt 0 ] && log_warning "  $skipped other workload(s) were skipped and were not checked."
         so_workload_patch_clear_stale "$out"
         return 0
@@ -1522,6 +1575,7 @@ wva_workload_patch() {
             case "$doc_rc" in
                 0) patched=$((patched + 1)) ;;
                 2) deferred=$((deferred + 1)) ;;
+                4) refused=$((refused + 1)) ;;
                 *) failed=$((failed + 1))
                    log_warning "  Patching $doc_ns/$doc_name failed; the emitted file still has it." ;;
             esac
@@ -1538,6 +1592,7 @@ wva_workload_patch() {
         # "Patched 3" with yq missing and zero patch calls made.
         [ "$patched" -gt 0 ] && log_success "Patched $patched of $found workload(s)."
         [ "$deferred" -gt 0 ] && log_info "$deferred workload(s) need only a volume or a cache variable, which is emitted rather than applied."
+        [ "$refused" -gt 0 ] && log_warning "$refused workload(s) were NOT applied because a controller owns them; put the change in the owner."
         if [ "$failed" -gt 0 ]; then
             log_warning "$failed of $found workload(s) were NOT patched."
             rc=1
@@ -1964,6 +2019,12 @@ so_workload_patch_plan() {
     # alone, because a confidently wrong answer here mounts a PVC into a workload
     # that had no use for one.
     model="$(so_model_source "$argv")" || model=""
+    # On a LeaderWorkerSet ($plan_lws), a model token that is a variable
+    # reference -- $(MODEL), ${MODEL} -- names no model; the caller says so
+    # rather than judging the weights of a name that is not one.
+    if [ "${plan_lws:-0}" -eq 1 ]; then
+        case "$model" in '$'*) model="" ;; esac
+    fi
     [ -n "$model" ] || [ -z "$argv" ] || model="${model_hint:-}"
     case "$model" in
         ""|/*) : ;;
@@ -2450,6 +2511,7 @@ so_workload_patch_doc_lws() {
     local who model_hint="" want_cache=0 want_engine=0 want_pyc=0 want_evol=0 pycdir="" pyckey="" pycwhy=""
     local mountpath claim claim_found=0 emount evol eclaim esub eclaim_found=0
     local any_cache=0 any_engine=0 any_pyc=0 any_evol=0 first_model=""
+    local plan_lws=1 hooked=1 lgrace="" wgrace=""
     local -a t_name=() t_engine=() t_image=() t_cache=() t_eng=() t_pyc=() t_evol=() t_pycdir=() t_pyckey=()
 
     if ! obj="$(kubectl get leaderworkersets "$name" -n "$ns" -o json 2>/dev/null)" || [ -z "$obj" ] \
@@ -2459,7 +2521,6 @@ so_workload_patch_doc_lws() {
         log_warning "  Could not read leaderworkersets/$name in $ns -- skipped. It is not being reported as healthy; it was not readable."
         return 3
     fi
-    log_warning "  LeaderWorkerSet $ns/$name: no drain half -- a worker that stops first aborts the leader's in-flight generations whatever hook either pod has; see docs/reference/workload-preparation.md#on-a-leaderworkerset."
     if [ -z "$tmpls" ]; then
         log_warning "  LeaderWorkerSet $ns/$name has no pod template under spec.leaderWorkerTemplate -- skipped."
         return 2
@@ -2481,7 +2542,12 @@ so_workload_patch_doc_lws() {
         want_cache=0 want_engine=0 want_pyc=0 want_evol=0 pycdir="" pyckey="" pycwhy="" model=""
         who="$ns/$name ($t)"
         so_workload_patch_plan
+        if [ -z "$model" ] && [ -n "$argv" ]; then
+            log_warning "  $who: the model could not be identified from the command (passed in a variable?), so whether its weights persist was not judged."
+        fi
         [ -n "$model_hint" ] || model_hint="$model"
+        [ "${prestop:-0}" -eq 1 ] || hooked=0
+        case "$t" in leaderTemplate) lgrace="${grace:-30}" ;; workerTemplate) wgrace="${grace:-30}" ;; esac
         [ "$want_cache" -eq 1 ] && [ -z "$first_model" ] && first_model="$model"
         t_name[n]="$t" t_engine[n]="$engine" t_image[n]="$image"
         t_cache[n]="$want_cache" t_eng[n]="$want_engine" t_pyc[n]="$want_pyc" t_evol[n]="$want_evol"
@@ -2502,7 +2568,15 @@ so_workload_patch_doc_lws() {
     done
 
     [ "$n" -gt 0 ] || return 2
-    [ "$any_cache" -eq 1 ] || [ "$any_engine" -eq 1 ] || [ "$any_pyc" -eq 1 ] || return 2
+    # No drain half is ever written, so the line says what to do by hand --
+    # and stays quiet once every template has a hook and the worker outlasts
+    # the leader.
+    if [ "$hooked" -eq 0 ] || { [ -n "$lgrace" ] && [ -n "$wgrace" ] && [ "$wgrace" -lt "$lgrace" ]; }; then
+        log_warning "  LeaderWorkerSet $ns/$name: no drain half -- a worker that stops first aborts the leader's in-flight generations whatever hook either pod has. Add a preStop to the leader AND the worker, with the worker terminationGracePeriodSeconds at least the leader one; see docs/reference/workload-preparation.md#on-a-leaderworkerset."
+        lws_undrained=$(( ${lws_undrained:-0} + 1 ))
+    fi
+    # Checked and nothing missing: 0, the same answer a healthy Deployment gets.
+    [ "$any_cache" -eq 1 ] || [ "$any_engine" -eq 1 ] || [ "$any_pyc" -eq 1 ] || return 0
 
     so_workload_patch_claims "$any_cache" "$any_evol"
 
@@ -2659,7 +2733,7 @@ so_namespaces_of() {
     kubectl get "$resource" -A -o json 2>/dev/null \
         | jq -r --argjson p "$pod" --argjson markers "$(so_serving_markers_json)" '
             .items[]
-            | ((getpath($p + ["metadata","labels"]) // {}) + (.metadata.labels // {}))
+            | (((getpath($p) // (if $p == ["spec", "leaderWorkerTemplate", "leaderTemplate"] then getpath(["spec", "leaderWorkerTemplate", "workerTemplate"]) else null end) // {}) | .metadata.labels // {}) + (.metadata.labels // {}))
               as $labels
             | select($labels | to_entries
                      | any((.key + "=" + (.value|tostring)) as $kv
@@ -3056,7 +3130,7 @@ so_discover() {
                 | jq -r --argjson p "$pod" '
                     .items[]
                     | . as $o
-                    | (getpath($p) // {}) as $t
+                    | (getpath($p) // (if $p == ["spec", "leaderWorkerTemplate", "leaderTemplate"] then getpath(["spec", "leaderWorkerTemplate", "workerTemplate"]) else null end) // {}) as $t
                     # The ENGINE container, not containers[0]. Same rule as
                     # so_workload_gaps, and the same reason: an llm-d
                     # deployment with a routing proxy lists the proxy first,
