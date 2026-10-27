@@ -92,7 +92,7 @@ check(mount["name"] == vols[0]["name"] and mount["mountPath"] == "/engine-cache"
 script = c["args"][0]
 check("$(" not in script and "$$" not in script, "the command carries no $( or $$ (Kubernetes rewrites both)")
 loop = re.search(r"^for d in (.*); do$", script, re.M)
-check(loop is not None and set(loop.group(1).split()) == {"vllm", "flashinfer", "triton"}, "one mkdir loop over the three cache directories: %s" % (loop.group(1) if loop else None))
+check(loop is not None and set(loop.group(1).split()) == {"vllm", "flashinfer", "triton", "pycache"}, "one mkdir loop over the four cache directories, Python bytecode (pycache) included: %s" % (loop.group(1) if loop else None))
 check('mkdir -p "/engine-cache/$d"' in script and 'chmod 1777 "/engine-cache/$d"' in script, "each made, then world-writable and sticky")
 check('touch "/engine-cache/$MARKER"' in script and env["MARKER"]["value"] == ".prepared", "the marker is written after the directories, its name from the environment")
 check("trap 'exit 0' TERM" in script and "sleep 3600" in script, "then the pod stays, so numberReady counts prepared nodes")
@@ -208,6 +208,35 @@ SEED_SUBPATH=engine-cache NODE_NAME=n1 "$SH" "$P/pub.sh" > "$P/pub.out" 2>&1; rc
 [ "$rc" = 0 ] && [ "$(cat "$P/seed/engine-cache/vllm/torch_compile_cache/keyN/f")" = n ] && [ "$(cat "$P/seed/engine-cache/triton/t/f")" = t ] \
     && [ "$(cat "$P/seed/engine-cache/vllm/torch_compile_cache/keyS/f")" = s ] && grep -q "published from n1: 2 file(s) copied" "$P/pub.out" \
     && ok "publish: a node's caches are merged into the seed, the seed's own entries kept" || fail "publish run: rc=$rc $(cat "$P/pub.out")"
+# Python bytecode: pycache/ is prepared 1777 like the other three (an engine
+# under another UID can create its image's key directory), and seed and
+# publish carry it -- each node of a LeaderWorkerSet needs its own copy.
+Y="$T/pyc"; mkdir -p "$Y/seed/pycache/k1/usr/lib/python3/vllm" "$Y/cache" "$Y/node/pycache/k2/usr/lib/python3/sglang" "$Y/pseed"
+echo a > "$Y/seed/pycache/k1/usr/lib/python3/vllm/a.cpython-312.pyc"; echo b > "$Y/node/pycache/k2/usr/lib/python3/sglang/b.cpython-312.pyc"
+sed -n "/^preparer_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$Y/seed|g; s|/engine-cache|$Y/cache|g; s|^trap .*||" > "$Y/p.sh"
+SEED_MARKER=.seeded SEED_ID=shared:pyc MARKER=.prepared NODE_NAME=n1 "$SH" "$Y/p.sh" > "$Y/run1.out" 2>&1; rc=$?
+mode="$(stat -c %a "$Y/cache/pycache" 2>/dev/null)"
+[ "$rc" = 0 ] && [ "$mode" = 1777 ] && grep -q "pycache}" "$Y/run1.out" \
+    && ok "preparer: pycache/ is made 1777, beside vllm/, flashinfer/ and triton/, and the log names it" || fail "preparer pycache: rc=$rc mode=${mode:-none} $(cat "$Y/run1.out")"
+[ "$(cat "$Y/cache/pycache/k1/usr/lib/python3/vllm/a.cpython-312.pyc" 2>/dev/null)" = a ] && grep -q "1 file(s) copied" "$Y/run1.out" \
+    && ok "seed: an image's bytecode under pycache/<key> is merged onto the node" || fail "seed pycache: $(cat "$Y/run1.out"; ls -R "$Y/cache" | head -20)"
+sed -n "/^publish_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$Y/pseed|g; s|/engine-cache|$Y/node|g" > "$Y/pub.sh"
+NODE_NAME=n2 "$SH" "$Y/pub.sh" > "$Y/pub.out" 2>&1; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$Y/pseed/pycache/k2/usr/lib/python3/sglang/b.cpython-312.pyc" 2>/dev/null)" = b ] && grep -q "published from n2: 1 file(s) copied" "$Y/pub.out" \
+    && ok "publish: a node's bytecode under pycache/<key> is merged into the seed" || fail "publish pycache: rc=$rc $(cat "$Y/pub.out"; ls -R "$Y/pseed" | head -20)"
+# A node prepared before pycache/ existed, where an engine already made it 755:
+# the next preparer start makes it 1777 again, keeping what is in it.
+Z="$T/pyc-old"; mkdir -p "$Z/seed/vllm/torch_compile_cache/keyO" "$Z/cache/vllm" "$Z/cache/pycache/k3"
+echo o > "$Z/seed/vllm/torch_compile_cache/keyO/f"; echo c > "$Z/cache/pycache/k3/c.pyc"; chmod 755 "$Z/cache/pycache"
+sed -n "/^preparer_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$Z/seed|g; s|/engine-cache|$Z/cache|g; s|^trap .*||" > "$Z/p.sh"
+SEED_MARKER=.seeded SEED_ID=old:seed MARKER=.prepared NODE_NAME=n3 "$SH" "$Z/p.sh" > "$Z/run1.out" 2>&1; rc=$?
+mode="$(stat -c %a "$Z/cache/pycache" 2>/dev/null)"
+[ "$rc" = 0 ] && [ "$mode" = 1777 ] && [ "$(cat "$Z/cache/pycache/k3/c.pyc")" = c ] \
+    && ok "preparer: a pycache/ an engine made 755 is 1777 after the next start, its contents kept" || fail "preparer rerun on 755 pycache: rc=$rc mode=${mode:-none} $(cat "$Z/run1.out")"
+# ...and a seed published before pycache/ existed merges cleanly: no pycache in
+# the seed is nothing to copy, not a failed merge.
+[ "$(cat "$Z/cache/vllm/torch_compile_cache/keyO/f" 2>/dev/null)" = o ] && [ "$(cat "$Z/cache/.seeded")" = old:seed ] && grep -q "1 file(s) copied" "$Z/run1.out" && [ -f "$Z/cache/.prepared" ] \
+    && ok "seed: a seed with no pycache/ merges cleanly and the node is prepared" || fail "pre-pycache seed: $(cat "$Z/run1.out"; cat "$Z/cache/.seeded" 2>&1)"
 # the node seeded before the publish ($F, marker workload-pvc:engine-cache) merges again once the seed is stamped
 echo 20261013120000 > "$F/seed/engine-cache/.published"
 mkdir -p "$F/seed/engine-cache/vllm/torch_compile_cache/keyP"; echo p > "$F/seed/engine-cache/vllm/torch_compile_cache/keyP/f"

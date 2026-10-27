@@ -758,7 +758,7 @@ so_pool() {
 # stays silent. It fires for a workload that was pointed at the Hub directly.
 so_weights_note() {
     local ns="$1" resource="$2" name="$3" pod="$4"
-    local gaps engine prestop grace pvcs onvol argv cachevol model
+    local gaps engine prestop grace pvcs onvol argv cachevol image pyc model
 
     # One detector, shared with the patch emitter. This function used to carry
     # its own copy and the copies disagreed: it accepted "a PVC exists anywhere
@@ -770,7 +770,7 @@ so_weights_note() {
         printf '%s' "Could not read the pod spec, so whether weights persist across scale-ups is unknown -- this is not a report that they do."
         return 0
     fi
-    IFS=$'\037' read -r engine prestop grace pvcs onvol argv cachevol <<< "$gaps"
+    IFS=$'\037' read -r engine prestop grace pvcs onvol argv cachevol image pyc <<< "$gaps"
     [ -n "$engine" ] || return 0
     [ "${onvol:-0}" -eq 1 ] && return 0
 
@@ -802,17 +802,52 @@ so_weights_note() {
 # saying it three times is how a reader learns to skip the notes.
 so_enginecache_note() {
     local ns="$1" resource="$2" name="$3" pod="$4"
-    local gaps engine prestop grace pvcs onvol argv cachevol
+    local gaps engine prestop grace pvcs onvol argv cachevol image pyc
     gaps="$(so_workload_gaps "$ns" "$resource" "$name" "$pod")" || return 0
-    IFS=$'\037' read -r engine prestop grace pvcs onvol argv cachevol <<< "$gaps"
+    IFS=$'\037' read -r engine prestop grace pvcs onvol argv cachevol image pyc <<< "$gaps"
     [ -n "$engine" ] || return 0
+    local also=""
+    case "$pyc" in
+        unset|mount:*) also=" Its Python bytecode is compiled again in every container too (PYTHONPYCACHEPREFIX is unset)." ;;
+        rootfrom)
+            printf '%s' "Every start recompiles its Python bytecode: ${engine} sets no PYTHONPYCACHEPREFIX (measured on vLLM: ~11 s of every start). Its VLLM_CACHE_ROOT comes from a ConfigMap or Secret, so no volume is proposed: set PYTHONPYCACHEPREFIX=<your cache volume>/pycache/<image key> beside it; see docs/reference/workload-preparation.md#python-bytecode."
+            return 0 ;;
+    esac
     case "$cachevol" in
         unset)
-            printf '%s' "Every start compiles from nothing: ${engine} keeps its torch.compile, FlashInfer and Triton caches under /tmp (VLLM_CACHE_ROOT is unset), so no replica finds what the previous one compiled -- tens of seconds on every scale-up. \`make workload-patch\` writes the fix; see docs/reference/workload-preparation.md#engine-caches-on-the-nodes-disk." ;;
+            printf '%s' "Every start compiles from nothing: ${engine} keeps its torch.compile, FlashInfer and Triton caches under /tmp (VLLM_CACHE_ROOT is unset), so no replica finds what the previous one compiled -- tens of seconds on every scale-up.${also} \`make workload-patch\` writes the fix; see docs/reference/workload-preparation.md#engine-caches-on-the-nodes-disk." ;;
         ephemeral:*)
-            printf '%s' "Every start compiles from nothing: ${engine} keeps its compile caches at ${cachevol#ephemeral:}, which is on no volume that outlives the pod, so no replica finds what the previous one compiled -- tens of seconds on every scale-up. \`make workload-patch\` writes the fix; see docs/reference/workload-preparation.md#engine-caches-on-the-nodes-disk." ;;
+            printf '%s' "Every start compiles from nothing: ${engine} keeps its compile caches at ${cachevol#ephemeral:}, which is on no volume that outlives the pod, so no replica finds what the previous one compiled -- tens of seconds on every scale-up.${also} \`make workload-patch\` writes the fix; see docs/reference/workload-preparation.md#engine-caches-on-the-nodes-disk." ;;
+        *)
+            # The other caches are fine, or not vLLM's to judge; the bytecode
+            # is any Python engine's.
+            [ -n "$also" ] || return 0
+            printf '%s' "Every start recompiles its Python bytecode: ${engine} sets no PYTHONPYCACHEPREFIX, and engine images ship almost none, so every container compiles its imports again (measured on vLLM: ~11 s of every start). \`make workload-patch\` writes the fix; see docs/reference/workload-preparation.md#engine-caches-on-the-nodes-disk." ;;
     esac
     return 0
+}
+
+# so_pycache_key prints the bytecode directory's key for image reference $1:
+# the first 12 hex digits of its SHA-256, over the exact string, tag or digest
+# included. A .pyc is checked against its source's mtime and size only, and
+# the files of one install share an mtime, so bytecode compiled for one image
+# can pass that check against another image's source (a patched derived
+# image, say). One key per image reference keeps them apart. Returns 1 with
+# no hash tool or no image.
+so_pycache_key() {
+    local sum
+    [ -n "$1" ] || return 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        sum="$(printf '%s' "$1" | sha256sum)" || return 1
+    elif command -v shasum >/dev/null 2>&1; then
+        sum="$(printf '%s' "$1" | shasum -a 256)" || return 1
+    else
+        return 1
+    fi
+    sum="${sum:0:12}"
+    case "$sum" in *[!0-9a-f]*|"") return 1 ;; esac
+    [ "${#sum}" -eq 12 ] || return 1
+    printf '%s' "$sum"
 }
 
 # ---------------------------------------------------------------------------
@@ -993,7 +1028,15 @@ so_workload_enginecache_can_apply() {
             fi
         fi
     fi
-    log_warning "  $ns/$name: the engine-cache guard is NOT applied with it -- the command belongs to the chart. A node where the cache stops being writable then loses the replica, not a compile; the emitted file has the guard."
+    # What an unguarded node costs depends on what the half carries: the vLLM
+    # caches lose the replica; the bytecode alone makes the start slower than
+    # no prefix, because Python then reads bytecode only from the prefix and
+    # ignores the image's own __pycache__ directories.
+    if [ "$(yq eval '[.spec.template.spec.containers[].env[]? | select(.name == "VLLM_CACHE_ROOT")] | length' "$doc" 2>/dev/null)" != 0 ]; then
+        log_warning "  $ns/$name: the engine-cache guard is NOT applied with it -- the command belongs to the chart. A node where the cache stops being writable then loses the replica, not a compile; the emitted file has the guard."
+    else
+        log_warning "  $ns/$name: the engine-cache guard is NOT applied with it -- the command belongs to the chart. A node where the bytecode directory is not writable then starts slower than with no PYTHONPYCACHEPREFIX at all; the emitted file has the guard."
+    fi
     return 0
 }
 
@@ -1026,7 +1069,7 @@ so_workload_patch_one() {
         # 2, not 1: a DELIBERATE skip. Counting it as a failure made every re-run
         # of the standup announce "scale-downs in this run will truncate
         # in-flight requests" about a workload that already had its drain hook.
-        log_info "  $ns/$name needs only a volume -- emitted, not applied."
+        log_info "  $ns/$name needs only a volume or a cache variable -- emitted, not applied."
         return 2
     fi
     # `kubectl patch --type=strategic`, never `kubectl apply`. These objects were
@@ -1059,7 +1102,7 @@ so_workload_patch_trim() {
     # was sent. Filtered as a whole, each list is walked once. `select(. !=
     # null)` on the left keeps a missing list missing rather than creating it.
     [ "$keep_w" -eq 1 ] || { vols="$vols or .name == \"$wvol\""; envs="$envs or .name == \"HF_HOME\""; }
-    [ "$keep_e" -eq 1 ] || { vols="$vols or .name == \"$evol\""; envs="$envs or .name == \"VLLM_CACHE_ROOT\" or .name == \"FLASHINFER_WORKSPACE_DIR\" or .name == \"TRITON_CACHE_DIR\""; }
+    [ "$keep_e" -eq 1 ] || { vols="$vols or .name == \"$evol\""; envs="$envs or .name == \"VLLM_CACHE_ROOT\" or .name == \"FLASHINFER_WORKSPACE_DIR\" or .name == \"TRITON_CACHE_DIR\" or .name == \"PYTHONPYCACHEPREFIX\""; }
     # The comments go too. They are written for whoever reads the FILE, and a
     # removed half leaves its explanation behind as a comment on the document,
     # so the body sent to the API server still spoke of a volume it no longer
@@ -1182,7 +1225,7 @@ wva_workload_patch() {
     local out="${WVA_WORKLOAD_PATCH_FILE:-wva-workload-patch.yaml}"
     local apply="${WVA_WORKLOAD_PATCH_APPLY:-false}"
     local ns resource pod kind name found=0 tmp rc=0
-    local unreadable=0 skipped=0 scanned=0 patched=0 failed=0 deferred=0 needs_cache=0 needs_engine=0
+    local unreadable=0 skipped=0 scanned=0 patched=0 failed=0 deferred=0 needs_cache=0 needs_engine=0 needs_pyc=0
     local listing names doc_rc index_lines tool doc_ns doc_name write_rc
 
     # The tool check this path never had. `make workload-patch` sources the
@@ -1293,7 +1336,7 @@ wva_workload_patch() {
             log_warning "Nothing was written: all $scanned workload(s) were skipped (see above)."
             return 0
         fi
-        log_success "$((scanned - skipped)) model server(s) already drain on scale-down and keep their weights on a volume; no vLLM among them compiles from nothing."
+        log_success "$((scanned - skipped)) model server(s) already drain on scale-down and keep their weights on a volume; no vLLM among them compiles from nothing, and none recompiles its Python bytecode."
         [ "$skipped" -gt 0 ] && log_warning "  $skipped other workload(s) were skipped and were not checked."
         so_workload_patch_clear_stale "$out"
         return 0
@@ -1319,6 +1362,13 @@ wva_workload_patch() {
         log_warning "  14 s of torch.compile against 3 s warm, and 8 s more before the API server answered)."
         log_warning "  $out has the pod-spec half, and says which claim to use or create -- and what a node"
         log_warning "  directory for it must be, or how to do without one."
+    fi
+    needs_pyc=$(grep -c '^#   bytecode:' "$tmp" 2>/dev/null) || needs_pyc=0
+    if [ "$needs_pyc" -gt 0 ]; then
+        log_warning "$needs_pyc model server(s) RECOMPILE THEIR PYTHON BYTECODE on every start."
+        log_warning "  Engine images ship almost no .pyc, so every container compiles its imports again"
+        log_warning "  (measured on vLLM: ~11 s of every start). $out points PYTHONPYCACHEPREFIX at the"
+        log_warning "  engine cache, one directory per image."
     fi
 
     if [ "$apply" = "true" ]; then
@@ -1364,7 +1414,7 @@ wva_workload_patch() {
         # message printed the emitted count unconditionally -- it reported
         # "Patched 3" with yq missing and zero patch calls made.
         [ "$patched" -gt 0 ] && log_success "Patched $patched of $found workload(s)."
-        [ "$deferred" -gt 0 ] && log_info "$deferred workload(s) need only a volume, which is emitted rather than applied."
+        [ "$deferred" -gt 0 ] && log_info "$deferred workload(s) need only a volume or a cache variable, which is emitted rather than applied."
         if [ "$failed" -gt 0 ]; then
             log_warning "$failed of $found workload(s) were NOT patched."
             rc=1
@@ -1399,6 +1449,7 @@ wva_workload_patch() {
 # workload is safe, as \037-separated fields:
 #
 #   engine \037 hasPreStop \037 grace \037 hasPVC \037 weightsOnVolume \037 argv
+#     \037 cacheOnVolume \037 image \037 bytecode
 #
 # Returns 1 and prints NOTHING when the object cannot be read. That distinction is
 # the point: an empty result used to mean both "no gaps" and "not allowed to
@@ -1423,7 +1474,7 @@ so_workload_gaps() {
     local ns="$1" resource="$2" name="$3" pod="$4" out
     out=$(kubectl get "$resource" "$name" -n "$ns" -o json 2>/dev/null) || return 1
     [ -n "$out" ] || return 1
-    printf '%s' "$out" | jq -r --argjson p "$pod" '
+    printf '%s' "$out" | jq -r --argjson p "$pod" --arg emount "${WVA_ENGINE_CACHE_PATH:-/engine-cache}" '
         (getpath($p) // {}) as $t
         | ([ $t.spec.containers[]?
              | ((.command // []) + (.args // []) | join(" ") | ascii_downcase) as $cmd
@@ -1490,6 +1541,34 @@ so_workload_gaps() {
             elif ([ $dmounts[] | select(. != null)
                     | select(. as $m | $cacheroot | (. == $m) or ($m == "/") or startswith($m + "/")) ] | length) > 0 then "volume:" + $cacheroot
             else "ephemeral:" + $cacheroot end ) as $cachevol
+        # Python bytecode, for any Python engine (vLLM, SGLang; not the
+        # simulator, which is Go). PYTHONPYCACHEPREFIX set in any form, a
+        # valueFrom included, is the workload owner deciding: "set:" and its
+        # value, which is respected. Unset, the answer is where it could go
+        # without a new volume: "mount:" and the durable mount the vLLM cache
+        # root already lives under, else a durable mount at the engine-cache
+        # path ($emount); "unset" when only a new volume would do.
+        # PYTHONDONTWRITEBYTECODE in the pod spec (any value but empty, or a
+        # valueFrom) is "dontwrite": Python would then read bytecode only from
+        # the prefix and never write it, which is slower than no prefix.
+        # VLLM_CACHE_ROOT from a ConfigMap or Secret is "rootfrom": the owner
+        # keeps the caches somewhere this cannot read, so the bytecode is
+        # reported but no volume is proposed beside it.
+        | ( [ $e.env[]? | select(.name == "PYTHONPYCACHEPREFIX") ] | last ) as $pycent
+        | ( [ $e.env[]? | select(.name == "PYTHONDONTWRITEBYTECODE") ] | last ) as $nowrite
+        | ([ $dmounts[] | select(. != null and . != "/") ]) as $pmounts
+        | ( if ($cachevol | startswith("volume:")) then
+              ($cachevol | ltrimstr("volume:")) as $r
+              | [ $pmounts[] | select(. as $m | $r | (. == $m) or startswith($m + "/")) ] | first
+            else null end ) as $byroot
+        | ( [ $pmounts[] | select(. == $emount) ] | first ) as $byemount
+        | ( if ($e | not) or $issim then ""
+            elif $pycent != null then "set:" + ($pycent.value // "")
+            elif $nowrite != null and (($nowrite.valueFrom != null) or (($nowrite.value // "") != "")) then "dontwrite"
+            elif ($cacheent != null) and ($cacheent.valueFrom != null) then "rootfrom"
+            elif $byroot != null then "mount:" + $byroot
+            elif $byemount != null then "mount:" + $byemount
+            else "unset" end ) as $pyc
         | [ ($e.name // ""),
             (if ($e | not) then 0 elif ($e.lifecycle.preStop != null) then 1 else 0 end),
             ($t.spec.terminationGracePeriodSeconds // 30),
@@ -1511,10 +1590,15 @@ so_workload_gaps() {
                      | select(. as $m | $dldir | (. == $m) or ($m == "/") or startswith($m + "/")) ] | length) > 0 then 1
              else 0 end),
             (if $issim then "" else $argv end),
-            # cacheOnVolume, LAST and after argv on purpose: the readers are
-            # `read -r ... argv cachevol`, and a field added before argv would
-            # land inside it on every reader that was not updated.
-            $cachevol
+            # cacheOnVolume, after argv on purpose: a field added before argv
+            # would land inside it on every reader that was not updated.
+            $cachevol,
+            # The engine image, which keys the bytecode directory, and the
+            # bytecode answer. Every reader takes all nine fields: `read`
+            # hands the rest of the line to its last variable, so a reader
+            # that stopped at cachevol would find these inside it.
+            ($e.image // ""),
+            $pyc
           ] | join("\u001f")' 2>/dev/null || return 1
 }
 
@@ -1738,9 +1822,13 @@ so_model_claim() {
 
 so_workload_patch_doc() {
     local ns="$1" resource="$2" name="$3" pod="$4"
-    local gaps engine prestop grace pvcs onvol argv cachevol model
+    local gaps engine prestop grace pvcs onvol argv cachevol image pyc model
     local want_drain=0 want_cache=0 want_engine=0 grace_want mountpath claim claim_found=0
     local emount evol eclaim esub eclaim_found=0
+    # want_pyc: emit PYTHONPYCACHEPREFIX; want_evol: emit the engine-cache
+    # volume, for the vLLM caches or for the bytecode alone; pycdir: the mount
+    # the bytecode goes under; pyckey: the image key under pycache/.
+    local want_pyc=0 want_evol=0 pycdir="" pyckey="" pycwhy=""
 
     # LWS is skipped, deliberately and loudly. Three things would each have to be
     # solved and none is: the pod template is spec.leaderWorkerTemplate, not
@@ -1762,7 +1850,7 @@ so_workload_patch_doc() {
         log_warning "  Could not read $resource/$name in $ns -- skipped. It is not being reported as healthy; it was not readable."
         return 3
     fi
-    IFS=$'\037' read -r engine prestop grace pvcs onvol argv cachevol <<< "$gaps"
+    IFS=$'\037' read -r engine prestop grace pvcs onvol argv cachevol image pyc <<< "$gaps"
 
     # No identifiable engine means no idea which container to patch, and the
     # fallback that guessed container 0 is what put hooks on routing proxies.
@@ -1795,16 +1883,57 @@ so_workload_patch_doc() {
     # volume make a start a load rather than a download; the compile caches on
     # a volume make it a load rather than a compile. Only vLLM has the variable
     # (cachevol is empty for anything else: no opinion, not a clean bill).
+    # The bytecode, for any Python engine: PYTHONPYCACHEPREFIX under the
+    # engine cache, one directory per image. A value the workload already sets
+    # is the owner's decision and is left alone -- but when it has this
+    # file's own shape (.../pycache/<12 hex>) and names another image's key,
+    # the image changed after the patch was written, and that is said.
+    case "$pyc" in
+        unset|mount:*)
+            if pyckey="$(so_pycache_key "$image")"; then
+                want_pyc=1
+                pycwhy=", and its Python bytecode in the container (PYTHONPYCACHEPREFIX is unset)"
+            fi ;;
+        set:*)
+            local setkey="${pyc#set:}"
+            setkey="${setkey%/}"
+            if [[ "$setkey" =~ /pycache/([0-9a-f]{12})$ ]] && pyckey="$(so_pycache_key "$image")" \
+               && [ "${BASH_REMATCH[1]}" != "$pyckey" ]; then
+                log_warning "  $ns/$name: PYTHONPYCACHEPREFIX=${pyc#set:} is keyed for another image than $image (key $pyckey); left as set. A key shared by two images can load one's bytecode for the other's source -- point it at .../pycache/$pyckey."
+            fi
+            pyckey="" ;;
+        rootfrom)
+            # Reported, not patched: the caches live where this cannot read.
+            if pyckey="$(so_pycache_key "$image")"; then
+                log_warning "  $ns/$name RECOMPILES ITS PYTHON BYTECODE on every start: $engine sets no PYTHONPYCACHEPREFIX. Its VLLM_CACHE_ROOT comes from a ConfigMap or Secret, so no volume is proposed: set PYTHONPYCACHEPREFIX=<your cache volume>/pycache/$pyckey beside it, with the guard."
+            fi
+            pyckey="" ;;
+    esac
+
     case "$cachevol" in
         unset)
             want_engine=1
-            log_warning "  $ns/$name COMPILES FROM NOTHING on every start: $engine keeps its torch.compile, FlashInfer and Triton caches under /tmp (VLLM_CACHE_ROOT is unset)." ;;
+            log_warning "  $ns/$name COMPILES FROM NOTHING on every start: $engine keeps its torch.compile, FlashInfer and Triton caches under /tmp (VLLM_CACHE_ROOT is unset)${pycwhy}." ;;
         ephemeral:*)
             want_engine=1
-            log_warning "  $ns/$name COMPILES FROM NOTHING on every start: $engine keeps its compile caches at ${cachevol#ephemeral:}, on no volume that outlives the pod." ;;
+            log_warning "  $ns/$name COMPILES FROM NOTHING on every start: $engine keeps its compile caches at ${cachevol#ephemeral:}, on no volume that outlives the pod${pycwhy}." ;;
+        *)
+            [ "$want_pyc" -eq 0 ] \
+                || log_warning "  $ns/$name RECOMPILES ITS PYTHON BYTECODE on every start: $engine sets no PYTHONPYCACHEPREFIX, so every container compiles its imports again (measured on vLLM: ~11 s of every start)." ;;
     esac
+    # Where the bytecode goes: with the vLLM half, under its new mount; else
+    # under the durable mount the engine already has (no new volume); else
+    # under the engine-cache volume, mounted for the bytecode alone.
+    if [ "$want_pyc" -eq 1 ]; then
+        case "$pyc" in
+            mount:*) [ "$want_engine" -eq 1 ] || pycdir="${pyc#mount:}" ;;
+        esac
+    fi
+    if [ "$want_engine" -eq 1 ] || { [ "$want_pyc" -eq 1 ] && [ -z "$pycdir" ]; }; then
+        want_evol=1
+    fi
 
-    [ "$want_drain" -eq 1 ] || [ "$want_cache" -eq 1 ] || [ "$want_engine" -eq 1 ] || return 0
+    [ "$want_drain" -eq 1 ] || [ "$want_cache" -eq 1 ] || [ "$want_engine" -eq 1 ] || [ "$want_pyc" -eq 1 ] || return 0
 
     cat <<HDR
 ---
@@ -1832,6 +1961,12 @@ CACHEWHY
 #   engine-cache: the compile caches (torch.compile, FlashInfer, Triton) are on
 #          no volume that outlives the pod, so every start compiles from nothing.
 ENGINEWHY
+    fi
+    if [ "$want_pyc" -eq 1 ]; then
+        cat <<PYCWHY
+#   bytecode: ${engine} sets no PYTHONPYCACHEPREFIX, so every container compiles
+#          its Python imports again (measured on vLLM: ~11 s of every start).
+PYCWHY
     fi
     cat <<HEAD
 #
@@ -1888,9 +2023,10 @@ PRESTOP
             if [ -n "$claim" ]; then claim_found=1; else claim="model-pvc"; fi
         fi
     fi
-    if [ "$want_engine" -eq 1 ]; then
+    if [ "$want_evol" -eq 1 ]; then
         emount="${WVA_ENGINE_CACHE_PATH:-/engine-cache}"
         evol="${WVA_ENGINE_CACHE_VOLUME_NAME:-engine-cache}"
+        [ -n "$pycdir" ] || pycdir="$emount"
         # The claim `make engine-cache` makes, unless the operator names one --
         # a shared RWX claim they already have, with an optional subPath, for a
         # cluster where no node directory is on offer.
@@ -1902,7 +2038,7 @@ PRESTOP
     # env, volumeMounts and volumes are each ONE list, filled from whichever
     # halves want them. Two `env:` keys in one mapping is a document yq reads as
     # the second one only, silently, and the API server as invalid.
-    if [ "$want_cache" -eq 1 ] || [ "$want_engine" -eq 1 ]; then
+    if [ "$want_cache" -eq 1 ] || [ "$want_engine" -eq 1 ] || [ "$want_pyc" -eq 1 ]; then
         echo "        env:"
         if [ "$want_cache" -eq 1 ]; then
             cat <<CACHEENV
@@ -1926,6 +2062,31 @@ CACHEENV
           value: ${emount}/triton
 ENGINEENV
         fi
+        if [ "$want_pyc" -eq 1 ]; then
+            cat <<PYCENV
+        # Python bytecode, one directory per image, keyed by a hash of the
+        # image reference ${image}.
+        # A .pyc is checked against its source's mtime and size only, so two
+        # images must not share one: run workload-patch again when the image
+        # changes (a moved tag keeps its key: pin by digest). With the prefix
+        # set, Python reads bytecode ONLY from it, so a path it cannot write
+        # is slower than none -- the guard below unsets it.
+PYCENV
+            if [ "$want_evol" -eq 0 ]; then
+                cat <<PYCMOUNT
+        # Under ${pycdir}, which the engine already mounts. If that is the
+        # engine-cache claim, run \`make engine-cache\` again first: nodes
+        # prepared before it made pycache/ 1777 may hold one only its first
+        # writer can write.
+PYCMOUNT
+            fi
+            cat <<PYCVAR
+        - name: PYTHONPYCACHEPREFIX
+          value: ${pycdir}/pycache/${pyckey}
+PYCVAR
+        fi
+    fi
+    if [ "$want_cache" -eq 1 ] || [ "$want_evol" -eq 1 ]; then
         echo "        volumeMounts:"
         if [ "$want_cache" -eq 1 ]; then
             cat <<CACHEMOUNT
@@ -1933,7 +2094,7 @@ ENGINEENV
           mountPath: ${mountpath}
 CACHEMOUNT
         fi
-        if [ "$want_engine" -eq 1 ]; then
+        if [ "$want_evol" -eq 1 ]; then
             cat <<ENGINEMOUNT
         - name: ${evol}
           mountPath: ${emount}
@@ -1948,7 +2109,7 @@ ENGINEMOUNT
           claimName: ${claim}
 CACHEVOL
         fi
-        if [ "$want_engine" -eq 1 ]; then
+        if [ "$want_evol" -eq 1 ]; then
             cat <<ENGINEVOL
       - name: ${evol}
         persistentVolumeClaim:
@@ -2003,7 +2164,7 @@ CACHEHAVE
 CACHENEED
         fi
     fi
-    if [ "$want_engine" -eq 1 ]; then
+    if [ "$want_evol" -eq 1 ]; then
         if [ "$eclaim_found" -eq 1 ]; then
             cat <<ENGINEHAVE
 #
@@ -2073,15 +2234,25 @@ ENGINENAMED
 #   once. Trust it as you would the engine image.
 ENGINENEED
         fi
+    fi
+    # The guard, for every half that sets a cache variable -- the bytecode
+    # alone included, and the env-only bytecode half too. With
+    # PYTHONPYCACHEPREFIX set Python reads bytecode ONLY under the prefix and
+    # ignores the image's own __pycache__ directories, so a prefix it cannot
+    # write (read-only, another UID's key directory, an SELinux label) is
+    # slower than no prefix. hack/check-workload-gaps.sh runs this text.
+    if [ "$want_engine" -eq 1 ] || [ "$want_pyc" -eq 1 ]; then
         cat <<'ENGINEGUARD'
 #
-#   Either way, keep the engine tolerant of a cache path that turns out not to
+#   Keep the engine tolerant of a cache path that turns out not to
 #   be writable: vLLM fails hard on a read-only cache directory unless the
 #   variable is unset first, and a storage hiccup must cost one compile, not
-#   the replica. In the container command, before the engine starts (the
-#   command belongs to the chart, so it is not patched here):
+#   the replica. PYTHONPYCACHEPREFIX too: with it set, Python reads bytecode
+#   only from it, so one it cannot write is slower than none. In the
+#   container command, before the engine starts (the command belongs to the
+#   chart, so it is not patched here):
 #
-#     for v in VLLM_CACHE_ROOT FLASHINFER_WORKSPACE_DIR TRITON_CACHE_DIR; do
+#     for v in VLLM_CACHE_ROOT FLASHINFER_WORKSPACE_DIR TRITON_CACHE_DIR PYTHONPYCACHEPREFIX; do
 #       eval "d=\${$v}"
 #       [ -n "$d" ] || continue
 #       if ! mkdir -p "$d" 2>/dev/null || ! touch "$d/.writable" 2>/dev/null; then
@@ -2095,7 +2266,7 @@ ENGINEGUARD
 
 so_drain_note() {
     local ns="$1" resource="$2" name="$3" pod="$4"
-    local gaps engine prestop grace pvcs onvol argv cachevol
+    local gaps engine prestop grace pvcs onvol argv cachevol image pyc
 
     # preStop is checked on the ENGINE, not pod-wide. The previous copy counted
     # containers with a hook across the whole pod, so an llm-d deployment whose
@@ -2105,7 +2276,7 @@ so_drain_note() {
         printf '%s' "Could not read the pod spec, so whether scale-down drains cleanly is unknown -- this is not a report that it does."
         return 0
     fi
-    IFS=$'\037' read -r engine prestop grace pvcs onvol argv cachevol <<< "$gaps"
+    IFS=$'\037' read -r engine prestop grace pvcs onvol argv cachevol image pyc <<< "$gaps"
     [ -n "$engine" ] || return 0
     # A hook of any shape counts. Whether it drains for long enough is the
     # operator's judgement, and guessing at a threshold would produce a warning

@@ -143,8 +143,9 @@ It checks three things:
   replica is still writing. llm-d does not set one.
 - **A model cache.** Without one, every scale-up downloads the weights again.
   llm-d mounts one by default.
-- **Engine caches (vLLM).** Without them, every new replica compiles its kernels from
-  nothing, tens of seconds on each scale-up. `make engine-cache` keeps them on
+- **Engine caches.** Without them, every new replica compiles from nothing: its
+  kernels on vLLM, its Python bytecode on any Python engine (vLLM, SGLang). That
+  is tens of seconds on each scale-up. `make engine-cache` keeps them on
   each node's disk.
 
 All three live in the pod spec, which your modelservice chart owns, so it writes a

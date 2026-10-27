@@ -11,6 +11,12 @@
 # some nodes by the CSI driver, the engine falling back to an empty cache
 # under /tmp, and every start there compiling from nothing (14 s of
 # torch.compile against 3 s from the cache, and 8 s more before the engine).
+# A fourth directory, pycache/, holds Python bytecode for any Python engine
+# (PYTHONPYCACHEPREFIX=/engine-cache/pycache/<image key>): engine images ship
+# almost no .pyc, so every container compiles its imports again -- measured
+# on vLLM v0.26.0, ~11 s of every start. One key per image (`make
+# workload-patch` derives it from the image reference): a .pyc is checked
+# against its source's mtime and size only, so two images must not share one.
 # This puts the caches on the node: one static hostPath PersistentVolume, one
 # claim bound to it, and one DaemonSet that prepares the directory on every
 # selected node and then reports Ready. The model servers mount the claim
@@ -154,8 +160,8 @@
 # line names the UID it was judged for, the summary warns and names the UIDs
 # it assumed, and the verdict says which ("VERIFIED for uid 1000",
 # "VERIFIED for root"); a plain VERIFIED needs ENGINE_CACHE_UID. It checks the
-# torch.compile cache only: the flashinfer/ and triton/ directories beside
-# vllm/ are not read.
+# torch.compile cache only: the flashinfer/, triton/ and pycache/ directories
+# beside vllm/ are not read.
 #
 # The claim is named engine-cache, one per namespace (the caches inside are
 # keyed by a hash of the engine config, so every model and flag set in the
@@ -163,17 +169,19 @@
 # mounts it read-write at, say, /engine-cache and points VLLM_CACHE_ROOT,
 # FLASHINFER_WORKSPACE_DIR and TRITON_CACHE_DIR under it -- and keeps a guard
 # that unsets a variable whose directory is not writable, so a node that is
-# not prepared costs a compile, not the replica. The volume is cluster-scoped:
+# not prepared costs a compile, not the replica. The guard covers
+# PYTHONPYCACHEPREFIX too: with it set Python reads bytecode only from it, so
+# one it cannot write is slower than none. The volume is cluster-scoped:
 # apply needs leave to create PersistentVolumes, which a namespace tenant does
 # not have -- ask the cluster admin to run apply, or to create the volume.
 # Nothing here uses a hostPath volume in a Pod (the preparer mounts the
 # claim), so Pod Security "baseline" admits it and "restricted" does not. The
-# node directory is cluster-shared, WORLD-writable state (1777 on the three
+# node directory is cluster-shared, WORLD-writable state (1777 on the four
 # cache directories, so any UID the engines run as can write; sticky, so one
 # UID's files are not another's to remove), what is written there is charged
 # to no quota, and what is written there is CODE: torch.compile artefacts,
-# FlashInfer and Triton kernels that every engine on the node loads and
-# runs. Whoever can write the directory runs code in every engine on that
+# FlashInfer and Triton kernels and Python bytecode that every engine on the
+# node loads and runs. Whoever can write the directory runs code in every engine on that
 # node -- on Kubernetes that is anyone with pods/create in a namespace that
 # can mount the claim, which is no more than pods/create already grants,
 # and across namespaces it is everyone pointed at the same DIR. So the
@@ -182,7 +190,7 @@
 # namespace or a directory changes hands -- delete keeps the caches, and a
 # new tenant of the same name and DIR would load the old one's. 1777 is a
 # trade-off, taken so the engines need no fsGroup; a namespace that runs
-# its engines under one UID and wants the separation can chown the three
+# its engines under one UID and wants the separation can chown the four
 # directories to it and chmod them 1770 on each node. The preparer runs as
 # its own ServiceAccount, engine-cache-preparer.
 #
@@ -191,7 +199,7 @@
 # relabel a hostPath: prepare DIR/engine-cache on each node as weights.sh
 # --help says (chgrp 0, chmod 2775, chcon -t container_file_t, or a
 # MachineConfig mount with context=...:container_file_t:s0). The preparer
-# then creates the three directories inside it as that UID, owns them, and
+# then creates the four directories inside it as that UID, owns them, and
 # its chmod 1777 takes (the setgid bit is not inherited by a mode set
 # outright; the files carry the project's SELinux level either way). `status`
 # says when the preparer died on a permission error.
@@ -272,7 +280,7 @@ check_image() {
 # dash has.
 preparer_script() {
     cat <<'SCRIPT'
-for d in vllm flashinfer triton; do
+for d in vllm flashinfer triton pycache; do
   mkdir -p "/engine-cache/$d" || exit 1
   chmod 1777 "/engine-cache/$d" 2>/dev/null || true
 done
@@ -350,7 +358,7 @@ elif [ -d /seed ] && [ "$seeded_from" != "$want" ]; then
   # Ready -- not Ready on the stamp it merged before.
   rm -f "/engine-cache/$SEED_MARKER" || exit 1
   complete=1; added=""; links=""; private=""; private_eg=""
-  for d in vllm flashinfer triton; do
+  for d in vllm flashinfer triton pycache; do
     [ -d "$seed_dir/$d" ] || continue
     merge "$seed_dir/$d" "/engine-cache/$d"
   done
@@ -363,7 +371,7 @@ elif [ -d /seed ] && [ "$seeded_from" != "$want" ]; then
   fi
 fi
 touch "/engine-cache/$MARKER" || exit 1
-echo "engine cache: prepared on $NODE_NAME: /engine-cache/{vllm,flashinfer,triton}"
+echo "engine cache: prepared on $NODE_NAME: /engine-cache/{vllm,flashinfer,triton,pycache}"
 trap 'exit 0' TERM; while :; do sleep 3600 & wait; done
 SCRIPT
 }
@@ -529,7 +537,7 @@ $(seed_volume_yaml)
           # and world-writable, so whoever can write here writes what every
           # engine on the node will load; see the header), then a marker,
           # then the pod stays, Ready, so the DaemonSet's numberReady is the
-          # count of prepared nodes. The preparer creates the three
+          # count of prepared nodes. The preparer creates the four
           # directories itself, so it owns them and the chmod takes, on
           # Kubernetes as root and on OpenShift as the project UID inside
           # the directory the admin prepared.
@@ -624,7 +632,7 @@ cmd_apply() {
     # an existing claim keeps its size (deploy/lib/nodedir.sh says why)
     nodedir_claim_capacity "$NAMESPACE" "$CLAIM" "$CAPACITY_GIVEN" "enginecache.sh delete -n ${NAMESPACE}"
     render | kubectl apply -f - >/dev/null
-    log_info "preparing ${NODE_PATH}/${SUBDIR} on $(accelerator_selector_text "$NODE_SELECTOR"); claim ${CLAIM}${SEED_CLAIM:+, seeded from ${SEED_CLAIM}${SEED_SUBPATH:+:$SEED_SUBPATH}} -- mount it read-write and point VLLM_CACHE_ROOT, FLASHINFER_WORKSPACE_DIR and TRITON_CACHE_DIR under it"
+    log_info "preparing ${NODE_PATH}/${SUBDIR} on $(accelerator_selector_text "$NODE_SELECTOR"); claim ${CLAIM}${SEED_CLAIM:+, seeded from ${SEED_CLAIM}${SEED_SUBPATH:+:$SEED_SUBPATH}} -- mount it read-write and point VLLM_CACHE_ROOT, FLASHINFER_WORKSPACE_DIR, TRITON_CACHE_DIR and PYTHONPYCACHEPREFIX (pycache/<image key>) under it"
     if kubectl api-resources --api-group=security.openshift.io 2>/dev/null | grep -q securitycontextconstraints; then
         log_warning "OpenShift: the preparer and the engines run as the project UID (GID 0) under restricted-v2 and the kubelet does not relabel a hostPath; on each node, before this takes: mkdir -p ${NODE_PATH}/${SUBDIR} && chgrp 0 ${NODE_PATH}/${SUBDIR} && chmod 2775 ${NODE_PATH}/${SUBDIR} && chcon -t container_file_t ${NODE_PATH}/${SUBDIR} (oc debug node/<n> -- chroot /host ...), or a MachineConfig mount with context=system_u:object_r:container_file_t:s0. Not yet run on OpenShift"
     fi
@@ -887,7 +895,7 @@ merge_report() {
   [ -z "$private" ] || echo "engine cache: ${#private} file(s) not readable by every user were copied readable by every user, for example $private_eg"
 }
 complete=1; added=""; links=""; private=""; private_eg=""
-for d in vllm flashinfer triton; do
+for d in vllm flashinfer triton pycache; do
   [ -d "/engine-cache/$d" ] || continue
   (umask 022; mkdir -p "$dst/$d") || exit 1
   merge "/engine-cache/$d" "$dst/$d"
