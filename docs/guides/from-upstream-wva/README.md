@@ -314,8 +314,16 @@ make undeploy-wva NAMESPACE=<namespace>
      Service, ServiceMonitor, the leader-election Role and RoleBinding).
      Reinstall upstream from its release, then put back the ConfigMaps you
      tuned.
-   - **Helm**: `helm install` the same chart and version (`upstream-release.txt`)
-     with `-f upstream-values.yaml`.
+   - **Helm**: `helm install` the same chart and version, under the same
+     release name (all three are in `upstream-release.txt`), with
+     `-f upstream-values.yaml`. The chart renders its ConfigMaps from the
+     values only, so changes made with `kubectl edit` are lost; put those back
+     with the Helm ConfigMap step below. The next `helm upgrade` renders them
+     from the values again, so also fold those changes into
+     `upstream-values.yaml`.
+
+   The other-namespace option needs neither ConfigMap step: upstream's
+   ConfigMaps were never touched.
 
 <!-- guide:rollback.controller start -->
 ```bash
@@ -326,10 +334,19 @@ yq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .
 
 <!-- guide:rollback.configmaps start -->
 ```bash
-# After a reinstall from the release, put back the ConfigMaps you tuned.
-yq '.items[] | select(.metadata.name | test("wva-")) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
+# After a reinstall from the release, put back the ConfigMaps you tuned, then restart the controller. It reads wva-manager-config only at startup.
+yq '.items[] | select(.metadata.name | test("^wva-")) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
+kubectl rollout restart deployment wva-controller-manager -n <upstream-namespace>
 ```
 <!-- guide:rollback.configmaps end -->
+
+<!-- guide:rollback.configmapshelm start -->
+```bash
+# Helm only. The chart names everything after the release. Put back the ConfigMaps you changed with kubectl edit, then restart the controller.
+yq '.items[] | select(.metadata.labels."app.kubernetes.io/instance" == "<release>") | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
+kubectl rollout restart deployment -n <upstream-namespace> -l app.kubernetes.io/instance=<release>,control-plane=controller-manager
+```
+<!-- guide:rollback.configmapshelm end -->
 
 4. *After step 5*: restore the saved ScaledObjects and plain HPAs. `error: no
    objects passed to apply` means there was nothing to restore. The restore
@@ -354,6 +371,8 @@ needs.
 
 Remove what is left of the upstream install. If the upstream namespace held
 nothing else, and the scaling manager does not run there, delete the namespace.
+Installed with Helm? `helm uninstall` already removed the chart's cluster-wide
+RBAC, whose names carry the release; the names below are the release install's.
 
 <!-- guide:cleanup.clusterrbac start -->
 ```bash
@@ -395,7 +414,8 @@ kubectl delete crd variantautoscalings.llmd.ai --ignore-not-found
 
 ## What stays the same
 
-- **Object names**: the controller Deployment `wva-controller-manager`, its
+- **Object names** (as in upstream's release install; the Helm chart prefixes
+  them with the release name): the controller Deployment `wva-controller-manager`, its
   Service, ServiceMonitor and ServiceAccount, and the `wva-manager-config`
   ConfigMap. Cluster-wide RBAC gains a per-install suffix.
 - **Metric names**: every `wva_` series upstream `v0.9.0` publishes, with the
