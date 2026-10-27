@@ -140,6 +140,7 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 - **[The cycle log](reference/cycle-log.md)** — the two lines the scaling manager emits per cycle, their fields and reason codes: the page that answers "why did it scale?"
 - **[Scaling policy](reference/scaling-policy.md)** — thresholds, tiers, scale-to-zero, limiters, the utilization-share optimizer
 - **[Preparing a workload](reference/workload-preparation.md)** — the model cache, draining before scale-down, `make workload-patch`
+- **[Replica start time](reference/start-time.md)** — every measured start time, what each preparation step and the warm pool buy, and what each costs
 - **[ScaledObject trigger metadata](reference/scaledobject-trigger.md)** — every key the trigger carries (`modelID`, `variantCost`, `scalingPolicy`, `defaultOutputTokens`, warm-pool keys), its default and validation, and the recommended HPA behavior
 - **[Install methods](reference/install-methods.md)** — installer, kustomize, and per-platform entry points
 - **[KEDA](reference/keda.md)**: supported versions, a KEDA the cluster already has, and what the installer prints about it

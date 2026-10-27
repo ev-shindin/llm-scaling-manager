@@ -114,6 +114,9 @@ longer pays it.
 Below that floor the only lever is not starting cold: the
 [warm pool](../guides/warm-pool/), or a minimum replica count of two.
 
+Every measured start time, step by step and beside the warm pool, is in
+[Replica start time: what each option buys](start-time.md).
+
 ### Depends on the vLLM version
 
 Use vLLM 0.27 or newer where you can: the one-file AOT artefact is the default
@@ -628,8 +631,9 @@ v0.26.0, it saves about 11 s of every start after the first:
 | Qwen3-32B, TP=2, LeaderWorkerSet leader and worker | 108.6 s | 97.7 s |
 | Qwen3-30B-A3B (MoE) | 61.8 s | 50.8 s |
 
-The API server's imports went from 13.5 s to 6.2 s, a worker's from 4.6 s to
-2.3 s. The first start writes about 150 MB (8,000 files).
+The API server's imports went from 13.5 s to 6.2 s, the engine's init before
+its first CUDA context from 4.6 s to 2.3 s. The first start writes about 150 MB
+(8,000 files).
 
 - **One directory per image.** `<image key>` is the first 12 hex digits of the
   SHA-256 of the exact image reference, tag or digest included. Python checks a
@@ -892,6 +896,9 @@ What the mode check cannot see:
 </details>
 
 #### What it costs
+
+What it buys, in seconds per start, is in
+[Replica start time](start-time.md#qwen3-32b-on-one-h200).
 
 Costs and needs are the weights section's, with two changes:
 
