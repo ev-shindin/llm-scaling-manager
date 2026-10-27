@@ -314,8 +314,9 @@ make undeploy-wva NAMESPACE=<namespace>
      Service, ServiceMonitor, the leader-election Role and RoleBinding).
      Reinstall upstream from its release, then put back the ConfigMaps you
      tuned.
-   - **Helm**: `helm install` the same chart and version (`upstream-release.txt`)
-     with `-f upstream-values.yaml`. The chart renders its ConfigMaps from the
+   - **Helm**: `helm install` the same chart and version, under the same
+     release name (all three are in `upstream-release.txt`), with
+     `-f upstream-values.yaml`. The chart renders its ConfigMaps from the
      values only, so changes made with `kubectl edit` are lost; put those back
      with the Helm ConfigMap step below. The next `helm upgrade` renders them
      from the values again, so also fold those changes into
@@ -370,6 +371,8 @@ needs.
 
 Remove what is left of the upstream install. If the upstream namespace held
 nothing else, and the scaling manager does not run there, delete the namespace.
+Installed with Helm? `helm uninstall` already removed the chart's cluster-wide
+RBAC, whose names carry the release; the names below are the release install's.
 
 <!-- guide:cleanup.clusterrbac start -->
 ```bash
