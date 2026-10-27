@@ -1,15 +1,16 @@
 # Reading a model's weights into memory while its engine starts
 
-- **Status:** proposed, revised after review (PR #362). Nothing here is built.
+- **Status:** proposed, second revision after review (PR #362). Nothing here
+  is built.
 - **Problem:** on a prepared node the weights are on local disk, but not in
   memory. The engine's weight load then waits on the disk. Measured on
   Qwen3-32B, the load takes 19.9 s cold and 10.0 s when the files are already
   in the page cache.
-- **Decision:** a native sidecar in the engine pod reads that pod's weight
-  files into the page cache while the engine imports and initialises. By
-  default it reads every file, because that is what the engine reads. `make
-  workload-patch` adds it, for Deployments and both LeaderWorkerSet templates.
-  Off by default.
+- **Decision:** a background reader, started by the engine container's own
+  command just before it `exec`s the engine, reads the pod's weight files into
+  the page cache while the engine imports and initialises. Same container, same
+  UID, same memory cgroup. It reads every file, because the engine does. Off by
+  default.
 
 This builds on [Weights on the node's disk](../reference/workload-preparation.md#weights-on-the-nodes-disk).
 It does not replace the [warm pool](warm-pool-lws.md) or
@@ -34,12 +35,12 @@ resident with `mincore`.
 | weight files read once beforehand | 10.0 s | 43.6 s | 2 |
 | weight files warm from an earlier start | 8.9 s | 42.3 s | 2 |
 
-Measured: one full buffered read of the files took 21.7 s (~3.0 GB/s) and left
-65.5 GB in the page cache. The cold engine load reads the same 65.5 GB in
-19.9 s, ~3.3 GB/s: **the cold load is disk-bound**, at the same rate as a
-plain read.
+Also measured: one buffered read of all the files took 21.7 s (~3.0 GB/s) and
+left 65.5 GB in the page cache. The cold engine load moves the same 65.5 GB in
+19.9 s (~3.3 GB/s), so **the cold load is disk-bound**.
 
-Measured on the same kind of node, from pod creation:
+From the same kind of node, the head start a reader gets if it starts with the
+container:
 
 | step | seconds |
 | --- | ---: |
@@ -48,9 +49,6 @@ Measured on the same kind of node, from pod creation:
 | engine process spawn | ~7 |
 | engine init to first CUDA context | 4.6 |
 | **container start to weight load** | **~18** |
-
-A sidecar starts with the pod, so it has a head start of about 18 s. §1.3
-shows that is enough for the whole ~10 s.
 
 ### Big model: GLM-5.2-FP8
 
@@ -64,373 +62,355 @@ warm. No two-node group has been measured.
 | the weight step in the real run | 26.7 read + 37.0 load |
 | process and rank construction before any weight is touched | ~60-90 |
 
-The 26.7 s read is faster than one NVMe can deliver for ~744 GB, so the page
-cache probably carried part of it. It is not a cold baseline.
+The 26.7 s read is faster than one NVMe can deliver ~744 GB, so the page cache
+probably carried part of it. It is not a cold baseline.
 
 ### 1.3 How much a head start buys
 
-Let `B` be the bytes to read, `R` the disk's buffered read rate, `H` the head
-start, `T_warm` the load time with every byte in memory, and `C` the
-sidecar's rate cap (`C <= R`). Both readers walk the files in the same order
-(§5), so the engine reads warm pages until it reaches the sidecar's front,
-then both move at disk speed. Then:
+Symbols: `B` bytes to read; `R` the engine's cold rate; `W = B / T_warm` the
+engine's rate from memory; `C` the reader's rate; `H` the head start;
+`P = H x C` the bytes read before the engine starts loading.
+
+From `H` on, the engine consumes warm pages at `W` while the reader keeps
+adding at `C`. The engine reaches the reader's front after `P / (W - C)`
+seconds, having read `P x W / (W - C)` bytes from memory instead of disk. So:
 
 ```
-T_cold = B / R                       (the load is disk-bound)
-gain   = min(H * C / R, T_cold - T_warm)
+gain = P x (W - R) / (R x (W - C)),   at most T_cold - T_warm
 ```
 
-The gain is the head start, scaled down by the cap, and never more than the
-whole disk term.
+| case | B | R | W | C | H | gain |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen3-32B, no cap (default) | 65.5 GB | 3.3 | 6.55 | 3.0 | 18 s | 15.0 s, capped: **9.9 s** |
+| Qwen3-32B, cap 2 GB/s | 65.5 GB | 3.3 | 6.55 | 2.0 | 18 s | **7.8 s** |
+| GLM class per node, one disk, no cap | 744 GB | 3.0 | 20.1 | 3.0 | 60-90 s | **60-90 s** |
+| GLM class, cap 2 GB/s | 744 GB | 3.0 | 20.1 | 2.0 | 60-90 s | **38-57 s** |
+| GLM class, striped NVMe | 744 GB | ~20 | 20.1 | ~20 | 60-90 s | **~0** (`T_cold ~ T_warm`) |
 
-| case | B | R | C | H | T_cold | T_warm | gain |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qwen3-32B, measured inputs | 65.5 GB | 3.3 GB/s | 2.0 GB/s | 18 s | 19.9 s | 10.0 s | **9.9 s** (estimate) |
-| GLM class, one disk, per node | 744 GB | 3.0 GB/s | 2.0 GB/s | 60-90 s | ~248 s | 37 s | **40-60 s** (estimate) |
-| GLM class, same, no cap | 744 GB | 3.0 GB/s | 3.0 GB/s | 60-90 s | ~248 s | 37 s | **60-90 s** (estimate) |
-| GLM class, striped NVMe | 744 GB | ~20 GB/s | 2.0 GB/s | 60-90 s | ~37 s | 37 s | **~0** (estimate) |
+Rates in GB/s. Every gain is an **estimate** from the formula. Qwen3-32B
+inputs are the measurements above; the full 9.9 s needs `C` of about
+2.4 GB/s at `H` = 18 s. GLM: `B` is the whole checkpoint, because every
+expert-parallel rank reads every file (§5); `R` and `C` are the Qwen3-32B
+buffered rates, assumed for the same class of disk; `T_warm` is the measured
+37 s; `H` the measured rank construction; the cap `T_cold - T_warm`
+(~248 - 37 s) does not bind. 5.2 GB/s, measured elsewhere for one local NVMe,
+is a direct-I/O figure and is not used. Measurement B (§10) replaces the GLM
+rows.
 
-Sources: `B`, `R` and `T_warm` for 32B are measured above. For GLM, `B` is the
-whole checkpoint because every EP rank reads every file (§5); `R` is the 32B
-buffered rate, assumed for the same class of disk; `T_warm` is the measured
-37 s load; `H` is the measured rank construction. 5.2 GB/s is the
-direct-I/O rate of one local NVMe measured on another cluster; buffered reads
-ran at ~3.0-3.3 GB/s, which is the rate used here. On a node with several
-devices striped the disk is no longer the bottleneck and there is nothing to
-hide. Measurement B (§10) replaces the GLM rows.
+## 2. Mechanism: a background reader in the engine container
 
-## 2. Mechanism: a native sidecar in the engine pod
+`make workload-patch` already emits a guard for the engine-cache variables,
+to go in the engine container's command before the engine starts. The command
+belongs to the model server's chart, so the guard is emitted, not patched live.
+The reader is three more lines in the same place:
 
-`make workload-patch` adds an `initContainers` entry with
-`restartPolicy: Always` (a native sidecar: Kubernetes 1.29 and later, on by
-default; GA in 1.33). The kubelet starts it before the engine container and
-keeps it running beside it.
+```sh
+if [ "${WVA_WEIGHTS_PREWARM:-off}" = "on" ]; then
+  ( nice -n 19 python3 -c "<reader, emitted by make workload-patch>" "$MODEL_DIR" & )
+fi
+exec vllm serve "$MODEL_DIR" ...
+```
 
-- It mounts the same weights volume, read-only, at the same path.
-- It runs as the engine container's UID and GID (copied from its
-  `securityContext`), with all capabilities dropped and no privilege
-  escalation.
-- It uses the engine image, which has Python. The tool is one stdlib-only
-  Python file, shipped in a ConfigMap by `make workload-patch`.
-- It needs no ServiceAccount token, no RBAC and no new privilege. It reads
-  files the engine can already read.
+- **No new object.** No container, ConfigMap, probe, token or RBAC. The pod's
+  QoS class, requests and limits do not change.
+- **Same memory cgroup.** The pages are charged to the engine container,
+  which would have been charged for them a few seconds later anyway (§4).
+- **Same UID.** The reader can read exactly what the engine can, and its
+  residency check is as truthful as it can be for that UID (§3).
+- **Python** is in the vLLM and SGLang images. The reader is stdlib only. It
+  contains no `$(`: the kubelet expands `$(VAR)` in a command.
+- **The switch is an env var.** `WVA_WEIGHTS_PREWARM=on` is env, which `make
+  workload-patch` can apply live; the lines in the command do nothing without
+  it.
 
-What it does, in order: check residency (§3), check memory (§4), read (§5),
-then sleep until the pod ends. It does **not** exit after the read. A native
-sidecar that exits is restarted, and its cgroup would be removed (§4).
+### Process lifetime
 
-Why a sidecar rather than a DaemonSet that watches for pods: the sidecar is
-inside the pod, so it covers every start (autoscaler, manual scale, restart,
-reschedule) with no watch, and its memory is charged inside the pod that uses
-it. §9 has the watcher and why it lost.
+- `( ... & )` forks the reader from a subshell that exits at once, and the
+  shell reaps the subshell. The reader is orphaned and reparented to the PID
+  namespace's init: the shell, which then `exec`s and becomes the engine, so
+  the engine is the reader's parent. (`pid_namespaces(7)`: an orphan "is
+  reparented to the init process in the PID namespace of its parent".)
+- **It never delays termination.** The kubelet signals PID 1, the engine. When
+  PID 1 exits, "the kernel terminates all of the processes in the namespace via
+  a SIGKILL signal" (`pid_namespaces(7)`). The reader also exits on its own
+  `SIGTERM`. vLLM's shutdown kills its own process tree, which includes the
+  reader; that is harmless.
+- **It exits after the read.** Nothing lingers but one zombie entry: Python
+  does not reap children it did not start, so the reader's exit status stays
+  in the process table until the container ends. It holds no memory or CPU.
+  Measurement A counts `<defunct>` entries to confirm there is exactly one.
+  `setsid` or a double fork would not avoid it: every orphan in the container
+  ends up under the same PID 1.
+- **CPU.** One reader thread, `nice 19`, competing a little with the engine's
+  imports. On a static CPU-manager pod it runs on the engine's pinned CPUs.
 
-On a LeaderWorkerSet, `make workload-patch` patches the leader and the worker
-templates (since #361), so each pod in a group reads on its own node.
+## 3. Check what is already in memory, and when to trust it
 
-## 3. Check what is already in memory, and when the answer can be trusted
+Before reading, the reader measures residency with `cachestat(2)` (Linux 6.5
+and later), else `mmap` plus `mincore(2)` through `ctypes`. Neither tells the
+truth to every caller:
 
-Before reading, the tool measures how much of each file is resident:
-`cachestat(2)` where the kernel has it (6.5 and later), else `mmap` plus
-`mincore(2)` through `ctypes`. `fincore` (util-linux) makes the same calls and
-is the operator's check (§7).
+- `mm/filemap.c` `can_do_cachestat()`: true if the file is open for write, or
+  `file_owner_or_capable()` (owner, or `CAP_FOWNER` over the inode), or write
+  permission. Otherwise `cachestat` returns `EPERM`.
+- `mm/mincore.c` `can_do_mincore()`: the same owner-or-write test. Otherwise
+  `mincore_vma()` does `memset(vec, 1, pages)`: **every page reported
+  resident**. (Kernels from before that rule reported only pages mapped by the
+  caller.)
 
-Both calls only tell the truth to some callers:
+On Kubernetes the downloader and the engine both run as root, so the engine
+owns the files and the check is truthful. The reader tests the rule first
+(`st_uid == geteuid()` or `os.access(W_OK)`). **If it cannot trust the check,
+it fails closed:** it treats every file as cold and reads it all. Rereading a
+cached page costs CPU, not disk.
 
-- `mm/filemap.c` `can_do_cachestat()`: the file must be open for write, or the
-  caller must own it or be capable over it (`inode_owner_or_capable`), or have
-  write permission. Otherwise `cachestat` returns `EPERM`.
-- `mm/mincore.c` `can_do_mincore()`: the same test on the mapping. Otherwise,
-  on current kernels, `mincore` reports **every page resident**; on old ones
-  it reported only pages mapped by the caller.
-
-A false "all resident" would skip the read on a cold cache. So:
-
-- The sidecar runs as the engine's UID. On Kubernetes the downloader and the
-  engine both run as root, so root owns the files and the check is truthful.
-- Before trusting the check, the tool tests the same rule itself: owner
-  (`st_uid == geteuid()`) or write permission (`os.access(W_OK)`).
-- **If it cannot, it fails closed:** it treats every file as cold and reads it
-  all. Reading cached pages costs CPU, not disk.
-
-Partial residency: the tool reads only non-resident ranges, merging gaps under
-8 MiB. A file 99 % resident or more is skipped. If everything is resident, it
-logs `skip reason=resident` and sleeps.
+It reads only non-resident ranges (gaps under 8 MiB merged) and skips a file
+99 % resident or more. If everything is resident it logs `skip
+reason=resident` and exits.
 
 ## 4. Memory
 
-### Whose cgroup the pages are charged to
+Sources: the kernel's [cgroup v2 documentation](https://docs.kernel.org/admin-guide/cgroup-v2.html#memory-ownership),
+Kubernetes [node-pressure eviction](https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/)
+and [pod QoS](https://kubernetes.io/docs/concepts/workloads/pods/pod-qos/).
 
-- **Charge at first touch.** A page-cache folio is charged to the memory cgroup
-  of the task that adds it to the cache (`filemap_add_folio()` charges the
-  current task's memcg). A later reader in another cgroup is not charged and
-  the charge does not move. `posix_fadvise(WILLNEED)` and `readahead(2)` run
-  in the caller's context too, so they are no way around it. The tool uses
-  plain `read()`.
-- **So the sidecar is charged.** Its container cgroup holds the pages; the pod
-  cgroup above it counts them, as it would have counted the engine's own cold
-  read. The pod's total is the same as today.
-- **A small limit defeats the read.** If the sidecar's limit is below the bytes
-  it reads, its cgroup reclaims its own earlier pages to make room for later
-  ones. Nothing is OOM-killed, and the model ends mostly cold.
-- **Working set.** The kubelet's working set is usage minus `inactive_file`
-  (cAdvisor). A page read once sits on the inactive list. When the engine maps
-  and touches it, it is activated, on the **sidecar's** LRU, and then counts
-  in the sidecar's and the pod's working set. The pod's working set ends near
-  where a cold start puts it: the model's bytes, in the pod that uses them.
-  Under node memory pressure the kubelet ranks pods by working set above their
-  requests, so the engine pod is as exposed to eviction as it is today, no
-  more.
-- **If the sidecar's cgroup goes away** (it is restarted or killed), its pages
-  stay cached on the dying memcg and are not recharged when the engine touches
-  them; they leave only when reclaimed. They are still usable. That is why the
-  sidecar sleeps instead of exiting.
-
-### The sidecar's limit
-
-- **Request** 64 MiB. It is added to the pod's request.
-- **Limit:** none by default. A container without a limit leaves the pod
-  without a pod-level limit, as it is when the engine has none (the usual case
-  for vLLM). The page cache is reclaimable, so an unlimited reader is bounded by
-  the budget below, not by OOM.
-- When the namespace has a `ResourceQuota` on `limits.memory`, or a
-  `LimitRange` that injects a default limit, `make workload-patch` requires
-  `WVA_WEIGHTS_PREWARM_MEMORY=<size>` and sets it: the bytes to read plus
-  2 GiB. It refuses to write a sidecar with a default limit it did not choose.
-  That limit counts against the quota.
-- At run time the tool reads `memory.max`. If the bytes it needs exceed it
-  minus 1 GiB, it logs `skip reason=cgroup-limit` and reads nothing.
+- **Charge.** "A memory area is charged to the cgroup which instantiated it
+  and stays charged to the cgroup until the area is released." The reader is a
+  process in the engine container, so the engine container is charged, as in a
+  cold start. `posix_fadvise(WILLNEED)` would be charged the same way; the
+  reader uses plain `read()` so it can see progress.
+- **Working set.** The kubelet's working set excludes `inactive_file` only. A
+  page read once sits on the inactive list; when the engine maps and uses it,
+  it may be activated, and then counts. That is where a cold start puts the
+  same pages, in the same container. Eviction ranks pods by whether usage
+  exceeds requests, then priority, then usage relative to requests, so the
+  engine pod's exposure is unchanged.
+- **A container limit.** A Guaranteed engine pod has a memory limit. If the
+  model and the engine's own memory do not fit under it, a full pre-read would
+  reclaim its own earlier pages before the engine reaches them. So the reader
+  also reads `memory.max` and `memory.current` and never reads more than the
+  room left under the limit minus 2 GiB; it reads the front of the file order
+  up to that point. A cold load in the same container has the same limit.
 
 ### The node's budget
 
-The budget uses **`MemFree`**, not `MemAvailable`. `MemAvailable` counts other
-tenants' clean page cache as available; reading into it would evict their
-files. `MemFree` is memory nobody is using.
+The budget is **`MemAvailable` minus a headroom** (the larger of 5 % of
+`MemTotal` and 16 GiB). Not `MemFree`: once anything is cached Linux keeps
+`MemFree` near the low watermark, so a `MemFree` test would skip on every
+busy node.
 
-- `need` = this pod's bytes that are not yet resident (§3). Pages of this model
-  already cached cost nothing and are not counted.
-- **Headroom** = the larger of 5 % of `MemTotal` and 16 GiB
-  (`WVA_WEIGHTS_PREWARM_HEADROOM`).
-- Start only if `MemFree - need >= headroom`; otherwise
-  `skip reason=memory`.
-- Re-read `MemFree` every 1 GiB; stop when it falls below headroom
-  (`stop reason=memory`). The tool never reads through reclaim.
+The argument for counting reclaimable cache as available: in read-all mode
+the reader reads exactly the bytes the engine's cold load reads seconds later.
+Whatever cache it evicts, the engine would have evicted too. It never reads a
+byte the engine will not read. It does not start when `need` (the non-resident
+bytes) exceeds the budget, and re-checks every 1 GiB, stopping below the
+headroom (`stop reason=memory`). When the pod terminates, the reader is
+killed with the engine (§2).
 
-What this adds: nothing in steady state. The engine maps the same files, so a
-cold start puts the same bytes in memory anyway, ~18 s (small) or 60-90 s
-(big) later.
+On a busy node whose page cache is full of other files, the budget still
+allows the read, because that cache is reclaimable. Measurement A runs on such
+a node.
 
 ## 5. What to read
 
 ### Every file, by default
 
-vLLM's default loader reads every file and every tensor on every rank,
-including on expert-parallel ranks (read in the v0.26.0 and v0.32.0 sources):
+Checked in the vLLM v0.26.0 and v0.32.0 sources
+(`vllm/model_executor/model_loader/`):
 
-- `safetensors_weights_iterator` (`model_executor/model_loader/weight_utils.py`,
-  ~lines 1079-1213) natural-sorts the file list, opens each with `safe_open`
-  and calls `get_tensor` on every key.
-- The default loader (`default_loader.py`, ~420-482) skips tensors only when
-  `--enable-ep-weight-filter` is set (`model_loader/ep_weight_filter.py`). It
-  defaults to off, and EPLB turns it off.
+- `weight_utils.py` `safetensors_weights_iterator` (v0.26.0 line 840, v0.32.0
+  line 1079) sorts the files with `_natural_sort_key`, opens each with
+  `safe_open` and calls `get_tensor` on every key that `should_skip_weight`
+  does not skip.
+- `default_loader.py` `_init_ep_weight_filter` (v0.26.0 line 351, v0.32.0
+  line 421) sets the local expert ids only for an MoE model with
+  `enable_expert_parallel` **and** `enable_ep_weight_filter`, and returns early
+  when `enable_eplb` is set. `enable_ep_weight_filter` defaults to `False`
+  (`vllm/config/parallel.py`).
 
-So **read-all is the correct default**, for one pod and for every pod of a
-LeaderWorkerSet group. It is what the engine will read on that node anyway.
-Files: every `*.safetensors` of the model directory, plus the small files read
-first (`config.json`, tokenizer files, the index).
+So by default every rank reads every file, expert-parallel or not, and
+**read-all is the correct default** for one pod and for each pod of a
+LeaderWorkerSet group. The reader reads every `*.safetensors` file in the same
+natural-sorted order, so it stays ahead of the engine, plus the small files
+read first (`config.json`, tokenizer files, the index).
 
-### This node's share, only when the engine filters too
+### This node's share, only when the engine filters (beta)
 
-When `--enable-ep-weight-filter` is set and EPLB is off, the engine reads only
-the dense and shared tensors plus its local experts. Then the sidecar reads the
-same **byte ranges**, from each file's safetensors header (tensor offsets), not
-whole files:
+With `--enable-ep-weight-filter`, EPLB off and the default loader, the reader
+mirrors `ep_weight_filter.py` exactly:
 
-| fact | where it comes from |
-| --- | --- |
-| node index in the group | label `leaderworkerset.sigs.k8s.io/worker-index`, env `LWS_WORKER_INDEX` |
-| TP, PCP, DP, DP per node, first DP rank | the engine's arguments (`--tensor-parallel-size`, prefill context parallel size, `--data-parallel-size`, `--data-parallel-size-local`, `--data-parallel-start-rank`) |
-| EP size | `DP x PCP x TP`; an EP rank includes its PCP rank |
-| local experts | linear placement over EP ranks, as `ep_weight_filter.py` computes it |
-| experts, tensor offsets | `config.json`; each file's safetensors header |
+- `ep_size = dp_size x pcp_size x tp_size`;
+  `ep_rank = dp_rank x pcp_size x tp_size + pcp_rank x tp_size + tp_rank`, for
+  every rank on this node (the node's DP ranks from
+  `--data-parallel-start-rank` and `--data-parallel-size-local`, or the
+  LeaderWorkerSet worker index times the local size);
+- local experts by linear placement (`compute_local_expert_ids`);
+- `should_skip_weight`: skip a tensor only if its name has `.experts.<id>.`,
+  the id is not local to **any** of this node's ranks, and it ends in `.weight`
+  (v0.26.0) or `.weight` / `.weight_packed` (v0.32.0). Scale and metadata
+  tensors of every expert are still read; so is a fused expert tensor with no
+  id.
 
-Anything else means read-all: `--expert-placement-strategy round_robin`, EPLB,
-any non-default `--load-format` (fastsafetensors ignores the filter; the
-multithreaded loader reads out of order), fused expert tensors, or an argument
-the tool cannot resolve. Arguments are read after Kubernetes' `$(VAR)`
-expansion against literal `env`; a shell variable inside `sh -c` or an env from
-a ConfigMap is unresolved, never guessed.
+It reads those tensors' **byte ranges**, from each file's safetensors header,
+not whole files.
 
-### Order and pace
+Read-all regardless, because the engine reads whole files or ignores the
+filter: `--expert-placement-strategy round_robin` (until mirrored),
+`--load-format fastsafetensors` (called without `local_expert_ids`),
+`--model-loader-extra-config '{"enable_multithread_load": true}'` (also called
+without them), `--safetensors-load-strategy eager` (reads each whole file with
+`f.read()` before filtering) and `prefetch` (`_prefetch_all_checkpoints` reads
+whole files, split across ranks). Also read-all for an argument the reader
+cannot resolve (a shell variable, an env from a ConfigMap): never a guess.
 
-- **Order.** The natural-sorted file order the iterator uses, so the sidecar
-  stays ahead of the engine.
-- **Readers.** 2 threads by default (`WVA_WEIGHTS_PREWARM_READERS`), from the
-  front of the list; 16 MiB blocks into a reused buffer;
-  `posix_fadvise(SEQUENTIAL)`; `nice 19`.
-- **Rate cap.** `WVA_WEIGHTS_PREWARM_RATE`, default **2000 MB/s**, a token
-  bucket across readers. I/O priority (`ionice`) does nothing on NVMe under the
-  `none` or `mq-deadline` schedulers, so the cap is the only control. The
-  default is about two thirds of the measured buffered rate (3.0-3.3 GB/s),
-  leaving a third of the device to everyone else. By §1.3 it still buys the
-  whole 9.9 s on Qwen3-32B. Raise it on a node whose disk is the model's alone;
-  lower it where other tenants' I/O matters more. Pick it from a buffered read
-  of one cold weight file on the node.
+### Pace
 
-### The engine already reading
+- One reader, 16 MiB blocks into a reused buffer, `posix_fadvise(SEQUENTIAL)`.
+- **No rate cap by default.** The previous revision defaulted to 2 GB/s, to
+  leave disk for others. That did not hold: during the head start the engine
+  is not reading the disk, so a cap only shrinks `P` (7.8 s instead of 9.9 s on
+  Qwen3-32B); once the engine reaches the front, both are disk-bound whatever
+  the cap. `WVA_WEIGHTS_PREWARM_RATE` (MB/s) stays as an option for a device
+  shared with I/O-sensitive tenants. `ionice` does nothing on NVMe under the
+  `none` or `mq-deadline` schedulers, so it is not used.
 
-If the engine catches up with the sidecar, both read the same pages. Each byte
-is read from disk once: a second reader of a folio that is being read waits on
-its lock. So overlap should be no worse than cold, apart from the sidecar's
-CPU. That is plausible from how the page cache works, and **not measured**;
-measurement A records it.
+### The engine catching up
+
+When the engine reaches the reader's front, both read the same pages. A
+second reader of a folio being read waits on its lock, so each byte should
+come from disk once and the overlap be no worse than cold. That follows from
+how the page cache works and is **not measured**; measurement A checks it.
 
 ## 6. Races and concurrency
 
 | case | behaviour |
 | --- | --- |
-| pod deleted or rescheduled | the sidecar dies with it; pages read stay cached and reclaimable. The new pod's sidecar starts on the new node. |
-| container restart | the sidecar keeps running and does not re-read. A restarted engine finds the pages it left. |
-| sidecar restart | runs the check again; finds the files resident and skips. |
-| engine Ready before the read ends | the read continues to the end; it is reading what the engine already has, from cache. |
-| two pods of one model start on one node | both sidecars read. The first charges the pages; the second mostly hits cache and costs CPU. The second engine's use then activates pages on the first pod's sidecar cgroup, so the first pod's working set carries both. That is how a shared cache is charged today too. |
-| several models start at once | each sidecar checks `MemFree` against its own need. Two can pass the start check together; the re-check every 1 GiB stops whichever brings `MemFree` to the headroom. |
-| download not finished | no read; logs `skip reason=not-downloaded` (the marker is missing). |
+| pod deleted or rescheduled | the reader dies with the container; pages stay cached and reclaimable. |
+| container restart | the command runs again, so the reader runs again; it finds the files resident and exits. |
+| engine Ready before the read ends | in read-all the engine has read every byte by then, so what is left is cached and the reader finishes from memory. |
+| two pods of one model start on one node | both read. The first charges the pages; the second mostly hits cache and costs CPU. A page is charged to whichever container read it first, as today. |
+| several models start on one node | each reader takes part of the device (no cap), so each `P` shrinks and each gain is smaller. No start is slower than cold, since the engines would contend for the same device moments later. |
+| download not finished | `skip reason=not-downloaded` (the marker is missing). |
 
 ## 7. Configuration and operator experience
-
-Same opt-in shape as the other halves of `make workload-patch`:
 
 ```bash
 make workload-patch NAMESPACE=<ns> WVA_WORKLOAD_PATCH_APPLY=true \
      WVA_WORKLOAD_PATCH_APPLY_PREWARM=true
 ```
 
-| variable | default | meaning |
-| --- | --- | --- |
-| `WVA_WORKLOAD_PATCH_APPLY_PREWARM` | `false` | add the sidecar and its ConfigMap |
-| `WVA_WEIGHTS_PREWARM_LAYOUT` | `all` | alpha: `all` only. Beta adds `auto` (share when the engine filters) |
-| `WVA_WEIGHTS_PREWARM_MEMORY` | unset (no limit) | required where a quota or LimitRange needs a limit (§4) |
-| `WVA_WEIGHTS_PREWARM_HEADROOM` | max(5 % RAM, 16Gi) | free memory the read never goes below |
-| `WVA_WEIGHTS_PREWARM_READERS` | 2 | reader threads |
-| `WVA_WEIGHTS_PREWARM_RATE` | 2000 (MB/s) | cap across readers |
+- `make workload-patch` emits the reader lines beside the engine-cache guard,
+  for the chart's command (leader and worker on a LeaderWorkerSet), and offers
+  it only where the weights volume is a claim made by `make weights`.
+- `WVA_WORKLOAD_PATCH_APPLY_PREWARM=true` applies `WVA_WEIGHTS_PREWARM=on` live.
+  Applying rolls the workload, like any pod-template change.
+- Options, as env on the engine container: `WVA_WEIGHTS_PREWARM_RATE` (MB/s,
+  unset = no cap), `WVA_WEIGHTS_PREWARM_HEADROOM` (default max(5 % RAM,
+  16Gi)), `WVA_WEIGHTS_PREWARM_LAYOUT` (`all`; `auto` from beta).
+- **Removing it:** set `WVA_WEIGHTS_PREWARM=off`, or drop the env. The lines
+  in the command then do nothing; remove them at the next chart change.
+- **Drift.** A live env patch is reverted by the next `helm upgrade`, and
+  Argo CD or Flux see it as drift and may revert it too. Put both the lines and
+  the env in the chart's values to keep them.
 
-It applies only to a workload that mounts a claim made by `make weights`;
-on a shared network claim it is not offered. Applying it rolls the workload,
-like any pod-template change, and `make workload-patch` says so. The next
-`helm upgrade` of the model server's chart reverts it, as it reverts every
-half.
-
-**Removing it.** `WVA_WORKLOAD_PATCH_REMOVE_PREWARM=true` writes and applies a
-patch that deletes the sidecar by name (a strategic merge `$patch: delete` on a
-Deployment, a JSON patch `remove` on each LeaderWorkerSet template).
-
-**Logs**, one key=value line per event from the `weights-prewarm` container:
+**Logs only**, on the engine container's output, one key=value line per
+event:
 
 ```
-prewarm start layout=all files=25 bytes=65.5G resident_before=0.0% memfree=1.8T trusted=yes
-prewarm done  read=65.5G seconds=32.8 rate=2.0GB/s resident_after=100.0% cgroup_memory=65.6G
+prewarm start layout=all files=25 bytes=65.5G resident_before=0.0% memavailable=1.7T trusted=yes
+prewarm done  read=65.5G seconds=21.7 rate=3.0GB/s resident_after=100.0% cgroup_memory=66.1G
 prewarm skip  reason=resident|memory|cgroup-limit|not-downloaded
 prewarm stop  reason=memory read=31.2G
 ```
 
-**Metrics** (beta), on a port of the sidecar, prefix `wva_weights_prewarm_`:
-`bytes_read_total`, `seconds`, `resident_ratio{phase="before|after"}`,
-`cgroup_memory_bytes`, `runs_total{result="done|skipped|stopped",reason}`.
+No metrics: a port on the engine container would need a scrape object, and
+the engine's own port is the chart's. A metric is a GA question.
 
-**How an operator checks it worked:**
+**How an operator checks it worked:** the `done` line comes before the
+engine's `Model loading took` line, and that line is near the warm figure (10 s
+for Qwen3-32B, not 20 s). `fincore` on the weight files, as root, shows the
+residency.
 
-1. `kubectl logs <pod> -c weights-prewarm`: the `done` line, and whether it
-   came before the engine's weight load.
-2. The engine's `Model loading took` line: near the warm figure (10 s for
-   Qwen3-32B, not 20 s).
-3. `fincore` on the weight files from a debug pod, as root.
-
-**OpenShift: out of scope for alpha.** The sidecar copies the engine's
-`securityContext` and runs as the project's range UID, so `restricted-v2`
-should admit it. Unverified: whether that UID owns the files the downloader
-wrote (if not, the residency check fails closed and the sidecar reads
-everything), and the SELinux level of the files.
+**OpenShift: out of scope for alpha.** The reader inherits the engine's
+`securityContext`, so admission is unchanged. Unverified: whether the
+project's UID owns the files (if not, the reader fails closed and reads
+everything).
 
 ## 8. Security and multi-tenancy
 
-- **Files.** The sidecar reads the model directory of the volume the engine
-  already mounts, read-only, as the engine's UID. It can read nothing the
-  engine cannot.
-- **Privilege.** None added: no token, no RBAC, no capability.
-- **Shared RAM.** The budget uses `MemFree`, so the sidecar only fills memory
-  nobody is using, and stops before reclaim. In steady state it adds nothing
-  beyond what the engine's own load puts in memory, charged to the same pod.
-- **Disk.** The 2000 MB/s default leaves about a third of one NVMe to other
-  tenants; set it lower where their I/O matters more.
+- **Files and privilege.** The reader reads the engine's own weights volume as
+  the engine's UID. No new object, privilege or capability.
+- **Shared RAM.** In read-all mode it adds no page cache beyond what the
+  engine's load creates, in the same container; it creates it sooner.
+- **Disk.** Unthrottled, one start takes the device for the length of one
+  cold read, as the engine's load does. `WVA_WEIGHTS_PREWARM_RATE` is the knob
+  for a device shared with I/O-sensitive tenants.
 
 ## 9. Alternatives considered
 
 | alternative | why not |
 | --- | --- |
-| **The weights DaemonSet watching pods bound to its node** (the first version of this proposal) | Needs a ServiceAccount token and a Role to list and watch pods in a DaemonSet that has neither, and any pod naming that ServiceAccount gets pod read. The page cache is charged to the DaemonSet pod, whose request is 256 MiB: under node pressure it becomes the first eviction target, and the engine's pages leave with its cgroup. The limit it needs (the model's size) collides with `limits.memory` quotas, LimitRange maxima and OpenShift overrides. It starts ~2 s earlier than a sidecar, which is not worth that. |
-| **Timed re-read** | Holds the model in page cache on every prepared node all the time (65 GB per node for 32B, ~744 GB for GLM class). The kernel drops it under pressure, which is when a scale-up is likely. |
-| **Trigger on the autoscaler's decision** | 11-23 s earlier (measured KEDA/HPA lag), but the node is unknown. Reading on all candidates multiplies reads and page cache: one 32B replica on 16 prepared nodes would read ~1 TB. Misses manual scale and restarts. |
-| **A pod holding the weights in RAM** (`mlock`, `vmtouch -l`) | Unevictable memory equal to the model, per node per model, forever. A warm pool without the GPU part. |
-| **Peer weight transfer** | Complementary: a replica filled from a serving peer over NCCL reads no files ([§4e](warm-pool-weight-transfer.md#4e-it-works-on-a-plain-scale-up-too-with-no-pool-at-all), measured byte-identical). Needs a same-layout peer and engine changes. Where it is used, the sidecar is not needed. |
+| **A native sidecar in the engine pod** (the previous revision) | A sidecar with no memory limit removes the pod-level limit and turns a Guaranteed pod Burstable: a different OOM score, eviction standing and no static CPU-manager pinning. Request equal to limit keeps Guaranteed but reserves the model's size. A namespace CPU quota rejects a container without CPU settings. A missing ConfigMap is `CreateContainerConfigError` for the whole pod. A sidecar's readiness gates pod Ready, and a PID 1 that ignores `SIGTERM` delays deletion. A pod-level `spec.resources` limit below engine plus model makes it reclaim its own pages. |
+| **The weights DaemonSet watching pods bound to its node** | Needs a token and a Role to watch pods in a DaemonSet that has neither. Its page cache is charged to a 256 MiB-request pod, the first eviction target under pressure, and the limit it needs collides with quotas, LimitRanges and OpenShift overrides. |
+| **Timed re-read** | Holds the model in page cache on every prepared node all the time (65 GB per node for 32B, ~744 GB for GLM class); dropped under pressure, when a scale-up is likely. |
+| **Trigger on the autoscaler's decision** | 11-23 s earlier (measured KEDA/HPA lag), but the node is unknown; reading on 16 candidates for one 32B replica is ~1 TB. |
+| **A pod holding the weights in RAM** (`mlock`) | Unevictable memory equal to the model, per node per model, forever. |
+| **Peer weight transfer** | Complementary: a replica filled from a serving peer over NCCL reads no files ([§4e](warm-pool-weight-transfer.md#4e-it-works-on-a-plain-scale-up-too-with-no-pool-at-all), measured byte-identical). Needs a same-layout peer and engine changes. |
 | **Snapshot of a loaded engine** | Measured: restores in ~15 s, TP=1 only today. Where it applies it removes much more than the read. |
-| **Warm pool** | Removes the whole start, at the cost of an idle engine. The sidecar is for the starts the pool does not cover. |
+| **vLLM's own `--safetensors-load-strategy prefetch`** | Reads whole files into page cache, but inside the load, after the head start; on node-local NVMe the [reference](../reference/workload-preparation.md#weights-on-the-nodes-disk) says it buys nothing. |
+| **Warm pool** | Removes the whole start, at the cost of an idle engine. |
 
 ## 10. Measurement plan before building past alpha
 
-Cold always means: weight files dropped with `posix_fadvise(DONTNEED)` and
-checked 0 % resident, as root. Not `drop_caches`, which affects every tenant.
+Cold means: weight files dropped with `posix_fadvise(DONTNEED)`, checked 0 %
+resident as root. Not `drop_caches`, which affects every tenant.
 
-**A. Qwen3-32B, TP=1, one H200, prepared node.** Three starts per arm, same
-node: cold (sidecar off); sidecar on, files cold; warm (sidecar off, files warm
-from an earlier start). Record per start:
+**A. Qwen3-32B, TP=1, one H200, prepared node whose page cache is already
+full of other files** (fill it with an unrelated read first). Three starts per
+arm: cold (reader off); reader on, files cold; reader on with
+`WVA_WEIGHTS_PREWARM_RATE=2000`; warm (reader off, files warm). Record per
+start:
 
 - pod created to `/health`; the engine's weight-load seconds;
-- the sidecar's read seconds, and whether it finished before the load began;
-- `MemFree` before and after; disk throughput (`/proc/diskstats`);
-- `container_memory_working_set_bytes` for the engine container, the sidecar
-  and the pod, sampled every 2 s from container start to 60 s after `/health`.
+- the reader's `done` line, and the time the engine began loading;
+- `MemAvailable` and `MemFree` before and after; `/proc/diskstats`;
+- `container_memory_working_set_bytes` for the engine container and pod,
+  every 2 s from start to 60 s after `/health`;
+- `<defunct>` entries in the container after the read.
 
-**B. GLM class on two 8xH200 nodes, LeaderWorkerSet, DP=16 / EP.**
-
-1. Confirm the loader reads every file: one cold start, `mincore` (as root) on
-   both nodes afterwards, every file resident on each, and
-   `--enable-ep-weight-filter` absent from the engine's arguments.
-2. Two arms, two starts each: cold; sidecar, read-all. Record per node: ready
-   time, weight step, bytes read, peak `Cached`, `MemFree` minimum, disk
-   throughput, working set as in A. Run one start with the rate cap off.
-3. Beta only: a third arm with `--enable-ep-weight-filter` and the share
-   layout, if anyone deploys with that flag.
+**B. GLM class, two 8xH200 nodes, LeaderWorkerSet, DP=16 / EP.** First measure
+`R` on the node (a buffered read of one cold weight file). Then two arms, two
+starts each: cold; reader on, read-all. Record per node what A records, plus
+peak `Cached`. Confirm `--enable-ep-weight-filter` is absent and, after the
+cold start, every file resident on both nodes.
 
 **Acceptance (alpha to beta):**
 
-- A: sidecar-on weight load within 2 s of the warm arm's median, and `/health`
+- A: reader-on weight load within 2 s of the warm arm's median, and `/health`
   at least 7 s faster than cold, on all three starts.
-- A: overlap is no worse than cold: no sidecar-on start slower than the
-  slowest cold start.
+- A: the capped arm's gain within 30 % of the formula's 7.8 s.
+- A: no reader-on start slower than the slowest cold start (overlap no worse).
 - A: a start with files resident logs `skip reason=resident` within 2 s.
-- No run takes `MemFree` below the headroom.
+- A: no change in the pod's QoS class, requests or limits; one `<defunct>` at most.
 
-**Acceptance (beta to GA):** B: the sidecar gains at least 20 s of ready time
-over cold, and §1.3's formula predicts the measured gain within 30 %. An e2e
-check on kind (no GPU): small stand-in safetensors files, a pod with the
-sidecar, residency asserted after start.
+**Acceptance (beta to GA):** B: a gain of at least 20 s, and within 30 % of
+§1.3's prediction for the measured `R`. A kind e2e (no GPU): stand-in
+safetensors files, the command lines, residency asserted after start.
 
 ## 11. Rollout and open questions
 
 | stage | scope |
 | --- | --- |
-| **alpha** | `WVA_WORKLOAD_PATCH_APPLY_PREWARM`; Deployments and LeaderWorkerSets; read-all only; residency check failing closed; `MemFree` budget; logs; remove switch. Measurement A. |
-| **beta** | metrics; the share layout for `--enable-ep-weight-filter`; measurement B. |
-| **GA** | both measurements met; the kind e2e in CI; the user-facing section in [workload-preparation](../reference/workload-preparation.md#weights-on-the-nodes-disk). Still off by default. |
+| **alpha** | the emitted lines and the env switch; Deployments and LeaderWorkerSets; read-all only; residency check failing closed; `MemAvailable` and cgroup budget; logs. Measurement A. |
+| **beta** | the share layout for `--enable-ep-weight-filter`; measurement B. |
+| **GA** | both met; the kind e2e in CI; the user-facing section in [workload-preparation](../reference/workload-preparation.md#weights-on-the-nodes-disk). Still off by default. |
 
 Open questions:
 
-1. **The disk rate on GLM-class nodes.** If they stripe several NVMe devices,
-   §1.3 predicts almost no gain there. Measure `R` on the node before running B.
+1. **The disk rate on GLM-class nodes.** If they stripe several devices, §1.3
+   predicts almost no gain there.
 2. **SGLang.** Its loader's file order and whether it reads every file are not
    checked. Alpha is vLLM only.
-3. **Kernel behaviour on a dying memcg.** Pages stay usable; whether a kernel
-   in use reparents them changes only accounting. Record the kernel in §10.
-4. **Native sidecar availability.** Kubernetes 1.29 or later. On an older
-   cluster `make workload-patch` refuses the half rather than fall back to a
-   plain init container, which would hold the engine's start for the read.
+3. **Python and zombies.** That vLLM's API server does not reap the reader is
+   expected from how CPython handles children, not checked; measurement A
+   checks it.
