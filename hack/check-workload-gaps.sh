@@ -159,13 +159,13 @@ ok() { RAN=$((RAN + 1)); printf 'ok    %s\n' "$CASE"; }
 # line-oriented and re-emits a delimiterless line whole, so it cannot see the
 # truncation that `read` suffers when a field still contains newlines.
 gaps_field() {
-    local idx="$1" gaps f1 f2 f3 f4 f5 f6 f7
+    local idx="$1" gaps f1 f2 f3 f4 f5 f6 f7 f8 f9
     gaps="$(so_workload_gaps ns deployments w "$POD_DEPLOY")" || return 1
-    IFS=$'\037' read -r f1 f2 f3 f4 f5 f6 f7 <<< "$gaps"
+    IFS=$'\037' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 <<< "$gaps"
     case "$idx" in
         1) printf '%s' "$f1" ;; 2) printf '%s' "$f2" ;; 3) printf '%s' "$f3" ;;
         4) printf '%s' "$f4" ;; 5) printf '%s' "$f5" ;; 6) printf '%s' "$f6" ;;
-        7) printf '%s' "$f7" ;;
+        7) printf '%s' "$f7" ;; 8) printf '%s' "$f8" ;; 9) printf '%s' "$f9" ;;
     esac
 }
 
@@ -228,14 +228,15 @@ f_mount_without_hf_home() {
 
 # Nothing wrong with it: drains, weights on the claim, and the engine caches
 # on it too (a second cache half is the same claim under another directory,
-# which is the layout the benchmark harness uses).
+# which is the layout the benchmark harness uses), Python bytecode included.
 f_cached_properly() {
     FIXTURE='{"spec":{"template":{"spec":{
         "terminationGracePeriodSeconds":120,
         "volumes":[{"name":"model-storage","persistentVolumeClaim":{"claimName":"model-pvc"}}],
         "containers":[{"name":"vllm","image":"quay.io/x/vllm-openai:v0.11",
                        "env":[{"name":"HF_HOME","value":"/model-cache/huggingface"},
-                              {"name":"VLLM_CACHE_ROOT","value":"/model-cache/engine-cache/vllm"}],
+                              {"name":"VLLM_CACHE_ROOT","value":"/model-cache/engine-cache/vllm"},
+                              {"name":"PYTHONPYCACHEPREFIX","value":"/model-cache/engine-cache/pycache/5f8fcd7456cd"}],
                        "volumeMounts":[{"name":"model-storage","mountPath":"/model-cache"}],
                        "lifecycle":{"preStop":{"exec":{"command":["sleep","45"]}}},
                        "args":["vllm","serve","Qwen/Qwen3-0.6B"]}]}}}}'
@@ -1360,7 +1361,8 @@ f_engine_cache_on_claim() {
                    {"name":"model-storage","persistentVolumeClaim":{"claimName":"model-pvc"}}],
         "containers":[{"name":"vllm","image":"quay.io/x/vllm-openai:v0.11",
                        "env":[{"name":"HF_HOME","value":"/model-cache/huggingface"},
-                              {"name":"VLLM_CACHE_ROOT","value":"/engine-cache/vllm"}],
+                              {"name":"VLLM_CACHE_ROOT","value":"/engine-cache/vllm"},
+                              {"name":"PYTHONPYCACHEPREFIX","value":"/engine-cache/pycache/5f8fcd7456cd"}],
                        "volumeMounts":[{"name":"model-storage","mountPath":"/model-cache"},
                                        {"name":"engine-cache","mountPath":"/engine-cache"}],
                        "lifecycle":{"preStop":{"exec":{"command":["sleep","45"]}}},
@@ -1472,17 +1474,24 @@ assert_field 1 "server"      # anchor: the engine was found
 assert_field 7 ""
 doc="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
 assert_contains "$doc" "preStop"                  # anchor: a document was produced
-assert_not_contains "$doc" "engine-cache"
+# No vLLM variable and no engine-cache header: only the bytecode, which is
+# any Python engine's (its own cases are below).
+assert_not_contains "$doc" "VLLM_CACHE_ROOT"
+assert_not_contains "$doc" "#   engine-cache:"
+assert_not_contains "$doc" 'unset $v'
+assert_contains "$doc" "PYTHONPYCACHEPREFIX"
 [ "$FAILED" -eq "$before" ] && ok
 
-CASE="engine cache: the field is LAST, so an un-updated reader keeps a clean argv"
+CASE="engine cache: nine fields, argv and cachevol where they were, image and bytecode after"
 reset; f_vllm_plain
 before=$FAILED
 gaps="$(so_workload_gaps ns deployments w "$POD_DEPLOY")"
-IFS=$'\037' read -r e1 e2 e3 e4 e5 e6 e7 e8 <<< "$gaps"
+IFS=$'\037' read -r e1 e2 e3 e4 e5 e6 e7 e8 e9 e10 <<< "$gaps"
 assert_eq "$e6" "vllm serve Qwen/Qwen3-0.6B" "argv (field 6)"
 assert_eq "$e7" "unset" "cachevol (field 7)"
-assert_eq "$e8" "" "an eighth field"
+assert_eq "$e8" "quay.io/x/vllm-openai:v0.11" "image (field 8)"
+assert_eq "$e9" "unset" "bytecode (field 9)"
+assert_eq "$e10" "" "a tenth field"
 [ "$FAILED" -eq "$before" ] && ok
 
 CASE="engine cache: the patch carries the three variables, the mount and the claim"
@@ -1519,7 +1528,7 @@ assert_eq "$(printf '%s\n' "$doc" | grep -c '^      volumes:$')" "1" "volumes li
 # second `volumes:` key would silently have replaced.
 d="$(mktemp)"; printf '%s\n' "$doc" > "$d"
 assert_eq "$(yq eval '.spec.template.spec.volumes | length' "$d" 2>/dev/null)" "2" "volumes read back"
-assert_eq "$(yq eval '.spec.template.spec.containers[0].env | length' "$d" 2>/dev/null)" "4" "env read back"
+assert_eq "$(yq eval '.spec.template.spec.containers[0].env | length' "$d" 2>/dev/null)" "5" "env read back (HF_HOME, the three vLLM caches, PYTHONPYCACHEPREFIX)"
 rm -f "$d"
 [ "$FAILED" -eq "$before" ] && ok
 
@@ -1593,12 +1602,14 @@ assert_contains "$note" "VLLM_CACHE_ROOT is unset"
 assert_contains "$note" "make workload-patch"
 [ "$FAILED" -eq "$before" ] && ok
 
-CASE="engine cache: the plan note is silent on a claim, on SGLang, and on an unreadable spec"
+CASE="engine cache: the plan note is silent on a claim, speaks only of bytecode on SGLang, and is silent on an unreadable spec"
 reset; f_engine_cache_on_claim
 before=$FAILED
 assert_eq "$(so_enginecache_note ns deployments w "$POD_DEPLOY")" "" "note for a cache on a claim"
 reset; f_sglang_proxy_has_hook
-assert_eq "$(so_enginecache_note ns deployments w "$POD_DEPLOY")" "" "note for SGLang"
+note="$(so_enginecache_note ns deployments w "$POD_DEPLOY")"
+assert_contains "$note" "recompiles its Python bytecode"
+assert_not_contains "$note" "VLLM_CACHE_ROOT"
 reset; f_unreadable
 assert_eq "$(so_enginecache_note ns deployments w "$POD_DEPLOY")" "" "note for an unreadable spec (the drain note says so)"
 assert_contains "$(so_drain_note ns deployments w "$POD_DEPLOY")" "unknown"   # anchor
@@ -1645,9 +1656,9 @@ assert_contains "$PATCH_BODY" "claimName: engine-cache"
 assert_not_contains "$PATCH_BODY" "HF_HOME"
 assert_not_contains "$PATCH_BODY" "claimName: model-pvc"
 assert_not_contains "$PATCH_BODY" "model-storage"
-# The body is a document the API server would take: one env list of three.
+# The body is a document the API server would take: one env list of four.
 d="$(mktemp)"; printf '%s\n' "$PATCH_BODY" > "$d"
-assert_eq "$(yq eval '.spec.template.spec.containers[0].env | length' "$d" 2>/dev/null)" "3" "env read back"
+assert_eq "$(yq eval '.spec.template.spec.containers[0].env | length' "$d" 2>/dev/null)" "4" "env read back (the three vLLM caches and PYTHONPYCACHEPREFIX)"
 assert_eq "$(yq eval '.spec.template.spec.volumes | length' "$d" 2>/dev/null)" "1" "volumes read back"
 rm -f "$d"
 # ...and the guard's absence is said at the time.
@@ -1933,7 +1944,8 @@ FIXTURE='{"spec":{"template":{"spec":{
     "terminationGracePeriodSeconds":120,
     "volumes":[{"name":"model-storage","persistentVolumeClaim":{"claimName":"model-pvc"}}],
     "containers":[{"name":"server","image":"lmsysorg/sglang:latest",
-                   "env":[{"name":"HF_HOME","value":"/model-cache/huggingface"}],
+                   "env":[{"name":"HF_HOME","value":"/model-cache/huggingface"},
+                          {"name":"PYTHONPYCACHEPREFIX","value":"/model-cache/pycache/596e0fdddd36"}],
                    "volumeMounts":[{"name":"model-storage","mountPath":"/model-cache"}],
                    "lifecycle":{"preStop":{"exec":{"command":["sleep","45"]}}},
                    "args":["python3","-m","sglang.launch_server","--model-path","meta-llama/Llama-3.1-8B"]}]}}}}'
@@ -2091,6 +2103,226 @@ done
 for good in shared-cache shared.cache:engine-cache shared-cache:Models/qwen_3; do
     run_ref "$good"; assert_eq "$DRIVER_RC" "0" "rc for '$good'"
 done
+[ "$FAILED" -eq "$before" ] && ok
+
+# --- Python bytecode ----------------------------------------------------------
+#
+# Engine images ship almost no .pyc, so every container compiles its imports
+# again: measured on vLLM v0.26.0, ~11 s of every start. PYTHONPYCACHEPREFIX
+# under the engine cache keeps them, one directory per image, because a .pyc
+# is checked against its source's mtime and size only.
+
+KEY_VLLM="$(printf '%s' "quay.io/x/vllm-openai:v0.11" | sha256sum | cut -c1-12)"
+KEY_SGLANG="$(printf '%s' "lmsysorg/sglang:latest" | sha256sum | cut -c1-12)"
+
+# The vLLM caches already on a claim; only the bytecode is missing.
+f_engine_cache_on_claim_no_pyc() {
+    f_engine_cache_on_claim
+    FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.template.spec.containers[0].env |= map(select(.name != "PYTHONPYCACHEPREFIX"))')"
+}
+
+# SGLang that drains and keeps its weights, with nothing for the bytecode.
+f_sglang_no_pyc() {
+    FIXTURE='{"spec":{"template":{"spec":{
+        "terminationGracePeriodSeconds":120,
+        "volumes":[{"name":"model-storage","persistentVolumeClaim":{"claimName":"model-pvc"}}],
+        "containers":[{"name":"server","image":"lmsysorg/sglang:latest",
+                       "env":[{"name":"HF_HOME","value":"/model-cache/huggingface"}],
+                       "volumeMounts":[{"name":"model-storage","mountPath":"/model-cache"}],
+                       "lifecycle":{"preStop":{"exec":{"command":["sleep","45"]}}},
+                       "args":["python3","-m","sglang.launch_server","--model-path","meta-llama/Llama-3.1-8B"]}]}}}}'
+}
+
+CASE="bytecode: the vLLM engine-cache half carries PYTHONPYCACHEPREFIX, keyed by the image"
+reset; f_engine_cache_only_gap
+before=$FAILED
+assert_field 9 "unset"
+doc="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
+assert_contains "$doc" "#   bytecode:"
+assert_contains "$doc" "- name: PYTHONPYCACHEPREFIX"
+assert_contains "$doc" "value: /engine-cache/pycache/${KEY_VLLM}"
+assert_contains "$doc" "image reference quay.io/x/vllm-openai:v0.11"
+assert_eq "${#KEY_VLLM}" "12" "key length"
+d="$(mktemp)"; printf '%s\n' "$doc" > "$d"
+assert_eq "$(yq eval '.spec.template.spec.containers[0].env[] | select(.name == "PYTHONPYCACHEPREFIX") | .value' "$d" 2>/dev/null)" \
+    "/engine-cache/pycache/${KEY_VLLM}" "PYTHONPYCACHEPREFIX read back"
+assert_eq "$(yq eval '.spec.template.spec.volumes | length' "$d" 2>/dev/null)" "1" "one volume: the bytecode shares the vLLM half's"
+rm -f "$d"
+# ...and the console says so with the vLLM warning, not a second one.
+warn="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>&1 >/dev/null)"
+assert_contains "$warn" "COMPILES FROM NOTHING"
+assert_contains "$warn" "Python bytecode in the container"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="bytecode: two images get two keys, and a digest is part of the key"
+reset
+before=$FAILED
+k1="$(so_pycache_key "quay.io/x/vllm-openai:v0.11")"
+k2="$(so_pycache_key "quay.io/x/vllm-openai:v0.12")"
+k3="$(so_pycache_key "quay.io/x/vllm-openai:v0.11@sha256:0000000000000000000000000000000000000000000000000000000000000000")"
+assert_eq "$k1" "$KEY_VLLM" "key of the exact string"
+[ -n "$k2" ] && [ "$k1" != "$k2" ] || fail "two tags gave one key: '$k1' '$k2'"
+[ -n "$k3" ] && [ "$k1" != "$k3" ] || fail "a digest did not change the key: '$k1' '$k3'"
+so_pycache_key "" >/dev/null && fail "an empty image must give no key"
+# ...and through the patch: the same pod spec on another image, another path.
+f_engine_cache_only_gap
+doc1="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
+FIXTURE="${FIXTURE//vllm-openai:v0.11/vllm-openai:v0.12}"
+doc2="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
+assert_contains "$doc1" "/engine-cache/pycache/${k1}"
+assert_contains "$doc2" "/engine-cache/pycache/${k2}"
+assert_not_contains "$doc2" "/engine-cache/pycache/${k1}"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="bytecode: a PYTHONPYCACHEPREFIX the workload sets is respected, value or valueFrom"
+reset
+before=$FAILED
+FIXTURE='{"spec":{"template":{"spec":{
+    "terminationGracePeriodSeconds":120,
+    "volumes":[{"name":"model-storage","persistentVolumeClaim":{"claimName":"model-pvc"}}],
+    "containers":[{"name":"vllm","image":"quay.io/x/vllm-openai:v0.11",
+                   "env":[{"name":"HF_HOME","value":"/model-cache/huggingface"},
+                          {"name":"PYTHONPYCACHEPREFIX","value":"/opt/my-pyc"}],
+                   "volumeMounts":[{"name":"model-storage","mountPath":"/model-cache"}],
+                   "lifecycle":{"preStop":{"exec":{"command":["sleep","45"]}}},
+                   "args":["vllm","serve","Qwen/Qwen3-0.6B"]}]}}}}'
+assert_field 9 "set:/opt/my-pyc"
+doc="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>&1)"
+assert_contains "$doc" "- name: VLLM_CACHE_ROOT"          # anchor: the vLLM half is still written
+assert_not_contains "$doc" "- name: PYTHONPYCACHEPREFIX"
+assert_not_contains "$doc" "#   bytecode:"
+assert_not_contains "$doc" "Python bytecode"
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.template.spec.containers[0].env[1] = {"name":"PYTHONPYCACHEPREFIX","valueFrom":{"configMapKeyRef":{"name":"c","key":"k"}}}')"
+assert_field 9 "set:"
+doc="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
+assert_contains "$doc" "- name: VLLM_CACHE_ROOT"
+assert_not_contains "$doc" "- name: PYTHONPYCACHEPREFIX"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="bytecode: a prefix keyed for another image is warned about, and left as set"
+reset; f_engine_cache_on_claim
+before=$FAILED
+FIXTURE="${FIXTURE//pycache\/${KEY_VLLM}/pycache\/aaaaaaaaaaaa}"
+assert_field 9 "set:/engine-cache/pycache/aaaaaaaaaaaa"
+warn="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>&1 >/dev/null)"
+assert_contains "$warn" "keyed for another image"
+assert_contains "$warn" ".../pycache/${KEY_VLLM}"
+assert_eq "$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)" "" "document"
+# ...while the right key is silent (anchor: the warning is about the key).
+reset; f_engine_cache_on_claim
+assert_eq "$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>&1)" "" "output for the right key"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="bytecode: a vLLM cache already on a claim gets the prefix under that mount, env only"
+reset; f_engine_cache_on_claim_no_pyc
+before=$FAILED
+assert_field 7 "volume:/engine-cache/vllm"
+assert_field 9 "mount:/engine-cache"
+doc="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
+assert_contains "$doc" "#   bytecode:"
+assert_contains "$doc" "value: /engine-cache/pycache/${KEY_VLLM}"
+assert_not_contains "$doc" "#   engine-cache:"
+assert_not_contains "$doc" "volumes:"
+assert_not_contains "$doc" "volumeMounts:"
+assert_not_contains "$doc" "VLLM_CACHE_ROOT"
+d="$(mktemp)"; printf '%s\n' "$doc" > "$d"
+assert_eq "$(yq eval '.spec.template.spec.containers[0].env | length' "$d" 2>/dev/null)" "1" "env read back"
+rm -f "$d"
+warn="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>&1 >/dev/null)"
+assert_contains "$warn" "RECOMPILES ITS PYTHON BYTECODE"
+# A hostPath counts the same way, under its own mount.
+reset; f_engine_cache_on_hostpath
+assert_field 9 "mount:/mnt/caches"
+assert_contains "$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)" "value: /mnt/caches/pycache/${KEY_VLLM}"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="bytecode: SGLang gets the engine-cache volume for the bytecode alone, with no guard"
+reset; f_sglang_no_pyc
+before=$FAILED
+assert_field 1 "server"
+assert_field 7 ""
+assert_field 9 "unset"
+doc="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
+assert_contains "$doc" "#   bytecode:"
+assert_contains "$doc" "value: /engine-cache/pycache/${KEY_SGLANG}"
+assert_contains "$doc" "mountPath: /engine-cache"
+assert_contains "$doc" "claimName: engine-cache"
+assert_contains "$doc" "engine-cache does NOT exist yet in ns"   # the claim note travels with the volume
+assert_contains "$doc" "needs no guard"
+assert_not_contains "$doc" 'unset $v'
+assert_not_contains "$doc" "VLLM_CACHE_ROOT"
+assert_not_contains "$doc" "preStop"                             # it drains already
+# ...and a mount already at the engine-cache path is used, with no new volume.
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.template.spec.volumes += [{"name":"ec","persistentVolumeClaim":{"claimName":"engine-cache"}}]
+    | .spec.template.spec.containers[0].volumeMounts += [{"name":"ec","mountPath":"/engine-cache"}]')"
+assert_field 9 "mount:/engine-cache"
+doc="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
+assert_contains "$doc" "value: /engine-cache/pycache/${KEY_SGLANG}"
+assert_not_contains "$doc" "volumes:"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="bytecode: the simulator is not a Python engine"
+reset
+before=$FAILED
+FIXTURE='{"spec":{"template":{"spec":{
+    "containers":[{"name":"sim","image":"ghcr.io/llm-d/llm-d-inference-sim:v0.9.0",
+                   "args":["--model","Qwen/Qwen3-0.6B"]}]}}}}'
+assert_field 1 "sim"           # anchor: found, as an engine for the drain half
+assert_field 9 ""
+doc="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
+assert_contains "$doc" "preStop"
+assert_not_contains "$doc" "PYTHONPYCACHEPREFIX"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="bytecode: the summary counts it, and an env-only half is emitted, never applied"
+reset; LIST_FIXTURE="$(serving_list)"; f_engine_cache_on_claim_no_pyc
+before=$FAILED
+PVC_FIXTURE="$(pvc_list engine-cache:ReadWriteMany)"
+dir="$(mktemp -d)"
+DRIVER_RC=0
+WVA_DEFAULT_SO_NS=ns1 WVA_WORKLOAD_PATCH_APPLY=true WVA_WORKLOAD_PATCH_APPLY_ENGINE_CACHE=true \
+    WVA_WORKLOAD_PATCH_FILE="$dir/p.yaml" wva_workload_patch >"$dir/log" 2>&1 || DRIVER_RC=$?
+assert_eq "$DRIVER_RC" "0" "return code"
+assert_contains "$(cat "$dir/log")" "1 model server(s) RECOMPILE THEIR PYTHON BYTECODE"
+assert_not_contains "$(cat "$dir/log")" "COMPILE FROM NOTHING"
+assert_eq "$PATCH_CALLS" "0" "kubectl patch calls"
+assert_contains "$(cat "$dir/log")" "need only a volume or a cache variable"
+assert_contains "$(cat "$dir/p.yaml")" "value: /engine-cache/pycache/${KEY_VLLM}"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="bytecode: without the engine-cache opt-in the prefix is trimmed with the half; with it, kept"
+reset; LIST_FIXTURE="$(serving_list)"; f_vllm_plain
+before=$FAILED
+PVC_FIXTURE="$(pvc_list engine-cache:ReadWriteMany model-pvc:ReadWriteMany)"
+dir="$(mktemp -d)"
+WVA_DEFAULT_SO_NS=ns1 WVA_WORKLOAD_PATCH_APPLY=true WVA_WORKLOAD_PATCH_FILE="$dir/p.yaml" \
+    wva_workload_patch >"$dir/log" 2>&1 || true
+assert_contains "$PATCH_BODY" "preStop"
+assert_not_contains "$PATCH_BODY" "PYTHONPYCACHEPREFIX"
+assert_contains "$(cat "$dir/p.yaml")" "PYTHONPYCACHEPREFIX"     # emitted still
+reset; LIST_FIXTURE="$(serving_list)"; f_vllm_plain
+PVC_FIXTURE="$(pvc_list engine-cache:ReadWriteMany model-pvc:ReadWriteMany)"
+WVA_DEFAULT_SO_NS=ns1 WVA_WORKLOAD_PATCH_APPLY=true WVA_WORKLOAD_PATCH_APPLY_ENGINE_CACHE=true \
+    WVA_WORKLOAD_PATCH_FILE="$dir/p.yaml" wva_workload_patch >"$dir/log" 2>&1 || true
+assert_contains "$PATCH_BODY" "value: /engine-cache/pycache/${KEY_VLLM}"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="bytecode: a bytecode-only half is applied with its opt-in, without the guard warning"
+reset; LIST_FIXTURE="$(serving_list)"; f_sglang_no_pyc
+before=$FAILED
+PVC_FIXTURE="$(pvc_list engine-cache:ReadWriteMany)"
+DS_FIXTURE='{"status":{"desiredNumberScheduled":2,"numberReady":2}}'
+engine_apply_run
+assert_eq "$PATCH_CALLS" "1" "kubectl patch calls"
+assert_contains "$PATCH_BODY" "value: /engine-cache/pycache/${KEY_SGLANG}"
+assert_contains "$PATCH_BODY" "claimName: engine-cache"
+assert_not_contains "$(cat "$DRIVER_LOG")" "guard is NOT applied"
+# ...while the vLLM half still warns (anchor).
+reset; LIST_FIXTURE="$(serving_list)"; f_engine_cache_only_gap
+PVC_FIXTURE="$(pvc_list engine-cache:ReadWriteMany)"
+DS_FIXTURE='{"status":{"desiredNumberScheduled":2,"numberReady":2}}'
+engine_apply_run
+assert_contains "$(cat "$DRIVER_LOG")" "guard is NOT applied"
 [ "$FAILED" -eq "$before" ] && ok
 
 # ----------------------------------------------------------------------------
