@@ -36,6 +36,9 @@ and the `warmPool:` setting from the models.
   capacity**, so the scaling manager never creates one for you.
 - Size it by how often you spike and how long a replica takes to start, never
   by peak load.
+- Prepare the workload first: it shortens every start for disk, not
+  accelerators. [Replica start time](../../reference/start-time.md) puts both
+  side by side.
 
 ## Evidence
 

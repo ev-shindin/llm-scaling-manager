@@ -140,6 +140,7 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 - **[The cycle log](reference/cycle-log.md)** — the two lines the scaling manager emits per cycle, their fields and reason codes: the page that answers "why did it scale?"
 - **[Scaling policy](reference/scaling-policy.md)** — thresholds, tiers, scale-to-zero, limiters, the utilization-share optimizer
 - **[Preparing a workload](reference/workload-preparation.md)** — the model cache, draining before scale-down, `make workload-patch`
+- **[Replica start time](reference/start-time.md)** — every measured start time, what each preparation step and the warm pool buy, and what each costs
 - **[ScaledObject trigger metadata](reference/scaledobject-trigger.md)** — every key the trigger carries (`modelID`, `variantCost`, `scalingPolicy`, `defaultOutputTokens`, warm-pool keys), its default and validation, and the recommended HPA behavior
 - **[Install methods](reference/install-methods.md)** — installer, kustomize, and per-platform entry points
 - **[KEDA](reference/keda.md)**: supported versions, a KEDA the cluster already has, and what the installer prints about it
@@ -172,6 +173,7 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 - **[Benchmark internals](developer-guide/benchmark-guide.md)** · **[two-variant benchmark](developer-guide/two-variant-wva-benchmark.md)** · **[recorded results](developer-guide/benchmark-results.md)** · **[an example k2 decision report](developer-guide/benchmark-k2-decisions-example.md)**
 - **[How the limiter set is built](developer-guide/limiter-composition.md)** — reading, building and rebuilding the declared limiters, skipping an unavailable one, the scale-from-zero snapshot
 - **[Kueue borrowing internals](developer-guide/kueue-borrowing.md)** — what is read from Kueue, where borrowing is counted, spent and given back, and how it is tested
+- **[Anatomy of a replica start](developer-guide/replica-start-anatomy.md)** — where the seconds of a vLLM start go, the levers ruled out, and the experimental snapshot restore
 - **[Release process](developer-guide/release-process.md)** · **[Contributing](../CONTRIBUTING.md)**
 
 ## What this project is

@@ -7,7 +7,9 @@ InferencePool, serves while the ordinary replica loads, and is handed back the
 moment that replica is ready.
 
 The pool is **insurance, not capacity**. Size it by how often you spike and how
-long a replica takes to start, never by peak load.
+long a replica takes to start, never by peak load. How long a start takes, and
+what preparing the workload takes off it before you reach for a pool, is in
+[Replica start time](../../reference/start-time.md).
 
 **It is not free.** Every pool Pod holds its accelerators all the time, lending
 or idle, and they count against your namespace's quota like any workload. A pool

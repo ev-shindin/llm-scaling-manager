@@ -21,6 +21,10 @@ This is easiest to get wrong on a pinned pool (`min == max`).
 Start with `maxReplicaCount: 6`, `warmPoolSleepMinSize: "1"`, and raise the
 ceiling if you see borrows blocked.
 
+The start time a pool bridges, and what a pool costs against preparing the
+workload or holding a floor, is in
+[Replica start time](../../reference/start-time.md).
+
 ### How many models fit in one Pod
 
 A third number lives in the pod template, not the trigger:
