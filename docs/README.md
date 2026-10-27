@@ -173,6 +173,7 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 - **[Benchmark internals](developer-guide/benchmark-guide.md)** · **[two-variant benchmark](developer-guide/two-variant-wva-benchmark.md)** · **[recorded results](developer-guide/benchmark-results.md)** · **[an example k2 decision report](developer-guide/benchmark-k2-decisions-example.md)**
 - **[How the limiter set is built](developer-guide/limiter-composition.md)** — reading, building and rebuilding the declared limiters, skipping an unavailable one, the scale-from-zero snapshot
 - **[Kueue borrowing internals](developer-guide/kueue-borrowing.md)** — what is read from Kueue, where borrowing is counted, spent and given back, and how it is tested
+- **[Anatomy of a replica start](developer-guide/replica-start-anatomy.md)** — where the seconds of a vLLM start go, the levers ruled out, and the experimental snapshot restore
 - **[Release process](developer-guide/release-process.md)** · **[Contributing](../CONTRIBUTING.md)**
 
 ## What this project is
