@@ -94,7 +94,7 @@ Check the model servers are safe to scale with `make workload-patch`, again
 with the scope:
 
 ```bash
-# Report what the model servers need (drain hook, model cache, engine caches), across the cluster
+# Report what the model servers need (drain hook, model cache, vLLM engine caches), across the cluster
 make workload-patch SCOPE=cluster
 # or for one namespace
 make workload-patch NAMESPACE=<ns>
