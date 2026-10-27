@@ -929,7 +929,7 @@ so_workload_patch_index() {
 # $1 the live object JSON, $2 the volume name, $3 the mount path, $4 the claim.
 #
 # $6, optional, the pod templates to look in, as a JSON array of jq paths
-# (so_workload_doc_shape's d_paths); a Deployment's spec.template by default.
+# (d_paths of so_workload_doc_shape); by default the spec.template of a Deployment.
 so_workload_weights_safe() {
     local live="$1" volname="$2" mountpath="$3" claim="$4" ns="$5" paths="${6:-}" reason pvc
     [ -n "$paths" ] || paths='[["spec","template"]]'
@@ -993,10 +993,10 @@ so_workload_volume_can_apply() {
 }
 
 # so_workload_doc_shape reads which kind patch document $1 is and sets the
-# caller's d_resource (what kubectl calls it), d_spec (its pod specs, as a yq
-# path, iterating a LeaderWorkerSet's templates) and d_paths (the same
+# d_resource of the caller (what kubectl calls it), d_spec (its pod specs, as a
+# yq path, iterating the templates of a LeaderWorkerSet) and d_paths (the same
 # templates as a JSON array of jq paths into the live object). A document
-# naming no kind is a Deployment's.
+# naming no kind is for a Deployment.
 so_workload_doc_shape() {
     local kind
     kind="$(yq eval '.kind // ""' "$1" 2>/dev/null)" || return 1
@@ -1142,8 +1142,8 @@ so_workload_patch_one() {
 # volume list for both. A list emptied by that goes too; an `env: []` left
 # behind is a field the patch would still write.
 #
-# $4, optional, is where the document keeps its pod specs (so_workload_doc_shape's
-# d_spec); a Deployment's by default.
+# $4, optional, is where the document keeps its pod specs (d_spec of
+# so_workload_doc_shape); by default where a Deployment keeps them.
 so_workload_patch_trim() {
     local doc="$1" keep_w="${2:-0}" keep_e="${3:-0}" s="${4:-.spec.template.spec}" stripped keep prog
     local wvol="${WVA_MODEL_VOLUME_NAME:-model-storage}" evol="${WVA_ENGINE_CACHE_VOLUME_NAME:-engine-cache}"
@@ -1945,7 +1945,7 @@ so_model_claim() {
 
 # so_workload_patch_plan decides which cache halves one pod template needs,
 # from the so_workload_gaps fields its caller has read (engine, onvol, argv,
-# cachevol, image, pyc). It sets the caller's want_cache, want_engine,
+# cachevol, image, pyc). It sets, in the caller, want_cache, want_engine,
 # want_pyc, want_evol, pycdir, pyckey, pycwhy and model, and logs each gap
 # against $who. A template whose command names no model (a Ray worker, say)
 # takes $model_hint, the model its leader serves, since it loads the same
@@ -2027,7 +2027,7 @@ so_workload_patch_plan() {
 
 # so_workload_patch_claims resolves the claims the emitted volumes name: the
 # weights claim when $1 is 1, the engine-cache claim when $2 is 1. It sets
-# the caller's mountpath, claim, claim_found, emount, evol, eclaim, esub and
+# in the caller mountpath, claim, claim_found, emount, evol, eclaim, esub and
 # eclaim_found.
 so_workload_patch_claims() {
     if [ "$1" -eq 1 ]; then
@@ -2059,10 +2059,10 @@ so_workload_patch_claims() {
     fi
 }
 
-# so_workload_patch_cache_body prints the env, volumeMounts and volumes of one
-# pod template's cache halves, indented for a Deployment's
+# so_workload_patch_cache_body prints the env, volumeMounts and volumes of the
+# cache halves of one pod template, indented for the pod spec of a Deployment at
 # spec.template.spec (the caller re-indents it for a LeaderWorkerSet). It reads
-# the caller's plan and claims.
+# the plan and claims of the caller.
 so_workload_patch_cache_body() {
     if [ "$want_evol" -eq 1 ] && [ -z "$pycdir" ]; then
         pycdir="$emount"
@@ -2152,7 +2152,7 @@ ENGINEVOL
 }
 
 # so_workload_patch_notes prints the comments that follow a document: whether
-# each claim exists and how to make it, and the guard. It reads the caller's
+# each claim exists and how to make it, and the guard. It reads, in the caller,
 # want_cache, want_evol, want_engine and want_pyc and its claims.
 so_workload_patch_notes() {
     if [ "$want_cache" -eq 1 ]; then
@@ -2423,7 +2423,7 @@ PRESTOP
 # namespace $1, for its leader template and its worker template, and returns
 # what so_workload_patch_doc returns.
 #
-# Each template is judged as a Deployment's would be -- its own engine
+# Each template is judged as the template of a Deployment would be -- its own engine
 # container, its own gaps, its own image and so its own bytecode key -- since
 # the leader commonly runs the API server and the worker something else. An LWS
 # with no leaderTemplate builds its leader from workerTemplate, so there is one
@@ -2459,8 +2459,8 @@ so_workload_patch_doc_lws() {
         return 2
     fi
 
-    # Leader first, so a worker whose command names no model takes the
-    # leader's.
+    # Leader first, so a worker whose command names no model takes the model
+    # of the leader.
     for t in $tmpls; do
         pod="[\"spec\",\"leaderWorkerTemplate\",\"$t\"]"
         if ! gaps="$(so_workload_gaps "$ns" leaderworkersets "$name" "$pod")"; then
