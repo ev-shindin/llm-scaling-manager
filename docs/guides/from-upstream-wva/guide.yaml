@@ -91,7 +91,11 @@ rollback:
     run: |
       yq '.items[] | select(.metadata.name | test("^wva-")) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
       kubectl rollout restart deployment wva-controller-manager -n <upstream-namespace>
-      # Helm: restart the Deployment the chart created
+  configmapshelm:
+    note: Helm only. The chart names everything after the release. Put back the ConfigMaps you changed with kubectl edit, then restart the controller.
+    run: |
+      yq '.items[] | select(.metadata.labels."app.kubernetes.io/instance" == "<release>") | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
+      kubectl rollout restart deployment -n <upstream-namespace> -l app.kubernetes.io/instance=<release>,control-plane=controller-manager
   autoscalers:
     note: Restore the saved ScaledObjects and plain HPAs. HPAs that KEDA owns are skipped; KEDA recreates them.
     run: yq '.items[] | select(.metadata.ownerReferences == null) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-autoscalers.yaml | kubectl apply -f -
