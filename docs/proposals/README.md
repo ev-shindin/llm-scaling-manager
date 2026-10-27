@@ -47,13 +47,13 @@ Read the review first; the implementation design says what was built.
 - **[Transferring weights instead of reading them](warm-pool-weight-transfer.md)**
   — investigated, nothing built. What the shipped machinery can and cannot do,
   and which of it is worth building.
-- **[Reading the weights into memory when a pod is scheduled](weights-prewarm-on-schedule.md)**
-  — proposed. When a pod that mounts a model's node-local weights is bound to
-  a node, the weights DaemonSet reads that pod's files into the page cache
-  before the engine loads them: measured 19.9 s to 10.0 s of weight load on a
-  32B model, estimated tens of seconds on a two-node expert-parallel group.
-  Residency check first, a memory budget that never reads through reclaim, and
-  a node's share of the files for multi-node groups. Off by default.
+- **[Reading the weights into memory while the engine starts](weights-prewarm-on-schedule.md)**
+  — proposed. A native sidecar, added by `make workload-patch`, reads the
+  pod's weight files into the page cache while the engine imports: measured
+  19.9 s to 10.0 s of weight load on a 32B model, estimated 40-90 s on a GLM
+  class node with one disk and ~0 with striped NVMe. Reads every file, because
+  the engine does; a residency check that fails closed, and a budget on
+  `MemFree` that never reads through reclaim. Off by default.
 
 ## Scaling and actuation
 
