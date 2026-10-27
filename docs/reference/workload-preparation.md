@@ -37,7 +37,7 @@ Deployment has `.spec.template`.
 | 7 | `preStop` hook on the engine container and `terminationGracePeriodSeconds` above it | every scale-down cuts in-flight streams | `make workload-patch NAMESPACE=<ns>` names workloads without a drain ([below](#draining-before-scale-down)) |
 | 8 | Weights read from a mounted model cache | every scale-up is a download | `make workload-patch NAMESPACE=<ns>` reports `RE-DOWNLOADS ITS WEIGHTS` ([below](#weights-and-the-model-cache)) |
 | 9 | Fast start: image held on the GPU nodes, short probe period | each scale-up pays the pull | `make prepull-status NAMESPACE=<ns>` ([below](#the-rest-of-the-start-path)) |
-| 10 | Engine compile caches (`VLLM_CACHE_ROOT`, `FLASHINFER_WORKSPACE_DIR`, `TRITON_CACHE_DIR`) on a path that outlives the pod | every replica recompiles: about 14 s of torch.compile against about 3 s cached | `make engine-cache-status NAMESPACE=<ns>`; `make workload-patch` reports `COMPILES FROM NOTHING` ([below](#engine-caches-on-the-nodes-disk)) |
+| 10 | Engine compile caches (`VLLM_CACHE_ROOT`, `FLASHINFER_WORKSPACE_DIR`, `TRITON_CACHE_DIR`) and Python bytecode (`PYTHONPYCACHEPREFIX`, any Python engine) on a path that outlives the pod | every replica recompiles: about 14 s of torch.compile against about 3 s cached, and about 11 s of bytecode | `make engine-cache-status NAMESPACE=<ns>`; `make workload-patch` reports `COMPILES FROM NOTHING` or `RECOMPILES ITS PYTHON BYTECODE` ([below](#engine-caches-on-the-nodes-disk)) |
 | 11 | A ScaledObject whose trigger is `external-push` with this `modelID` | nothing scales it — the controller has no watch of its own | `kubectl get scaledobject -n <ns> -o custom-columns='NAME:.metadata.name,MODEL:.spec.triggers[0].metadata.modelID,READY:.status.conditions[0].status'` |
 
 ## Weights and the model cache
@@ -597,20 +597,66 @@ The API server's imports went from 13.5 s to 6.2 s, a worker's from 4.6 s to
   patched from another could load the other's bytecode. `make workload-patch`
   writes the key. Run it again when the image changes; it warns when a pod's
   key belongs to another image.
-- **Any Python engine.** vLLM and SGLang alike; the variable is Python's.
-- **No guard needed.** When Python cannot write the directory (read-only, or
-  not prepared), it compiles in memory, as it does without the variable. That
-  costs the 11 s, never the start.
-- **Another user gets no gain, and no harm.** `pycache/` is `1777`, but the
-  first engine to start an image creates its key directory, mode `755`, as its
-  own user. An engine of that image under another UID reads what is there and
-  compiles the rest in memory. Run one image as one UID to get the full gain.
+- **Pin the image by digest, or use tags that never move.** A tag pushed again
+  keeps its key, and the warning cannot see a rebuilt tag.
+- **Any Python engine.** vLLM and SGLang alike; the variable is Python's. For
+  SGLang this is new: its namespace needs `make engine-cache` (or
+  `WVA_ENGINE_CACHE_CLAIM`) to get it.
+- **It needs the guard.** With the variable set, Python reads bytecode only
+  from that directory and ignores the image's own `__pycache__` directories. So
+  a directory Python cannot write (read-only, created by another user, blocked
+  by an SELinux label) makes the start slower than no variable at all. The
+  guard in the engine's command (the emitted file has it) unsets the variable
+  when the directory is not writable, and logs one line.
+- **Skip it** when the pod sets `PYTHONDONTWRITEBYTECODE` (`make workload-patch`
+  does not emit it then; check the image's own environment too), and for an
+  image that already ships its bytecode compiled.
+- **One user per image.** The first engine to start an image creates its key
+  directory as its own user, mode `755`. An engine of that image under another
+  user cannot write there; the guard then unsets the variable.
+- **It is code, like the other caches.** The key comes from the public image
+  name and `pycache/` is `1777`, so anyone who can run a pod that mounts the
+  same node directory can create a key directory first and put bytecode in it
+  that every engine of that image loads. This is the same exposure as `vllm/`,
+  `flashinfer/` and `triton/` ([What it costs](#what-it-costs)): keep one
+  engine-cache directory per trust domain, or `chown` and `chmod 1770` the
+  directories for the engines' one UID.
 - **Several engines at once are fine.** Three engines filling one key together
   left a clean cache.
 - **Seed and publish carry it**, like the other three directories. Each node
-  keeps its own copy, so the leader and each worker of a LeaderWorkerSet read
-  their own node's. Until publish runs (or each node has started that image
+  keeps its own copy. Until publish runs (or each node has started that image
   once), a node starts without it.
+
+**Turning it on where the cache already exists.** On nodes prepared before this
+version an engine may already have created `pycache/` as `755`. Run
+`make engine-cache` again (the preparer makes `pycache/` `1777`), then
+`make workload-patch`, then apply the emitted file. Do the same when the patch
+puts the variable under a volume the engine already mounts that was never
+prepared.
+
+**Turning it off.** Remove the variable; the files left behind are not read.
+Delete `<dir>/engine-cache/pycache` on the nodes to get the space back.
+
+**On a LeaderWorkerSet** (`make workload-patch` skips them), add it by hand to
+the leader AND the worker template: the `engine-cache` volume and its mount, the
+variable, and the guard in each command. The leader and each worker read their
+own node's copy.
+
+```yaml
+volumes:
+  - name: engine-cache
+    persistentVolumeClaim:
+      claimName: engine-cache
+containers:
+  - name: vllm
+    volumeMounts:
+      - name: engine-cache
+        mountPath: /engine-cache
+    env:
+      - {name: PYTHONPYCACHEPREFIX, value: /engine-cache/pycache/<image key>}
+```
+
+`<image key>` is `printf '%s' '<image reference>' | sha256sum | cut -c1-12`.
 
 #### Check the cache without a second start
 
@@ -782,6 +828,10 @@ changes hands: `delete` keeps the caches, and a new tenant with the same
 namespace name and directory would load the old one's. 1777 is a trade-off so
 the engines need no `fsGroup`. A namespace that runs its engines as one UID can
 `chown` the four directories to it and `chmod 1770` them on each node.
+
+Nothing cleans the cache. The bytecode alone grows about 150 MB per image per
+node, and an old image's key stays after the image is gone: delete
+`<dir>/engine-cache/pycache/<key>` on the nodes when you retire an image.
 
 The rest is the same: rights to create PersistentVolumes (the claim's
 `ENGINE_CACHE_CAPACITY`, 200Gi unless set, is what a storage quota charges), and
@@ -1102,11 +1152,15 @@ of that warning). The patch sets `PYTHONPYCACHEPREFIX` to
   `/engine-cache` (`WVA_ENGINE_CACHE_PATH`), under that mount: a variable and
   no new volume. This half is emitted, never applied.
 - Otherwise (SGLang, usually) with the `engine-cache` volume, mounted for the
-  bytecode alone. It needs no guard.
+  bytecode alone; create the claim with `make engine-cache` first.
 
-A workload that already sets `PYTHONPYCACHEPREFIX`, by value or from a
-ConfigMap or Secret, is left as it is. If its value ends in `pycache/<key>` and
-the key belongs to another image, the console says so and names the right key.
+Each of them comes with the guard, which now also covers `PYTHONPYCACHEPREFIX`;
+put it in the command. A workload that already sets `PYTHONPYCACHEPREFIX`, by
+value or from a ConfigMap or Secret, is left as it is. If its value ends in
+`pycache/<key>` and the key belongs to another image, the console says so and
+names the right key. A workload that sets `PYTHONDONTWRITEBYTECODE` gets no
+bytecode half. LeaderWorkerSets are skipped, as for the other halves; set it by
+hand ([Python bytecode](#python-bytecode)).
 
 `WVA_WORKLOAD_PATCH_APPLY=true` also applies the **drain half** to the live
 objects. Read what it prints first:

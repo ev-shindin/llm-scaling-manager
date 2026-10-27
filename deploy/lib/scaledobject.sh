@@ -1023,10 +1023,14 @@ so_workload_enginecache_can_apply() {
             fi
         fi
     fi
-    # The bytecode alone needs no guard (Python ignores a .pyc it cannot
-    # write), so the warning is for a document carrying the vLLM caches.
+    # What an unguarded node costs depends on what the half carries: the vLLM
+    # caches lose the replica; the bytecode alone makes the start slower than
+    # no prefix, because Python then reads bytecode only from the prefix and
+    # ignores the image's own __pycache__ directories.
     if [ "$(yq eval '[.spec.template.spec.containers[].env[]? | select(.name == "VLLM_CACHE_ROOT")] | length' "$doc" 2>/dev/null)" != 0 ]; then
         log_warning "  $ns/$name: the engine-cache guard is NOT applied with it -- the command belongs to the chart. A node where the cache stops being writable then loses the replica, not a compile; the emitted file has the guard."
+    else
+        log_warning "  $ns/$name: the engine-cache guard is NOT applied with it -- the command belongs to the chart. A node where the bytecode directory is not writable then starts slower than with no PYTHONPYCACHEPREFIX at all; the emitted file has the guard."
     fi
     return 0
 }
@@ -1539,7 +1543,11 @@ so_workload_gaps() {
         # without a new volume: "mount:" and the durable mount the vLLM cache
         # root already lives under, else a durable mount at the engine-cache
         # path ($emount); "unset" when only a new volume would do.
+        # PYTHONDONTWRITEBYTECODE in the pod spec (any value but empty, or a
+        # valueFrom) is "dontwrite": Python would then read bytecode only from
+        # the prefix and never write it, which is slower than no prefix.
         | ( [ $e.env[]? | select(.name == "PYTHONPYCACHEPREFIX") ] | last ) as $pycent
+        | ( [ $e.env[]? | select(.name == "PYTHONDONTWRITEBYTECODE") ] | last ) as $nowrite
         | ([ $dmounts[] | select(. != null and . != "/") ]) as $pmounts
         | ( if ($cachevol | startswith("volume:")) then
               ($cachevol | ltrimstr("volume:")) as $r
@@ -1548,6 +1556,7 @@ so_workload_gaps() {
         | ( [ $pmounts[] | select(. == $emount) ] | first ) as $byemount
         | ( if ($e | not) or $issim then ""
             elif $pycent != null then "set:" + ($pycent.value // "")
+            elif $nowrite != null and (($nowrite.valueFrom != null) or (($nowrite.value // "") != "")) then "dontwrite"
             elif $byroot != null then "mount:" + $byroot
             elif $byemount != null then "mount:" + $byemount
             else "unset" end ) as $pyc
@@ -2044,11 +2053,22 @@ ENGINEENV
         # image reference ${image}.
         # A .pyc is checked against its source's mtime and size only, so two
         # images must not share one: run workload-patch again when the image
-        # changes. A path that is not writable costs nothing -- Python then
-        # compiles in memory -- so this needs no guard.
+        # changes (a moved tag keeps its key: pin by digest). With the prefix
+        # set, Python reads bytecode ONLY from it, so a path it cannot write
+        # is slower than none -- the guard below unsets it.
+PYCENV
+            if [ "$want_evol" -eq 0 ]; then
+                cat <<PYCMOUNT
+        # Under ${pycdir}, which the engine already mounts. If that is the
+        # engine-cache claim, run \`make engine-cache\` again first: nodes
+        # prepared before it made pycache/ 1777 may hold one only its first
+        # writer can write.
+PYCMOUNT
+            fi
+            cat <<PYCVAR
         - name: PYTHONPYCACHEPREFIX
           value: ${pycdir}/pycache/${pyckey}
-PYCENV
+PYCVAR
         fi
     fi
     if [ "$want_cache" -eq 1 ] || [ "$want_evol" -eq 1 ]; then
@@ -2199,25 +2219,25 @@ ENGINENAMED
 #   once. Trust it as you would the engine image.
 ENGINENEED
         fi
-        if [ "$want_engine" -eq 0 ]; then
-            # The bytecode alone: Python ignores a .pyc it cannot write.
-            cat <<'PYCNOGUARD'
-#
-#   The bytecode needs no guard in the command: Python ignores a .pyc it
-#   cannot write and compiles in memory, so an unwritable path costs the
-#   ~11 s it saves, not the replica.
-PYCNOGUARD
-        else
+    fi
+    # The guard, for every half that sets a cache variable -- the bytecode
+    # alone included, and the env-only bytecode half too. With
+    # PYTHONPYCACHEPREFIX set Python reads bytecode ONLY under the prefix and
+    # ignores the image's own __pycache__ directories, so a prefix it cannot
+    # write (read-only, another UID's key directory, an SELinux label) is
+    # slower than no prefix. hack/check-workload-gaps.sh runs this text.
+    if [ "$want_engine" -eq 1 ] || [ "$want_pyc" -eq 1 ]; then
         cat <<'ENGINEGUARD'
 #
-#   Either way, keep the engine tolerant of a cache path that turns out not to
+#   Keep the engine tolerant of a cache path that turns out not to
 #   be writable: vLLM fails hard on a read-only cache directory unless the
 #   variable is unset first, and a storage hiccup must cost one compile, not
-#   the replica. In the container command, before the engine starts (the
-#   command belongs to the chart, so it is not patched here; and
-#   PYTHONPYCACHEPREFIX is not in it: Python ignores a .pyc it cannot write):
+#   the replica. PYTHONPYCACHEPREFIX too: with it set, Python reads bytecode
+#   only from it, so one it cannot write is slower than none. In the
+#   container command, before the engine starts (the command belongs to the
+#   chart, so it is not patched here):
 #
-#     for v in VLLM_CACHE_ROOT FLASHINFER_WORKSPACE_DIR TRITON_CACHE_DIR; do
+#     for v in VLLM_CACHE_ROOT FLASHINFER_WORKSPACE_DIR TRITON_CACHE_DIR PYTHONPYCACHEPREFIX; do
 #       eval "d=\${$v}"
 #       [ -n "$d" ] || continue
 #       if ! mkdir -p "$d" 2>/dev/null || ! touch "$d/.writable" 2>/dev/null; then
@@ -2226,7 +2246,6 @@ PYCNOGUARD
 #       fi
 #     done
 ENGINEGUARD
-        fi
     fi
 }
 

@@ -1476,9 +1476,8 @@ doc="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
 assert_contains "$doc" "preStop"                  # anchor: a document was produced
 # No vLLM variable and no engine-cache header: only the bytecode, which is
 # any Python engine's (its own cases are below).
-assert_not_contains "$doc" "VLLM_CACHE_ROOT"
+assert_not_contains "$doc" "- name: VLLM_CACHE_ROOT"
 assert_not_contains "$doc" "#   engine-cache:"
-assert_not_contains "$doc" 'unset $v'
 assert_contains "$doc" "PYTHONPYCACHEPREFIX"
 [ "$FAILED" -eq "$before" ] && ok
 
@@ -1853,7 +1852,7 @@ assert_field 1 "vllm"      # anchor: the engine was found
 assert_field 7 ""
 doc="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
 assert_contains "$doc" "preStop"
-assert_not_contains "$doc" "VLLM_CACHE_ROOT"
+assert_not_contains "$doc" "- name: VLLM_CACHE_ROOT"
 [ "$FAILED" -eq "$before" ] && ok
 
 CASE="engine cache: an empty value is unset, not a cache at ''"
@@ -2112,8 +2111,8 @@ done
 # under the engine cache keeps them, one directory per image, because a .pyc
 # is checked against its source's mtime and size only.
 
-KEY_VLLM="$(printf '%s' "quay.io/x/vllm-openai:v0.11" | sha256sum | cut -c1-12)"
-KEY_SGLANG="$(printf '%s' "lmsysorg/sglang:latest" | sha256sum | cut -c1-12)"
+KEY_VLLM="$(so_pycache_key "quay.io/x/vllm-openai:v0.11")"
+KEY_SGLANG="$(so_pycache_key "lmsysorg/sglang:latest")"
 
 # The vLLM caches already on a claim; only the bytecode is missing.
 f_engine_cache_on_claim_no_pyc() {
@@ -2160,7 +2159,19 @@ before=$FAILED
 k1="$(so_pycache_key "quay.io/x/vllm-openai:v0.11")"
 k2="$(so_pycache_key "quay.io/x/vllm-openai:v0.12")"
 k3="$(so_pycache_key "quay.io/x/vllm-openai:v0.11@sha256:0000000000000000000000000000000000000000000000000000000000000000")"
-assert_eq "$k1" "$KEY_VLLM" "key of the exact string"
+# Pinned: the first 12 hex digits of the SHA-256 of the exact string, as
+# the fixtures above write it; and the shasum branch (macOS) gives the same.
+assert_eq "$k1" "5f8fcd7456cd" "key of the exact string"
+assert_eq "$KEY_SGLANG" "596e0fdddd36" "SGLang key"
+SUMS="$(mktemp -d)"
+if command -v shasum >/dev/null 2>&1; then
+    ln -s "$(command -v shasum)" "$SUMS/shasum"
+    assert_eq "$(PATH="$SUMS" so_pycache_key "quay.io/x/vllm-openai:v0.11")" "5f8fcd7456cd" "key through shasum"
+else
+    fail "shasum is not installed, so the macOS branch of so_pycache_key was not run"
+fi
+assert_eq "$(PATH="$SUMS/none" so_pycache_key "quay.io/x/vllm-openai:v0.11"; echo "rc=$?")" "rc=1" "no hash tool: no key"
+rm -rf "$SUMS"
 [ -n "$k2" ] && [ "$k1" != "$k2" ] || fail "two tags gave one key: '$k1' '$k2'"
 [ -n "$k3" ] && [ "$k1" != "$k3" ] || fail "a digest did not change the key: '$k1' '$k3'"
 so_pycache_key "" >/dev/null && fail "an empty image must give no key"
@@ -2224,7 +2235,7 @@ assert_contains "$doc" "value: /engine-cache/pycache/${KEY_VLLM}"
 assert_not_contains "$doc" "#   engine-cache:"
 assert_not_contains "$doc" "volumes:"
 assert_not_contains "$doc" "volumeMounts:"
-assert_not_contains "$doc" "VLLM_CACHE_ROOT"
+assert_not_contains "$doc" "- name: VLLM_CACHE_ROOT"
 d="$(mktemp)"; printf '%s\n' "$doc" > "$d"
 assert_eq "$(yq eval '.spec.template.spec.containers[0].env | length' "$d" 2>/dev/null)" "1" "env read back"
 rm -f "$d"
@@ -2236,7 +2247,7 @@ assert_field 9 "mount:/mnt/caches"
 assert_contains "$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)" "value: /mnt/caches/pycache/${KEY_VLLM}"
 [ "$FAILED" -eq "$before" ] && ok
 
-CASE="bytecode: SGLang gets the engine-cache volume for the bytecode alone, with no guard"
+CASE="bytecode: SGLang gets the engine-cache volume for the bytecode alone, with the guard"
 reset; f_sglang_no_pyc
 before=$FAILED
 assert_field 1 "server"
@@ -2248,9 +2259,9 @@ assert_contains "$doc" "value: /engine-cache/pycache/${KEY_SGLANG}"
 assert_contains "$doc" "mountPath: /engine-cache"
 assert_contains "$doc" "claimName: engine-cache"
 assert_contains "$doc" "engine-cache does NOT exist yet in ns"   # the claim note travels with the volume
-assert_contains "$doc" "needs no guard"
-assert_not_contains "$doc" 'unset $v'
-assert_not_contains "$doc" "VLLM_CACHE_ROOT"
+# The guard travels with it: an unwritable prefix is slower than none.
+assert_contains "$doc" "for v in VLLM_CACHE_ROOT FLASHINFER_WORKSPACE_DIR TRITON_CACHE_DIR PYTHONPYCACHEPREFIX; do"
+assert_not_contains "$doc" "- name: VLLM_CACHE_ROOT"
 assert_not_contains "$doc" "preStop"                             # it drains already
 # ...and a mount already at the engine-cache path is used, with no new volume.
 FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.template.spec.volumes += [{"name":"ec","persistentVolumeClaim":{"claimName":"engine-cache"}}]
@@ -2307,7 +2318,7 @@ WVA_DEFAULT_SO_NS=ns1 WVA_WORKLOAD_PATCH_APPLY=true WVA_WORKLOAD_PATCH_APPLY_ENG
 assert_contains "$PATCH_BODY" "value: /engine-cache/pycache/${KEY_VLLM}"
 [ "$FAILED" -eq "$before" ] && ok
 
-CASE="bytecode: a bytecode-only half is applied with its opt-in, without the guard warning"
+CASE="bytecode: a bytecode-only half is applied with its opt-in, and its missing guard is named for what it costs"
 reset; LIST_FIXTURE="$(serving_list)"; f_sglang_no_pyc
 before=$FAILED
 PVC_FIXTURE="$(pvc_list engine-cache:ReadWriteMany)"
@@ -2316,13 +2327,98 @@ engine_apply_run
 assert_eq "$PATCH_CALLS" "1" "kubectl patch calls"
 assert_contains "$PATCH_BODY" "value: /engine-cache/pycache/${KEY_SGLANG}"
 assert_contains "$PATCH_BODY" "claimName: engine-cache"
-assert_not_contains "$(cat "$DRIVER_LOG")" "guard is NOT applied"
-# ...while the vLLM half still warns (anchor).
+assert_contains "$(cat "$DRIVER_LOG")" "starts slower than with no PYTHONPYCACHEPREFIX"
+assert_not_contains "$(cat "$DRIVER_LOG")" "loses the replica"
+# ...while the vLLM half warns of the replica (anchor).
 reset; LIST_FIXTURE="$(serving_list)"; f_engine_cache_only_gap
 PVC_FIXTURE="$(pvc_list engine-cache:ReadWriteMany)"
 DS_FIXTURE='{"status":{"desiredNumberScheduled":2,"numberReady":2}}'
 engine_apply_run
-assert_contains "$(cat "$DRIVER_LOG")" "guard is NOT applied"
+assert_contains "$(cat "$DRIVER_LOG")" "loses the replica"
+[ "$FAILED" -eq "$before" ] && ok
+
+# The guard is emitted as text for the chart's command. Run that text, as
+# written in the patch, against real directories: a writable prefix is kept,
+# an unwritable one is unset with one log line.
+guard_from() {   # $1 the emitted document; prints the guard as a script
+    printf '%s\n' "$1" | sed -n '/^#     for v in /,/^#     done$/p' | sed 's/^#     //'
+}
+
+CASE="bytecode: the emitted guard keeps a writable prefix and unsets an unwritable one"
+reset; f_sglang_no_pyc
+before=$FAILED
+G="$(mktemp -d)"
+guard_from "$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)" > "$G/guard.sh"
+grep -q 'PYTHONPYCACHEPREFIX; do$' "$G/guard.sh" || fail "no guard extracted: $(cat "$G/guard.sh")"
+printf '%s\n' 'echo "PYC=${PYTHONPYCACHEPREFIX-unset}"' >> "$G/guard.sh"
+mkdir -p "$G/ok" "$G/ro"
+out="$(PYTHONPYCACHEPREFIX="$G/ok/pycache/k" sh "$G/guard.sh" 2>&1)"
+assert_contains "$out" "PYC=$G/ok/pycache/k"
+assert_not_contains "$out" "not writable"
+if [ "$(id -u)" = 0 ]; then
+    ok_note="(the unwritable half needs a non-root check runner)"
+    assert_contains "$ok_note" "non-root"
+else
+    chmod 555 "$G/ro"
+    out="$(PYTHONPYCACHEPREFIX="$G/ro/pycache/k" sh "$G/guard.sh" 2>&1)"
+    chmod 755 "$G/ro"
+    assert_contains "$out" "PYC=unset"
+    assert_contains "$out" "engine cache PYTHONPYCACHEPREFIX=$G/ro/pycache/k is not writable"
+    assert_eq "$(printf '%s\n' "$out" | grep -c 'not writable')" "1" "log lines"
+fi
+rm -rf "$G"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="bytecode: an env-only half carries the guard too, and the re-prepare note"
+reset; f_engine_cache_on_claim_no_pyc
+before=$FAILED
+doc="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
+assert_contains "$doc" "PYTHONPYCACHEPREFIX; do"
+assert_contains "$doc" "run \`make engine-cache\` again first"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="bytecode: PYTHONDONTWRITEBYTECODE in the pod spec means no prefix is written"
+reset; f_engine_cache_only_gap
+before=$FAILED
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.template.spec.containers[0].env += [{"name":"PYTHONDONTWRITEBYTECODE","value":"1"}]')"
+assert_field 9 "dontwrite"
+doc="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
+assert_contains "$doc" "- name: VLLM_CACHE_ROOT"           # anchor: the vLLM half is still written
+assert_not_contains "$doc" "- name: PYTHONPYCACHEPREFIX"
+assert_not_contains "$doc" "#   bytecode:"
+# ...and SGLang with it gets no half at all.
+reset; f_sglang_no_pyc
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.template.spec.containers[0].env += [{"name":"PYTHONDONTWRITEBYTECODE","valueFrom":{"configMapKeyRef":{"name":"c","key":"k"}}}]')"
+assert_field 9 "dontwrite"
+assert_eq "$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>&1)" "" "SGLang output"
+# An empty value is unset, as Python reads it (anchor).
+reset; f_sglang_no_pyc
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.template.spec.containers[0].env += [{"name":"PYTHONDONTWRITEBYTECODE","value":""}]')"
+assert_field 9 "unset"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="bytecode: a tag and a digest of one image get two keys through the patch"
+reset; f_engine_cache_only_gap
+before=$FAILED
+doc1="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
+DIGEST="quay.io/x/vllm-openai:v0.11@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+FIXTURE="${FIXTURE//quay.io\/x\/vllm-openai:v0.11/$DIGEST}"
+assert_field 8 "$DIGEST"
+doc2="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
+assert_contains "$doc1" "/engine-cache/pycache/${KEY_VLLM}"
+assert_contains "$doc2" "/engine-cache/pycache/$(so_pycache_key "$DIGEST")"
+assert_not_contains "$doc2" "/engine-cache/pycache/${KEY_VLLM}"
+assert_contains "$doc2" "image reference ${DIGEST}"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="bytecode: SGLang with a prefix keyed for another image is warned about too"
+reset; f_sglang_no_pyc
+before=$FAILED
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.template.spec.containers[0].env += [{"name":"PYTHONPYCACHEPREFIX","value":"/engine-cache/pycache/bbbbbbbbbbbb"}]')"
+warn="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>&1 >/dev/null)"
+assert_contains "$warn" "keyed for another image"
+assert_contains "$warn" ".../pycache/${KEY_SGLANG}"
+assert_eq "$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)" "" "document"
 [ "$FAILED" -eq "$before" ] && ok
 
 # ----------------------------------------------------------------------------

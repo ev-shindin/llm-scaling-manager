@@ -169,8 +169,9 @@
 # mounts it read-write at, say, /engine-cache and points VLLM_CACHE_ROOT,
 # FLASHINFER_WORKSPACE_DIR and TRITON_CACHE_DIR under it -- and keeps a guard
 # that unsets a variable whose directory is not writable, so a node that is
-# not prepared costs a compile, not the replica. PYTHONPYCACHEPREFIX needs no
-# guard: Python ignores a bytecode write that fails. The volume is cluster-scoped:
+# not prepared costs a compile, not the replica. The guard covers
+# PYTHONPYCACHEPREFIX too: with it set Python reads bytecode only from it, so
+# one it cannot write is slower than none. The volume is cluster-scoped:
 # apply needs leave to create PersistentVolumes, which a namespace tenant does
 # not have -- ask the cluster admin to run apply, or to create the volume.
 # Nothing here uses a hostPath volume in a Pod (the preparer mounts the
