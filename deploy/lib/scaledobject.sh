@@ -2384,15 +2384,176 @@ ENGINENEED
 #   chart, so it is not patched here):
 #
 #     for v in VLLM_CACHE_ROOT FLASHINFER_WORKSPACE_DIR TRITON_CACHE_DIR PYTHONPYCACHEPREFIX; do
-#       eval "d=\${$v}"
+#       eval "d=\${$v:-}"
 #       [ -n "$d" ] || continue
 #       if ! mkdir -p "$d" 2>/dev/null || ! touch "$d/.writable" 2>/dev/null; then
 #         echo "engine cache $v=$d is not writable; using the engine default instead"
 #         unset $v
 #       fi
 #     done
+#     # What the installed engine does by itself, asked of the interpreter
+#     # without importing the engine: an image tag can lie, the install cannot.
+#     # The package directory (vllm, else sglang) and the version of the
+#     # distribution installed beside it, so a stale dist-info elsewhere on the
+#     # path does not decide; any failure leaves all four empty.
+#     out=$(python3 -c 'import sys, os, importlib.util as u, importlib.metadata as m; s = [(n, u.find_spec(n)) for n in ("vllm", "sglang")]; n, x = [(n, x) for n, x in s if x and x.origin][0]; p = os.path.dirname(x.origin); v = [d.version for d in m.distributions(name=n, path=[os.path.dirname(p)])] or [m.version(n)]; t = u.find_spec("torch"); print(sys.implementation.cache_tag, v[0], p, os.path.dirname(t.origin) if t and t.origin else "", sep="|")' 2>/dev/null) || out=
+#     tag=${out%%|*}; out=${out#*|}; ver=${out%%|*}; out=${out#*|}
+#     pkg=${out%%|*}; tpkg=${out#*|}
+#     # An image that ships its bytecode (vLLM 0.32 does): with a prefix,
+#     # Python ignores it and compiles a second copy, so the prefix only costs.
+#     # Shipped means every top-level module of the engine AND of torch has a
+#     # .pyc for this interpreter; an empty directory is not shipped.
+#     if [ -n "${PYTHONPYCACHEPREFIX:-}" ] && [ -n "$pkg" ] && [ -n "$tpkg" ]; then
+#       shipped=yes
+#       for d in "$pkg" "$tpkg"; do
+#         n=0
+#         for f in "$d"/*.py; do
+#           [ -f "$f" ] || continue
+#           b=${f##*/}
+#           [ -f "$d/__pycache__/${b%.py}.$tag.pyc" ] || { n=-1; break; }
+#           n=$((n + 1))
+#         done
+#         [ "$n" -gt 0 ] || { shipped=no; break; }
+#       done
+#       if [ "$shipped" = yes ]; then
+#         echo "engine cache PYTHONPYCACHEPREFIX: $pkg ships its bytecode; using that instead"
+#         unset PYTHONPYCACHEPREFIX
+#       fi
+#     fi
 ENGINEGUARD
+        # The one-file AOT compile artefact, for the vLLM half only. Measured
+        # on vLLM 0.26 (torch 2.11): compile 5.1 -> 0.8 s, same output. From
+        # 0.27 it is the default (torch >= 2.12), so it is not set there; below
+        # 0.26 it was never measured, so it is not set there either.
+        if [ "$want_engine" -eq 1 ] && [ "${WVA_ENGINE_CACHE_AOT:-true}" != "false" ]; then
+            cat <<'AOTGUARD'
+#     # vLLM 0.26 loads its compile as one AOT artefact only when asked (the
+#     # default from 0.27). Released 0.26.x only, a +local suffix included;
+#     # no dev or rc build. WVA_ENGINE_CACHE_AOT=false leaves this out.
+#     case $ver in
+#       0.26.[0-9]|0.26.[0-9][0-9]|0.26.[0-9]+*|0.26.[0-9][0-9]+*)
+#         if [ -n "${VLLM_CACHE_ROOT:-}" ] && [ -z "${VLLM_USE_MEGA_AOT_ARTIFACT+x}" ]; then
+#           echo "engine cache: vLLM $ver, VLLM_USE_MEGA_AOT_ARTIFACT=1 (the default from 0.27)"
+#           export VLLM_USE_MEGA_AOT_ARTIFACT=1
+#         fi ;;
+#     esac
+AOTGUARD
+        fi
     fi
+}
+
+# so_kv_bytes_proposal sets kvnote, in the caller, to a comment proposing
+# --kv-cache-memory-bytes for the vLLM Deployment $2 in namespace $1 (engine
+# container $3, engine argv $4), and says the same on the console. When it
+# proposes nothing it sets kvsay to why, which the caller prints only beside a
+# document: a workload with nothing to fix stays silent. It is never
+# applied: the value is fixed per model, GPU, flags and vLLM version, and a
+# stale one runs out of memory or wastes KV cache.
+#
+# Model Runner V2 (the default for every architecture from vLLM 0.29; for a
+# few before) profiles memory with a full CUDA-graph capture, measured at ~8 s
+# of every start on vLLM 0.32; the flag skips that profile. The value is read
+# from a Ready replica, from the line every vLLM worker logs at start:
+#   "Available KV cache memory: <GiB> GiB"
+# (vllm/v1/worker/gpu_worker.py, 0.26 through 0.32; format_gib rounds to two
+# decimals, so the value is taken 0.005 GiB down and floored to the MiB). With
+# tensor parallelism every rank logs one; the smallest is the per-GPU value.
+# The V2 runner is read from "Using V2 Model Runner" in the same log.
+so_kv_bytes_proposal() {
+    local errf
+    kvnote="" kvsay=""
+    errf="$(mktemp)" || errf=/dev/null
+    so_kv_bytes_read "$@"
+    [ "$errf" = /dev/null ] || rm -f "$errf"
+}
+
+# so_kv_bytes_read is so_kv_bytes_proposal, with $errf for the stderr of each
+# read: a failed read is said as a failure, with its reason, never as an
+# answer (Forbidden on pods/log is not a rotated log).
+so_kv_bytes_read() {
+    local ns="$1" name="$2" engine="$3" argv="$4" obj sel hash pods pod log gib bytes
+    case "$argv" in *--kv-cache-memory*) return 0 ;; esac
+    if [ -z "$engine" ]; then
+        kvsay="  $ns/$name: no engine container identified, so no --kv-cache-memory-bytes is proposed."
+        return 0
+    fi
+    if ! obj="$(kubectl get deployments "$name" -n "$ns" -o json 2>"$errf")"; then
+        kvsay="  $ns/$name: could not read the Deployment ($(head -n 1 "$errf" 2>/dev/null)), so no --kv-cache-memory-bytes is proposed."
+        return 0
+    fi
+    sel="$(printf '%s' "$obj" | jq -r '[(.spec.selector.matchLabels // {}) | to_entries[] | "\(.key)=\(.value)"] | join(",")' 2>/dev/null)" || sel=""
+    if [ -z "$sel" ]; then
+        kvsay="  $ns/$name: its selector has no matchLabels (matchExpressions only, or none), so its pods were not looked up and no --kv-cache-memory-bytes is proposed."
+        return 0
+    fi
+    # The current ReplicaSet: of those this Deployment owns, the highest
+    # revision. Its pod-template-hash narrows the pods to the running
+    # template; unreadable, every pod of the selector is a candidate.
+    hash="$(kubectl get replicasets -n "$ns" -l "$sel" -o json 2>/dev/null \
+        | jq -r --arg d "$name" '[.items[]?
+                | select(any(.metadata.ownerReferences[]?; .kind == "Deployment" and .name == $d))
+                | {r: ((.metadata.annotations["deployment.kubernetes.io/revision"] // "0") | (tonumber? // 0)),
+                   h: (.metadata.labels["pod-template-hash"] // "")}]
+            | sort_by(.r) | last | .h // empty' 2>/dev/null)" || hash=""
+    if ! pods="$(kubectl get pods -n "$ns" -l "$sel" -o json 2>"$errf")"; then
+        kvsay="  $ns/$name: could not list its pods ($(head -n 1 "$errf" 2>/dev/null)), so no --kv-cache-memory-bytes is proposed."
+        return 0
+    fi
+    # The newest Ready pod of that template: the one most likely to have
+    # started with the flags and version the template has now.
+    pod="$(printf '%s' "$pods" | jq -r --arg h "$hash" '[.items[]?
+                | select(.metadata.deletionTimestamp == null)
+                | select($h == "" or .metadata.labels["pod-template-hash"] == $h)
+                | select([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length > 0)]
+            | sort_by(.metadata.creationTimestamp // "") | last | .metadata.name // empty' 2>/dev/null)" || pod=""
+    if [ -z "$pod" ]; then
+        kvsay="  $ns/$name: no Ready pod${hash:+ of its current ReplicaSet} to read its KV cache size from, so no --kv-cache-memory-bytes is proposed."
+        return 0
+    fi
+    # --limit-bytes keeps the FIRST 16 MiB of the log, which is where the
+    # start lines are; a long-running replica can log far more after them.
+    if ! log="$(kubectl logs "$pod" -n "$ns" -c "$engine" --limit-bytes=16777216 2>"$errf")"; then
+        kvsay="  $ns/$name: could not read the logs of $pod ($(head -n 1 "$errf" 2>/dev/null)), so no --kv-cache-memory-bytes is proposed."
+        return 0
+    fi
+    # One value per rank, keyed by the process tag vLLM puts first on each
+    # line ("(Worker_TP0 pid=210)"): the LAST value of each rank (an engine
+    # that restarted inside this container logged the line again), then the
+    # smallest rank, which is the per-GPU value every rank can hold.
+    gib="$(printf '%s\n' "$log" | awk '
+        /Available KV cache memory: [0-9.]+ GiB/ {
+            r = ""
+            if (match($0, /^\([^ )]+/)) r = substr($0, 2, RLENGTH - 1)
+            v = $0
+            sub(/.*Available KV cache memory: /, "", v)
+            sub(/ GiB.*/, "", v)
+            if (v ~ /^[0-9]*[.]?[0-9]+$/) { last[r] = v + 0; seen = 1 }
+        }
+        END {
+            if (!seen) exit
+            m = -1
+            for (r in last) if (m < 0 || last[r] < m) m = last[r]
+            print m
+        }')"
+    if [ -z "$gib" ]; then
+        kvsay="  $ns/$name: $pod logged no \"Available KV cache memory\" line in the first 16 MiB of its log (rotated, or no vLLM start in it), so no --kv-cache-memory-bytes is proposed."
+        return 0
+    fi
+    if ! printf '%s\n' "$log" | grep -q 'Using V2 Model Runner'; then
+        kvsay="  $ns/$name: $pod runs the V1 model runner, whose memory profile takes under a second; no --kv-cache-memory-bytes is proposed."
+        return 0
+    fi
+    bytes="$(awk -v g="$gib" 'BEGIN { printf "%.0f", int((g - 0.005) * 1024) * 1048576 }')"
+    [ "${bytes:-0}" -gt 0 ] 2>/dev/null || return 0
+    kvnote="#   kv-cache-memory: PROPOSED, NOT APPLIED. ${pod} runs Model Runner V2, which
+#          profiles memory with a full CUDA-graph capture (measured on vLLM
+#          0.32: ~8 s of every start), and logged \"Available KV cache memory:
+#          ${gib} GiB\". Adding  --kv-cache-memory-bytes=${bytes}  to the engine
+#          args skips that profile with the same KV cache (rounded down to the
+#          MiB). Derive it again after ANY change of vLLM version, model, GPU
+#          type or engine flags: a stale value runs out of memory or wastes KV
+#          cache."
+    log_info "  $ns/$name: PROPOSED, not applied: --kv-cache-memory-bytes=${bytes} (from \"Available KV cache memory: ${gib} GiB\" in $pod) skips the CUDA-graph memory profile of Model Runner V2, measured at ~8 s of every start on vLLM 0.32. Derive it again after any change of vLLM version, model, GPU type or engine flags: a stale value runs out of memory or wastes KV cache."
 }
 
 so_workload_patch_doc() {
@@ -2432,8 +2593,15 @@ so_workload_patch_doc() {
 
     who="$ns/$name"
     so_workload_patch_plan
+    # A proposal, never a half: it rides along as a comment on whatever
+    # document this writes, and on the console either way.
+    local kvnote="" kvsay=""
+    case "$(printf '%s %s' "$image" "$argv" | tr '[:upper:]' '[:lower:]')" in
+        *vllm*) so_kv_bytes_proposal "$ns" "$name" "$engine" "$argv" ;;
+    esac
 
     [ "$want_drain" -eq 1 ] || [ "$want_cache" -eq 1 ] || [ "$want_engine" -eq 1 ] || [ "$want_pyc" -eq 1 ] || return 0
+    [ -z "$kvsay" ] || log_info "$kvsay"
 
     cat <<HDR
 ---
@@ -2468,6 +2636,7 @@ ENGINEWHY
 #          its Python imports again (measured on vLLM: ~11 s of every start).
 PYCWHY
     fi
+    [ -z "$kvnote" ] || printf '%s\n' "$kvnote"
     cat <<HEAD
 #
 # Apply where the pod spec is OWNED -- your modelservice values, or the chart that

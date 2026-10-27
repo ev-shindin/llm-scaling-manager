@@ -68,6 +68,15 @@ PVC_FIXTURE='{"items":[]}'   # JSON for `kubectl get pvc -n <ns>`
 PVC_RC=0
 DS_FIXTURE=""     # JSON for `kubectl get daemonset <name>`; empty: none
 DS_RC=0           # or the failure the read returns instead
+PODS_FIXTURE=''   # JSON for `kubectl get pods -n <ns> -l <sel>`; empty: none
+PODS_RC=0
+PODS_ERR=""
+RS_FIXTURE=''     # JSON for `kubectl get replicasets -n <ns> -l <sel>`; empty: none
+KUBECTL_TRACE=""  # a file the pods and logs reads are appended to: they run
+                  # inside command substitutions, so a variable set there is lost
+LOGS_FIXTURE=''   # the text `kubectl logs <pod>` prints
+LOGS_RC=0
+LOGS_ERR=""
 # Per-NAME object fixtures, for the cases about a namespace holding more than
 # one workload. A single FIXTURE cannot express "this one is readable and that
 # one is not", nor tell two patch documents apart. "__RC1__" means the read
@@ -126,8 +135,23 @@ kubectl() {
                         printf '%s' "$FIXTURE"
                     fi
                     ;;
+                replicasets)
+                    printf '%s' "$RS_FIXTURE"
+                    ;;
+                pods)
+                    # `get pods -n <ns> -l <selector> -o json`: the replicas
+                    # the KV-bytes proposal reads a log from.
+                    [ -z "$KUBECTL_TRACE" ] || printf '%s\n' "$*" >> "$KUBECTL_TRACE"
+                    [ "$PODS_RC" -eq 0 ] || { printf '%s\n' "$PODS_ERR" >&2; return "$PODS_RC"; }
+                    printf '%s' "$PODS_FIXTURE"
+                    ;;
                 *) return 0 ;;
             esac
+            ;;
+        logs)
+            [ -z "$KUBECTL_TRACE" ] || printf '%s\n' "$*" >> "$KUBECTL_TRACE"
+            [ "$LOGS_RC" -eq 0 ] || { printf '%s\n' "$LOGS_ERR" >&2; return "$LOGS_RC"; }
+            printf '%s' "$LOGS_FIXTURE"
             ;;
         patch)
             PATCH_CALLS=$((PATCH_CALLS + 1))
@@ -338,6 +362,7 @@ reset() {
     FIXTURE=""; FIXTURE_RC=0; LIST_FIXTURE=''; LIST_FIXTURE_LWS=''; LIST_RC=0; CRD_RC=1
     PATCH_CALLS=0; PATCH_RC=0; PATCH_BODY=""; PATCH_ARGS=""
     PVC_FIXTURE='{"items":[]}'; PVC_RC=0; DS_FIXTURE=""; DS_RC=0
+    PODS_FIXTURE=''; PODS_RC=0; PODS_ERR=""; RS_FIXTURE=''; LOGS_FIXTURE=''; LOGS_RC=0; LOGS_ERR=""; KUBECTL_TRACE=""
     FIXTURE_MAP=()
 }
 
@@ -2379,6 +2404,409 @@ else
     assert_contains "$out" "engine cache PYTHONPYCACHEPREFIX=$G/ro/pycache/k is not writable"
     assert_eq "$(printf '%s\n' "$out" | grep -c 'not writable')" "1" "log lines"
 fi
+rm -rf "$G"
+[ "$FAILED" -eq "$before" ] && ok
+
+# --- the guard reads the installed engine -------------------------------------
+#
+# The rest of the guard decides from the installed package, never the image
+# tag: the vLLM version in its dist-info METADATA (VLLM_USE_MEGA_AOT_ARTIFACT
+# on 0.26 only) and whether the engine package ships its bytecode (the prefix
+# then only costs, so it is unset). Run the emitted text, as written, under
+# every POSIX shell here, against fake site-packages trees found through the
+# real python3 of the runner.
+guard_all_from() {   # $1 the emitted document; prints the whole guard as a script
+    printf '%s\n' "$1" | awk '/^#     for v in /{on=1} on && !/^#     /{exit} on{sub(/^#     /, ""); print}'
+}
+command -v python3 >/dev/null 2>&1 || { printf 'FATAL: python3 is required to run the guard cases.\n' >&2; exit 1; }
+PYTAG="$(python3 -S -c 'import sys; print(sys.implementation.cache_tag)')"
+GUARD_SHELLS="sh"
+command -v dash >/dev/null 2>&1 && GUARD_SHELLS="$GUARD_SHELLS dash"
+GUARD_SHELLS="$GUARD_SHELLS bash"
+# fake_engine <site-packages> <pkg> <version> <pyc: none|all|init>: the engine
+# package, its dist-info, and (once per tree) a torch package with the same
+# bytecode, since the guard asks both.
+fake_engine() {
+    local sp="$1" pkg="$2" ver="$3" pyc="$4" f
+    fake_dist "$sp" "$pkg" "$ver"
+    fake_pkg "$sp" "$pkg" "$pyc"
+    [ -d "$sp/torch" ] || fake_pkg "$sp" torch "$pyc"
+}
+fake_dist() {   # <site-packages> <name> <version>: a dist-info alone
+    mkdir -p "$1/$2-$3.dist-info"
+    printf 'Metadata-Version: 2.1\nName: %s\nVersion: %s\n\nVersion: 9.9.9 in the body is not the version\n' "$2" "$3" \
+        > "$1/$2-$3.dist-info/METADATA"
+}
+fake_pkg() {    # <dir> <pkg> <pyc: none|all|init>: a package alone
+    local f
+    mkdir -p "$1/$2/__pycache__"
+    for f in __init__ envs logger scripts; do : > "$1/$2/$f.py"; done
+    case "$3" in
+        all)  for f in __init__ envs logger scripts; do : > "$1/$2/__pycache__/$f.$PYTAG.pyc"; done ;;
+        init) : > "$1/$2/__pycache__/__init__.$PYTAG.pyc" ;;
+    esac
+}
+# run_guard <shell> <guard> <site-packages> [VAR=value ...]: the guard, then what it left
+run_guard() {
+    local shell="$1" g="$2" sp="$3"
+    shift 3
+    env -u VLLM_USE_MEGA_AOT_ARTIFACT -u PYTHONPYCACHEPREFIX -u VLLM_CACHE_ROOT \
+        PYTHONPATH="$sp" "$@" "$shell" -c ". \"$g\"; echo \"AOT=\${VLLM_USE_MEGA_AOT_ARTIFACT-unset} PYC=\${PYTHONPYCACHEPREFIX-unset}\"" 2>&1
+}
+
+CASE="guard: VLLM_USE_MEGA_AOT_ARTIFACT=1 on an installed vLLM 0.26 only, never over a user value"
+reset; f_engine_cache_only_gap
+before=$FAILED
+G="$(mktemp -d)"
+doc="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
+guard_all_from "$doc" > "$G/guard.sh"
+grep -q 'PYTHONPYCACHEPREFIX; do$' "$G/guard.sh" || fail "no guard extracted: $(cat "$G/guard.sh")"
+assert_contains "$(cat "$G/guard.sh")" "export VLLM_USE_MEGA_AOT_ARTIFACT=1"
+fake_engine "$G/v26" vllm 0.26.0 none
+fake_engine "$G/v27" vllm 0.27.0 none
+fake_engine "$G/v25" vllm 0.25.1 none
+mkdir -p "$G/c"
+for sh_ in $GUARD_SHELLS; do
+    out="$(run_guard "$sh_" "$G/guard.sh" "$G/v26" VLLM_CACHE_ROOT="$G/c/vllm" PYTHONPYCACHEPREFIX="$G/c/pyc")"
+    assert_contains "$out" "AOT=1 PYC=$G/c/pyc"
+    assert_contains "$out" "engine cache: vLLM 0.26.0, VLLM_USE_MEGA_AOT_ARTIFACT=1"
+    # 0.27 and later: the default there, so not set.
+    out="$(run_guard "$sh_" "$G/guard.sh" "$G/v27" VLLM_CACHE_ROOT="$G/c/vllm")"
+    assert_contains "$out" "AOT=unset"
+    # Below 0.26 it was never measured.
+    out="$(run_guard "$sh_" "$G/guard.sh" "$G/v25" VLLM_CACHE_ROOT="$G/c/vllm")"
+    assert_contains "$out" "AOT=unset"
+    # A value the user set, even empty, is theirs.
+    out="$(run_guard "$sh_" "$G/guard.sh" "$G/v26" VLLM_CACHE_ROOT="$G/c/vllm" VLLM_USE_MEGA_AOT_ARTIFACT=0)"
+    assert_contains "$out" "AOT=0 "
+    out="$(run_guard "$sh_" "$G/guard.sh" "$G/v26" VLLM_CACHE_ROOT="$G/c/vllm" VLLM_USE_MEGA_AOT_ARTIFACT=)"
+    assert_contains "$out" "AOT= "
+    # No cache root left (the loop unset it, or none was set): nothing to load from.
+    out="$(run_guard "$sh_" "$G/guard.sh" "$G/v26")"
+    assert_contains "$out" "AOT=unset"
+done
+# WVA_ENGINE_CACHE_AOT=false leaves the block out of the text.
+doc="$(WVA_ENGINE_CACHE_AOT=false so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
+assert_contains "$doc" "PYTHONPYCACHEPREFIX; do"                     # anchor: the guard is there
+assert_not_contains "$doc" "VLLM_USE_MEGA_AOT_ARTIFACT"
+guard_all_from "$doc" > "$G/noaot.sh"
+out="$(run_guard sh "$G/noaot.sh" "$G/v26" VLLM_CACHE_ROOT="$G/c/vllm")"
+assert_contains "$out" "AOT=unset"
+rm -rf "$G"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="guard: a prefix is unset when the installed package ships its bytecode, kept when it does not"
+reset; f_engine_cache_only_gap
+before=$FAILED
+G="$(mktemp -d)"
+guard_all_from "$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)" > "$G/guard.sh"
+fake_engine "$G/v32" vllm 0.32.0 all
+fake_engine "$G/v31" vllm 0.31.0 none
+fake_engine "$G/part" vllm 0.31.0 init     # a build-time import compiled __init__ only
+mkdir -p "$G/c"
+for sh_ in $GUARD_SHELLS; do
+    out="$(run_guard "$sh_" "$G/guard.sh" "$G/v32" VLLM_CACHE_ROOT="$G/c/vllm" PYTHONPYCACHEPREFIX="$G/c/pyc")"
+    assert_contains "$out" "AOT=unset PYC=unset"
+    assert_contains "$out" "engine cache PYTHONPYCACHEPREFIX: $G/v32/vllm ships its bytecode; using that instead"
+    assert_eq "$(printf '%s\n' "$out" | grep -c 'ships its bytecode')" "1" "log lines ($sh_)"
+    out="$(run_guard "$sh_" "$G/guard.sh" "$G/v31" VLLM_CACHE_ROOT="$G/c/vllm" PYTHONPYCACHEPREFIX="$G/c/pyc")"
+    assert_contains "$out" "PYC=$G/c/pyc"
+    assert_not_contains "$out" "ships its bytecode"
+    out="$(run_guard "$sh_" "$G/guard.sh" "$G/part" VLLM_CACHE_ROOT="$G/c/vllm" PYTHONPYCACHEPREFIX="$G/c/pyc")"
+    assert_contains "$out" "PYC=$G/c/pyc"
+done
+# Bytecode for ANOTHER interpreter is not bytecode this one can use.
+mv "$G/v32/vllm/__pycache__/envs.$PYTAG.pyc" "$G/v32/vllm/__pycache__/envs.cpython-20.pyc"
+out="$(run_guard sh "$G/guard.sh" "$G/v32" PYTHONPYCACHEPREFIX="$G/c/pyc")"
+assert_contains "$out" "PYC=$G/c/pyc"
+rm -rf "$G"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="guard: found through the site-packages of a venv interpreter, with no PYTHONPATH"
+reset; f_engine_cache_only_gap
+before=$FAILED
+G="$(mktemp -d)"
+guard_all_from "$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)" > "$G/guard.sh"
+# A venv by hand, as `python -m venv` lays one out: pyvenv.cfg beside bin/.
+PYREAL="$(python3 -S -c 'import sys, os; print(os.path.realpath(sys.executable))')"
+PYVER="$(python3 -S -c 'import sys; print("python%d.%d" % sys.version_info[:2])')"
+mkdir -p "$G/venv/bin" "$G/c"
+printf 'home = %s\ninclude-system-site-packages = false\n' "$(dirname "$PYREAL")" > "$G/venv/pyvenv.cfg"
+ln -s "$PYREAL" "$G/venv/bin/python3"
+fake_engine "$G/venv/lib/$PYVER/site-packages" vllm 0.26.0 all
+for sh_ in $GUARD_SHELLS; do
+    out="$(env -u VLLM_USE_MEGA_AOT_ARTIFACT -u PYTHONPATH PATH="$G/venv/bin:$PATH" \
+        VLLM_CACHE_ROOT="$G/c/vllm" PYTHONPYCACHEPREFIX="$G/c/pyc" \
+        "$sh_" -c ". \"$G/guard.sh\"; echo \"AOT=\${VLLM_USE_MEGA_AOT_ARTIFACT-unset} PYC=\${PYTHONPYCACHEPREFIX-unset}\"" 2>&1)"
+    assert_contains "$out" "AOT=1 PYC=unset"
+done
+rm -rf "$G"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="guard: SGLang gets the bytecode check on its own package, and no AOT block"
+reset; f_sglang_no_pyc
+before=$FAILED
+G="$(mktemp -d)"
+doc="$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)"
+assert_contains "$doc" "ships its bytecode"
+assert_not_contains "$doc" "VLLM_USE_MEGA_AOT_ARTIFACT"
+guard_all_from "$doc" > "$G/guard.sh"
+fake_engine "$G/sg" sglang 0.5.9 all
+fake_engine "$G/sgno" sglang 0.5.9 none
+mkdir -p "$G/c"
+for sh_ in $GUARD_SHELLS; do
+    out="$(run_guard "$sh_" "$G/guard.sh" "$G/sg" PYTHONPYCACHEPREFIX="$G/c/pyc")"
+    assert_contains "$out" "PYC=unset"
+    assert_contains "$out" "$G/sg/sglang ships its bytecode"
+    out="$(run_guard "$sh_" "$G/guard.sh" "$G/sgno" PYTHONPYCACHEPREFIX="$G/c/pyc")"
+    assert_contains "$out" "PYC=$G/c/pyc"
+done
+rm -rf "$G"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="guard: the version is the one installed beside the package, not a stale dist-info earlier on the path"
+reset; f_engine_cache_only_gap
+before=$FAILED
+G="$(mktemp -d)"
+guard_all_from "$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)" > "$G/guard.sh"
+fake_dist "$G/stale" vllm 0.27.0                  # a dist-info left behind, no package
+fake_engine "$G/real" vllm 0.26.0 none
+# ...and one installed as editable: the package in a source tree, its dist-info elsewhere.
+fake_pkg "$G/src" vllm none
+fake_dist "$G/sp" vllm 0.26.0
+mkdir -p "$G/c"
+for sh_ in $GUARD_SHELLS; do
+    out="$(run_guard "$sh_" "$G/guard.sh" "$G/stale:$G/real" VLLM_CACHE_ROOT="$G/c/vllm")"
+    assert_contains "$out" "engine cache: vLLM 0.26.0, VLLM_USE_MEGA_AOT_ARTIFACT=1"
+    assert_contains "$out" "AOT=1"
+    out="$(run_guard "$sh_" "$G/guard.sh" "$G/src:$G/sp" VLLM_CACHE_ROOT="$G/c/vllm")"
+    assert_contains "$out" "AOT=1"
+done
+rm -rf "$G"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="guard: AOT for a released 0.26.x only -- a +local build yes, dev, rc, unparsable or empty no"
+reset; f_engine_cache_only_gap
+before=$FAILED
+G="$(mktemp -d)"
+guard_all_from "$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)" > "$G/guard.sh"
+mkdir -p "$G/c"
+i=0
+for v in "0.26.0+cu129:1" "0.26.12:1" "0.26.1.dev1:unset" "0.26.0rc1:unset" "0.26.0a1:unset" "banana:unset" ":unset"; do
+    i=$((i + 1))
+    fake_engine "$G/t$i" vllm "${v%:*}" none
+    for sh_ in $GUARD_SHELLS; do
+        out="$(run_guard "$sh_" "$G/guard.sh" "$G/t$i" VLLM_CACHE_ROOT="$G/c/vllm")"
+        assert_contains "$out" "AOT=${v##*:} "
+        assert_not_contains "$out" "rror"
+    done
+done
+rm -rf "$G"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="guard: torch must ship its bytecode too, and nullglob does not read an empty glob as shipped"
+reset; f_engine_cache_only_gap
+before=$FAILED
+G="$(mktemp -d)"
+guard_all_from "$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)" > "$G/guard.sh"
+fake_engine "$G/notorch" vllm 0.32.0 all
+rm -f "$G/notorch/torch/__pycache__/"*.pyc     # vllm shipped, torch not
+fake_engine "$G/ok" vllm 0.32.0 all
+# A package with no .py at the top (a compiled __init__): nothing to judge.
+EXT="$(python3 -S -c 'import importlib.machinery as m; print(m.EXTENSION_SUFFIXES[0])')"
+mkdir -p "$G/so/vllm/__pycache__"
+: > "$G/so/vllm/__init__$EXT"
+fake_dist "$G/so" vllm 0.32.0
+fake_pkg "$G/so" torch all
+mkdir -p "$G/c"
+for sh_ in $GUARD_SHELLS; do
+    out="$(run_guard "$sh_" "$G/guard.sh" "$G/notorch" PYTHONPYCACHEPREFIX="$G/c/pyc")"
+    assert_contains "$out" "PYC=$G/c/pyc"
+    out="$(run_guard "$sh_" "$G/guard.sh" "$G/ok" PYTHONPYCACHEPREFIX="$G/c/pyc")"
+    assert_contains "$out" "PYC=unset"                        # anchor
+done
+out="$(env -u PYTHONPYCACHEPREFIX PYTHONPATH="$G/so" PYTHONPYCACHEPREFIX="$G/c/pyc" \
+    bash -O nullglob -c ". \"$G/guard.sh\"; echo \"PYC=\${PYTHONPYCACHEPREFIX-unset}\"" 2>&1)"
+assert_contains "$out" "PYC=$G/c/pyc"
+assert_not_contains "$out" "ships its bytecode"
+rm -rf "$G"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="guard: runs under set -eu, and with no python3 on PATH changes nothing"
+reset; f_engine_cache_only_gap
+before=$FAILED
+G="$(mktemp -d)"
+guard_all_from "$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>/dev/null)" > "$G/guard.sh"
+fake_engine "$G/v26" vllm 0.26.0 none
+fake_engine "$G/v32" vllm 0.32.0 all
+mkdir -p "$G/c" "$G/bin"
+for t in mkdir touch; do ln -s "$(command -v "$t")" "$G/bin/$t"; done
+for sh_ in $GUARD_SHELLS; do
+    shp="$(command -v "$sh_")"
+    # Only the guard variables set, everything else unset: -u must not trip.
+    out="$(env -u VLLM_USE_MEGA_AOT_ARTIFACT -u PYTHONPYCACHEPREFIX -u VLLM_CACHE_ROOT \
+        -u FLASHINFER_WORKSPACE_DIR -u TRITON_CACHE_DIR PYTHONPATH="$G/v26" VLLM_CACHE_ROOT="$G/c/vllm" \
+        "$sh_" -c "set -eu; . \"$G/guard.sh\"; echo \"AOT=\${VLLM_USE_MEGA_AOT_ARTIFACT-unset} done\"" 2>&1)"
+    assert_contains "$out" "AOT=1 done"
+    out="$(env -u VLLM_USE_MEGA_AOT_ARTIFACT -u FLASHINFER_WORKSPACE_DIR -u TRITON_CACHE_DIR \
+        PYTHONPATH="$G/v32" PATH="$G/bin" VLLM_CACHE_ROOT="$G/c/vllm" PYTHONPYCACHEPREFIX="$G/c/pyc" \
+        "$shp" -c "set -eu; . \"$G/guard.sh\"; echo \"AOT=\${VLLM_USE_MEGA_AOT_ARTIFACT-unset} PYC=\${PYTHONPYCACHEPREFIX-unset} done\"" 2>&1)"
+    assert_contains "$out" "AOT=unset PYC=$G/c/pyc done"
+done
+rm -rf "$G"
+[ "$FAILED" -eq "$before" ] && ok
+
+# --- the KV-bytes proposal ----------------------------------------------------
+#
+# Model Runner V2 profiles memory with a full CUDA-graph capture; a fixed
+# --kv-cache-memory-bytes skips it. The value comes from the log of a Ready
+# replica and is PROPOSED -- in a comment and on the console -- never applied.
+f_kv_deploy() {   # the engine-cache gap, with a selector and a TP=2 vLLM 0.32
+    f_engine_cache_only_gap
+    FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.selector = {"matchLabels":{"app":"w"}}
+        | .spec.template.spec.containers[0].image = "quay.io/x/vllm-openai:v0.32.0"')"
+    PODS_FIXTURE='{"items":[
+      {"metadata":{"name":"w-0"},"status":{"phase":"Pending","conditions":[{"type":"Ready","status":"False"}]}},
+      {"metadata":{"name":"w-2"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}},
+      {"metadata":{"name":"w-1","deletionTimestamp":"2026-10-27T00:00:00Z"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'
+}
+# The lines vLLM 0.32 prints at start (vllm/v1/worker/gpu_worker.py), one per rank.
+KV_LOG_V2='(APIServer pid=1) INFO 10-18 13:30:55 [utils.py:253] non-default args: {"model": "Qwen/Qwen3-32B", "tensor_parallel_size": 2}
+(Worker_TP0 pid=210) INFO 10-18 13:31:02 [gpu_worker.py:518] Using V2 Model Runner
+(Worker_TP1 pid=211) INFO 10-18 13:31:02 [gpu_worker.py:518] Using V2 Model Runner
+(Worker_TP0 pid=210) INFO 10-18 13:31:20 [gpu_worker.py:760] Available KV cache memory: 60.24 GiB
+(Worker_TP1 pid=211) INFO 10-18 13:31:20 [gpu_worker.py:760] Available KV cache memory: 60.3 GiB
+(EngineCore pid=150) INFO 10-18 13:31:21 [kv_cache_utils.py:1311] GPU KV cache size: 493,472 tokens'
+KV_LOG_V1='(EngineCore_DP0 pid=150) INFO 10-18 11:52:30 [gpu_worker.py:561] Available KV cache memory: 63.08 GiB
+(EngineCore_DP0 pid=150) INFO 10-18 11:52:30 [kv_cache_utils.py:1287] GPU KV cache size: 258,352 tokens'
+
+CASE="kv bytes: a Ready V2 replica gets the flag PROPOSED in a comment and on the console, never as an arg"
+reset; f_kv_deploy
+before=$FAILED
+LOGS_FIXTURE="$KV_LOG_V2"
+G="$(mktemp -d)"
+# 60.24 GiB, less the 0.005 rounding, floored to the MiB: 61680 MiB (TP1 logged
+# 60.3; the smaller rank decides).
+KUBECTL_TRACE="$G/trace"
+so_workload_patch_doc ns deployments w "$POD_DEPLOY" >"$G/doc" 2>"$G/log"
+assert_contains "$(cat "$G/doc")" "#   kv-cache-memory: PROPOSED, NOT APPLIED. w-2 runs Model Runner V2"
+assert_contains "$(cat "$G/doc")" "--kv-cache-memory-bytes=64676167680"
+assert_contains "$(cat "$G/doc")" "Available KV cache memory:"
+assert_contains "$(cat "$G/doc")" "Derive it again after ANY change of vLLM version, model, GPU"
+assert_contains "$(cat "$G/log")" "PROPOSED, not applied: --kv-cache-memory-bytes=64676167680"
+assert_contains "$(cat "$G/log")" "~8 s of every start"
+assert_contains "$(cat "$G/trace")" "get pods -n ns -l app=w -o json"
+assert_contains "$(cat "$G/trace")" "logs w-2 -n ns -c vllm"
+# Only ever a comment: no line of the document outside a comment names it.
+assert_eq "$(grep -v '^[[:space:]]*#' "$G/doc" | grep -c 'kv-cache-memory')" "0" "uncommented mentions"
+assert_contains "$(grep -v '^[[:space:]]*#' "$G/doc")" "- name: VLLM_CACHE_ROOT"   # anchor: the half itself
+assert_eq "$(yq eval '.spec.template.spec.containers[0] | has("args")' "$G/doc" 2>/dev/null)" "false" "args in the document"
+rm -rf "$G"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="kv bytes: V1, no Ready pod, no log line, or the flag already set -- said, and nothing proposed"
+reset; f_kv_deploy
+before=$FAILED
+G="$(mktemp -d)"
+LOGS_FIXTURE="$KV_LOG_V1"
+so_workload_patch_doc ns deployments w "$POD_DEPLOY" >"$G/doc" 2>"$G/log"
+assert_contains "$(cat "$G/log")" "ns/w: w-2 runs the V1 model runner"
+assert_contains "$(cat "$G/doc")" "- name: VLLM_CACHE_ROOT"           # anchor: a document was written
+assert_not_contains "$(cat "$G/doc")" "kv-cache-memory"
+LOGS_FIXTURE='(APIServer pid=1) INFO 10-18 13:30:55 [api_server.py:1] Starting'
+so_workload_patch_doc ns deployments w "$POD_DEPLOY" >"$G/doc" 2>"$G/log"
+assert_contains "$(cat "$G/log")" "ns/w: w-2 logged no \"Available KV cache memory\" line"
+assert_not_contains "$(cat "$G/doc")" "kv-cache-memory"
+LOGS_FIXTURE="$KV_LOG_V2"
+PODS_FIXTURE="$(printf '%s' "$PODS_FIXTURE" | jq -c '.items |= map(select(.metadata.name != "w-2"))')"
+so_workload_patch_doc ns deployments w "$POD_DEPLOY" >"$G/doc" 2>"$G/log"
+assert_contains "$(cat "$G/log")" "ns/w: no Ready pod to read its KV cache size from"
+assert_not_contains "$(cat "$G/doc")" "kv-cache-memory"
+# ...and a workload with nothing to fix is not told about it at all.
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.template.spec.containers[0].env += [{"name":"VLLM_CACHE_ROOT","value":"/model-cache/vllm"},{"name":"PYTHONPYCACHEPREFIX","value":"/model-cache/pyc"}]')"
+assert_field 7 "volume:/model-cache/vllm"                           # anchor: no gap left
+assert_eq "$(so_workload_patch_doc ns deployments w "$POD_DEPLOY" 2>&1)" "" "output for a workload with nothing to fix"
+reset; f_kv_deploy
+LOGS_FIXTURE="$KV_LOG_V2"
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.template.spec.containers[0].args += ["--kv-cache-memory-bytes","1000"]')"
+KUBECTL_TRACE="$G/trace2"
+so_workload_patch_doc ns deployments w "$POD_DEPLOY" >"$G/doc" 2>"$G/log"
+assert_contains "$(cat "$G/doc")" "- name: VLLM_CACHE_ROOT"
+assert_not_contains "$(cat "$G/doc")" "PROPOSED"
+assert_not_contains "$(cat "$G/log")" "PROPOSED"
+assert_eq "$(cat "$G/trace2" 2>/dev/null)" "" "kubectl reads for a workload that sets the flag"
+# SGLang is not asked at all.
+reset; f_sglang_no_pyc
+LOGS_FIXTURE="$KV_LOG_V2"
+so_workload_patch_doc ns deployments w "$POD_DEPLOY" >"$G/doc" 2>"$G/log"
+assert_contains "$(cat "$G/doc")" "#   bytecode:"
+assert_not_contains "$(cat "$G/log")" "KV cache"
+rm -rf "$G"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="kv bytes: a failed read is said as a failure, with its reason, not as no pod or a rotated log"
+reset; f_kv_deploy
+before=$FAILED
+G="$(mktemp -d)"
+LOGS_FIXTURE="$KV_LOG_V2"
+LOGS_RC=1 LOGS_ERR='Error from server (Forbidden): pods "w-2" is forbidden: User "u" cannot get resource "pods/log"'
+so_workload_patch_doc ns deployments w "$POD_DEPLOY" >"$G/doc" 2>"$G/log"
+assert_contains "$(cat "$G/log")" "ns/w: could not read the logs of w-2 (Error from server (Forbidden): pods"
+assert_not_contains "$(cat "$G/log")" "rotated"
+assert_contains "$(cat "$G/doc")" "- name: VLLM_CACHE_ROOT"           # anchor: the document is still written
+LOGS_RC=0 PODS_RC=1 PODS_ERR='Error from server (Forbidden): pods is forbidden'
+so_workload_patch_doc ns deployments w "$POD_DEPLOY" >"$G/doc" 2>"$G/log"
+assert_contains "$(cat "$G/log")" "ns/w: could not list its pods (Error from server (Forbidden): pods is forbidden)"
+assert_not_contains "$(cat "$G/log")" "no Ready pod"
+PODS_RC=0
+FIXTURE="$(printf '%s' "$FIXTURE" | jq -c '.spec.selector = {"matchExpressions":[{"key":"app","operator":"In","values":["w"]}]}')"
+so_workload_patch_doc ns deployments w "$POD_DEPLOY" >"$G/doc" 2>"$G/log"
+assert_contains "$(cat "$G/log")" "ns/w: its selector has no matchLabels"
+assert_not_contains "$(cat "$G/log")" "no Ready pod"
+rm -rf "$G"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="kv bytes: the newest Ready pod of the current ReplicaSet is read, not the first by name"
+reset; f_kv_deploy
+before=$FAILED
+G="$(mktemp -d)"
+LOGS_FIXTURE="$KV_LOG_V2"
+RS_FIXTURE='{"items":[
+  {"metadata":{"name":"w-old","labels":{"pod-template-hash":"old"},"annotations":{"deployment.kubernetes.io/revision":"9"},
+   "ownerReferences":[{"kind":"Deployment","name":"w"}]}},
+  {"metadata":{"name":"w-new","labels":{"pod-template-hash":"new"},"annotations":{"deployment.kubernetes.io/revision":"10"},
+   "ownerReferences":[{"kind":"Deployment","name":"w"}]}},
+  {"metadata":{"name":"x-rs","labels":{"pod-template-hash":"x"},"annotations":{"deployment.kubernetes.io/revision":"99"},
+   "ownerReferences":[{"kind":"Deployment","name":"x"}]}}]}'
+READY='"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}'
+PODS_FIXTURE="{\"items\":[
+  {\"metadata\":{\"name\":\"w-a\",\"creationTimestamp\":\"2026-10-27T09:00:00Z\",\"labels\":{\"pod-template-hash\":\"old\"}},$READY},
+  {\"metadata\":{\"name\":\"w-c\",\"creationTimestamp\":\"2026-10-27T08:00:00Z\",\"labels\":{\"pod-template-hash\":\"new\"}},$READY},
+  {\"metadata\":{\"name\":\"w-d\",\"creationTimestamp\":\"2026-10-27T08:30:00Z\",\"labels\":{\"pod-template-hash\":\"new\"}},$READY},
+  {\"metadata\":{\"name\":\"w-x\",\"creationTimestamp\":\"2026-10-27T10:00:00Z\",\"labels\":{\"pod-template-hash\":\"x\"}},$READY}]}"
+KUBECTL_TRACE="$G/trace"
+so_workload_patch_doc ns deployments w "$POD_DEPLOY" >"$G/doc" 2>"$G/log"
+assert_contains "$(cat "$G/trace")" "logs w-d -n ns -c vllm"
+assert_contains "$(cat "$G/doc")" "PROPOSED, NOT APPLIED. w-d runs Model Runner V2"
+rm -rf "$G"
+[ "$FAILED" -eq "$before" ] && ok
+
+CASE="kv bytes: an engine restarted inside the log is read at its last start, and .5 parses"
+reset; f_kv_deploy
+before=$FAILED
+G="$(mktemp -d)"
+LOGS_FIXTURE='(EngineCore pid=150) INFO 10-18 13:31:02 [gpu_worker.py:518] Using V2 Model Runner
+(EngineCore pid=150) INFO 10-18 13:31:20 [gpu_worker.py:760] Available KV cache memory: 50.0 GiB
+(EngineCore pid=480) INFO 10-18 14:02:11 [gpu_worker.py:518] Using V2 Model Runner
+(EngineCore pid=480) INFO 10-18 14:02:30 [gpu_worker.py:760] Available KV cache memory: 60.24 GiB'
+so_workload_patch_doc ns deployments w "$POD_DEPLOY" >"$G/doc" 2>"$G/log"
+assert_contains "$(cat "$G/doc")" "--kv-cache-memory-bytes=64676167680"
+assert_not_contains "$(cat "$G/doc")" "50.0 GiB"
+# (0.5 - 0.005) GiB floored to the MiB: 506 MiB.
+LOGS_FIXTURE='(EngineCore pid=150) INFO 10-18 13:31:02 [gpu_worker.py:518] Using V2 Model Runner
+(EngineCore pid=150) INFO 10-18 13:31:20 [gpu_worker.py:760] Available KV cache memory: .5 GiB'
+so_workload_patch_doc ns deployments w "$POD_DEPLOY" >"$G/doc" 2>"$G/log"
+assert_contains "$(cat "$G/doc")" "--kv-cache-memory-bytes=530579456"
 rm -rf "$G"
 [ "$FAILED" -eq "$before" ] && ok
 

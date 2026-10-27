@@ -108,9 +108,50 @@ What remains is the cold process itself (imports, the API server, the
 KV-transfer connector, the profile run) and, on a large model, the weight load.
 One part of it is not cacheable today, so do not chase it: on vLLM, the
 `ll_bf16` router-GEMM kernel warmup (about 7.5 s measured) is built with
-`cute.compile` with its cache turned off, and no cache directory keeps it.
+`cute.compile` with its cache turned off, and no cache directory keeps it. From
+vLLM 0.27 it runs only for models with a bf16 MoE router; a dense model no
+longer pays it.
 Below that floor the only lever is not starting cold: the
 [warm pool](../guides/warm-pool/), or a minimum replica count of two.
+
+### Depends on the vLLM version
+
+Use vLLM 0.27 or newer where you can: the one-file AOT artefact is the default
+there, and a dense model skips the `ll_bf16` warmup. What `make workload-patch` does, by version:
+
+| | vLLM 0.26 | 0.27 to 0.31 | 0.32 and newer |
+|---|---|---|---|
+| **Bytecode cache** (`PYTHONPYCACHEPREFIX`) | helps, ~11 s | helps, ~11 s | no gain: the image ships its bytecode. The guard sees it and unsets the variable. |
+| **One-file AOT compile** (`VLLM_USE_MEGA_AOT_ARTIFACT=1`) | the guard sets it: compile 5.1 s to 0.8 s, start ~5 s shorter, same output | already the default | already the default |
+| **`ll_bf16` warmup** (~7.5 s) | every model | MoE models with a bf16 router only (from source, not measured: `_ll_bf16_router_shapes_from_model` in `vllm/model_executor/warmup/kernel_warmup.py`, first in v0.27.0) | the same; a dense model measured on 0.32 logs no warmup |
+| **`--kv-cache-memory-bytes`** | proposed when the replica runs Model Runner V2 (a few architectures) | the same; from 0.29 V2 is the default for every model (from source, not measured: `use_v2_model_runner` in `vllm/config/vllm.py` drops the architecture list in v0.29.0) | proposed (V2 is the default) |
+
+- **The guard decides at container start**, from the install, not the image
+  tag. One `python3` call finds the `vllm` (or `sglang`) package and the
+  version of the distribution installed beside it, without importing the
+  engine; without `python3`, or on any error, the guard changes nothing.
+- **AOT only on a released 0.26.x**, a local build such as `0.26.0+cu130`
+  included; a `dev`, `rc`, `a` or `b` build is left alone, and below 0.26 it
+  was never measured. A `VLLM_USE_MEGA_AOT_ARTIFACT` you set yourself, even
+  empty, is kept. `WVA_ENGINE_CACHE_AOT=false` leaves that part out.
+- **Shipped bytecode** means every top-level module of the engine package
+  and of `torch` has a `.pyc` for the running Python. That is presence, not
+  validity: a `.pyc` that no longer matches its source (another timestamp) is
+  recompiled, and in a read-only image on every start. A
+  partial set keeps the prefix.
+- **`--kv-cache-memory-bytes` is a proposal, never applied.** With Model
+  Runner V2, vLLM measures its memory by capturing every CUDA graph once more
+  (~8 s per start, measured on vLLM 0.32 with Qwen3-32B). A fixed KV size skips
+  that: 50.4 s to 42.3 s, same KV cache, same speed. `make workload-patch` reads
+  `Available KV cache memory: <n> GiB` from the log of a Ready replica, and
+  prints the flag with its value, on the console and as a comment in the
+  emitted file. It reads the newest Ready pod of the current ReplicaSet and
+  the first 16 MiB of its log. No Ready replica, no such line (rotated), or a
+  read that fails (it then says why) means no proposal. It does not see a KV
+  size set through `--config` or an environment variable, and it does not
+  cover a LeaderWorkerSet. **The value is only right for that model, GPU type, engine flags
+  and vLLM version.** Derive it again after any change: too large runs out of
+  memory, too small wastes KV cache.
 
 ### Holding the image on the nodes
 
@@ -610,7 +651,9 @@ The API server's imports went from 13.5 s to 6.2 s, a worker's from 4.6 s to
   when the directory is not writable, and logs one line.
 - **Skip it** when the pod sets `PYTHONDONTWRITEBYTECODE` (`make workload-patch`
   does not emit it then; check the image's own environment too), and for an
-  image that already ships its bytecode compiled.
+  image that already ships its bytecode compiled (vLLM 0.32 does). The guard
+  does the second by itself: it unsets the variable when every top-level
+  module of the engine package has its `.pyc`.
 - **One user per image.** The first engine to start an image creates its key
   directory as its own user, mode `755`. An engine of that image under another
   user cannot write there; the guard then unsets the variable.
@@ -647,18 +690,59 @@ LeaderWorkerSet, the leader's and the worker's):
 
 ```bash
 for v in VLLM_CACHE_ROOT FLASHINFER_WORKSPACE_DIR TRITON_CACHE_DIR PYTHONPYCACHEPREFIX; do
-  eval "d=\${$v}"
+  eval "d=\${$v:-}"
   [ -n "$d" ] || continue
   if ! mkdir -p "$d" 2>/dev/null || ! touch "$d/.writable" 2>/dev/null; then
     echo "engine cache $v=$d is not writable; using the engine default instead"
     unset $v
   fi
 done
+# What the installed engine does by itself, asked of the interpreter
+# without importing the engine: an image tag can lie, the install cannot.
+# The package directory (vllm, else sglang) and the version of the
+# distribution installed beside it, so a stale dist-info elsewhere on the
+# path does not decide; any failure leaves all four empty.
+out=$(python3 -c 'import sys, os, importlib.util as u, importlib.metadata as m; s = [(n, u.find_spec(n)) for n in ("vllm", "sglang")]; n, x = [(n, x) for n, x in s if x and x.origin][0]; p = os.path.dirname(x.origin); v = [d.version for d in m.distributions(name=n, path=[os.path.dirname(p)])] or [m.version(n)]; t = u.find_spec("torch"); print(sys.implementation.cache_tag, v[0], p, os.path.dirname(t.origin) if t and t.origin else "", sep="|")' 2>/dev/null) || out=
+tag=${out%%|*}; out=${out#*|}; ver=${out%%|*}; out=${out#*|}
+pkg=${out%%|*}; tpkg=${out#*|}
+# An image that ships its bytecode (vLLM 0.32 does): with a prefix,
+# Python ignores it and compiles a second copy, so the prefix only costs.
+# Shipped means every top-level module of the engine AND of torch has a
+# .pyc for this interpreter; an empty directory is not shipped.
+if [ -n "${PYTHONPYCACHEPREFIX:-}" ] && [ -n "$pkg" ] && [ -n "$tpkg" ]; then
+  shipped=yes
+  for d in "$pkg" "$tpkg"; do
+    n=0
+    for f in "$d"/*.py; do
+      [ -f "$f" ] || continue
+      b=${f##*/}
+      [ -f "$d/__pycache__/${b%.py}.$tag.pyc" ] || { n=-1; break; }
+      n=$((n + 1))
+    done
+    [ "$n" -gt 0 ] || { shipped=no; break; }
+  done
+  if [ "$shipped" = yes ]; then
+    echo "engine cache PYTHONPYCACHEPREFIX: $pkg ships its bytecode; using that instead"
+    unset PYTHONPYCACHEPREFIX
+  fi
+fi
+# vLLM 0.26 loads its compile as one AOT artefact only when asked (the
+# default from 0.27). Released 0.26.x only, a +local suffix included;
+# no dev or rc build. WVA_ENGINE_CACHE_AOT=false leaves this out.
+case $ver in
+  0.26.[0-9]|0.26.[0-9][0-9]|0.26.[0-9]+*|0.26.[0-9][0-9]+*)
+    if [ -n "${VLLM_CACHE_ROOT:-}" ] && [ -z "${VLLM_USE_MEGA_AOT_ARTIFACT+x}" ]; then
+      echo "engine cache: vLLM $ver, VLLM_USE_MEGA_AOT_ARTIFACT=1 (the default from 0.27)"
+      export VLLM_USE_MEGA_AOT_ARTIFACT=1
+    fi ;;
+esac
 ```
 
-The loop also covers a `PYTHONPYCACHEPREFIX` you set yourself: it is unset only
-when its directory is not writable (then the faster choice), and the check
-leaves an empty `.writable` file in that directory.
+The loop also covers a `PYTHONPYCACHEPREFIX` you set yourself: it is unset
+when its directory is not writable (then the faster choice), or when the image
+ships its bytecode, and the check leaves an empty `.writable` file in that
+directory. The last block is emitted for vLLM only
+([Depends on the vLLM version](#depends-on-the-vllm-version)).
 
 #### Check the cache without a second start
 
@@ -1245,6 +1329,7 @@ objects. Read what it prints first:
 | `WVA_ENGINE_CACHE_CLAIM` | `engine-cache` | the claim the emitted engine-cache volume names, `<claim>[:<subPath>]` — the one `make engine-cache` makes, or a shared RWX claim you already have (whoever can write it runs code in every engine; see above) |
 | `WVA_ENGINE_CACHE_VOLUME_NAME` | `engine-cache` | the volume name in the emitted patch |
 | `WVA_ENGINE_CACHE_PATH` | `/engine-cache` | where that volume is mounted, and the parent of the emitted `VLLM_CACHE_ROOT`, `FLASHINFER_WORKSPACE_DIR` and `TRITON_CACHE_DIR` |
+| `WVA_ENGINE_CACHE_AOT` | `true` | `false` leaves the `VLLM_USE_MEGA_AOT_ARTIFACT` block (vLLM 0.26 only) out of the emitted guard ([Depends on the vLLM version](#depends-on-the-vllm-version)) |
 
 The `*_NAME` and `*_PATH` variables affect the emitted file only — without the
 opt-in nothing applies a volume.
