@@ -42,8 +42,8 @@ make check-prereqs
 If `check-prereqs` says the namespace is empty or missing, fix `NAMESPACE`
 before going on. Each refusal and its fix is in [First-line
 troubleshooting](../../reference/operations.md#first-line-troubleshooting).
-Step 3 checks two more things the model servers need: a model cache and a drain
-hook.
+Step 3 checks three more things the model servers need: a drain hook, a model
+cache and engine caches that outlive the pod.
 
 ## Installation Instructions
 
@@ -137,17 +137,25 @@ make workload-patch NAMESPACE=${NAMESPACE}
 ```
 <!-- guide:deploy.readiness end -->
 
-It checks two things:
+It checks three things:
 
 - **A drain hook (preStop).** Without one, every scale-down cuts the responses a
   replica is still writing. llm-d does not set one.
 - **A model cache.** Without one, every scale-up downloads the weights again.
   llm-d mounts one by default.
+- **Engine caches.** Without them, every new replica compiles its kernels from
+  nothing, tens of seconds on each scale-up. `make engine-cache` keeps them on
+  each node's disk.
 
 Both live in the pod spec, which your modelservice chart owns, so it writes a
 patch file rather than changing your workloads. See [Writing the
 patch](../../reference/workload-preparation.md#writing-the-patch-make-workload-patch),
 including `make model-cache` when the cache is missing.
+
+A scale-up also waits for the image pull and the weight read. `make prepull`
+holds the engine image on every accelerator node, and `make weights` puts a large
+model's weights on each node's disk. See
+[The rest of the start path](../../reference/workload-preparation.md#the-rest-of-the-start-path).
 
 ### 4. Register the workloads
 
