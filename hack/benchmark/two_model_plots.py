@@ -97,7 +97,7 @@ def plot_ttft(data, out):
     arms = list(data["arms"].keys())
     models = data["models"]
     keys = []
-    for k in ("a", "b"):
+    for k in sorted(data["rises"]):
         for i in data["rises"][k]:
             keys.append("%s@%d" % (k, data["schedule"][i]["start"]))
     keys.sort(key=lambda s: int(s.split("@")[1]))
@@ -124,7 +124,7 @@ def plot_ttft(data, out):
     # is a knob, and a title that says 90s over a 240s window mislabels every
     # default run.
     widths = sorted({int(data["schedule"][i]["end"] - data["schedule"][i]["start"])
-                     for k in ("a", "b") for i in data["rises"][k]})
+                     for k in sorted(data["rises"]) for i in data["rises"][k]})
     span = "/".join("%d" % w for w in widths) if widths else "?"
     svg.text(left, 22, "Time to first token in each rise window (first %ss after the rate goes up)" % span, 14, weight="bold")
     svg.text(left, 38, "bar = p95, tick = p50; one group per scale-up event, one run each", 11, fill="#555")
@@ -232,13 +232,16 @@ def plot_timeline(data, out):
 
     svg.text(left, 22, "Accelerators held over the run", 14, weight="bold")
     svg.text(left, 38, "shaded: a model's burst (A above, B below); the bands between are both-low", 11, fill="#555")
-    low_a = min(s["rate_a"] for s in sched)
-    low_b = min(s["rate_b"] for s in sched)
-    for s in sched:
-        if s["rate_a"] > low_a:
-            svg.rect(x_of(s["start"]), top, x_of(s["end"]) - x_of(s["start"]), ph / 2, "#000", 0.05)
-        if s["rate_b"] > low_b:
-            svg.rect(x_of(s["start"]), top + ph / 2, x_of(s["end"]) - x_of(s["start"]), ph / 2, "#000", 0.05)
+    # One horizontal band per model, A at the top: halves for two models, as
+    # before, quarters for four.
+    roles = [r for r in ("a", "b", "c", "d") if sched and "rate_" + r in sched[0]]
+    band_h = ph / max(1, len(roles))
+    for n, r in enumerate(roles):
+        low = min(s["rate_" + r] for s in sched)
+        for s in sched:
+            if s["rate_" + r] > low:
+                svg.rect(x_of(s["start"]), top + n * band_h, x_of(s["end"]) - x_of(s["start"]),
+                         band_h, "#000", 0.05)
     for g in range(0, int(ymax) + 1):
         y = y_of(g)
         svg.line(left, y, W - right, y, "#e5e5e5")

@@ -1980,6 +1980,131 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# THREE AND FOUR MODELS (MODEL_COUNT=3|4). Each mistake here drives fewer models
+# than the run reports, or reports fewer than it drove: a load Job with two
+# containers for four models, a ceiling or a GPU peak that counts two, a
+# results wait that stops at two markers. Sourced again in a subshell with
+# MODEL_COUNT set, because the model list is fixed when the script is read.
+# ---------------------------------------------------------------------------
+# nm_source <MODEL_COUNT> [NAME=value...]: the driver re-read with that many
+# models, every default it derives from them (the scenario, the stacks)
+# recomputed, and the given settings in force when it is read.
+nm_source() {
+    unset BENCH_SPEC STACK_C STACK_D MODEL_C MODEL_D MAX_REPLICAS_C MAX_REPLICAS_D GPUS_PER_REPLICA_C GPUS_PER_REPLICA_D HIGH_RPS_C HIGH_RPS_D
+    MODEL_COUNT="$1"
+    shift
+    local kv
+    for kv in "$@"; do printf -v "${kv%%=*}" '%s' "${kv#*=}"; done
+    # Sourced with no arguments: the script's verb dispatch reads $1, which
+    # inside this function would be one of the settings above.
+    set --
+    # shellcheck disable=SC1090
+    . "$SCRIPT" >/dev/null 2>&1
+    NS=ns-under-test
+}
+
+case_begin
+got="$( (nm_source 4; URL_C=http://10.0.0.1:80/qwen3-30b-a3b URL_D=http://10.0.0.1:80/qwen3-32b \
+         LOAD_IMAGE=ghcr.io/llm-d/llm-d-benchmark:vX; render_load_job wva-two-model-load-share share 1770000000) 2>&1)"
+names="$(printf '%s\n' "$got" | grep -o '^        - name: load-[a-z]' | sed 's/.*load-//' | paste -sd, -)"
+if [ "$names" != "a,b,c,d" ]; then
+    fail "a four-model load Job renders containers '$names', not a,b,c,d: the models without one are never driven"
+elif [ "$(printf '%s\n' "$got" | grep -c 'value: "1770000000"')" -ne 4 ]; then
+    fail "the four containers do not share one start barrier, so the rotation is offset by however far apart they started"
+elif ! printf '%s\n' "$got" | grep -A1 'name: BASE_URL' | grep -q 'http://10.0.0.1:80/qwen3-32b'; then
+    fail "model D's container is not pointed at its own stack: $(printf '%s\n' "$got" | grep -A1 'name: BASE_URL')"
+elif command -v yq >/dev/null 2>&1 && \
+     [ "$(printf '%s\n' "$got" | yq -r '[.spec.template.spec.containers[].env[] | select(.name == "ROLE") | .value] | join(",")' 2>&1)" != "a,b,c,d" ]; then
+    fail "the four-model Job does not parse to four containers with roles a..d"
+else
+    ok "four models: one Pod, four containers a..d, one barrier, each on its own stack"
+fi
+
+case_begin
+got2="$( (nm_source 2; printf '%s|%s|%s' "$ROLES" "$(extra_role_flags model endpoint high-rps)" "${#MODEL_FLAGS[@]}") 2>&1)"
+got4="$( (nm_source 4 MAX_REPLICAS_D=5; printf '%s|%s|%s|%s|%s|%s' "$ROLES" "$(peak_gpus)" "$(max_ceiling)" "$(peak_pods 8)" \
+          "$(extra_role_flags model | paste -sd' ' -)" "${MODEL_FLAGS[*]}") 2>&1)"
+if [ "$got2" != "a b||0" ]; then
+    fail "two models are no longer exactly two: roles|extra flags|report flags = '$got2'"
+elif [ "$got4" != "a b c d|14|5|8|--model-c Qwen/Qwen3-30B-A3B-FP8 --model-d Qwen/Qwen3-32B|--model-c Qwen/Qwen3-30B-A3B-FP8 --model-d Qwen/Qwen3-32B" ]; then
+    fail "four models: roles|peak GPUs|largest ceiling|pods in 8 GPUs|profile flags|report flags = '$got4', want 'a b c d|14|5|8|...' (3+3+3+5 GPUs at 1 each, ceiling 5, 8 pods)"
+else
+    ok "two models add no flag anywhere; four peak at the sum of their ceilings and pass every model to the reports"
+fi
+
+case_begin
+export MODEL_COUNT=5
+run_verb preflight
+unset MODEL_COUNT
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'MODEL_COUNT=5: 2, 3 or 4 models'; then
+    fail "MODEL_COUNT=5 was not refused (rc=$RC): $(printf '%s' "$OUT" | tail -3)"
+elif [ -s "$CALLS" ]; then
+    fail "MODEL_COUNT=5 was refused only after calling the cluster: $(head -3 "$CALLS")"
+else
+    ok "a model count other than 2, 3 or 4 is refused before anything is asked of the cluster"
+fi
+
+case_begin
+if command -v yq >/dev/null 2>&1; then
+    p4="$( (nm_source 4; scenario_size_problems) 2>&1)"
+    pdup="$( (nm_source 3; MODEL_C="$MODEL_A"; scenario_size_problems) 2>&1)"
+    pwrong="$( (BENCH_SPEC=guides/two-model-warm-pool; MODEL_COUNT=3; . "$SCRIPT" >/dev/null 2>&1; scenario_size_problems) 2>&1)"
+    if [ -n "$p4" ]; then
+        fail "the four-model defaults disagree with n-model-share: $p4"
+    elif ! printf '%s' "$pdup" | grep -q 'share model id'; then
+        fail "model C copied model A's id and nothing said so: '$pdup'"
+    elif ! printf '%s' "$pwrong" | grep -q 'STACK_C=qwen3-30b-a3b is not a stack of guides/two-model-warm-pool'; then
+        fail "three models against the two-stack scenario were not refused: '$pwrong'"
+    else
+        ok "four models match n-model-share; a copied model id and a two-stack scenario are refused"
+    fi
+else
+    fail "yq is required to read the scenario sizes"
+fi
+
+case_begin
+# The stack names are the route's path prefixes AND the driver's defaults --
+# for every model of n-model-share, as for the two-model scenario.
+if ! grep -q 'STACK_C="${STACK_C:-qwen3-30b-a3b}"' "$SCRIPT" || ! grep -q 'STACK_D="${STACK_D:-qwen3-32b}"' "$SCRIPT"; then
+    fail "the driver's STACK_C/STACK_D defaults changed; they must match n-model-share's stack names"
+elif [ "$(grep -cE '^  - name: "(llama-31-8b|qwen3-8b|qwen3-30b-a3b|qwen3-32b)"' "$SPEC_DIR/n-model-share.yaml")" -ne 4 ]; then
+    fail "n-model-share does not carry the four stacks the driver drives"
+elif ! grep -q 'scenarios/guides/n-model-share.yaml' "$SPEC_DIR/n-model-share.yaml.j2"; then
+    fail "n-model-share's specification points at another scenario: $(grep -A1 scenario_file "$SPEC_DIR/n-model-share.yaml.j2")"
+elif ! grep -q 'BENCHMARK_STACKS="$keep_stacks"' "$SCRIPT"; then
+    fail "the standup no longer hands the stacks it runs to the scenario copy, so a three-model run stands up four"
+else
+    ok "n-model-share's four stack names are the driver's defaults, and its specification is its own"
+fi
+
+case_begin
+printf '{"arm":"share","max_replicas_a":3,"max_replicas_b":3,"gpus_per_replica_a":1,"gpus_per_replica_b":1}\n' > "$WORK/b4.json"
+cp "$WORK/b4.json" "$WORK/b2.json"
+( nm_source 4; decode_deploy_for() { printf 'short-%s-decode' "$1"; }; add_budget_fields "$WORK/b4.json" ) >/dev/null 2>&1
+( nm_source 2; decode_deploy_for() { printf 'short-%s-decode' "$1"; }; add_budget_fields "$WORK/b2.json" ) >/dev/null 2>&1
+b4="$(jq -r '[.max_replicas_c, .gpus_per_replica_d, (.model_deploys | keys | join("")), .model_deploys.d, .arm] | map(tostring) | join("|")' "$WORK/b4.json" 2>&1)"
+b2="$(jq -r '[has("max_replicas_c"), (.model_deploys | keys | join("")), .model_deploys.b, .max_replicas_b] | map(tostring) | join("|")' "$WORK/b2.json" 2>&1)"
+if [ "$b4" != "3|1|abcd|short-qwen3-32b|share" ]; then
+    fail "a four-model budget does not record models C and D and every Deployment: '$b4'"
+elif [ "$b2" != "false|ab|short-qwen3-8b|3" ]; then
+    fail "a two-model budget changed beyond the Deployment map: '$b2'"
+else
+    ok "budget.json records models C and D and which Deployments are whose; two models keep every field"
+fi
+
+case_begin
+w3="$( (nm_source 4; printf 'RESULTS-WRITTEN-a\nRESULTS-WRITTEN-b\nRESULTS-WRITTEN-c\n' | all_results_written && echo done || echo waiting) 2>&1)"
+w4="$( (nm_source 4; printf 'RESULTS-WRITTEN-a\nRESULTS-WRITTEN-b\nRESULTS-WRITTEN-c\nRESULTS-WRITTEN-d\n' | all_results_written && echo done || echo waiting) 2>&1)"
+w2="$( (nm_source 2; printf 'RESULTS-WRITTEN-b\nRESULTS-WRITTEN-a\n' | all_results_written && echo done || echo waiting) 2>&1)"
+if [ "$w3" != waiting ]; then
+    fail "four loaders counted as done with model D's results unwritten -- the arm would be collected without them"
+elif [ "$w4" != done ] || [ "$w2" != done ]; then
+    fail "every model's marker present still reads as waiting (four: $w4, two: $w2)"
+else
+    ok "the results wait needs every model's marker: three of four is still waiting"
+fi
+
+# ---------------------------------------------------------------------------
 # The schedule and the report, executed.
 # ---------------------------------------------------------------------------
 case_begin
@@ -1990,7 +2115,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=120
+CASES_EXPECTED=127
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

@@ -32,7 +32,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from two_model_report import (  # noqa: E402  (beside this file, not installed)
-    clip_series, gpu_series, integrate, load_meta, rise_stages, window_of)
+    burst_order, clip_series, gpu_series, gpu_seconds_by_model, integrate, load_meta,
+    rise_stages, roles_of, window_of)
 from two_model_share_report import load_placement, placement_table  # noqa: E402
 
 ARMS = ("today", "shadow", "share")
@@ -110,6 +111,10 @@ def transfers_from_log(path):
     ended = {o: 0 for o in OUTCOMES}
     started = fills = node_planned = 0
     sets = set()
+    # {model: {"gave": transfers it donated to, "got": transfers it received}},
+    # from the started lines' donor and receiver: with three or four models
+    # the fleet total says nothing about WHICH model was funded from which.
+    by_model = {}
     with open(path, errors="replace") as fh:
         for line in fh:
             if "Utilization share:" not in line:
@@ -124,16 +129,21 @@ def transfers_from_log(path):
                     sets.add(str(f.get("set")))
                 if str(f.get("planned", "")).lower() == "true":
                     node_planned += 1
+                for field, side in (("donor", "gave"), ("receiver", "got")):
+                    m = f.get(field)
+                    if m:
+                        e = by_model.setdefault(str(m), {"gave": 0, "got": 0})
+                        e[side] += 1
             elif "filling from idle GPUs" in line:
                 fills += 1
     return {"started": started, "ended": ended, "donor_sets": len(sets),
-            "node_planned": node_planned, "idle_fills": fills}
+            "node_planned": node_planned, "idle_fills": fills, "by_model": by_model}
 
 
 def bursts(meta, model_key):
     """[(rise stage index, rest stage index or None)] for one model."""
     sched = (meta or {}).get("schedule") or []
-    key = "rate_a" if model_key == "a" else "rate_b"
+    key = "rate_" + model_key
     out = []
     for i in rise_stages(sched, model_key):
         rest = i + 1 if i + 1 < len(sched) and sched[i + 1][key] == sched[i][key] else None
@@ -160,8 +170,16 @@ def load_arm(d, name):
     gsec, _ = integrate(gs, 1)
     arm = {"name": name, "dir": d, "meta": meta}
     snap = load_json(os.path.join(d, "share.json"))
+    roles = roles_of(meta)
+    prefixes = (load_json(os.path.join(d, "budget.json")) or {}).get("model_deploys")
     out = {
+        "roles": list(roles),
         "gpu_seconds": gsec,
+        # Per model, by the Deployments the arm recorded; None for an arm that
+        # recorded none (every arm before this split existed).
+        "gpu_seconds_by_model": (gpu_seconds_by_model(os.path.join(d, "gpus.jsonl"),
+                                                      meta.get("t0", 0), t_end, prefixes, roles)
+                                 if prefixes else None),
         "peak_gpus": max((s[1] for s in gs), default=None),
         "bursts": {},
         "blocked": series(snap, "sum by (model_name, reason)", "model_name", "reason"),
@@ -172,7 +190,7 @@ def load_arm(d, name):
         "has_share_json": snap is not None,
         "placement": load_placement(d),
     }
-    for key in ("a", "b"):
+    for key in roles:
         out["bursts"][key] = [
             {"rise_stage": r, "rise": window_stats(arm, key, r), "rest": window_stats(arm, key, rest)}
             for r, rest in bursts(meta, key)]
@@ -209,12 +227,26 @@ def spread(values):
     return (max(vals) - min(vals)) if len(vals) >= 2 else None
 
 
+def run_roles(data, reps):
+    """Every model any arm drove, in model order: a and b, then c and d."""
+    seen = set()
+    for r in reps:
+        for a in data[r].values():
+            seen.update(a.get("roles") or ())
+    return tuple(k for k in ("a", "b", "c", "d") if k in seen) or ("a", "b")
+
+
+def bursting_order(data, reps):
+    """The models in the order they burst: b, a for two; b, c, d, a for four."""
+    return burst_order(run_roles(data, reps))
+
+
 def summarize(data, reps, models):
     """Plain sentences, each one checkable against the tables above it."""
     lines = []
     n_bursts = {k: max((len(a["bursts"].get(k) or []) for r in reps for a in data[r].values()), default=0)
-                for k in ("a", "b")}
-    for key in ("b", "a"):
+                for k in run_roles(data, reps)}
+    for key in bursting_order(data, reps):
         for b in range(n_bursts[key]):
             name = burst_name(key, b, models)
             today = [p95_of(data, r, "today", key, b) for r in reps]
@@ -293,7 +325,7 @@ def report(data, reps, models, missing):
     print("")
     print("| burst | repeat | arm | rise n | rise failed | rise p50 | rise p95 | rest p50 | rest p95 |")
     print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
-    for key in ("b", "a"):
+    for key in bursting_order(data, reps):
         nb = max((len(a["bursts"].get(key) or []) for r in reps for a in data[r].values()), default=0)
         for b in range(nb):
             for r in reps:
@@ -311,7 +343,7 @@ def report(data, reps, models, missing):
     print("")
     print("| burst | arm | p95 by repeat | spread across repeats |")
     print("| --- | --- | --- | --- |")
-    for key in ("b", "a"):
+    for key in bursting_order(data, reps):
         nb = max((len(a["bursts"].get(key) or []) for r in reps for a in data[r].values()), default=0)
         for b in range(nb):
             for arm in ARMS:
@@ -350,6 +382,28 @@ def report(data, reps, models, missing):
                 or "none")
             print("| %s | %s | %s | %s |" % (r, arm, bl_txt, lim_txt))
     print("")
+    # The same series, totalled per model across reasons: with three or four
+    # models sharing a quota, which one was held back is the question.
+    held = {}
+    for r in reps:
+        for arm in ARMS:
+            a = data[r].get(arm)
+            if not a or not a["has_share_json"] or a["blocked"] is None:
+                continue
+            for (m, _why), v in a["blocked"].items():
+                held.setdefault(m or "?", {}).setdefault((r, arm), 0.0)
+                held[m or "?"][(r, arm)] += v
+    cols = [(r, arm) for r in reps for arm in ARMS if data[r].get(arm)]
+    print("Model-seconds held back, by model (every reason):")
+    print("")
+    if not held:
+        print("- no model was held back in any arm, or no arm kept share.json.")
+    else:
+        print("| model | " + " | ".join("%s %s" % c for c in cols) + " |")
+        print("| --- |" + " --- |" * len(cols))
+        for m in sorted(held):
+            print("| %s | %s |" % (m, " | ".join(n0(held[m].get(c, 0.0)) for c in cols)))
+    print("")
     print("## Transfers")
     print("")
     print("Counted from each arm's controller log. The metric column is increase() over the arm, "
@@ -373,6 +427,26 @@ def report(data, reps, models, missing):
                 r, arm, lg["started"], " | ".join(str(lg["ended"].get(o, 0)) for o in OUTCOMES),
                 lg["donor_sets"], lg["node_planned"], lg["idle_fills"], mdone))
     print("")
+    # Per model, from the started lines: which model gave and which received.
+    givers = sorted({m for r in reps for a in data[r].values()
+                     for m in ((a.get("log") or {}).get("by_model") or {})})
+    print("Transfers started, by model (gave = donor, got = receiver):")
+    print("")
+    if not givers:
+        print("- no transfer was started in any arm that kept its log.")
+    else:
+        print("| repeat | arm | " + " | ".join(givers) + " |")
+        print("| --- | --- |" + " --- |" * len(givers))
+        for r in reps:
+            for arm in ARMS:
+                a = data[r].get(arm)
+                if not a or a["log"] is None:
+                    continue
+                bm = a["log"].get("by_model") or {}
+                print("| %s | %s | %s |" % (r, arm, " | ".join(
+                    "gave %d, got %d" % (bm.get(m, {}).get("gave", 0), bm.get(m, {}).get("got", 0))
+                    for m in givers)))
+    print("")
     print("## GPU-seconds")
     print("")
     print("| repeat | arm | GPU-seconds | peak GPUs | against today |")
@@ -387,6 +461,22 @@ def report(data, reps, models, missing):
             rel = "-" if not (g and base) else "%+.0f%%" % (100.0 * (g - base) / base)
             print("| %s | %s | %s | %s | %s |" % (r, arm, n0(g), n0(a["peak_gpus"]), rel))
     print("")
+    # Per model, for the arms that recorded which Deployments are whose.
+    roles = run_roles(data, reps)
+    split = [(r, arm, data[r][arm]["gpu_seconds_by_model"]) for r in reps for arm in ARMS
+             if data[r].get(arm) and data[r][arm].get("gpu_seconds_by_model")]
+    if split:
+        print("GPU-seconds by model (pool Pods counted apart; unattributed is any "
+              "accelerator no recorded Deployment owns):")
+        print("")
+        print("| repeat | arm | " + " | ".join(models.get(k, k.upper()) for k in roles)
+              + " | pool | unattributed | all |")
+        print("| --- | --- |" + " --- |" * (len(roles) + 3))
+        for r, arm, g in split:
+            print("| %s | %s | %s | %s | %s | %s |" % (
+                r, arm, " | ".join(n0(g.get(k)) for k in roles),
+                n0(g.get("pool")), n0(g.get("unattributed")), n0(g.get("all"))))
+        print("")
     print("## Placement")
     print("")
     print("Where each arm's pods landed. A replica of N GPUs needs N free GPUs on one node, "
@@ -409,6 +499,8 @@ def main(argv):
     p.add_argument("--out-root", required=True, help="the run's results directory (holds rep1/, rep2/, ...)")
     p.add_argument("--model-a", default="A")
     p.add_argument("--model-b", default="B")
+    p.add_argument("--model-c", default="C", help="model C, in a run of three or four models")
+    p.add_argument("--model-d", default="D", help="model D, in a run of four models")
     p.add_argument("--json", help="also write every number to this file")
     args = p.parse_args(argv)
     reps = repeat_dirs(args.out_root)
@@ -428,7 +520,7 @@ def main(argv):
     if not any(data[r] for r in labels):
         print("no arm under %s has results" % args.out_root, file=sys.stderr)
         return 1
-    models = {"a": args.model_a, "b": args.model_b}
+    models = dict((k, getattr(args, "model_" + k)) for k in run_roles(data, labels))
     report(data, labels, models, missing)
     if args.json:
         def keyed(v):

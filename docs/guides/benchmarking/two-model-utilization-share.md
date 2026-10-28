@@ -210,6 +210,56 @@ The scenario (`hack/benchmark/scenarios/guides/two-model-shapes.yaml`) is
 a copy otherwise. `BENCH_SPEC` is read by preflight and standup; the shapes are
 read by each `run`, and every arm of one comparison must use the same ones.
 
+## Three or four models
+
+> **Not run on GPUs yet.** The driver, the schedule and every report are
+> checked by `make lint-deploy-scripts`; no cluster run has measured them.
+
+Two models in anti-phase are the smallest case of the claim. With more models,
+each rise has more falling models to take GPUs from. `MODEL_COUNT=3` or `4` runs
+the same arms with three or four models under one quota:
+
+- **Bursts rotate.** In each cycle every model bursts once, one at a time, in
+  the order B, C, D, A. Each burst starts one phase plus one band
+  (`PHASE_SECONDS + OVERLAP_SECONDS`) after the one before. That is the period
+  divided by the number of models. For two models it is the anti-phase run
+  above, unchanged.
+- **The scenario is `n-model-share`.** It has four stacks, each one GPU per
+  replica: the two models above, `Qwen/Qwen3-30B-A3B-FP8` (model C) and
+  `Qwen/Qwen3-32B` (model D). The standup keeps only the first `MODEL_COUNT`
+  of them. Model D needs a GPU larger than 80 GB; on smaller GPUs run three.
+- **Per-model settings** follow the A/B names: `STACK_C`, `MODEL_C`,
+  `HIGH_RPS_C`, `MAX_REPLICAS_C`, `GPUS_PER_REPLICA_C`, and the same with `_D`.
+
+The quota bounds above become, for N models:
+
+- **below the sum of the peaks:** quota < `N × MAX_REPLICAS × GPUS_PER_REPLICA`;
+- **at least one peak plus every other model's floor:** quota ≥
+  `(MAX_REPLICAS + (N - 1) × MIN_REPLICAS) × GPUS_PER_REPLICA`.
+
+With four models at the defaults that is 6 to 11 GPUs. Six is the sharpest
+test: a rising model gets its peak only from GPUs the others give back.
+
+```bash
+export MODEL_COUNT=4
+WVA_QUOTAS='<accelerator>=6' make benchmark-two-model-preflight
+WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=6' make benchmark-two-model-standup
+make benchmark-two-model-verify
+SHARE_ARMS='today share' REPEATS=1 TEARDOWN_ON_EXIT=1 make benchmark-two-model-share-arms
+```
+
+One arm runs `LEAD_IN + N × CYCLES × PHASE_SECONDS + (N × CYCLES - 1) ×
+OVERLAP_SECONDS` seconds of load: 2310 s for four models and one cycle at the
+defaults. The load Pod runs one loader container per model, so it requests
+`N × LOAD_CPU` CPU and `N × LOAD_MEMORY` on one node.
+
+The reports cover every model: TTFT per model and per rise, held-back
+model-seconds per model, transfers by model (which model gave, which received),
+and GPU-seconds per model beside the fleet total. Each arm records which
+Deployments belong to which model (`model_deploys` in `budget.json`), so the
+split comes from the sampled Pods. An arm whose results lack a model the
+schedule drove is refused, not reported as fewer models.
+
 ## Mixed replica sizes: a 2-GPU model beside a 1-GPU model
 
 > **Not run on GPUs yet.** The flow has run end to end on kind with simulated

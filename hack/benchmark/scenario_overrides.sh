@@ -25,6 +25,10 @@
 #   BENCHMARK_DECODE_TOLERATIONS=<JSON array>
 #       Tolerations for those same roles, exactly as given. Each must name a
 #       taint key: a toleration with no key tolerates every taint.
+#   BENCHMARK_STACKS=<stack>,<stack>...
+#       Keep only these stacks of the scenario, and drop the rest: a run of
+#       three models on a four-stack scenario stands up three. Every name must
+#       be a stack of the scenario; nothing is dropped when it is empty.
 #   BENCHMARK_RENDER_DRAIN=true (the default)
 #       The drain fields -- a preStop sleep of WVA_DRAIN_SLEEP_SECONDS (45) and
 #       terminationGracePeriodSeconds of WVA_DRAIN_GRACE_SECONDS (120) -- on every
@@ -49,6 +53,28 @@ if [ -n "${BENCHMARK_DECODE_TOLERATIONS:-}" ]; then
     export TOLS="$BENCHMARK_DECODE_TOLERATIONS"
     tols_ok="$(yq -p json -r 'type == "!!seq" and length > 0 and ([.[] | select(type != "!!map" or (.key // "") == "")] | length) == 0' <<< "$TOLS" 2>/dev/null || true)"
     [ "$tols_ok" = true ] || log_error "BENCHMARK_DECODE_TOLERATIONS is not a list of tolerations that each name a taint key: '${TOLS}'"
+fi
+
+# BENCHMARK_STACKS=<stack>,...: only those stacks, first, so every edit below
+# applies to the stacks that will run. A name the scenario does not have is
+# refused before anything is dropped: a typo would otherwise stand up fewer
+# models than the run drives.
+if [ -n "${BENCHMARK_STACKS:-}" ]; then
+    keep_json=""
+    IFS=',' read -r -a stack_list <<< "$BENCHMARK_STACKS"
+    for st in "${stack_list[@]}"; do
+        st="${st// /}"
+        [ -n "$st" ] || continue
+        case "$st" in *[!a-z0-9.-]*) log_error "not a stack name: '${st}'" ;; esac
+        export ST="$st"
+        n="$(yq -r '[.scenario[] | select(.name == strenv(ST))] | length' "$SCENARIO")"
+        [ "$n" = 1 ] || log_error "BENCHMARK_STACKS names ${st}, which is not a stack of ${SCENARIO} (its stacks: $(yq -r '[.scenario[].name] | join(", ")' "$SCENARIO"))"
+        keep_json="${keep_json:+$keep_json,}\"${st}\""
+    done
+    [ -n "$keep_json" ] || log_error "BENCHMARK_STACKS names no stack"
+    export KEEP_JSON="[${keep_json}]"
+    yq -i '.scenario |= map(select(.name as $n | env(KEEP_JSON) | any_c(. == $n)))' "$SCENARIO"
+    echo "stacks: kept $(yq -r '[.scenario[].name] | join(", ")' "$SCENARIO")"
 fi
 
 # The engine roles: every decode or prefill map that runs vLLM and is not
