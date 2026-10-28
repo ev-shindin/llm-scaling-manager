@@ -753,15 +753,20 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 		}
 		if t.SetID != "" && !t.IsSetPrimary() {
 			for _, p := range l.transfers {
-				if p.ID == t.SetID && p.State == ShareReleasing {
+				if p.ID != t.SetID {
+					continue
+				}
+				if p.State == ShareReleasing {
 					p.setReleased += t.DonorGPUs
 					p.setPending--
-					for n, g := range t.HoleNodes {
-						if p.setHoles == nil {
-							p.setHoles = map[string]int{}
-						}
-						p.setHoles[n] += g
+				}
+				// Also when the primary released earlier in this pass: its
+				// receiver's replica fills this hole too.
+				for n, g := range t.HoleNodes {
+					if p.setHoles == nil {
+						p.setHoles = map[string]int{}
 					}
+					p.setHoles[n] += g
 				}
 			}
 		}

@@ -57,6 +57,62 @@ func TestSharePromisedHolesSurplus(t *testing.T) {
 	checkHoles(t, l, t0.Add(time.Minute), map[string]int{"n3": 4}, 0)
 }
 
+// A promise smaller than its holes, which span several nodes -- a
+// LeaderWorkerSet donor's group on two nodes funding a smaller receiver
+// replica -- sits on the holes in node-name order, the same every time.
+func TestSharePromisedHolesSmallerThanItsHoles(t *testing.T) {
+	tm := spareTimings()
+	t0 := time.Unix(1000, 0)
+	for range 50 {
+		l := NewShareLedger()
+		q := l.Start(ShareTransfer{Donor: "Q", Receiver: "R", GPUs: 6, DonorGPUs: 12}, map[string]int{"Q": 12, "R": 4}, t0, tm)
+		l.RecordHoles(q.ID, map[string]int{"nc": 4, "na": 4, "nb": 4})
+		l.Observe(map[string]int{"Q": 0, "R": 4}, t0.Add(time.Minute), tm)
+		checkHoles(t, l, t0.Add(time.Minute), map[string]int{"na": 4, "nb": 2}, 0)
+	}
+}
+
+// A donor set whose members release in the same cycle: the primary, first in
+// start order, is filling before its contributor is seen to release, and the
+// contributor's hole still joins the receiver's promise.
+func TestSharePromisedHolesDonorSetReleasedTogether(t *testing.T) {
+	tm := spareTimings()
+	t0 := time.Unix(1000, 0)
+	held := map[string]int{"A": 8, "B": 8, "R": 8}
+	l := NewShareLedger()
+	p := l.Start(ShareTransfer{Donor: "A", Receiver: "R", GPUs: 8, DonorGPUs: 4, SetID: "pending"}, held, t0, tm)
+	c := l.Start(ShareTransfer{Donor: "B", DonorGPUs: 4, SetID: "pending"}, held, t0, tm)
+	l.LinkSet(p.ID, c.ID)
+	l.RecordHoles(p.ID, map[string]int{"na": 4})
+	l.RecordHoles(c.ID, map[string]int{"nb": 4})
+	l.Observe(map[string]int{"A": 4, "B": 4, "R": 8}, t0.Add(time.Minute), tm)
+	if l.Promised() != 8 {
+		t.Fatalf("setup: %d promised, want the replica's 8: %+v", l.Promised(), l.Transfers())
+	}
+	checkHoles(t, l, t0.Add(time.Minute), map[string]int{"na": 4, "nb": 4}, 0)
+}
+
+// A donor set restored after a restart: its members come back from their
+// marked pods, holes included, and none has released yet -- a set with a
+// member whose pod is already gone gives less than its receiver takes, and
+// the restore drops it whole. The contributor's hole is then collected as it
+// releases, as it is without a restart.
+func TestSharePromisedHolesRestoredDonorSet(t *testing.T) {
+	tm := spareTimings()
+	t0 := time.Unix(1000, 0)
+	l := NewShareLedger()
+	l.Restore(ShareTransfer{ID: "p", Donor: "A", Receiver: "R", GPUs: 8, DonorGPUs: 4, SetID: "p", Started: t0,
+		Deadline: t0.Add(time.Hour), HoleNodes: map[string]int{"na": 4}}, 8)
+	l.Restore(ShareTransfer{ID: "c", Donor: "B", DonorGPUs: 4, SetID: "p", Started: t0,
+		Deadline: t0.Add(time.Hour), HoleNodes: map[string]int{"nb": 4}}, 8)
+	l.LinkSet("p", "c")
+	checkHoles(t, l, t0, nil, 0)
+	l.Observe(map[string]int{"A": 8, "B": 4, "R": 8}, t0.Add(time.Minute), tm)
+	checkHoles(t, l, t0.Add(time.Minute), map[string]int{"nb": 4}, 0)
+	l.Observe(map[string]int{"A": 4, "B": 4, "R": 8}, t0.Add(2*time.Minute), tm)
+	checkHoles(t, l, t0.Add(2*time.Minute), map[string]int{"na": 4, "nb": 4}, 0)
+}
+
 // A donor set's promise sits on its members' nodes: while the primary still
 // releases, what its released contributor opened; once it has released too,
 // the receiver's whole replica across both.
