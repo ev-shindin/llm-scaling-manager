@@ -831,7 +831,9 @@ func (e *Engine) livenessThreshold() time.Duration {
 func (e *Engine) listedInGrace(namespace, modelID string, policy config.ScalingPolicy,
 	ran []allocation.NamedAnalyzerResult) []allocation.NamedAnalyzerResult {
 	perAnalyzer := e.lastGoodAnalysis[utils.GetNamespacedKey(namespace, modelID)]
-	threshold, now := e.livenessThreshold(), time.Now()
+	// The cycle clock, the one the analyzers stamp AnalyzedAt with
+	// (updateLivenessAndSetLive).
+	threshold, now := e.livenessThreshold(), e.clock.Now()
 	var out []allocation.NamedAnalyzerResult
 	for _, a := range policy.Analyzers {
 		name := a.EffectiveType()
@@ -871,7 +873,11 @@ func (e *Engine) updateLivenessAndSetLive(
 	}
 	perAnalyzer := e.lastGoodAnalysis[modelKey]
 
-	now := time.Now()
+	// The cycle clock, which the analyzers stamp AnalyzedAt with: pinned, so
+	// a result is compared with the instant it was stamped at, not with the
+	// wall clock some time into the cycle. Against time.Now the margin of
+	// the staleness window shrank by however long the cycle had run.
+	now := e.clock.Now()
 	threshold := e.livenessThreshold()
 
 	for i := range namedResults {
