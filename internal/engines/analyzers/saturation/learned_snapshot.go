@@ -402,15 +402,15 @@ type pendingVariant struct {
 // entries all age out, and it goes -- however often the controller restarts.
 // A clock in the future counts as dead, as it does at install: kept alive by
 // it, an entry that can never be installed would be written back forever.
-func (p *pendingVariant) alive(now, wall time.Time, h capacity.Horizons) bool {
+func (p *pendingVariant) alive(now time.Time, h capacity.Horizons) bool {
 	s := p.state
 	for _, w := range s.K2 {
-		if within(w.LastUsed, wall, h.BucketRetention) {
+		if within(w.LastUsed, now, h.BucketRetention) {
 			return true
 		}
 	}
 	for _, w := range s.Throughput {
-		if within(w.LastUsed, wall, h.BucketRetention) {
+		if within(w.LastUsed, now, h.BucketRetention) {
 			return true
 		}
 	}
@@ -420,7 +420,7 @@ func (p *pendingVariant) alive(now, wall time.Time, h capacity.Horizons) bool {
 		}
 	}
 	for _, m := range s.Accelerators {
-		if within(m.LastUsed, wall, h.BucketRetention) {
+		if within(m.LastUsed, now, h.BucketRetention) {
 			return true
 		}
 	}
@@ -430,12 +430,12 @@ func (p *pendingVariant) alive(now, wall time.Time, h capacity.Horizons) bool {
 // pruneWindows drops the k2 and throughput windows past the bucket retention
 // from a variant kept pending by its liveness: install would drop them, and
 // written back they only take room from the size bound.
-func (p *pendingVariant) pruneWindows(wall time.Time, h capacity.Horizons) {
+func (p *pendingVariant) pruneWindows(now time.Time, h capacity.Horizons) {
 	maps.DeleteFunc(p.state.K2, func(_ string, w capacity.RollingAverageSnapshot) bool {
-		return !within(w.LastUsed, wall, h.BucketRetention)
+		return !within(w.LastUsed, now, h.BucketRetention)
 	})
 	maps.DeleteFunc(p.state.Throughput, func(_ string, w ThroughputSnapshot) bool {
-		return !within(w.LastUsed, wall, h.BucketRetention)
+		return !within(w.LastUsed, now, h.BucketRetention)
 	})
 	maps.DeleteFunc(p.state.K2Args, func(k, _ string) bool { _, ok := p.state.K2[k]; return !ok })
 	maps.DeleteFunc(p.state.ThroughputArgs, func(k, _ string) bool { _, ok := p.state.Throughput[k]; return !ok })
@@ -1002,9 +1002,8 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 	// installed now, with no configuration check: each names the arguments
 	// it was written under, and only a variant running them takes it back
 	// (window_args.go).
-	wall := time.Now()
 	for k, w := range s.K2Stash {
-		w, inTime := windowClocks(w, wall)
+		w, inTime := windowClocks(w, now)
 		_, live := a.k2Stash[k]
 		switch {
 		case live, strings.Contains(k, "#"+legacyArgsPrefix):
@@ -1012,7 +1011,7 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 			rep.Forgotten++
 		case !inTime:
 			rep.Unusable++
-		case wall.Sub(w.LastUsed) > bucketRetention:
+		case now.Sub(w.LastUsed) > bucketRetention:
 			rep.Aged++
 		default:
 			if ra, ok := capacity.RestoreRollingAverage(w, capacity.RollingAverageWindowSize); ok && ra.Len() > 0 {
@@ -1024,8 +1023,8 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 		}
 	}
 	for k, w := range s.ThroughputStash {
-		snap, inTime := windowClocks(w.RollingAverageSnapshot, wall)
-		sampledAt, sampledInTime := notFuture(w.SampledAt, wall)
+		snap, inTime := windowClocks(w.RollingAverageSnapshot, now)
+		sampledAt, sampledInTime := notFuture(w.SampledAt, now)
 		_, live := a.throughputStash[k]
 		switch {
 		case live, strings.Contains(k, "#"+legacyArgsPrefix):
@@ -1033,7 +1032,7 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 			rep.Forgotten++
 		case !inTime || !sampledInTime:
 			rep.Unusable++
-		case wall.Sub(snap.LastUsed) > bucketRetention:
+		case now.Sub(snap.LastUsed) > bucketRetention:
 			rep.Aged++
 		default:
 			if ra, ok := capacity.RestoreRollingAverage(snap, capacity.RollingAverageWindowSize); ok && ra.Len() > 0 {
@@ -1052,7 +1051,7 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 		}
 	}
 	for v, p := range a.pendingRestore {
-		if !p.alive(now, time.Now(), a.horizons) {
+		if !p.alive(now, a.horizons) {
 			rep.Aged += p.size()
 			delete(a.pendingRestore, v)
 		}
@@ -1145,11 +1144,11 @@ func (a *SaturationAnalyzer) installRestored(namespace, modelID, variant string)
 // left out. Returns how many k2 and throughput windows it installed. Callers
 // hold a.mu.
 func (a *SaturationAnalyzer) installPreviousK2Locked(s LearnedState, windowsUnder string, rec *capacity.Record) (k2, throughput int) {
-	wall := time.Now()
+	now := a.now()
 	kept := 0
 	for k, w := range s.K2 {
-		w, inTime := windowClocks(w, wall)
-		if _, live := a.computeCapacityHistory[k]; live || !inTime || wall.Sub(w.LastUsed) > a.horizons.BucketRetention ||
+		w, inTime := windowClocks(w, now)
+		if _, live := a.computeCapacityHistory[k]; live || !inTime || now.Sub(w.LastUsed) > a.horizons.BucketRetention ||
 			!priorKeyRuns(k, rec) {
 			continue
 		}
@@ -1163,12 +1162,12 @@ func (a *SaturationAnalyzer) installPreviousK2Locked(s LearnedState, windowsUnde
 	// pods intermittently report an unresolved accelerator, the windows
 	// installed here are filed under the stable one, and without the memo a
 	// cycle that read none looked them up under a key nothing holds.
-	a.installAcceleratorsLocked(s, wall, rec)
+	a.installAcceleratorsLocked(s, now, rec)
 	for k, w := range s.Throughput {
-		snap, inTime := windowClocks(w.RollingAverageSnapshot, wall)
-		sampledAt, sampledInTime := notFuture(w.SampledAt, wall)
+		snap, inTime := windowClocks(w.RollingAverageSnapshot, now)
+		sampledAt, sampledInTime := notFuture(w.SampledAt, now)
 		if _, live := a.saturatedThroughput[k]; live || !inTime || !sampledInTime ||
-			wall.Sub(snap.LastUsed) > a.horizons.BucketRetention || !priorKeyRuns(k, rec) {
+			now.Sub(snap.LastUsed) > a.horizons.BucketRetention || !priorKeyRuns(k, rec) {
 			continue
 		}
 		if ra, ok := capacity.RestoreRollingAverage(snap, capacity.RollingAverageWindowSize); ok && ra.Len() > 0 {
@@ -1193,12 +1192,12 @@ func (a *SaturationAnalyzer) installPreviousK2Locked(s LearnedState, windowsUnde
 // rec, when not nil, is the record of a variant whose arguments changed: a
 // memo naming another resolved accelerator than the one it runs now is left
 // out, as its windows are (priorKeyRuns).
-func (a *SaturationAnalyzer) installAcceleratorsLocked(s LearnedState, wall time.Time, rec *capacity.Record) int {
+func (a *SaturationAnalyzer) installAcceleratorsLocked(s LearnedState, now time.Time, rec *capacity.Record) int {
 	kept := 0
 	for k, m := range s.Accelerators {
-		lastUsed, inTime := notFuture(m.LastUsed, wall)
+		lastUsed, inTime := notFuture(m.LastUsed, now)
 		if _, live := a.lastAccelerator[k]; live || m.Name == "" || m.LastUsed.IsZero() || !inTime ||
-			wall.Sub(lastUsed) > a.horizons.BucketRetention {
+			now.Sub(lastUsed) > a.horizons.BucketRetention {
 			continue
 		}
 		if rec != nil && constants.IsAcceleratorResolved(rec.AcceleratorName) && m.Name != rec.AcceleratorName {
@@ -1224,20 +1223,18 @@ func (a *SaturationAnalyzer) tagRestoredLocked(tags map[string]string, k string,
 
 // installLocked applies the horizons to a checked variant's entries, keeps
 // what is still within them and returns how many it kept. Callers hold a.mu.
-// The windows and the memo age on the wall clock, as they do live; the rest on
-// the analyzer's. Each window is installed with the arguments it was written
-// under (windowsUnder for one the document gives none for), so one learned
-// before a rollout is moved out of the way on its first read. latency is false
-// when the image changed: the ITL baseline, a latency figure, is then left
-// out.
+// Everything ages on the analyzer's clock, as it does live. Each window is
+// installed with the arguments it was written under (windowsUnder for one the
+// document gives none for), so one learned before a rollout is moved out of
+// the way on its first read. latency is false when the image changed: the ITL
+// baseline, a latency figure, is then left out.
 func (a *SaturationAnalyzer) installLocked(s LearnedState, windowsUnder string, latency bool) int {
 	now := a.now()
-	wall := time.Now()
 	h := a.horizons
 	kept := 0
 	for k, w := range s.K2 {
-		w, inTime := windowClocks(w, wall)
-		if _, live := a.computeCapacityHistory[k]; live || !inTime || wall.Sub(w.LastUsed) > h.BucketRetention {
+		w, inTime := windowClocks(w, now)
+		if _, live := a.computeCapacityHistory[k]; live || !inTime || now.Sub(w.LastUsed) > h.BucketRetention {
 			continue
 		}
 		if ra, ok := capacity.RestoreRollingAverage(w, capacity.RollingAverageWindowSize); ok {
@@ -1247,9 +1244,9 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState, windowsUnder string, 
 		}
 	}
 	for k, w := range s.Throughput {
-		snap, inTime := windowClocks(w.RollingAverageSnapshot, wall)
-		sampledAt, sampledInTime := notFuture(w.SampledAt, wall)
-		if _, live := a.saturatedThroughput[k]; live || !inTime || !sampledInTime || wall.Sub(snap.LastUsed) > h.BucketRetention {
+		snap, inTime := windowClocks(w.RollingAverageSnapshot, now)
+		sampledAt, sampledInTime := notFuture(w.SampledAt, now)
+		if _, live := a.saturatedThroughput[k]; live || !inTime || !sampledInTime || now.Sub(snap.LastUsed) > h.BucketRetention {
 			continue
 		}
 		if ra, ok := capacity.RestoreRollingAverage(snap, capacity.RollingAverageWindowSize); ok {
@@ -1264,7 +1261,7 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState, windowsUnder string, 
 			}
 		}
 	}
-	kept += a.installAcceleratorsLocked(s, wall, nil)
+	kept += a.installAcceleratorsLocked(s, now, nil)
 	for k, seen := range s.VariantSeenAt {
 		seen, inTime := notFuture(seen, now)
 		if _, live := a.variantSeenAt[k]; live || seen.IsZero() || !inTime || now.Sub(seen) > h.VariantTimeout {
@@ -1434,7 +1431,7 @@ func (a *SaturationAnalyzer) notePendingPresent(namespace string, prefixes, vari
 			}
 		}
 		if m, ok := p.state.Accelerators[namespace+"/"+v]; ok {
-			m.LastUsed = time.Now()
+			m.LastUsed = now
 			p.state.Accelerators[namespace+"/"+v] = m
 		}
 	}

@@ -633,7 +633,7 @@ func (a *SaturationAnalyzer) k2WriteAge(historyKey string, src capacity.K2Source
 	if !ok || ra.Len() == 0 {
 		return 0, false
 	}
-	return ra.WriteAge(), true
+	return ra.WriteAgeAt(a.now()), true
 }
 
 // logBorrowedK2 is the k2-decision line for a lower bound. It names the donor

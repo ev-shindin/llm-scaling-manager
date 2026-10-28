@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,7 +46,7 @@ func srAnalyzer(variants ...string) *SaturationAnalyzer {
 	for _, v := range variants {
 		store.Update(srNS, srModel, v, capacity.Record{
 			AcceleratorName: srAccel, GpuCount: 1, EngineParams: srParams(),
-		})
+		}, time.Now())
 	}
 	return NewSaturationAnalyzer(store)
 }

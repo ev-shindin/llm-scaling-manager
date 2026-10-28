@@ -293,7 +293,7 @@ func TestLogContract_ITLWindowTakesTheCappedReplica(t *testing.T) {
 		store := capacity.NewStore()
 		store.Update("test-ns", "test-model", "variant-d", capacity.Record{
 			GpuCount: 1, EngineParams: params, LearnedFrom: "deployment",
-		})
+		}, time.Now())
 		analyzer := NewSaturationAnalyzer(store)
 		capped := makeReplicaMetrics("pod-1", "variant-d", 14000, 16000, 768, 1000, 500)
 		capped.Ready = true
@@ -501,7 +501,7 @@ func TestLogContract_FallbackOutcomesHaveDistinctMessages(t *testing.T) {
 			EffectiveCapacity: 10000,
 			LearnedFrom:       capacity.LearnedFromLive,
 			LearnedAt:         time.Now(),
-		})
+		}, time.Now())
 		analyzer := NewSaturationAnalyzer(store)
 
 		_, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{noRecord}, states))
@@ -528,7 +528,7 @@ func TestLogContract_ZeroReplicaEstimateNamesItsSource(t *testing.T) {
 			GpuCount:          1,
 			EffectiveCapacity: 10000,
 			LearnedFrom:       capacity.LearnedFromLive,
-		})
+		}, time.Now())
 		analyzer := NewSaturationAnalyzer(store)
 
 		_, err := analyzer.Analyze(ctx, makeAnalyzerInput(nil, zeroState))
@@ -547,7 +547,7 @@ func TestLogContract_ZeroReplicaEstimateNamesItsSource(t *testing.T) {
 			EffectiveCapacity: 4000,
 			EngineParams:      deploymentParams(),
 			LearnedFrom:       "deployment",
-		})
+		}, time.Now())
 		analyzer := NewSaturationAnalyzer(store)
 
 		// A live variant alongside it supplies the model-level token averages
@@ -579,7 +579,7 @@ func TestLogContract_ZeroReplicaEstimateNamesItsSource(t *testing.T) {
 			GpuCount:          1,
 			EffectiveCapacity: 4000,
 			LearnedFrom:       "deployment",
-		})
+		}, time.Now())
 		analyzer := NewSaturationAnalyzer(store)
 
 		_, err := analyzer.Analyze(ctx, makeAnalyzerInput(nil, zeroState))
@@ -605,7 +605,7 @@ func TestLogContract_BorrowedCapacityNamesItsDonor(t *testing.T) {
 		TotalKvCapacityTokens: 0,
 		EngineParams:          deploymentParams(),
 		LearnedFrom:           "deployment",
-	})
+	}, time.Now())
 	// ...but a sibling on the same hardware, with equal-valued params, has one.
 	store.Update("test-ns", "test-model", "variant-donor", capacity.Record{
 		AcceleratorName:   "H100",
@@ -613,7 +613,7 @@ func TestLogContract_BorrowedCapacityNamesItsDonor(t *testing.T) {
 		EffectiveCapacity: 9000,
 		EngineParams:      deploymentParams(),
 		LearnedFrom:       capacity.LearnedFromLive,
-	})
+	}, time.Now())
 	analyzer := NewSaturationAnalyzer(store)
 
 	_, err := analyzer.Analyze(ctx, makeReusingAnalyzerInput(nil, []domain.VariantReplicaState{
@@ -650,13 +650,13 @@ func TestLogContract_BorrowNamesAnIncompleteDonor(t *testing.T) {
 		EffectiveCapacity: 0, TotalKvCapacityTokens: 0,
 		EngineParams: incomplete,
 		LearnedFrom:  "deployment",
-	})
+	}, time.Now())
 	store.Update("test-ns", "test-model", "variant-donor", capacity.Record{
 		AcceleratorName: "H100", GpuCount: 1,
 		EffectiveCapacity: 9000,
 		EngineParams:      incomplete,
 		LearnedFrom:       capacity.LearnedFromLive,
-	})
+	}, time.Now())
 	analyzer := NewSaturationAnalyzer(store)
 
 	_, err := analyzer.Analyze(ctx, makeReusingAnalyzerInput(nil, []domain.VariantReplicaState{

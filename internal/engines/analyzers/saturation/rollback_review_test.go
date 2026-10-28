@@ -122,7 +122,7 @@ func TestARollbackThatMeasuresAgainGivesTheReRollAFreshHold(t *testing.T) {
 	a.throughputStash[stashKey(key, argsA)] = st
 	a.throughputWindowUnderLocked(key, argsA)
 	time.Sleep(time.Millisecond)
-	a.saturatedThroughput[key].Add(4)
+	a.saturatedThroughput[key].AddAt(4, time.Now())
 	a.throughputWindowUnderLocked(key, argsB)
 	if got := a.throughputStash[stashKey(key, argsA)].heldFor; got != 0 {
 		t.Errorf("a window measured again under the rollback kept the old hold: %v", got)

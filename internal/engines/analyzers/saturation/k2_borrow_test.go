@@ -30,8 +30,8 @@ var _ = Describe("borrowing a sibling's k2", func() {
 		ctx = context.Background()
 		clock = time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 		a.now = func() time.Time { return clock }
-		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params(256)})
-		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params(256)})
+		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params(256)}, time.Now())
+		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params(256)}, time.Now())
 	})
 
 	states := []domain.VariantReplicaState{
@@ -116,8 +116,8 @@ var _ = Describe("borrowing a sibling's k2", func() {
 		// the sibling measured 4000; k1 is 12800. Borrowing 4000 would raise
 		// variant-b by 60% on a figure measured elsewhere.
 		budget := &capacity.EngineParams{Engine: "vllm", MaxNumSeqs: 256, EffectiveMaxBatchedTokens: 60}
-		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: budget})
-		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: budget})
+		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: budget}, time.Now())
+		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: budget}, time.Now())
 		Expect(estimateCapacityFromParams(budget, 100, 50)).To(Equal(int64(2500)), "precondition: the derived figure")
 
 		cycle(4000, 6, 1000, 16000, 0)
@@ -127,7 +127,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 	})
 
 	It("does not borrow from a variant whose engine is configured differently", func() {
-		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params(128)})
+		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params(128)}, time.Now())
 		cycle(4000, 6, 1000, 16000, 0)
 		result := cycle(1000, 0, 1000, 16000, 0)
 		Expect(capacityOf(result, "variant-b")).To(Equal(float64(12800)),
@@ -151,8 +151,8 @@ var _ = Describe("borrowing a sibling's k2", func() {
 		var own, donor string
 		BeforeEach(func() {
 			own, donor = keyOf("variant-b"), keyOf("variant-a")
-			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-			ra.Add(4000)
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+			ra.AddAt(4000, time.Now())
 			a.computeCapacityHistory[donor] = ra
 		})
 		borrow := func() (k2Borrow, bool) { return a.borrowedK2(own, "test-model", 12800, params(256), true, true) }
@@ -196,7 +196,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			a.computeCapacityHistory[donor].TouchAt(time.Now().Add(-time.Hour))
 			_, ok := borrow()
 			Expect(ok).To(BeTrue())
-			Expect(a.computeCapacityHistory[donor].Stale(time.Minute)).To(BeTrue(),
+			Expect(a.computeCapacityHistory[donor].StaleAt(time.Now(), time.Minute)).To(BeTrue(),
 				"the borrow touched the donor; a lender would then live as long as anyone borrows from it")
 		})
 
@@ -204,7 +204,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			// The other namespace has its own variant-a, as two teams deploying
 			// the same manifests would: a key match that ignored the namespace
 			// would read test-ns's variant-a window under other-ns's record.
-			store.Update("other-ns", "test-model", "variant-a", capacity.Record{EngineParams: params(256)})
+			store.Update("other-ns", "test-model", "variant-a", capacity.Record{EngineParams: params(256)}, time.Now())
 			other := a.historyKey("test-model", "other-ns", "variant-b", "H100", 1, domain.RoleBoth, 50, 5)
 			_, ok := a.borrowedK2(other, "test-model", 12800, params(256), true, true)
 			Expect(ok).To(BeFalse())
@@ -249,8 +249,8 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			Expect(a.computeCapacityHistory).NotTo(HaveKey(donor),
 				"a window unread for a retention on the analyzer's clock was kept")
 
-			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-			ra.Add(4000)
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+			ra.AddAt(4000, time.Now())
 			a.computeCapacityHistory[donor] = ra
 			clock = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
 			ra.TouchAt(clock.Add(-retention - time.Minute))
@@ -264,13 +264,13 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			Expect(ok).To(BeTrue())
 			serve(own, BorrowedK2Hold+BorrowedK2Relax)
 
-			a.computeCapacityHistory[donor] = capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-			a.computeCapacityHistory[donor].Add(3600)
+			a.computeCapacityHistory[donor] = capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+			a.computeCapacityHistory[donor].AddAt(3600, time.Now())
 			_, ok = borrow()
 			Expect(ok).To(BeFalse(), "a 10% move is a donor still measuring, not new evidence")
 
-			a.computeCapacityHistory[donor] = capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-			a.computeCapacityHistory[donor].Add(2000)
+			a.computeCapacityHistory[donor] = capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+			a.computeCapacityHistory[donor].AddAt(2000, time.Now())
 			b, ok := borrow()
 			Expect(ok).To(BeTrue(), "the donor halved its figure and the spent borrow ignored it")
 			Expect(b.k2).To(Equal(int64(2000)), "re-armed from full strength")
@@ -311,8 +311,8 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			// per bucket, in extra replicas.
 			longOwn := a.historyKey("test-model", "test-ns", "variant-b", "H100", 1, domain.RoleBoth, 5000, 5)
 			longDonor := a.historyKey("test-model", "test-ns", "variant-a", "H100", 1, domain.RoleBoth, 5000, 5)
-			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-			ra.Add(4000)
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+			ra.AddAt(4000, time.Now())
 			a.computeCapacityHistory[longDonor] = ra
 
 			_, ok := borrow()
@@ -334,8 +334,8 @@ var _ = Describe("borrowing a sibling's k2", func() {
 		var own, donor string
 		BeforeEach(func() {
 			own, donor = keyOf("variant-b"), keyOf("variant-a")
-			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-			ra.Add(4000)
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+			ra.AddAt(4000, time.Now())
 			a.computeCapacityHistory[donor] = ra
 		})
 
@@ -417,8 +417,8 @@ var _ = Describe("borrowing a sibling's k2", func() {
 	Describe("the model's switch", func() {
 		It("prices a variant on its own figure, and leaves a running clock where it stands", func() {
 			own := keyOf("variant-b")
-			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-			ra.Add(4000)
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+			ra.AddAt(4000, time.Now())
 			a.computeCapacityHistory[keyOf("variant-a")] = ra
 			_, ok := a.borrowedK2(own, "test-model", 12800, params(256), true, true)
 			Expect(ok).To(BeTrue())
@@ -440,13 +440,13 @@ var _ = Describe("borrowing a sibling's k2", func() {
 
 	Describe("which sibling", func() {
 		seed := func(variant string, avgOutput float64, k2 float64) {
-			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-			ra.Add(k2)
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+			ra.AddAt(k2, time.Now())
 			a.computeCapacityHistory[a.historyKey("test-model", "test-ns", variant, "H100", 1, domain.RoleBoth, avgOutput, 5)] = ra
 		}
 
 		It("takes the highest of several lower donors", func() {
-			store.Update("test-ns", "test-model", "variant-c", capacity.Record{EngineParams: params(256)})
+			store.Update("test-ns", "test-model", "variant-c", capacity.Record{EngineParams: params(256)}, time.Now())
 			seed("variant-a", 50, 3000)
 			seed("variant-c", 50, 6000)
 			b, ok := a.borrowedK2(keyOf("variant-b"), "test-model", 12800, params(256), true, true)
@@ -471,15 +471,15 @@ var _ = Describe("borrowing a sibling's k2", func() {
 		var budget *capacity.EngineParams
 		BeforeEach(func() {
 			budget = &capacity.EngineParams{Engine: "vllm", MaxNumSeqs: 256, EffectiveMaxBatchedTokens: 2048}
-			store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: budget})
-			store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: budget})
+			store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: budget}, time.Now())
+			store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: budget}, time.Now())
 			Expect(estimateCapacityFromParams(budget, 100, 50)).To(Equal(int64(32000)), "precondition: derived above k1")
 		})
 
 		It("borrows on the derived path when the donor is below the variant's capacity", func() {
 			budget.EffectiveMaxBatchedTokens = 60 // derives 2500, below k1
-			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-			ra.Add(2000)
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+			ra.AddAt(2000, time.Now())
 			a.computeCapacityHistory[keyOf("variant-a")] = ra
 
 			result := cycle(1000, 0, 1000, 16000, 0)

@@ -163,7 +163,7 @@ func TestALegacyWindowIsNotKeptForARollback(t *testing.T) {
 func TestARolloutReadingPricesOnlyItsOwnCycle(t *testing.T) {
 	a, store, clock := waProcess(mtParams(256, "vllm:v1"))
 	waRun(t, a, clock, 4000, 6)
-	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(256, "vllm:v2"), RollingOut: true})
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(256, "vllm:v2"), RollingOut: true}, time.Now())
 	key := rrKey(a, "variant-a")
 	a.mu.Lock()
 	before := a.computeCapacityHistory[key].Len()

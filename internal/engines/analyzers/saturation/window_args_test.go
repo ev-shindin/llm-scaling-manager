@@ -14,7 +14,7 @@ import (
 func waProcess(params *capacity.EngineParams) (*SaturationAnalyzer, *capacity.Store, *time.Time) {
 	clock := time.Now()
 	store := capacity.NewStore()
-	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params})
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params}, time.Now())
 	a := NewSaturationAnalyzer(store)
 	a.now = func() time.Time { return clock }
 	return a, store, &clock
@@ -29,7 +29,7 @@ func waRun(t *testing.T, a *SaturationAnalyzer, clock *time.Time, tokens int64, 
 }
 
 func waSetParams(store *capacity.Store, p *capacity.EngineParams) {
-	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: p})
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: p}, time.Now())
 }
 
 // A rollout that changes the engine's arguments while the controller runs:
@@ -102,7 +102,7 @@ func TestAnUnreadConfigurationIsAConfiguration(t *testing.T) {
 	}
 
 	waRun(t, a, clock, 4500, 6)
-	store.Update("test-ns", "test-model", "variant-a", capacity.Record{})
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{}, time.Now())
 	key := a.historyKey("test-model", "test-ns", "variant-a", "H100", 1, domain.RoleBoth, 50, 5)
 	a.mu.Lock()
 	before := len(a.computeCapacityHistory)
@@ -119,8 +119,8 @@ func TestAnUnreadConfigurationIsAConfiguration(t *testing.T) {
 func TestAWindowWithNoArgumentsAdoptsTheVariants(t *testing.T) {
 	a, _, clock := waProcess(mtParams(256, "vllm:v1"))
 	key := a.historyKey("test-model", "test-ns", "variant-a", "H100", 1, domain.RoleBoth, 50, 5)
-	ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-	ra.Add(4000)
+	ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+	ra.AddAt(4000, time.Now())
 	a.computeCapacityHistory[key] = ra
 	if vc := waRun(t, a, clock, 1000, 0); vc.K2Source != capacity.K2SrcHistorical.String() {
 		t.Fatalf("an untagged window was not read as the variant's own: %s", vc.K2Source)
@@ -148,8 +148,8 @@ func TestAThroughputWindowFromOtherArgumentsIsNotRead(t *testing.T) {
 	}
 	neighbour := prefix + outputBuckets[i+1] + suffix
 	window := func(rate float64) *capacity.RollingAverage {
-		ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-		ra.Add(rate)
+		ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+		ra.AddAt(rate, time.Now())
 		return ra
 	}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
@@ -71,7 +72,7 @@ func TestPublishEngineConfig_PublishesTheFingerprintItWouldKeyOn(t *testing.T) {
 
 	st := scaletarget.NewDeploymentAccessor(deployWithArgs(
 		"--max-num-seqs=128", "--dtype=bfloat16", "--quantization=fp8"))
-	e.capacityStore.LoadFromScaleTarget("ns", "m", "v1", "NVIDIA-H200", 1, st)
+	e.capacityStore.LoadFromScaleTarget("ns", "m", "v1", "NVIDIA-H200", 1, st, time.Now())
 
 	e.publishEngineConfig("ns", "m", "v1", "NVIDIA-H200", 1)
 
@@ -120,7 +121,7 @@ func TestEvictStaleAnalyzerSeries_DeletesTheConfigSeriesOfADepartedVariant(t *te
 
 	st := scaletarget.NewDeploymentAccessor(deployWithArgs("--max-num-seqs=128"))
 	for _, v := range []string{"v1", "v2"} {
-		e.capacityStore.LoadFromScaleTarget("ns", "m", v, "NVIDIA-H200", 1, st)
+		e.capacityStore.LoadFromScaleTarget("ns", "m", v, "NVIDIA-H200", 1, st, time.Now())
 		e.publishEngineConfig("ns", "m", v, "NVIDIA-H200", 1)
 	}
 	require.ElementsMatch(t, []string{"v1", "v2"},
@@ -237,7 +238,7 @@ func TestPruneAnalyzerSeries_DeletesAConfigPublishedWithoutARecord(t *testing.T)
 
 	st := scaletarget.NewDeploymentAccessor(deployWithArgs("--max-num-seqs=128"))
 	for _, m := range []string{"m1", "m2"} {
-		e.capacityStore.LoadFromScaleTarget("ns", m, "v", "NVIDIA-H200", 1, st)
+		e.capacityStore.LoadFromScaleTarget("ns", m, "v", "NVIDIA-H200", 1, st, time.Now())
 		e.publishEngineConfig("ns", m, "v", "NVIDIA-H200", 1)
 	}
 	e.pruneAnalyzerSeries(map[string]bool{"ns/m1": true})
@@ -253,7 +254,7 @@ func TestPruneAnalyzerSeries_DeletesTheConfigSeriesOfADepartedModel(t *testing.T
 
 	st := scaletarget.NewDeploymentAccessor(deployWithArgs("--max-num-seqs=128"))
 	for _, m := range []string{"m1", "m2"} {
-		e.capacityStore.LoadFromScaleTarget("ns", m, "v", "NVIDIA-H200", 1, st)
+		e.capacityStore.LoadFromScaleTarget("ns", m, "v", "NVIDIA-H200", 1, st, time.Now())
 		e.publishEngineConfig("ns", m, "v", "NVIDIA-H200", 1)
 		e.recordAnalyzerMetrics("ns", m, []allocation.NamedAnalyzerResult{
 			namedResult("saturation", nil, 5, "v"),
@@ -276,7 +277,7 @@ func TestEvictAllAnalyzerSeries_ClearsEveryConfigSeries(t *testing.T) {
 
 	st := scaletarget.NewDeploymentAccessor(deployWithArgs("--max-num-seqs=128"))
 	for _, m := range []string{"m1", "m2"} {
-		e.capacityStore.LoadFromScaleTarget("ns", m, "v", "NVIDIA-H200", 1, st)
+		e.capacityStore.LoadFromScaleTarget("ns", m, "v", "NVIDIA-H200", 1, st, time.Now())
 		e.publishEngineConfig("ns", m, "v", "NVIDIA-H200", 1)
 		e.recordAnalyzerMetrics("ns", m, []allocation.NamedAnalyzerResult{
 			namedResult("saturation", nil, 5, "v"),
@@ -403,7 +404,7 @@ func TestRunV2AnalysisOnly_PublishesNothingForAVariantWithNoScaleTarget(t *testi
 			MaxNumSeqs:                256,
 			EffectiveMaxBatchedTokens: 8192,
 		},
-	})
+	}, time.Now())
 
 	va := &llmdVariantAutoscalingV1alpha1.VariantAutoscaling{
 		ObjectMeta: metav1.ObjectMeta{Name: "v1", Namespace: "ns"},

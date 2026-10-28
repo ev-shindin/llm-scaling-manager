@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -72,7 +73,7 @@ func newHREngine(variants ...string) *hrEngine {
 	for _, v := range variants {
 		store.Update("test-ns", "test-model", v, capacity.Record{
 			EngineParams: &capacity.EngineParams{EffectiveMaxBatchedTokens: 8192, MaxNumSeqs: 256},
-		})
+		}, time.Now())
 	}
 	return &hrEngine{a: saturation.NewSaturationAnalyzer(store)}
 }

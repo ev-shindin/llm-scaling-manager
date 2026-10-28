@@ -34,8 +34,8 @@ var _ = Describe("the sweep's own completeness", func() {
 		// measurement existed and could not be reached.
 		It("outlives the window it keys, so a retained measurement stays reachable", func() {
 			a := NewSaturationAnalyzer(capacity.NewStore())
-			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-			ra.Add(50000)
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+			ra.AddAt(50000, time.Now())
 			a.computeCapacityHistory["m|NVIDIA-H200|1|decode|huge|q5"] = ra
 			a.lastAccelerator["ns/v1"] = acceleratorMemo{
 				name:     "NVIDIA-H200",

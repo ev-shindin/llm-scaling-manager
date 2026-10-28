@@ -13,8 +13,8 @@ import (
 // Rollbacks, rollouts and what a variant keeps across them.
 
 func rrWindow(v float64) *capacity.RollingAverage {
-	ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-	ra.Add(v)
+	ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+	ra.AddAt(v, time.Now())
 	return ra
 }
 
@@ -247,7 +247,7 @@ func TestTheCacheGateReadsTheReplicasLiveTotal(t *testing.T) {
 			a, own, _, _ := lbProcess(t, 4000)
 			a.capacityStore.Update("test-ns", "test-model", "variant-a", capacity.Record{
 				EngineParams: mtParams(256, "vllm:v1"), TotalKvCapacityTokens: 32000, LearnedFrom: capacity.LearnedFromLive,
-			})
+			}, time.Now())
 			_, ok := a.borrowedK2WithKv(own, "test-model", 12800, mtParams(256, "vllm:v1"), tc.live, true, true)
 			if ok != tc.lends {
 				t.Errorf("lent = %v, want %v", ok, tc.lends)
@@ -429,7 +429,7 @@ func TestAReadingMidRolloutIsNotRecorded(t *testing.T) {
 	a, store, clock := waProcess(mtParams(64, "vllm:v1"))
 	store.Update("test-ns", "test-model", "variant-a", capacity.Record{
 		EngineParams: mtParams(64, "vllm:v1"), RollingOut: true,
-	})
+	}, time.Now())
 	rrAnalyzeTwo(t, a, 4000, 6)
 	*clock = clock.Add(time.Minute)
 	a.mu.Lock()
@@ -439,7 +439,7 @@ func TestAReadingMidRolloutIsNotRecorded(t *testing.T) {
 		t.Errorf("a reading mid-rollout was recorded (%d windows)", windows)
 	}
 
-	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(64, "vllm:v1")})
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(64, "vllm:v1")}, time.Now())
 	rrAnalyzeTwo(t, a, 4000, 6)
 	a.mu.Lock()
 	windows = len(a.computeCapacityHistory)

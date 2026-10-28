@@ -72,7 +72,7 @@ func (e *Engine) runV2AnalysisOnly(
 		if s, ok := e.saturationV2Analyzer.(acceleratorStabiliser); ok {
 			publishAccel = s.StableAcceleratorFor(namespace, va.Name, accelerator)
 		}
-		e.capacityStore.LoadFromScaleTarget(namespace, modelID, va.Name, publishAccel, gpuCount, scaleTarget)
+		e.capacityStore.LoadFromScaleTarget(namespace, modelID, va.Name, publishAccel, gpuCount, scaleTarget, e.clock.Now())
 		logger.V(logging.DEBUG).Info("Pre-populated capacity store from scale target",
 			"variant", va.Name, "accelerator", accelerator, "gpuCount", gpuCount)
 		// Publish the engine-configuration fingerprint. Read back from the
@@ -600,7 +600,7 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 	}
 	records := 0
 	if e.capacityStore != nil {
-		records = e.capacityStore.EvictStale(capacity.EvictionTimeout)
+		records = e.capacityStore.EvictStale(e.clock.Now(), capacity.EvictionTimeout)
 	}
 	if history.Any() || records > 0 {
 		// Broken out per map, not summed. Which map lost entries is the whole
@@ -631,7 +631,7 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 			"recordTimeout", capacity.EvictionTimeout)
 	}
 	if e.sloAnalyzer != nil {
-		if ev := e.sloAnalyzer.EvictStale(time.Now()); ev.Any() {
+		if ev := e.sloAnalyzer.EvictStale(e.clock.Now()); ev.Any() {
 			logger.Info("evicted stale slo analyzer state",
 				"lines", ev.Lines, "baselines", ev.Baselines,
 				"transients", ev.Transients, "accelerators", ev.Accelerators)

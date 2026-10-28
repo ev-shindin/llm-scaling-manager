@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -106,7 +107,7 @@ func brRun(t *testing.T, role string, cycles ...[]brPod) []brCycle {
 	store := capacity.NewStore()
 	store.Update("test-ns", "test-model", brVariant, capacity.Record{
 		EngineParams: &capacity.EngineParams{EffectiveMaxBatchedTokens: 8192, MaxNumSeqs: 256},
-	})
+	}, time.Now())
 	a := NewSaturationAnalyzer(store)
 	out := make([]brCycle, 0, len(cycles))
 	for _, pods := range cycles {
@@ -252,7 +253,7 @@ func TestSingleRankReplicaUnchangedByBusiestRank(t *testing.T) {
 				store := capacity.NewStore()
 				store.Update("test-ns", "test-model", brVariant, capacity.Record{
 					EngineParams: &capacity.EngineParams{EffectiveMaxBatchedTokens: 8192, MaxNumSeqs: 256},
-				})
+				}, time.Now())
 				a := NewSaturationAnalyzer(store)
 				full := makeReplicaMetrics("pod-a", brVariant, brRankKv, brRankKv, 3, 1000, 1000)
 				idle := makeReplicaMetrics("pod-b", brVariant, brRankKv/10, brRankKv, 0, 1000, 1000)
@@ -296,7 +297,7 @@ func TestHotRankHoldOnPD(t *testing.T) {
 	for _, v := range []string{"dec", "pre"} {
 		store.Update("test-ns", "test-model", v, capacity.Record{
 			EngineParams: &capacity.EngineParams{EffectiveMaxBatchedTokens: 8192, MaxNumSeqs: 256},
-		})
+		}, time.Now())
 	}
 	a := NewSaturationAnalyzer(store)
 	rows := make([]domain.ReplicaMetrics, 0, 4)
@@ -327,7 +328,7 @@ func TestHotRankHoldLeavesPrefillToThePrefillHold(t *testing.T) {
 	for _, v := range []string{"dec", "pre"} {
 		store.Update("test-ns", "test-model", v, capacity.Record{
 			EngineParams: &capacity.EngineParams{EffectiveMaxBatchedTokens: 8192, MaxNumSeqs: 256},
-		})
+		}, time.Now())
 	}
 	a := NewSaturationAnalyzer(store)
 	rows := make([]domain.ReplicaMetrics, 0, 4)

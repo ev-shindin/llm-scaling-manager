@@ -2,6 +2,7 @@ package capacity
 
 import (
 	"testing"
+	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
@@ -28,37 +29,37 @@ func TestARecordFollowsTheRolloutItsScaleTargetReports(t *testing.T) {
 	}{{"from a record derived from the deployment", false}, {"from a live record", true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := NewStore()
-			s.LoadFromScaleTarget("ns", "m", "v", "H100", 8, rolloutDeployment(false, "--max-num-seqs=256"))
+			s.LoadFromScaleTarget("ns", "m", "v", "H100", 8, rolloutDeployment(false, "--max-num-seqs=256"), time.Now())
 			if tc.live {
 				r := s.Get("ns", "m", "v")
 				s.Update("ns", "m", "v", Record{AcceleratorName: "H100", GpuCount: 8, EngineParams: r.EngineParams,
-					TotalKvCapacityTokens: 16000, EffectiveCapacity: 12800, LearnedFrom: LearnedFromLive})
+					TotalKvCapacityTokens: 16000, EffectiveCapacity: 12800, LearnedFrom: LearnedFromLive}, time.Now())
 			}
 			if s.Get("ns", "m", "v").InRollout() {
 				t.Fatal("precondition: no rollout")
 			}
-			s.LoadFromScaleTarget("ns", "m", "v", "H100", 8, rolloutDeployment(true, "--max-num-seqs=256"))
+			s.LoadFromScaleTarget("ns", "m", "v", "H100", 8, rolloutDeployment(true, "--max-num-seqs=256"), time.Now())
 			if !s.Get("ns", "m", "v").InRollout() {
 				t.Error("a rollout that leaves the arguments alone is a rollout too")
 			}
-			s.LoadFromScaleTarget("ns", "m", "v", "H100", 8, rolloutDeployment(true, "--max-num-seqs=64"))
+			s.LoadFromScaleTarget("ns", "m", "v", "H100", 8, rolloutDeployment(true, "--max-num-seqs=64"), time.Now())
 			if !s.Get("ns", "m", "v").InRollout() {
 				t.Error("a rollout to other arguments")
 			}
 			if tc.live {
 				r := s.Get("ns", "m", "v")
 				s.Update("ns", "m", "v", Record{AcceleratorName: "H100", GpuCount: 8, EngineParams: r.EngineParams,
-					RollingOut: r.RollingOut, LearnedFrom: LearnedFromLive})
-				s.LoadFromScaleTarget("ns", "m", "v", "H100", 8, rolloutDeployment(true, "--max-num-seqs=64"))
+					RollingOut: r.RollingOut, LearnedFrom: LearnedFromLive}, time.Now())
+				s.LoadFromScaleTarget("ns", "m", "v", "H100", 8, rolloutDeployment(true, "--max-num-seqs=64"), time.Now())
 				if !s.Get("ns", "m", "v").InRollout() {
 					t.Error("a live record lost the rollout it is in")
 				}
 			}
-			s.LoadFromScaleTarget("ns", "m", "v", "H100", 8, rolloutDeployment(true, "--max-num-seqs=256"))
+			s.LoadFromScaleTarget("ns", "m", "v", "H100", 8, rolloutDeployment(true, "--max-num-seqs=256"), time.Now())
 			if !s.Get("ns", "m", "v").InRollout() {
 				t.Error("an undo in mid-rollout read as no rollout while the other arguments' pods still serve")
 			}
-			s.LoadFromScaleTarget("ns", "m", "v", "H100", 8, rolloutDeployment(false, "--max-num-seqs=256"))
+			s.LoadFromScaleTarget("ns", "m", "v", "H100", 8, rolloutDeployment(false, "--max-num-seqs=256"), time.Now())
 			if s.Get("ns", "m", "v").InRollout() {
 				t.Error("the rollout completed and is still reported")
 			}
@@ -71,11 +72,11 @@ func TestARecordFollowsTheRolloutItsScaleTargetReports(t *testing.T) {
 // remembered, so nothing is missing.
 func TestARolloutFirstSeenWithNoRecordIsOne(t *testing.T) {
 	s := NewStore()
-	s.LoadFromScaleTarget("ns", "m", "v", "H100", 8, rolloutDeployment(true, "--max-num-seqs=64"))
+	s.LoadFromScaleTarget("ns", "m", "v", "H100", 8, rolloutDeployment(true, "--max-num-seqs=64"), time.Now())
 	if !s.Get("ns", "m", "v").InRollout() {
 		t.Error("a rollout first seen with no record was not taken as one")
 	}
-	s.LoadFromScaleTarget("ns", "m", "v", "H100", 8, rolloutDeployment(false, "--max-num-seqs=64"))
+	s.LoadFromScaleTarget("ns", "m", "v", "H100", 8, rolloutDeployment(false, "--max-num-seqs=64"), time.Now())
 	if s.Get("ns", "m", "v").InRollout() {
 		t.Error("it completed and is still reported")
 	}

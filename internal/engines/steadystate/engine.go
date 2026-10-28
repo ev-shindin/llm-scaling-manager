@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -60,6 +61,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/scalingpolicy"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/balance"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/cycleclock"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
@@ -193,6 +195,12 @@ type Engine struct {
 
 	// capacityStore is shared with the V2 analyzer for caching capacity knowledge.
 	capacityStore *capacity.Store
+
+	// clock is the cycle clock: pinned once per optimize cycle (optimizeV2),
+	// it is what the analyzers and the capacity store stamp and age their
+	// learned state on, so one cycle reads one instant. Nil in an engine a
+	// test builds by hand, which reads the wall clock.
+	clock *cycleclock.Clock
 
 	// lastGoodAnalysis records, per model (keyed by utils.GetNamespacedKey(namespace,
 	// modelID)) and analyzer name, the AnalyzedAt of the most recent informative
@@ -332,7 +340,8 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	}
 
 	capacityStore := capacity.NewStore()
-	satV2 := saturation.NewSaturationAnalyzer(capacityStore)
+	cycleClock := cycleclock.New(clock.RealClock{})
+	satV2 := saturation.NewSaturationAnalyzer(capacityStore).WithClock(cycleClock)
 	// How long the analyzer keeps what it learns. Configured here rather than
 	// read per-cycle: these are process-lifetime horizons, and a sweep whose
 	// horizon moved underneath it would evict on one age and report another.
@@ -403,6 +412,7 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	// own: LEARNED_STATE_VARIANT_TIMEOUT governs both, and
 	// LEARNED_STATE_BUCKET_RETENTION bounds how long both hold a line's slope.
 	sloAnalyzer := slo.New(replicaCollector, capacityStore).
+		WithClock(cycleClock).
 		WithStateTimeout(satV2.Horizons().VariantTimeout).
 		WithSlopeHoldFor(satV2.Horizons().BucketRetention)
 
@@ -420,6 +430,7 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 		saturationV2Analyzer:    satV2,
 		sloAnalyzer:             sloAnalyzer,
 		capacityStore:           capacityStore,
+		clock:                   cycleClock,
 		lastGoodAnalysis:        make(map[string]map[string]time.Time),
 		lastAnalyzerSeries:      make(map[string]analyzerSeries),
 		lastBlockedModels:       make(map[string]blockedModelRef),
@@ -466,6 +477,13 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	registration.RegisterSLOQueries(metricsRegistry)
 
 	return &engine
+}
+
+// Clock is the engine's cycle clock, for an analyzer registered from outside
+// (RegisterAnalyzer) to stamp its state on the same instant as the built-in
+// ones.
+func (e *Engine) Clock() clock.PassiveClock {
+	return e.clock
 }
 
 // RegisterAnalyzer adds an external analyzer to the engine's analyzer
@@ -1483,6 +1501,13 @@ func (e *Engine) optimizeV2(
 	// tier" record forgotten, so the line is said again when it comes back.
 	evaluated := make(map[string]bool, len(modelGroups))
 	defer func() { e.forgetForbiddenBy(evaluated) }()
+	// One clock reading for the cycle: from here until optimizeV2 returns,
+	// the analyzers and the capacity store stamp and age learned state on
+	// this one instant (e.clock). The engine's own timers -- the sticky
+	// scale-down memory below, the snapshot's write cadence, in-flight
+	// orders, borrowing and the headroom reading -- still read time.Now;
+	// they are scheduling, not learned state.
+	defer e.clock.Pin()()
 	e.pruneLastDecided(e.stickyAge(), time.Now())
 	// The learned-state snapshot, restored once before anything is learned or
 	// swept, and written after the cycle has learned what it will.

@@ -67,8 +67,8 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 		}
 		withHistory := func(k2 float64) (*SaturationAnalyzer, *capacity.RollingAverage) {
 			a := NewSaturationAnalyzer(capacity.NewStore())
-			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-			ra.Add(k2)
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+			ra.AddAt(k2, time.Now())
 			a.computeCapacityHistory[historyKey] = ra
 			return a, ra
 		}
@@ -79,14 +79,14 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 		It("refreshes the window on the read, so a live variant keeps its measured k2", func() {
 			a, ra := withHistory(50000)
 			ra.TouchAt(time.Now().Add(-sinceWrite))
-			Expect(ra.Stale(time.Second)).To(BeTrue(),
+			Expect(ra.StaleAt(time.Now(), time.Second)).To(BeTrue(),
 				"precondition: nothing has written this window for nearly the whole day")
 
 			k2, src := k2With(a, nil, 90000)
 			Expect(src).To(Equal(capacity.K2SrcHistorical))
 			Expect(k2).To(BeNumerically("==", 50000))
 
-			Expect(ra.Stale(time.Second)).To(BeFalse(),
+			Expect(ra.StaleAt(time.Now(), time.Second)).To(BeFalse(),
 				"the read is a USE and must refresh the window: aged on last-write it "+
 					"expires and k2 leaves the measurement, for a variant that is "+
 					"merely not saturating")
@@ -154,7 +154,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 			// Nine more, so a blend would be visible and a reset would not be
 			// confusable with it.
 			for i := 0; i < 9; i++ {
-				ra.Add(90000)
+				ra.AddAt(90000, time.Now())
 			}
 			Expect(ra.Len()).To(Equal(10))
 
@@ -164,8 +164,8 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 			for i := 0; i < 5; i++ {
 				k2With(a, nil, 1000000)
 			}
-			Expect(ra.Stale(time.Second)).To(BeFalse(), "reads kept it in use, as they should")
-			Expect(ra.WriteGapExceeds(capacity.HistoryEvictionTimeout)).To(BeTrue(),
+			Expect(ra.StaleAt(time.Now(), time.Second)).To(BeFalse(), "reads kept it in use, as they should")
+			Expect(ra.WriteGapExceedsAt(time.Now(), capacity.HistoryEvictionTimeout)).To(BeTrue(),
 				"but nothing has been WRITTEN for a day, and that is the write path's question")
 
 			// Now the queue saturates and today's true figure is much lower.
@@ -210,13 +210,13 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 			a.recordSaturatedThroughput(own, 3.2)
 			ra := a.saturatedThroughput[own]
 			ra.TouchAt(time.Now().Add(-sinceWrite))
-			Expect(ra.Stale(time.Second)).To(BeTrue(), "precondition: unwritten for nearly the timeout")
+			Expect(ra.StaleAt(time.Now(), time.Second)).To(BeTrue(), "precondition: unwritten for nearly the timeout")
 
 			rate, bucket := a.saturatedThroughputFor(own)
 			Expect(rate).To(Equal(3.2))
 			Expect(bucket).To(Equal("medium"), "the key's own bucket, not a borrowed one")
 
-			Expect(ra.Stale(time.Second)).To(BeFalse(),
+			Expect(ra.StaleAt(time.Now(), time.Second)).To(BeFalse(),
 				"the floor read this bucket, so the sweep must not take it on the next cycle")
 		})
 
@@ -232,7 +232,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 			Expect(rate).To(Equal(3.2))
 			Expect(bucket).To(Equal("medium"), "borrowed from the nearest bucket with a reading")
 
-			Expect(ra.Stale(time.Second)).To(BeFalse(),
+			Expect(ra.StaleAt(time.Now(), time.Second)).To(BeFalse(),
 				"the only reading on the fleet is this one; expiring it leaves the floor "+
 					"nothing to borrow and no rate at all")
 		})

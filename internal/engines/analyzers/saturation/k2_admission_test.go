@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -200,8 +201,8 @@ func TestK2Admission_ABridgeDoesNotStartTheBorrowClock(t *testing.T) {
 	store := capacity.NewStore()
 	analyzer := NewSaturationAnalyzer(store)
 	params := &capacity.EngineParams{Engine: "vllm", MaxNumSeqs: 256}
-	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params})
-	store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params})
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params}, time.Now())
+	store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params}, time.Now())
 	states := []domain.VariantReplicaState{
 		{VariantName: "variant-a", AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},
 		{VariantName: "variant-b", AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},

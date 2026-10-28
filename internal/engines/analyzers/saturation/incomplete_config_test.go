@@ -3,6 +3,7 @@ package saturation
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -48,7 +49,7 @@ func TestAnUnreadableConfigurationIsNotASharingKey(t *testing.T) {
 		store := capacity.NewStore()
 		store.Update(ns, model, variant, capacity.Record{
 			AcceleratorName: accel, GpuCount: 1, EngineParams: params(),
-		})
+		}, time.Now())
 		a := NewSaturationAnalyzer(store)
 		fp := a.engineFingerprint(ns, model, variant)
 		require.NotEmpty(t, fp,
@@ -59,7 +60,7 @@ func TestAnUnreadableConfigurationIsNotASharingKey(t *testing.T) {
 		store := capacity.NewStore()
 		store.Update(ns, model, variant, capacity.Record{
 			AcceleratorName: accel, GpuCount: 1, EngineParams: params("block_size"),
-		})
+		}, time.Now())
 		a := NewSaturationAnalyzer(store)
 		require.Empty(t, a.engineFingerprint(ns, model, variant),
 			"a configuration whose block size could not be read must not be a "+
@@ -70,7 +71,7 @@ func TestAnUnreadableConfigurationIsNotASharingKey(t *testing.T) {
 		store := capacity.NewStore()
 		store.Update(ns, model, variant, capacity.Record{
 			AcceleratorName: accel, GpuCount: 1, EngineParams: params("block_size"),
-		})
+		}, time.Now())
 		a := NewSaturationAnalyzer(store)
 		own := a.itlWindowKey(ns, model, variant, accel, 1)
 		physics := a.itlPhysicsKey(ns, model, variant, accel, 1,
@@ -109,7 +110,7 @@ func TestTwoUnreadableVariantsDoNotShareALine(t *testing.T) {
 					EffectiveMaxBatchedTokens: 8192,
 					Unresolved:                unresolved,
 				},
-			})
+			}, time.Now())
 		}
 		a := NewSaturationAnalyzer(store)
 

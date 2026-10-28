@@ -31,7 +31,7 @@ var _ = Describe("Store", func() {
 				TotalKvCapacityTokens: 16000,
 				EffectiveCapacity:     14000,
 				LearnedFrom:           "live",
-			})
+			}, time.Now())
 
 			got := store.Get("ns-1", "model-a", "variant-h100")
 			Expect(got).NotTo(BeNil())
@@ -45,11 +45,11 @@ var _ = Describe("Store", func() {
 			store.Update("ns-1", "model-a", "variant-h100", Record{
 				TotalKvCapacityTokens: 16000,
 				LearnedFrom:           "live",
-			})
+			}, time.Now())
 			store.Update("ns-2", "model-a", "variant-h100", Record{
 				TotalKvCapacityTokens: 32000,
 				LearnedFrom:           "live",
-			})
+			}, time.Now())
 
 			Expect(store.Get("ns-1", "model-a", "variant-h100").TotalKvCapacityTokens).To(Equal(int64(16000)))
 			Expect(store.Get("ns-2", "model-a", "variant-h100").TotalKvCapacityTokens).To(Equal(int64(32000)))
@@ -65,7 +65,7 @@ var _ = Describe("Store", func() {
 	Describe("LoadFromScaleTarget", func() {
 		It("should populate EngineParams from deployment args", func() {
 			deploy := makeTestDeployment("--gpu-memory-utilization=0.85", "--max-num-batched-tokens=4096")
-			store.LoadFromScaleTarget("ns-1", "model-a", "variant-a100", "A100", 2, scaletarget.NewDeploymentAccessor(deploy))
+			store.LoadFromScaleTarget("ns-1", "model-a", "variant-a100", "A100", 2, scaletarget.NewDeploymentAccessor(deploy), time.Now())
 
 			got := store.Get("ns-1", "model-a", "variant-a100")
 			Expect(got).NotTo(BeNil())
@@ -95,7 +95,7 @@ var _ = Describe("Store", func() {
 					},
 				},
 			}
-			store.LoadFromScaleTarget("ns-1", "model-a", "variant-sglang", "H100", 1, scaletarget.NewDeploymentAccessor(deploy))
+			store.LoadFromScaleTarget("ns-1", "model-a", "variant-sglang", "H100", 1, scaletarget.NewDeploymentAccessor(deploy), time.Now())
 
 			got := store.Get("ns-1", "model-a", "variant-sglang")
 			Expect(got).NotTo(BeNil())
@@ -110,10 +110,10 @@ var _ = Describe("Store", func() {
 			store.Update("ns-1", "model-a", "variant-h100", Record{
 				TotalKvCapacityTokens: 16000,
 				LearnedFrom:           "live",
-			})
+			}, time.Now())
 
 			deploy := makeTestDeployment("--gpu-memory-utilization=0.85")
-			store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", "H100", 1, scaletarget.NewDeploymentAccessor(deploy))
+			store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", "H100", 1, scaletarget.NewDeploymentAccessor(deploy), time.Now())
 
 			got := store.Get("ns-1", "model-a", "variant-h100")
 			Expect(got.LearnedFrom).To(Equal("live"))
@@ -133,11 +133,11 @@ var _ = Describe("Store", func() {
 					EffectiveCapacity:     12800,
 					EngineParams:          loaded.EngineParams,
 					LearnedFrom:           LearnedFromLive,
-				})
+				}, time.Now())
 			}
 			load := func(args ...string) {
 				store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", "H100", 1,
-					scaletarget.NewDeploymentAccessor(makeTestDeployment(args...)))
+					scaletarget.NewDeploymentAccessor(makeTestDeployment(args...)), time.Now())
 			}
 
 			It("keeps the live record while the arguments are the ones it was learned under", func() {
@@ -166,7 +166,7 @@ var _ = Describe("Store", func() {
 				d := makeTestDeployment(args...)
 				d.Spec.Template.Spec.Containers[0].Image = image
 				store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", "H100", 1,
-					scaletarget.NewDeploymentAccessor(d))
+					scaletarget.NewDeploymentAccessor(d), time.Now())
 			}
 
 			It("keeps the live record across a rollout that changes only the image", func() {
@@ -231,7 +231,7 @@ var _ = Describe("Store", func() {
 
 			loadOn := func(accelerator string, gpus int) {
 				store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", accelerator, gpus,
-					scaletarget.NewDeploymentAccessor(makeTestDeployment("--max-num-seqs=256")))
+					scaletarget.NewDeploymentAccessor(makeTestDeployment("--max-num-seqs=256")), time.Now())
 			}
 
 			It("replaces it when the variant moves to other hardware, with no KV total carried", func() {
@@ -259,7 +259,7 @@ var _ = Describe("Store", func() {
 				Expect(store.Get("ns-1", "model-a", "variant-h100").PriorLiveCapacity).To(Equal(int64(12800)))
 
 				store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", "H200", 1,
-					scaletarget.NewDeploymentAccessor(makeTestDeployment("--max-num-seqs=64")))
+					scaletarget.NewDeploymentAccessor(makeTestDeployment("--max-num-seqs=64")), time.Now())
 				Expect(store.Get("ns-1", "model-a", "variant-h100").PriorLiveCapacity).To(BeZero(),
 					"the ceiling outlived the hardware it was measured on")
 			})
@@ -313,14 +313,14 @@ var _ = Describe("Store", func() {
 		})
 
 		It("should handle nil scale target gracefully", func() {
-			store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", "H100", 1, nil)
+			store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", "H100", 1, nil, time.Now())
 			Expect(store.Get("ns-1", "model-a", "variant-h100")).To(BeNil())
 		})
 
 		It("should set conservative EffectiveCapacity from EffectiveMaxBatchedTokens", func() {
 			// Default vLLM V1 deployment (no overrides)
 			deploy := makeTestDeployment()
-			store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", "H100", 1, scaletarget.NewDeploymentAccessor(deploy))
+			store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", "H100", 1, scaletarget.NewDeploymentAccessor(deploy), time.Now())
 
 			got := store.Get("ns-1", "model-a", "variant-h100")
 			Expect(got).NotTo(BeNil())
@@ -331,7 +331,7 @@ var _ = Describe("Store", func() {
 
 		It("should use num_gpu_blocks_override for k1 without overriding EffectiveCapacity", func() {
 			deploy := makeTestDeployment("--num-gpu-blocks-override=5000", "--block-size=16")
-			store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", "H100", 1, scaletarget.NewDeploymentAccessor(deploy))
+			store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", "H100", 1, scaletarget.NewDeploymentAccessor(deploy), time.Now())
 
 			got := store.Get("ns-1", "model-a", "variant-h100")
 			Expect(got).NotTo(BeNil())
@@ -347,16 +347,16 @@ var _ = Describe("Store", func() {
 
 	Describe("Staleness", func() {
 		It("should report missing keys as stale", func() {
-			Expect(store.IsStale("ns-1", "x", "y")).To(BeTrue())
+			Expect(store.IsStale("ns-1", "x", "y", time.Now())).To(BeTrue())
 		})
 
 		It("should report fresh records as not stale", func() {
-			store.Update("ns-1", "model-a", "variant-h100", Record{LearnedFrom: "live"})
-			Expect(store.IsStale("ns-1", "model-a", "variant-h100")).To(BeFalse())
+			store.Update("ns-1", "model-a", "variant-h100", Record{LearnedFrom: "live"}, time.Now())
+			Expect(store.IsStale("ns-1", "model-a", "variant-h100", time.Now())).To(BeFalse())
 		})
 
 		It("should report old records as stale", func() {
-			store.Update("ns-1", "model-a", "variant-h100", Record{LearnedFrom: "live"})
+			store.Update("ns-1", "model-a", "variant-h100", Record{LearnedFrom: "live"}, time.Now())
 
 			// Manually age the record
 			store.mu.Lock()
@@ -364,7 +364,7 @@ var _ = Describe("Store", func() {
 			rec.LearnedAt = time.Now().Add(-StalenessTimeout - time.Minute)
 			store.mu.Unlock()
 
-			Expect(store.IsStale("ns-1", "model-a", "variant-h100")).To(BeTrue())
+			Expect(store.IsStale("ns-1", "model-a", "variant-h100", time.Now())).To(BeTrue())
 		})
 	})
 
@@ -379,7 +379,7 @@ var _ = Describe("Store", func() {
 					store.Update("ns-1", "model-a", "variant-h100", Record{
 						TotalKvCapacityTokens: int64(i * 1000),
 						LearnedFrom:           "live",
-					})
+					}, time.Now())
 				}(i)
 			}
 
@@ -388,7 +388,7 @@ var _ = Describe("Store", func() {
 				go func() {
 					defer wg.Done()
 					_ = store.Get("ns-1", "model-a", "variant-h100")
-					_ = store.IsStale("ns-1", "model-a", "variant-h100")
+					_ = store.IsStale("ns-1", "model-a", "variant-h100", time.Now())
 				}()
 			}
 
@@ -405,12 +405,12 @@ var _ = Describe("Store", func() {
 				AcceleratorName:       "H100",
 				TotalKvCapacityTokens: 32000,
 				LearnedFrom:           "live",
-			})
+			}, time.Now())
 			store.Update("ns-1", "model-a", "variant-a100", Record{
 				AcceleratorName:       "A100",
 				TotalKvCapacityTokens: 16000,
 				LearnedFrom:           "live",
-			})
+			}, time.Now())
 
 			Expect(store.Get("ns-1", "model-a", "variant-h100").TotalKvCapacityTokens).To(Equal(int64(32000)))
 			Expect(store.Get("ns-1", "model-a", "variant-a100").TotalKvCapacityTokens).To(Equal(int64(16000)))
@@ -433,7 +433,7 @@ var _ = Describe("Store", func() {
 				EffectiveCapacity:     28000,
 				EngineParams:          params,
 				LearnedFrom:           "live",
-			})
+			}, time.Now())
 
 			// Search for a compatible record for a different H100 variant
 			found := store.FindCompatible("model-a", "H100", 1, params)
@@ -450,7 +450,7 @@ var _ = Describe("Store", func() {
 				EffectiveCapacity:     28000,
 				EngineParams:          params,
 				LearnedFrom:           "live",
-			})
+			}, time.Now())
 
 			// Search for A100 — should not match H100 record
 			found := store.FindCompatible("model-a", "A100", 1, params)
@@ -466,7 +466,7 @@ var _ = Describe("Store", func() {
 				EffectiveCapacity:     28000,
 				EngineParams:          params,
 				LearnedFrom:           "live",
-			})
+			}, time.Now())
 
 			// Search for 2-GPU H100 — should not match 1-GPU record
 			found := store.FindCompatible("model-a", "H100", 2, params)
@@ -482,7 +482,7 @@ var _ = Describe("Store", func() {
 				EffectiveCapacity:     28000,
 				EngineParams:          params1,
 				LearnedFrom:           "live",
-			})
+			}, time.Now())
 
 			// Search with different gpu_memory_utilization
 			params2 := defaultParams()
@@ -500,7 +500,7 @@ var _ = Describe("Store", func() {
 				EffectiveCapacity:     28000,
 				EngineParams:          params,
 				LearnedFrom:           "live",
-			})
+			}, time.Now())
 
 			// Record in ns-1 should be found when searching for model-a
 			found := store.FindCompatible("model-a", "H100", 1, params)
@@ -517,7 +517,7 @@ var _ = Describe("Store", func() {
 				EffectiveCapacity:     28000,
 				EngineParams:          params,
 				LearnedFrom:           "live",
-			})
+			}, time.Now())
 
 			// Different model should not match
 			found := store.FindCompatible("model-b", "H100", 1, params)
@@ -534,7 +534,7 @@ var _ = Describe("Store", func() {
 				EffectiveCapacity:     25000,
 				EngineParams:          params,
 				LearnedFrom:           "deployment",
-			})
+			}, time.Now())
 			store.Update("ns-1", "model-a", "variant-h100-live", Record{
 				AcceleratorName:       "H100",
 				GpuCount:              1,
@@ -542,7 +542,7 @@ var _ = Describe("Store", func() {
 				EffectiveCapacity:     28000,
 				EngineParams:          params,
 				LearnedFrom:           "live",
-			})
+			}, time.Now())
 
 			found := store.FindCompatible("model-a", "H100", 1, params)
 			Expect(found).NotTo(BeNil())
@@ -559,7 +559,7 @@ var _ = Describe("Store", func() {
 				EffectiveCapacity:     0,
 				TotalKvCapacityTokens: 0,
 				LearnedFrom:           "deployment",
-			})
+			}, time.Now())
 
 			found := store.FindCompatible("model-a", "H100", 1, params)
 			Expect(found).To(BeNil())
@@ -573,7 +573,7 @@ var _ = Describe("Store", func() {
 				EffectiveCapacity:     28000,
 				EngineParams:          defaultParams(),
 				LearnedFrom:           "live",
-			})
+			}, time.Now())
 
 			found := store.FindCompatible("model-a", "H100", 1, nil)
 			Expect(found).To(BeNil())

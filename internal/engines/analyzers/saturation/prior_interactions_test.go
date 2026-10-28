@@ -51,7 +51,7 @@ func mtPriorProcess(t *testing.T) (*SaturationAnalyzer, *time.Time) {
 	t.Helper()
 	clock := time.Now()
 	learnStore := capacity.NewStore()
-	learnStore.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(256, "vllm:v1")})
+	learnStore.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(256, "vllm:v1")}, time.Now())
 	first := NewSaturationAnalyzer(learnStore)
 	first.now = func() time.Time { return clock }
 	mtAnalyze(t, first, 4000, 6, nil)
@@ -68,7 +68,7 @@ func mtPriorProcess(t *testing.T) (*SaturationAnalyzer, *time.Time) {
 	}
 
 	store := capacity.NewStore()
-	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(64, "vllm:v1")})
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(64, "vllm:v1")}, time.Now())
 	second := NewSaturationAnalyzer(store)
 	second.now = func() time.Time { return clock }
 	second.RestoreLearnedState(saved)
@@ -118,8 +118,8 @@ func mtServe(a *SaturationAnalyzer, clock *time.Time, d time.Duration) {
 func TestAnImageOnlyBumpLeavesASpentBorrowSpent(t *testing.T) {
 	clock := time.Now()
 	store := capacity.NewStore()
-	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(256, "vllm:v1")})
-	store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: mtParams(256, "vllm:v1")})
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(256, "vllm:v1")}, time.Now())
+	store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: mtParams(256, "vllm:v1")}, time.Now())
 	a := NewSaturationAnalyzer(store)
 	a.now = func() time.Time { return clock }
 	states := []domain.VariantReplicaState{

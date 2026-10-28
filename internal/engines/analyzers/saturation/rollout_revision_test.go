@@ -15,7 +15,7 @@ import (
 
 // r4Rolling marks variant-a mid-rollout, or not, on params p.
 func r4Rolling(store *capacity.Store, p *capacity.EngineParams, rolling bool) {
-	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: p, RollingOut: rolling})
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: p, RollingOut: rolling}, time.Now())
 }
 
 // r4Windows is how many k2 windows a holds.

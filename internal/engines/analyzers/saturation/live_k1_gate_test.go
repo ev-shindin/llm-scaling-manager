@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"testing"
+	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
@@ -27,9 +28,9 @@ func TestASiblingWithAnotherKvTotalIsNotADonor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a, own, _, _ := lbProcess(t, 3000)
 			a.capacityStore.Update("test-ns", "test-model", "variant-a",
-				capacity.Record{EngineParams: mtParams(256, "vllm:v1"), TotalKvCapacityTokens: tc.donorKv})
+				capacity.Record{EngineParams: mtParams(256, "vllm:v1"), TotalKvCapacityTokens: tc.donorKv}, time.Now())
 			a.capacityStore.Update("test-ns", "test-model", "variant-b",
-				capacity.Record{EngineParams: mtParams(256, "vllm:v1"), TotalKvCapacityTokens: tc.own})
+				capacity.Record{EngineParams: mtParams(256, "vllm:v1"), TotalKvCapacityTokens: tc.own}, time.Now())
 			b, ok := a.borrowedK2(own, "test-model", 12800, mtParams(256, "vllm:v1"), true, true)
 			if ok != tc.wantCandidate {
 				t.Fatalf("borrowed = %v (%+v), want %v", ok, b, tc.wantCandidate)
@@ -50,7 +51,7 @@ func TestTheKvTotalGateDoesNotReachTheVariantsOwnPreviousFigure(t *testing.T) {
 	a.lowerBounds[own] = &lowerBound{prior: 5000, priorSince: a.now()}
 	a.mu.Unlock()
 	a.capacityStore.Update("test-ns", "test-model", "variant-b",
-		capacity.Record{EngineParams: mtParams(256, "vllm:v1"), TotalKvCapacityTokens: 100000})
+		capacity.Record{EngineParams: mtParams(256, "vllm:v1"), TotalKvCapacityTokens: 100000}, time.Now())
 	b, ok := a.borrowedK2(own, "test-model", 12800, mtParams(256, "vllm:v1"), true, true)
 	if !ok || !b.own || b.donorK2 != 5000 {
 		t.Fatalf("borrowed = %v %+v, want the variant's own previous figure 5000", ok, b)

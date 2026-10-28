@@ -32,7 +32,7 @@ var _ = Describe("forgetting one variant", func() {
 		states := make([]domain.VariantReplicaState, 0, len(variants))
 		rows := make([]domain.ReplicaMetrics, 0, len(variants))
 		for _, v := range variants {
-			store.Update("test-ns", "test-model", v, capacity.Record{EngineParams: params()})
+			store.Update("test-ns", "test-model", v, capacity.Record{EngineParams: params()}, time.Now())
 			states = append(states, domain.VariantReplicaState{VariantName: v, AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1})
 			r := makeReplicaMetrics("pod-"+v, v, 4000, 16000, 6, 100, 50)
 			r.Ready = true

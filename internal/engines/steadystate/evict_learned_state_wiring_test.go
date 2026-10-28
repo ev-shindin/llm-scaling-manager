@@ -98,7 +98,7 @@ func TestEvictStaleLearnedStateSweepsTheCapacityStore(t *testing.T) {
 		AcceleratorName: "NVIDIA-H200",
 		GpuCount:        1,
 		EngineParams:    &capacity.EngineParams{Engine: inferenceengine.EngineVLLM},
-	})
+	}, time.Now())
 	fresh := store.Get("ns", "m", "v1")
 	require.NotNil(t, fresh, "the record must exist before the sweep can be observed")
 

@@ -59,7 +59,7 @@ func newE1Analyzer(t *testing.T, line bool) *SaturationAnalyzer {
 	store := capacity.NewStore()
 	store.Update("test-ns", "test-model", e1Variant, capacity.Record{
 		AcceleratorName: "H200", GpuCount: 1, EngineParams: deploymentParams(),
-	})
+	}, time.Now())
 	a := NewSaturationAnalyzer(store)
 	if line {
 		publishE1Line(a)

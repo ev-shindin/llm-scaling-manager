@@ -915,7 +915,7 @@ func main() {
 		// was disabled -- which is the default.
 		registration.RegisterAlwaysOnQueries(sourceRegistry)
 		if taRegistered {
-			if err := engine.RegisterAnalyzer(throughput.AnalyzerName, throughput.NewThroughputAnalyzer()); err != nil {
+			if err := engine.RegisterAnalyzer(throughput.AnalyzerName, throughput.NewThroughputAnalyzer().WithClock(engine.Clock())); err != nil {
 				return nil, err
 			}
 			setupLog.Info("ThroughputAnalyzer registered (enabled in saturation config)")

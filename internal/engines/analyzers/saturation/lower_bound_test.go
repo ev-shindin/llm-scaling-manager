@@ -17,8 +17,8 @@ func lbProcess(t *testing.T, donorK2 float64) (a *SaturationAnalyzer, own, donor
 	now := time.Now()
 	clock = &now
 	store := capacity.NewStore()
-	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(256, "vllm:v1")})
-	store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: mtParams(256, "vllm:v1")})
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(256, "vllm:v1")}, time.Now())
+	store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: mtParams(256, "vllm:v1")}, time.Now())
 	a = NewSaturationAnalyzer(store)
 	a.now = func() time.Time { return *clock }
 	own = a.historyKey("test-model", "test-ns", "variant-b", "H100", 1, domain.RoleBoth, 50, 5)
@@ -28,8 +28,8 @@ func lbProcess(t *testing.T, donorK2 float64) (a *SaturationAnalyzer, own, donor
 }
 
 func lbSetDonor(a *SaturationAnalyzer, donor string, k2 float64) {
-	ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-	ra.Add(k2)
+	ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+	ra.AddAt(k2, time.Now())
 	a.mu.Lock()
 	a.computeCapacityHistory[donor] = ra
 	a.mu.Unlock()
@@ -73,7 +73,7 @@ func TestASpentBoundReArmsOnlyOnALowerFigure(t *testing.T) {
 				a.mu.Lock()
 				delete(a.computeCapacityHistory, donor)
 				a.mu.Unlock()
-				a.capacityStore.Update("test-ns", "test-model", "variant-c", capacity.Record{EngineParams: mtParams(256, "vllm:v1")})
+				a.capacityStore.Update("test-ns", "test-model", "variant-c", capacity.Record{EngineParams: mtParams(256, "vllm:v1")}, time.Now())
 				lbSetDonor(a, a.historyKey("test-model", "test-ns", "variant-c", "H100", 1, domain.RoleBoth, 50, 5), 3000)
 			}
 			*clock = clock.Add(time.Minute)

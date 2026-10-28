@@ -17,7 +17,7 @@ import (
 // as the rollout lasted; main recorded the reading and priced it.
 func TestARolloutWithNoFigurePricesASaturatedReadingForItsCycle(t *testing.T) {
 	a, store, clock := waProcess(mtParams(256, "vllm:v1"))
-	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(256, "vllm:v2"), RollingOut: true})
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(256, "vllm:v2"), RollingOut: true}, time.Now())
 	key := rrKey(a, "variant-a")
 
 	vc := waRun(t, a, clock, 3000, 6)
@@ -53,7 +53,7 @@ func TestAnExportedPreviousFigureLeavesNoLegacyClock(t *testing.T) {
 	a.computeCapacityHistory[own] = rrWindow(5000)
 	a.k2WindowArgs[own] = windowArgs(from)
 	a.mu.Unlock()
-	a.capacityStore.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: to})
+	a.capacityStore.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: to}, time.Now())
 
 	s := a.ExportLearnedState()
 	if s.LowerBounds[own].Prior != 5000 {

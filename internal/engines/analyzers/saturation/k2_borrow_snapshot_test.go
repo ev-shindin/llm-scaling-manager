@@ -25,8 +25,8 @@ var _ = Describe("a borrow clock across a restart", func() {
 	var clock time.Time
 	newProcess := func() *SaturationAnalyzer {
 		store := capacity.NewStore()
-		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params()})
-		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params()})
+		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params()}, time.Now())
+		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params()}, time.Now())
 		a := NewSaturationAnalyzer(store)
 		a.now = func() time.Time { return clock }
 		return a
@@ -101,8 +101,8 @@ var _ = Describe("a borrow clock across a restart", func() {
 		// conservative, for a bounded time), so it needs none.
 		lone := newProcess()
 		donor := lone.historyKey("test-model", "test-ns", "variant-a", "H100", 1, domain.RoleBoth, 50, 5)
-		ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-		ra.Add(4000)
+		ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+		ra.AddAt(4000, time.Now())
 		lone.computeCapacityHistory[donor] = ra
 		_, ok := lone.borrowedK2(own, "test-model", 12800, params(), true, true)
 		Expect(ok).To(BeTrue())

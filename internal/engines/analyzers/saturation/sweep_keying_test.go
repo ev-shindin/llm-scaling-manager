@@ -151,7 +151,7 @@ var _ = Describe("a key-resolving memo outlives what it keys", func() {
 			for i := 0; i < 5; i++ {
 				a.saturatedThroughputFor(key)
 			}
-			Expect(a.saturatedThroughput[key].Stale(time.Second)).To(BeFalse(),
+			Expect(a.saturatedThroughput[key].StaleAt(time.Now(), time.Second)).To(BeFalse(),
 				"reads kept it in use, as they should")
 
 			// Today's episode, at a much lower true rate.
