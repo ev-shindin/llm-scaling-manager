@@ -71,6 +71,18 @@ type podMetricData struct {
 	runningRequests  int
 	preemptionRate   float64
 	preemptionRateOK bool
+	// Presence bits: each is set when its series was present and finite (and
+	// in the range its block accepts), so a zero above can be told from a
+	// missing reading (domain.ReplicaMetrics.KvCacheUsageKnown and its
+	// siblings). avgITLEmpty is set instead of avgITLKnown when the ITL
+	// series was present but NaN.
+	kvUsageKnown                  bool
+	avgITLKnown                   bool
+	avgITLEmpty                   bool
+	prefillComputedTokenRateKnown bool
+	generationTokenRateKnown      bool
+	requestRateKnown              bool
+	runningRequestsKnown          bool
 }
 
 // extractPodMetrics reads every series the replica queries returned into one
@@ -118,6 +130,7 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 			podData[instanceKey].kvUsage = value.Value
 			podData[instanceKey].kvTimestamp = value.Timestamp
 			podData[instanceKey].hasKv = true
+			podData[instanceKey].kvUsageKnown = value.Finite()
 
 			logger.V(logging.DEBUG).Info("KV cache metric",
 				"instanceKey", instanceKey,
@@ -183,10 +196,12 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 	if result := results[registration.QueryCapacityQueueLength]; result != nil && !result.HasError() {
 		for _, value := range result.Values {
 			instanceKey, _, _ := c.buildInstanceKey(ctx, namespace, value.Labels)
+			// A NaN the source turned into 0 passes the range test and keeps
+			// its old value, but is not a reading: the bit needs Finite.
 			if data := podData[instanceKey]; instanceKey != "" && data != nil &&
 				value.Value >= 0 && !math.IsInf(value.Value, 0) {
 				data.capacityQueue = int(value.Value)
-				data.hasCapacityQueue = true
+				data.hasCapacityQueue = value.Finite()
 			}
 		}
 	}
@@ -434,6 +449,12 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 						vaName:  vaName,
 					}
 				}
+				// Three states (domain.ITLState): a usable mean is known; a
+				// present NaN is the 0/0 of a window with no tokens, an idle
+				// replica rather than a failed query; anything else, and a
+				// failed or absent query, sets neither.
+				podData[instanceKey].avgITLKnown = value.Finite() && value.Value > 0
+				podData[instanceKey].avgITLEmpty = value.IsNaN()
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value > 0 {
 					podData[instanceKey].avgITL = value.Value
 					podData[instanceKey].avgITLTimestamp = value.Timestamp
@@ -496,6 +517,8 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 					podData[instanceKey].prefillComputedTokenRate = value.Value
 					podData[instanceKey].prefillComputedTokenRateTimestamp = value.Timestamp
 				}
+				// A read zero is known: no prefill work, not no reading.
+				podData[instanceKey].prefillComputedTokenRateKnown = value.Finite() && value.Value >= 0
 			}
 		}
 	}
@@ -541,6 +564,7 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 				}
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value >= 0 {
 					podData[instanceKey].generationTokenRate = value.Value
+					podData[instanceKey].generationTokenRateKnown = value.Finite()
 				}
 			}
 		}
@@ -559,7 +583,9 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 				}
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value >= 0 && value.Value <= 1 {
 					podData[instanceKey].kvUsageInstant = value.Value
-					podData[instanceKey].kvUsageInstantOK = true
+					// The source turns a NaN into 0, which passes the range
+					// test above; only a finite sample is a reading.
+					podData[instanceKey].kvUsageInstantOK = value.Finite()
 				}
 			}
 		}
@@ -578,6 +604,7 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 				}
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value >= 0 {
 					podData[instanceKey].requestRate = value.Value
+					podData[instanceKey].requestRateKnown = value.Finite()
 				}
 			}
 		}

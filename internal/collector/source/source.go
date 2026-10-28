@@ -6,6 +6,7 @@ package source
 
 import (
 	"context"
+	"math"
 	"time"
 )
 
@@ -48,6 +49,27 @@ type MetricValue struct {
 	Timestamp time.Time
 	// Labels contains any labels associated with the metric (e.g., pod name).
 	Labels map[string]string
+	// NaN and Inf say the backend returned a sample that was not a finite
+	// number: NaN, or plus or minus infinity. A source that sets either
+	// stores 0 in Value, so a consumer that reads Value alone sees what it
+	// always saw. The flags let a consumer tell a series that was present
+	// but non-finite from one that was absent: an idle replica's
+	// rate(sum)/rate(count) reads 0/0 = NaN with the series present.
+	NaN bool
+	Inf bool
+}
+
+// Finite reports whether the sample was a finite number: neither flag is set
+// and Value itself is finite. Value is checked as well because a source that
+// does not set the flags may hand over a NaN or an infinity as it read it.
+func (v MetricValue) Finite() bool {
+	return !v.NaN && !v.Inf && !math.IsNaN(v.Value) && !math.IsInf(v.Value, 0)
+}
+
+// IsNaN reports whether the sample was NaN, flagged by the source or carried
+// in Value.
+func (v MetricValue) IsNaN() bool {
+	return v.NaN || math.IsNaN(v.Value)
 }
 
 // IsStale returns true if the metric sample timestamp is older than the given threshold.

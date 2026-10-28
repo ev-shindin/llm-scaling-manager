@@ -131,6 +131,11 @@ type ReplicaMetrics struct {
 	// so its empty KV cache says nothing about the router.
 	ReadySince time.Time
 
+	// KvCacheUsageKnown is set when KvCacheUsage was read from a present,
+	// finite series, so a zero means an empty cache and not a missing or NaN
+	// reading. A pod whose ranks did not all report one is not known.
+	KvCacheUsageKnown bool
+
 	// Metadata contains freshness information (optional)
 	Metadata *ReplicaMetricsMetadata `json:"metadata,omitempty"`
 
@@ -284,6 +289,14 @@ type ReplicaMetrics struct {
 	// TA notation: ITL_obs — the (k*, ITL_obs) pair drives OLS calibration of ITL(k) = A·k + B.
 	// Zero when metrics are unavailable.
 	AvgITL float64
+	// AvgITLKnown and AvgITLEmpty say which of three readings AvgITL is; read
+	// them through ITLState. Known: a finite, positive mean was read. Empty:
+	// the series was present but NaN, the 0/0 of a replica that generated no
+	// token in the window. Neither: the series was absent, the query failed,
+	// the value was not usable, or the Pod was not Ready and its timing was
+	// discarded. The two are never both set.
+	AvgITLKnown bool
+	AvgITLEmpty bool
 
 	// AvgTTFT is the average time to first token on this replica in seconds.
 	// Derived from rate(vllm:time_to_first_token_seconds_sum[1m]) / rate(..._count[1m]),
@@ -323,6 +336,11 @@ type ReplicaMetrics struct {
 	// (sgl-project/sglang issue #14303); those variants keep the request-rate
 	// reading.
 	PrefillComputedTokenRate float64
+	// PrefillComputedTokenRateKnown is set when the rate was read from a
+	// present, finite, non-negative series, so a zero means no prefill work
+	// and not a missing reading. A pod whose ranks did not all report one is
+	// not known.
+	PrefillComputedTokenRateKnown bool
 
 	// --- Fields for Throughput Analyzer ---
 
@@ -332,6 +350,10 @@ type ReplicaMetrics struct {
 	// against the demand estimate (μ_dec^obs ≈ λ_dec at steady state with no queueing).
 	// Zero when metrics are unavailable.
 	GenerationTokenRate float64
+	// GenerationTokenRateKnown is set when GenerationTokenRate was read from
+	// a present, finite, non-negative series. A pod whose ranks did not all
+	// report one is not known.
+	GenerationTokenRateKnown bool
 
 	// KvUsageInstant is the instantaneous KV cache utilization fraction on this replica (0.0–1.0).
 	// Derived from vllm:kv_cache_usage_perc (no max_over_time window).
@@ -354,6 +376,11 @@ type ReplicaMetrics struct {
 	// much KV is free, so its KV fill above the ITL band is the cap's and not
 	// memory pressure (itl.Tracker).
 	RunningRequests int
+	// RunningRequestsKnown is set when RunningRequests was read from a
+	// present, finite, non-negative series, so a zero means an empty batch
+	// and not a missing reading. A pod whose ranks did not all report one is
+	// not known.
+	RunningRequestsKnown bool
 
 	// PreemptionRate is how many sequences the replica's engines preempted
 	// per second over the last minute, summed over its ranks. Derived from
@@ -372,6 +399,49 @@ type ReplicaMetrics struct {
 	// Measures completed requests only; undercounts when requests queue in the scheduler.
 	// Zero when metrics are unavailable.
 	RequestRate float64
+	// RequestRateKnown is set when RequestRate was read from a present,
+	// finite, non-negative series. A pod whose ranks did not all report one
+	// is not known.
+	RequestRateKnown bool
+}
+
+// ITLState is which of three readings a replica's AvgITL is.
+type ITLState int
+
+const (
+	// ITLAbsent is no usable reading: the series was absent, the query failed,
+	// the value was not a positive finite number, or the Pod was not Ready.
+	ITLAbsent ITLState = iota
+	// ITLEmpty is a series present and NaN: the 0/0 of a replica that
+	// generated no token in the window. An idle replica, not a failed query.
+	ITLEmpty
+	// ITLFinite is a reading where AvgITL holds a measured, finite, positive mean.
+	ITLFinite
+)
+
+// String names the state.
+func (s ITLState) String() string {
+	switch s {
+	case ITLEmpty:
+		return "empty"
+	case ITLFinite:
+		return "finite"
+	default:
+		return "absent"
+	}
+}
+
+// ITLState reads AvgITLKnown and AvgITLEmpty as one of the three states.
+// Known wins should both be set.
+func (m ReplicaMetrics) ITLState() ITLState {
+	switch {
+	case m.AvgITLKnown:
+		return ITLFinite
+	case m.AvgITLEmpty:
+		return ITLEmpty
+	default:
+		return ITLAbsent
+	}
 }
 
 // Ranks is the number of data-parallel engine ranks the record covers, never

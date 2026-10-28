@@ -18,7 +18,7 @@ import (
 // model_name is kept, as the instance key already ties it to a seen pod.
 func (c *ReplicaMetricsCollector) extractSequenceCap(ctx context.Context, modelID, namespace string,
 	results map[string]*source.MetricResult, podData map[string]*podMetricData) {
-	each := func(query string, fn func(d *podMetricData, v float64)) {
+	each := func(query string, fn func(d *podMetricData, v float64, finite bool)) {
 		result := results[query]
 		if result == nil || result.HasError() {
 			return
@@ -32,15 +32,19 @@ func (c *ReplicaMetricsCollector) extractSequenceCap(ctx context.Context, modelI
 				continue
 			}
 			if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value >= 0 {
-				fn(podData[instanceKey], value.Value)
+				// finite is false for a NaN or an infinity the source
+				// turned into 0: the value is kept as before, but it is
+				// not a reading.
+				fn(podData[instanceKey], value.Value, value.Finite())
 			}
 		}
 	}
-	each(registration.QueryRunningRequests, func(d *podMetricData, v float64) {
+	each(registration.QueryRunningRequests, func(d *podMetricData, v float64, finite bool) {
 		d.runningRequests = int(math.Round(v))
+		d.runningRequestsKnown = finite
 	})
-	each(registration.QueryPreemptionRate, func(d *podMetricData, v float64) {
+	each(registration.QueryPreemptionRate, func(d *podMetricData, v float64, finite bool) {
 		d.preemptionRate = v
-		d.preemptionRateOK = true
+		d.preemptionRateOK = finite
 	})
 }

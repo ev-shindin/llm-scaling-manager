@@ -47,6 +47,10 @@ import (
 //     engine, the fullest, which the saturation guards judge. The capacity
 //     part of the queue (CapacityQueueLength, MaxRankCapacityQueueLength)
 //     merges the same way, and is known only if every instance reported it.
+//   - Every other presence bit (the ...Known fields) is likewise known only if
+//     every instance reported it. ITL's three states merge as described at
+//     the loop: known if one rank measured a mean and none is absent, empty
+//     only if every rank is.
 //   - Request-shape ratios (input/output tokens, service time, TTFT) are
 //     weighted by RequestRate: they describe the average request, so the
 //     instance serving more of them should dominate. ITL is a mean per
@@ -138,10 +142,29 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	// count none of its queue as waiting for capacity.
 	pod.CapacityQueueKnown = true
 	pod.PreemptionRateKnown = true
+	pod.KvCacheUsageKnown = true
+	pod.PrefillComputedTokenRateKnown = true
+	pod.GenerationTokenRateKnown = true
+	pod.RequestRateKnown = true
+	pod.RunningRequestsKnown = true
+	// ITL has three states (domain.ITLState). The pod's mean is known when
+	// at least one rank measured one and no rank is absent: an idle rank adds
+	// no tokens to the per-token mean, a missing one would hide its own. It
+	// is empty only when every rank is.
+	itlAnyKnown, itlAllEmpty, itlNoneAbsent := false, true, true
 	for _, m := range group {
 		pod.KvUsageInstantKnown = pod.KvUsageInstantKnown && m.KvUsageInstantKnown
 		pod.PreemptionRateKnown = pod.PreemptionRateKnown && m.PreemptionRateKnown
 		pod.CapacityQueueKnown = pod.CapacityQueueKnown && m.CapacityQueueKnown
+		pod.KvCacheUsageKnown = pod.KvCacheUsageKnown && m.KvCacheUsageKnown
+		pod.PrefillComputedTokenRateKnown = pod.PrefillComputedTokenRateKnown && m.PrefillComputedTokenRateKnown
+		pod.GenerationTokenRateKnown = pod.GenerationTokenRateKnown && m.GenerationTokenRateKnown
+		pod.RequestRateKnown = pod.RequestRateKnown && m.RequestRateKnown
+		pod.RunningRequestsKnown = pod.RunningRequestsKnown && m.RunningRequestsKnown
+		state := m.ITLState()
+		itlAnyKnown = itlAnyKnown || state == domain.ITLFinite
+		itlAllEmpty = itlAllEmpty && state == domain.ITLEmpty
+		itlNoneAbsent = itlNoneAbsent && state != domain.ITLAbsent
 		pod.CapacityQueueLength += m.CapacityQueueLength
 		pod.MaxRankCapacityQueueLength = max(pod.MaxRankCapacityQueueLength, m.BusiestRankCapacityQueue())
 		pod.NumGpuBlocks += m.NumGpuBlocks
@@ -169,6 +192,8 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	if !pod.CapacityQueueKnown {
 		pod.CapacityQueueLength, pod.MaxRankCapacityQueueLength = 0, 0
 	}
+	pod.AvgITLKnown = itlAnyKnown && itlNoneAbsent
+	pod.AvgITLEmpty = itlAllEmpty
 
 	// BlockSize is a per-instance config value, uniform across a pod's ranks;
 	// keeping the first preserves NumGpuBlocks × BlockSize == TotalKvCapacityTokens.

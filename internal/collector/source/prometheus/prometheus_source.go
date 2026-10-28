@@ -224,7 +224,7 @@ func (p *PrometheusSource) parseVector(vec model.Vector) []source.MetricValue {
 	values := make([]source.MetricValue, 0, len(vec))
 	for _, sample := range vec {
 		value := float64(sample.Value)
-		fixNaN(&value)
+		nan, inf := fixNaN(&value)
 
 		labels := make(map[string]string)
 		for k, v := range sample.Metric {
@@ -235,6 +235,8 @@ func (p *PrometheusSource) parseVector(vec model.Vector) []source.MetricValue {
 			Value:     value,
 			Timestamp: sample.Timestamp.Time(),
 			Labels:    labels,
+			NaN:       nan,
+			Inf:       inf,
 		})
 	}
 	return values
@@ -247,11 +249,13 @@ func (p *PrometheusSource) parseScalar(scalar *model.Scalar) []source.MetricValu
 	}
 
 	value := float64(scalar.Value)
-	fixNaN(&value)
+	nan, inf := fixNaN(&value)
 
 	return []source.MetricValue{{
 		Value:     value,
 		Timestamp: scalar.Timestamp.Time(),
+		NaN:       nan,
+		Inf:       inf,
 	}}
 }
 
@@ -267,7 +271,7 @@ func (p *PrometheusSource) parseMatrix(matrix model.Matrix) []source.MetricValue
 		// Get the latest sample
 		latest := stream.Values[len(stream.Values)-1]
 		value := float64(latest.Value)
-		fixNaN(&value)
+		nan, inf := fixNaN(&value)
 
 		labels := make(map[string]string)
 		for k, v := range stream.Metric {
@@ -278,6 +282,8 @@ func (p *PrometheusSource) parseMatrix(matrix model.Matrix) []source.MetricValue
 			Value:     value,
 			Timestamp: latest.Timestamp.Time(),
 			Labels:    labels,
+			NaN:       nan,
+			Inf:       inf,
 		})
 	}
 	return values
@@ -334,11 +340,15 @@ func (p *PrometheusSource) MustGet(ctx context.Context, queryName string, params
 
 // --- Helpers ---
 
-// fixNaN replaces NaN and Inf values with 0.
-func fixNaN(v *float64) {
-	if math.IsNaN(*v) || math.IsInf(*v, 0) {
+// fixNaN replaces NaN and Inf values with 0, and reports which of the two it
+// replaced, so the sample can say it was non-finite (source.MetricValue.NaN
+// and Inf) while its Value reads as it always did.
+func fixNaN(v *float64) (nan, inf bool) {
+	nan, inf = math.IsNaN(*v), math.IsInf(*v, 0)
+	if nan || inf {
 		*v = 0
 	}
+	return nan, inf
 }
 
 // countSuccessful counts results without errors.
