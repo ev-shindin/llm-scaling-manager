@@ -1339,7 +1339,7 @@ physical limiter: drop gpu-inventory from WVA_LIMITER."
 # mid-flow state between `deploy-wva` and `scaledobjects-apply`, or a forgotten
 # registration step -- and NOTHING IN CLUSTER STATE DISTINGUISHES THEM.
 wva_report_scaledobjects() {
-    local ns="${WVA_WATCH_NS:-$WVA_NS}" count where in_where sc="" one
+    local ns="${WVA_WATCH_NS:-$WVA_NS}" count where in_where one
     if declare -F wva_watch_is_multi >/dev/null && wva_watch_is_multi; then
         for one in $(wva_watch_words); do
             (WVA_WATCH_NS="$one"; wva_report_scaledobjects) || true
@@ -1352,7 +1352,7 @@ wva_report_scaledobjects() {
     # SCOPE=cluster, scan only the controller's namespace and find nothing.
     where="-n $ns" in_where="in $ns"
     if [ "$(wva_install_scope)" = cluster ]; then
-        where="-A" in_where="on the cluster" sc=" SCOPE=cluster"
+        where="-A" in_where="on the cluster"
     fi
 
     # `|| count=0` is the "never fails" contract above, not decoration: under the
@@ -1401,12 +1401,26 @@ wva_report_scaledobjects() {
             log_warning "    Registered, but NOT Ready — KEDA is not acting on these, so WVA is never called about them and they do not scale:"
             printf '%s\n' "$notready" | while IFS= read -r line; do log_warning "$line"; done
             log_warning "      A ScaledObject that outlived its target stays in this state even after the target comes back. Recreate it:"
-            log_warning "      make scaledobjects-apply WVA_DEFAULT_SO_PLAN=<plan>   # after deleting the stale one"
+            log_warning "      $(wva_make_cmd scaledobjects-apply) WVA_DEFAULT_SO_PLAN=<plan>   # after deleting the stale one"
         fi
         return 0
     fi
+    # The count above is ScaledObjects naming THIS scaler, not every ScaledObject:
+    # mid-migration, upstream ones still sit on the same workloads. Saying "none"
+    # beside them read as a fresh cluster. The commands go through wva_make_cmd
+    # so they carry WVA_NS: printed without it, apply looks for the scaler in the
+    # default namespace and exits 2.
+    local others
+    # shellcheck disable=SC2086
+    others=$(kubectl get scaledobject $where -o json 2>/dev/null | jq -r '
+        [ .items[]?
+          | select([ .spec.triggers[]?.metadata.scalerAddress // ""
+                     | select(startswith("wva-external-scaler.")) ] | length == 0) ] | length' 2>/dev/null) || others=0
     # Deliberately log_info, not a warning: this is the expected state here.
-    log_info "  ScaledObjects: none $in_where yet — registration is the next step, and nothing scales until it runs:"
-    log_info "      make scaledobjects-plan${sc} WVA_DEFAULT_SO_PLAN=wva-plan.yaml   # then edit it"
-    log_info "      make scaledobjects-apply${sc} WVA_DEFAULT_SO_PLAN=wva-plan.yaml"
+    log_info "  ScaledObjects: none $in_where registered with this scaling manager yet — registration is the next step, and nothing scales until it runs:"
+    if [ "${others:-0}" -gt 0 ]; then
+        log_info "    $others other ScaledObject(s) $in_where use another scaler. Any that target these model servers are adopted in the plan (apply: adopt), not registered fresh."
+    fi
+    log_info "      $(wva_make_cmd scaledobjects-plan) WVA_DEFAULT_SO_PLAN=wva-plan.yaml   # then edit it"
+    log_info "      $(wva_make_cmd scaledobjects-apply) WVA_DEFAULT_SO_PLAN=wva-plan.yaml"
 }
