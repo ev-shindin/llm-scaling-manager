@@ -15,6 +15,7 @@ jobs:
     # one adds `do-not-merge/hold` to a PR whose base is not main, and a fork's
     # GITHUB_TOKEN cannot write labels on the `pull_request` event. The hold is
     # advisory anyway — the base-branch rule it enforces is unchanged, and a
-    # same-repo PR still gets held.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # same-repo PR still gets held. A release-MAJOR.MINOR branch is a patch
+    # line, not a stacked PR, so a PR to one is not held.
+    if: github.event.pull_request.head.repo.full_name == github.repository && !startsWith(github.base_ref, 'release-')
     uses: llm-d/llm-d-infra/.github/workflows/reusable-non-main-gatekeeper.yaml@49a41ad0160a60f8838f541173ecc4ff87bc2632 # main as of 2026-10-12
