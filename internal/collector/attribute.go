@@ -317,7 +317,17 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 	// applies to it as well. A first-token latency longer than the pod has
 	// existed is the same impossibility as a service time longer than it.
 	avgTTFT := data.avgTTFT
+	avgITLKnown, avgITLEmpty := data.avgITLKnown, data.avgITLEmpty
 	if !ready {
+		// The ITL reading is discarded, so its state is absent: neither a
+		// measured mean nor an idle replica, since no traffic is routed to
+		// the Pod yet and its window says nothing about either.
+		//
+		// ITL ONLY. The other presence bits stay as read: their values are
+		// kept for a not-Ready Pod, and a bit says whether its value was
+		// read, not whether the Pod is serving. Service time and TTFT have
+		// no presence bit.
+		avgITLKnown, avgITLEmpty = false, false
 		// At DEFAULT, not DEBUG. The incident this guards against was
 		// visible only as a moved demand floor; now that both layers
 		// discard the reading, a silent drop would leave the NEXT
@@ -433,6 +443,15 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		PreemptionRate:           data.preemptionRate,
 		PreemptionRateKnown:      data.preemptionRateOK,
 		RequestRate:              data.requestRate,
+		// Presence bits: present and finite. KV is known only beside a KV
+		// series that was read at all.
+		KvCacheUsageKnown:             data.hasKv && data.kvUsageKnown,
+		AvgITLKnown:                   avgITLKnown,
+		AvgITLEmpty:                   avgITLEmpty,
+		PrefillComputedTokenRateKnown: data.prefillComputedTokenRateKnown,
+		GenerationTokenRateKnown:      data.generationTokenRateKnown,
+		RequestRateKnown:              data.requestRateKnown,
+		RunningRequestsKnown:          data.runningRequestsKnown,
 		Metadata: &domain.ReplicaMetricsMetadata{
 			CollectedAt:     collectedAt,
 			Age:             freshnessAge,
