@@ -1214,9 +1214,9 @@ wva_prometheus_url_namespace() {
 #                              its account is known, not read
 #
 # Never from an AUTO-DETECTED URL. wva_detect_prometheus_url returns the first
-# prometheus-operated Service it finds in the order the API lists Prometheus
-# CRs; on a shared cluster that is whichever namespace sorts first, usually
-# someone else's, and the grant then went to an account in a namespace nobody
+# Prometheus CR, in the order the API lists them, that selects the model
+# namespace -- or, when none is known to, simply the first; on a shared cluster
+# that is usually someone else's, and the grant then went to an account in a namespace nobody
 # named. Never "the first Prometheus CR on the cluster" for the same reason, and
 # never `default`, which is what a CR with no serviceAccountName runs as: every
 # Pod in that namespace without its own account would be granted. PROMETHEUS_URL

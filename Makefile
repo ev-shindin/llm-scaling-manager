@@ -3045,6 +3045,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# found, and the controller crash-looped on the x509 name mismatch: all of
 	@# it parses.
 	@KUSTOMIZE=$(KUSTOMIZE) bash hack/check-prometheus-url.sh
+	@echo "Checking that the detected Prometheus scrapes the model namespace..."
+	@# Runs the detection against several stubbed Prometheus resources. The
+	@# first one listed, a per-user Prometheus selecting only its own
+	@# namespace, was picked and the controller read no series: it parses.
+	@bash hack/check-prometheus-detect.sh
 	@# An alert that errors at evaluation, or never fires, loads cleanly; promtool
 	@# evaluates the shipped rules on synthetic series.
 	@$(MAKE) --no-print-directory promtool

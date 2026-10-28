@@ -558,15 +558,58 @@ wva_detect_prometheus_url() {
         return 0
     fi
 
-    # A Prometheus Operator install: the first Prometheus CR with a Service in
-    # front of it. Which Service is wva_pick_prometheus_service's decision.
+    # A Prometheus Operator install: the first Prometheus CR that scrapes the
+    # model namespaces and has a Service in front of it. Which Service is
+    # wva_pick_prometheus_service's decision.
+    #
+    # The API lists CRs by namespace name, so "the first CR" alone is whichever
+    # namespace sorts first. On a shared cluster that was a new per-user
+    # Prometheus selecting monitors only in its own namespace: the controller
+    # read no series, every variant looked idle, and nothing reported an error.
+    local crs targets cov v why want
+    crs="$(kubectl get prometheuses.monitoring.coreos.com -A \
+        -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+    targets="$(wva_prometheus_target_namespaces | paste -sd' ' -)"
+    if [ -n "$crs" ] && [ -n "$targets" ]; then
+        if cov="$(wva_prometheus_coverage "$targets")" && [ -n "$cov" ]; then
+            while read -r ns name v why; do
+                [ "$v" = yes ] || continue
+                if wva_pick_prometheus_service "$ns" "$name"; then
+                    return 0
+                fi
+            done <<< "$cov"
+            # None is known to scrape them. Still a fallback -- a URL that may
+            # be right beats the shipped default, which names a Prometheus this
+            # installer would deploy -- but said out loud, with the reasons.
+            log_warning "No Prometheus is known to scrape $targets, so the one picked may read no metrics for your models:"
+            while read -r ns name v why; do
+                [ -n "$ns" ] || continue
+                log_warning "  $ns/$name: $why"
+            done <<< "$cov"
+            log_warning "  Pass PROMETHEUS_URL=<url> of the Prometheus that scrapes $targets."
+            # One that could not be checked before one known not to scrape them.
+            for want in unknown no; do
+                while read -r ns name v why; do
+                    [ "$v" = "$want" ] || continue
+                    if wva_pick_prometheus_service "$ns" "$name"; then
+                        return 0
+                    fi
+                done <<< "$cov"
+            done
+        else
+            log_warning "Could not check which Prometheus scrapes $targets (reading the Prometheus resources failed), so the first one listed is used. Pass PROMETHEUS_URL=<url> to choose."
+        fi
+    elif [ -n "$crs" ] && [ "$(printf '%s\n' "$crs" | grep -c .)" -gt 1 ]; then
+        # Cluster scope with no namespace named: nothing to check against, and
+        # guessing one is how a check passes for the wrong namespace.
+        log_info "Several Prometheus resources and no model namespace named, so the first one is used without checking what it scrapes. Pass NAMESPACE=<model namespace> to check, or PROMETHEUS_URL=<url> to choose."
+    fi
     while read -r ns name; do
         [ -n "$ns" ] || continue
         if wva_pick_prometheus_service "$ns" "$name"; then
             return 0
         fi
-    done < <(kubectl get prometheuses.monitoring.coreos.com -A \
-        -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+    done <<< "$crs"
 
     # Last resort: a Service serving a Prometheus web port, in the namespaces this
     # install already knows about. Deliberately NOT `get svc -A`: on a large
@@ -589,6 +632,105 @@ wva_detect_prometheus_url() {
     done
 
     return 0
+}
+
+# wva_prometheus_target_namespaces echoes the namespaces the models run in, one
+# per line, as far as this install was told: the WVA_WATCH_NS list, else
+# NAMESPACE as the caller set it. Nothing when neither was named -- a
+# cluster-scoped install with no NAMESPACE manages every namespace, and picking
+# one to check against would be a guess.
+wva_prometheus_target_namespaces() {
+    case "${WVA_WATCH_NS:-}" in
+        ''|auto) ;;
+        *) wva_watch_list; return 0 ;;
+    esac
+    [ -z "${NAMESPACE_EXPLICIT:-}" ] || printf '%s\n' "$NAMESPACE_EXPLICIT"
+    return 0
+}
+
+# The labels WVA's own monitors carry (config/modelserver-metrics and
+# wva_epp_scrape_docs), for a namespace that has no monitor of that kind yet:
+# setup-prereqs adds them later, and a Prometheus whose monitor selector they
+# do not match will not scrape them either.
+WVA_SHIPPED_PODMONITOR_LABELS='{"app.kubernetes.io/name":"workload-variant-autoscaler","app.kubernetes.io/component":"modelserver-metrics","llm-d.ai/applied-by":"wva-setup-prereqs"}'
+WVA_SHIPPED_SERVICEMONITOR_LABELS='{"app.kubernetes.io/name":"workload-variant-autoscaler","app.kubernetes.io/component":"epp-metrics","llm-d.ai/applied-by":"wva-setup-prereqs"}'
+
+# wva_prometheus_coverage echoes "<namespace> <name> <yes|no|unknown> <why>"
+# for every Prometheus CR, in the order the API lists them: whether it scrapes
+# every namespace in $1 (space-separated). Fails when the CRs cannot be read.
+#
+# Prometheus Operator semantics, per monitor kind:
+#   *MonitorNamespaceSelector  {} every namespace; unset only the CR's own;
+#                              otherwise matchLabels / matchExpressions against
+#                              the namespace's labels
+#   *MonitorSelector           {} every monitor; unset none; otherwise the
+#                              labels of the monitors in that namespace (WVA's
+#                              own when there are none yet)
+#
+# BOTH kinds must select it. vLLM is scraped by a PodMonitor and the EPP by a
+# ServiceMonitor; a Prometheus that has only one of them gives the controller
+# half its signals (saturation without the flow-control queue, or the reverse),
+# which looks like a working install with a scaler that never moves.
+#
+# A read that is refused is "unknown", never yes or no. A namespace whose
+# labels cannot be read is still decided when the selector names only
+# kubernetes.io/metadata.name, which is the namespace's name.
+wva_prometheus_coverage() {
+    local targets="$1" crs ns labels pm sm info='[]'
+    crs="$(kubectl get prometheuses.monitoring.coreos.com -A -o json 2>/dev/null)" || return 1
+    printf '%s' "$crs" | jq -e '.items | type == "array"' >/dev/null 2>&1 || return 1
+    for ns in $targets; do
+        labels="$(kubectl get namespace "$ns" -o json 2>/dev/null | jq -c '.metadata.labels // {}' 2>/dev/null)" || labels=""
+        pm="$(kubectl get podmonitors.monitoring.coreos.com -n "$ns" -o json 2>/dev/null \
+            | jq -c '[.items[]? | .metadata.labels // {}]' 2>/dev/null)" || pm=""
+        sm="$(kubectl get servicemonitors.monitoring.coreos.com -n "$ns" -o json 2>/dev/null \
+            | jq -c '[.items[]? | .metadata.labels // {}]' 2>/dev/null)" || sm=""
+        info="$(jq -c --arg ns "$ns" --argjson l "${labels:-null}" --argjson pm "${pm:-null}" --argjson sm "${sm:-null}" \
+            '. + [{ns: $ns, labels: $l, pm: $pm, sm: $sm}]' <<< "$info")" || return 1
+    done
+    printf '%s' "$crs" | jq -r --argjson info "$info" \
+        --argjson shippm "$WVA_SHIPPED_PODMONITOR_LABELS" --argjson shipsm "$WVA_SHIPPED_SERVICEMONITOR_LABELS" '
+        def matches($sel; $l):
+            (($sel.matchLabels // {}) | to_entries | all(. as $e | $l[$e.key] == $e.value))
+            and (($sel.matchExpressions // []) | all(. as $x
+                | ($l | has($x.key)) as $has
+                | if $x.operator == "In" then $has and (($x.values // []) | any(. == $l[$x.key]))
+                  elif $x.operator == "NotIn" then ($has | not) or (($x.values // []) | all(. != $l[$x.key]))
+                  elif $x.operator == "Exists" then $has
+                  elif $x.operator == "DoesNotExist" then ($has | not)
+                  else false end));
+        def selkeys($sel): [(($sel.matchLabels // {}) | keys[]), (($sel.matchExpressions // [])[] | .key)];
+        def nsv($sel; $crns; $n):
+            if $sel == null then (if $crns == $n.ns then "yes" else "no" end)
+            elif $n.labels != null then (if matches($sel; $n.labels) then "yes" else "no" end)
+            elif (selkeys($sel) | all(. == "kubernetes.io/metadata.name")) then
+                (if matches($sel; {"kubernetes.io/metadata.name": $n.ns}) then "yes" else "no" end)
+            else "unknown" end;
+        def monv($sel; $mons; $ship):
+            if $sel == null then "no"
+            elif ((if ($mons // []) | length > 0 then $mons else [$ship] end) | any(. as $m | matches($sel; $m))) then "yes"
+            elif $mons == null then "unknown"
+            else "no" end;
+        def why($c):
+            if $c.v == "unknown" then
+                (if ($c.what | endswith("NamespaceSelector")) then "could not check (reading the labels of namespace \($c.ns) failed)"
+                 else "could not check (listing \($c.kind)s in \($c.ns) failed)" end)
+            elif ($c.what | endswith("NamespaceSelector")) then "its \($c.what) does not select \($c.ns)"
+            else "its \($c.what) selects no \($c.kind) in \($c.ns)" end;
+        .items[]
+        | .metadata.namespace as $crns | .metadata.name as $name | (.spec // {}) as $s
+        | [ $info[] as $n
+            | {ns: $n.ns, kind: "PodMonitor", what: "podMonitorNamespaceSelector",
+               v: nsv($s.podMonitorNamespaceSelector; $crns; $n)},
+              {ns: $n.ns, kind: "ServiceMonitor", what: "serviceMonitorNamespaceSelector",
+               v: nsv($s.serviceMonitorNamespaceSelector; $crns; $n)},
+              {ns: $n.ns, kind: "PodMonitor", what: "podMonitorSelector",
+               v: monv($s.podMonitorSelector; $n.pm; $shippm)},
+              {ns: $n.ns, kind: "ServiceMonitor", what: "serviceMonitorSelector",
+               v: monv($s.serviceMonitorSelector; $n.sm; $shipsm)} ] as $c
+        | (if any($c[]; .v == "no") then "no" elif all($c[]; .v == "yes") then "yes" else "unknown" end) as $v
+        | (if $v == "yes" then "scrapes them" else why([$c[] | select(.v == $v)][0]) end) as $why
+        | "\($crns) \($name) \($v) \($why)"'
 }
 
 # wva_pick_prometheus_service echoes the URL of the Service to reach Prometheus
