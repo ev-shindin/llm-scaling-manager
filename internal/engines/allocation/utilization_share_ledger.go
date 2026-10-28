@@ -116,6 +116,12 @@ type ShareTransfer struct {
 	// the ones to mark, because the holes are planned where they run (§6.5).
 	// Empty when any of the donor's pods will do.
 	PlannedPods []string
+	// HoleNodes is where the donor pods this transfer removes run: their GPUs
+	// per node, recorded when they are marked (RecordHoles) or read back with
+	// the marks after a restart. The holes open there. Empty when no pod's
+	// node is known; its promise then counts against no node in particular
+	// (PromisedHoles).
+	HoleNodes map[string]int
 	// SetID links the transfers of one donor set (§6.5): several donor
 	// replicas funding one receiver replica, each receiver pod by a donor pod
 	// of its own. The primary carries the receiver and its ID is the set's;
@@ -146,6 +152,9 @@ type ShareTransfer struct {
 	// forgotten, aborted -- is aborted too: its receiver's replica will never
 	// have all its holes.
 	setReleased, setPending int
+	// setHoles is, on a set's primary, where its released contributors'
+	// holes are: their HoleNodes, added as each releases.
+	setHoles map[string]int
 	// plannedRunning is set, each cycle, while one of PlannedPods still runs;
 	// plannedUnknown while one of them could not be read.
 	plannedRunning, plannedUnknown bool
@@ -326,7 +335,9 @@ const shareReleaseSamples = 20
 // for as long as the release takes (id names the transfer, until is zero), then
 // for hold more, while the wake's pod lands.
 type shareWakeHold struct {
-	gpus  int
+	gpus int
+	// holes is where the redirected transfer's holes are (HoleNodes).
+	holes map[string]int
 	id    string
 	hold  time.Duration
 	until time.Time
@@ -499,6 +510,84 @@ func (l *ShareLedger) Promised() int {
 	return p
 }
 
+// ShareHoles is the GPUs promised to receivers or held for wakes and not yet
+// taken (Promised, WakeHeld), by where their holes are: Nodes on the node a
+// hole is known to be on, Unplaced where it is not known.
+type ShareHoles struct {
+	Nodes    map[string]int
+	Unplaced int
+}
+
+// Total is every GPU h holds back, placed or not.
+func (h ShareHoles) Total() int {
+	n := h.Unplaced
+	for _, g := range h.Nodes {
+		n += g
+	}
+	return n
+}
+
+// add places gpus on holes, the nodes in name order, each up to what it
+// opened; what no known hole covers is unplaced.
+func (h *ShareHoles) add(gpus int, holes ...map[string]int) {
+	if gpus <= 0 {
+		return
+	}
+	at := map[string]int{}
+	for _, m := range holes {
+		for n, g := range m {
+			at[n] += g
+		}
+	}
+	for _, n := range slices.Sorted(maps.Keys(at)) {
+		take := min(gpus, at[n])
+		if take <= 0 {
+			continue
+		}
+		if h.Nodes == nil {
+			h.Nodes = map[string]int{}
+		}
+		h.Nodes[n] += take
+		gpus -= take
+	}
+	h.Unplaced += gpus
+}
+
+// PromisedHoles is Promised and WakeHeld together, each GPU on the node its
+// hole is on when the ledger knows it (HoleNodes): a receiver's pod, or a
+// wake's, waits for that hole. Its Total is Promised() + WakeHeld(now).
+func (l *ShareLedger) PromisedHoles(now time.Time) ShareHoles {
+	var h ShareHoles
+	for _, t := range l.transfers {
+		switch t.State {
+		case ShareFilling:
+			h.add(t.GPUs, t.HoleNodes, t.setHoles)
+		case ShareReleasing:
+			h.add(t.setReleased, t.setHoles)
+		}
+	}
+	l.WakeHeld(now) // drops the expired holds
+	for _, w := range l.wakeHolds {
+		h.add(w.gpus, w.holes)
+	}
+	return h
+}
+
+// RecordHoles records where transfer id's holes open: the GPUs of the donor
+// pods it marked, per node (HoleNodes).
+func (l *ShareLedger) RecordHoles(id string, holes map[string]int) {
+	for _, t := range l.transfers {
+		if t.ID == id {
+			t.HoleNodes = maps.Clone(holes)
+		}
+	}
+	for i := range l.wakeHolds {
+		if l.wakeHolds[i].id == id {
+			l.wakeHolds[i].holes = maps.Clone(holes)
+		}
+	}
+}
+
 // Start records a newly admitted transfer, in Releasing.
 func (l *ShareLedger) Start(t ShareTransfer, held map[string]int, now time.Time, tm ShareTimings) ShareTransfer {
 	l.nextID++
@@ -667,6 +756,12 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 				if p.ID == t.SetID && p.State == ShareReleasing {
 					p.setReleased += t.DonorGPUs
 					p.setPending--
+					for n, g := range t.HoleNodes {
+						if p.setHoles == nil {
+							p.setHoles = map[string]int{}
+						}
+						p.setHoles[n] += g
+					}
 				}
 			}
 		}
@@ -858,7 +953,7 @@ func (l *ShareLedger) Redirect(id string, hold time.Duration) (ShareTransfer, bo
 		if t.ID == id && redirectable(t) {
 			prev := *t
 			t.Receiver, t.ReceiverVariant, t.GPUs, t.Urgent = "", "", 0, false
-			l.wakeHolds = append(l.wakeHolds, shareWakeHold{gpus: t.DonorGPUs, id: t.ID, hold: hold})
+			l.wakeHolds = append(l.wakeHolds, shareWakeHold{gpus: t.DonorGPUs, holes: maps.Clone(t.HoleNodes), id: t.ID, hold: hold})
 			return prev, true
 		}
 	}
