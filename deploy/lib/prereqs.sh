@@ -1362,14 +1362,20 @@ wva_report_scaledobjects() {
     # fails" contract above: under `set -e` in the caller a non-zero exit would
     # otherwise abort the whole script here.
     #
-    # "Registered with this scaling manager" is a trigger naming the scaler of
-    # THIS install (wva_names_scaler, with WVA_NS): the scaler of another install
-    # on the same cluster is another scaler, not a registration with this one.
+    # "Registered with WVA" here is a trigger naming the scaler of THIS install
+    # (wva_names_scaler, with WVA_NS): the scaler of another install on the same
+    # cluster is another scaler, not a registration with this one.
+    #
+    # The reason quoted is kubectl's own error line, not stderr's first line:
+    # client-go logs discovery trouble (E1028 ... memcache.go ... could not get
+    # resource list for external.metrics.k8s.io) ahead of it, and quoting that
+    # named an unrelated API as the reason.
     local so rc=0 count
     # shellcheck disable=SC2086 # $where is one or two words by construction
     kc_capture get scaledobject $where -o json || rc=$?
     if [ "$rc" -ne 0 ]; then
-        so="${KC_ERR%%$'\n'*}"
+        so=$(printf '%s\n' "$KC_ERR" | grep -m1 -E '^(error|Error from server)' || true)
+        [ -n "$so" ] || so=$(printf '%s\n' "$KC_ERR" | grep -v '^[[:space:]]*$' | tail -n1 || true)
         log_warning "  ScaledObjects: could not list them $in_where (${so:-kubectl exited $rc}) -- not checked."
         return 0
     fi
@@ -1379,7 +1385,7 @@ wva_report_scaledobjects() {
           | select(any(.spec.triggers[]?; .metadata.scalerAddress | wva_names_scaler($ns))) ] | length' 2>/dev/null) || count=""
     case "$count" in
         ''|*[!0-9]*)
-            log_warning "  ScaledObjects: the list $in_where could not be read -- not checked."
+            log_warning "  ScaledObjects: could not list them $in_where (kubectl did not return a readable list) -- not checked."
             return 0 ;;
     esac
     if [ "$count" -gt 0 ]; then
@@ -1430,7 +1436,7 @@ wva_report_scaledobjects() {
         [ .items[]?
           | select(any(.spec.triggers[]?; .metadata.scalerAddress | wva_names_scaler($ns)) | not) ] | length' 2>/dev/null) || others=0
     # Deliberately log_info, not a warning: this is the expected state here.
-    log_info "  ScaledObjects: none $in_where registered with this scaling manager yet — registration is the next step, and nothing scales until it runs:"
+    log_info "  ScaledObjects: none $in_where registered with WVA yet — registration is the next step, and nothing scales until it runs:"
     if [ "${others:-0}" -gt 0 ]; then
         log_info "    $others other ScaledObject(s) $in_where use another scaler. Any that target these model servers are adopted in the plan (apply: adopt), not registered fresh."
     fi

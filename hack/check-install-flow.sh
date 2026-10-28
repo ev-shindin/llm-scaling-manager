@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=103
+EXPECT_CASES=106
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -1047,11 +1047,16 @@ SO_TWO='{"items":[
 so_report() {
     (
         WVA_SCOPE="$1"
-        # SO_FORBID refuses both lists; SO_NS_LIST is what the -n list returns.
+        # SO_FORBID refuses both lists, with SO_KLOG on stderr ahead of the
+        # error when set; SO_NS_LIST is what the -n list returns.
         kubectl() {
             case "$*" in
                 "get scaledobject "*)
-                    [ -z "${SO_FORBID:-}" ] || { echo 'Error from server (Forbidden): scaledobjects.keda.sh is forbidden: User "u" cannot list resource "scaledobjects"' >&2; return 1; } ;;
+                    [ -z "${SO_FORBID:-}" ] || {
+                        [ -z "${SO_KLOG:-}" ] || printf '%s\n' "$SO_KLOG" >&2
+                        echo 'Error from server (Forbidden): scaledobjects.keda.sh is forbidden: User "u" cannot list resource "scaledobjects"' >&2
+                        return 1
+                    } ;;
             esac
             case "$*" in
                 "get scaledobject -A -o json")
@@ -1084,7 +1089,7 @@ else
     fail "cluster scope: the printed plan/apply commands must carry SCOPE=cluster" "$out"
 fi
 out="$(so_report namespace)"
-if printf '%s' "$out" | grep -q 'none in wva-system registered with this scaling manager yet' && ! printf '%s' "$out" | grep -q 'SCOPE=cluster'; then
+if printf '%s' "$out" | grep -q 'none in wva-system registered with WVA yet' && ! printf '%s' "$out" | grep -q 'SCOPE=cluster'; then
     ok "namespace scope: only the controller's namespace is read"
 else
     fail "namespace scope must read only its own namespace" "$out"
@@ -1109,12 +1114,12 @@ fi
 # The count is ScaledObjects naming this scaler. Upstream ones on the same
 # workloads are not "none on the cluster": say what was counted, and name them.
 out="$(SO_LIST='{"items":[{"metadata":{"namespace":"team-a","name":"up"},"spec":{"triggers":[{"type":"prometheus","metadata":{"serverAddress":"http://prom:9090"}}]}}]}' so_report cluster)"
-if printf '%s' "$out" | grep -q 'none on the cluster registered with this scaling manager yet' \
+if printf '%s' "$out" | grep -q 'none on the cluster registered with WVA yet' \
     && printf '%s' "$out" | grep -q '1 other ScaledObject(s) on the cluster use another scaler' \
     && ! printf '%s' "$out" | grep -q 'none on the cluster yet'; then
     ok "cluster scope: an upstream ScaledObject is named, not reported as none on the cluster"
 else
-    fail "cluster scope: with only an upstream ScaledObject, say none registered with this scaling manager and name the other one" "$out"
+    fail "cluster scope: with only an upstream ScaledObject, say none registered with WVA and name the other one" "$out"
 fi
 out="$(SO_NONE=1 so_report cluster)"
 if ! printf '%s' "$out" | grep -q 'other ScaledObject'; then
@@ -1125,7 +1130,7 @@ fi
 # The scaler of another install is another scaler: a ScaledObject naming it is
 # not registered with this one, and is named among the others.
 out="$(SO_LIST='{"items":[{"metadata":{"namespace":"team-a","name":"o"},"spec":{"triggers":[{"metadata":{"scalerAddress":"wva-external-scaler.wva-system-2.svc:9090"}}]},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}' so_report cluster)"
-if printf '%s' "$out" | grep -q 'none on the cluster registered with this scaling manager yet' \
+if printf '%s' "$out" | grep -q 'none on the cluster registered with WVA yet' \
     && printf '%s' "$out" | grep -q '1 other ScaledObject(s) on the cluster use another scaler' \
     && ! printf '%s' "$out" | grep -q 'already registered'; then
     ok "cluster scope: a ScaledObject naming the scaler of another install is not counted as registered here"
@@ -1143,7 +1148,7 @@ else
     fail "namespace scope: the printed plan/apply commands must start NAMESPACE=team-x" "$out"
 fi
 out="$(SO_NS_LIST='{"items":[{"metadata":{"namespace":"wva-system","name":"up"},"spec":{"triggers":[{"type":"prometheus","metadata":{"serverAddress":"http://prom:9090"}}]}}]}' so_report namespace)"
-if printf '%s' "$out" | grep -q 'none in wva-system registered with this scaling manager yet' \
+if printf '%s' "$out" | grep -q 'none in wva-system registered with WVA yet' \
     && printf '%s' "$out" | grep -q '1 other ScaledObject(s) in wva-system use another scaler'; then
     ok "namespace scope: an upstream ScaledObject in the namespace is named"
 else
@@ -1161,6 +1166,36 @@ for scope in cluster namespace; do
         fail "$scope scope: a Forbidden ScaledObject list must warn with the error and claim nothing" "$out"
     fi
 done
+# client-go logs discovery trouble ahead of the error. The reason quoted is the
+# error, not whatever stderr happened to start with.
+out="$(SO_FORBID=1 SO_KLOG="E1028 12:00:00.000000 1 memcache.go:265] couldn't get resource list for external.metrics.k8s.io/v1beta1: the server is currently unable to handle the request" so_report cluster)"
+if printf '%s' "$out" | grep -q '^WARN   ScaledObjects: could not list them on the cluster (Error from server (Forbidden)' \
+    && ! printf '%s' "$out" | grep -q 'memcache'; then
+    ok "cluster scope: a klog line ahead of the error is not quoted as the reason"
+else
+    fail "cluster scope: with a memcache klog line before the Forbidden one, quote the Forbidden line" "$out"
+fi
+# kubectl exits 0 but its stdout is not a list: said the same way, never "none".
+out="$(SO_LIST='not json' so_report cluster)"
+if printf '%s' "$out" | grep -q '^WARN   ScaledObjects: could not list them on the cluster (kubectl did not return a readable list) -- not checked' \
+    && ! printf '%s' "$out" | grep -q 'none '; then
+    ok "cluster scope: an unreadable list is said, not reported as none"
+else
+    fail "cluster scope: non-JSON kubectl output must warn that the list could not be read and claim nothing" "$out"
+fi
+# Mixed: one Ready ScaledObject of this install, one not-Ready one naming the
+# scaler of another install. The other one is neither counted nor told to be
+# recreated with this install's command.
+out="$(SO_LIST='{"items":[
+ {"metadata":{"namespace":"team-a","name":"mine"},"spec":{"triggers":[{"metadata":{"scalerAddress":"wva-external-scaler.wva-system.svc:9090"}}]},"status":{"conditions":[{"type":"Ready","status":"True"}]}},
+ {"metadata":{"namespace":"team-b","name":"theirs"},"spec":{"triggers":[{"metadata":{"scalerAddress":"wva-external-scaler.wva-system-2.svc:9090"}}]},"status":{"conditions":[{"type":"Ready","status":"False","message":"stale"}]}}]}' so_report cluster)"
+if printf '%s' "$out" | grep -q 'ScaledObjects: 1 workload(s) on the cluster already registered' \
+    && ! printf '%s' "$out" | grep -q 'NOT Ready' \
+    && ! printf '%s' "$out" | grep -q 'scaledobjects-apply'; then
+    ok "cluster scope: a not-Ready ScaledObject of another install is not counted or given a recreate hint"
+else
+    fail "cluster scope: one Ready SO here plus one not-Ready SO of wva-system-2 must report 1 registered and no recreate hint" "$out"
+fi
 
 # The node read, with no physical limiter: the admin phase grants it, so a run
 # that includes that phase must not warn that the controller cannot list nodes.
