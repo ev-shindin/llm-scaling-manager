@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=94
+EXPECT_CASES=98
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -1049,7 +1049,10 @@ so_report() {
         WVA_SCOPE="$1"
         kubectl() {
             case "$*" in
-                "get scaledobject -A -o json") [ -n "${SO_NONE:-}" ] && echo '{"items":[]}' || printf '%s' "$SO_TWO" ;;
+                "get scaledobject -A -o json")
+                    if [ -n "${SO_LIST:-}" ]; then printf '%s' "$SO_LIST"
+                    elif [ -n "${SO_NONE:-}" ]; then echo '{"items":[]}'
+                    else printf '%s' "$SO_TWO"; fi ;;
                 "get scaledobject -n "*) echo '{"items":[]}' ;;
                 *) return 1 ;;
             esac
@@ -1074,10 +1077,43 @@ else
     fail "cluster scope: the printed plan/apply commands must carry SCOPE=cluster" "$out"
 fi
 out="$(so_report namespace)"
-if printf '%s' "$out" | grep -q 'none in wva-system yet' && ! printf '%s' "$out" | grep -q 'SCOPE=cluster'; then
+if printf '%s' "$out" | grep -q 'none in wva-system registered with this scaling manager yet' && ! printf '%s' "$out" | grep -q 'SCOPE=cluster'; then
     ok "namespace scope: only the controller's namespace is read"
 else
     fail "namespace scope must read only its own namespace" "$out"
+fi
+
+# The printed commands must run as printed. Without WVA_NS, apply looks for the
+# scaler in the default controller namespace, finds none and exits 2 (#358).
+out="$(SO_NONE=1 so_report cluster)"
+if printf '%s' "$out" | grep -q 'make scaledobjects-plan SCOPE=cluster WVA_NS=wva-system WVA_DEFAULT_SO_PLAN=' \
+    && printf '%s' "$out" | grep -q 'make scaledobjects-apply SCOPE=cluster WVA_NS=wva-system WVA_DEFAULT_SO_PLAN='; then
+    ok "cluster scope: the registration commands carry WVA_NS"
+else
+    fail "cluster scope: the printed plan/apply commands must carry WVA_NS=wva-system" "$out"
+fi
+out="$(SO_LIST='{"items":[{"metadata":{"namespace":"team-a","name":"a"},"spec":{"triggers":[{"metadata":{"scalerAddress":"wva-external-scaler.wva-system.svc:9090"}}]},"status":{"conditions":[{"type":"Ready","status":"False","message":"stale"}]}}]}' so_report cluster)"
+if printf '%s' "$out" | grep -q 'make scaledobjects-apply SCOPE=cluster WVA_NS=wva-system WVA_DEFAULT_SO_PLAN=<plan>'; then
+    ok "cluster scope: the not-Ready recreate command carries WVA_NS"
+else
+    fail "cluster scope: the not-Ready recreate command must carry SCOPE=cluster WVA_NS=wva-system" "$out"
+fi
+
+# The count is ScaledObjects naming this scaler. Upstream ones on the same
+# workloads are not "none on the cluster": say what was counted, and name them.
+out="$(SO_LIST='{"items":[{"metadata":{"namespace":"team-a","name":"up"},"spec":{"triggers":[{"type":"prometheus","metadata":{"serverAddress":"http://prom:9090"}}]}}]}' so_report cluster)"
+if printf '%s' "$out" | grep -q 'none on the cluster registered with this scaling manager yet' \
+    && printf '%s' "$out" | grep -q '1 other ScaledObject(s) on the cluster use another scaler' \
+    && ! printf '%s' "$out" | grep -q 'none on the cluster yet'; then
+    ok "cluster scope: an upstream ScaledObject is named, not reported as none on the cluster"
+else
+    fail "cluster scope: with only an upstream ScaledObject, say none registered with this scaling manager and name the other one" "$out"
+fi
+out="$(SO_NONE=1 so_report cluster)"
+if ! printf '%s' "$out" | grep -q 'other ScaledObject'; then
+    ok "cluster scope: no other ScaledObjects, no line about them"
+else
+    fail "cluster scope: with no ScaledObjects at all, nothing may be said about other ones" "$out"
 fi
 
 # The node read, with no physical limiter: the admin phase grants it, so a run
