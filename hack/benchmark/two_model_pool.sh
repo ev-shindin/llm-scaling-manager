@@ -94,7 +94,7 @@
 # kind dry run of the whole flow, no GPUs): see sim_standup.
 #
 # THREE OR FOUR MODELS: MODEL_COUNT=3|4 (default 2) adds STACK_C/MODEL_C and
-# STACK_D/MODEL_D, with HIGH_RPS_C/D, MAX_REPLICAS_C/D and GPUS_PER_REPLICA_C/D
+# STACK_D/MODEL_D, with HIGH_RPS_C/D, LOW_RPS_C/D, MAX_REPLICAS_C/D and GPUS_PER_REPLICA_C/D
 # beside the A/B ones. The bursts then ROTATE -- b, c, d, a, each shifted from
 # the last by period/N -- under the same quota and the same arms, and the
 # default scenario is guides/n-model-share, stood up with only the first N of
@@ -167,9 +167,24 @@ HIGH_RPS="${HIGH_RPS:-9}"
 # OF DEMAND is flat, and with equal request rates against unequal capacity the
 # sum of ACCELERATOR demand is not.
 HIGH_RPS_B="${HIGH_RPS_B:-8}"
-# Models C and D's burst rates, in a run of three or four; HIGH_RPS when unset.
-HIGH_RPS_C="${HIGH_RPS_C:-$HIGH_RPS}"
-HIGH_RPS_D="${HIGH_RPS_D:-$HIGH_RPS}"
+# Models C and D's rates, in a run of three or four: each between its bursts
+# (LOW_RPS_C/D) and at its burst (HIGH_RPS_C/D). Sized so each model needs ONE
+# replica between bursts and about MAX_REPLICAS (3) at its peak.
+#
+# AN ESTIMATE, NOT A MEASUREMENT. The anchor is measured: with 1000 tokens in
+# and 500 out, an 8B model holds about 3 rps per replica (Llama served 9 rps on
+# three, Qwen3-8B needed 8 to stay out of an unbounded queue). Decode is
+# memory-bound, so a replica's rate scales with the bytes each step reads:
+#   C, Qwen3-30B-A3B-FP8: ~30 GB of FP8 experts, most of them touched per step
+#      at a batch of tens, against 16 GB for an 8B model -> ~1.7x slower,
+#      ~1.75 rps a replica. 1.5 rps is 0.9 of one replica; 5 rps is 2.9.
+#   D, Qwen3-32B (bf16, maxNumSeq 32, one H200): 64 GB a step -> ~4x slower,
+#      ~0.75 rps a replica. 0.5 rps is 0.7 of one replica; 2 rps is 2.7.
+# Measure them before trusting a result that leans on C or D.
+HIGH_RPS_C="${HIGH_RPS_C:-5}"
+LOW_RPS_C="${LOW_RPS_C:-1.5}"
+HIGH_RPS_D="${HIGH_RPS_D:-2}"
+LOW_RPS_D="${LOW_RPS_D:-0.5}"
 INPUT_TOKENS="${INPUT_TOKENS:-1000}"
 OUTPUT_TOKENS="${OUTPUT_TOKENS:-500}"
 # Loader b's shape. Defaults to a's; a single-stack P/D run gives the two
@@ -346,6 +361,10 @@ RESET_TIMEOUT="${RESET_TIMEOUT:-600}"
 # renders, never to the tracked file.
 GATEWAY_REUSE="${GATEWAY_REUSE:-auto}"
 GATEWAY_PROVIDER_NAMESPACE="${GATEWAY_PROVIDER_NAMESPACE:-istio-system}"
+# Whether preflight checks that the namespace has the pull secrets a reused
+# control plane names for its gateway proxy image (see gateway_pull_preflight).
+# 0 skips it, for an image that pulls without them.
+GATEWAY_PULL_CHECK="${GATEWAY_PULL_CHECK:-1}"
 # A decode Pod's CPU and memory request, for nodes whose spare CPU is smaller
 # than the scenario's. Empty keeps the scenario's own values. Applied to the
 # scenario copy at standup, and used by preflight's placement count.
@@ -418,7 +437,7 @@ role_of_model() { local r; for r in $ROLES; do [ "$(rvar MODEL "$r")" = "$1" ] &
 # extra_role_flags <flag-suffix>... : for every role past b, --<suffix>-<role>
 # and the value of the matching <NAME>_<ROLE>, one word per line. Empty for a
 # two-model run, so its command lines are exactly what they always were.
-# Suffixes: model, endpoint (URL_<ROLE> in the caller), high-rps.
+# Suffixes: model, endpoint (URL_<ROLE> in the caller), high-rps, low-rps.
 extra_role_flags() {
     local r s
     [ -n "$EXTRA_ROLES" ] || return 0
@@ -427,6 +446,7 @@ extra_role_flags() {
             case "$s" in
                 model)    printf '%s\n' "--model-$r" "$(rvar MODEL "$r")" ;;
                 high-rps) printf '%s\n' "--high-rps-$r" "$(rvar HIGH_RPS "$r")" ;;
+                low-rps)  printf '%s\n' "--low-rps-$r" "$(rvar LOW_RPS "$r")" ;;
                 endpoint) printf '%s\n' "--endpoint-$r" "$(rvar URL "$r")" ;;
             esac
         done
@@ -718,6 +738,15 @@ PY
 
 pool_gpus() { echo $(( POOL_REPLICAS * GPUS_PER_REPLICA )); }
 
+# scenario_stack_count: how many stacks the scenario defines; 0 when it cannot
+# be read, which keeps every stack rather than guessing which to drop.
+scenario_stack_count() {
+    local file="$ROOT/hack/benchmark/scenarios/$BENCH_SPEC.yaml" n
+    n="$(yq -r '.scenario | length' "$file" 2>/dev/null | tr -d '\r')"
+    case "$n" in ""|*[!0-9]*) n=0 ;; esac
+    printf '%s' "$n"
+}
+
 case "$REPEAT" in
     ""|[1-9]|[1-9][0-9]) ;;
     *) die "REPEAT=$REPEAT: a repeat number from 1 to 99, or empty" ;;
@@ -839,6 +868,61 @@ gateway_reuse() {
         true|false) printf '%s' "$GATEWAY_REUSE" ;;
         *) if [ "$(istio_gatewayclasses)" -gt 0 ] 2>/dev/null; then printf true; else printf false; fi ;;
     esac
+}
+
+# gateway_proxy_pull: what a reused control plane gives a gateway Pod, as
+# "<proxy image>|<pull secret> ...", read from its injector ConfigMaps in
+# GATEWAY_PROVIDER_NAMESPACE. Nothing when they cannot be read.
+gateway_proxy_pull() {
+    kc -n "$GATEWAY_PROVIDER_NAMESPACE" get configmap -o json 2>/dev/null | jq -r '
+        [.items[] | select(.metadata.name | startswith("istio-sidecar-injector"))
+         | ((.data.values // "{}") | (fromjson? // {})) | (.global // {})] as $g
+        | if ($g | length) == 0 then empty else
+            ($g[0]) as $x
+            | ($x.proxy.image // "proxyv2") as $img
+            | (if ($img | test("/")) then $img else "\($x.hub // "?")/\($img):\($x.tag // "?")" end)
+              + "|" + ([$g[] | .imagePullSecrets[]? | if type == "object" then .name else . end]
+                       | unique | join(" "))
+          end' 2>/dev/null
+}
+
+# gateway_pull_preflight: refuses a reused control plane whose gateway proxy
+# names pull secrets this namespace lacks. MEASURED on a shared H200 cluster:
+# the Istio it now runs hands every gateway Pod a proxy image from a registry
+# that needs a login, and a pull secret for it that the benchmark namespace
+# does not have. The standup downloaded four models, then found the gateway
+# Pod in ErrImagePull and aborted. The scenario was not the cause: the
+# two-model runs there had predated GATEWAY_REUSE and installed their own
+# Istio (proxy docker.io/istio/proxyv2). Read-only: a ConfigMap read and a
+# Secret existence check. A secret that cannot be read (as opposed to absent)
+# is reported, not refused.
+gateway_pull_preflight() {
+    [ "$GATEWAY_PULL_CHECK" = 1 ] || { info "  GATEWAY_PULL_CHECK=$GATEWAY_PULL_CHECK: the gateway proxy pull secrets are not checked"; return 0; }
+    local got image secrets s out missing="" unread=""
+    got="$(gateway_proxy_pull)"
+    if [ -z "$got" ]; then
+        info "  could not read the gateway proxy image the control plane in $GATEWAY_PROVIDER_NAMESPACE hands out (no readable istio-sidecar-injector ConfigMap); its pull secrets are unchecked"
+        return 0
+    fi
+    image="${got%%|*}"; secrets="${got#*|}"
+    for s in $secrets; do
+        out="$(k get secret "$s" -o name 2>&1)" && continue
+        case "$out" in
+            *NotFound*|*"not found"*) missing="$missing${missing:+ }$s" ;;
+            *) unread="$unread${unread:+ }$s" ;;
+        esac
+    done
+    if [ -n "$missing" ]; then
+        warn "the reused control plane in $GATEWAY_PROVIDER_NAMESPACE gives the gateway Pod the image"
+        warn "  $image"
+        warn "  with pull secret(s) '$missing', which $NS does not have. The gateway Pod would fail in"
+        warn "  ErrImagePull and the standup abort at gateway infra, after the model downloads. Create the"
+        warn "  secret(s) in $NS with credentials for that registry, or set GATEWAY_PULL_CHECK=0 if the image"
+        warn "  pulls without them."
+        return 1
+    fi
+    [ -z "$unread" ] || info "  could not read pull secret(s) '$unread' in $NS to tell whether they exist; the gateway proxy may not pull"
+    ok "  the gateway proxy image is $image${secrets:+ (pull secrets: $secrets)}"
 }
 
 placeable_slots() {
@@ -1111,6 +1195,30 @@ verb_preflight() {
         info "the quota (WVA_QUOTAS=${WVA_QUOTAS}) holds the models to ${cap} GPU(s), below the ${want} their ceilings allow; placement is checked for ${cap}"
         want="$cap"
     fi
+    # THE QUOTA'S LOWER BOUND: one model's peak plus every other model's floor.
+    # Below it, even a perfect transfer cannot give a rising model its peak
+    # while the others keep their floors, and the arms measure how a shortage
+    # is cut rather than whether GPUs arrive in time. For two 1-GPU models of
+    # up to 3 that is 4; for four, 6.
+    if [ -n "$cap" ] && [ "$PD_SINGLE_STACK" != 1 ] && ! scenario_is_pd; then
+        local qr qo q_floors q_need=0 q_role="" q_one
+        for qr in $ROLES; do
+            q_floors=0
+            for qo in $ROLES; do
+                [ "$qo" = "$qr" ] || q_floors=$(( q_floors + MIN_REPLICAS * $(model_gpus "$qo") ))
+            done
+            q_one=$(( $(rvar MAX_REPLICAS "$qr") * $(model_gpus "$qr") + q_floors ))
+            if [ "$q_one" -gt "$q_need" ]; then q_need="$q_one"; q_role="$qr"; fi
+        done
+        if [ "$cap" -lt "$q_need" ]; then
+            warn "the quota (${cap} GPU(s)) is below one model's peak plus the others' floors: model $(upper "$q_role")"
+            warn "  at $(rvar MAX_REPLICAS "$q_role") x $(model_gpus "$q_role") GPU(s) beside $(( MODEL_COUNT - 1 )) model(s) at MIN_REPLICAS=${MIN_REPLICAS} needs ${q_need}."
+            warn "  Raise WVA_QUOTAS to at least ${q_need}, or lower MAX_REPLICAS."
+            rc=1
+        else
+            ok "the quota (${cap}) covers one model's peak plus the others' floors (${q_need})"
+        fi
+    fi
     info "accelerators: ${total:-?} schedulable, ${used:-?} held by pods on those nodes, ${free} free; this run peaks at ${want}"
     if [ "${unbound%% *}" -gt 0 ] 2>/dev/null; then
         warn "${unbound%% *} Pending pod(s) wait for ${unbound#* } accelerator(s) and hold none yet; they are not"
@@ -1281,6 +1389,7 @@ verb_preflight() {
         rc=1
     elif [ "${gw_installed:-0}" -gt 0 ]; then
         ok "Istio is provided by the cluster; the standup reuses it (control plane in $GATEWAY_PROVIDER_NAMESPACE)"
+        gateway_pull_preflight || rc=1
     fi
 
     # The model cache. A pool Pod loads its warm copies through the SAME claim
@@ -1416,16 +1525,20 @@ $size_problems"
     k create configmap "$STANDUP_RECORD" --from-literal=spec="$BENCH_SPEC" \
         --dry-run=client -o yaml | k apply -f - >/dev/null \
         || die "could not record the scenario in ConfigMap $STANDUP_RECORD; the teardown would not know what to undo"
-    # Three or four models stand up only their own stacks: the scenario copy
-    # keeps the first MODEL_COUNT (BENCHMARK_STACKS, scenario_overrides.sh), so
-    # a three-model run does not hold a fourth model's GPU for nothing. Empty
-    # for two models, whose scenario is exactly theirs.
-    local keep_stacks=""
-    [ "$MODEL_COUNT" = 2 ] || keep_stacks="$(role_stacks | paste -sd, -)"
-    if [ "$MODEL_COUNT" = 2 ]; then
+    # The run stands up only its own stacks whenever the scenario has more: the
+    # scenario copy keeps the run's (BENCHMARK_STACKS, scenario_overrides.sh),
+    # so three models on n-model-share -- or two, with BENCH_SPEC pointed at it
+    # -- do not hold the other models' GPUs for nothing. Empty when the
+    # scenario is exactly the run's, as every two-model scenario is.
+    local keep_stacks="" n_stacks
+    n_stacks="$(scenario_stack_count)"
+    [ "$n_stacks" -gt "$MODEL_COUNT" ] && keep_stacks="$(role_stacks | paste -sd, -)"
+    if [ -n "$keep_stacks" ]; then
+        info "standing up ${MODEL_COUNT} of the ${n_stacks} stacks of $BENCH_SPEC: $keep_stacks"
+    elif [ "$MODEL_COUNT" = 2 ]; then
         info "standing up both stacks from $BENCH_SPEC"
     else
-        info "standing up ${MODEL_COUNT} stacks from $BENCH_SPEC: $keep_stacks"
+        info "standing up all ${MODEL_COUNT} stacks of $BENCH_SPEC"
     fi
     local gw_reuse
     gw_reuse="$(gateway_reuse)"
@@ -1875,8 +1988,13 @@ sim_teardown() {
     k delete job -l app.kubernetes.io/name=wva-two-model-load --ignore-not-found --timeout=120s >/dev/null 2>&1
     k delete configmap wva-two-model-load --ignore-not-found --timeout=60s >/dev/null 2>&1
     # The ScaledObjects first: left behind, KEDA would scale the Deployments
-    # back up while they are being deleted.
-    for d in $(role_stacks | sed 's/$/-decode/'); do
+    # back up while they are being deleted. EVERY simulator stack present, not
+    # only this invocation's models: a teardown run without the standup's
+    # MODEL_COUNT would otherwise leave models C and D's ScaledObjects behind.
+    local present
+    present="$(k get deploy -l app.kubernetes.io/part-of=wva-two-model-sim \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)"
+    for d in $( { printf '%s\n' "$present"; role_stacks | sed 's/$/-decode/'; } | grep -v '^$' | sort -u); do
         sos="$(k get scaledobject -o json 2>/dev/null | jq -r --arg d "$d" \
             '.items[] | select(.spec.scaleTargetRef.name == $d) | .metadata.name')"
         for so in $sos; do k delete scaledobject "$so" --ignore-not-found >/dev/null 2>&1; done
@@ -3461,9 +3579,9 @@ verb_run() {
             --rise-window "$RISE_WINDOW" --overlap "$OVERLAP_SECONDS" \
             --seed "$SEED" --results-root /results
         # Nothing at all for two models; --models N and each further model's
-        # id, endpoint and burst rate for three or four.
+        # id, endpoint, burst rate and low rate for three or four.
         [ -z "$EXTRA_ROLES" ] || printf '%s\n' --models "$MODEL_COUNT"
-        extra_role_flags model endpoint high-rps
+        extra_role_flags model endpoint high-rps low-rps
     }
     local pyargs; pyargs="$(profile_args)"
     # shellcheck disable=SC2046 # deliberate word splitting of the rendered flags

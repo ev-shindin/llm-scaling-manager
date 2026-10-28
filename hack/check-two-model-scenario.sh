@@ -64,6 +64,10 @@ case "$args" in
         # model, on the Deployments the route resolves to.
         so() { printf '{"metadata":{"name":"%s-wva"},"spec":{"scaleTargetRef":{"name":"%s"},"triggers":[{"metadata":{}}]}}' "$1" "$1"; }
         echo "{\"items\":[$(so unsloth--244120d9-instruct-decode),$(so unsloth--244120d9-instruct-prefill),$(so qwen-qwe-6e036fd5-qwen3-8b-decode),$(so qwen-qwe-6e036fd5-qwen3-8b-prefill)]}"
+      elif [ "${SIM4_STUB:-0}" = "1" ]; then
+        # Four simulator stacks, one ScaledObject each.
+        so() { printf '{"metadata":{"name":"%s-so"},"spec":{"scaleTargetRef":{"name":"%s-decode"},"triggers":[{"metadata":{}}]}}' "$1" "$1"; }
+        echo "{\"items\":[$(so llama-31-8b),$(so qwen3-8b),$(so qwen3-30b-a3b),$(so qwen3-32b)]}"
       elif [ "${MIXED_SO:-0}" = "1" ]; then
         # A mixed-size run: each ScaledObject's trigger names its model.
         echo '{"items":[{"metadata":{"name":"so-a"},"spec":{"scaleTargetRef":{"name":"qwen3-30b-a3b-decode"},"triggers":[{"metadata":{"modelID":"Qwen/Qwen3-30B-A3B-FP8"}}]}},
@@ -313,6 +317,25 @@ case "$args" in
         echo '{"items":[]}'
       fi
       exit 0 ;;
+  # ISTIO_INJECTOR=login: the reused control plane hands its gateway Pods a
+  # proxy image from a registry that needs a login, and a pull secret for it.
+  # SECRET_PRESENT=0: the benchmark namespace does not have that secret.
+  *"istio-system get configmap -o json"*)
+      if [ "${ISTIO_INJECTOR:-}" = "login" ]; then
+        echo '{"items":[{"metadata":{"name":"istio-ca-root-cert"},"data":{}},
+          {"metadata":{"name":"istio-sidecar-injector"},"data":{"values":"{\"global\":{\"hub\":\"registry.example.com/mesh\",\"tag\":\"1.26\",\"imagePullSecrets\":[\"mesh-pull-secret\"],\"proxy\":{\"image\":\"registry.example.com/mesh/proxyv2@sha256:13da\"}}}"}}]}'
+      else
+        echo '{"items":[]}'
+      fi
+      exit 0 ;;
+  # SIM4_STUB=1: the four simulator Deployments a four-model kind run left.
+  *"get deploy -l app.kubernetes.io/part-of=wva-two-model-sim"*)
+      [ "${SIM4_STUB:-0}" = "1" ] && printf '%s\n' llama-31-8b-decode qwen3-8b-decode qwen3-30b-a3b-decode qwen3-32b-decode
+      exit 0 ;;
+  *"get secret "*"-o name"*)
+      if [ "${SECRET_PRESENT:-1}" = "1" ]; then echo "secret/x"; exit 0; fi
+      echo 'Error from server (NotFound): secrets "mesh-pull-secret" not found' >&2
+      exit 1 ;;
   *) exit 0 ;;
 esac
 STUBEOF
@@ -322,7 +345,7 @@ chmod +x "$STUB/kubectl"
 # teardown can be checked without running the harness's.
 cat > "$STUB/make" <<'STUBEOF'
 #!/usr/bin/env bash
-printf 'MAKE[%s] SPEC=%s\n' "$*" "${BENCHMARK_SPEC:-}" >> "${KCALLS:-/dev/null}"
+printf 'MAKE[%s] SPEC=%s STACKS=%s\n' "$*" "${BENCHMARK_SPEC:-}" "${BENCHMARK_STACKS:-}" >> "${KCALLS:-/dev/null}"
 exit 0
 STUBEOF
 chmod +x "$STUB/make"
@@ -1223,6 +1246,42 @@ else
     ok "the standup records its scenario before the harness runs"
 fi
 
+# A SIMULATOR TEARDOWN RUN WITHOUT THE STANDUP'S MODEL_COUNT still removes
+# every stack present: it used to walk only its own two models, and left models
+# C and D's ScaledObjects scaling Deployments being deleted.
+case_begin
+SIM4_STUB=1 STANDUP_SPEC=sim:guides/n-model-share VERB_TIMEOUT=60 run_verb teardown
+sim_dels="$(grep -o 'delete scaledobject [a-z0-9.-]*-so' "$CALLS" | sed 's/delete scaledobject //' | sort | paste -sd, -)"
+if [ "$sim_dels" != "llama-31-8b-so,qwen3-30b-a3b-so,qwen3-32b-so,qwen3-8b-so" ]; then
+    fail "a simulator teardown with MODEL_COUNT unset deleted ScaledObjects '$sim_dels', not all four stacks'"
+else
+    ok "a simulator teardown removes every stack present, whatever MODEL_COUNT it is run with"
+fi
+
+# THE STACKS THE STANDUP KEEPS: the run's own whenever the scenario has more.
+# Two models pointed at the four-stack n-model-share stood up all four.
+case_begin
+VERB_TIMEOUT=60 run_verb standup
+std_two="$(grep -o 'benchmark-standup\] SPEC=[^ ]* STACKS=.*' "$CALLS" | head -1)"
+std_two_out="$(grep -E 'MAKE|configmap' "$CALLS" | head -5)"
+BENCH_SPEC=guides/n-model-share EPP_COUNT=0 VERB_TIMEOUT=60 run_verb standup
+std_n2="$(grep -o 'benchmark-standup\] SPEC=[^ ]* STACKS=.*' "$CALLS" | head -1)"
+MODEL_COUNT=4 EPP_COUNT=0 VERB_TIMEOUT=60 run_verb standup
+std_n4="$(grep -o 'benchmark-standup\] SPEC=[^ ]* STACKS=.*' "$CALLS" | head -1)"
+MODEL_COUNT=3 EPP_COUNT=0 VERB_TIMEOUT=60 run_verb standup
+std_n3="$(grep -o 'benchmark-standup\] SPEC=[^ ]* STACKS=.*' "$CALLS" | head -1)"
+if [ "$std_two" != "benchmark-standup] SPEC=guides/two-model-warm-pool STACKS=" ]; then
+    fail "two models on their own two-stack scenario were handed a stack list: '$std_two' ($(printf '%s' "$std_two_out" | tail -4))"
+elif [ "$std_n2" != "benchmark-standup] SPEC=guides/n-model-share STACKS=llama-31-8b,qwen3-8b" ]; then
+    fail "two models on the four-stack n-model-share would stand up more than their two: '$std_n2'"
+elif [ "$std_n3" != "benchmark-standup] SPEC=guides/n-model-share STACKS=llama-31-8b,qwen3-8b,qwen3-30b-a3b" ]; then
+    fail "three models on n-model-share are not handed their three stacks: '$std_n3' ($(printf '%s' "$OUT" | tail -4))"
+elif [ "$std_n4" != "benchmark-standup] SPEC=guides/n-model-share STACKS=" ]; then
+    fail "four models on the four-stack scenario were handed a list to drop from: '$std_n4'"
+else
+    ok "the standup keeps only the run's stacks when the scenario has more: 2 and 3 of 4; all of a scenario that is the run's"
+fi
+
 # A QUOTA BELOW THE CEILINGS IS THE PEAK. The share runbook stands up under a
 # 4-GPU quota with two models of up to 3; preflight asked for 6 placeable and
 # refused a cluster with 5, though the run can never hold more than 4.
@@ -1277,6 +1336,45 @@ if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'no istio.io/gateway-contro
     fail "GATEWAY_REUSE=true on a cluster with no Istio passed preflight; the Gateway would never be Programmed: $OUT"
 else
     ok "GATEWAY_REUSE=true with no Istio on the cluster is refused"
+fi
+
+# A REUSED ISTIO WHOSE GATEWAY PROXY THIS NAMESPACE CANNOT PULL. Measured: the
+# standup downloaded four models and then aborted on a gateway Pod in
+# ErrImagePull, because the control plane named a pull secret the namespace
+# did not have. Preflight reads the injector and refuses that up front.
+case_begin
+GWCLASS=1 NODE_CPU=127 run_verb preflight
+GW_BASE_RC="$RC"
+GWCLASS=1 ISTIO_INJECTOR=login SECRET_PRESENT=0 NODE_CPU=127 run_verb preflight
+if [ "$GW_BASE_RC" -ne 0 ]; then
+    fail "the control fails: a cluster that runs Istio, injector unread, did not pass preflight (rc=$GW_BASE_RC), so a refusal below would prove nothing"
+elif [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q "pull secret(s) 'mesh-pull-secret', which ns-under-test does not have" \
+    || ! printf '%s' "$OUT" | grep -q 'registry.example.com/mesh/proxyv2@sha256:13da'; then
+    fail "a reused Istio whose proxy needs a pull secret the namespace lacks passed preflight (rc=$RC): $(printf '%s' "$OUT" | grep -iE 'gateway|pull' | head -5)"
+else
+    ok "a reused Istio whose gateway proxy needs a missing pull secret is refused, naming the image and the secret"
+fi
+
+case_begin
+GWCLASS=1 ISTIO_INJECTOR=login SECRET_PRESENT=1 NODE_CPU=127 run_verb preflight
+c1="$RC"; o1="$OUT"
+GWCLASS=1 ISTIO_INJECTOR=login SECRET_PRESENT=0 GATEWAY_PULL_CHECK=0 NODE_CPU=127 run_verb preflight
+if printf '%s' "$o1" | grep -q 'does not have' || ! printf '%s' "$o1" | grep -q 'pull secrets: mesh-pull-secret'; then
+    fail "the pull secret present still read as missing (rc=$c1): $(printf '%s' "$o1" | grep -iE 'pull' | head -3)"
+elif printf '%s' "$OUT" | grep -q 'does not have' || ! printf '%s' "$OUT" | grep -q 'GATEWAY_PULL_CHECK=0'; then
+    fail "GATEWAY_PULL_CHECK=0 did not skip the check: $(printf '%s' "$OUT" | grep -iE 'pull' | head -3)"
+elif [ "$c1" -ne 0 ] || [ "$RC" -ne 0 ]; then
+    fail "with the secret present (rc=$c1) or the check off (rc=$RC) preflight still refused: $(printf '%s' "$OUT" | grep WARN | head -3)"
+else
+    ok "the pull secret present passes, and GATEWAY_PULL_CHECK=0 skips the check"
+fi
+
+case_begin
+GWCLASS=1 NODE_CPU=127 run_verb preflight
+if [ "$RC" -ne 0 ] || ! printf '%s' "$OUT" | grep -q 'its pull secrets are unchecked'; then
+    fail "an unreadable injector was not reported as unchecked, or refused (rc=$RC): $(printf '%s' "$OUT" | grep -iE 'pull|injector' | head -3)"
+else
+    ok "an injector it cannot read is reported as unchecked, not refused"
 fi
 
 case_begin
@@ -1990,7 +2088,7 @@ fi
 # models, every default it derives from them (the scenario, the stacks)
 # recomputed, and the given settings in force when it is read.
 nm_source() {
-    unset BENCH_SPEC STACK_C STACK_D MODEL_C MODEL_D MAX_REPLICAS_C MAX_REPLICAS_D GPUS_PER_REPLICA_C GPUS_PER_REPLICA_D HIGH_RPS_C HIGH_RPS_D
+    unset BENCH_SPEC STACK_C STACK_D MODEL_C MODEL_D MAX_REPLICAS_C MAX_REPLICAS_D GPUS_PER_REPLICA_C GPUS_PER_REPLICA_D HIGH_RPS_C HIGH_RPS_D LOW_RPS_C LOW_RPS_D
     MODEL_COUNT="$1"
     shift
     local kv
@@ -2021,7 +2119,7 @@ else
 fi
 
 case_begin
-got2="$( (nm_source 2; printf '%s|%s|%s' "$ROLES" "$(extra_role_flags model endpoint high-rps)" "${#MODEL_FLAGS[@]}") 2>&1)"
+got2="$( (nm_source 2; printf '%s|%s|%s' "$ROLES" "$(extra_role_flags model endpoint high-rps low-rps)" "${#MODEL_FLAGS[@]}") 2>&1)"
 got4="$( (nm_source 4 MAX_REPLICAS_D=5; printf '%s|%s|%s|%s|%s|%s' "$ROLES" "$(peak_gpus)" "$(max_ceiling)" "$(peak_pods 8)" \
           "$(extra_role_flags model | paste -sd' ' -)" "${MODEL_FLAGS[*]}") 2>&1)"
 if [ "$got2" != "a b||0" ]; then
@@ -2042,6 +2140,28 @@ elif [ -s "$CALLS" ]; then
     fail "MODEL_COUNT=5 was refused only after calling the cluster: $(head -3 "$CALLS")"
 else
     ok "a model count other than 2, 3 or 4 is refused before anything is asked of the cluster"
+fi
+
+# THE QUOTA'S LOWER BOUND, one peak plus every other model's floor: 3 + 3 x 1 = 6
+# for four 1-GPU models of up to 3, and 3 + 1 = 4 for two. One below it is refused.
+case_begin
+MODEL_COUNT=4 WVA_QUOTAS='H200=5' NODE_CPU=127 run_verb preflight
+q5_rc="$RC"; q5="$OUT"
+MODEL_COUNT=4 WVA_QUOTAS='H200=6' NODE_CPU=127 run_verb preflight
+q6="$OUT"
+WVA_QUOTAS='H200=3' NODE_CPU=127 run_verb preflight
+q3_rc="$RC"; q3="$OUT"
+WVA_QUOTAS='H200=4' NODE_CPU=127 run_verb preflight
+if [ "$q5_rc" -eq 0 ] || ! printf '%s' "$q5" | grep -q "beside 3 model(s) at MIN_REPLICAS=1 needs 6"; then
+    fail "four models under a quota of 5 were not refused for the lower bound of 6 (rc=$q5_rc): $(printf '%s' "$q5" | grep -iE 'quota' | head -3)"
+elif ! printf '%s' "$q6" | grep -q "the quota (6) covers one model's peak plus the others' floors (6)"; then
+    fail "four models under a quota of 6 did not pass the lower bound: $(printf '%s' "$q6" | grep -iE 'quota' | head -3)"
+elif [ "$q3_rc" -eq 0 ] || ! printf '%s' "$q3" | grep -q "beside 1 model(s) at MIN_REPLICAS=1 needs 4"; then
+    fail "two models under a quota of 3 were not refused for the lower bound of 4 (rc=$q3_rc): $(printf '%s' "$q3" | grep -iE 'quota' | head -3)"
+elif ! printf '%s' "$OUT" | grep -q "the quota (4) covers one model's peak plus the others' floors (4)"; then
+    fail "two models under a quota of 4 did not pass the lower bound: $(printf '%s' "$OUT" | grep -iE 'quota' | head -3)"
+else
+    ok "a quota below one peak plus the other floors is refused: 5 for four models (needs 6), 3 for two (needs 4)"
 fi
 
 case_begin
@@ -2115,7 +2235,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=127
+CASES_EXPECTED=133
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

@@ -63,7 +63,9 @@ order b, c, d, a -- for two models that is b then a, the anti-phase ladder
 exactly as before -- with the same both-low band between consecutive bursts.
 Each model's burst is therefore shifted from the previous model's by
 period / N, where the period is N x (phase + band). Every schedule row carries
-one `rate_<role>` per model.
+one `rate_<role>` per model. Models C and D take their own burst and low rates
+(`--high-rps-c/-d`, `--low-rps-c/-d`), since a 32B model's replica serves a
+fraction of an 8B one's.
 """
 
 import argparse
@@ -92,7 +94,8 @@ def burst_order(roles):
 
 
 def build_schedule(phase_seconds, cycles, low_rps, high_rps, lead_in, overlap=0,
-                   high_rps_b=None, models=2, high_rps_by_role=None):
+                   high_rps_b=None, models=2, high_rps_by_role=None,
+                   low_rps_by_role=None):
     """Anti-phase square wave: A low->high->low..., B high->low->high...
 
     `overlap` inserts a band between consecutive phases where BOTH models are
@@ -136,7 +139,15 @@ def build_schedule(phase_seconds, cycles, low_rps, high_rps, lead_in, overlap=0,
     for r in roles[2:]:
         v = (high_rps_by_role or {}).get(r)
         highs[r] = high_rps if v is None else v
-    lows = (low_rps,) * len(roles)
+    # Each model's LOW rate: low_rps for a and b, and a third or fourth model's
+    # own entry in low_rps_by_role, else low_rps. A 32B model serves on one
+    # replica a fraction of what an 8B one does, so one low rate cannot leave
+    # every model at one replica between its bursts.
+    low = {r: low_rps for r in roles}
+    for r in roles[2:]:
+        v = (low_rps_by_role or {}).get(r)
+        low[r] = low_rps if v is None else v
+    lows = tuple(low[r] for r in roles)
     phases = []
     t = 0
     if lead_in > 0:
@@ -155,7 +166,7 @@ def build_schedule(phase_seconds, cycles, low_rps, high_rps, lead_in, overlap=0,
                 if not (cycle == 0 and slot == 0 and lead_in > 0):
                     phases.append((t, t + overlap) + lows)
                     t += overlap
-            rates = tuple(highs[r] if r == burster else low_rps for r in roles)
+            rates = tuple(highs[r] if r == burster else low[r] for r in roles)
             phases.append((t, t + phase_seconds) + rates)
             t += phase_seconds
     return phases
@@ -402,6 +413,10 @@ def build_parser():
                    help="model C's burst rate; defaults to --high-rps")
     p.add_argument("--high-rps-d", type=float, default=None,
                    help="model D's burst rate; defaults to --high-rps")
+    p.add_argument("--low-rps-c", type=float, default=None,
+                   help="model C's rate between its bursts; defaults to --low-rps")
+    p.add_argument("--low-rps-d", type=float, default=None,
+                   help="model D's rate between its bursts; defaults to --low-rps")
     p.add_argument("--phase-seconds", type=int, default=480)
     p.add_argument("--cycles", type=int, default=2)
     p.add_argument("--lead-in", type=int, default=120)
@@ -456,11 +471,21 @@ def main(argv):
               file=sys.stderr)
         return 2
     extra_highs = {r: getattr(args, "high_rps_" + r) for r in roles_for(args.models)[2:]}
-    if any(v is not None and v <= args.low_rps for v in extra_highs.values()):
-        print("--high-rps-c and --high-rps-d must exceed --low-rps: the scenario is a "
-              "burst, and with a flat rate no scale-up happens in either arm.",
+    extra_lows = {r: getattr(args, "low_rps_" + r) for r in roles_for(args.models)[2:]}
+    if any(v is not None and v <= 0 for v in extra_lows.values()):
+        print("--low-rps-c and --low-rps-d must be above 0: a model with no load "
+              "between its bursts is scaled to its floor and measured cold.",
               file=sys.stderr)
         return 2
+    for r in extra_highs:
+        high = args.high_rps if extra_highs[r] is None else extra_highs[r]
+        low = args.low_rps if extra_lows[r] is None else extra_lows[r]
+        if high <= low:
+            print("--high-rps-c and --high-rps-d must exceed that model's low rate "
+                  "(--low-rps-c/-d, else --low-rps): the scenario is a burst, and "
+                  "with a flat rate no scale-up happens in either arm.",
+                  file=sys.stderr)
+            return 2
     if args.cycles < 1:
         print("--cycles must be at least 1: with none, neither model ever rises "
               "and there is nothing for a warm pool to be measured against.",
@@ -491,7 +516,8 @@ def main(argv):
     schedule = build_schedule(args.phase_seconds, args.cycles,
                               args.low_rps, args.high_rps, args.lead_in,
                               args.overlap, args.high_rps_b,
-                              models=args.models, high_rps_by_role=extra_highs)
+                              models=args.models, high_rps_by_role=extra_highs,
+                              low_rps_by_role=extra_lows)
     stages = stage_map(schedule, args.rise_window)
     if args.emit == "schedule":
         json.dump(schedule_json(stages), sys.stdout, indent=2)

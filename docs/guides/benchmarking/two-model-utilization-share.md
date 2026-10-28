@@ -52,9 +52,9 @@ GPUs:
 The tightest value, 4, is the sharpest test: at B's peak, A must be at its
 floor, so every replica B adds beyond the free quota comes from A.
 
-The driver does **not** check these bounds, and `preflight` still asks for the
-full `2 × MAX_REPLICAS × GPUS_PER_REPLICA` placeable accelerators because it does
-not read the quota. Choose the number yourself.
+`preflight` refuses a quota below the lower bound, and places accelerators for
+the quota rather than for the ceilings. It does not check the upper bound:
+choose a number below the combined peak yourself.
 
 ## What it needs
 
@@ -108,6 +108,7 @@ The standup applies these to its own copy of the scenario, so nothing under
 | --- | --- | --- |
 | `GATEWAY_REUSE` | `auto` | `auto` reuses the Istio the cluster already runs (an `istio.io/gateway-controller` GatewayClass exists) instead of installing `istio-base` over it, which fails part-way through. `true` and `false` force it. |
 | `GATEWAY_PROVIDER_NAMESPACE` | `istio-system` | where that control plane runs |
+| `GATEWAY_PULL_CHECK` | `1` | when reusing it, `preflight` reads the gateway proxy image the control plane hands out, and refuses if that image needs a pull secret your namespace lacks: the gateway Pod would fail with `ErrImagePull` after the model downloads. Create the secret, or set `0` if the image pulls without it. |
 | `DECODE_CPU`, `DECODE_MEMORY` | the scenario's (8, `64Gi`) | a decode Pod's request and limit. Lower them when `preflight` reports fewer placeable Pods than the run's peak because the nodes with free accelerators lack spare CPU. |
 | `BENCHMARK_RENDER_DRAIN` | `true` | the drain hook and grace go into the engines before they first start, so the drain patch after the standup finds nothing to change and no model starts twice |
 | `BENCHMARK_ENGINE_CACHE_HOSTPATH` | empty | a directory on the nodes for the engines' compile caches. Opt-in, so earlier runs stay comparable. |
@@ -226,19 +227,38 @@ the same arms with three or four models under one quota:
   above, unchanged.
 - **The scenario is `n-model-share`.** It has four stacks, each one GPU per
   replica: the two models above, `Qwen/Qwen3-30B-A3B-FP8` (model C) and
-  `Qwen/Qwen3-32B` (model D). The standup keeps only the first `MODEL_COUNT`
-  of them. Model D needs a GPU larger than 80 GB; on smaller GPUs run three.
+  `Qwen/Qwen3-32B` (model D). The standup keeps only the run's stacks, so
+  three models stand up three. Model D needs a GPU larger than 80 GB; on
+  smaller GPUs run three.
 - **Per-model settings** follow the A/B names: `STACK_C`, `MODEL_C`,
-  `HIGH_RPS_C`, `MAX_REPLICAS_C`, `GPUS_PER_REPLICA_C`, and the same with `_D`.
+  `HIGH_RPS_C`, `LOW_RPS_C`, `MAX_REPLICAS_C`, `GPUS_PER_REPLICA_C`, and the
+  same with `_D`.
+- **Models C and D have their own rates**, so that each needs one replica
+  between bursts and about `MAX_REPLICAS` (3) at its burst. The defaults are an
+  **estimate**, not a measurement: an 8B model holds about 3 rps a replica
+  (measured), and decode slows with the bytes each step reads.
+
+  | model | between bursts | burst | estimated rps a replica |
+  | --- | --- | --- | --- |
+  | C, `Qwen3-30B-A3B-FP8` | `LOW_RPS_C=1.5` | `HIGH_RPS_C=5` | ~1.75 (30 GB of experts a step, against 16 GB) |
+  | D, `Qwen3-32B` | `LOW_RPS_D=0.5` | `HIGH_RPS_D=2` | ~0.75 (64 GB a step) |
+
+  Models A and B keep `LOW_RPS` (3), `HIGH_RPS` (9) and `HIGH_RPS_B` (8).
 
 The quota bounds above become, for N models:
 
 - **below the sum of the peaks:** quota < `N × MAX_REPLICAS × GPUS_PER_REPLICA`;
 - **at least one peak plus every other model's floor:** quota ≥
-  `(MAX_REPLICAS + (N - 1) × MIN_REPLICAS) × GPUS_PER_REPLICA`.
+  `(MAX_REPLICAS + (N - 1) × MIN_REPLICAS) × GPUS_PER_REPLICA`. `preflight`
+  refuses a quota below this.
 
 With four models at the defaults that is 6 to 11 GPUs. Six is the sharpest
 test: a rising model gets its peak only from GPUs the others give back.
+
+The warm-pool comparison's `floor` arm does not fit a quota this tight: it
+holds `FLOOR_REPLICAS` (2) of every model, 8 GPUs for four models, above a
+quota of 6. Run the share arms (`today`, `shadow`, `share`) at N = 4, or give
+the floor arm a quota of at least `N × FLOOR_REPLICAS × GPUS_PER_REPLICA`.
 
 ```bash
 export MODEL_COUNT=4
@@ -249,8 +269,10 @@ SHARE_ARMS='today share' REPEATS=1 TEARDOWN_ON_EXIT=1 make benchmark-two-model-s
 ```
 
 One arm runs `LEAD_IN + N × CYCLES × PHASE_SECONDS + (N × CYCLES - 1) ×
-OVERLAP_SECONDS` seconds of load: 2310 s for four models and one cycle at the
-defaults. The load Pod runs one loader container per model, so it requests
+OVERLAP_SECONDS` seconds of load. For four models at the defaults
+(`CYCLES=2`) that is 4590 s, about 77 minutes; `CYCLES=1` halves it to 2310 s,
+with one burst per model instead of two. The load Pod runs one loader container
+per model, so it requests
 `N × LOAD_CPU` CPU and `N × LOAD_MEMORY` on one node.
 
 The reports cover every model: TTFT per model and per rise, held-back

@@ -231,10 +231,15 @@ def plot_timeline(data, out):
         return top + ph - (g / ymax) * ph
 
     svg.text(left, 22, "Accelerators held over the run", 14, weight="bold")
-    svg.text(left, 38, "shaded: a model's burst (A above, B below); the bands between are both-low", 11, fill="#555")
     # One horizontal band per model, A at the top: halves for two models, as
     # before, quarters for four.
     roles = [r for r in ("a", "b", "c", "d") if sched and "rate_" + r in sched[0]]
+    if len(roles) > 2:
+        legend = ("shaded: a model's burst (%s, top to bottom); the bands between are all-low"
+                  % ", ".join(r.upper() for r in roles))
+    else:
+        legend = "shaded: a model's burst (A above, B below); the bands between are both-low"
+    svg.text(left, 38, legend, 11, fill="#555")
     band_h = ph / max(1, len(roles))
     for n, r in enumerate(roles):
         low = min(s["rate_" + r] for s in sched)

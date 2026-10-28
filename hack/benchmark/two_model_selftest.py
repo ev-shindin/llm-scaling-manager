@@ -1625,6 +1625,36 @@ elif _rc_bad != 2:
 else:
     ok("four ladders, one per column, four seeds, four rates; role c refused in a two-model run")
 
+case("four models: C and D keep their own low rate between bursts")
+_lo4 = profile.build_schedule(480, 1, 3, 9, 120, 90, 8, models=4,
+                              high_rps_by_role={"c": 5, "d": 2},
+                              low_rps_by_role={"c": 1.5, "d": 0.5})
+_lows = [min(p[2 + i] for p in _lo4) for i in range(4)]
+_highs = [max(p[2 + i] for p in _lo4) for i in range(4)]
+_buf = io.StringIO()
+_keep_err = sys.stderr
+sys.stderr = _buf
+try:
+    # Model C's burst no higher than its own low: a flat rate, refused.
+    _rc_flat = profile.main(["--emit", "schedule", "--models", "3", "--low-rps", "1",
+                             "--high-rps-c", "2", "--low-rps-c", "2"])
+    _rc_zero = profile.main(["--emit", "schedule", "--models", "4", "--low-rps-d", "0"])
+finally:
+    sys.stderr = _keep_err
+if _lows != [3, 3, 1.5, 0.5] or _highs != [9, 8, 5, 2]:
+    fail("per-model rates not kept: lows %s (want [3, 3, 1.5, 0.5]), highs %s (want [9, 8, 5, 2])"
+         % (_lows, _highs))
+elif _lo4[0][2:] != (3, 3, 1.5, 0.5):
+    fail("the lead-in is not every model at its own low rate: %s" % (_lo4[0][2:],))
+elif _rc_flat != 2 or _rc_zero != 2:
+    fail("a burst at its own low rate (rc=%r) or a zero low rate (rc=%r) was not refused"
+         % (_rc_flat, _rc_zero))
+elif profile.build_schedule(480, 1, 3, 9, 120, 90, 8) != \
+        profile.build_schedule(480, 1, 3, 9, 120, 90, 8, low_rps_by_role={"c": 1, "d": 1}):
+    fail("a low rate for C or D changed the two-model schedule")
+else:
+    ok("C and D idle at 1.5 and 0.5 and burst at 5 and 2; a flat or zero rate is refused; two models untouched")
+
 
 def nm_schedule(models):
     return profile.schedule_json(profile.stage_map(
