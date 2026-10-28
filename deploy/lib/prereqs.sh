@@ -1339,7 +1339,7 @@ physical limiter: drop gpu-inventory from WVA_LIMITER."
 # mid-flow state between `deploy-wva` and `scaledobjects-apply`, or a forgotten
 # registration step -- and NOTHING IN CLUSTER STATE DISTINGUISHES THEM.
 wva_report_scaledobjects() {
-    local ns="${WVA_WATCH_NS:-$WVA_NS}" count where in_where sc="" one
+    local ns="${WVA_WATCH_NS:-$WVA_NS}" count where in_where one
     if declare -F wva_watch_is_multi >/dev/null && wva_watch_is_multi; then
         for one in $(wva_watch_words); do
             (WVA_WATCH_NS="$one"; wva_report_scaledobjects) || true
@@ -1352,20 +1352,43 @@ wva_report_scaledobjects() {
     # SCOPE=cluster, scan only the controller's namespace and find nothing.
     where="-n $ns" in_where="in $ns"
     if [ "$(wva_install_scope)" = cluster ]; then
-        where="-A" in_where="on the cluster" sc=" SCOPE=cluster"
+        where="-A" in_where="on the cluster"
     fi
 
-    # `|| count=0` is the "never fails" contract above, not decoration: under the
-    # caller's `set -e -o pipefail`, a non-zero exit anywhere in this pipe -- e.g.
-    # the ScaledObject CRD not installed yet, an entirely ordinary state for a
-    # preflight to run in -- would otherwise abort the whole script right here,
-    # in the one function on this path that promises it can't.
+    # One list, read three ways below. A list that fails -- Forbidden, the
+    # ScaledObject CRD not installed yet, a timeout -- is said and the check
+    # stops: folded into a count of 0 it printed "none registered yet" to a
+    # tenant who may simply not list ScaledObjects. `|| rc=$?` is the "never
+    # fails" contract above: under `set -e` in the caller a non-zero exit would
+    # otherwise abort the whole script here.
+    #
+    # "Registered with WVA" here is a trigger naming the scaler of THIS install
+    # (wva_names_scaler, with WVA_NS): the scaler of another install on the same
+    # cluster is another scaler, not a registration with this one.
+    #
+    # The reason quoted is kubectl's own error line, not stderr's first line:
+    # client-go logs discovery trouble (E1028 ... memcache.go ... could not get
+    # resource list for external.metrics.k8s.io) ahead of it, and quoting that
+    # named an unrelated API as the reason.
+    local so rc=0 count
     # shellcheck disable=SC2086 # $where is one or two words by construction
-    count=$(kubectl get scaledobject $where -o json 2>/dev/null | jq -r '
+    kc_capture get scaledobject $where -o json || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        so=$(printf '%s\n' "$KC_ERR" | grep -m1 -E '^(error|Error from server)' || true)
+        [ -n "$so" ] || so=$(printf '%s\n' "$KC_ERR" | grep -v '^[[:space:]]*$' | tail -n1 || true)
+        log_warning "  ScaledObjects: could not list them $in_where (${so:-kubectl exited $rc}) -- not checked."
+        return 0
+    fi
+    so="$KC_OUT"
+    count=$(printf '%s' "$so" | jq -r --arg ns "$WVA_NS" "$WVA_SCALER_ADDRESS_JQ"'
         [ .items[]?
-          | select([ .spec.triggers[]?.metadata.scalerAddress // ""
-                     | select(startswith("wva-external-scaler.")) ] | length > 0) ] | length' 2>/dev/null) || count=0
-    if [ "${count:-0}" -gt 0 ]; then
+          | select(any(.spec.triggers[]?; .metadata.scalerAddress | wva_names_scaler($ns))) ] | length' 2>/dev/null) || count=""
+    case "$count" in
+        ''|*[!0-9]*)
+            log_warning "  ScaledObjects: could not list them $in_where (kubectl did not return a readable list) -- not checked."
+            return 0 ;;
+    esac
+    if [ "$count" -gt 0 ]; then
         log_success "  ScaledObjects: $count workload(s) $in_where already registered with WVA."
         log_info "    The plan will offer 'adopt' for each, so you choose what happens to them."
 
@@ -1388,11 +1411,9 @@ wva_report_scaledobjects() {
         # lastTransitionTime unset. An annotation touch did not clear it; only
         # deleting and recreating the ScaledObject did.
         local notready
-        # shellcheck disable=SC2086
-        notready=$(kubectl get scaledobject $where -o json 2>/dev/null | jq -r '
+        notready=$(printf '%s' "$so" | jq -r --arg ns "$WVA_NS" "$WVA_SCALER_ADDRESS_JQ"'
             .items[]?
-            | select([ .spec.triggers[]?.metadata.scalerAddress // ""
-                       | select(startswith("wva-external-scaler.")) ] | length > 0)
+            | select(any(.spec.triggers[]?; .metadata.scalerAddress | wva_names_scaler($ns)))
             | select([ .status.conditions[]? | select(.type == "Ready" and .status == "True") ] | length == 0)
             | "      " + .metadata.namespace + "/" + .metadata.name + ": " +
               ([ .status.conditions[]? | select(.type == "Ready") | .message // .reason ][0] // "no Ready condition yet")
@@ -1401,12 +1422,24 @@ wva_report_scaledobjects() {
             log_warning "    Registered, but NOT Ready — KEDA is not acting on these, so WVA is never called about them and they do not scale:"
             printf '%s\n' "$notready" | while IFS= read -r line; do log_warning "$line"; done
             log_warning "      A ScaledObject that outlived its target stays in this state even after the target comes back. Recreate it:"
-            log_warning "      make scaledobjects-apply WVA_DEFAULT_SO_PLAN=<plan>   # after deleting the stale one"
+            log_warning "      $(wva_make_cmd scaledobjects-apply) WVA_DEFAULT_SO_PLAN=<plan>   # after deleting the stale one"
         fi
         return 0
     fi
+    # The count above is ScaledObjects naming THIS scaler, not every ScaledObject:
+    # mid-migration, upstream ones still sit on the same workloads. Saying "none"
+    # beside them read as a fresh cluster. The commands go through wva_make_cmd
+    # so they carry WVA_NS: printed without it, apply looks for the scaler in the
+    # default namespace and exits 2.
+    local others
+    others=$(printf '%s' "$so" | jq -r --arg ns "$WVA_NS" "$WVA_SCALER_ADDRESS_JQ"'
+        [ .items[]?
+          | select(any(.spec.triggers[]?; .metadata.scalerAddress | wva_names_scaler($ns)) | not) ] | length' 2>/dev/null) || others=0
     # Deliberately log_info, not a warning: this is the expected state here.
-    log_info "  ScaledObjects: none $in_where yet — registration is the next step, and nothing scales until it runs:"
-    log_info "      make scaledobjects-plan${sc} WVA_DEFAULT_SO_PLAN=wva-plan.yaml   # then edit it"
-    log_info "      make scaledobjects-apply${sc} WVA_DEFAULT_SO_PLAN=wva-plan.yaml"
+    log_info "  ScaledObjects: none $in_where registered with WVA yet — registration is the next step, and nothing scales until it runs:"
+    if [ "${others:-0}" -gt 0 ]; then
+        log_info "    $others other ScaledObject(s) $in_where use another scaler. Any that target these model servers are adopted in the plan (apply: adopt), not registered fresh."
+    fi
+    log_info "      $(wva_make_cmd scaledobjects-plan) WVA_DEFAULT_SO_PLAN=wva-plan.yaml   # then edit it"
+    log_info "      $(wva_make_cmd scaledobjects-apply) WVA_DEFAULT_SO_PLAN=wva-plan.yaml"
 }
