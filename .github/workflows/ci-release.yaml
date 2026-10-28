@@ -52,11 +52,12 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      # Only a reviewed commit is released: one on main, or, for a patch to an
-      # older line, one on that line's release-MAJOR.MINOR branch. Anyone who
-      # may push a tag could otherwise publish, sign and move `latest` to a
-      # commit no review has seen. The branch is the tag's own line, so a
-      # v0.11.0 tag on release-0.10 is refused. The full checkout above already
+      # Only a commit on a release line is released: one on main, or, for a
+      # patch to an older line, one on that line's release-MAJOR.MINOR branch,
+      # and only for a line that already has a tag on main. Anyone who may push
+      # a tag could otherwise publish, sign and move `latest` to any commit. The
+      # branch is the tag's own line, so a v0.11.0 tag on release-0.10 is
+      # refused. Review is enforced by branch rules, not here. The full checkout above already
       # holds both branches; each is fetched only if not. A failed fetch leaves
       # the ref missing, which refuses. hack/check-release-latest.sh runs this
       # step too.
@@ -79,6 +80,12 @@ jobs:
             fi
             if git rev-parse --verify -q "refs/remotes/origin/$branch" >/dev/null \
               && git merge-base --is-ancestor "$GITHUB_SHA" "refs/remotes/origin/$branch"; then
+              # Only a line already released from main has a patch branch, so
+              # pushing a new release-9.0 branch cannot publish a v9.0.0.
+              if [ -z "$(git tag --merged refs/remotes/origin/main --list "v$line.*")" ]; then
+                echo "::error::${GITHUB_SHA} is on $branch, but no v$line.* tag is on main; $line was never released from main, refusing to release it"
+                exit 1
+              fi
               echo "${GITHUB_SHA} is on $branch"
               exit 0
             fi

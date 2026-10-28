@@ -17,7 +17,7 @@ ROOT="${CHECK_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 WORKFLOW="$ROOT/.github/workflows/ci-release.yaml"
 # One ok or FAIL per case. A run that stops early otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=32
+EXPECT_CASES=33
 PASS=0
 FAIL=0
 
@@ -157,10 +157,15 @@ else
         fail "a commit off main must be refused" "$onmain_log"
     fi
     # A patch line: release-1.0 forks from main and carries a commit main has
-    # not. Only a tag of that line, on that branch, is released.
+    # not. Only a tag of that line, on that branch, is released, and only once
+    # the line has a tag on main. release-2.0 has none.
+    "${G[@]}" -C "$WORK/origin" tag v1.0.0 HEAD~1
     "${G[@]}" -C "$WORK/origin" checkout -q -b release-1.0 HEAD~1
     "${G[@]}" -C "$WORK/origin" commit -q --allow-empty -m patch
     patch_sha="$(git -C "$WORK/origin" rev-parse HEAD)"
+    "${G[@]}" -C "$WORK/origin" checkout -q -b release-2.0 main
+    "${G[@]}" -C "$WORK/origin" commit -q --allow-empty -m unreleased
+    unreleased_sha="$(git -C "$WORK/origin" rev-parse HEAD)"
     "${G[@]}" -C "$WORK/origin" checkout -q main
     git -C "$WORK/clone" fetch -q origin
     git -C "$WORK/clone" update-ref -d refs/remotes/origin/release-1.0
@@ -181,6 +186,12 @@ else
         ok "a v1.0.x tag on a commit on neither branch is refused"
     else
         fail "a v1.0.3 tag off both main and release-1.0 must be refused" "$onmain_log"
+    fi
+    onmain_log="$(cd "$WORK/clone" && env GITHUB_SHA="$unreleased_sha" GITHUB_REF_NAME=v2.0.0 bash "$WORK/onmain.sh" 2>&1)"
+    if [ $? -ne 0 ] && printf '%s\n' "$onmain_log" | grep -q 'never released from main'; then
+        ok "a new release-2.0 branch cannot publish v2.0.0 (no 2.0 tag on main)"
+    else
+        fail "a tag on a branch whose line has no tag on main must be refused" "$onmain_log"
     fi
 fi
 

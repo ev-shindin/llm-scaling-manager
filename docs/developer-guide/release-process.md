@@ -5,7 +5,9 @@ to tag it, and what to do when the release workflow fails.
 
 ## Quick reference
 
-Every release, `-rc` ones included, takes **three PRs to `main`** and one tag:
+A release from `main`, `-rc` ones included, takes **three PRs to `main`** and
+one tag. A patch to an older line follows [Patch releases](#patch-releases)
+instead.
 
 | Step | Where | What |
 |------|--------|------|
@@ -28,8 +30,8 @@ Every release, `-rc` ones included, takes **three PRs to `main`** and one tag:
    this repository.
 
 A tag is released only from `main`, or from its own line's
-`release-MAJOR.MINOR` branch (a `v0.10.2` from `release-0.10`), and only when
-`newTag` on the tagged commit equals the tag. See [Patch releases](#patch-releases).
+`release-MAJOR.MINOR` branch (a `v0.10.2` from `release-0.10`) once that line
+has a tag on `main`, and only when `newTag` on the tagged commit equals the tag. See [Patch releases](#patch-releases).
 
 ---
 
@@ -40,6 +42,8 @@ A tag is released only from `main`, or from its own line's
   access ([first release](#the-first-release-to-a-new-package)).
 - [ ] The commit you will tag passed its PR checks, including the e2e runs. The
   release reruns the PR checks, not the e2e suites.
+- [ ] The workflow checks where a tag is, not who reviewed it. Review on `main`
+  and `release-*` is enforced only by the repository's branch rules, if set.
 
 ---
 
@@ -121,7 +125,8 @@ Find the failed step in the run.
 published.
 
 - A flaky check: open the run and use **Re-run failed jobs**.
-- Anything else: delete the tag, fix the problem with a PR to `main` that keeps
+- Anything else: delete the tag, fix the problem with a PR to `main` (for a
+  patch, to its release branch) that keeps
   `newTag: vX.Y.Z`, tag that PR's merge commit as in step 1, and repeat:
   ```bash
   git push "$REMOTE" --delete vX.Y.Z && git tag -d vX.Y.Z
@@ -140,31 +145,59 @@ be public under that tag. Do not move or delete the tag.
 
 ## Patch releases
 
-An urgent fix for a released line ships from that line's branch, while `main`
-moves on. `release-0.10` holds the 0.10 line; it starts at the `v0.10.1` tag.
+An urgent fix for a released line ships from that line's branch while `main`
+moves on: `v0.10.2` from `release-0.10`. The workflow releases a tag from a
+`release-MAJOR.MINOR` branch only if the tag is of that line and the line
+already has a tag on `main`.
+
+**Creating a line's branch** (once per line). Start it at the line's latest
+release and add the release-branch CI change, which a tag runs from the tagged
+commit:
+
+```bash
+REMOTE=<remote for ev-shindin/llm-scaling-manager>
+git fetch "$REMOTE"
+git push "$REMOTE" 'v0.10.1^{commit}:refs/heads/release-0.10'
+```
+
+Then open a PR to `release-0.10` that cherry-picks the commit adding
+release-branch support to `ci-release.yaml`, `ci-pr-checks.yaml` and
+`non-main-gatekeeper.yml`. Until it merges, PRs to the branch get no checks and
+its tags are refused.
+
+**Each patch:**
 
 1. **Fix on `main` first**, then open a PR to `release-0.10` that cherry-picks
-   the merged commit (`git cherry-pick -x <sha>`). A fix that only applies to
-   the old line goes straight to the release branch and says why in the PR.
-   PRs to `release-*` run the same PR checks as PRs to `main`.
-2. **Release PR to `release-0.10`**, not to `main`: `newTag: v0.10.2`. The
-   branch already pins the previous patch, so this is a one-line change.
+   the merged commit (`git cherry-pick -x <sha>`). If `main` no longer has the
+   bug, open the fix against the release branch alone and say why in the PR.
+   PRs to `release-*` run the same checks as PRs to `main`.
+2. **Release PR to `release-0.10`**, not to `main`. It sets
+   `newTag: v0.10.2` and moves every version reference on the branch to
+   `v0.10.2`; list them with
+   `git grep -n 'v0\.10\.[0-9]' -- docs deploy hack/benchmark`. It adds
+   "Upgrading from v0.10.1 to v0.10.2" to
+   `docs/reference/upgrade-and-uninstall.md`. Pre-release checklist items 2-4
+   apply.
 3. **Tag its merge commit**, as in [step 1](#1-push-the-tag), with the release
    branch in place of `main`:
    ```bash
+   REMOTE=<remote for ev-shindin/llm-scaling-manager>
    git fetch "$REMOTE"
    git tag -m "llm-scaling-manager v0.10.2" v0.10.2 <merge commit>
    git show v0.10.2:config/base/manager/kustomization.yaml | grep -x '  newTag: v0.10.2' \
      && git merge-base --is-ancestor v0.10.2 "$REMOTE/release-0.10" && git push "$REMOTE" v0.10.2
    ```
-   The workflow refuses a tag of another line on this branch (a `v0.11.0` on
-   `release-0.10`).
-4. **No reset PR.** The release branch keeps the pin; `main` never had it.
-5. **Publish and docs** as in steps 4 and 5. The docs PR goes to `main`.
+4. **No reset PR.** The branch keeps the pin; `main` never had it.
+5. **Publish** as in [step 4](#4-publish-the-github-release). Untick
+   **Set as the latest release** unless the patch is the highest final release.
+6. **Docs PR to `main`**: add the upgrade section. Point `main`'s install docs
+   at the patch only if it is the highest final release.
 
-`latest` moves only if the patch is the highest final release; a `v0.10.2` after
-`v0.11.0` leaves it on `v0.11.0`. Start the next line's branch
-(`release-0.11`) from its `.0` tag when that line needs its first patch.
+If the run fails, recover as in [If the release fails](#if-the-release-fails),
+with the fix PR going to the release branch instead of `main`.
+
+The `latest` image tag moves only for the highest final release; a `v0.10.2`
+after `v0.11.0` leaves it on `v0.11.0`.
 
 ---
 
