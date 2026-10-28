@@ -198,8 +198,9 @@ func pricingK(cfg *config.ScalingPolicy) float64 {
 // sequence ages are spread over [0, OL] in steady state, so the average
 // resident sequence carries half its generation.
 //
-// The cap is the engine's max_num_seqs, and it is not optional: short requests
-// imply more resident sequences than the engine will admit, and the trace's
+// The cap is the engine's max_num_seqs, lowered by --max-num-active-seqs when
+// set (capacity.EngineParams.BatchCap, issue #335), and it is not optional:
+// short requests imply more resident sequences than the engine will admit, and the trace's
 // second phase ran at exactly 256, the configured ceiling. itl.TokenRate does
 // not apply it -- it prices a cache, not an engine -- so the sequence count is
 // capped here before the division.
@@ -247,8 +248,8 @@ func deriveMu(model itl.Model, params *capacity.EngineParams, ranks int,
 	if seqs <= 0 {
 		return derivedMu{why: "no-seqs"}
 	}
-	if params != nil && params.MaxNumSeqs > 0 {
-		seqs = min(seqs, float64(params.MaxNumSeqs)*float64(max(ranks, 1)))
+	if batchCap := params.BatchCap(); batchCap > 0 {
+		seqs = min(seqs, float64(batchCap)*float64(max(ranks, 1)))
 	}
 	itlSec := model.ITLAt(kPrice)
 	if !(itlSec > 0) {

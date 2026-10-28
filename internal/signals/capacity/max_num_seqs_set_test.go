@@ -34,6 +34,36 @@ func TestExplicitMaxNumSeqs(t *testing.T) {
 	}
 }
 
+// BatchCap prices a replica, so it takes max_num_seqs stated or defaulted,
+// lowered by --max-num-active-seqs when that is set (issue #335).
+func TestBatchCap(t *testing.T) {
+	for name, tc := range map[string]struct {
+		params EngineParams
+		want   int64
+	}{
+		"neither":              {EngineParams{}, 0},
+		"max_num_seqs alone":   {EngineParams{MaxNumSeqs: 256}, 256},
+		"active below":         {EngineParams{MaxNumSeqs: 256, MaxNumActiveSeqs: 64}, 64},
+		"active equal":         {EngineParams{MaxNumSeqs: 256, MaxNumActiveSeqs: 256}, 256},
+		"active above":         {EngineParams{MaxNumSeqs: 256, MaxNumSeqsSet: true, MaxNumActiveSeqs: 512}, 256},
+		"active alone":         {EngineParams{MaxNumActiveSeqs: 64}, 64},
+		"defaulted max, flag":  {ParseVLLMArgs(scaletarget.NewDeploymentAccessor(makeTestDeployment("--max-num-active-seqs=32"))), 32},
+		"defaulted max, alone": {ParseVLLMArgs(scaletarget.NewDeploymentAccessor(makeTestDeployment("--gpu-memory-utilization=0.9"))), 256},
+		// vLLM refuses an active cap above max_num_seqs, so a stated one
+		// above the defaulted 256 is the engine's real bound.
+		"defaulted max, active above": {ParseVLLMArgs(scaletarget.NewDeploymentAccessor(makeTestDeployment("--max-num-active-seqs=512"))), 512},
+		"stated max, active above":    {ParseVLLMArgs(scaletarget.NewDeploymentAccessor(makeTestDeployment("--max-num-seqs=256", "--max-num-active-seqs=512"))), 256},
+		"unreadable max, active":      {ParseVLLMArgs(scaletarget.NewDeploymentAccessor(makeTestDeployment("--max-num-seqs", "$UNSET_SEQS", "--max-num-active-seqs=512"))), 512},
+	} {
+		if got := tc.params.BatchCap(); got != tc.want {
+			t.Errorf("%s: BatchCap = %d, want %d", name, got, tc.want)
+		}
+	}
+	if got := (*EngineParams)(nil).BatchCap(); got != 0 {
+		t.Errorf("nil params: %d, want 0", got)
+	}
+}
+
 // --max-num-active-seqs (vLLM v0.31+) stops the running batch below
 // max_num_seqs, so the batch cap is the lower of the two (issue #308). Read in
 // every form max_num_seqs is.

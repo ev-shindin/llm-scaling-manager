@@ -226,7 +226,7 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				"notReady", d.line.NotReady, "declined", d.line.Declined,
 				// The fill before the clamp and the batch cap, and the cap's inputs.
 				"targetFill", d.targetFill, "capacityTokens", d.capTokens, "kvTokensPerRequest", fleet.shape.KVreq,
-				"maxNumSeqs", d.maxSeqs, "engineRanks", d.ranks, "scaleUpThreshold", scaleUp)
+				"maxNumSeqs", d.maxSeqs, "maxNumActiveSeqs", d.activeSeqs, "engineRanks", d.ranks, "scaleUpThreshold", scaleUp)
 		}
 	}
 
@@ -274,9 +274,12 @@ type pricingDetail struct {
 	line       itl.Reading
 	targetFill float64
 	capTokens  float64
-	// maxSeqs is the replica's batch cap: max_num_seqs times ranks.
-	maxSeqs int64
-	ranks   int64
+	// maxSeqs is max_num_seqs times ranks, and activeSeqs is
+	// max_num_active_seqs times ranks (0 when unset). The replica's batch cap
+	// is the lower of the two.
+	maxSeqs    int64
+	activeSeqs int64
+	ranks      int64
 }
 
 // priceVariant fits the variant's line and prices one replica of it at the
@@ -336,14 +339,16 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 		reading.Source = constants.SLOSourceInfeasible
 		return vc, reading, d
 	}
-	// max_num_seqs bounds one engine; a replica of several data-parallel
-	// ranks admits that many times it, against capacity tokens that are
-	// already the whole replica's (issue #150).
+	// The batch cap bounds one engine: max_num_seqs, lowered by
+	// max_num_active_seqs when set (issue #335). A replica of several
+	// data-parallel ranks admits that many times it, against capacity tokens
+	// that are already the whole replica's (issue #150).
 	d.ranks = fleet.engineRanks(vs.VariantName)
 	if params != nil {
 		d.maxSeqs = params.MaxNumSeqs * d.ranks
+		d.activeSeqs = params.MaxNumActiveSeqs * d.ranks
 	}
-	maxSeqs := d.maxSeqs
+	maxSeqs := params.BatchCap() * d.ranks
 	capTokens := fleet.capacityTokens(vs.VariantName, params)
 	d.capTokens = capTokens
 	fill := reachableFill(band, p.fill, capTokens, fleet.shape.KVreq, maxSeqs)

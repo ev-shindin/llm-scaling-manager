@@ -360,6 +360,25 @@ func (p *EngineParams) explicitMaxNumSeqsFlag() int64 {
 	return p.MaxNumSeqs
 }
 
+// BatchCap is the most sequences one engine rank runs at once, for pricing:
+// ExplicitMaxNumSeqs when the flags state a cap, and MaxNumSeqs, stated or
+// defaulted, when they do not. Unlike ExplicitMaxNumSeqs it is never 0 for a
+// defaulted max_num_seqs, since it bounds what a replica is priced to serve,
+// not which rows read as at the cap. 0 when neither is known.
+//
+// A stated --max-num-active-seqs is the cap even above the defaulted 256:
+// vLLM refuses an active cap above max_num_seqs, so a running engine's real
+// max_num_seqs is at least that high.
+func (p *EngineParams) BatchCap() int64 {
+	if p == nil {
+		return 0
+	}
+	if stated := p.ExplicitMaxNumSeqs(); stated > 0 {
+		return stated
+	}
+	return p.MaxNumSeqs
+}
+
 // maxNumSeqsKeys are the normalised flags either parser reads into
 // MaxNumSeqs.
 var maxNumSeqsKeys = []string{"max_num_seq", "max_num_seqs", "max_running_requests"}
