@@ -17,7 +17,7 @@ ROOT="${CHECK_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 WORKFLOW="$ROOT/.github/workflows/ci-release.yaml"
 # One ok or FAIL per case. A run that stops early otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=29
+EXPECT_CASES=32
 PASS=0
 FAIL=0
 
@@ -155,6 +155,32 @@ else
         ok "a tag on a commit that is not on main is refused"
     else
         fail "a commit off main must be refused" "$onmain_log"
+    fi
+    # A patch line: release-1.0 forks from main and carries a commit main has
+    # not. Only a tag of that line, on that branch, is released.
+    "${G[@]}" -C "$WORK/origin" checkout -q -b release-1.0 HEAD~1
+    "${G[@]}" -C "$WORK/origin" commit -q --allow-empty -m patch
+    patch_sha="$(git -C "$WORK/origin" rev-parse HEAD)"
+    "${G[@]}" -C "$WORK/origin" checkout -q main
+    git -C "$WORK/clone" fetch -q origin
+    git -C "$WORK/clone" update-ref -d refs/remotes/origin/release-1.0
+    onmain_log="$(cd "$WORK/clone" && env GITHUB_SHA="$patch_sha" GITHUB_REF_NAME=v1.0.2 bash "$WORK/onmain.sh" 2>&1)"
+    if [ $? -eq 0 ] && printf '%s\n' "$onmain_log" | grep -q 'is on release-1.0'; then
+        ok "a v1.0.x tag on release-1.0 is released (the branch fetched when missing)"
+    else
+        fail "a tag of the 1.0 line on release-1.0 must pass the on-main step" "$onmain_log"
+    fi
+    onmain_log="$(cd "$WORK/clone" && env GITHUB_SHA="$patch_sha" GITHUB_REF_NAME=v1.1.0 bash "$WORK/onmain.sh" 2>&1)"
+    if [ $? -ne 0 ] && printf '%s\n' "$onmain_log" | grep -q 'not on main or on release-1.1'; then
+        ok "a tag of another line on release-1.0 is refused"
+    else
+        fail "a v1.1.0 tag on a release-1.0 commit must be refused" "$onmain_log"
+    fi
+    onmain_log="$(cd "$WORK/clone" && env GITHUB_SHA="$side_sha" GITHUB_REF_NAME=v1.0.3 bash "$WORK/onmain.sh" 2>&1)"
+    if [ $? -ne 0 ] && printf '%s\n' "$onmain_log" | grep -q 'not on main or on release-1.0'; then
+        ok "a v1.0.x tag on a commit on neither branch is refused"
+    else
+        fail "a v1.0.3 tag off both main and release-1.0 must be refused" "$onmain_log"
     fi
 fi
 

@@ -27,10 +27,9 @@ Every release, `-rc` ones included, takes **three PRs to `main`** and one tag:
 3. **Release notes**, in the GitHub Release. They are not kept as a file in
    this repository.
 
-Only `main`'s current line can be released. The workflow refuses a tag that is
-not on `main`, and needs `newTag` on the tagged commit to equal the tag. There
-is no release branch, so a patch for an older line (a `v0.5.3` after `v0.6.0`)
-cannot be released.
+A tag is released only from `main`, or from its own line's
+`release-MAJOR.MINOR` branch (a `v0.10.2` from `release-0.10`), and only when
+`newTag` on the tagged commit equals the tag. See [Patch releases](#patch-releases).
 
 ---
 
@@ -139,6 +138,36 @@ be public under that tag. Do not move or delete the tag.
 
 ---
 
+## Patch releases
+
+An urgent fix for a released line ships from that line's branch, while `main`
+moves on. `release-0.10` holds the 0.10 line; it starts at the `v0.10.1` tag.
+
+1. **Fix on `main` first**, then open a PR to `release-0.10` that cherry-picks
+   the merged commit (`git cherry-pick -x <sha>`). A fix that only applies to
+   the old line goes straight to the release branch and says why in the PR.
+   PRs to `release-*` run the same PR checks as PRs to `main`.
+2. **Release PR to `release-0.10`**, not to `main`: `newTag: v0.10.2`. The
+   branch already pins the previous patch, so this is a one-line change.
+3. **Tag its merge commit**, as in [step 1](#1-push-the-tag), with the release
+   branch in place of `main`:
+   ```bash
+   git fetch "$REMOTE"
+   git tag -m "llm-scaling-manager v0.10.2" v0.10.2 <merge commit>
+   git show v0.10.2:config/base/manager/kustomization.yaml | grep -x '  newTag: v0.10.2' \
+     && git merge-base --is-ancestor v0.10.2 "$REMOTE/release-0.10" && git push "$REMOTE" v0.10.2
+   ```
+   The workflow refuses a tag of another line on this branch (a `v0.11.0` on
+   `release-0.10`).
+4. **No reset PR.** The release branch keeps the pin; `main` never had it.
+5. **Publish and docs** as in steps 4 and 5. The docs PR goes to `main`.
+
+`latest` moves only if the patch is the highest final release; a `v0.10.2` after
+`v0.11.0` leaves it on `v0.11.0`. Start the next line's branch
+(`release-0.11`) from its `.0` tag when that line needs its first patch.
+
+---
+
 ## The first release to a new package
 
 The package `llm-scaling-manager` already exists for this repository: it is
@@ -218,7 +247,8 @@ re-run from the **Actions** tab.
 1. **Gate.** Calls [`ci-pr-checks.yaml`](../../.github/workflows/ci-pr-checks.yaml)
    on the tagged commit: `golangci-lint`, `make build`, `make test`,
    `make lint-deploy-scripts`, the docs checks and the kustomize builds.
-2. **Validate.** Refuses a tag whose commit is not on `main`, a tag that is not
+2. **Validate.** Refuses a tag whose commit is on neither `main` nor the tag's
+   `release-MAJOR.MINOR` branch, a tag that is not
    `vMAJOR.MINOR.PATCH[-PRERELEASE]`, and a commit whose `newTag` is not the tag.
 3. **Scan before push.** Builds the `linux/amd64` image locally and scans it
    with Trivy. A **fixable CRITICAL** vulnerability fails the release. A CRITICAL

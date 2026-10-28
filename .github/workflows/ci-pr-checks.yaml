@@ -10,6 +10,8 @@ on:
     branches:
       - main
       - dev
+      # Patch lines (release-0.10): a fix to one is checked like a fix to main.
+      - 'release-*'
   # Also on push to main. This workflow holds the ONLY build, test and lint
   # steps in the repo, and it used to fire on pull_request alone -- so a commit
   # pushed straight to main was never compiled, tested or linted by CI at all.
@@ -26,6 +28,7 @@ on:
   push:
     branches:
       - main
+      - 'release-*'
   # Nightly, for the live-Kueue borrowing e2e (e2e-tests-kueue-borrow): it runs
   # on a PR only when the PR touches borrowing, so main is checked every night
   # whatever merged. The other e2e jobs exclude this event at their own `if`;

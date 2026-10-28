@@ -52,22 +52,39 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      # Only a commit on main is released. Anyone who may push a tag could
-      # otherwise publish, sign and move `latest` to a commit no review has
-      # seen. The full checkout above already holds origin/main; it is fetched
-      # only if not. hack/check-release-latest.sh runs this step too.
-      - name: Refuse a tag that is not on main
+      # Only a reviewed commit is released: one on main, or, for a patch to an
+      # older line, one on that line's release-MAJOR.MINOR branch. Anyone who
+      # may push a tag could otherwise publish, sign and move `latest` to a
+      # commit no review has seen. The branch is the tag's own line, so a
+      # v0.11.0 tag on release-0.10 is refused. The full checkout above already
+      # holds both branches; each is fetched only if not. A failed fetch leaves
+      # the ref missing, which refuses. hack/check-release-latest.sh runs this
+      # step too.
+      - name: Refuse a tag that is not on main or its release branch
         id: onmain
         run: |
           set -euo pipefail
           if ! git rev-parse --verify -q refs/remotes/origin/main >/dev/null; then
             git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           fi
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
-            echo "::error::tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not on main; refusing to release it"
-            exit 1
+          if git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "${GITHUB_SHA} is on main"
+            exit 0
           fi
-          echo "${GITHUB_SHA} is on main"
+          line="$(printf '%s' "$GITHUB_REF_NAME" | sed -nE 's/^v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*))\.[0-9].*$/\1/p')"
+          if [ -n "$line" ]; then
+            branch="release-$line"
+            if ! git rev-parse --verify -q "refs/remotes/origin/$branch" >/dev/null; then
+              git fetch --no-tags origin "+refs/heads/$branch:refs/remotes/origin/$branch" || true
+            fi
+            if git rev-parse --verify -q "refs/remotes/origin/$branch" >/dev/null \
+              && git merge-base --is-ancestor "$GITHUB_SHA" "refs/remotes/origin/$branch"; then
+              echo "${GITHUB_SHA} is on $branch"
+              exit 0
+            fi
+          fi
+          echo "::error::tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not on main or on release-${line:-MAJOR.MINOR}; refusing to release it"
+          exit 1
 
       # The image goes to the repository owner's namespace, as ci-main-image.yaml
       # does: ghcr.io/ev-shindin/llm-scaling-manager here, which is what
