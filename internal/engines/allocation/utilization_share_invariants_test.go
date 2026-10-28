@@ -176,13 +176,19 @@ func (s *shareInvariants) observe(v simCycleView) {
 			if ago, held := s.heldBy(tr.Receiver, true, v.at); tr.Receiver != "" && held {
 				s.fail(v.at, "%s->%s: %s gave %v ago, inside the reversal hold", tr.Donor, tr.Receiver, tr.Receiver, ago)
 			}
-			if ago, held := s.heldBy(tr.Donor, false, v.at); tr.Receiver != "" && held {
+			if ago, held := s.heldBy(tr.Donor, false, v.at); tr.Donor != "" && held {
 				s.fail(v.at, "%s->%s: %s received %v ago, inside the reversal hold", tr.Donor, tr.Receiver, tr.Donor, ago)
 			}
 		}
-		if !tr.Entitled && tr.Receiver != "" { // what the ledger records (ShareLedger.Start)
-			s.moves[tr.Donor] = append(s.moves[tr.Donor], simMove{v.at, tr.ID, false})
-			s.moves[tr.Receiver] = append(s.moves[tr.Receiver], simMove{v.at, tr.ID, true})
+		// What the ledger records (ShareLedger.Start): every move not entitled
+		// holds its donor -- a donor-set contributor too -- and its receiver.
+		if !tr.Entitled {
+			if tr.Donor != "" {
+				s.moves[tr.Donor] = append(s.moves[tr.Donor], simMove{v.at, tr.ID, false})
+			}
+			if tr.Receiver != "" {
+				s.moves[tr.Receiver] = append(s.moves[tr.Receiver], simMove{v.at, tr.ID, true})
+			}
 		}
 	}
 	for k, n := range moved {
