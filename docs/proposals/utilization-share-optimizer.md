@@ -30,9 +30,9 @@ limit) and wants all of it used. When it is on:
    target, not the next cycle.
 5. **It does not oscillate, and it says what it cannot follow.** Its moves
    land about twelve minutes after it decides them, so §6.7 builds it not to
-   oscillate and measures the result in a simulator. Steady load produces no
-   transfers; a demand step settles in the minimum number of moves, with none
-   wasted; slow shifts are followed. Load that swings back within about 100
+   oscillate and measures the result in a simulator. In its three-model
+   scenarios, steady load produces no transfers; a demand step settles in the
+   minimum number of moves, with none wasted; slow shifts are followed. Load that swings back within about 100
    minutes cannot be followed by moving GPUs, and there standing still does
    better. The rules limit that loss rather than pretend to remove it.
 
@@ -1905,8 +1905,11 @@ that are actually serving, as a share of need — what makes requests queue).
 Under the rules of this section:
 
 - **No oscillation.** Steady and tied load produce no transfers at all. In
-  every scenario no transfer is wasted, and free cancels fall from hundreds to
-  at most two dozen.
+  every scenario of the table above (three models) no transfer is wasted, and
+  free cancels fall from hundreds to at most two dozen. With four or more
+  models swinging at 30 minutes, the hard-imbalance exemption can undo a move
+  within the reversal hold: 1 to 2 moves in 6 hours, measured at N = 5 to 16.
+  15-minute swings waste none.
 - **A real shift is followed in the minimum number of moves**, and the
   shortfall it was built for drops sharply: 15.9 % → 0.6 % on a demand step,
   5.5 % → 1.4 % on a three-hour swing.
@@ -2442,8 +2445,11 @@ optimizer every cycle (§6.6).
   `hack/utilization-share-oscillation-sim.py`, and its period sweep, is re-run
   against the real planner with a fake clock, a release delay, a fill delay
   and lagged demand. Steady and tied load produce zero transfers; a demand step
-  settles in the minimum number of transfers with none wasted; no scenario
-  wastes a transfer; the 30-minute swing stays below 2.5 × standing still.
+  settles in the minimum number of transfers with none wasted; no
+  three-model scenario wastes a transfer; the 30-minute swing stays below
+  2.5 × standing still. With four or more models swinging at 30 minutes, the
+  hard-imbalance exemption can undo a move within the reversal hold (1 to 2
+  moves in 6 hours at N = 5 to 16, measured); 15-minute swings waste none.
   Ablations, one per rule, must each reproduce the failure the rule removes:
   without `committed`, hundreds of cancels on the tight step; without
   hysteresis, a step whose transfer never lands; without the hold, wasted
