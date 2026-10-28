@@ -525,6 +525,9 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 		mark transferMark
 		pods []string
 		live bool
+		// holes is where the marked pods run (HoleNodes): the mark does
+		// not carry it, the pod does.
+		holes []corev1.Pod
 	}
 	byID := map[string]*found{}
 	var order []string
@@ -565,6 +568,7 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 				order = append(order, id)
 			}
 			f.pods = append(f.pods, key)
+			f.holes = append(f.holes, p)
 			f.live = f.live || p.DeletionTimestamp == nil
 		}
 	}
@@ -625,6 +629,7 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 			ReceiverVariant: m.ReceiverVariant, GPUs: m.GPUs, DonorGPUs: m.DonorGPUs, Started: m.Started,
 			Deadline: m.Started.Add(tm.ReleaseTimeout), DonorPods: f.pods, DonorLowered: f.live, SetID: m.SetID,
 			PlannedPods: plannedPods(m.Planned, f.pods), Returned: m.Returned, Entitled: m.Returned,
+			HoleNodes: shareHoleNodes(f.holes),
 		}, g.Committed[m.Donor])
 		if f.live {
 			e.utilizationShare.desired[variantKey(m.Donor, m.DonorVariant)]--

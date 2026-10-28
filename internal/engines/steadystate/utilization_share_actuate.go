@@ -303,7 +303,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	for _, t := range l.Transfers() {
 		before[t.ID] = t
 	}
-	nodes, units, domains, placements := e.shareNodeInputs(ctx, logger, g, accessor, l.Promised()+l.WakeHeld(now),
+	nodes, units, domains, placements := e.shareNodeInputs(ctx, logger, g, accessor, l.PromisedHoles(now),
 		shareMarkOwned(l, nil), now)
 	plan := allocation.PlanShareTransfers(l, allocation.SharePlanInput{
 		Roles: g.Roles, Held: held, Thresholds: g.Thresholds, DownThresholds: g.DownThresholds, BusiestQueueLoad: g.BusiestQueueLoad, Budget: g.Budget, Tolerance: us.Tolerance,
@@ -411,6 +411,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		metrics.CountUtilizationShareStart(g.AcceleratorType, scope, shareStartKind(set[0]), set[0].SkippedWaits)
 		for _, t := range set {
 			l.ConfirmStarted(t.ID, marked[t.ID])
+			l.RecordHoles(t.ID, shareHoleNodes(markedPods[t.ID]))
 			st.desired[variantKey(t.Donor, t.DonorVariant)]--
 			e.shareStartedEvents(g, t, set, marked[t.ID], accessor)
 			logger.Info("Utilization share: transfer started", "id", t.ID, "set", t.SetID, "donor", t.Donor,

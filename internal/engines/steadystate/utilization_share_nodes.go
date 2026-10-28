@@ -41,7 +41,7 @@ import (
 // pod first, wherever it runs, so the planned hole would not open. A
 // LeaderWorkerSet donor offers the group LWS removes next (donorPods).
 func (e *Engine) shareNodeInputs(ctx context.Context, logger logr.Logger, g allocation.ShareGroup,
-	accessor func(role, variant string) scaletarget.ScaleTargetAccessor, reserved int,
+	accessor func(role, variant string) scaletarget.ScaleTargetAccessor, reserved allocation.ShareHoles,
 	marked func(*corev1.Pod) bool, now time.Time) (
 	map[string]allocation.ShareNode, map[string][]allocation.ShareUnit, map[string]string, map[string][]domain.PodPlacement) {
 	// Domains are known without node information, and a receiver with one
@@ -80,6 +80,16 @@ func (e *Engine) shareNodeInputs(ctx context.Context, logger logr.Logger, g allo
 	nodes := shareFreeNodesAfter(snap, g.AcceleratorType, reserved, st.left.NodeDebits(st.planned), tolerations...)
 	if len(nodes) == 0 {
 		return nil, nil, domains, placements
+	}
+	if debug := logger.V(logging.DEBUG); debug.Enabled() {
+		free := make(map[string]int, len(nodes))
+		for name, n := range nodes {
+			free[name] = n.Free
+		}
+		// Why a receiver was or was not placed: the free GPUs the plan saw,
+		// and where the in-flight promises were taken from.
+		debug.Info("Utilization share: node picture", "accelerator", g.AcceleratorType, "free", free,
+			"promisedOnNodes", reserved.Nodes, "promisedUnplaced", reserved.Unplaced)
 	}
 	// A domain where the pass placed, or the in-flight ledger holds, an
 	// exclusive-topology group holds no other group: the node view's rule.
@@ -332,22 +342,25 @@ func shareDonorUnits(lws bool, pods []corev1.Pod, marked func(*corev1.Pod) bool)
 // shareFreeNodes is the node picture a node-aware plan may use: the schedulable
 // nodes of the accelerator, each with its free GPUs. reserved GPUs -- released
 // to a receiver whose pods are still Pending, or held for a wake -- show as
-// free on some node, because a Pending pod has none; where is not known, so
-// they are taken from the nodes with the most free first, which is where they
-// would count most.
+// free on some node, because a Pending pod has none; where is not known here,
+// so they are taken from the nodes with the most free first, which is where
+// they would count most. shareFreeNodesAfter takes a hole whose node the
+// ledger knows off that node.
 func shareFreeNodes(snap map[string]decision.NodeGPU, accelerator string, reserved int) map[string]allocation.ShareNode {
-	return shareFreeNodesAfter(snap, accelerator, reserved, nil)
+	return shareFreeNodesAfter(snap, accelerator, allocation.ShareHoles{Unplaced: reserved}, nil)
 }
 
 // shareFreeNodesAfter is shareFreeNodes with taken GPUs per node (what this
 // cycle's optimizer pass and the in-flight ledger hold on each,
-// allocation.PassLeft.NodeDebits) no longer free. A node counts as the node
-// view counts it (allocation.NodeAdmits): schedulable, carrying the group's
-// accelerator by name or family, and its taints tolerated by each of
-// tolerations (the receivers' pod templates; none given: no toleration).
-// Matched by exact name and blind to taints, the share placed a receiver on
-// a node of another product of the family, or one a taint keeps it off.
-func shareFreeNodesAfter(snap map[string]decision.NodeGPU, accelerator string, reserved int,
+// allocation.PassLeft.NodeDebits) no longer free, and the reserved GPUs
+// (allocation.ShareLedger.PromisedHoles) taken off the nodes their holes are
+// on. A node counts as the node view counts it (allocation.NodeAdmits):
+// schedulable, carrying the group's accelerator by name or family, and its
+// taints tolerated by each of tolerations (the receivers' pod templates; none
+// given: no toleration). Matched by exact name and blind to taints, the share
+// placed a receiver on a node of another product of the family, or one a
+// taint keeps it off.
+func shareFreeNodesAfter(snap map[string]decision.NodeGPU, accelerator string, reserved allocation.ShareHoles,
 	taken map[string]int, tolerations ...[]corev1.Toleration) map[string]allocation.ShareNode {
 	if len(tolerations) == 0 {
 		tolerations = [][]corev1.Toleration{nil}
@@ -358,12 +371,31 @@ func shareFreeNodesAfter(snap map[string]decision.NodeGPU, accelerator string, r
 			nodes[name] = allocation.ShareNode{Free: max(0, n.Free()-taken[name]), Labels: n.Labels, Groups: n.LWSGroups}
 		}
 	}
-	// The reserved GPUs are taken in one piece from the freest node, then the
-	// next: they are the holes promised transfers opened, whole nodes for
+	// A hole whose node is known is taken off that node: the receiver's pod
+	// waits for it there. Taken off the freest node instead, a 1-GPU hole on
+	// a nearly full node made a wholly free node look short of one, and no
+	// whole-node pod was planned onto it. What its node no longer shows free
+	// -- something else landed in the hole, or the node is gone -- the
+	// receiver's pod finds elsewhere, so it joins the holes of no known node.
+	unplaced := reserved.Unplaced
+	for _, name := range slices.Sorted(maps.Keys(reserved.Nodes)) {
+		g := reserved.Nodes[name]
+		n, ok := nodes[name]
+		if !ok {
+			unplaced += g
+			continue
+		}
+		take := min(n.Free, g)
+		n.Free -= take
+		nodes[name] = n
+		unplaced += g - take
+	}
+	// The rest are taken in one piece from the freest node, then the next:
+	// they are the holes promised transfers opened, whole nodes for
 	// whole-node pods. Taken a GPU at a time across nodes, eight promised over
 	// two free 8-GPU nodes would leave four on each, and a genuinely free node
 	// would stop being placeable until the promise landed.
-	for reserved > 0 {
+	for unplaced > 0 {
 		most := ""
 		for name, n := range nodes {
 			if n.Free > 0 && (most == "" || n.Free > nodes[most].Free || (n.Free == nodes[most].Free && name < most)) {
@@ -374,12 +406,29 @@ func shareFreeNodesAfter(snap map[string]decision.NodeGPU, accelerator string, r
 			break
 		}
 		n := nodes[most]
-		take := min(n.Free, reserved)
+		take := min(n.Free, unplaced)
 		n.Free -= take
 		nodes[most] = n
-		reserved -= take
+		unplaced -= take
 	}
 	return nodes
+}
+
+// shareHoleNodes is where removing pods opens holes: their GPUs per node,
+// pods not yet scheduled left out. nil when none is on a node.
+func shareHoleNodes(pods []corev1.Pod) map[string]int {
+	var out map[string]int
+	for i := range pods {
+		p := &pods[i]
+		if p.Spec.NodeName == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]int{}
+		}
+		out[p.Spec.NodeName] += resources.PodGPURequests(p)
+	}
+	return out
 }
 
 // shareFit is the node picture the idle fill places into: the nodes' free
