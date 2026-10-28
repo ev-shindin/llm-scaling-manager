@@ -31,7 +31,7 @@ source "$WORK/infra_wva.sh"
 # shellcheck source=/dev/null
 source "$WORK/infra_monitoring.sh"
 
-EXPECT_CASES=43
+EXPECT_CASES=60
 RAN=0
 FAILED=0
 
@@ -134,7 +134,7 @@ kubectl() {
             jq --arg ns "$ns" '{items: [(.sms[$ns] // [])[] | {metadata: {labels: .}}]}' "$W" ;;
         svc)
             # A prometheus-operated Service in each namespace that holds a CR.
-            jq -e --arg ns "$ns" 'any(.crs[]; .ns == $ns)' "$W" >/dev/null || {
+            jq -e --arg ns "$ns" 'any(.crs[]; .ns == $ns) and ((.nosvc // []) | index([$ns]) | not)' "$W" >/dev/null || {
                 [ -z "$name" ] && [ "$out" = json ] && echo '{"items": []}'
                 [ -n "$name" ] && { echo "Error from server (NotFound): not found" >&2; return 1; }
                 return 0
@@ -179,17 +179,18 @@ shared_cluster() {
     cr zz-dev prometheus "{\"podMonitorNamespaceSelector\": $(OWN zz-dev), \"serviceMonitorSelector\": {\"matchLabels\": {\"experiment\": \"e1\"}}, \"podMonitorSelector\": {}}"
     set_world '.nss = {"team-a": {"kubernetes.io/metadata.name": "team-a", "tier": "gpu"},
                        "aaa-dev": {"kubernetes.io/metadata.name": "aaa-dev"},
-                       "zz-dev": {"kubernetes.io/metadata.name": "zz-dev"}}'
+                       "zz-dev": {"kubernetes.io/metadata.name": "zz-dev"}}
+               | .sms["zz-dev"] = [{"app": "epp"}]'
 }
 
 shared_cluster
-NAMESPACE_EXPLICIT=team-a
+WVA_NS=team-a
 check 'shared cluster: a per-user Prometheus sorted first is passed over for one that selects every namespace' \
     "$(url llm-d-wva-monitoring)" "$(detect)"
 lacks 'shared cluster: a covering Prometheus found is not a warning' 'WARNING' "$(detect_err)"
 check 'shared cluster: own-namespace selectors do not select team-a; {} selects it; null selects only its own' \
     'aaa-dev=no llm-d-wva-monitoring=yes monitoring=yes zz-dev=no' "$(verdicts team-a)"
-check 'own-namespace selector: selects its own namespace' "$(url aaa-dev)" "$(NAMESPACE_EXPLICIT=aaa-dev detect)"
+check 'own-namespace selector: selects its own namespace' "$(url aaa-dev)" "$(WVA_NS=aaa-dev detect)"
 check 'null serviceMonitorNamespaceSelector selects its own namespace, but a ServiceMonitor selector our monitors do not match does not cover it' \
     'aaa-dev=no llm-d-wva-monitoring=yes monitoring=yes zz-dev=no' "$(verdicts zz-dev)"
 has 'non-matching monitor selector: the reason names it' 'its serviceMonitorSelector selects no ServiceMonitor in zz-dev' \
@@ -248,7 +249,18 @@ check 'monitor selector matching the monitors in the namespace: covering' 'mon=y
 set_world '.sms["team-a"] = [{"app": "epp"}]'
 check 'ServiceMonitor selector matching none of the ServiceMonitors there: not covering' 'mon=no' "$(verdicts team-a)"
 set_world '.pms["team-a"] = [] | .sms["team-a"] = []'
-check 'no monitors yet, a selector WVA own monitors do not carry: not covering' 'mon=no' "$(verdicts team-a)"
+check 'lone kube-prometheus-stack (release=kps), no monitors yet: covering, since setup-prereqs stamps its labels' \
+    'mon=yes' "$(verdicts team-a)"
+lacks 'lone kube-prometheus-stack, no monitors yet: no warning' 'WARNING' "$(detect_err)"
+set_world '.pms["team-a"] = [{"release": "kps"}]'
+check 'lone kube-prometheus-stack, llm-d PodMonitor there but no EPP ServiceMonitor yet: covering' \
+    'mon=yes' "$(verdicts team-a)"
+cr other p "$ALL"
+set_world '.pms["team-a"] = [] | .sms["team-a"] = []'
+check 'two Prometheus, no monitors yet, a selector WVA own monitors do not carry: unknown, not no' \
+    'mon=unknown other=yes' "$(verdicts team-a)"
+has 'no monitors yet: the reason says what is missing' 'could not check (no PodMonitor in team-a yet' \
+    "$(wva_prometheus_coverage team-a 2>/dev/null)"
 world
 cr mon wva '{"podMonitorNamespaceSelector": {}, "serviceMonitorNamespaceSelector": {}, "podMonitorSelector": {"matchLabels": {"app.kubernetes.io/name": "workload-variant-autoscaler"}}, "serviceMonitorSelector": {"matchExpressions": [{"key": "llm-d.ai/applied-by", "operator": "Exists"}]}}'
 set_world '.nss["team-a"] = {"kubernetes.io/metadata.name": "team-a"}'
@@ -279,6 +291,23 @@ has 'PodMonitors Forbidden: the reason says it could not list them' 'could not c
     "$(wva_prometheus_coverage team-a 2>/dev/null)"
 set_world '.crs[0].spec.podMonitorSelector = {}'
 check 'PodMonitors Forbidden and a {} selector: decided without them' 'mon=yes' "$(verdicts team-a)"
+set_world '.crs[0].spec.podMonitorSelector = {"matchLabels": {"app.kubernetes.io/name": "workload-variant-autoscaler"}}'
+check 'PodMonitors Forbidden and a selector WVA own monitor carries: still unknown, a refused read is no evidence' \
+    'mon=unknown' "$(verdicts team-a)"
+
+world
+cr mon tiered '{"podMonitorNamespaceSelector": {"matchLabels": {"tier": "gpu"}}, "serviceMonitorNamespaceSelector": {}, "podMonitorSelector": {}, "serviceMonitorSelector": {}}'
+check 'model namespace not created yet: unknown, and says it does not exist' \
+    'mon unknown could not check (namespace team-a does not exist yet)' \
+    "$(wva_prometheus_coverage team-a 2>/dev/null | cut -d' ' -f1,3-)"
+
+world
+cr mon tiered '{"podMonitorNamespaceSelector": {"matchLabels": {"tier": "gpu"}}, "serviceMonitorNamespaceSelector": {}, "podMonitorSelector": {}, "serviceMonitorSelector": {}}'
+set_world '.nss["team-a"] = {"tier": "gpu"}'
+check 'under set -eo pipefail with every read refused: still answers, rc 0' \
+    "$(url mon) rc=0" \
+    "$( set -eo pipefail; set_world '.forbid = ["namespace", "podmonitors", "servicemonitors"]'
+        out="$(wva_detect_prometheus_url 2>/dev/null)"; printf '%s rc=%s' "$out" "$?" )"
 
 world
 cr aaa first "$ALL"
@@ -299,6 +328,16 @@ err="$(detect_err)"
 has 'none covering: warns' '[WARNING] No Prometheus is known to scrape team-a' "$err"
 has 'none covering: names each candidate and why' 'bbb/second: its podMonitorNamespaceSelector does not select team-a' "$err"
 has 'none covering: tells the reader to pass PROMETHEUS_URL' 'Pass PROMETHEUS_URL=<url> of the Prometheus that scrapes team-a' "$err"
+has 'none covering: says what this check cannot see' 'additionalScrapeConfigs' "$err"
+
+world
+cr aaa own "{\"podMonitorNamespaceSelector\": $(OWN aaa), \"serviceMonitorNamespaceSelector\": $(OWN aaa), \"podMonitorSelector\": {}, \"serviceMonitorSelector\": {}}"
+cr mon all "$ALL"
+set_world '.nss["team-a"] = {"kubernetes.io/metadata.name": "team-a"} | .nosvc = ["mon"]'
+check 'a covering Prometheus with no Service: falls back to one that has one' "$(url aaa)" "$(detect)"
+err="$(detect_err)"
+has 'a covering Prometheus with no Service: the warning says so' 'mon/all scrapes team-a, but no Service routes to it' "$err"
+lacks 'a covering Prometheus with no Service: not called unknown' 'No Prometheus is known to scrape' "$err"
 
 # ----------------------------------------------------------------------------
 # Several managed namespaces: every one must be selected
@@ -314,11 +353,25 @@ check 'WVA_WATCH_NS list: the Prometheus that selects every listed namespace' "$
 # No model namespace named, and the explicit override
 # ----------------------------------------------------------------------------
 shared_cluster
-check 'no model namespace named: the first, as before' "$(url aaa-dev)" "$(NAMESPACE_EXPLICIT='' detect)"
-has 'no model namespace named: a note says it was not checked' 'no model namespace named' "$(NAMESPACE_EXPLICIT='' detect_err)"
+check 'no model namespace named: the first, as before' "$(url aaa-dev)" "$(WVA_SCOPE=cluster NAMESPACE_EXPLICIT="" detect)"
+has 'no model namespace named: a note says it was not checked' 'no model namespace named' "$(WVA_SCOPE=cluster NAMESPACE_EXPLICIT="" detect_err)"
 world
 cr monitoring k8s "$ALL"
-lacks 'no model namespace named, one Prometheus: no note' 'no model namespace named' "$(NAMESPACE_EXPLICIT='' detect_err)"
+lacks 'no model namespace named, one Prometheus: no note' 'no model namespace named' "$(WVA_SCOPE=cluster NAMESPACE_EXPLICIT="" detect_err)"
+
+world
+cr aaa own "{\"podMonitorNamespaceSelector\": $(OWN aaa), \"serviceMonitorNamespaceSelector\": $(OWN aaa), \"podMonitorSelector\": {}, \"serviceMonitorSelector\": {}}"
+cr mon all "$ALL"
+set_world '.nss = {"team-a": {"kubernetes.io/metadata.name": "team-a"}, "wva-system": {"kubernetes.io/metadata.name": "wva-system"}}'
+check 'cluster scope, NAMESPACE named: checked against it' "$(url mon)" "$(WVA_SCOPE=cluster NAMESPACE_EXPLICIT=team-a detect)"
+check 'namespace scope, NAMESPACE unset: the watched namespace (WVA_NS) is checked' "$(url mon)" \
+    "$(WVA_SCOPE=namespace NAMESPACE_EXPLICIT="" WVA_NS=wva-system detect)"
+lacks 'namespace scope, NAMESPACE unset: no claim that no namespace was named' 'no model namespace named' \
+    "$(WVA_SCOPE=namespace NAMESPACE_EXPLICIT="" WVA_NS=wva-system detect_err)"
+check 'WVA_WATCH_NS=auto not yet discovered: the first, as before' "$(url aaa)" "$(WVA_WATCH_NS=auto detect)"
+has 'WVA_WATCH_NS=auto not yet discovered: says so plainly' 'WVA_WATCH_NS=auto has not found the model namespaces yet' \
+    "$(WVA_WATCH_NS=auto detect_err)"
+check 'WVA_WATCH_NS=auto once discovered (a list): checked against it' "$(url mon)" "$(WVA_WATCH_NS=team-a detect)"
 
 shared_cluster
 check 'explicit PROMETHEUS_URL: the endpoint is the one given' 'https://prom.example.com:443' \
