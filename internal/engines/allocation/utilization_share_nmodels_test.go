@@ -551,11 +551,11 @@ func TestShareManyModelsWeightOrdersReceivers(t *testing.T) {
 }
 
 // pdModels is n P/D models, each a prefill and a decode role of one model
-// (SharePlanInput.Origins). Model 0's two roles drop at an hour; of every
+// (SharePlanInput.Origins). Model 0's prefill drops at 90 minutes; of every
 // other model, one role steps up -- decode for odd models, prefill for even
 // ones -- and the other stays put.
 func pdModels(n int) ([]simRole, map[string]ShareRoleOrigin, map[string]int) {
-	var roles []simRole
+	roles := make([]simRole, 0, 2*n)
 	origins := map[string]ShareRoleOrigin{}
 	final := map[string]int{}
 	for i := range n {
@@ -567,9 +567,9 @@ func pdModels(n int) ([]simRole, map[string]ShareRoleOrigin, map[string]int) {
 			switch rising := (i%2 == 1) == (role == "decode"); {
 			case i == 0 && role == "prefill":
 				r.initial = 2*(n-1) + 2
-				r.demand = stepAt(float64(2*(n-1)), 1, time.Hour)
+				r.demand = stepAt(float64(2*(n-1)), 1, 90*time.Minute)
 			case rising:
-				r.demand = stepAt(1, 3, time.Hour)
+				r.demand = stepAt(1, 3, 90*time.Minute)
 				final[key] = 4
 			}
 			roles = append(roles, r)
@@ -667,10 +667,10 @@ func TestShareManyModelsTwoWholeNodeReceivers(t *testing.T) {
 	}
 	place("C", "n4", 4)
 	place("D", "n4", 4)
-	roles := []ShareRole{
-		{Key: "R1", Weight: 1, Need: 14, Floor: 8, Ceiling: 64, ReplicaGPUs: 8},
-		{Key: "R2", Weight: 1, Need: 14, Floor: 8, Ceiling: 64, ReplicaGPUs: 8},
-	}
+	roles := make([]ShareRole, 0, 6)
+	roles = append(roles,
+		ShareRole{Key: "R1", Weight: 1, Need: 14, Floor: 8, Ceiling: 64, ReplicaGPUs: 8},
+		ShareRole{Key: "R2", Weight: 1, Need: 14, Floor: 8, Ceiling: 64, ReplicaGPUs: 8})
 	held := map[string]int{"R1": 8, "R2": 8}
 	thresholds := map[string]float64{"R1": 0.8, "R2": 0.8}
 	give := map[string]ShareVariant{}
@@ -681,7 +681,7 @@ func TestShareManyModelsTwoWholeNodeReceivers(t *testing.T) {
 	}
 	nodes := map[string]ShareNode{"n1": {}, "n2": {}, "n3": {}, "n4": {}, "n5": {}, "n6": {}}
 	var trace string
-	for run := range 3 { // three runs: the result must not depend on map order
+	for run := range 10 { // ten runs: the result must not depend on map order
 		units := map[string][]ShareUnit{}
 		for r, u := range all {
 			units[r] = slices.Clone(u)
@@ -689,7 +689,7 @@ func TestShareManyModelsTwoWholeNodeReceivers(t *testing.T) {
 		in := SharePlanInput{Roles: roles, Held: held, Thresholds: thresholds, Budget: 48, Tolerance: 0.15,
 			Give: give, Grow: grow, Nodes: nodes, PhysicalFree: 0}
 		l := NewShareLedger()
-		var started []ShareTransfer
+		started := make([]ShareTransfer, 0, 32)
 		var b strings.Builder
 		for i := range 6 {
 			in.DonorUnits = units
@@ -733,7 +733,7 @@ func TestShareManyModelsTwoWholeNodeReceivers(t *testing.T) {
 				holes[rc][nodeOf[pod]]++
 			}
 		}
-		var used []string
+		used := make([]string, 0, 2)
 		for _, rc := range []string{"R1", "R2"} {
 			full := ""
 			for n, g := range holes[rc] {

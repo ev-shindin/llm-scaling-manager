@@ -19,7 +19,7 @@ func TestShareClaimStoreManyWakesOneWinnerPerTransfer(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("%d transfers %d wakes", tc.transfers, tc.wakes), func(t *testing.T) {
 			for round := range 20 { // goroutine order differs between rounds
-				var entries []ShareClaimable
+				entries := make([]ShareClaimable, 0, tc.transfers)
 				for i := range tc.transfers {
 					entries = append(entries, ShareClaimable{ID: fmt.Sprintf("t%d", i), ReceiverZ: -0.2,
 						DonorGPUs: 8, DonorPodGPUs: []int{8}})
