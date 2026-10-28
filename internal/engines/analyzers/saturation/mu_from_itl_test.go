@@ -205,6 +205,51 @@ var _ = Describe("deriveMu", func() {
 			"and that is a number the engine will not admit")
 	})
 
+	// Issue #335: vLLM runs at most --max-num-active-seqs at once, so the
+	// resident sequences are capped at the lower of it and max_num_seqs, per
+	// rank. The short shape's cache implies thousands of sequences; the long
+	// one's implies fewer than 64.
+	Describe("the active-sequence cap", func() {
+		short := shape.New(100, 100, 0)
+		long := shape.New(15000, 1600, 0)
+		priced := func(p capacity.EngineParams, ranks int, s shape.Shape) derivedMu {
+			got := deriveMu(tracedModel, &p, ranks, int64(max(ranks, 1))*tracedKv, s, tracedK, s.AvgOutputTokens)
+			Expect(got.ok).To(BeTrue())
+			return got
+		}
+
+		It("caps the sequences at --max-num-active-seqs when it is below max_num_seqs and the cache allows more", func() {
+			capped := priced(capacity.EngineParams{MaxNumSeqs: 256, MaxNumActiveSeqs: 64}, 1, short)
+			plain := priced(capacity.EngineParams{MaxNumSeqs: 256}, 1, short)
+			Expect(capped.seqs).To(Equal(64.0))
+			Expect(capped.rate).To(BeNumerically("~", plain.rate/4, 1e-9*plain.rate),
+				"a quarter of the sequences is a quarter of the rate, so more replicas")
+		})
+
+		It("is max_num_seqs alone when the active cap is unset", func() {
+			Expect(priced(capacity.EngineParams{MaxNumSeqs: 256}, 1, short).seqs).To(Equal(256.0))
+		})
+
+		It("is max_num_seqs when the active cap is at or above it", func() {
+			Expect(priced(capacity.EngineParams{MaxNumSeqs: 256, MaxNumActiveSeqs: 256}, 1, short).seqs).To(Equal(256.0))
+			Expect(priced(capacity.EngineParams{MaxNumSeqs: 256, MaxNumActiveSeqs: 512}, 1, short).seqs).To(Equal(256.0))
+		})
+
+		It("is the active cap alone when max_num_seqs is unknown", func() {
+			Expect(priced(capacity.EngineParams{MaxNumActiveSeqs: 64}, 1, short).seqs).To(Equal(64.0))
+		})
+
+		It("multiplies the active cap by the data-parallel ranks", func() {
+			Expect(priced(capacity.EngineParams{MaxNumSeqs: 256, MaxNumActiveSeqs: 64}, 8, short).seqs).To(Equal(8 * 64.0))
+		})
+
+		It("leaves a count the cache limits unchanged", func() {
+			uncapped := priced(capacity.EngineParams{}, 1, long)
+			Expect(uncapped.seqs).To(BeNumerically("<", 64), "precondition: the cache, not a cap, limits it")
+			Expect(priced(capacity.EngineParams{MaxNumSeqs: 256, MaxNumActiveSeqs: 64}, 1, long)).To(Equal(uncapped))
+		})
+	})
+
 	// The same mu, priced on one window or two. A swap that raises the
 	// generation and drops the prompt has the [1m] divisor arrive before the
 	// [5m] shape does, and the mixed pair prices a request larger than either
