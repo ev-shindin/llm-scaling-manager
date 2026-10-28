@@ -271,6 +271,12 @@ So the recorder is a field inside each analyzer (`a.rec`, nil when off). The
 saturation, SLO and throughput analyzers each get one, and so does the shared
 `*capacity.Store`. All write to one sink with one `seq`.
 
+The `Analyze` event's schema follows engine-structure stage 3 (#345 step 1),
+so recordings survive that change: the `AnalyzerInput`, each variant's capacity
+record, `VariantMetadata`, and the merged policy including `analyzerTuning`.
+The store's scale-target split is the seam stage 3 moves into the input
+builder.
+
 **It records at the input boundary,** not only at the analyzer's methods. An
 input is anything an analyzer reads that it did not compute. Two inputs reach
 the analyzers without passing an analyzer method:
@@ -464,7 +470,10 @@ names the output.
 with their sources and keys; priced figures; per-key window contents; the
 learner reports. Required and spare capacity come from the engine's threshold
 post-step, not from `Analyze`, so an analyzer replay does not compare them.
-`AnalyzedAt` is excluded.
+`AnalyzedAt` is excluded. An engine-level golden layer (the composite, its
+holds and their reasons, `ReleaseBound`/`OtherFrames`, the warm-pool supply and
+pressure, the optimizer's decisions) is #345's, built on these recordings, and
+outside this plan.
 
 **The rule.**
 
@@ -1072,7 +1081,7 @@ or deprecated, docs rows rewritten, tools updated.
 | --- | --- | --- | --- |
 | **0a** | One clock (2.2), including the capacity store and the engine's calls into it; presence bits with ITL's three states (2.3), reusing `KvUsageInstantKnown`, `CapacityQueueKnown` and `PreemptionRateKnown` and adding `RunningRequestsKnown` (a prerequisite of #277). Unit tests, the `EpisodeGap` negative control, the one-cycle boundary test | none needed | Nothing, beyond 2.2's one-cycle boundary. Metrics: none |
 | **0b** | The recorder at the input boundary in each analyzer and the store (2.4), with each `Analyze` result recorded and the test that a replay at the recording's commit reproduces it byte for byte; raw rows and the merged policy recorded every cycle; the store split into parsing and one shared method; one switch hook per package; replay with goldens and the golden rule (2.5), per-path counters, property tests with the known-failures ledger and a mutant per mapping row (2.6, 2.7). Mu's mean fold and the sibling yield go into the base goldens, the one-slow-pod case as a passing guard | E1 re-run from a build with 0a, and one under a non-default `analyzerTuning` (no) | Nothing. A recorder flag and overlay in `testing.md`. Metrics: none |
-| **1** | `internal/signals/settle`, written by the engine at the top of `runAnalyzers`, read-only views for the balance tracker and the analyzers. The tracker exposes event times; each learner keeps its policy-keyed window (4.3). #283's one-missing-row forget becomes the gap rule, a named change proved by unit tests on the balance tracker, with a re-lend within 1 min still restarting the grace (4.2). `idleRows`, `steadyFor` and `idleAfterReady` keep their documented meaning, or the PR names the change in scaling-policy.md. 2.3's A4 and 273-r3 #2 negative controls | 0b's, the non-default one included (no) | The imbalance timers no longer restart on one missed scrape. The `WVALoadImbalanced` alert text is checked against the new rule |
+| **1** | `internal/signals/settle`, written by the engine at the top of `runAnalyzers` (in the input builder, if #345 step 1 has landed), read-only views for the balance tracker and the analyzers. The tracker exposes event times; each learner keeps its policy-keyed window (4.3). #283's one-missing-row forget becomes the gap rule, a named change proved by unit tests on the balance tracker, with a re-lend within 1 min still restarting the grace (4.2). `idleRows`, `steadyFor` and `idleAfterReady` keep their documented meaning, or the PR names the change in scaling-policy.md. 2.3's A4 and 273-r3 #2 negative controls | 0b's, the non-default one included (no) | The imbalance timers no longer restart on one missed scrape. The `WVALoadImbalanced` alert text is checked against the new rule |
 | **2** | k2 (#3, #4) onto the tracker. k2 keeps the Ready-time rule `noteReady` applies today (#288), now read from the tracker; nothing is switched on twice. The LWS rule named. `learn` lands. `learner-write` for k2, at V(3). Restart suite | flow control off, P/D, same-name restart (no) | After a controller restart every replica waits once: `P1-obs-unsettled` across the fleet for 1 min, and with the snapshot off k2-less fleets price at k1 for that minute (SLO side). A pod back from a restart under the same name already waits today (#288) and still does. `learner-start` at the default; k2 writes at `--v=3` |
 | **3** | Mu (#5, #6). The fold across pods stays the mean (#282). Its joined test reads k2's stamp. Exact repeats count as use. Unknown age resolves safe. The latch persisted or restored safe-side. Two prefill pods in one spacing pin #7's max before the fold is touched. The closed-loop probe and its fleet simulator land here (2.5) | flow control off (no) | `learner-write` for mu, including choice flips. `throughput-demand-floor` names `muKey`, `muSource`, `startEstimateSeconds`, `startSource`. Measured mu waits out the post-restart settle |
 | **4a** | ITL #1 and #13 onto the tracker. Cap admission above the band (#293, #331), the policy band, the steady-gate keys and the persisted held slope (`ITLSlopes`, #329) stay as they are. Neutral on the recording except two named changes, each behind its own switch: ITL waits the settle after a controller restart (today it takes the first cycle as settled), and one missing row no longer restarts a settle (the 1 min absence rule, 4.2). Neither occurs in the OLS recording, so the restart suite (PR 2) and the settle suite's one-missing-row case, both run through ITL, cover them, each with a negative control on the parent. The closed-loop probe runs through a controller restart (4.4) | a run that reaches OLS, SLO analyzer recorded with its router latency (no) | No ITL refit for 2 min after a controller restart; with the snapshot off the throughput floor is silent for about 2.75 min (SLO side, masked by the default 300 s scale-down stabilization as long as the controller is back within about 2 min). A missed scrape no longer restarts ITL's settle |
@@ -1084,6 +1093,14 @@ Later, each after a recorded run that covers it: idle room and the decode gate
 and its own-reading witness. Out of scope: drift actions, fit changes, #8, #11,
 #14, #15, and the share planner's holds (why a second transfer waited), which
 belong to the utilization-share work.
+
+**Order with #345** (a composite that does not depend on saturation): 0a, 0b,
+then #345's engine-level golden and its step 1 (one registry, one
+`AnalyzerInput` built before `Analyze`, zero golden change), then PRs 1 to 5,
+then #305 and #345's later steps. `AnalyzerInput.Capacity` is a read-only view
+of the store for the cycle; learning capacity stays in the analyzers, as this
+plan has it. #345's last step (saturation runs only when listed) needs an owner
+for k2, mu, start time and the snapshot first.
 
 ### Shipped behaviour each PR must keep
 
