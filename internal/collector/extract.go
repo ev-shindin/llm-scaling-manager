@@ -452,9 +452,17 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 				// Three states (domain.ITLState): a usable mean is known; a
 				// present NaN is the 0/0 of a window with no tokens, an idle
 				// replica rather than a failed query; anything else, and a
-				// failed or absent query, sets neither.
-				podData[instanceKey].avgITLKnown = value.Finite() && value.Value > 0
-				podData[instanceKey].avgITLEmpty = value.IsNaN()
+				// failed or absent query, sets neither. Several series can
+				// share an instance key and the value kept below is the last
+				// usable one, so the bits follow it: once a series is known
+				// the state stays known whatever a later one says, and it is
+				// empty only while no series has been known.
+				data := podData[instanceKey]
+				if value.Finite() && value.Value > 0 {
+					data.avgITLKnown, data.avgITLEmpty = true, false
+				} else if value.IsNaN() && !data.avgITLKnown {
+					data.avgITLEmpty = true
+				}
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value > 0 {
 					podData[instanceKey].avgITL = value.Value
 					podData[instanceKey].avgITLTimestamp = value.Timestamp

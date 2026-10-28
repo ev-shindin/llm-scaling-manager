@@ -295,6 +295,14 @@ type ReplicaMetrics struct {
 	// token in the window. Neither: the series was absent, the query failed,
 	// the value was not usable, or the Pod was not Ready and its timing was
 	// discarded. The two are never both set.
+	//
+	// Trust the bits, not AvgITL > 0. A pod whose ranks were merged with one
+	// rank absent carries the known ranks' mean in AvgITL while AvgITLKnown
+	// is false: the absent rank's tokens are missing from that mean.
+	//
+	// A prefill-role pod emits one token per request and hands decode on, so
+	// its ITL window stays empty: it reads Empty permanently, and that is not
+	// idleness. Gate by role before reading Empty as an idle replica.
 	AvgITLKnown bool
 	AvgITLEmpty bool
 
@@ -413,7 +421,8 @@ const (
 	// the value was not a positive finite number, or the Pod was not Ready.
 	ITLAbsent ITLState = iota
 	// ITLEmpty is a series present and NaN: the 0/0 of a replica that
-	// generated no token in the window. An idle replica, not a failed query.
+	// generated no token in the window: an idle decode replica, not a failed
+	// query. A prefill-role pod reads it permanently, so gate by role first.
 	ITLEmpty
 	// ITLFinite is a reading where AvgITL holds a measured, finite, positive mean.
 	ITLFinite
@@ -432,7 +441,9 @@ func (s ITLState) String() string {
 }
 
 // ITLState reads AvgITLKnown and AvgITLEmpty as one of the three states.
-// Known wins should both be set.
+// Known wins should both be set. Read it, not AvgITL > 0: after a rank merge
+// with an absent rank AvgITL holds the known ranks' mean while the state is
+// absent (see AvgITLKnown).
 func (m ReplicaMetrics) ITLState() ITLState {
 	switch {
 	case m.AvgITLKnown:

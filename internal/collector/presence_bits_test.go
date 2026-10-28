@@ -69,21 +69,42 @@ const presencePod = "pod-abc"
 // presenceSample is one series for the test pod with value v, as Prometheus
 // returns it.
 func presenceSample(v float64) model.Value {
-	return model.Vector{&model.Sample{
-		Metric: model.Metric{
-			seriesModelLabel: "test-model",
-			"pod":            presencePod,
-			"instance":       "10.0.0.1:8000",
-		},
-		Value:     model.SampleValue(v),
-		Timestamp: model.TimeFromUnixNano(time.Now().UnixNano()),
-	}}
+	return rankSamples("8000", v)
+}
+
+// rankSamples is one series per value, all for the test pod's engine on
+// port: several series under one instance key.
+func rankSamples(port string, vs ...float64) model.Vector {
+	vec := make(model.Vector, 0, len(vs))
+	for _, v := range vs {
+		vec = append(vec, &model.Sample{
+			Metric: model.Metric{
+				seriesModelLabel: "test-model",
+				"pod":            presencePod,
+				"instance":       model.LabelValue("10.0.0.1:" + port),
+			},
+			Value:     model.SampleValue(v),
+			Timestamp: model.TimeFromUnixNano(time.Now().UnixNano()),
+		})
+	}
+	return vec
 }
 
 // collectParsed runs one collection of the test pod through the Prometheus
-// parse path. The queue-length series is always present, so the pod has a row
-// whatever else is missing. reader lists the Pods; nil fails open to Ready.
+// parse path and returns its one row. A queue-length series is added when
+// series has none, so the pod has a row whatever else is missing. reader
+// lists the Pods; nil fails open to Ready.
 func collectParsed(t *testing.T, series map[string]model.Value, failed map[string]bool, reader client.Reader) domain.ReplicaMetrics {
+	t.Helper()
+	got := collectParsedRows(t, series, failed, reader)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 replica row, got %d", len(got))
+	}
+	return got[0]
+}
+
+// collectParsedRows is collectParsed returning every row.
+func collectParsedRows(t *testing.T, series map[string]model.Value, failed map[string]bool, reader client.Reader) []domain.ReplicaMetrics {
 	t.Helper()
 	reg := promclient.NewRegistry()
 	if err := metrics.InitMetrics(reg); err != nil {
@@ -93,9 +114,12 @@ func collectParsed(t *testing.T, series map[string]model.Value, failed map[strin
 	if err := llmdVariantAutoscalingV1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
-	all := map[string]model.Value{registration.QueryQueueLength: presenceSample(1)}
+	all := map[string]model.Value{}
 	for name, v := range series {
 		all[name] = v
+	}
+	if _, ok := all[registration.QueryQueueLength]; !ok {
+		all[registration.QueryQueueLength] = presenceSample(1)
 	}
 	cfg := prometheus.DefaultPrometheusSourceConfig()
 	// Bounds the backoff on a failed query.
@@ -111,10 +135,7 @@ func collectParsed(t *testing.T, series map[string]model.Value, failed map[strin
 	if err != nil {
 		t.Fatalf("CollectReplicaMetrics: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("expected 1 replica row, got %d", len(got))
-	}
-	return got[0]
+	return got
 }
 
 // presenceBits names each bit, the query it reports on and a reading that
@@ -126,25 +147,29 @@ var presenceBits = []struct {
 	// zeroKnown says a read zero is a reading (no work), as it is for every
 	// gauge and rate here; an ITL of zero is not a measured mean.
 	zeroKnown bool
-	bit       func(domain.ReplicaMetrics) bool
+	// negKnown says a finite negative value is kept as a reading. Only the
+	// peak KV usage is, as its block takes the series without a range test;
+	// every other block rejects it.
+	negKnown bool
+	bit      func(domain.ReplicaMetrics) bool
 }{
-	{"KvCacheUsageKnown", registration.QueryKvCacheUsage, 0.5, true,
+	{"KvCacheUsageKnown", registration.QueryKvCacheUsage, 0.5, true, true,
 		func(m domain.ReplicaMetrics) bool { return m.KvCacheUsageKnown }},
-	{"KvUsageInstantKnown", registration.QueryKvUsageInstant, 0.4, true,
+	{"KvUsageInstantKnown", registration.QueryKvUsageInstant, 0.4, true, false,
 		func(m domain.ReplicaMetrics) bool { return m.KvUsageInstantKnown }},
-	{"CapacityQueueKnown", registration.QueryCapacityQueueLength, 2, true,
+	{"CapacityQueueKnown", registration.QueryCapacityQueueLength, 2, true, false,
 		func(m domain.ReplicaMetrics) bool { return m.CapacityQueueKnown }},
-	{"PreemptionRateKnown", registration.QueryPreemptionRate, 0.1, true,
+	{"PreemptionRateKnown", registration.QueryPreemptionRate, 0.1, true, false,
 		func(m domain.ReplicaMetrics) bool { return m.PreemptionRateKnown }},
-	{"PrefillComputedTokenRateKnown", registration.QueryPrefillComputedTokenRate, 1000, true,
+	{"PrefillComputedTokenRateKnown", registration.QueryPrefillComputedTokenRate, 1000, true, false,
 		func(m domain.ReplicaMetrics) bool { return m.PrefillComputedTokenRateKnown }},
-	{"GenerationTokenRateKnown", registration.QueryGenerationTokenRate, 500, true,
+	{"GenerationTokenRateKnown", registration.QueryGenerationTokenRate, 500, true, false,
 		func(m domain.ReplicaMetrics) bool { return m.GenerationTokenRateKnown }},
-	{"RequestRateKnown", registration.QueryRequestRate, 2, true,
+	{"RequestRateKnown", registration.QueryRequestRate, 2, true, false,
 		func(m domain.ReplicaMetrics) bool { return m.RequestRateKnown }},
-	{"RunningRequestsKnown", registration.QueryRunningRequests, 8, true,
+	{"RunningRequestsKnown", registration.QueryRunningRequests, 8, true, false,
 		func(m domain.ReplicaMetrics) bool { return m.RunningRequestsKnown }},
-	{"AvgITLKnown", registration.QueryAvgITL, 0.02, false,
+	{"AvgITLKnown", registration.QueryAvgITL, 0.02, false, false,
 		func(m domain.ReplicaMetrics) bool { return m.AvgITLKnown }},
 }
 
@@ -163,6 +188,8 @@ func TestPresenceBitsThroughPrometheusParse(t *testing.T) {
 				{"present zero", map[string]model.Value{b.query: presenceSample(0)}, b.zeroKnown},
 				{"NaN", map[string]model.Value{b.query: presenceSample(math.NaN())}, false},
 				{"+Inf", map[string]model.Value{b.query: presenceSample(math.Inf(1))}, false},
+				{"-Inf", map[string]model.Value{b.query: presenceSample(math.Inf(-1))}, false},
+				{"negative", map[string]model.Value{b.query: presenceSample(-1)}, b.negKnown},
 				{"absent", nil, false},
 			}
 			for _, tc := range cases {
@@ -310,5 +337,138 @@ func TestMergePodInstances_PresenceBits(t *testing.T) {
 		if got.AvgITLKnown && got.AvgITLEmpty {
 			t.Errorf("ranks %v: AvgITLKnown and AvgITLEmpty are both set", tc.ranks)
 		}
+	}
+}
+
+// Each ordinary bit merges on its own: with every bit set on both ranks but
+// one cleared on one rank, the merged row loses that bit and keeps the rest.
+// A cross-wired AND (one bit merged from another's field) fails here.
+func TestMergePodInstances_PresenceBitsIndependent(t *testing.T) {
+	bits := []struct {
+		name  string
+		clear func(*domain.ReplicaMetrics)
+		get   func(domain.ReplicaMetrics) bool
+	}{
+		{"KvCacheUsageKnown", func(m *domain.ReplicaMetrics) { m.KvCacheUsageKnown = false },
+			func(m domain.ReplicaMetrics) bool { return m.KvCacheUsageKnown }},
+		{"KvUsageInstantKnown", func(m *domain.ReplicaMetrics) { m.KvUsageInstantKnown = false },
+			func(m domain.ReplicaMetrics) bool { return m.KvUsageInstantKnown }},
+		{"CapacityQueueKnown", func(m *domain.ReplicaMetrics) { m.CapacityQueueKnown = false },
+			func(m domain.ReplicaMetrics) bool { return m.CapacityQueueKnown }},
+		{"PreemptionRateKnown", func(m *domain.ReplicaMetrics) { m.PreemptionRateKnown = false },
+			func(m domain.ReplicaMetrics) bool { return m.PreemptionRateKnown }},
+		{"PrefillComputedTokenRateKnown", func(m *domain.ReplicaMetrics) { m.PrefillComputedTokenRateKnown = false },
+			func(m domain.ReplicaMetrics) bool { return m.PrefillComputedTokenRateKnown }},
+		{"GenerationTokenRateKnown", func(m *domain.ReplicaMetrics) { m.GenerationTokenRateKnown = false },
+			func(m domain.ReplicaMetrics) bool { return m.GenerationTokenRateKnown }},
+		{"RequestRateKnown", func(m *domain.ReplicaMetrics) { m.RequestRateKnown = false },
+			func(m domain.ReplicaMetrics) bool { return m.RequestRateKnown }},
+		{"RunningRequestsKnown", func(m *domain.ReplicaMetrics) { m.RunningRequestsKnown = false },
+			func(m domain.ReplicaMetrics) bool { return m.RunningRequestsKnown }},
+		{"AvgITLKnown", func(m *domain.ReplicaMetrics) { m.AvgITLKnown = false },
+			func(m domain.ReplicaMetrics) bool { return m.AvgITLKnown }},
+	}
+	full := func() domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{PodName: "p", ModelID: "m",
+			KvCacheUsageKnown: true, KvUsageInstantKnown: true, CapacityQueueKnown: true,
+			PreemptionRateKnown: true, PrefillComputedTokenRateKnown: true,
+			GenerationTokenRateKnown: true, RequestRateKnown: true, RunningRequestsKnown: true,
+			AvgITLKnown: true}
+	}
+	for _, cleared := range bits {
+		for _, onRank := range []int{0, 1} {
+			ranks := []domain.ReplicaMetrics{full(), full()}
+			cleared.clear(&ranks[onRank])
+			got := collapseToPods(ranks)
+			if len(got) != 1 {
+				t.Fatalf("got %d rows, want 1", len(got))
+			}
+			for _, b := range bits {
+				if want := b.name != cleared.name; b.get(got[0]) != want {
+					t.Errorf("%s cleared on rank %d: %s = %v, want %v",
+						cleared.name, onRank, b.name, b.get(got[0]), want)
+				}
+			}
+		}
+	}
+}
+
+// Several ITL series under one instance key: the state follows the value
+// kept. A known mean stays known whatever order a NaN arrives in, and the
+// row's AvgITL is that mean.
+func TestITLStateSeveralSeriesOneKey(t *testing.T) {
+	nan := math.NaN()
+	cases := []struct {
+		name    string
+		values  []float64
+		want    domain.ITLState
+		wantITL float64
+	}{
+		{"finite then NaN", []float64{0.02, nan}, domain.ITLFinite, 0.02},
+		{"NaN then finite", []float64{nan, 0.02}, domain.ITLFinite, 0.02},
+		{"NaN then NaN", []float64{nan, nan}, domain.ITLEmpty, 0},
+		{"finite then +Inf", []float64{0.02, math.Inf(1)}, domain.ITLFinite, 0.02},
+		{"+Inf then NaN", []float64{math.Inf(1), nan}, domain.ITLEmpty, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := collectParsed(t, map[string]model.Value{registration.QueryAvgITL: rankSamples("8000", tc.values...)}, nil, nil)
+			if s := got.ITLState(); s != tc.want {
+				t.Errorf("ITLState = %v, want %v", s, tc.want)
+			}
+			if got.AvgITLKnown && got.AvgITLEmpty {
+				t.Error("AvgITLKnown and AvgITLEmpty are both set")
+			}
+			if got.AvgITL != tc.wantITL {
+				t.Errorf("AvgITL = %v, want %v", got.AvgITL, tc.wantITL)
+			}
+		})
+	}
+}
+
+// Two ranks of one pod, each its own scrape target, from parsed series
+// through attributeInstance and collapseToPods: the pod's ITL state is the
+// merge of the ranks' states, an absent rank being one with no ITL series.
+func TestITLStateTwoRanksFullPath(t *testing.T) {
+	const absent = -1.0 // marks a rank with no ITL series
+	nan := math.NaN()
+	cases := []struct {
+		name   string
+		r0, r1 float64
+		want   domain.ITLState
+	}{
+		{"finite + finite", 0.02, 0.03, domain.ITLFinite},
+		{"finite + empty", 0.02, nan, domain.ITLFinite},
+		{"empty + empty", nan, nan, domain.ITLEmpty},
+		{"finite + absent", 0.02, absent, domain.ITLAbsent},
+		{"empty + absent", nan, absent, domain.ITLAbsent},
+		{"absent + absent", absent, absent, domain.ITLAbsent},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			itl := model.Vector{}
+			for port, v := range map[string]float64{"8000": tc.r0, "8001": tc.r1} {
+				if v != absent {
+					itl = append(itl, rankSamples(port, v)...)
+				}
+			}
+			queue := append(rankSamples("8000", 1), rankSamples("8001", 1)...)
+			rows := collectParsedRows(t, map[string]model.Value{
+				registration.QueryQueueLength: queue,
+				registration.QueryAvgITL:      itl,
+			}, nil, nil)
+			if len(rows) != 1 {
+				t.Fatalf("got %d rows, want the two ranks merged into 1", len(rows))
+			}
+			if rows[0].EngineRanks != 2 {
+				t.Fatalf("EngineRanks = %d, want 2", rows[0].EngineRanks)
+			}
+			if s := rows[0].ITLState(); s != tc.want {
+				t.Errorf("ITLState = %v, want %v", s, tc.want)
+			}
+			if rows[0].AvgITLKnown && rows[0].AvgITLEmpty {
+				t.Error("AvgITLKnown and AvgITLEmpty are both set")
+			}
+		})
 	}
 }
