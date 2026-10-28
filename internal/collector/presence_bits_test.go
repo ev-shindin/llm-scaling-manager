@@ -147,29 +147,29 @@ var presenceBits = []struct {
 	// zeroKnown says a read zero is a reading (no work), as it is for every
 	// gauge and rate here; an ITL of zero is not a measured mean.
 	zeroKnown bool
-	// negKnown says a finite negative value is kept as a reading. Only the
-	// peak KV usage is, as its block takes the series without a range test;
-	// every other block rejects it.
-	negKnown bool
-	bit      func(domain.ReplicaMetrics) bool
+	// overOneKnown says a value of 1.5 is a reading. It is for the rates,
+	// counts and ITL; a KV utilization above 1 is outside its range. A
+	// negative value is a reading for no bit.
+	overOneKnown bool
+	bit          func(domain.ReplicaMetrics) bool
 }{
-	{"KvCacheUsageKnown", registration.QueryKvCacheUsage, 0.5, true, true,
+	{"KvCacheUsageKnown", registration.QueryKvCacheUsage, 0.5, true, false,
 		func(m domain.ReplicaMetrics) bool { return m.KvCacheUsageKnown }},
 	{"KvUsageInstantKnown", registration.QueryKvUsageInstant, 0.4, true, false,
 		func(m domain.ReplicaMetrics) bool { return m.KvUsageInstantKnown }},
-	{"CapacityQueueKnown", registration.QueryCapacityQueueLength, 2, true, false,
+	{"CapacityQueueKnown", registration.QueryCapacityQueueLength, 2, true, true,
 		func(m domain.ReplicaMetrics) bool { return m.CapacityQueueKnown }},
-	{"PreemptionRateKnown", registration.QueryPreemptionRate, 0.1, true, false,
+	{"PreemptionRateKnown", registration.QueryPreemptionRate, 0.1, true, true,
 		func(m domain.ReplicaMetrics) bool { return m.PreemptionRateKnown }},
-	{"PrefillComputedTokenRateKnown", registration.QueryPrefillComputedTokenRate, 1000, true, false,
+	{"PrefillComputedTokenRateKnown", registration.QueryPrefillComputedTokenRate, 1000, true, true,
 		func(m domain.ReplicaMetrics) bool { return m.PrefillComputedTokenRateKnown }},
-	{"GenerationTokenRateKnown", registration.QueryGenerationTokenRate, 500, true, false,
+	{"GenerationTokenRateKnown", registration.QueryGenerationTokenRate, 500, true, true,
 		func(m domain.ReplicaMetrics) bool { return m.GenerationTokenRateKnown }},
-	{"RequestRateKnown", registration.QueryRequestRate, 2, true, false,
+	{"RequestRateKnown", registration.QueryRequestRate, 2, true, true,
 		func(m domain.ReplicaMetrics) bool { return m.RequestRateKnown }},
-	{"RunningRequestsKnown", registration.QueryRunningRequests, 8, true, false,
+	{"RunningRequestsKnown", registration.QueryRunningRequests, 8, true, true,
 		func(m domain.ReplicaMetrics) bool { return m.RunningRequestsKnown }},
-	{"AvgITLKnown", registration.QueryAvgITL, 0.02, false, false,
+	{"AvgITLKnown", registration.QueryAvgITL, 0.02, false, true,
 		func(m domain.ReplicaMetrics) bool { return m.AvgITLKnown }},
 }
 
@@ -189,7 +189,8 @@ func TestPresenceBitsThroughPrometheusParse(t *testing.T) {
 				{"NaN", map[string]model.Value{b.query: presenceSample(math.NaN())}, false},
 				{"+Inf", map[string]model.Value{b.query: presenceSample(math.Inf(1))}, false},
 				{"-Inf", map[string]model.Value{b.query: presenceSample(math.Inf(-1))}, false},
-				{"negative", map[string]model.Value{b.query: presenceSample(-1)}, b.negKnown},
+				{"negative", map[string]model.Value{b.query: presenceSample(-1)}, false},
+				{"1.5", map[string]model.Value{b.query: presenceSample(1.5)}, b.overOneKnown},
 				{"absent", nil, false},
 			}
 			for _, tc := range cases {
@@ -468,6 +469,85 @@ func TestITLStateTwoRanksFullPath(t *testing.T) {
 			}
 			if rows[0].AvgITLKnown && rows[0].AvgITLEmpty {
 				t.Error("AvgITLKnown and AvgITLEmpty are both set")
+			}
+		})
+	}
+}
+
+// An empty rank that generated tokens weighs into the pod's ITL mean with an
+// ITL of 0, so the pod reads absent; the mean itself is left as main computes
+// it (#341 4a owns that change). An empty rank with no tokens keeps the rule.
+func TestMergePodInstances_ITLEmptyRankThatGenerated(t *testing.T) {
+	rank := func(state domain.ITLState, itl, gen float64) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{PodName: "p", ModelID: "m", AvgITL: itl, GenerationTokenRate: gen,
+			AvgITLKnown: state == domain.ITLFinite, AvgITLEmpty: state == domain.ITLEmpty}
+	}
+	cases := []struct {
+		name    string
+		ranks   []domain.ReplicaMetrics
+		want    domain.ITLState
+		wantITL float64
+	}{
+		// 0.02 x 100 / (100 + 50): the generation-weighted mean main computes.
+		{"finite + empty that generated", []domain.ReplicaMetrics{
+			rank(domain.ITLFinite, 0.02, 100), rank(domain.ITLEmpty, 0, 50)}, domain.ITLAbsent, 0.02 * 100 / 150},
+		{"finite + empty with no tokens", []domain.ReplicaMetrics{
+			rank(domain.ITLFinite, 0.02, 100), rank(domain.ITLEmpty, 0, 0)}, domain.ITLFinite, 0.02},
+		{"empty that generated + empty", []domain.ReplicaMetrics{
+			rank(domain.ITLEmpty, 0, 50), rank(domain.ITLEmpty, 0, 0)}, domain.ITLAbsent, 0},
+		{"empty + empty, no tokens", []domain.ReplicaMetrics{
+			rank(domain.ITLEmpty, 0, 0), rank(domain.ITLEmpty, 0, 0)}, domain.ITLEmpty, 0},
+	}
+	for _, tc := range cases {
+		got := collapseToPods(tc.ranks)
+		if len(got) != 1 {
+			t.Fatalf("%s: got %d rows, want 1", tc.name, len(got))
+		}
+		if s := got[0].ITLState(); s != tc.want {
+			t.Errorf("%s: ITLState = %v, want %v", tc.name, s, tc.want)
+		}
+		if math.Abs(got[0].AvgITL-tc.wantITL) > 1e-12 {
+			t.Errorf("%s: AvgITL = %v, want %v (unchanged from main)", tc.name, got[0].AvgITL, tc.wantITL)
+		}
+	}
+}
+
+// Several series under one key for the peak KV usage and the prefill rate,
+// in both orders. The prefill bit is sticky like ITL's, because its value
+// keeps the usable reading. The KV value is the LAST series' whatever it
+// held, so its bit follows the last series as well.
+func TestPresenceBitsSeveralSeriesOneKey(t *testing.T) {
+	nan := math.NaN()
+	cases := []struct {
+		name      string
+		query     string
+		values    []float64
+		wantKnown bool
+		wantValue float64
+		bit       func(domain.ReplicaMetrics) bool
+		value     func(domain.ReplicaMetrics) float64
+	}{
+		{"prefill finite then NaN", registration.QueryPrefillComputedTokenRate, []float64{1000, nan}, true, 1000,
+			func(m domain.ReplicaMetrics) bool { return m.PrefillComputedTokenRateKnown },
+			func(m domain.ReplicaMetrics) float64 { return m.PrefillComputedTokenRate }},
+		{"prefill NaN then finite", registration.QueryPrefillComputedTokenRate, []float64{nan, 1000}, true, 1000,
+			func(m domain.ReplicaMetrics) bool { return m.PrefillComputedTokenRateKnown },
+			func(m domain.ReplicaMetrics) float64 { return m.PrefillComputedTokenRate }},
+		{"prefill NaN then NaN", registration.QueryPrefillComputedTokenRate, []float64{nan, nan}, false, 0,
+			func(m domain.ReplicaMetrics) bool { return m.PrefillComputedTokenRateKnown },
+			func(m domain.ReplicaMetrics) float64 { return m.PrefillComputedTokenRate }},
+		{"KV finite then NaN", registration.QueryKvCacheUsage, []float64{0.5, nan}, false, 0,
+			func(m domain.ReplicaMetrics) bool { return m.KvCacheUsageKnown },
+			func(m domain.ReplicaMetrics) float64 { return m.KvCacheUsage }},
+		{"KV NaN then finite", registration.QueryKvCacheUsage, []float64{nan, 0.5}, true, 0.5,
+			func(m domain.ReplicaMetrics) bool { return m.KvCacheUsageKnown },
+			func(m domain.ReplicaMetrics) float64 { return m.KvCacheUsage }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := collectParsed(t, map[string]model.Value{tc.query: rankSamples("8000", tc.values...)}, nil, nil)
+			if tc.bit(got) != tc.wantKnown || tc.value(got) != tc.wantValue {
+				t.Errorf("known %v value %v, want known %v value %v", tc.bit(got), tc.value(got), tc.wantKnown, tc.wantValue)
 			}
 		})
 	}

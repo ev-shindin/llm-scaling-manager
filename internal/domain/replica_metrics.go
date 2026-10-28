@@ -298,7 +298,10 @@ type ReplicaMetrics struct {
 	//
 	// Trust the bits, not AvgITL > 0. A pod whose ranks were merged with one
 	// rank absent carries the known ranks' mean in AvgITL while AvgITLKnown
-	// is false: the absent rank's tokens are missing from that mean.
+	// is false: the absent rank's tokens are missing from that mean. The same
+	// holds for a merge with an empty rank that generated tokens: that rank
+	// weighs in with an ITL of 0, so the pod reads absent (collector
+	// mergePodInstances).
 	//
 	// A prefill-role pod emits one token per request and hands decode on, so
 	// its ITL window stays empty: it reads Empty permanently, and that is not

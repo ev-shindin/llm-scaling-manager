@@ -233,7 +233,14 @@ series into 0 (`collector/extract.go`). PR 0a reuses the three bits and adds a
 `...Known` bit beside each other gauge a learner reads: peak KV, ITL
 (`AvgITL`), request rate, generation-token rate, prompt-token rate, and
 `RunningRequests`. The engine-queue bit is `CapacityQueueKnown`; 0a does not
-add a second one. A bit is true when the series was present and finite.
+add a second one. A bit is true when the series was present, finite and inside
+its block's range. A read zero is known (no work), except for ITL: ITL is
+`ITLFinite` only for a finite value above 0; a NaN is `ITLEmpty`; ±Inf, a
+value at or below 0, or a failed query is `ITLAbsent`. A not-Ready Pod clears
+only its ITL bits. Ranks merge by AND; for ITL, Finite needs one Finite rank,
+none Absent, and no Empty rank that generated tokens; Empty needs every rank
+Empty. A prefill-role Pod reads Empty permanently, so readers gate by role.
+Computing the Pod's mean over Finite ranks only is #341 4a's named change.
 
 `RunningRequestsKnown` is a prerequisite of #277 (reading
 `num_requests_running` as resident load). `RunningRequests` is "zero when the

@@ -130,7 +130,12 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 			podData[instanceKey].kvUsage = value.Value
 			podData[instanceKey].kvTimestamp = value.Timestamp
 			podData[instanceKey].hasKv = true
-			podData[instanceKey].kvUsageKnown = value.Finite()
+			// The bit only: the value above is kept as it always was. A
+			// utilization outside [0, 1] is not a reading. Not sticky across
+			// series under one key, unlike ITL and the prefill rate: the
+			// value above is the LAST series', whatever it held, so the bit
+			// follows that series too.
+			podData[instanceKey].kvUsageKnown = value.Finite() && value.Value >= 0 && value.Value <= 1
 
 			logger.V(logging.DEBUG).Info("KV cache metric",
 				"instanceKey", instanceKey,
@@ -526,7 +531,12 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 					podData[instanceKey].prefillComputedTokenRateTimestamp = value.Timestamp
 				}
 				// A read zero is known: no prefill work, not no reading.
-				podData[instanceKey].prefillComputedTokenRateKnown = value.Finite() && value.Value >= 0
+				// Sticky across series under one key, like ITL: a later
+				// non-finite series leaves the rate above as it was, so it
+				// leaves the bit as well.
+				if value.Finite() && value.Value >= 0 {
+					podData[instanceKey].prefillComputedTokenRateKnown = true
+				}
 			}
 		}
 	}
