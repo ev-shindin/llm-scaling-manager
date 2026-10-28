@@ -2739,8 +2739,9 @@ optimizer every cycle (§6.6).
          donor in a cycle order strictly.
        - today's optimizer decides with promised GPUs withheld
          (`decideV2`), so it does not scale a model into a whole node freed
-         for a share receiver; promised GPUs are taken from the freest node
-         in one piece (`shareFreeNodes`), so they do not hide a whole free
+         for a share receiver; promised GPUs are taken off the node their
+         hole is on, or, where that is not known, from the freest node in
+         one piece (`shareFreeNodesAfter`), so they do not hide a whole free
          node; and an LWS receiver gets the gang-scheduling allowance in the
          fill timeout.
      - a transfer released by count -- another of the donor's pods went --
@@ -2836,9 +2837,15 @@ optimizer every cycle (§6.6).
          admission as a node-blind set, the concurrency limit counted across
          all its donors.
        - only schedulable nodes count, and the GPUs already promised to a
-         Pending receiver or held for a wake are taken off the nodes with the
-         most free first: a Pending pod has no node, so they would otherwise
-         show as free twice.
+         Pending receiver or held for a wake are taken off the node picture:
+         a Pending pod has no node, so they would otherwise show as free
+         twice. Each is taken off the node its hole is on, which the ledger
+         records when it marks the donor pod (`HoleNodes`) and reads back
+         from the marked pods after a restart. A promise whose node is not
+         known, or that its node no longer shows free, is taken off the nodes
+         with the most free first. Taken off the freest nodes regardless, a
+         1-GPU hole on a nearly full node made a wholly free node look one
+         short, and a second whole-node receiver was never funded.
        - within one cycle, a started node-aware set spends its node state: the
          free GPUs it placed into and its donor pods are not offered to the
          next receiver.
