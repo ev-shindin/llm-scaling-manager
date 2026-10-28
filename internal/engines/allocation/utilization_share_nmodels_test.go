@@ -42,201 +42,6 @@ func simBudget(roles []simRole) int {
 	return b
 }
 
-// shareInvariants checks, every simulated cycle, what must hold however many
-// roles a group plans: the committed allocation stays within the budget and
-// at or above every floor; no role gives and receives at once; and paced
-// moves keep to the pace and the concurrency limit and never reverse a move
-// inside the reversal hold. A move that skipped the waits (a hard imbalance,
-// unpaced) passes all three by design and is not counted.
-type shareInvariants struct {
-	t      *testing.T
-	label  string
-	floors map[string]int
-	// strict counts every transfer against the concurrency limit: the run
-	// skips no wait (ShareSkipWaits.Off), so none may pass it.
-	strict bool
-	// maxInFlight is the most transfers counted in flight in any cycle.
-	maxInFlight int
-	// trace is every start and every cycle's cancel count, in order, without
-	// transfer IDs: what two runs of one seed must agree on.
-	trace strings.Builder
-	// firstStart and served are, per role, the cycle of its first move as a
-	// receiver and the first cycle it served at least its target (want).
-	firstStart, served map[string]time.Duration
-	want               map[string]int
-	// lastMove is each donor, receiver pair's last move not cancelled.
-	lastMove map[[2]string]simMove
-	errs     int
-}
-
-// newShareInvariants checks roles; strict when the run skips no wait.
-func newShareInvariants(t *testing.T, label string, roles []simRole, strict bool) *shareInvariants {
-	floors := map[string]int{}
-	for _, r := range roles {
-		floors[r.key] = r.floor
-	}
-	return &shareInvariants{t: t, label: label, floors: floors, strict: strict,
-		firstStart: map[string]time.Duration{}, served: map[string]time.Duration{}, lastMove: map[[2]string]simMove{}}
-}
-
-// fail reports a broken invariant, at most five per run.
-func (s *shareInvariants) fail(at time.Duration, format string, args ...any) {
-	s.t.Helper()
-	if s.errs++; s.errs <= 5 {
-		s.t.Errorf("%s at %v: %s", s.label, at, fmt.Sprintf(format, args...))
-	}
-}
-
-// observe checks one cycle; it is the run's simOptions.observe.
-func (s *shareInvariants) observe(v simCycleView) {
-	s.t.Helper()
-	committed := v.ledger.Committed(v.held)
-	sum := 0
-	for k, c := range committed {
-		sum += c
-		if c < s.floors[k] {
-			s.fail(v.at, "%s committed %d, below its floor %d", k, c, s.floors[k])
-		}
-	}
-	if sum > v.in.Budget {
-		s.fail(v.at, "committed %d over the budget %d: %v", sum, v.in.Budget, committed)
-	}
-	giving, receiving := map[string]bool{}, map[string]bool{}
-	paced := 0
-	for _, tr := range v.ledger.Transfers() {
-		if tr.State == ShareReleasing && tr.Donor != "" {
-			giving[tr.Donor] = true
-		}
-		if tr.Receiver != "" {
-			receiving[tr.Receiver] = true
-		}
-		if tr.Donor != "" && !tr.Returned && (s.strict || !tr.SkippedWaits) {
-			paced++
-		}
-	}
-	for k := range giving {
-		if receiving[k] {
-			s.fail(v.at, "%s gives and receives at once", k)
-		}
-	}
-	if paced > ShareMaxConcurrentTransfers {
-		s.fail(v.at, "%d paced transfers in flight, over the limit of %d", paced, ShareMaxConcurrentTransfers)
-	}
-	if s.strict && v.ledger.InFlight() > ShareMaxConcurrentTransfers {
-		s.fail(v.at, "%d transfers in flight, over the limit of %d", v.ledger.InFlight(), ShareMaxConcurrentTransfers)
-	}
-	s.maxInFlight = max(s.maxInFlight, v.ledger.InFlight())
-	// A cancelled move never happened: it holds nothing (ShareLedger.unrecord).
-	for pair, m := range s.lastMove {
-		if slices.Contains(v.plan.Cancelled, m.id) {
-			delete(s.lastMove, pair)
-		}
-	}
-	moved := map[string]int{}
-	for _, tr := range v.plan.Started {
-		fmt.Fprintf(&s.trace, "%v start %s->%s %d\n", v.at, tr.Donor, tr.Receiver, tr.GPUs)
-		last, seen := s.lastMove[[2]string{tr.Receiver, tr.Donor}]
-		if tr.Receiver != "" && tr.Donor != "" {
-			s.lastMove[[2]string{tr.Donor, tr.Receiver}] = simMove{v.at, tr.ID}
-		}
-		if tr.SkippedWaits && !s.strict {
-			continue
-		}
-		moved[tr.Donor]++
-		moved[tr.Receiver]++
-		// Rule 4: GPUs do not go back the way they came within the
-		// reversal hold, unless the move skipped the waits.
-		if seen && v.at-last.at < simTimings().ReversalHold {
-			s.fail(v.at, "%s->%s reverses a move of %v ago, inside the reversal hold", tr.Donor, tr.Receiver, v.at-last.at)
-		}
-	}
-	for _, tr := range v.plan.Started {
-		if _, ok := s.firstStart[tr.Receiver]; !ok && tr.Receiver != "" {
-			s.firstStart[tr.Receiver] = v.at
-		}
-	}
-	for k, n := range moved {
-		if k != "" && n > ShareMaxReplicasPerCycle {
-			s.fail(v.at, "%s moved %d paced replicas in one cycle, over the pace of %d", k, n, ShareMaxReplicasPerCycle)
-		}
-	}
-	fmt.Fprintf(&s.trace, "%v cancelled %d\n", v.at, len(v.plan.Cancelled))
-	for k, w := range s.want {
-		if _, ok := s.served[k]; !ok && v.serving[k] >= w {
-			s.served[k] = v.at
-		}
-	}
-}
-
-// starts is the trace's starts, for a failure message.
-func (s *shareInvariants) starts() string {
-	var out []string
-	for line := range strings.SplitSeq(s.trace.String(), "\n") {
-		if strings.Contains(line, " start ") {
-			out = append(out, line)
-		}
-	}
-	return strings.Join(out, "\n")
-}
-
-// lastServed is the latest cycle a role of want first served its target, and
-// whether every one did.
-func (s *shareInvariants) lastServed() (time.Duration, bool) {
-	var last time.Duration
-	for k := range s.want {
-		at, ok := s.served[k]
-		if !ok {
-			return 0, false
-		}
-		last = max(last, at)
-	}
-	return last, true
-}
-
-// stillShortfall is runShareSim's shortfall for a fleet that never moves: every
-// role serves what it starts with. The demand draws the same random sequence
-// runShareSim does, so the two compare seed for seed.
-func stillShortfall(roles []simRole, seed int64, dur time.Duration) float64 {
-	rnd := rand.New(rand.NewSource(seed))
-	var short, total float64
-	for t := time.Duration(0); t < dur; t += simCycle {
-		for _, r := range roles {
-			inst := r.demand(t, rnd) / simK
-			short += math.Max(0, inst-float64(r.initial))
-			total += inst
-		}
-	}
-	return short / total
-}
-
-// shareRun runs roles three times on one seed, checking the invariants every
-// cycle, and fails unless the three runs plan the same moves: the planner
-// ranges over maps, and its result must not depend on their order.
-func shareRun(t *testing.T, label string, roles []simRole, budget int, seed int64, tm ShareTimings,
-	opt simOptions, want map[string]int) (simResult, *shareInvariants) {
-	t.Helper()
-	var first simResult
-	var inv *shareInvariants
-	for run := range 3 {
-		s := newShareInvariants(t, label, roles, opt.skipWaits.Off)
-		s.want = want
-		o := opt
-		o.observe = s.observe
-		r := runShareSimWith(roles, budget, seed, tm, o)
-		if run == 0 {
-			first, inv = r, s
-			continue
-		}
-		if s.trace.String() != inv.trace.String() {
-			t.Fatalf("%s: run %d planned differently from run 0 on one seed", label, run)
-		}
-		if fmt.Sprint(r.final) != fmt.Sprint(first.final) {
-			t.Fatalf("%s: run %d ended at %v, run 0 at %v", label, run, r.final, first.final)
-		}
-	}
-	return first, inv
-}
-
 // manyModelCounts are the group sizes every scenario runs at.
 var manyModelCounts = []int{5, 8, 16}
 
@@ -302,7 +107,8 @@ func swingPairs(n int, period time.Duration) []simRole {
 // shortfall within the 1.7x of a still fleet the three-model resonance is
 // held to. Measured: 1.2x to 1.35x for N=5, 8 and 16. Without the reversal
 // hold the invariants catch moves reversed inside it, and a role giving and
-// receiving at once.
+// receiving at once. The 1.7x is a regression guard over measured values,
+// not a documented property of the planner.
 func TestShareManyModelsFastSwingsWasteNothing(t *testing.T) {
 	const dur = 3 * time.Hour
 	for _, n := range manyModelCounts {
@@ -322,6 +128,44 @@ func TestShareManyModelsFastSwingsWasteNothing(t *testing.T) {
 			if with >= 1.7*still {
 				t.Errorf("shortfall %.4f, over 1.7x a still fleet's %.4f", with/3, still/3)
 			}
+		})
+	}
+}
+
+// At a 30-minute swing, four or more models can waste a move the
+// three-model scenarios never do: a role that just gave receives again, or
+// one that just received gives, within the reversal hold -- the hard-imbalance
+// exemption (shareHardImbalance), which lets a model at its threshold take
+// GPUs from one that idles without waiting. Measured: 1 such move in three
+// 6-hour runs at N=5, 2 at N=16, none at N=4 or 8. Every wasted move must be
+// one of those: no move that waited for the hold undoes another inside it.
+func TestShareManyModelsSlowSwingsWasteOnlyExemptMoves(t *testing.T) {
+	const dur = 6 * time.Hour
+	for _, n := range []int{4, 5, 8, 16} {
+		t.Run(fmt.Sprintf("N=%d", n), func(t *testing.T) {
+			roles := swingPairs(n, 30*time.Minute)
+			total := 0
+			for _, seed := range []int64{1, 2, 3} {
+				label := fmt.Sprintf("N=%d seed %d", n, seed)
+				inv := newShareInvariants(label, roles, false)
+				r := runShareSimWith(roles, simBudget(roles), seed, simTimings(), simOptions{dur: dur, observe: inv.observe})
+				inv.report(t)
+				wasted := inv.wasted()
+				if len(wasted) != r.wasted {
+					t.Fatalf("%s: the observer found %d wasted moves, the simulator %d", label, len(wasted), r.wasted)
+				}
+				total += len(wasted)
+				for _, w := range wasted {
+					a, b := w[0], w[1]
+					t.Logf("%s: %v %s->%s (exempt %v) undone by %v %s->%s (exempt %v)",
+						label, a.at, a.donor, a.receiver, a.exempt, b.at, b.donor, b.receiver, b.exempt)
+					if !b.exempt {
+						t.Errorf("%s: %s->%s at %v undoes %s->%s at %v without skipping the waits",
+							label, b.donor, b.receiver, b.at, a.donor, a.receiver, a.at)
+					}
+				}
+			}
+			t.Logf("N=%d: %d wasted moves in three runs", n, total)
 		})
 	}
 }
@@ -486,7 +330,8 @@ func rotating(n int) []simRole {
 
 // Bursts that rotate through every model leave less demand unserved than a
 // fleet that never moves, with no move cancelled or wasted. Measured: 0.47 to
-// 0.57 of the still fleet's shortfall for N=5, 8 and 16; the bound is 0.7.
+// 0.57 of the still fleet's shortfall for N=5, 8 and 16. The 0.7 bound is a
+// regression guard over those measured values, not a documented property.
 func TestShareManyModelsRotatingBursts(t *testing.T) {
 	const dur = 6 * time.Hour
 	for _, n := range manyModelCounts {
@@ -514,30 +359,41 @@ func TestShareManyModelsRotatingBursts(t *testing.T) {
 
 // A heavier model short of its need is funded first, and the lighter ones
 // after it are funded too: weight orders the queue, it starves nobody. M00
-// gives; M01 weighs 3 and every other model 1; all of them step up together.
-// Paced, the concurrency limit makes them queue.
+// gives; the last model weighs 3 and every other one 1, so a tie broken by
+// key would put it last; all of them step up together. Paced, the
+// concurrency limit makes them queue.
 func TestShareManyModelsWeightOrdersReceivers(t *testing.T) {
 	for _, n := range []int{5, 8} {
 		t.Run(fmt.Sprintf("N=%d", n), func(t *testing.T) {
 			roles := oneDonor(n)
-			roles[1].weight = 3
+			heavy := simModelKey(n - 1)
+			roles[n-1].weight = 3
 			receivers := map[string]int{}
 			for i := 1; i < n; i++ {
 				receivers[simModelKey(i)] = 4
 			}
 			r, inv := shareRun(t, t.Name(), roles, simBudget(roles), 1, simTimings(),
 				simOptions{dur: 6 * time.Hour, skipWaits: ShareSkipWaits{Off: true}}, receivers)
-			heavy := simModelKey(1)
 			t.Logf("final %v; first moves %v; served %v", r.final, inv.firstStart, inv.served)
-			for i := 2; i < n; i++ {
+			// Two moves start at once, so the first wave funds the heavy model
+			// and one light one together: heavy is never after any, and it is
+			// strictly before every light model but that one.
+			light := 0
+			for i := 1; i < n-1; i++ {
 				k := simModelKey(i)
-				if inv.firstStart[heavy] > inv.firstStart[k] {
+				switch {
+				case inv.firstStart[heavy] > inv.firstStart[k]:
 					t.Errorf("%s (weight 3) first funded at %v, after %s (weight 1) at %v",
 						heavy, inv.firstStart[heavy], k, inv.firstStart[k])
+				case inv.firstStart[heavy] == inv.firstStart[k]:
+					light++
 				}
-				if inv.served[heavy] > inv.served[k] {
-					t.Errorf("%s (weight 3) served at %v, after %s (weight 1) at %v", heavy, inv.served[heavy], k, inv.served[k])
+				if inv.served[heavy] >= inv.served[k] {
+					t.Errorf("%s (weight 3) served at %v, not before %s (weight 1) at %v", heavy, inv.served[heavy], k, inv.served[k])
 				}
+			}
+			if light > ShareMaxConcurrentTransfers-1 {
+				t.Errorf("%d light models funded in the heavy model's first wave, want at most %d", light, ShareMaxConcurrentTransfers-1)
 			}
 			last, ok := inv.lastServed()
 			if !ok {
@@ -594,7 +450,7 @@ func TestShareManyModelsPrefillDecode(t *testing.T) {
 			}
 			for _, paced := range []bool{true, false} {
 				label := fmt.Sprintf("%s paced=%v", t.Name(), paced)
-				inv := newShareInvariants(t, label, roles, paced)
+				inv := newShareInvariants(label, roles, paced)
 				inv.want = receivers
 				r := runShareSimWith(roles, simBudget(roles), 1, simTimings(), simOptions{
 					dur: 6 * time.Hour, origins: origins, skipWaits: ShareSkipWaits{Off: paced},
@@ -604,6 +460,7 @@ func TestShareManyModelsPrefillDecode(t *testing.T) {
 							gave[tr.Donor], got[tr.Receiver] = true, true
 						}
 					}})
+				inv.report(t)
 				if fmt.Sprint(r.final) != fmt.Sprint(final) {
 					t.Errorf("%s: final %v, want %v", label, r.final, final)
 				}
@@ -614,7 +471,7 @@ func TestShareManyModelsPrefillDecode(t *testing.T) {
 					t.Errorf("%s: a rising role never served its target: %v", label, inv.served)
 				}
 				// Determinism over 2n roles and their origins.
-				again := newShareInvariants(t, label, roles, paced)
+				again := newShareInvariants(label, roles, paced)
 				runShareSimWith(roles, simBudget(roles), 1, simTimings(), simOptions{
 					dur: 6 * time.Hour, origins: origins, skipWaits: ShareSkipWaits{Off: paced}, observe: again.observe})
 				if again.trace.String() != inv.trace.String() {
@@ -680,6 +537,10 @@ func TestShareManyModelsTwoWholeNodeReceivers(t *testing.T) {
 		held[r], thresholds[r], give[r], grow[r] = len(all[r]), 0.8, one, one
 	}
 	nodes := map[string]ShareNode{"n1": {}, "n2": {}, "n3": {}, "n4": {}, "n5": {}, "n6": {}}
+	floors := make([]simRole, 0, len(roles))
+	for _, r := range roles {
+		floors = append(floors, simRole{key: r.Key, floor: r.Floor})
+	}
 	var trace string
 	for run := range 10 { // ten runs: the result must not depend on map order
 		units := map[string][]ShareUnit{}
@@ -691,9 +552,13 @@ func TestShareManyModelsTwoWholeNodeReceivers(t *testing.T) {
 		l := NewShareLedger()
 		started := make([]ShareTransfer, 0, 32)
 		var b strings.Builder
+		// Every cycle: budget, floors, no role giving and receiving at once.
+		inv := newShareInvariants(fmt.Sprintf("run %d", run), floors, false)
 		for i := range 6 {
 			in.DonorUnits = units
-			for _, tr := range PlanShareTransfers(l, in, time.Unix(int64(30*i), 0), simTimings()).Started {
+			p := PlanShareTransfers(l, in, time.Unix(int64(30*i), 0), simTimings())
+			inv.observe(simCycleView{at: time.Duration(30*i) * time.Second, ledger: l, held: held, in: in, plan: p})
+			for _, tr := range p.Started {
 				fmt.Fprintf(&b, "cycle %d: %s->%s %v\n", i, tr.Donor, tr.Receiver, tr.PlannedPods)
 				started = append(started, tr)
 				// The planned pods are marked: offered to no later set.
@@ -702,6 +567,7 @@ func TestShareManyModelsTwoWholeNodeReceivers(t *testing.T) {
 				})
 			}
 		}
+		inv.report(t)
 		if run == 0 {
 			trace = b.String()
 			t.Logf("planned:\n%s", trace)
@@ -754,18 +620,5 @@ func TestShareManyModelsTwoWholeNodeReceivers(t *testing.T) {
 				t.Errorf("%s gave %d of %d, below its floor of 1", r, g, held[r])
 			}
 		}
-		committed := 0
-		for _, c := range l.Committed(held) {
-			committed += c
-		}
-		if committed > in.Budget {
-			t.Errorf("committed %d over the budget %d", committed, in.Budget)
-		}
 	}
-}
-
-// simMove is when a transfer started, and which.
-type simMove struct {
-	at time.Duration
-	id string
 }

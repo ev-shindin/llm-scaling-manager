@@ -74,6 +74,9 @@ type simCycleView struct {
 	plan          SharePlan
 }
 
+// runShareSimWith is runShareSim with opt: the simulated span, role origins,
+// the hard-imbalance band, and an observer called after every cycle's plan.
+// It returns what runShareSim does.
 func runShareSimWith(roles []simRole, budget int, seed int64, tm ShareTimings, opt simOptions) simResult {
 	dur := opt.dur
 	if dur == 0 {
@@ -235,7 +238,7 @@ var _ = Describe("PlanShareTransfers against the §6.7 scenarios", func() {
 		}
 	})
 
-	It("wastes no transfer under load swinging at any period", func() {
+	It("wastes no transfer when two models swing in antiphase beside a steady one, at every period swept", func() {
 		for _, period := range []time.Duration{15 * time.Minute, 30 * time.Minute, time.Hour, 3 * time.Hour} {
 			for _, seed := range seeds {
 				r := runShareSim(threeSim(swing(period, 0), swing(period, math.Pi), steady(1), 6, 5, 1),
