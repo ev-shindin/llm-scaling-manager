@@ -566,7 +566,7 @@ wva_detect_prometheus_url() {
     # namespace sorts first. On a shared cluster that was a new per-user
     # Prometheus selecting monitors only in its own namespace: the controller
     # read no series, every variant looked idle, and nothing reported an error.
-    local crs targets cov v why want unserved=""
+    local crs targets cov v why want unserved="" picked picked_url use
     crs="$(kubectl get prometheuses.monitoring.coreos.com -A \
         -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
     targets="$(wva_prometheus_target_namespaces | paste -sd' ' -)"
@@ -581,29 +581,38 @@ wva_detect_prometheus_url() {
             done <<< "$cov"
             # None is known to scrape them. Still a fallback -- a URL that may
             # be right beats the shipped default, which names a Prometheus this
-            # installer would deploy -- but said out loud, with the reasons.
+            # installer would deploy -- but said out loud, with the reasons and
+            # the one it picked: one that could not be checked before one known
+            # not to scrape them.
+            picked="" picked_url=""
+            for want in unknown no; do
+                while read -r ns name v why; do
+                    [ "$v" = "$want" ] || continue
+                    if picked_url="$(wva_pick_prometheus_service "$ns" "$name")"; then
+                        picked="$ns/$name"
+                        break 2
+                    fi
+                done <<< "$cov"
+            done
+            use="none of them has a Service, so none is picked"
+            [ -z "$picked" ] || use="using $picked ($picked_url), which may read no metrics for your models"
             if [ -n "$unserved" ]; then
-                log_warning "$unserved scrapes $targets, but no Service routes to it, so another Prometheus is picked and may read no metrics for your models:"
+                log_warning "$unserved scrapes $targets, but no Service routes to it; $use:"
             else
-                log_warning "No Prometheus is known to scrape $targets, so the one picked may read no metrics for your models:"
+                log_warning "No Prometheus is known to scrape $targets; $use:"
             fi
             while read -r ns name v why; do
                 [ -n "$ns" ] || continue
                 log_warning "  $ns/$name: $why"
             done <<< "$cov"
             if printf '%s\n' "$cov" | awk '$3 == "no"' | grep -q .; then
-                log_warning "  (Only monitor selectors are read: a Prometheus that scrapes through additionalScrapeConfigs, or selects no monitors, is not seen here.)"
+                log_warning "  A Prometheus that scrapes by scrape config rather than monitors is not detected here."
             fi
             log_warning "  Pass PROMETHEUS_URL=<url> of the Prometheus that scrapes $targets."
-            # One that could not be checked before one known not to scrape them.
-            for want in unknown no; do
-                while read -r ns name v why; do
-                    [ "$v" = "$want" ] || continue
-                    if wva_pick_prometheus_service "$ns" "$name"; then
-                        return 0
-                    fi
-                done <<< "$cov"
-            done
+            if [ -n "$picked" ]; then
+                echo "$picked_url"
+                return 0
+            fi
         else
             log_warning "Could not check which Prometheus scrapes $targets (reading the Prometheus resources failed), so the first one listed is used. Pass PROMETHEUS_URL=<url> to choose."
         fi

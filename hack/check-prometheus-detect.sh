@@ -19,7 +19,18 @@ cd "$ROOT" || exit 1
 command -v jq >/dev/null 2>&1 || { printf 'FATAL: jq is required.\n' >&2; exit 1; }
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+REACHED_SUMMARY=0
+# An exit before the summary (a stub error under set -u, a sourced library
+# that exits) must not pass for a green run.
+on_exit() {
+    local rc=$?
+    rm -rf "$WORK"
+    if [ "$REACHED_SUMMARY" != 1 ]; then
+        printf 'FAIL: exited before the summary (rc=%s), after %d passed and %d failed.\n' "$rc" "$RAN" "$FAILED" >&2
+        exit 1
+    fi
+}
+trap on_exit EXIT
 for lib in common.sh infra_wva.sh infra_monitoring.sh; do
     tr -d '\r' < "deploy/lib/$lib" > "$WORK/$lib"
 done
@@ -31,7 +42,7 @@ source "$WORK/infra_wva.sh"
 # shellcheck source=/dev/null
 source "$WORK/infra_monitoring.sh"
 
-EXPECT_CASES=60
+EXPECT_CASES=64
 RAN=0
 FAILED=0
 
@@ -235,6 +246,7 @@ check 'matchExpressions In, value absent: does not select' 'mon=no' "$(expr In '
 check 'matchExpressions NotIn, value present: does not select' 'mon=no' "$(expr NotIn '["gpu"]' tier)"
 check 'matchExpressions NotIn, key absent: selects' 'mon=yes' "$(expr NotIn '["gpu"]' zone)"
 check 'matchExpressions Exists: selects' 'mon=yes' "$(expr Exists null tier)"
+check 'matchExpressions Exists, key absent: does not select' 'mon=no' "$(expr Exists null zone)"
 check 'matchExpressions DoesNotExist, key present: does not select' 'mon=no' "$(expr DoesNotExist null tier)"
 check 'matchExpressions DoesNotExist, key absent: selects' 'mon=yes' "$(expr DoesNotExist null zone)"
 
@@ -282,6 +294,11 @@ has 'namespace labels Forbidden: says it could not check' 'could not check (read
 has 'namespace labels Forbidden: tells how to choose' 'PROMETHEUS_URL=<url>' "$err"
 set_world '.forbid = []'
 check 'namespace labels readable: the same selector is decided' 'aaa=no mon=yes' "$(verdicts team-a)"
+world
+cr mon expr '{"podMonitorNamespaceSelector": {"matchExpressions": [{"key": "tier", "operator": "In", "values": ["x"]}]}, "serviceMonitorNamespaceSelector": {}, "podMonitorSelector": {}, "serviceMonitorSelector": {}}'
+set_world '.nss["team-a"] = {"kubernetes.io/metadata.name": "team-a"} | .forbid = ["namespace"]'
+check 'namespace labels Forbidden, matchExpressions on another label: unknown, not decided from the name' \
+    'mon=unknown' "$(verdicts team-a)"
 
 world
 cr mon kps '{"podMonitorNamespaceSelector": {}, "serviceMonitorNamespaceSelector": {}, "podMonitorSelector": {"matchLabels": {"release": "kps"}}, "serviceMonitorSelector": {}}'
@@ -314,7 +331,7 @@ cr aaa first "$ALL"
 cr mon second "$ALL"
 set_world '.nss["team-a"] = {"kubernetes.io/metadata.name": "team-a"} | .forbid = ["crjson"]'
 check 'Prometheus specs unreadable: the first one listed, as before' "$(url aaa)" "$(detect)"
-has 'Prometheus specs unreadable: says it could not check' 'Could not check which Prometheus scrapes team-a' "$(detect_err)"
+has 'Prometheus specs unreadable: warns that it could not check' '[WARNING] Could not check which Prometheus scrapes team-a' "$(detect_err)"
 
 # ----------------------------------------------------------------------------
 # None known to cover: a warning, the candidates, and the fallback
@@ -328,7 +345,8 @@ err="$(detect_err)"
 has 'none covering: warns' '[WARNING] No Prometheus is known to scrape team-a' "$err"
 has 'none covering: names each candidate and why' 'bbb/second: its podMonitorNamespaceSelector does not select team-a' "$err"
 has 'none covering: tells the reader to pass PROMETHEUS_URL' 'Pass PROMETHEUS_URL=<url> of the Prometheus that scrapes team-a' "$err"
-has 'none covering: says what this check cannot see' 'additionalScrapeConfigs' "$err"
+has 'none covering: says what this check cannot see' 'A Prometheus that scrapes by scrape config rather than monitors is not detected here.' "$err"
+has 'none covering: names the Prometheus it uses, as a warning' "[WARNING] No Prometheus is known to scrape team-a; using aaa/first ($(url aaa))" "$err"
 
 world
 cr aaa own "{\"podMonitorNamespaceSelector\": $(OWN aaa), \"serviceMonitorNamespaceSelector\": $(OWN aaa), \"podMonitorSelector\": {}, \"serviceMonitorSelector\": {}}"
@@ -336,7 +354,8 @@ cr mon all "$ALL"
 set_world '.nss["team-a"] = {"kubernetes.io/metadata.name": "team-a"} | .nosvc = ["mon"]'
 check 'a covering Prometheus with no Service: falls back to one that has one' "$(url aaa)" "$(detect)"
 err="$(detect_err)"
-has 'a covering Prometheus with no Service: the warning says so' 'mon/all scrapes team-a, but no Service routes to it' "$err"
+has 'a covering Prometheus with no Service: the warning says so' '[WARNING] mon/all scrapes team-a, but no Service routes to it' "$err"
+has 'a covering Prometheus with no Service: names the one used instead' "using aaa/own ($(url aaa))" "$err"
 lacks 'a covering Prometheus with no Service: not called unknown' 'No Prometheus is known to scrape' "$err"
 
 # ----------------------------------------------------------------------------
@@ -383,6 +402,7 @@ check 'no explicit URL: resolution takes the covering one' "$(url llm-d-wva-moni
     "$( PROMETHEUS_URL='https://kube-prometheus-stack-prometheus.default:9090'; WVA_PROMETHEUS_URL_RESOLVED=""
         wva_resolve_prometheus_url >/dev/null 2>&1; printf '%s' "$PROMETHEUS_URL" )"
 
+REACHED_SUMMARY=1
 printf '\n%d passed, %d failed (expected %d)\n' "$RAN" "$FAILED" "$EXPECT_CASES"
 [ "$FAILED" -eq 0 ] || exit 1
 if [ "$RAN" -ne "$EXPECT_CASES" ]; then
