@@ -61,9 +61,10 @@ var _ clock.PassiveClock = (*tickingClock)(nil)
 func oneClockFleet(t *testing.T, base clock.PassiveClock) (*Engine, map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling) {
 	t.Helper()
 	const namespace, modelID = "chat", "m"
-	objs := []client.Object{}
-	vas := []llmdVariantAutoscalingV1alpha1.VariantAutoscaling{}
-	for _, v := range []string{"chat-a", "chat-b"} {
+	variants := []string{"chat-a", "chat-b"}
+	objs := make([]client.Object, 0, len(variants))
+	vas := make([]llmdVariantAutoscalingV1alpha1.VariantAutoscaling, 0, len(variants))
+	for _, v := range variants {
 		objs = append(objs, &appsv1.Deployment{
 			ObjectMeta: metav1.ObjectMeta{Name: v, Namespace: namespace},
 			Spec: appsv1.DeploymentSpec{
