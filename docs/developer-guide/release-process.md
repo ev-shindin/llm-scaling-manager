@@ -42,8 +42,9 @@ has a tag on `main`, and only when `newTag` on the tagged commit equals the tag.
   access ([first release](#the-first-release-to-a-new-package)).
 - [ ] The commit you will tag passed its PR checks, including the e2e runs. The
   release reruns the PR checks, not the e2e suites.
-- [ ] The workflow checks where a tag is, not who reviewed it. Review on `main`
-  and `release-*` is enforced only by the repository's branch rules, if set.
+
+The workflow checks where a tag is, not who reviewed it. Review on `main` and
+`release-*` is enforced only by the repository's branch rules, if set.
 
 ---
 
@@ -148,7 +149,7 @@ be public under that tag. Do not move or delete the tag.
 An urgent fix for a released line ships from that line's branch while `main`
 moves on: `v0.10.2` from `release-0.10`. The workflow releases a tag from a
 `release-MAJOR.MINOR` branch only if the tag is of that line and the line
-already has a tag on `main`.
+already has a tag on `main` (an `-rc` tag counts).
 
 **Creating a line's branch** (once per line). Start it at the line's latest
 release and add the release-branch CI change, which a tag runs from the tagged
@@ -156,14 +157,14 @@ commit:
 
 ```bash
 REMOTE=<remote for ev-shindin/llm-scaling-manager>
-git fetch "$REMOTE"
+git fetch --tags "$REMOTE"
 git push "$REMOTE" 'v0.10.1^{commit}:refs/heads/release-0.10'
 ```
 
 Then open a PR to `release-0.10` that cherry-picks the commit adding
 release-branch support to `ci-release.yaml`, `ci-pr-checks.yaml` and
-`non-main-gatekeeper.yml`. Until it merges, PRs to the branch get no checks and
-its tags are refused.
+`non-main-gatekeeper.yml`. Merge it first: until it is on the branch, the
+branch's tags are refused.
 
 **Each patch:**
 
@@ -176,8 +177,8 @@ its tags are refused.
    `v0.10.2`; list them with
    `git grep -n 'v0\.10\.[0-9]' -- docs deploy hack/benchmark`. It adds
    "Upgrading from v0.10.1 to v0.10.2" to
-   `docs/reference/upgrade-and-uninstall.md`. Pre-release checklist items 2-4
-   apply.
+   `docs/reference/upgrade-and-uninstall.md`. Pre-release checklist items 2
+   and 3 apply.
 3. **Tag its merge commit**, as in [step 1](#1-push-the-tag), with the release
    branch in place of `main`:
    ```bash

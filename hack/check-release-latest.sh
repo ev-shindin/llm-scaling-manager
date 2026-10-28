@@ -166,6 +166,8 @@ else
     "${G[@]}" -C "$WORK/origin" checkout -q -b release-2.0 main
     "${G[@]}" -C "$WORK/origin" commit -q --allow-empty -m unreleased
     unreleased_sha="$(git -C "$WORK/origin" rev-parse HEAD)"
+    # A refused v2.0.0 stays tagged on the branch; it must not count as a release.
+    "${G[@]}" -C "$WORK/origin" tag v2.0.0 HEAD
     "${G[@]}" -C "$WORK/origin" checkout -q main
     git -C "$WORK/clone" fetch -q origin
     git -C "$WORK/clone" update-ref -d refs/remotes/origin/release-1.0
@@ -187,9 +189,9 @@ else
     else
         fail "a v1.0.3 tag off both main and release-1.0 must be refused" "$onmain_log"
     fi
-    onmain_log="$(cd "$WORK/clone" && env GITHUB_SHA="$unreleased_sha" GITHUB_REF_NAME=v2.0.0 bash "$WORK/onmain.sh" 2>&1)"
+    onmain_log="$(cd "$WORK/clone" && env GITHUB_SHA="$unreleased_sha" GITHUB_REF_NAME=v2.0.1-rc1 bash "$WORK/onmain.sh" 2>&1)"
     if [ $? -ne 0 ] && printf '%s\n' "$onmain_log" | grep -q 'never released from main'; then
-        ok "a new release-2.0 branch cannot publish v2.0.0 (no 2.0 tag on main)"
+        ok "a new release-2.0 branch cannot publish (its v2.0.0 tag is not on main)"
     else
         fail "a tag on a branch whose line has no tag on main must be refused" "$onmain_log"
     fi
