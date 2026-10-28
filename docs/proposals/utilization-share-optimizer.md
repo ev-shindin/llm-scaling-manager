@@ -30,10 +30,11 @@ limit) and wants all of it used. When it is on:
    target, not the next cycle.
 5. **It does not oscillate, and it says what it cannot follow.** Its moves
    land about twelve minutes after it decides them, so §6.7 builds it not to
-   oscillate and measures the result in a simulator. In its three-model
-   scenarios, steady load produces no transfers; a demand step settles in the
-   minimum number of moves, with none wasted; slow shifts are followed. Load that swings back within about 100
-   minutes cannot be followed by moving GPUs, and there standing still does
+   oscillate and measures the result in a simulator. Steady load produces no
+   transfers and a demand step settles in the minimum number of moves, with
+   none wasted, in simulation up to 16 models; slow shifts are followed. Load
+   that swings back within about 100 minutes cannot be followed by moving
+   GPUs, and there standing still does
    better. The rules limit that loss rather than pretend to remove it.
 
 The two roles of a P/D model get the same headroom, so they run equally loaded
@@ -1906,10 +1907,10 @@ Under the rules of this section:
 
 - **No oscillation.** Steady and tied load produce no transfers at all. In
   every scenario of the table above (three models) no transfer is wasted, and
-  free cancels fall from hundreds to at most two dozen. With four or more
+  free cancels fall from hundreds to at most two dozen. With five or more
   models swinging at 30 minutes, the hard-imbalance exemption can undo a move
-  within the reversal hold: 1 to 2 moves in 6 hours, measured at N = 5 to 16.
-  15-minute swings waste none.
+  within the reversal hold: at most 2 moves in three 6-hour runs (1 at N = 5,
+  2 at N = 16, none at N = 4 or 8). 15-minute swings waste none.
 - **A real shift is followed in the minimum number of moves**, and the
   shortfall it was built for drops sharply: 15.9 % → 0.6 % on a demand step,
   5.5 % → 1.4 % on a three-hour swing.
@@ -2447,9 +2448,10 @@ optimizer every cycle (§6.6).
   and lagged demand. Steady and tied load produce zero transfers; a demand step
   settles in the minimum number of transfers with none wasted; no
   three-model scenario wastes a transfer; the 30-minute swing stays below
-  2.5 × standing still. With four or more models swinging at 30 minutes, the
-  hard-imbalance exemption can undo a move within the reversal hold (1 to 2
-  moves in 6 hours at N = 5 to 16, measured); 15-minute swings waste none.
+  2.5 × standing still. With five or more models swinging at 30 minutes, the
+  hard-imbalance exemption can undo a move within the reversal hold (at most
+  2 moves in three 6-hour runs: 1 at N = 5, 2 at N = 16, none at N = 4 or 8);
+  15-minute swings waste none.
   Ablations, one per rule, must each reproduce the failure the rule removes:
   without `committed`, hundreds of cancels on the tight step; without
   hysteresis, a step whose transfer never lands; without the hold, wasted
