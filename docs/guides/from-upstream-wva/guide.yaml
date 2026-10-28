@@ -23,6 +23,7 @@ migrate:
       # Installed with Helm: save the release, its values and the chart version instead of the Deployment
       #   helm get values <release> -n <upstream-namespace> > upstream-values.yaml
       #   helm list -A | grep workload-variant-autoscaler > upstream-release.txt
+      #   helm list does not record where the chart came from: add its repo or path to upstream-release.txt
   freeze:
     note: Freeze every ScaledObject with a prometheus trigger that upstream scales. It holds its current replica count.
     run: kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused=true
@@ -48,10 +49,10 @@ migrate:
     note: Carry over the settings you tuned. Edit the new ConfigMap, not the old one.
     run: kubectl edit configmap wva-scaling-policy-config -n <controller-namespace>
   plan:
-    note: "Write the plan. It applies nothing. Cluster-wide install: add SCOPE=cluster."
+    note: "Write the plan. It applies nothing. Cluster-wide install: add SCOPE=cluster WVA_NS=<controller-namespace>."
     run: make scaledobjects-plan WVA_DEFAULT_SO_PLAN=wva-plan.yaml
   apply:
-    note: "Only after editing the plan and deleting the plain HPAs. Cluster-wide install: add SCOPE=cluster."
+    note: "Only after editing the plan and deleting the plain HPAs. Cluster-wide install: add SCOPE=cluster WVA_NS=<controller-namespace>."
     run: make scaledobjects-apply WVA_DEFAULT_SO_PLAN=wva-plan.yaml
   unlisted:
     note: A workload missing from the plan has no llm-d serving label. Label the Deployment itself (its pods do not restart), then plan again.
@@ -70,7 +71,7 @@ verify:
       #   make verify-deployment SCOPE=cluster WVA_NS=<controller-namespace>
       #   make verify-scaledobjects SCOPE=cluster WVA_NS=<controller-namespace>
   rewire:
-    note: A ScaledObject whose HPA shows only cpu is unwired. Re-wire it. Cluster-wide install, add SCOPE=cluster.
+    note: A ScaledObject whose HPA shows only cpu is unwired. Re-wire it.
     run: |
       make scaledobjects-rewire
       # cluster-wide install:
@@ -81,14 +82,21 @@ rollback:
     note: Freeze the adopted ScaledObjects again, so nothing scales while the controllers change.
     run: kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused=true --overwrite
   undeploy:
-    note: Remove the scaling manager, with the same SCOPE and NAMESPACE you installed with. It also deletes the ScaledObjects it created.
+    note: Remove the scaling manager, with the same SCOPE and NAMESPACE (cluster-wide, WVA_NS) you installed with. It also deletes the ScaledObjects it created.
     run: make undeploy-wva NAMESPACE=<namespace>
   controller:
     note: Restore the upstream controller. yq drops the fields the API server sets.
     run: yq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status)' upstream-controller.yaml | kubectl apply -f -
   configmaps:
-    note: After a reinstall from the release, put back the ConfigMaps you tuned.
-    run: yq '.items[] | select(.metadata.name | test("wva-")) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
+    note: After a reinstall from the release, put back the ConfigMaps you tuned, then restart the controller. It reads wva-manager-config only at startup.
+    run: |
+      yq '.items[] | select(.metadata.name | test("^wva-")) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
+      kubectl rollout restart deployment wva-controller-manager -n <upstream-namespace>
+  configmapshelm:
+    note: Helm only. The chart names everything after the release. Put back the ConfigMaps you changed with kubectl edit, then restart the controller.
+    run: |
+      yq '.items[] | select(.metadata.labels."app.kubernetes.io/instance" == "<release>") | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
+      kubectl rollout restart deployment -n <upstream-namespace> -l app.kubernetes.io/instance=<release>,control-plane=controller-manager
   autoscalers:
     note: Restore the saved ScaledObjects and plain HPAs. HPAs that KEDA owns are skipped; KEDA recreates them.
     run: yq '.items[] | select(.metadata.ownerReferences == null) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-autoscalers.yaml | kubectl apply -f -

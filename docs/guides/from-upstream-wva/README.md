@@ -65,6 +65,7 @@ kubectl get scaledobject,hpa -A -o yaml > upstream-autoscalers.yaml
 # Installed with Helm: save the release, its values and the chart version instead of the Deployment
 #   helm get values <release> -n <upstream-namespace> > upstream-values.yaml
 #   helm list -A | grep workload-variant-autoscaler > upstream-release.txt
+#   helm list does not record where the chart came from: add its repo or path to upstream-release.txt
 ```
 <!-- guide:migrate.save end -->
 
@@ -164,6 +165,14 @@ admin) and `make deploy-wva`. The cluster-wide guide runs
 `make deploy-wva SCOPE=cluster`, which does both. Pin the release as [Pin the
 version](../../reference/upgrade-and-uninstall.md#pin-the-version) shows.
 
+To run a cluster-wide install in the upstream namespace, name it:
+`make deploy-wva SCOPE=cluster WVA_NS=<upstream-namespace>`. Then
+`<controller-namespace>` below is `<upstream-namespace>`: pass
+`SCOPE=cluster WVA_NS=<upstream-namespace>` to every `make` command; without
+`WVA_NS` they look in `workload-variant-autoscaler-system`. A namespace-scope
+install there also works:
+`NAMESPACE=<model-namespace> WVA_NS=<upstream-namespace> WVA_WATCH_NS=<model-namespace>`.
+
 Then carry over the settings you tuned, from `upstream-configmaps.yaml`:
 
 <!-- guide:migrate.policy start -->
@@ -200,7 +209,7 @@ Settings outside that ConfigMap do not carry over:
 
 <!-- guide:migrate.plan start -->
 ```bash
-# Write the plan. It applies nothing. Cluster-wide install: add SCOPE=cluster.
+# Write the plan. It applies nothing. Cluster-wide install: add SCOPE=cluster WVA_NS=<controller-namespace>.
 make scaledobjects-plan WVA_DEFAULT_SO_PLAN=wva-plan.yaml
 ```
 <!-- guide:migrate.plan end -->
@@ -218,7 +227,9 @@ Edit `wva-plan.yaml` before you apply anything:
   and without the EPP's `flowControl` gate it never wakes. Set
   `minReplicas: 1` unless you want that ([scale to zero](../scale-to-zero/)),
   or install with `ENABLE_SCALE_TO_ZERO=false`.
-- **Plain HPAs**: the workload's entry is already `apply: yes`. Delete the HPA
+- **Plain HPAs**: the workload's entry is already `apply: yes`, with the plan's
+  bounds (1 and 10), not the HPA's: copy the HPA's `minReplicas` and
+  `maxReplicas` into the entry. Then delete the HPA
   (`kubectl delete hpa <name> -n <namespace>`) before you run
   `scaledobjects-apply`. Two autoscalers on one workload fight over its replica
   count. Its new ScaledObject is named `<workload>-wva`, so its
@@ -241,7 +252,7 @@ Then apply the edited plan:
 
 <!-- guide:migrate.apply start -->
 ```bash
-# Only after editing the plan and deleting the plain HPAs. Cluster-wide install: add SCOPE=cluster.
+# Only after editing the plan and deleting the plain HPAs. Cluster-wide install: add SCOPE=cluster WVA_NS=<controller-namespace>.
 make scaledobjects-apply WVA_DEFAULT_SO_PLAN=wva-plan.yaml
 ```
 <!-- guide:migrate.apply end -->
@@ -270,7 +281,7 @@ make verify-scaledobjects
 
 <!-- guide:verify.rewire start -->
 ```bash
-# A ScaledObject whose HPA shows only cpu is unwired. Re-wire it. Cluster-wide install, add SCOPE=cluster.
+# A ScaledObject whose HPA shows only cpu is unwired. Re-wire it.
 make scaledobjects-rewire
 # cluster-wide install:
 #   make scaledobjects-rewire SCOPE=cluster WVA_NS=<controller-namespace>
@@ -299,7 +310,7 @@ kubectl annotate scaledobject <name> -n <namespace> autoscaling.keda.sh/paused=t
 
 <!-- guide:rollback.undeploy start -->
 ```bash
-# Remove the scaling manager, with the same SCOPE and NAMESPACE you installed with. It also deletes the ScaledObjects it created.
+# Remove the scaling manager, with the same SCOPE and NAMESPACE (cluster-wide, WVA_NS) you installed with. It also deletes the ScaledObjects it created.
 make undeploy-wva NAMESPACE=<namespace>
 ```
 <!-- guide:rollback.undeploy end -->
@@ -310,12 +321,21 @@ make undeploy-wva NAMESPACE=<namespace>
    - **The scaling manager ran in another namespace**: apply the saved
      Deployment.
    - **It ran in the upstream namespace**: the uninstall deleted the whole
-     same-named install there (ConfigMaps, ServiceAccounts, the token Secret,
+     same-named install there (ConfigMaps except
+     `wva-saturation-scaling-config`, ServiceAccounts, the token Secret,
      Service, ServiceMonitor, the leader-election Role and RoleBinding).
      Reinstall upstream from its release, then put back the ConfigMaps you
      tuned.
-   - **Helm**: `helm install` the same chart and version (`upstream-release.txt`)
-     with `-f upstream-values.yaml`.
+   - **Helm**: `helm install` the same chart and version, under the same
+     release name (all three are in `upstream-release.txt`), with
+     `-f upstream-values.yaml`. The chart renders its ConfigMaps from the
+     values only, so changes made with `kubectl edit` are lost; put those back
+     with the Helm ConfigMap step below. The next `helm upgrade` renders them
+     from the values again, so also fold those changes into
+     `upstream-values.yaml`.
+
+   The other-namespace option needs neither ConfigMap step: upstream's
+   ConfigMaps were never touched.
 
 <!-- guide:rollback.controller start -->
 ```bash
@@ -326,10 +346,19 @@ yq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .
 
 <!-- guide:rollback.configmaps start -->
 ```bash
-# After a reinstall from the release, put back the ConfigMaps you tuned.
-yq '.items[] | select(.metadata.name | test("wva-")) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
+# After a reinstall from the release, put back the ConfigMaps you tuned, then restart the controller. It reads wva-manager-config only at startup.
+yq '.items[] | select(.metadata.name | test("^wva-")) | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
+kubectl rollout restart deployment wva-controller-manager -n <upstream-namespace>
 ```
 <!-- guide:rollback.configmaps end -->
+
+<!-- guide:rollback.configmapshelm start -->
+```bash
+# Helm only. The chart names everything after the release. Put back the ConfigMaps you changed with kubectl edit, then restart the controller.
+yq '.items[] | select(.metadata.labels."app.kubernetes.io/instance" == "<release>") | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .status) | split_doc' upstream-configmaps.yaml | kubectl apply -f -
+kubectl rollout restart deployment -n <upstream-namespace> -l app.kubernetes.io/instance=<release>,control-plane=controller-manager
+```
+<!-- guide:rollback.configmapshelm end -->
 
 4. *After step 5*: restore the saved ScaledObjects and plain HPAs. `error: no
    objects passed to apply` means there was nothing to restore. The restore
@@ -354,6 +383,8 @@ needs.
 
 Remove what is left of the upstream install. If the upstream namespace held
 nothing else, and the scaling manager does not run there, delete the namespace.
+Installed with Helm? `helm uninstall` already removed the chart's cluster-wide
+RBAC, whose names carry the release; the names below are the release install's.
 
 <!-- guide:cleanup.clusterrbac start -->
 ```bash
@@ -395,7 +426,8 @@ kubectl delete crd variantautoscalings.llmd.ai --ignore-not-found
 
 ## What stays the same
 
-- **Object names**: the controller Deployment `wva-controller-manager`, its
+- **Object names** (as in upstream's release install; the Helm chart prefixes
+  them with the release name): the controller Deployment `wva-controller-manager`, its
   Service, ServiceMonitor and ServiceAccount, and the `wva-manager-config`
   ConfigMap. Cluster-wide RBAC gains a per-install suffix.
 - **Metric names**: every `wva_` series upstream `v0.9.0` publishes, with the
