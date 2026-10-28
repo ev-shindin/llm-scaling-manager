@@ -320,15 +320,16 @@ shipped default and **exits at startup** if nothing answers there
 1. `PROMETHEUS_URL`, when you set it. It is used as given, and still checked
    (step 4).
 2. On OpenShift, the Thanos Querier at its fixed address.
-3. Otherwise a Prometheus resource (Prometheus Operator) on the cluster. When
-   you named the model namespace (`NAMESPACE` or `WVA_WATCH_NS`), it is the
-   first one that scrapes it: its PodMonitor and ServiceMonitor namespace
-   selectors both select the namespace (`{}` selects every namespace, unset only
-   its own), and its monitor selectors match the monitors there. If none is known
-   to, the install warns, lists each one and why, and uses the first it could not rule out; pass
-   `PROMETHEUS_URL` to choose. With no model namespace named, it is the first one.
-   It is reached through a Service its certificate names. The controller verifies
-   the certificate, so the host must be one of its names:
+3. Otherwise a Prometheus resource (Prometheus Operator) on the cluster: the
+   first one that scrapes the model namespace (the managed namespace, or each in
+   `WVA_WATCH_NS`). Its PodMonitor and ServiceMonitor namespace selectors must
+   both select it (`{}` selects every namespace, unset only its own), and its
+   monitor selectors must match the monitors there. If none is known to, the
+   install warns with each one and why, then uses the first it could not check,
+   else the first; pass `PROMETHEUS_URL` to choose. A cluster-scoped install
+   with no `NAMESPACE` takes the first. It is reached through a Service its
+   certificate names. The controller verifies the certificate, so the host must
+   be one of its names:
    - the installer reads the certificate from the Secret or ConfigMap the
      Prometheus resource's `web.tlsConfig` names (the certificate only), and
      takes the first Service that routes to that Prometheus and whose

@@ -1215,13 +1215,13 @@ wva_prometheus_url_namespace() {
 #
 # Never from an AUTO-DETECTED URL. wva_detect_prometheus_url returns the first
 # Prometheus CR, in the order the API lists them, that selects the model
-# namespace -- or, when none is known to, simply the first; on a shared cluster
-# that is usually someone else's, and the grant then went to an account in a namespace nobody
-# named. Never "the first Prometheus CR on the cluster" for the same reason, and
-# never `default`, which is what a CR with no serviceAccountName runs as: every
-# Pod in that namespace without its own account would be granted. PROMETHEUS_URL
-# must be resolved before this is asked (wva_resolve_prometheus_url), or the
-# namespace is the default's.
+# namespace, or when none is known to, the first one; on a shared cluster that
+# is usually someone else's, and the grant then went to an account in a
+# namespace nobody named. Never "the first Prometheus CR on the cluster" for
+# the same reason, and never `default`, which is what a CR with no
+# serviceAccountName runs as: every Pod in that namespace without its own
+# account would be granted. PROMETHEUS_URL must be resolved before this is
+# asked (wva_resolve_prometheus_url), or the namespace is the default's.
 wva_prometheus_scraper_sa() {
     if [ -n "${PROMETHEUS_SA:-}" ]; then
         case "$PROMETHEUS_SA" in
