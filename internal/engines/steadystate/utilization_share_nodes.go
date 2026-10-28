@@ -81,6 +81,16 @@ func (e *Engine) shareNodeInputs(ctx context.Context, logger logr.Logger, g allo
 	if len(nodes) == 0 {
 		return nil, nil, domains, placements
 	}
+	if debug := logger.V(logging.DEBUG); debug.Enabled() {
+		free := make(map[string]int, len(nodes))
+		for name, n := range nodes {
+			free[name] = n.Free
+		}
+		// Why a receiver was or was not placed: the free GPUs the plan saw,
+		// and where the in-flight promises were taken from.
+		debug.Info("Utilization share: node picture", "accelerator", g.AcceleratorType, "free", free,
+			"promisedOnNodes", reserved.Nodes, "promisedUnplaced", reserved.Unplaced)
+	}
 	// A domain where the pass placed, or the in-flight ledger holds, an
 	// exclusive-topology group holds no other group: the node view's rule.
 	allocation.ClaimShareDomains(nodes, st.left.TakenDomains(st.planned))

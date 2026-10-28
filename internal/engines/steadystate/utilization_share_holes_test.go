@@ -7,12 +7,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/zapr"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 )
 
 // A second whole-node receiver while two promised holes are in flight: one
@@ -248,5 +254,44 @@ func TestUtilizationShareRecordsWhereHolesOpen(t *testing.T) {
 	nf.cycle(true) // restores from the marks
 	if got, want := holes(), map[string]int{"shared": 2}; !maps.Equal(got, want) {
 		t.Fatalf("holes restored from the marks %v, want %v", got, want)
+	}
+}
+
+// The node picture the planner gets, through the engine: once the pods
+// planned on node "shared" are gone and B is raised into the hole they left,
+// the next cycle takes B's promise off "shared" -- not off the freest node,
+// "a-spare", which is nobody's and stays whole. The engine logs that picture
+// at V(DEBUG).
+func TestUtilizationSharePlansOnTheHoleItsPromiseIsOn(t *testing.T) {
+	nf := newNodeFleet(t)
+	if got := nf.untilMarked(t, true); !slices.Equal(got, []string{"A-v-5", "A-v-6"}) {
+		t.Fatalf("setup: marked %v", got)
+	}
+	nf.deletePods(t, "A-v-5", "A-v-6")
+	nf.f.current["A"] -= 2
+	nf.nodes["shared"] = decision.NodeGPU{Accelerator: "A100", Capacity: 2}
+	raised := false
+	for range 6 {
+		if nf.cycle(true)["ns/B-v"].Target > 5 {
+			raised = true
+			break
+		}
+	}
+	if !raised {
+		t.Fatal("setup: B was not raised once its planned holes opened")
+	}
+	core, logs := observer.New(zapcore.Level(-logging.DEBUG))
+	nf.se.ctx = logr.NewContext(t.Context(), zapr.NewLogger(zap.New(core)))
+	nf.nodes["a-spare"] = decision.NodeGPU{Accelerator: "A100", Capacity: 2}
+	nf.cycle(true)
+	lines := logs.FilterMessage("Utilization share: node picture").All()
+	if len(lines) == 0 {
+		t.Fatal("no node picture logged")
+	}
+	fields := lines[len(lines)-1].ContextMap()
+	got, _ := fields["free"].(map[string]int)
+	if got["shared"] != 0 || got["a-spare"] != 2 {
+		t.Fatalf("node picture %v (promised on nodes %v, unplaced %v): want shared=0 a-spare=2, B's promise off its own hole",
+			got, fields["promisedOnNodes"], fields["promisedUnplaced"])
 	}
 }
