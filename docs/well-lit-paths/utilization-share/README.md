@@ -20,6 +20,10 @@ used or not (on-prem, a reservation, a team allotment).
   a donor at 0.6 or less, the move first waits two confirmation cycles, and a
   model that just gave GPUs waits about twelve minutes before it takes them
   back.
+- Many models wait on one donor. A group runs two transfers at a time, so
+  when a donor funds many models and the imbalance is not hard, the last is
+  served late: about 100 minutes for 15 receivers, against 23 minutes when it
+  is. Tested in simulation up to 16 models; benchmarked with two.
 - More cases are in [Details](#more-cases-where-it-does-not-fit).
 
 ## Start here

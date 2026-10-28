@@ -50,7 +50,38 @@ type simResult struct {
 }
 
 func runShareSim(roles []simRole, budget int, seed int64, tm ShareTimings) simResult {
-	const dur = 6 * time.Hour
+	return runShareSimWith(roles, budget, seed, tm, simOptions{})
+}
+
+// simOptions extends runShareSim: dur is the simulated span (six hours when
+// zero), origins names each role's model and role (SharePlanInput.Origins),
+// skipWaits is the hard-imbalance band, and observe, when set, sees every
+// cycle once it is planned.
+type simOptions struct {
+	dur       time.Duration
+	origins   map[string]ShareRoleOrigin
+	skipWaits ShareSkipWaits
+	observe   func(simCycleView)
+}
+
+// simCycleView is one simulated cycle after its plan: the ledger, what each
+// role holds and serves, the planner's input and its plan.
+type simCycleView struct {
+	at            time.Duration
+	ledger        *ShareLedger
+	held, serving map[string]int
+	in            SharePlanInput
+	plan          SharePlan
+}
+
+// runShareSimWith is runShareSim with opt: the simulated span, role origins,
+// the hard-imbalance band, and an observer called after every cycle's plan.
+// It returns what runShareSim does.
+func runShareSimWith(roles []simRole, budget int, seed int64, tm ShareTimings, opt simOptions) simResult {
+	dur := opt.dur
+	if dur == 0 {
+		dur = 6 * time.Hour
+	}
 	rnd := rand.New(rand.NewSource(seed))
 	l := NewShareLedger()
 	t0 := time.Unix(0, 0)
@@ -106,7 +137,8 @@ func runShareSim(roles []simRole, budget int, seed int64, tm ShareTimings) simRe
 			}
 		}
 
-		in := SharePlanInput{Held: held, Thresholds: map[string]float64{}, Budget: budget, Tolerance: 0.15}
+		in := SharePlanInput{Held: held, Thresholds: map[string]float64{}, Budget: budget, Tolerance: 0.15,
+			Origins: opt.origins, SkipWaits: opt.skipWaits}
 		for _, r := range roles {
 			d := r.demand(t, rnd)
 			inst := d / simK
@@ -130,6 +162,9 @@ func runShareSim(roles []simRole, budget int, seed int64, tm ShareTimings) simRe
 		plan := PlanShareTransfers(l, in, now, tm)
 		res.started += len(plan.Started)
 		res.cancelled += len(plan.Cancelled)
+		if opt.observe != nil {
+			opt.observe(simCycleView{at: t, ledger: l, held: held, serving: serving, in: in, plan: plan})
+		}
 	}
 	for i, a := range landed {
 		for _, b := range landed[i+1:] {
@@ -203,7 +238,7 @@ var _ = Describe("PlanShareTransfers against the §6.7 scenarios", func() {
 		}
 	})
 
-	It("wastes no transfer under load swinging at any period", func() {
+	It("wastes no transfer when two models swing in antiphase beside a steady one, at every period swept", func() {
 		for _, period := range []time.Duration{15 * time.Minute, 30 * time.Minute, time.Hour, 3 * time.Hour} {
 			for _, seed := range seeds {
 				r := runShareSim(threeSim(swing(period, 0), swing(period, math.Pi), steady(1), 6, 5, 1),
