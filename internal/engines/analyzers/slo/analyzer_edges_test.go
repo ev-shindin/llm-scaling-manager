@@ -291,8 +291,8 @@ var _ = Describe("Analyzer state and inputs", func() {
 			})
 
 			It("is max_num_seqs when the active cap is at or above it", func() {
-				Expect(priced(capacity.EngineParams{MaxNumSeqs: 64, MaxNumActiveSeqs: 64}, 0)).To(BeNumerically("~", capped, 1e-6))
-				Expect(priced(capacity.EngineParams{MaxNumSeqs: 64, MaxNumActiveSeqs: 128}, 0)).To(BeNumerically("~", capped, 1e-6))
+				Expect(priced(capacity.EngineParams{MaxNumSeqs: 64, MaxNumSeqsSet: true, MaxNumActiveSeqs: 64}, 0)).To(BeNumerically("~", capped, 1e-6))
+				Expect(priced(capacity.EngineParams{MaxNumSeqs: 64, MaxNumSeqsSet: true, MaxNumActiveSeqs: 128}, 0)).To(BeNumerically("~", capped, 1e-6))
 			})
 
 			It("multiplies the active cap by the data-parallel ranks", func() {
