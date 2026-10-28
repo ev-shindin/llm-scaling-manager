@@ -9,11 +9,14 @@ import (
 	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
 var _ = Describe("SaturationAnalyzer", func() {
@@ -960,6 +963,55 @@ var _ = Describe("SaturationAnalyzer", func() {
 			// N_steady = min(8192*200/300, 64) = min(5461, 64) = 64
 			// k2 = 64 * (100 + 100) = 64 * 200 = 12800
 			Expect(estimateCapacityFromParams(params, 100, 200)).To(Equal(int64(12800)))
+		})
+
+		// vLLM runs at most --max-num-active-seqs at once, so a lower active
+		// cap bounds N_steady where max_num_seqs would not (issue #335).
+		It("should cap N_steady at a lower --max-num-active-seqs", func() {
+			params := &capacity.EngineParams{
+				EffectiveMaxBatchedTokens: 4096,
+				MaxNumSeqs:                256,
+				MaxNumSeqsSet:             true,
+				MaxNumActiveSeqs:          64,
+			}
+			// N_steady = min(4096*100/600, 64) = 64; k2 = 64 * 550 = 35200,
+			// against 140800 at max_num_seqs alone.
+			Expect(estimateCapacityFromParams(params, 500, 100)).To(Equal(int64(35200)))
+		})
+
+		It("should leave N_steady alone when the active cap does not bind", func() {
+			params := &capacity.EngineParams{
+				EffectiveMaxBatchedTokens: 4096,
+				MaxNumSeqs:                1024,
+				MaxNumSeqsSet:             true,
+				MaxNumActiveSeqs:          800,
+			}
+			unset := *params
+			unset.MaxNumActiveSeqs = 0
+			// N_steady = 4096*100/600 = 682.67, below both caps.
+			Expect(estimateCapacityFromParams(params, 500, 100)).To(Equal(int64(375466)))
+			Expect(estimateCapacityFromParams(&unset, 500, 100)).To(Equal(int64(375466)))
+		})
+
+		// The zero-replica estimate prices from the same formula, so a parked
+		// variant's scale-from-zero order honours the active cap too.
+		It("should cap the zero-replica derived estimate at --max-num-active-seqs", func() {
+			const ns, model, variant, accel = "test-ns", "test-model", "variant-a", "H100"
+			estimate := func(args ...string) float64 {
+				params := capacity.ParseVLLMArgs(scaletarget.NewDeploymentAccessor(&appsv1.Deployment{Spec: appsv1.DeploymentSpec{
+					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "vllm", Command: []string{"vllm", "serve", model}, Args: args,
+					}}}},
+				}}))
+				rec := &capacity.Record{
+					AcceleratorName: accel, GpuCount: 1, LearnedFrom: "deployment",
+					EffectiveCapacity: params.EffectiveMaxBatchedTokens, EngineParams: &params,
+				}
+				return NewSaturationAnalyzer(capacity.NewStore()).estimateStoredCapacity(rec, model, ns, variant, accel, 1, 0.8, 1000, 600, logr.Discard())
+			}
+			// N_steady = min(65536*600/1600, S) = S; capacity = S * (1000 + 300).
+			Expect(estimate("--max-num-seqs=256", "--max-num-batched-tokens=65536")).To(Equal(float64(256 * 1300)))
+			Expect(estimate("--max-num-seqs=256", "--max-num-batched-tokens=65536", "--max-num-active-seqs=16")).To(Equal(float64(16 * 1300)))
 		})
 
 		It("should return 0 when avgOutput is 0", func() {

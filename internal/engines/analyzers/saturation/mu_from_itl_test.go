@@ -231,8 +231,8 @@ var _ = Describe("deriveMu", func() {
 		})
 
 		It("is max_num_seqs when the active cap is at or above it", func() {
-			Expect(priced(capacity.EngineParams{MaxNumSeqs: 256, MaxNumActiveSeqs: 256}, 1, short).seqs).To(Equal(256.0))
-			Expect(priced(capacity.EngineParams{MaxNumSeqs: 256, MaxNumActiveSeqs: 512}, 1, short).seqs).To(Equal(256.0))
+			Expect(priced(capacity.EngineParams{MaxNumSeqs: 256, MaxNumSeqsSet: true, MaxNumActiveSeqs: 256}, 1, short).seqs).To(Equal(256.0))
+			Expect(priced(capacity.EngineParams{MaxNumSeqs: 256, MaxNumSeqsSet: true, MaxNumActiveSeqs: 512}, 1, short).seqs).To(Equal(256.0))
 		})
 
 		It("is the active cap alone when max_num_seqs is unknown", func() {
