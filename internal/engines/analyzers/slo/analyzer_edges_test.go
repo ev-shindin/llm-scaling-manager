@@ -142,7 +142,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 	Context("engine params from the capacity store", func() {
 		store := func(params capacity.EngineParams) *capacity.Store {
 			s := capacity.NewStore()
-			s.Update("ns", "m", "agg", capacity.Record{EngineParams: &params})
+			s.Update("ns", "m", "agg", capacity.Record{EngineParams: &params}, time.Now())
 			return s
 		}
 
@@ -207,7 +207,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 				a := newAt(s)
 				warmWith(a, noop)
 				clock = clock.Add(itl.DefaultObservationMaxAge + time.Minute)
-				s.Update("ns", "m", "agg", capacity.Record{EngineParams: &capacity.EngineParams{MaxNumSeqs: 128}})
+				s.Update("ns", "m", "agg", capacity.Record{EngineParams: &capacity.EngineParams{MaxNumSeqs: 128}}, time.Now())
 				reading, line := price(a)
 				Expect(line.SlopeHeld).To(BeFalse())
 				Expect(reading.Source).To(Equal(constants.SLOSourceNoLine))
@@ -220,7 +220,7 @@ var _ = Describe("Analyzer state and inputs", func() {
 				s := store(params)
 				a := newAt(s)
 				warmWith(a, noop)
-				s.Update("ns", "m", "agg", capacity.Record{EngineParams: &capacity.EngineParams{MaxNumSeqs: 128}})
+				s.Update("ns", "m", "agg", capacity.Record{EngineParams: &capacity.EngineParams{MaxNumSeqs: 128}}, time.Now())
 				reading, line := price(a)
 				Expect(line.Tier).To(BeEmpty(), "no fit from the old engine's readings")
 				Expect(reading.Source).To(Equal(constants.SLOSourceNoLine))

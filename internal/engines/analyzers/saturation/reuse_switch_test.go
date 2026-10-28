@@ -3,6 +3,7 @@ package saturation
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
@@ -59,7 +60,7 @@ func TestTheReuseSwitchStopsLineSharing(t *testing.T) {
 			store.Update(ns, model, v, capacity.Record{
 				AcceleratorName: accel, GpuCount: 1,
 				EngineParams: reuseSwitchParams(),
-			})
+			}, time.Now())
 		}
 		a := NewSaturationAnalyzer(store)
 
@@ -152,11 +153,11 @@ func TestTheReuseSwitchStopsCrossVariantCapacity(t *testing.T) {
 		EngineParams:      reuseSwitchParams(),
 		EffectiveCapacity: 400_000,
 		LearnedFrom:       capacity.LearnedFromLive,
-	})
+	}, time.Now())
 	store.Update(ns, model, starved, capacity.Record{
 		AcceleratorName: accel, GpuCount: 1,
 		EngineParams: reuseSwitchParams(),
-	})
+	}, time.Now())
 	a := NewSaturationAnalyzer(store)
 
 	t.Run("with reuse enabled a compatible sibling is found", func(t *testing.T) {
@@ -210,13 +211,13 @@ func TestTheReuseSwitchDoesNotRemoveACapacityCeiling(t *testing.T) {
 			EffectiveCapacity: 900_000, TotalKvCapacityTokens: 0,
 			EngineParams: params,
 			LearnedFrom:  "deployment",
-		})
+		}, time.Now())
 		store.Update(ns, model, donor, capacity.Record{
 			AcceleratorName: accel, GpuCount: 1,
 			EffectiveCapacity: ceiling,
 			EngineParams:      params,
 			LearnedFrom:       capacity.LearnedFromLive,
-		})
+		}, time.Now())
 		return NewSaturationAnalyzer(store)
 	}
 

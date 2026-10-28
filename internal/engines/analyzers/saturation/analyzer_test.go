@@ -552,7 +552,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 					ChunkedPrefillEnabled:     true,
 				},
 				LearnedFrom: "deployment",
-			})
+			}, time.Now())
 
 			input := makeAnalyzerInput(
 				[]domain.ReplicaMetrics{
@@ -602,7 +602,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 					ChunkedPrefillEnabled:     true,
 				},
 				LearnedFrom: "deployment",
-			})
+			}, time.Now())
 
 			input := makeAnalyzerInput(
 				[]domain.ReplicaMetrics{
@@ -654,7 +654,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 					ChunkedPrefillEnabled:     true,
 				},
 				LearnedFrom: "deployment",
-			})
+			}, time.Now())
 
 			input := makeAnalyzerInput(
 				[]domain.ReplicaMetrics{
@@ -770,7 +770,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 				GpuCount:          1,
 				EffectiveCapacity: 12000,
 				LearnedFrom:       "live",
-			})
+			}, time.Now())
 
 			input := makeAnalyzerInput(
 				[]domain.ReplicaMetrics{}, // no pods
@@ -796,7 +796,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 					MaxNumSeqs:                256,
 				},
 				LearnedFrom: "deployment",
-			})
+			}, time.Now())
 
 			// Another variant has live pods providing workload data
 			input := makeAnalyzerInput(
@@ -839,7 +839,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 				EffectiveCapacity: 8192,
 				EngineParams:      defaultParams,
 				LearnedFrom:       "deployment",
-			})
+			}, time.Now())
 
 			// variant-a has a compatible live record (same accel, GPU count, params)
 			store.Update("test-ns", "test-model", "variant-a", capacity.Record{
@@ -848,7 +848,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 				EffectiveCapacity:     40000, // observed min(k1, k2) = 40000
 				EngineParams:          defaultParams,
 				LearnedFrom:           "live",
-			})
+			}, time.Now())
 
 			// variant-a provides workload data
 			input := makeAnalyzerInput(
@@ -884,7 +884,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 					BlockSize:                 16,
 				},
 				LearnedFrom: "deployment",
-			})
+			}, time.Now())
 
 			// Another variant provides workload data. Its accelerator differs from
 			// variant-a's, so FindCompatible must not match it — the accelerator is
@@ -922,7 +922,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 					MaxNumSeqs:                256,
 				},
 				LearnedFrom: "deployment",
-			})
+			}, time.Now())
 
 			input := makeAnalyzerInput(
 				[]domain.ReplicaMetrics{}, // no live pods at all
@@ -1710,7 +1710,7 @@ var _ = Describe("computeReplicaCapacityFallback", func() {
 		store.Update("test-ns", "test-model", "variant-a", capacity.Record{
 			EffectiveCapacity: 10000,
 			LearnedFrom:       "deployment",
-		})
+		}, time.Now())
 		rm := domain.ReplicaMetrics{
 			PodName:      "pod-1",
 			VariantName:  "variant-a",
@@ -1739,7 +1739,7 @@ var _ = Describe("computeReplicaCapacityFallback", func() {
 		store.Update("test-ns", "test-model", "variant-a", capacity.Record{
 			EffectiveCapacity: 10, // 10 * 0.05 = 0.5 -> truncates to 0
 			LearnedFrom:       "deployment",
-		})
+		}, time.Now())
 		cfg.KvCacheThreshold = 0.05
 
 		rm := domain.ReplicaMetrics{
@@ -1758,7 +1758,7 @@ var _ = Describe("computeReplicaCapacityFallback", func() {
 		store.Update("test-ns", "test-model", "variant-a", capacity.Record{
 			EffectiveCapacity: 0,
 			LearnedFrom:       "deployment",
-		})
+		}, time.Now())
 		rm := domain.ReplicaMetrics{
 			PodName:      "pod-1",
 			VariantName:  "variant-a",
@@ -1783,7 +1783,7 @@ var _ = Describe("computeReplicaCapacityFallback", func() {
 		store.Update("test-ns", "test-model", "variant-a", capacity.Record{
 			EffectiveCapacity: 0,
 			LearnedFrom:       "deployment",
-		})
+		}, time.Now())
 
 		rm := domain.ReplicaMetrics{
 			PodName:      "pod-1",
@@ -1800,7 +1800,7 @@ var _ = Describe("computeReplicaCapacityFallback", func() {
 		store.Update("test-ns", "test-model", "variant-a", capacity.Record{
 			EffectiveCapacity: 10000,
 			LearnedFrom:       "deployment",
-		})
+		}, time.Now())
 
 		rm := domain.ReplicaMetrics{
 			PodName:               "pod-1",
@@ -1824,7 +1824,7 @@ var _ = Describe("computeReplicaCapacityFallback", func() {
 		store.Update("test-ns", "test-model", "variant-a", capacity.Record{
 			EffectiveCapacity: 10000,
 			LearnedFrom:       "deployment",
-		})
+		}, time.Now())
 
 		rm := domain.ReplicaMetrics{
 			PodName:               "pod-1",
@@ -1845,7 +1845,7 @@ var _ = Describe("computeReplicaCapacityFallback", func() {
 		store.Update("test-ns", "test-model", "variant-a", capacity.Record{
 			EffectiveCapacity: 10000,
 			LearnedFrom:       "deployment",
-		})
+		}, time.Now())
 
 		rm := domain.ReplicaMetrics{
 			PodName:               "pod-1",
@@ -1870,7 +1870,7 @@ var _ = Describe("computeReplicaCapacityFallback", func() {
 		store.Update("test-ns", "test-model", "variant-a", capacity.Record{
 			EffectiveCapacity: 10000,
 			LearnedFrom:       "deployment",
-		})
+		}, time.Now())
 
 		rm := domain.ReplicaMetrics{
 			PodName:               "pod-1",
@@ -1892,7 +1892,7 @@ var _ = Describe("computeReplicaCapacityFallback", func() {
 		store.Update("test-ns", "test-model", "variant-a", capacity.Record{
 			EffectiveCapacity: 10000,
 			LearnedFrom:       "deployment",
-		})
+		}, time.Now())
 
 		rm := domain.ReplicaMetrics{
 			PodName:               "pod-1",
@@ -1914,7 +1914,7 @@ var _ = Describe("computeReplicaCapacityFallback", func() {
 		store.Update("test-ns", "test-model", "variant-a", capacity.Record{
 			EffectiveCapacity: 10000,
 			LearnedFrom:       "deployment",
-		})
+		}, time.Now())
 
 		rm := domain.ReplicaMetrics{
 			PodName:               "pod-1",
@@ -1947,7 +1947,7 @@ var _ = Describe("computeReplicaCapacityFallback", func() {
 		store.Update("test-ns", "test-model", "variant-a", capacity.Record{
 			EffectiveCapacity: 8192,
 			LearnedFrom:       "deployment",
-		})
+		}, time.Now())
 
 		rm := domain.ReplicaMetrics{
 			PodName:               "pod-1",
@@ -1971,7 +1971,7 @@ var _ = Describe("computeReplicaCapacityFallback", func() {
 		store.Update("test-ns", "test-model", "variant-a", capacity.Record{
 			EffectiveCapacity: 10000,
 			LearnedFrom:       "deployment",
-		})
+		}, time.Now())
 
 		rm := domain.ReplicaMetrics{
 			PodName:               "pod-1",
@@ -2162,7 +2162,7 @@ var _ = Describe("Analyze per-replica waiting-queue demand by role", func() {
 			store.Update("test-ns", "test-model", "variant-a", capacity.Record{
 				EffectiveCapacity: 10000,
 				LearnedFrom:       "deployment",
-			})
+			}, time.Now())
 
 			rm := replicaFor("variant-a")
 			rm.TotalKvCapacityTokens = 0 // forces the fallback
@@ -2252,7 +2252,7 @@ var _ = Describe("Analyze with fallback (no cache_config_info)", func() {
 			GpuCount:          1,
 			EffectiveCapacity: 8192,
 			LearnedFrom:       "deployment",
-		})
+		}, time.Now())
 
 		input := domain.AnalyzerInput{
 			ModelID:   "test-model",
@@ -2392,7 +2392,7 @@ var _ = Describe("aggregateByVariant capacity Reason", func() {
 		store.Update("ns", "m", "v1", capacity.Record{
 			EffectiveCapacity: 50000,
 			LearnedFrom:       capacity.LearnedFromLive,
-		})
+		}, time.Now())
 		a := NewSaturationAnalyzer(store)
 
 		input := domain.AnalyzerInput{

@@ -2,6 +2,7 @@ package capacity
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -190,13 +191,13 @@ func TestFindClampBoundTakesTheLowestLiveSiblingOwnNamespaceFirst(t *testing.T) 
 	}
 
 	s := NewStore()
-	s.Update("ns-a", model, "v1", live(9000))
-	s.Update("ns-a", model, "v2", live(7000))
-	s.Update("ns-a", model, "v3", live(8000))
-	s.Update("ns-b", model, "v1", live(3000))
+	s.Update("ns-a", model, "v1", live(9000), time.Now())
+	s.Update("ns-a", model, "v2", live(7000), time.Now())
+	s.Update("ns-a", model, "v3", live(8000), time.Now())
+	s.Update("ns-b", model, "v1", live(3000), time.Now())
 	dep := live(1000)
 	dep.LearnedFrom = "deployment"
-	s.Update("ns-a", model, "v4", dep)
+	s.Update("ns-a", model, "v4", dep, time.Now())
 
 	for range 20 {
 		got := s.FindClampBound("ns-a", model, accel, 8, &params)

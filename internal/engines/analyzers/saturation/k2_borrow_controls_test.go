@@ -34,8 +34,8 @@ var _ = Describe("a borrow around the operator's controls", func() {
 		a = NewSaturationAnalyzer(store)
 		clock = time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 		a.now = func() time.Time { return clock }
-		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params()})
-		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params()})
+		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params()}, time.Now())
+		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params()}, time.Now())
 		own = a.historyKey("test-model", "test-ns", "variant-b", "H100", 1, domain.RoleBoth, 50, 5)
 		donor = a.historyKey("test-model", "test-ns", "variant-a", "H100", 1, domain.RoleBoth, 50, 5)
 		setDonor(a, donor, 4000)
@@ -141,7 +141,7 @@ var _ = Describe("a borrow around the operator's controls", func() {
 		It("keeps the clock of a borrower whose configuration was not read completely", func() {
 			unread := params()
 			unread.Unresolved = []string{"max_num_seqs"}
-			store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: unread})
+			store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: unread}, time.Now())
 			_, ok := borrow(unread)
 			Expect(ok).To(BeTrue(), "precondition: an unread borrower still borrows")
 			serve(BorrowedK2Hold+BorrowedK2Relax, time.Minute)
@@ -183,7 +183,7 @@ var _ = Describe("a borrow around the operator's controls", func() {
 		It("restores a variant whose stored document is already past its forget", func() {
 			a.ForgetVariant("test-ns", "test-model", "variant-b", "t1")
 			// The engine refiles the record from the scale target on the cycle.
-			store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params()})
+			store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params()}, time.Now())
 			ownPod := makeReplicaMetrics("pod-b", "variant-b", 4000, 16000, 6, 100, 50)
 			ownPod.Ready = true
 			_, err := a.Analyze(context.Background(), makeAnalyzerInput([]domain.ReplicaMetrics{ownPod}, states[1:]))
@@ -202,7 +202,7 @@ var _ = Describe("a borrow around the operator's controls", func() {
 
 // setDonor replaces the donor's k2 window with one reading.
 func setDonor(a *SaturationAnalyzer, key string, k2 float64) {
-	ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-	ra.Add(k2)
+	ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+	ra.AddAt(k2, time.Now())
 	a.computeCapacityHistory[key] = ra
 }

@@ -19,7 +19,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
+
+	"k8s.io/utils/clock"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -103,6 +104,10 @@ type Analyzer struct {
 	// layered: the engine wires the collector's gate in after construction, and
 	// an analyzer built without one sums everything, which is what it did before.
 	DropSeries SeriesGate
+
+	// clock stamps AnalyzedAt: the engine's cycle clock (WithClock), the wall
+	// clock by default.
+	clock clock.PassiveClock
 }
 
 // New constructs an external analyzer from def and registers each body's query
@@ -140,7 +145,14 @@ func New(def Definition, src source.MetricsSource) (*Analyzer, error) {
 		queryNames[engineKey] = name
 	}
 
-	return &Analyzer{def: def, source: src, queryNames: queryNames}, nil
+	return &Analyzer{def: def, source: src, queryNames: queryNames, clock: clock.RealClock{}}, nil
+}
+
+// WithClock sets the clock AnalyzedAt is stamped on: the engine passes its
+// cycle clock. Call it before the analyzer is used.
+func (a *Analyzer) WithClock(c clock.PassiveClock) *Analyzer {
+	a.clock = c
+	return a
 }
 
 // Name returns the analyzer's label.
@@ -188,7 +200,7 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 		AnalyzerName:      a.def.Label,
 		ModelID:           input.ModelID,
 		Namespace:         input.Namespace,
-		AnalyzedAt:        time.Now(),
+		AnalyzedAt:        a.clock.Now(),
 		VariantCapacities: vcs,
 		TotalDemand:       demand,
 		// Supply, utilization, and RoleCapacities are assembled downstream by the

@@ -184,7 +184,7 @@ func (a *SaturationAnalyzer) notePreviousFigureLocked(key string, ra *capacity.R
 		lb = &lowerBound{}
 		a.lowerBounds[key] = lb
 	}
-	lb.prior, lb.priorSince, lb.priorAge, lb.priorUsed, lb.seen = v, now, ra.WriteAge(), now, now
+	lb.prior, lb.priorSince, lb.priorAge, lb.priorUsed, lb.seen = v, now, ra.WriteAgeAt(now), now, now
 	lb.figureWritten = written
 }
 

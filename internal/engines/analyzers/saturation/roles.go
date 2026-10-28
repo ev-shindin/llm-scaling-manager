@@ -2,7 +2,6 @@ package saturation
 
 import (
 	"math"
-	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -46,7 +45,7 @@ func (a *SaturationAnalyzer) stableAccelerator(namespace, variantName, accelerat
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if constants.IsAcceleratorResolved(accelerator) {
-		a.lastAccelerator[key] = acceleratorMemo{name: accelerator, lastUsed: time.Now()}
+		a.lastAccelerator[key] = acceleratorMemo{name: accelerator, lastUsed: a.now()}
 		return accelerator
 	}
 	if last, ok := a.lastAccelerator[key]; ok {
@@ -57,7 +56,7 @@ func (a *SaturationAnalyzer) stableAccelerator(namespace, variantName, accelerat
 		// zero keeps it while it is parked; a variant that is gone goes quiet on
 		// all three and EvictStaleHistory ages it out. Its k2 and mu windows
 		// age on their own clock, so the two need not go together.
-		last.lastUsed = time.Now()
+		last.lastUsed = a.now()
 		a.lastAccelerator[key] = last
 		return last.name
 	}

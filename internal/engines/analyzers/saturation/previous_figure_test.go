@@ -16,7 +16,7 @@ import (
 // r2Rolling marks variant-a mid-rollout to p, as LoadFromScaleTarget leaves
 // the record while the scale target reports one.
 func r2Rolling(store *capacity.Store, p *capacity.EngineParams) {
-	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: p, RollingOut: true})
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: p, RollingOut: true}, time.Now())
 }
 
 // r2Step is how far apart r2Cycles runs its cycles: inside the tick gap.
@@ -126,7 +126,7 @@ func TestAnExportedPreviousFigureRestartsItsBound(t *testing.T) {
 	a.computeCapacityHistory[own] = rrWindow(5000)
 	a.k2WindowArgs[own] = windowArgs(from)
 	a.mu.Unlock()
-	a.capacityStore.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: to})
+	a.capacityStore.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: to}, time.Now())
 
 	lb := a.ExportLearnedState().LowerBounds[own]
 	if lb.Prior != 5000 {
@@ -229,8 +229,8 @@ func TestASpentBoundUnderAnUnreadConfigurationReArmsOnALowerFigure(t *testing.T)
 func TestARolloutFreezesARunningSiblingBorrow(t *testing.T) {
 	store := capacity.NewStore()
 	params := &capacity.EngineParams{Engine: "vllm", MaxNumSeqs: 256}
-	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params})
-	store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params})
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params}, time.Now())
+	store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params}, time.Now())
 	a := NewSaturationAnalyzer(store)
 	clock := time.Now()
 	a.now = func() time.Time { return clock }
@@ -261,7 +261,7 @@ func TestARolloutFreezesARunningSiblingBorrow(t *testing.T) {
 	if got := run(5); got != 4000 {
 		t.Fatalf("precondition: variant-b borrows 4000 in its hold, got %v", got)
 	}
-	store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params, RollingOut: true})
+	store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params, RollingOut: true}, time.Now())
 	if got := run(120); got != 4000 {
 		t.Errorf("after eight hours mid-rollout variant-b is priced at %v: its borrow ran with nothing recorded, want 4000", got)
 	}

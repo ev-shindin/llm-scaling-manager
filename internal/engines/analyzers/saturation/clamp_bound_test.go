@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
@@ -36,11 +37,11 @@ func TestACeilingSurvivesADifferenceTheBorrowRefuses(t *testing.T) {
 			store.Update(ns, model, zero, capacity.Record{
 				AcceleratorName: accel, GpuCount: 1,
 				EffectiveCapacity: 900_000, EngineParams: &zeroParams, LearnedFrom: "deployment",
-			})
+			}, time.Now())
 			store.Update(ns, model, donor, capacity.Record{
 				AcceleratorName: accel, GpuCount: 1,
 				EffectiveCapacity: ceiling, EngineParams: donorParams, LearnedFrom: capacity.LearnedFromLive,
-			})
+			}, time.Now())
 			a := NewSaturationAnalyzer(store)
 			rec := a.capacityStore.Get(ns, model, zero)
 			require.NotNil(t, rec)

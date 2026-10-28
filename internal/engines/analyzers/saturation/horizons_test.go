@@ -104,8 +104,8 @@ var _ = Describe("learned-state horizons", func() {
 				WithHorizons(capacity.Horizons{
 					EpisodeGap: time.Hour, VariantTimeout: 240 * time.Hour, BucketRetention: time.Hour,
 				})
-			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-			ra.Add(50000)
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+			ra.AddAt(50000, time.Now())
 			ra.TouchAt(time.Now().Add(-2 * time.Hour))
 			a.computeCapacityHistory["hist-key"] = ra
 
@@ -188,8 +188,8 @@ var _ = Describe("learned-state horizons", func() {
 			})
 		// A window holding one old measurement, last WRITTEN two hours ago:
 		// past the configured hour, far inside the 24h default.
-		ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-		ra.Add(50000)
+		ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+		ra.AddAt(50000, time.Now())
 		ra.ObservedAt(time.Now().Add(-2 * time.Hour))
 		a.computeCapacityHistory[historyKey] = ra
 

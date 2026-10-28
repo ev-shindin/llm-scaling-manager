@@ -132,9 +132,9 @@ var _ = Describe("the saturated-throughput window", func() {
 		Expect(a.saturatedThroughputReading("k").samples).To(Equal(1))
 
 		By("still counting as observed: a re-read row does not let the window go stale")
-		a.saturatedThroughput["k"].TouchAt(time.Now().Add(-2 * time.Hour))
+		a.saturatedThroughput["k"].TouchAt(now.Add(-2 * time.Hour))
 		a.recordSaturatedThroughput("k", 3.433333333333333)
-		Expect(a.saturatedThroughput["k"].Stale(time.Hour)).To(BeFalse())
+		Expect(a.saturatedThroughput["k"].StaleAt(now, time.Hour)).To(BeFalse())
 		Expect(a.saturatedThroughput["k"].Len()).To(Equal(1))
 
 		By("folding a higher reading inside the spacing into the sample: two replicas, one moment, the max")

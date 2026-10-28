@@ -110,15 +110,15 @@ func storeKey(namespace, modelID, variantName string) string {
 }
 
 // Update stores or overwrites a capacity record for a specific variant and
-// stamps LearnedAt. Live data is always authoritative and should always be
-// written via Update, with LearnedFrom set to LearnedFromLive by the caller:
-// that is what stops LoadFromScaleTarget overwriting it while the variant runs
-// the arguments and hardware it was measured on (LoadFromScaleTarget replaces
-// it when either changes).
-func (s *Store) Update(namespace, modelID, variantName string, record Record) {
+// stamps LearnedAt with now. Live data is always authoritative and should
+// always be written via Update, with LearnedFrom set to LearnedFromLive by the
+// caller: that is what stops LoadFromScaleTarget overwriting it while the
+// variant runs the arguments and hardware it was measured on
+// (LoadFromScaleTarget replaces it when either changes).
+func (s *Store) Update(namespace, modelID, variantName string, record Record, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	record.LearnedAt = time.Now()
+	record.LearnedAt = now
 	s.records[storeKey(namespace, modelID, variantName)] = &record
 }
 
@@ -139,7 +139,7 @@ func (s *Store) Get(namespace, modelID, variantName string) *Record {
 }
 
 // IsStale returns true if the record for the given variant is older than
-// StalenessTimeout, or if no record exists. No caller on the reconcile path
+// StalenessTimeout as of now, or if no record exists. No caller on the reconcile path
 // today, and that is deliberate: the read paths have no trust horizon.
 //
 // StalenessTimeout is 30 minutes and EvictionTimeout is seven days, so the
@@ -177,23 +177,23 @@ func (s *Store) Get(namespace, modelID, variantName string) *Record {
 // condition on the CR -- and because what it means is now written down. An
 // earlier version of this comment reached the same conclusion from two
 // premises that were both false.
-func (s *Store) IsStale(namespace, modelID, variantName string) bool {
+func (s *Store) IsStale(namespace, modelID, variantName string, now time.Time) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	rec, ok := s.records[storeKey(namespace, modelID, variantName)]
 	if !ok {
 		return true
 	}
-	return time.Since(rec.LearnedAt) > StalenessTimeout
+	return now.Sub(rec.LearnedAt) > StalenessTimeout
 }
 
 // LoadFromScaleTarget parses the engine args from a scale target (dispatching by
 // detected engine via ParseEngineArgs) and stores an estimated capacity record for
-// the variant. Scale-target-derived data is a fallback only: an existing
+// the variant, stamped now. Scale-target-derived data is a fallback only: an existing
 // "live" record is kept while the variant runs the arguments and hardware it
 // was measured on (an image-only change re-tags its parameters), and replaced
 // when either changes.
-func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator string, gpuCount int, scaleTarget scaletarget.ScaleTargetAccessor) {
+func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator string, gpuCount int, scaleTarget scaletarget.ScaleTargetAccessor, now time.Time) {
 	if scaleTarget == nil {
 		return
 	}
@@ -265,7 +265,7 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 		if sameHW {
 			priorLive, priorLiveAt = existing.EffectiveCapacity, existing.LearnedAt
 		}
-	} else if ok && sameHW && time.Since(existing.PriorLiveAt) <= EvictionTimeout {
+	} else if ok && sameHW && now.Sub(existing.PriorLiveAt) <= EvictionTimeout {
 		priorLive, priorLiveAt = existing.PriorLiveCapacity, existing.PriorLiveAt
 	}
 	if priorLive == 0 {
@@ -286,7 +286,7 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 		PriorLiveAt:       priorLiveAt,
 		RollingOut:        rolling,
 		LearnedFrom:       "deployment", // same for deployment and LWS
-		LearnedAt:         time.Now(),
+		LearnedAt:         now,
 	}
 
 	// k1: the measured KV total carried across a flag change, or, if
@@ -327,16 +327,16 @@ func (s *Store) Delete(namespace, modelID, variantName string) bool {
 }
 
 // EvictStale removes capacity records that have not been updated within the
-// given timeout. This prevents unbounded memory growth from deleted or
+// given timeout as of now. This prevents unbounded memory growth from deleted or
 // long-unused variants. Use a long timeout (EvictionTimeout, seven days)
 // since historical capacity data is valuable for zero-replica estimation.
 // Called once per cycle from steadystate.evictStaleLearnedState.
-func (s *Store) EvictStale(timeout time.Duration) int {
+func (s *Store) EvictStale(now time.Time, timeout time.Duration) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	evicted := 0
 	for key, rec := range s.records {
-		if time.Since(rec.LearnedAt) > timeout {
+		if now.Sub(rec.LearnedAt) > timeout {
 			delete(s.records, key)
 			evicted++
 		}

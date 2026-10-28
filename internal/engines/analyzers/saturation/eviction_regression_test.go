@@ -62,8 +62,8 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 
 		It("reports a retained measurement as historical however old the figure is", func() {
 			a := NewSaturationAnalyzer(capacity.NewStore())
-			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-			ra.Add(50000)
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+			ra.AddAt(50000, time.Now())
 			a.computeCapacityHistory[historyKey] = ra
 
 			// Fresh: the historical figure is what a decision reads.
@@ -93,8 +93,8 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 			// nothing", not "the measurement is used" -- the DescribeTable in
 			// sweep_lastuse_test.go is what pins the latter.
 			a := NewSaturationAnalyzer(capacity.NewStore())
-			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-			ra.Add(50000)
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+			ra.AddAt(50000, time.Now())
 			ra.ObservedAt(time.Now().Add(-2 * capacity.HistoryEvictionTimeout))
 			a.computeCapacityHistory[historyKey] = ra
 
@@ -124,8 +124,8 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 		// the smaller number, and nothing in the suite said so until here.
 		It("prefers a retained measurement to a LOWER derived figure", func() {
 			a := NewSaturationAnalyzer(capacity.NewStore())
-			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-			ra.Add(95000)
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize, time.Now())
+			ra.AddAt(95000, time.Now())
 			ra.ObservedAt(time.Now().Add(-30 * 24 * time.Hour))
 			a.computeCapacityHistory[historyKey] = ra
 

@@ -175,7 +175,7 @@ func TestABoundFigureOnOtherHardwareIsNotCountedAsRestored(t *testing.T) {
 		a, s, _ := waProcess(mtParams(128, "vllm:v1"))
 		s.Update("test-ns", "test-model", "variant-a", capacity.Record{
 			EngineParams: mtParams(128, "vllm:v1"), AcceleratorName: accelerator, GpuCount: 1,
-		})
+		}, time.Now())
 		a.RestoreLearnedState(doc)
 		r, done := a.installRestored("test-ns", "test-model", "variant-a")
 		if !done {

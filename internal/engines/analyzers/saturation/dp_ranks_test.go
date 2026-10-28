@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -86,7 +87,7 @@ func TestReplicaCapacityPricesEveryRank(t *testing.T) {
 	params := &capacity.EngineParams{EffectiveMaxBatchedTokens: 8192, MaxNumSeqs: 256}
 	price := func(ranks int) *capacity.ReplicaCapacity {
 		store := capacity.NewStore()
-		store.Update("ns", "m", "decode-v", capacity.Record{EngineParams: params})
+		store.Update("ns", "m", "decode-v", capacity.Record{EngineParams: params}, time.Now())
 		a := NewSaturationAnalyzer(store)
 		// Eight ranks of 640,000 tokens; 20% used, nothing waiting.
 		rm := makeReplicaMetrics("dp8-0", "decode-v", 1_024_000, 5_120_000, 0, 1000, 1000)

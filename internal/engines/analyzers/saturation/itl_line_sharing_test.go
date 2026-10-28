@@ -44,7 +44,7 @@ func analyzerWithParams(byVariant map[string]*capacity.EngineParams) *Saturation
 			AcceleratorName: keyAccel,
 			GpuCount:        1,
 			EngineParams:    p,
-		})
+		}, time.Now())
 	}
 	return NewSaturationAnalyzer(store)
 }

@@ -140,12 +140,12 @@ func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	ra, ok := a.saturatedThroughput[key]
-	// WriteGapExceeds, not Stale, for the reason given at the k2 history
+	// WriteGapExceedsAt, not StaleAt, for the reason given at the k2 history
 	// write in replica_capacity.go: the floor reads this window every
 	// cycle, so a use-based check never sees the write gap it is asking
 	// about.
-	if !ok || ra.WriteGapExceeds(a.horizons.EpisodeGap) {
-		ra = capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
+	if !ok || ra.WriteGapExceedsAt(now, a.horizons.EpisodeGap) {
+		ra = capacity.NewRollingAverage(capacity.RollingAverageWindowSize, now)
 		a.saturatedThroughput[key] = ra
 		delete(a.throughputSampledAt, key)
 		delete(a.throughputLastRead, key)
@@ -167,15 +167,15 @@ func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate
 			}
 			reads.pods[pod] = max(reads.pods[pod], rate)
 			a.throughputPodReads[key] = reads
-			ra.SetLast(meanOf(reads.pods))
+			ra.SetLastAt(meanOf(reads.pods), now)
 			return
 		}
 		if read && rate == lastRead {
-			ra.Observe() // the same pair across the boundary, or a repeat
+			ra.ObservedAt(now) // the same pair across the boundary, or a repeat
 			return
 		}
 	}
-	ra.Add(rate)
+	ra.AddAt(rate, now)
 	a.throughputSampledAt[key] = now
 	a.throughputPodReads[key] = podReads{at: now, pods: map[string]float64{pod: rate}}
 }
@@ -257,7 +257,7 @@ func (a *SaturationAnalyzer) saturatedThroughputReadingUnder(key, args string, s
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if ra, ok := a.saturatedThroughput[key]; ok {
-		ra.Touch()
+		ra.TouchAt(a.now())
 		return throughputReading{rate: ra.Median(), bucket: bucketOf(key), samples: ra.Len(),
 			sampledAt: a.throughputSampledAt[key]}
 	}
@@ -361,7 +361,7 @@ func (a *SaturationAnalyzer) nearestSaturatedThroughput(key, args string) (float
 			if ra, found := a.saturatedThroughput[neighbour]; found && a.throughputWindowUsable(neighbour, args) {
 				// A borrowed bucket is still a bucket a decision reads, so it
 				// ages on this read like the key's own window does.
-				ra.Touch()
+				ra.TouchAt(a.now())
 				return ra.Median(), outputBuckets[i], ra.Len()
 			}
 		}

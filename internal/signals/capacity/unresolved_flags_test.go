@@ -3,6 +3,7 @@ package capacity
 import (
 	"slices"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -428,7 +429,7 @@ func TestFindCompatibleDoesNotGateOnCompleteness(t *testing.T) {
 		EffectiveCapacity: 5000,
 		EngineParams:      &unread,
 		LearnedFrom:       LearnedFromLive,
-	})
+	}, time.Now())
 
 	got := s.FindCompatible("m", "H200", 1, &unread)
 	if got == nil {

@@ -25,18 +25,18 @@ var _ = Describe("RollingAverage's two clocks", func() {
 	)
 
 	It("starts both clocks together, so a new window is neither stale nor gapped", func() {
-		ra := NewRollingAverage(10)
-		Expect(ra.Stale(short)).To(BeFalse())
-		Expect(ra.WriteGapExceeds(short)).To(BeFalse())
+		ra := NewRollingAverage(10, time.Now())
+		Expect(ra.StaleAt(time.Now(), short)).To(BeFalse())
+		Expect(ra.WriteGapExceedsAt(time.Now(), short)).To(BeFalse())
 	})
 
 	It("ages on the clock it is given, not the wall clock", func() {
-		ra := NewRollingAverage(10)
+		ra := NewRollingAverage(10, time.Now())
 		at := time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)
 		ra.TouchAt(at)
 		Expect(ra.StaleAt(at.Add(gap), gap)).To(BeFalse(), "exactly the timeout is not past it")
 		Expect(ra.StaleAt(at.Add(gap+time.Second), gap)).To(BeTrue())
-		Expect(ra.Stale(gap)).To(BeTrue(), "Stale is StaleAt on the wall clock")
+		Expect(ra.StaleAt(time.Now(), gap)).To(BeTrue(), "Stale is StaleAt on the wall clock")
 	})
 
 	It("fails safe on a zero value, which the constructor is the only way to avoid", func() {
@@ -46,30 +46,30 @@ var _ = Describe("RollingAverage's two clocks", func() {
 		// observation as a new episode -- rather than silently keeping a
 		// window whose timestamps are the zero time.
 		var ra RollingAverage
-		Expect(ra.Stale(gap)).To(BeTrue())
-		Expect(ra.WriteGapExceeds(gap)).To(BeTrue())
+		Expect(ra.StaleAt(time.Now(), gap)).To(BeTrue())
+		Expect(ra.WriteGapExceedsAt(time.Now(), gap)).To(BeTrue())
 	})
 
 	DescribeTable("what each mutator advances",
 		func(apply func(*RollingAverage), advancesWrite bool) {
-			ra := NewRollingAverage(10)
-			ra.Add(1) // so RaiseLast has a value to raise
+			ra := NewRollingAverage(10, time.Now())
+			ra.AddAt(1, time.Now()) // so RaiseLast has a value to raise
 			// Age BOTH clocks, then apply the mutator and see which moved.
 			ra.ObservedAt(time.Now().Add(-2 * gap))
-			Expect(ra.Stale(gap)).To(BeTrue(), "precondition: both clocks are old")
-			Expect(ra.WriteGapExceeds(gap)).To(BeTrue())
+			Expect(ra.StaleAt(time.Now(), gap)).To(BeTrue(), "precondition: both clocks are old")
+			Expect(ra.WriteGapExceedsAt(time.Now(), gap)).To(BeTrue())
 
 			apply(ra)
 
-			Expect(ra.Stale(gap)).To(BeFalse(),
+			Expect(ra.StaleAt(time.Now(), gap)).To(BeFalse(),
 				"every mutator counts as USE: anything that touches a window means a "+
 					"decision still depends on it, and the sweep must not take it")
-			Expect(ra.WriteGapExceeds(gap)).To(Equal(!advancesWrite))
+			Expect(ra.WriteGapExceedsAt(time.Now(), gap)).To(Equal(!advancesWrite))
 		},
-		Entry("Add is a write", func(ra *RollingAverage) { ra.Add(2) }, true),
-		Entry("RaiseLast is a write", func(ra *RollingAverage) { ra.RaiseLast(99) }, true),
-		Entry("Observe is a write with no new value", func(ra *RollingAverage) { ra.Observe() }, true),
-		Entry("Touch is NOT a write", func(ra *RollingAverage) { ra.Touch() }, false),
+		Entry("Add is a write", func(ra *RollingAverage) { ra.AddAt(2, time.Now()) }, true),
+		Entry("RaiseLast is a write", func(ra *RollingAverage) { ra.RaiseLastAt(99, time.Now()) }, true),
+		Entry("Observe is a write with no new value", func(ra *RollingAverage) { ra.ObservedAt(time.Now()) }, true),
+		Entry("Touch is NOT a write", func(ra *RollingAverage) { ra.TouchAt(time.Now()) }, false),
 	)
 
 	It("keeps a read-only window alive forever without making its figure newer", func() {
@@ -78,40 +78,40 @@ var _ = Describe("RollingAverage's two clocks", func() {
 		// a fleet that has stopped saturating looks like -- must never expire,
 		// and must still report the write gap so a new observation resets it
 		// instead of blending into a figure from before the gap.
-		ra := NewRollingAverage(10)
-		ra.Add(50000)
+		ra := NewRollingAverage(10, time.Now())
+		ra.AddAt(50000, time.Now())
 		ra.ObservedAt(time.Now().Add(-30 * 24 * time.Hour))
 
 		for i := 0; i < 50; i++ {
-			ra.Touch()
+			ra.TouchAt(time.Now())
 		}
 
-		Expect(ra.Stale(gap)).To(BeFalse(), "reads keep it; the sweep must not take it")
-		Expect(ra.WriteGapExceeds(gap)).To(BeTrue(),
+		Expect(ra.StaleAt(time.Now(), gap)).To(BeFalse(), "reads keep it; the sweep must not take it")
+		Expect(ra.WriteGapExceedsAt(time.Now(), gap)).To(BeTrue(),
 			"but nothing has been WRITTEN for a month, and the producer has to be able "+
 				"to see that -- collapsed onto one field, the reads hid it and two "+
 				"episodes a month apart were averaged together")
-		Expect(ra.WriteAge()).To(BeNumerically(">", 29*24*time.Hour),
+		Expect(ra.WriteAgeAt(time.Now())).To(BeNumerically(">", 29*24*time.Hour),
 			"and the age must be reportable, since nothing refuses a window on age any more")
 	})
 
 	It("reports an age that tracks the last write, not the last read", func() {
-		ra := NewRollingAverage(10)
-		ra.Add(1)
+		ra := NewRollingAverage(10, time.Now())
+		ra.AddAt(1, time.Now())
 		ra.ObservedAt(time.Now().Add(-3 * gap))
-		ra.Touch()
-		Expect(ra.WriteAge()).To(BeNumerically("~", 3*gap, time.Minute),
+		ra.TouchAt(time.Now())
+		Expect(ra.WriteAgeAt(time.Now())).To(BeNumerically("~", 3*gap, time.Minute),
 			"a read must not reset the reported age, or the field is a lie in the log line")
 	})
 
 	It("does not disturb the stored values when only the clocks move", func() {
-		ra := NewRollingAverage(10)
-		ra.Add(10)
-		ra.Add(20)
+		ra := NewRollingAverage(10, time.Now())
+		ra.AddAt(10, time.Now())
+		ra.AddAt(20, time.Now())
 		before, n := ra.Average(), ra.Len()
 
-		ra.Touch()
-		ra.Observe()
+		ra.TouchAt(time.Now())
+		ra.ObservedAt(time.Now())
 		ra.ObservedAt(time.Now().Add(-gap))
 		ra.TouchAt(time.Now().Add(-gap))
 

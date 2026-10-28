@@ -219,7 +219,7 @@ func TestPDDecodeAtItsSequenceCapKeepsTheFullQueue(t *testing.T) {
 		store := capacity.NewStore()
 		store.Update("test-ns", "test-model", decodeVariant, capacity.Record{
 			GpuCount: 1, EngineParams: params, LearnedFrom: "deployment",
-		})
+		}, time.Now())
 		return analyzePDWith(t, store, []domain.ReplicaMetrics{capped(running), pdPrefillRow()}, pdStates)
 	}
 
@@ -259,7 +259,7 @@ func TestPDDecodeAtItsActiveSequenceCapKeepsTheFullQueue(t *testing.T) {
 		store := capacity.NewStore()
 		store.Update("test-ns", "test-model", decodeVariant, capacity.Record{
 			GpuCount: 1, EngineParams: params, LearnedFrom: "deployment",
-		})
+		}, time.Now())
 		rm := withReason(pdDecodeRow(halfCache), 0)
 		rm.RunningRequests = running
 		return analyzePDWith(t, store, []domain.ReplicaMetrics{rm, pdPrefillRow()}, pdStates)

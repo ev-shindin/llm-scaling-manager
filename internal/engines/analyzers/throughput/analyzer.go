@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -26,6 +27,9 @@ import (
 type ThroughputAnalyzer struct {
 	mu            sync.Mutex
 	variantStates map[string]*variantState
+	// clock is what Analyze stamps observations and ages variant state
+	// on: the engine's cycle clock (WithClock), the wall clock by default.
+	clock clock.PassiveClock
 }
 
 // variantState holds the cross-cycle calibration state for a single variant.
@@ -59,7 +63,15 @@ type variantState struct {
 func NewThroughputAnalyzer() *ThroughputAnalyzer {
 	return &ThroughputAnalyzer{
 		variantStates: make(map[string]*variantState),
+		clock:         clock.RealClock{},
 	}
+}
+
+// WithClock sets the clock Analyze reads: the engine passes its cycle clock,
+// which holds one reading per cycle. Call it before the analyzer is used.
+func (a *ThroughputAnalyzer) WithClock(c clock.PassiveClock) *ThroughputAnalyzer {
+	a.clock = c
+	return a
 }
 
 // Name returns the canonical name for this analyzer.
@@ -228,7 +240,7 @@ func (a *ThroughputAnalyzer) Analyze(
 		return nil, err
 	}
 
-	now := time.Now()
+	now := a.clock.Now()
 
 	// Build lookup tables from VariantStates before taking any locks.
 	pendingByVariant := make(map[string]int, len(input.VariantStates))

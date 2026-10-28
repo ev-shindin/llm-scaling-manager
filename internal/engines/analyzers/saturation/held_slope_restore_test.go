@@ -41,7 +41,7 @@ func TestAHeldITLLineSurvivesARestart(t *testing.T) {
 	clock := time.Date(2026, 10, 24, 8, 0, 0, 0, time.UTC)
 	process := func() *SaturationAnalyzer {
 		store := capacity.NewStore()
-		store.Update("test-ns", "test-model", variant, capacity.Record{EngineParams: mtParams(64, "vllm:v1")})
+		store.Update("test-ns", "test-model", variant, capacity.Record{EngineParams: mtParams(64, "vllm:v1")}, time.Now())
 		a := NewSaturationAnalyzer(store)
 		a.now = func() time.Time { return clock }
 		return a

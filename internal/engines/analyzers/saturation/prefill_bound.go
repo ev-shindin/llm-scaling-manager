@@ -146,7 +146,7 @@ func (a *SaturationAnalyzer) notePrefillBound(rm domain.ReplicaMetrics, cfg *con
 			// grew prefill again, by at least 1/scaleUp. Each reading is a
 			// lower bound on the same rate, so the highest one stays true.
 			if ra.Max() < prior {
-				ra.RaiseLast(prior)
+				ra.RaiseLastAt(prior, a.now())
 			}
 		}
 		a.mu.Unlock()
@@ -166,6 +166,6 @@ func (a *SaturationAnalyzer) notePrefillBound(rm domain.ReplicaMetrics, cfg *con
 	// floor prices from every cycle must not age out for want of a new
 	// saturation, which is the one thing a fleet the bound is working for
 	// stops producing.
-	ra.Touch()
+	ra.TouchAt(a.now())
 	return prefillBoundReading{rate: ra.Max() / ileff, samples: ra.Len()}
 }

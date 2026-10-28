@@ -13,7 +13,7 @@ const (
 
 	// EpisodeGap is how long without a WRITE before the next observation is
 	// treated as the start of a new episode rather than another sample of the
-	// current one. The producers ask WriteGapExceeds and reset the window
+	// current one. The producers ask WriteGapExceedsAt and reset the window
 	// instead of adding to it, so a figure from before a long quiet period is
 	// never averaged in at 1/N weight with today's.
 	//
@@ -177,9 +177,14 @@ type RollingAverage struct {
 	lastWritten time.Time
 }
 
-// NewRollingAverage creates a RollingAverage with the given window size.
-func NewRollingAverage(maxSize int) *RollingAverage {
-	now := time.Now()
+// NewRollingAverage creates a RollingAverage with the given window size, used
+// and written as of now.
+//
+// No method of this type reads the wall clock: every stamp and every age is
+// taken against the now its caller passes, so a caller that keeps its own
+// clock -- the analyzers pin one reading per cycle -- ages the window on that
+// clock alone.
+func NewRollingAverage(maxSize int, now time.Time) *RollingAverage {
 	return &RollingAverage{
 		values:      make([]float64, 0, maxSize),
 		maxSize:     maxSize,
@@ -188,13 +193,13 @@ func NewRollingAverage(maxSize int) *RollingAverage {
 	}
 }
 
-// Add appends a value, evicting the oldest entry if the window is full.
-func (r *RollingAverage) Add(value float64) {
+// AddAt appends a value written at now, evicting the oldest entry if the
+// window is full.
+func (r *RollingAverage) AddAt(value float64, now time.Time) {
 	if len(r.values) >= r.maxSize {
 		r.values = r.values[1:]
 	}
 	r.values = append(r.values, value)
-	now := time.Now()
 	r.lastUsed = now
 	r.lastWritten = now
 }
@@ -211,55 +216,43 @@ func (r *RollingAverage) Average() float64 {
 	return sum / float64(len(r.values))
 }
 
-// Touch marks the window as USED now, without adding to it and without
+// TouchAt marks the window as USED at t, without adding to it and without
 // counting as a write. A decision that reads a window is still depending on
 // it, which is what retention asks about -- but reading cannot make the data
-// newer, so Touch deliberately leaves lastWritten alone. Writers call Observe.
-func (r *RollingAverage) Touch() {
-	r.TouchAt(time.Now())
-}
-
-// TouchAt is Touch at a given time; Touch is TouchAt(time.Now()). A test ages
-// a window's USE by it, which is what the sweep reads.
+// newer, so TouchAt deliberately leaves lastWritten alone. Writers call
+// ObservedAt.
 func (r *RollingAverage) TouchAt(t time.Time) {
 	r.lastUsed = t
 }
 
-// Observe records that the window's own producer saw its reading again without
-// a new value to store -- the same sample across a spacing boundary, or a
-// repeat. It is a write for gap purposes even though nothing is appended: the
-// producer only runs while the condition it measures holds, so seeing the same
-// reading again is evidence the episode is still going.
-func (r *RollingAverage) Observe() {
-	now := time.Now()
-	r.lastUsed = now
-	r.lastWritten = now
-}
-
-// ObservedAt is Observe at a given time; a test ages a window's WRITE by it.
+// ObservedAt records that the window's own producer saw its reading again at t
+// without a new value to store -- the same sample across a spacing boundary,
+// or a repeat. It is a write for gap purposes even though nothing is appended:
+// the producer only runs while the condition it measures holds, so seeing the
+// same reading again is evidence the episode is still going.
 func (r *RollingAverage) ObservedAt(t time.Time) {
 	r.lastUsed = t
 	r.lastWritten = t
 }
 
-// RaiseLast lifts the most recent value to v when v is higher, and counts as a
-// write either way. A reading that belongs to the last sample's window is
-// folded into that sample this way rather than counted or dropped.
-func (r *RollingAverage) RaiseLast(v float64) {
+// RaiseLastAt lifts the most recent value to v when v is higher, and counts as
+// a write at now either way. A reading that belongs to the last sample's
+// window is folded into that sample this way rather than counted or dropped.
+func (r *RollingAverage) RaiseLastAt(v float64, now time.Time) {
 	if n := len(r.values); n > 0 && v > r.values[n-1] {
 		r.values[n-1] = v
 	}
-	r.Observe()
+	r.ObservedAt(now)
 }
 
-// SetLast replaces the most recent value with v, and counts as a write. A
-// sample folded from several sources is re-formed this way each time one of
-// them reads again. An empty window is left empty.
-func (r *RollingAverage) SetLast(v float64) {
+// SetLastAt replaces the most recent value with v, and counts as a write at
+// now. A sample folded from several sources is re-formed this way each time
+// one of them reads again. An empty window is left empty.
+func (r *RollingAverage) SetLastAt(v float64, now time.Time) {
 	if n := len(r.values); n > 0 {
 		r.values[n-1] = v
 	}
-	r.Observe()
+	r.ObservedAt(now)
 }
 
 // Last returns the most recent value, or 0 if empty. No production caller;
@@ -311,12 +304,12 @@ func (r *RollingAverage) Median() float64 {
 	return sorted[(len(sorted)-1)/2]
 }
 
-// Stale reports whether nothing has USED the window within the timeout:
-// creation, Add, RaiseLast, Observe and Touch all count, so a window created
-// and never added to is fresh for one timeout. This is the retention question,
-// and the sweep is its caller. For "has a long gap passed since anything was
-// written", which is a different question with a different answer, see
-// WriteGapExceeds.
+// StaleAt reports whether nothing has USED the window within the timeout, as
+// of now: creation, AddAt, RaiseLastAt, ObservedAt and TouchAt all count, so a
+// window created and never added to is fresh for one timeout. This is the
+// retention question, and the sweep is its caller. For "has a long gap passed
+// since anything was written", which is a different question with a different
+// answer, see WriteGapExceedsAt.
 //
 // The saturation analyzer's EvictStaleHistory sweeps whole entries on the same
 // measure, once per cycle from steadystate.evictStaleLearnedState. Readers
@@ -326,25 +319,22 @@ func (r *RollingAverage) Median() float64 {
 // like data and is weighted like data.
 //
 // Which makes WHAT counts as a touch load-bearing. A window whose only writer
-// is a saturated-queue path ages on "last saturated" unless its readers Touch
+// is a saturated-queue path ages on "last saturated" unless its readers touch
 // it, and a fleet that is coping does not saturate -- so both the k2 history
 // and the mu windows touch on the read, and age on last USE. See the Priority
 // 2 read in the analyzer's replica_capacity.go for what that cost when they
 // did not.
-func (r *RollingAverage) Stale(timeout time.Duration) bool {
-	return r.StaleAt(time.Now(), timeout)
-}
-
-// StaleAt is Stale as of now rather than the wall clock. A caller that keeps
-// its own clock sweeps on it: TouchAt stamps a window with that clock, and
-// measuring the stamp against time.Now instead mixes two clocks, which only
-// agree when the caller's clock IS the wall clock.
+//
+// now is the caller's clock, the one TouchAt was stamped with: measuring the
+// stamp against another clock mixes two, which only agree when the caller's
+// clock IS that clock.
 func (r *RollingAverage) StaleAt(now time.Time, timeout time.Duration) bool {
 	return now.Sub(r.lastUsed) > timeout
 }
 
-// WriteGapExceeds reports whether more than the given gap has passed since a
-// value was last written to this window. Reads do not count, by design.
+// WriteGapExceedsAt reports whether more than the given gap has passed, as of
+// now, since a value was last written to this window. Reads do not count, by
+// design.
 //
 // It answers the producer's question: is this new reading a continuation of
 // what the window already holds, or the first of a new episode? The windows
@@ -355,22 +345,22 @@ func (r *RollingAverage) StaleAt(now time.Time, timeout time.Duration) bool {
 // rolling average weights the old readings like evidence. The producers reset
 // the window on this rather than adding to it.
 //
-// Asking Stale instead is the defect this method exists to prevent: Stale
+// Asking StaleAt instead is the defect this method exists to prevent: StaleAt
 // tracks USE, every cycle reads these windows, so it never reports a gap for
 // any bucket the fleet is still serving.
-func (r *RollingAverage) WriteGapExceeds(gap time.Duration) bool {
-	return time.Since(r.lastWritten) > gap
+func (r *RollingAverage) WriteGapExceedsAt(now time.Time, gap time.Duration) bool {
+	return now.Sub(r.lastWritten) > gap
 }
 
-// WriteAge is how long ago a value was last written to this window.
+// WriteAgeAt is how long before now a value was last written to this window.
 //
 // For the log line, not for a decision. Since the read no longer refuses a
 // window on age, nothing else distinguishes a measurement taken an hour ago
 // from one taken last Tuesday -- the k2-decision line reported them
 // identically, and the age has no ceiling any more. A reader chasing a replica
 // count needs to know which it is looking at.
-func (r *RollingAverage) WriteAge() time.Duration {
-	return time.Since(r.lastWritten)
+func (r *RollingAverage) WriteAgeAt(now time.Time) time.Duration {
+	return now.Sub(r.lastWritten)
 }
 
 // LastWritten is when a value was last put in: the same window, not written

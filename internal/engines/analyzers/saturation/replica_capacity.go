@@ -454,7 +454,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 			EngineParams:          existingParams,
 			RollingOut:            rolling,
 			LearnedFrom:           capacity.LearnedFromLive,
-		})
+		}, a.now())
 	}
 
 	return &capacity.ReplicaCapacity{
@@ -895,20 +895,21 @@ func (a *SaturationAnalyzer) k2Chain(
 				"reason", "observed tokensInUse exceeds the KV cache's physical ceiling; discarding as implausible",
 				"k2Observed", k2Observed, "k1", k1, "kvCeiling", kvCeiling)
 		} else {
+			now := a.now()
 			a.mu.Lock()
 			ra, ok := a.computeCapacityHistory[historyKey]
-			// WriteGapExceeds, not Stale: this asks whether the last
+			// WriteGapExceedsAt, not StaleAt: this asks whether the last
 			// OBSERVATION is old enough that today's belongs to a new
-			// episode. Stale tracks use, and Priority 2 below reads this
+			// episode. StaleAt tracks use, and Priority 2 below reads this
 			// window every cycle, so asking it could never report a gap for
 			// a bucket the fleet is still serving -- two episodes weeks
 			// apart would blend, and a stale high reading would hold
 			// capacity up against today's lower, truer one.
-			if !ok || ra.WriteGapExceeds(a.horizons.EpisodeGap) {
-				ra = capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
+			if !ok || ra.WriteGapExceedsAt(now, a.horizons.EpisodeGap) {
+				ra = capacity.NewRollingAverage(capacity.RollingAverageWindowSize, now)
 				a.computeCapacityHistory[historyKey] = ra
 			}
-			ra.Add(float64(k2Observed))
+			ra.AddAt(float64(k2Observed), now)
 			if args != "" {
 				a.k2WindowArgs[historyKey] = args
 			}
@@ -939,7 +940,7 @@ func (a *SaturationAnalyzer) k2Chain(
 	// only raise capacity. An intermediate revision guarded this read and
 	// fell through to k1; it cost between 1.8x and 18x the replicas.
 	//
-	// Touch() is what keeps the window alive to be read. The ONLY writer is
+	// TouchAt is what keeps the window alive to be read. The ONLY writer is
 	// Priority 1 above, which needs a saturated queue, so without the touch
 	// the window ages on "last saturated" -- and a comfortably provisioned
 	// fleet does not saturate. Measured: a live variant serving happily for
@@ -949,7 +950,7 @@ func (a *SaturationAnalyzer) k2Chain(
 	// nothing reads still ages out at HistoryRetention, so the leak closes;
 	// one a decision depends on every cycle does not.
 	//
-	// The write path above asks WriteGapExceeds, not Stale, precisely because
+	// The write path above asks WriteGapExceedsAt, not StaleAt, precisely because
 	// these reads touch: a use-based check could never see the write gap it
 	// is asking about. Two clocks, two questions -- see RollingAverage.
 	a.mu.Lock()
@@ -959,8 +960,9 @@ func (a *SaturationAnalyzer) k2Chain(
 	if ra, ok := a.computeCapacityHistory[historyKey]; ok {
 		histAvg = ra.Average()
 		histLen = ra.Len()
-		histAge = ra.WriteAge()
-		ra.Touch()
+		now := a.now()
+		histAge = ra.WriteAgeAt(now)
+		ra.TouchAt(now)
 	}
 	a.mu.Unlock()
 	if histAvg > 0 {

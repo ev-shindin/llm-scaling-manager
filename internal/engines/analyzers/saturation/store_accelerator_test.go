@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"context"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -26,8 +27,8 @@ var _ = Describe("the capacity store's accelerator", func() {
 		store = capacity.NewStore()
 		a = NewSaturationAnalyzer(store)
 		ctx = context.Background()
-		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params})
-		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params})
+		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params}, time.Now())
+		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params}, time.Now())
 		// Both variants once ran on H100, so each has its memo.
 		Expect(a.stableAccelerator("test-ns", "variant-a", "H100")).To(Equal("H100"))
 		Expect(a.stableAccelerator("test-ns", "variant-b", "H100")).To(Equal("H100"))
@@ -57,7 +58,7 @@ var _ = Describe("the capacity store's accelerator", func() {
 			},
 		))
 		Expect(err).NotTo(HaveOccurred())
-		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params}) // no capacity of its own
+		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params}, time.Now()) // no capacity of its own
 
 		Expect(a.lookupCompatibleCapacity("test-ns", "test-model", "variant-b",
 			a.StableAcceleratorFor("test-ns", "variant-b", ""), 1, false)).NotTo(BeNil(),

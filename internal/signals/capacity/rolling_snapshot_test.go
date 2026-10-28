@@ -10,9 +10,9 @@ import (
 )
 
 func TestRollingAverageSnapshotRoundTripsValuesAndBothClocks(t *testing.T) {
-	r := NewRollingAverage(4)
-	r.Add(4000)
-	r.Add(5000)
+	r := NewRollingAverage(4, time.Now())
+	r.AddAt(4000, time.Now())
+	r.AddAt(5000, time.Now())
 	used := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
 	r.TouchAt(used)
 	written := r.lastWritten
@@ -25,10 +25,10 @@ func TestRollingAverageSnapshotRoundTripsValuesAndBothClocks(t *testing.T) {
 }
 
 func TestSnapshotDoesNotAliasTheLiveWindow(t *testing.T) {
-	r := NewRollingAverage(4)
-	r.Add(4000)
+	r := NewRollingAverage(4, time.Now())
+	r.AddAt(4000, time.Now())
 	s := r.Snapshot()
-	r.Add(9000)
+	r.AddAt(9000, time.Now())
 	assert.Equal(t, []float64{4000}, s.Values)
 }
 

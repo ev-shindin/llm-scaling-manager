@@ -107,7 +107,7 @@ var _ = Describe("What Analyze publishes", func() {
 
 	It("publishes the fill the engine can reach when max_num_seqs binds", func() {
 		s := capacity.NewStore()
-		s.Update("ns", "m", "agg", capacity.Record{EngineParams: &capacity.EngineParams{MaxNumSeqs: 64}})
+		s.Update("ns", "m", "agg", capacity.Record{EngineParams: &capacity.EngineParams{MaxNumSeqs: 64}}, time.Now())
 		warm(New(nil, s), 44*time.Millisecond, noop)
 		fill, _ := gaugeIn(registry, constants.WVASLOFill, agg1)
 		Expect(fill).To(BeNumerically("~", 0.32, 1e-9))

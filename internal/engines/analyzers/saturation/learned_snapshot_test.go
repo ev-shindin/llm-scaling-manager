@@ -31,7 +31,7 @@ var _ = Describe("learned state across a restart", func() {
 	// scale target as the engine does before every cycle, and its analyzer.
 	newProcess := func(p *capacity.EngineParams) *SaturationAnalyzer {
 		store := capacity.NewStore()
-		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: p})
+		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: p}, time.Now())
 		return NewSaturationAnalyzer(store)
 	}
 	decisionOf := func(a *SaturationAnalyzer) domain.VariantCapacity {
@@ -143,7 +143,7 @@ var _ = Describe("learned state across a restart", func() {
 		second.mu.Lock()
 		defer second.mu.Unlock()
 		Expect(second.computeCapacityHistory).To(HaveKey(key))
-		Expect(second.computeCapacityHistory[key].Stale(30*time.Minute)).To(BeTrue(),
+		Expect(second.computeCapacityHistory[key].StaleAt(time.Now(), 30*time.Minute)).To(BeTrue(),
 			"restored as last read now, not an hour ago")
 	})
 
@@ -191,7 +191,7 @@ var _ = Describe("learned state across a restart", func() {
 						Name: "vllm", Command: []string{"vllm", "serve", "test-model"},
 						Args: []string{"--max-num-seqs", maxNumSeqs},
 					}}}},
-				}}))
+				}}), time.Now())
 		}
 		saturate := func(a *SaturationAnalyzer) {
 			_, err := a.Analyze(context.Background(), makeAnalyzerInput(
@@ -227,7 +227,7 @@ var _ = Describe("learned state across a restart", func() {
 						Name: "vllm", Image: image, Command: []string{"vllm", "serve", "test-model"},
 						Args: []string{"--max-num-seqs", "256"},
 					}}}},
-				}}))
+				}}), time.Now())
 		}
 		saturate := func(a *SaturationAnalyzer) {
 			_, err := a.Analyze(context.Background(), makeAnalyzerInput(
@@ -346,7 +346,7 @@ var _ = Describe("learned state across a restart", func() {
 
 		// Other hardware: neither the windows nor the memo describe it.
 		store := capacity.NewStore()
-		store.Update("test-ns", "test-model", "variant-a", capacity.Record{AcceleratorName: "A100", EngineParams: params(64)})
+		store.Update("test-ns", "test-model", "variant-a", capacity.Record{AcceleratorName: "A100", EngineParams: params(64)}, time.Now())
 		moved := NewSaturationAnalyzer(store)
 		moved.RestoreLearnedState(saved)
 		_, done = moved.installRestored("test-ns", "test-model", "variant-a")
@@ -421,7 +421,7 @@ var _ = Describe("learned state across a restart", func() {
 	It("does not export what was learned with no configuration known under a restored fingerprint", func() {
 		saved := carry(learn(newProcess(params(256))))
 		store := capacity.NewStore()
-		store.Update("test-ns", "test-model", "variant-a", capacity.Record{}) // scale target not read yet
+		store.Update("test-ns", "test-model", "variant-a", capacity.Record{}, time.Now()) // scale target not read yet
 		second := NewSaturationAnalyzer(store)
 		second.RestoreLearnedState(saved)
 		_, err := second.Analyze(context.Background(), makeAnalyzerInput(

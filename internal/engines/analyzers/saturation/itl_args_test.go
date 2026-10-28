@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
@@ -36,7 +37,7 @@ func TestTheITLWindowTakesNoReadingsMidRollout(t *testing.T) {
 		store := capacity.NewStore()
 		store.Update("test-ns", "test-model", "decode-a", capacity.Record{
 			EngineParams: mtParams(256, "vllm:v1"), RollingOut: rolling,
-		})
+		}, time.Now())
 		a := NewSaturationAnalyzer(store)
 		rows := make([]domain.ReplicaMetrics, 0, 10)
 		for i := range 10 {
@@ -79,7 +80,7 @@ func TestARollbackGetsTheITLBaselineBack(t *testing.T) {
 // The cycle checks the ITL state against the arguments the variant runs.
 func TestACycleDropsTheITLBaselineOfArgumentsTheVariantLeft(t *testing.T) {
 	store := capacity.NewStore()
-	store.Update("test-ns", "test-model", "decode-a", capacity.Record{EngineParams: mtParams(256, "vllm:v1")})
+	store.Update("test-ns", "test-model", "decode-a", capacity.Record{EngineParams: mtParams(256, "vllm:v1")}, time.Now())
 	a := NewSaturationAnalyzer(store)
 	in := makeAnalyzerInput([]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "decode-a", 4000, 16000, 0, 100, 50)},
 		[]domain.VariantReplicaState{{VariantName: "decode-a", AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1, Role: domain.RoleDecode}})
@@ -88,7 +89,7 @@ func TestACycleDropsTheITLBaselineOfArgumentsTheVariantLeft(t *testing.T) {
 		t.Fatalf("Analyze: %v", err)
 	}
 	a.itlTracker.SetBaseline(key, 0.011)
-	store.Update("test-ns", "test-model", "decode-a", capacity.Record{EngineParams: mtParams(64, "vllm:v1")})
+	store.Update("test-ns", "test-model", "decode-a", capacity.Record{EngineParams: mtParams(64, "vllm:v1")}, time.Now())
 	if _, err := a.Analyze(context.Background(), in); err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}

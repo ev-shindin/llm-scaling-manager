@@ -34,8 +34,8 @@ var _ = Describe("the source and age of the k2 a variant is priced on", func() {
 		ctx = context.Background()
 		clock = time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 		a.now = func() time.Time { return clock }
-		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params()})
-		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params()})
+		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: params()}, time.Now())
+		store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: params()}, time.Now())
 	})
 
 	states := []domain.VariantReplicaState{
@@ -66,7 +66,7 @@ var _ = Describe("the source and age of the k2 a variant is priced on", func() {
 		defer a.mu.Unlock()
 		ra, ok := a.computeCapacityHistory[key]
 		Expect(ok).To(BeTrue(), "precondition: "+variant+" has a k2 window")
-		ra.ObservedAt(time.Now().Add(-ago))
+		ra.ObservedAt(clock.Add(-ago))
 	}
 
 	It("reports a figure measured this cycle as P1-obs, just written", func() {
@@ -102,7 +102,7 @@ var _ = Describe("the source and age of the k2 a variant is priced on", func() {
 	It("gives no age to a figure no window holds", func() {
 		// Different engines: variant-b may not borrow, so it is on k1.
 		store.Update("test-ns", "test-model", "variant-b", capacity.Record{
-			EngineParams: &capacity.EngineParams{Engine: "vllm", MaxNumSeqs: 128}})
+			EngineParams: &capacity.EngineParams{Engine: "vllm", MaxNumSeqs: 128}}, time.Now())
 		cycle(4000, 6, 1000, 0)
 		got := cycle(1000, 0, 1000, 0)["variant-b"]
 

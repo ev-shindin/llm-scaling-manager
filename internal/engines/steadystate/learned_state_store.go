@@ -394,6 +394,8 @@ func (e *Engine) flushLearnedState() {
 	defer cancel()
 	st := &e.learnedState
 	st.lastWrite, st.lastDigest = time.Time{}, ""
+	// The wall clock, not the cycle clock: the loop has stopped, so nothing
+	// is pinned, and the cadence it would be compared with was just reset.
 	e.writeLearnedState(ctx, time.Now())
 }
 

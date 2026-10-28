@@ -6,7 +6,6 @@ import (
 	"maps"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -111,7 +110,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		AnalyzerName:      a.Name(),
 		ModelID:           input.ModelID,
 		Namespace:         input.Namespace,
-		AnalyzedAt:        time.Now(),
+		AnalyzedAt:        a.now(),
 		VariantCapacities: d.variants,
 		TotalDemand:       total,
 		RoleDemand:        d.roleDemand,

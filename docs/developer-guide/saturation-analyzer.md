@@ -951,8 +951,16 @@ one field:
 
 | question | field | asked by |
 | --- | --- | --- |
-| keep this entry? | `lastUsed` | the sweep, via `Stale` |
-| is a new observation part of this window, or a new episode? | `lastWritten` | the write paths, via `WriteGapExceeds` |
+| keep this entry? | `lastUsed` | the sweep, via `StaleAt` |
+| is a new observation part of this window, or a new episode? | `lastWritten` | the write paths, via `WriteGapExceedsAt` |
+
+Neither is ever read against the wall clock. Every method takes `now` from its
+caller, and the analyzer passes its own clock, which the engine pins once per
+cycle (`internal/signals/cycleclock`): every stamp in one cycle is the same
+instant, and a test that moves the analyzer's fake clock past `EpisodeGap`
+sees the window reset. `TestNoWallClockInLearnedState` fails on a `time.Now`,
+`time.Since` or `time.Until` in the capacity package or the saturation,
+throughput and slo analyzers.
 
 Collapsing them is a live defect: reads happen every cycle, so one field made
 every read look like a write, and the write path's "a long gap means a new

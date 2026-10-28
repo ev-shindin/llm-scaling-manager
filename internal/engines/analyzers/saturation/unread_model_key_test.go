@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -21,12 +22,12 @@ func TestAnUnreadCheckpointIsNotASharingKey(t *testing.T) {
 	}
 
 	store := capacity.NewStore()
-	store.Update(ns, model, variant, capacity.Record{AcceleratorName: "H100", GpuCount: 1, EngineParams: params})
+	store.Update(ns, model, variant, capacity.Record{AcceleratorName: "H100", GpuCount: 1, EngineParams: params}, time.Now())
 	require.NotEmpty(t, NewSaturationAnalyzer(store).engineFingerprint(ns, model, variant))
 
 	unread := *params
 	unread.ModelUnresolved = true
 	require.True(t, unread.Complete(), "an unread checkpoint is not an incomplete read")
-	store.Update(ns, model, variant, capacity.Record{AcceleratorName: "H100", GpuCount: 1, EngineParams: &unread})
+	store.Update(ns, model, variant, capacity.Record{AcceleratorName: "H100", GpuCount: 1, EngineParams: &unread}, time.Now())
 	require.Empty(t, NewSaturationAnalyzer(store).engineFingerprint(ns, model, variant))
 }

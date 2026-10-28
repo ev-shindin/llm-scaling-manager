@@ -3,6 +3,7 @@ package saturation
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -51,7 +52,7 @@ func TestBorrowedLineReachesTheRecord(t *testing.T) {
 		for _, v := range []string{lender, starved} {
 			store.Update(ns, model, v, capacity.Record{
 				AcceleratorName: accel, GpuCount: 1, EngineParams: params(),
-			})
+			}, time.Now())
 		}
 		return NewSaturationAnalyzer(store)
 	}

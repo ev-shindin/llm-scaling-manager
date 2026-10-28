@@ -23,7 +23,7 @@ var _ = Describe("learned state restored by engine arguments", func() {
 	}
 	newProcess := func(p *capacity.EngineParams) *SaturationAnalyzer {
 		store := capacity.NewStore()
-		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: p})
+		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: p}, time.Now())
 		return NewSaturationAnalyzer(store)
 	}
 	capacityOf := func(a *SaturationAnalyzer) float64 {
@@ -229,7 +229,7 @@ var _ = Describe("learned state restored by engine arguments", func() {
 		store := capacity.NewStore()
 		store.Update("test-ns", "test-model", "variant-a", capacity.Record{
 			AcceleratorName: "H100", GpuCount: 2, EngineParams: params(64, "vllm:v1"),
-		})
+		}, time.Now())
 		second := NewSaturationAnalyzer(store)
 		second.RestoreLearnedState(saved)
 		r, done := second.installRestored("test-ns", "test-model", "variant-a")

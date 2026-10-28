@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
@@ -31,7 +32,7 @@ func TestAParkedVariantIsNotPricedAboveItsLastMeasurementAfterARollout(t *testin
 				Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
 					Name: "vllm", Command: []string{"vllm", "serve", model}, Args: args,
 				}}}},
-			}}))
+			}}), time.Now())
 	}
 
 	for _, tc := range []struct {
@@ -53,7 +54,7 @@ func TestAParkedVariantIsNotPricedAboveItsLastMeasurementAfterARollout(t *testin
 				AcceleratorName: accel, GpuCount: 1,
 				TotalKvCapacityTokens: 16_000, EffectiveCapacity: measured,
 				EngineParams: loaded.EngineParams, LearnedFrom: capacity.LearnedFromLive,
-			})
+			}, time.Now())
 			load(store, tc.rollout...) // the rollout, read while parked
 			load(store, tc.rollout...) // and again on the next cycle
 

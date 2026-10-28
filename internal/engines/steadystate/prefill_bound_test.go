@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -61,7 +62,7 @@ func pbStore() *capacity.Store {
 	for _, v := range []string{"dec", "pre"} {
 		store.Update("test-ns", "test-model", v, capacity.Record{
 			EngineParams: &capacity.EngineParams{EffectiveMaxBatchedTokens: 8192, MaxNumSeqs: 256},
-		})
+		}, time.Now())
 	}
 	return store
 }

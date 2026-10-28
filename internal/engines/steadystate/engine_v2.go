@@ -72,7 +72,7 @@ func (e *Engine) runV2AnalysisOnly(
 		if s, ok := e.saturationV2Analyzer.(acceleratorStabiliser); ok {
 			publishAccel = s.StableAcceleratorFor(namespace, va.Name, accelerator)
 		}
-		e.capacityStore.LoadFromScaleTarget(namespace, modelID, va.Name, publishAccel, gpuCount, scaleTarget)
+		e.capacityStore.LoadFromScaleTarget(namespace, modelID, va.Name, publishAccel, gpuCount, scaleTarget, e.clock.Now())
 		logger.V(logging.DEBUG).Info("Pre-populated capacity store from scale target",
 			"variant", va.Name, "accelerator", accelerator, "gpuCount", gpuCount)
 		// Publish the engine-configuration fingerprint. Read back from the
@@ -600,7 +600,7 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 	}
 	records := 0
 	if e.capacityStore != nil {
-		records = e.capacityStore.EvictStale(capacity.EvictionTimeout)
+		records = e.capacityStore.EvictStale(e.clock.Now(), capacity.EvictionTimeout)
 	}
 	if history.Any() || records > 0 {
 		// Broken out per map, not summed. Which map lost entries is the whole
@@ -631,7 +631,7 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 			"recordTimeout", capacity.EvictionTimeout)
 	}
 	if e.sloAnalyzer != nil {
-		if ev := e.sloAnalyzer.EvictStale(time.Now()); ev.Any() {
+		if ev := e.sloAnalyzer.EvictStale(e.clock.Now()); ev.Any() {
 			logger.Info("evicted stale slo analyzer state",
 				"lines", ev.Lines, "baselines", ev.Baselines,
 				"transients", ev.Transients, "accelerators", ev.Accelerators)
@@ -831,7 +831,9 @@ func (e *Engine) livenessThreshold() time.Duration {
 func (e *Engine) listedInGrace(namespace, modelID string, policy config.ScalingPolicy,
 	ran []allocation.NamedAnalyzerResult) []allocation.NamedAnalyzerResult {
 	perAnalyzer := e.lastGoodAnalysis[utils.GetNamespacedKey(namespace, modelID)]
-	threshold, now := e.livenessThreshold(), time.Now()
+	// The cycle clock, the one the analyzers stamp AnalyzedAt with
+	// (updateLivenessAndSetLive).
+	threshold, now := e.livenessThreshold(), e.clock.Now()
 	var out []allocation.NamedAnalyzerResult
 	for _, a := range policy.Analyzers {
 		name := a.EffectiveType()
@@ -871,7 +873,11 @@ func (e *Engine) updateLivenessAndSetLive(
 	}
 	perAnalyzer := e.lastGoodAnalysis[modelKey]
 
-	now := time.Now()
+	// The cycle clock, which the analyzers stamp AnalyzedAt with: pinned, so
+	// a result is compared with the instant it was stamped at, not with the
+	// wall clock some time into the cycle. Against time.Now the margin of
+	// the staleness window shrank by however long the cycle had run.
+	now := e.clock.Now()
 	threshold := e.livenessThreshold()
 
 	for i := range namedResults {

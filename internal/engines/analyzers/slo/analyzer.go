@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
@@ -100,7 +101,7 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 	return &Analyzer{
 		router:       router,
 		store:        store,
-		now:          time.Now,
+		now:          clock.RealClock{}.Now,
 		stateTimeout: defaultStateTimeout,
 		slopeHoldFor: capacity.HistoryRetention,
 		lines:        itl.NewTracker(),
@@ -109,6 +110,14 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		accelerators: make(map[string]acceleratorMemo),
 		transients:   make(map[string]*transientMemo),
 	}
+}
+
+// WithClock sets the clock the analyzer stamps and ages its learned state on:
+// the engine passes its cycle clock, which holds one reading per cycle. Call it
+// before the analyzer is used.
+func (a *Analyzer) WithClock(c clock.PassiveClock) *Analyzer {
+	a.now = c.Now
+	return a
 }
 
 // WithStateTimeout sets how long unused learned state is kept: the engine

@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/utils/clock"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
@@ -240,7 +242,8 @@ type SaturationAnalyzer struct {
 	// past VariantTimeout re-learned its ITL baseline and start estimate on
 	// wake. A deleted variant is not found, so it still ages out.
 	variantSeenAt map[string]time.Time
-	// now is the clock the memory reads; tests set it.
+	// now is the clock the memory reads: the engine's cycle clock
+	// (WithClock), and tests set it.
 	now func() time.Time
 	// readySince is when a replica's Pod last became Ready, as the
 	// collector reports it, zero when unknown (replicaReadySince); tests
@@ -378,7 +381,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		startSeenPods:          make(map[string]time.Time),
 		startOutliers:          make(map[string]int),
 		variantSeenAt:          make(map[string]time.Time),
-		now:                    time.Now,
+		now:                    clock.RealClock{}.Now,
 		readySince:             replicaReadySince,
 		horizons:               capacity.DefaultHorizons(),
 	}
@@ -404,6 +407,14 @@ func (a *SaturationAnalyzer) WithHorizons(h capacity.Horizons) (*SaturationAnaly
 	defer a.mu.Unlock()
 	a.horizons = sanitized
 	return a, replaced
+}
+
+// WithClock sets the clock every stamp and every age in the analyzer's learned
+// state reads: the engine passes its cycle clock, which holds one reading per
+// cycle. Call it before the analyzer is used.
+func (a *SaturationAnalyzer) WithClock(c clock.PassiveClock) *SaturationAnalyzer {
+	a.now = c.Now
+	return a
 }
 
 // Horizons reports the horizons in force, for the caller that logs them.
@@ -508,11 +519,11 @@ func (a *SaturationAnalyzer) NoteVariantsPresent(namespace, modelID string, vari
 			a.forgotten[namespace+"/"+v] = m
 		}
 	}
-	// The memo ages on the wall clock (stableAccelerator), so it is touched on
-	// the wall clock too.
+	// The memo ages on the analyzer's clock (stableAccelerator), so it is
+	// touched on that clock too.
 	for _, v := range variantNames {
 		if memo, ok := a.lastAccelerator[namespace+"/"+v]; ok {
-			memo.lastUsed = time.Now()
+			memo.lastUsed = now
 			a.lastAccelerator[namespace+"/"+v] = memo
 		}
 	}
@@ -559,19 +570,13 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 	defer a.mu.Unlock()
 	variantTimeout, bucketRetention := a.horizons.VariantTimeout, a.horizons.BucketRetention
 	var evicted Evicted
-	// The analyzer's clock for the sweep, the windows included. In the
-	// controller a.now is time.Now, so this changes nothing there. Under a
-	// spec's fake clock it does: a spec stamps a window with TouchAt(fake),
-	// and Stale measured that stamp against the wall clock, so the two
-	// disagreed by the distance from the fixture's date to today. Once that
-	// passed a retention, the sweep took a window touched a moment earlier
-	// and the spec failed on the date rather than on the code.
-	//
-	// Two entries still age on the wall clock, because that is the clock
-	// they are stamped on: the accelerator memo (stableAccelerator and
-	// NoteVariantsPresent write time.Now) and a pending restore's windows
-	// (their LastUsed came from a window's own stamp). A stamp and its sweep
-	// must read one clock; which one is the stamp's choice.
+	// The analyzer's clock for the sweep, and for every entry it sweeps:
+	// each is stamped on a.now too, the windows, the accelerator memo and a
+	// pending restore's windows included. A stamp and its sweep must read one
+	// clock. Before they did, a spec stamped a window with TouchAt(fake) and
+	// the sweep measured it against the wall clock, so the two disagreed by
+	// the distance from the fixture's date to today, and the spec failed on
+	// the date rather than on the code.
 	now := a.now()
 	for key, ra := range a.computeCapacityHistory {
 		if ra.StaleAt(now, bucketRetention) {
@@ -604,7 +609,7 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 	// safe either way: k2 from the wrong hardware is still clamped by the
 	// live k1.
 	for key, memo := range a.lastAccelerator {
-		if time.Since(memo.lastUsed) > bucketRetention {
+		if now.Sub(memo.lastUsed) > bucketRetention {
 			delete(a.lastAccelerator, key)
 			evicted.Accelerators++
 		}
@@ -615,10 +620,10 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 	// own last-use stamp, because they are keyed by workload BUCKET as well as
 	// by variant (namespace|variant|model|accel|gpus|role|bucket|qN): a bucket
 	// the variant has stopped serving must still expire while the variant
-	// lives, which a per-variant stamp cannot express. Their reads call Touch
+	// lives, which a per-variant stamp cannot express. Their reads call TouchAt
 	// so that "last use" is what it says. The decode-saturation memory and the
 	// fleet shape are per model, not per variant, and age on their own stamps,
-	// written on a.now; the accelerator memo ages on its own wall-clock stamp.
+	// written on a.now; the accelerator memo ages on its own stamp.
 	//
 	// The window is still pruned every sweep,
 	// because stale observations must not reach a fit, but an empty window is
@@ -809,12 +814,12 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 	// their own clocks -- not on when they were restored, which every restart
 	// resets and which a parked variant noted present never moves.
 	for key, p := range a.pendingRestore {
-		if !p.alive(a.now(), time.Now(), a.horizons) {
+		if !p.alive(now, a.horizons) {
 			delete(a.pendingRestore, key)
 			evicted.PendingRestores++
 			continue
 		}
-		p.pruneWindows(time.Now(), a.horizons)
+		p.pruneWindows(now, a.horizons)
 	}
 	// On a.now, the clock rememberDecodeSaturation stamps it with.
 	for key, at := range a.decodeSaturatedAt {

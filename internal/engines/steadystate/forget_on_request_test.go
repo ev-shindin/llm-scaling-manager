@@ -3,6 +3,7 @@ package steadystate
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -58,7 +59,7 @@ func TestRunV2AnalysisOnly_ForgetsOneVariantOnRequest(t *testing.T) {
 		e.capacityStore.Update("ns", "m", "v1", capacity.Record{
 			EffectiveCapacity: 4000, TotalKvCapacityTokens: 16000,
 			EngineParams: rec.EngineParams, LearnedFrom: capacity.LearnedFromLive,
-		})
+		}, time.Now())
 	}
 	isLive := func() bool { return e.capacityStore.Get("ns", "m", "v1").LearnedFrom == capacity.LearnedFromLive }
 
