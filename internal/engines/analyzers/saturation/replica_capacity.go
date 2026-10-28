@@ -1233,7 +1233,9 @@ func estimateCapacityFromParams(params *capacity.EngineParams, avgInput, avgOutp
 	}
 
 	B := float64(params.EffectiveMaxBatchedTokens)
-	S := float64(params.MaxNumSeqs)
+	// S is the engine's batch cap: max_num_seqs, or a lower
+	// --max-num-active-seqs, the most sequences vLLM runs at once (#335).
+	S := float64(params.BatchCap())
 	I := avgInput
 	O := avgOutput
 

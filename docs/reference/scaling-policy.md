@@ -1843,7 +1843,9 @@ not readings of the fleet:
 - `wva_slo_fill` is before any scale-up headroom: compare it with
   `kvCacheThreshold` (0.80 by default). Lower means the target needs more
   replicas than the tier gives. It is also lowered where `max_num_seqs` binds
-  first, so the line's ITL there is at or below the target.
+  first (or `--max-num-active-seqs`: the lower of the two when both are set,
+  the active cap alone when `max_num_seqs` is not stated), so the line's
+  ITL there is at or below the target.
 - Its demand and per-replica capacity are published as `wva_analyzer_demand` /
   `wva_analyzer_target` with `analyzer_name="slo"`, in output tokens per second.
   For one generating variant, `demand ÷ (target × scaleUpThreshold)` is the
@@ -1860,7 +1862,8 @@ not readings of the fleet:
   per step, not per token) and a high prefix-cache hit rate (the per-request KV
   footprint is under-counted). A pod running several data-parallel ranks, the
   normal wide-EP decode layout, is priced as all of its ranks: its batch cap is
-  the ranks times `max_num_seqs`. The
+  the ranks times `max_num_seqs`, or times `--max-num-active-seqs` when that
+  is set and lower, or set with `max_num_seqs` not stated. The
   [proposal](../proposals/slo-tiers.md#before-phase-1-prices-anything) lists
   what is fixed before any of it sizes a fleet.
 - **Prefill is not priced.** On a P/D model only decode variants get a figure,

@@ -267,6 +267,45 @@ var _ = Describe("Analyzer state and inputs", func() {
 			Expect(res.VariantCapacities[0].PerReplicaCapacity).To(BeNumerically("~", 120/0.044, 1e-6))
 		})
 
+		// Issue #335: vLLM runs at most --max-num-active-seqs at once, so the
+		// fill is capped at the lower of it and max_num_seqs, per rank. k = 0.6
+		// implies 120 sequences, so 64 binds and 120 is the target's.
+		Describe("the active-sequence cap", func() {
+			capped := 64 / line.ITLAt(0.32)
+			targetLimited := 120 / 0.044
+			priced := func(p capacity.EngineParams, ranks int) float64 {
+				res := warmWith(newAt(store(p)), func(rm *domain.ReplicaMetrics) { rm.EngineRanks = ranks })
+				return res.VariantCapacities[0].PerReplicaCapacity
+			}
+
+			It("caps the fill at --max-num-active-seqs when it is below max_num_seqs and the target allows more", func() {
+				got := priced(capacity.EngineParams{MaxNumSeqs: 256, MaxNumActiveSeqs: 64}, 0)
+				Expect(got).To(BeNumerically("~", capped, 1e-6))
+				Expect(got).To(BeNumerically("<", priced(capacity.EngineParams{MaxNumSeqs: 256}, 0)),
+					"fewer sequences per replica, so more replicas")
+			})
+
+			It("is max_num_seqs alone when the active cap is unset", func() {
+				Expect(priced(capacity.EngineParams{MaxNumSeqs: 256}, 0)).To(BeNumerically("~", targetLimited, 1e-6))
+				Expect(priced(capacity.EngineParams{MaxNumSeqs: 64}, 0)).To(BeNumerically("~", capped, 1e-6))
+			})
+
+			It("is max_num_seqs when the active cap is at or above it", func() {
+				Expect(priced(capacity.EngineParams{MaxNumSeqs: 64, MaxNumSeqsSet: true, MaxNumActiveSeqs: 64}, 0)).To(BeNumerically("~", capped, 1e-6))
+				Expect(priced(capacity.EngineParams{MaxNumSeqs: 64, MaxNumSeqsSet: true, MaxNumActiveSeqs: 128}, 0)).To(BeNumerically("~", capped, 1e-6))
+			})
+
+			It("multiplies the active cap by the data-parallel ranks", func() {
+				// 8 x 8 = 64 binds; 8 x 16 = 128 does not.
+				Expect(priced(capacity.EngineParams{MaxNumSeqs: 256, MaxNumActiveSeqs: 8}, 8)).To(BeNumerically("~", capped, 1e-6))
+				Expect(priced(capacity.EngineParams{MaxNumSeqs: 256, MaxNumActiveSeqs: 16}, 8)).To(BeNumerically("~", targetLimited, 1e-6))
+			})
+
+			It("leaves a fill the latency target limits unchanged", func() {
+				Expect(priced(capacity.EngineParams{MaxNumSeqs: 256, MaxNumActiveSeqs: 128}, 0)).To(BeNumerically("~", targetLimited, 1e-6))
+			})
+		})
+
 		It("scales the configured KV override, which sizes one engine, by the replica's ranks", func() {
 			res := warmWith(newAt(store(capacity.EngineParams{TotalKvTokensOverride: 100000})),
 				func(rm *domain.ReplicaMetrics) { rm.TotalKvCapacityTokens = 0; rm.EngineRanks = 2 })

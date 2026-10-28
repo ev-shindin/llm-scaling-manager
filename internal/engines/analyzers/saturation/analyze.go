@@ -606,9 +606,9 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			// discarded diagnoses in one session. maxNumSeqs is reported
 			// separately from seqs so the cap is visible when it binds. One
 			// line per replica, so at perReplicaLogLevel.
-			var maxSeqs int64
+			var maxSeqs, activeSeqs int64
 			if engineParams != nil {
-				maxSeqs = engineParams.MaxNumSeqs
+				maxSeqs, activeSeqs = engineParams.MaxNumSeqs, engineParams.MaxNumActiveSeqs
 			}
 			c.logger.V(perReplicaLogLevel).Info("derived-mu",
 				"namespace", c.input.Namespace, "variant", rm.VariantName, "pod", rm.PodName,
@@ -635,8 +635,9 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				"kvReqPerSeq", muShape.KVreq,
 				"kvReqFleet", fleetShape.KVreq,
 				"replicaKvTokens", rm.TotalKvCapacityTokens,
-				// Per engine rank; the replica admits engineRanks times it.
-				"maxNumSeqs", maxSeqs, "engineRanks", rm.Ranks())
+				// Per engine rank; the replica admits engineRanks times the
+				// lower of the two (0 when the active cap is unset).
+				"maxNumSeqs", maxSeqs, "maxNumActiveSeqs", activeSeqs, "engineRanks", rm.Ranks())
 		}
 		c.a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq,
 			c.itlBorrowedFrom[rm.VariantName], c.logger)
