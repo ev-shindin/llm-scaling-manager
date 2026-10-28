@@ -1355,17 +1355,34 @@ wva_report_scaledobjects() {
         where="-A" in_where="on the cluster"
     fi
 
-    # `|| count=0` is the "never fails" contract above, not decoration: under the
-    # caller's `set -e -o pipefail`, a non-zero exit anywhere in this pipe -- e.g.
-    # the ScaledObject CRD not installed yet, an entirely ordinary state for a
-    # preflight to run in -- would otherwise abort the whole script right here,
-    # in the one function on this path that promises it can't.
+    # One list, read three ways below. A list that fails -- Forbidden, the
+    # ScaledObject CRD not installed yet, a timeout -- is said and the check
+    # stops: folded into a count of 0 it printed "none registered yet" to a
+    # tenant who may simply not list ScaledObjects. `|| rc=$?` is the "never
+    # fails" contract above: under `set -e` in the caller a non-zero exit would
+    # otherwise abort the whole script here.
+    #
+    # "Registered with this scaling manager" is a trigger naming the scaler of
+    # THIS install (wva_names_scaler, with WVA_NS): the scaler of another install
+    # on the same cluster is another scaler, not a registration with this one.
+    local so rc=0 count
     # shellcheck disable=SC2086 # $where is one or two words by construction
-    count=$(kubectl get scaledobject $where -o json 2>/dev/null | jq -r '
+    kc_capture get scaledobject $where -o json || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        so="${KC_ERR%%$'\n'*}"
+        log_warning "  ScaledObjects: could not list them $in_where (${so:-kubectl exited $rc}) -- not checked."
+        return 0
+    fi
+    so="$KC_OUT"
+    count=$(printf '%s' "$so" | jq -r --arg ns "$WVA_NS" "$WVA_SCALER_ADDRESS_JQ"'
         [ .items[]?
-          | select([ .spec.triggers[]?.metadata.scalerAddress // ""
-                     | select(startswith("wva-external-scaler.")) ] | length > 0) ] | length' 2>/dev/null) || count=0
-    if [ "${count:-0}" -gt 0 ]; then
+          | select(any(.spec.triggers[]?; .metadata.scalerAddress | wva_names_scaler($ns))) ] | length' 2>/dev/null) || count=""
+    case "$count" in
+        ''|*[!0-9]*)
+            log_warning "  ScaledObjects: the list $in_where could not be read -- not checked."
+            return 0 ;;
+    esac
+    if [ "$count" -gt 0 ]; then
         log_success "  ScaledObjects: $count workload(s) $in_where already registered with WVA."
         log_info "    The plan will offer 'adopt' for each, so you choose what happens to them."
 
@@ -1388,11 +1405,9 @@ wva_report_scaledobjects() {
         # lastTransitionTime unset. An annotation touch did not clear it; only
         # deleting and recreating the ScaledObject did.
         local notready
-        # shellcheck disable=SC2086
-        notready=$(kubectl get scaledobject $where -o json 2>/dev/null | jq -r '
+        notready=$(printf '%s' "$so" | jq -r --arg ns "$WVA_NS" "$WVA_SCALER_ADDRESS_JQ"'
             .items[]?
-            | select([ .spec.triggers[]?.metadata.scalerAddress // ""
-                       | select(startswith("wva-external-scaler.")) ] | length > 0)
+            | select(any(.spec.triggers[]?; .metadata.scalerAddress | wva_names_scaler($ns)))
             | select([ .status.conditions[]? | select(.type == "Ready" and .status == "True") ] | length == 0)
             | "      " + .metadata.namespace + "/" + .metadata.name + ": " +
               ([ .status.conditions[]? | select(.type == "Ready") | .message // .reason ][0] // "no Ready condition yet")
@@ -1411,11 +1426,9 @@ wva_report_scaledobjects() {
     # so they carry WVA_NS: printed without it, apply looks for the scaler in the
     # default namespace and exits 2.
     local others
-    # shellcheck disable=SC2086
-    others=$(kubectl get scaledobject $where -o json 2>/dev/null | jq -r '
+    others=$(printf '%s' "$so" | jq -r --arg ns "$WVA_NS" "$WVA_SCALER_ADDRESS_JQ"'
         [ .items[]?
-          | select([ .spec.triggers[]?.metadata.scalerAddress // ""
-                     | select(startswith("wva-external-scaler.")) ] | length == 0) ] | length' 2>/dev/null) || others=0
+          | select(any(.spec.triggers[]?; .metadata.scalerAddress | wva_names_scaler($ns)) | not) ] | length' 2>/dev/null) || others=0
     # Deliberately log_info, not a warning: this is the expected state here.
     log_info "  ScaledObjects: none $in_where registered with this scaling manager yet — registration is the next step, and nothing scales until it runs:"
     if [ "${others:-0}" -gt 0 ]; then

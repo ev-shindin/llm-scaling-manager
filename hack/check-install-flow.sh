@@ -23,7 +23,7 @@ PASS=0
 # Every case below reports ok or FAIL exactly once. A run that ends early --
 # a sourced lib that exits, a section that stops -- otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=98
+EXPECT_CASES=103
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -1047,13 +1047,20 @@ SO_TWO='{"items":[
 so_report() {
     (
         WVA_SCOPE="$1"
+        # SO_FORBID refuses both lists; SO_NS_LIST is what the -n list returns.
         kubectl() {
+            case "$*" in
+                "get scaledobject "*)
+                    [ -z "${SO_FORBID:-}" ] || { echo 'Error from server (Forbidden): scaledobjects.keda.sh is forbidden: User "u" cannot list resource "scaledobjects"' >&2; return 1; } ;;
+            esac
             case "$*" in
                 "get scaledobject -A -o json")
                     if [ -n "${SO_LIST:-}" ]; then printf '%s' "$SO_LIST"
                     elif [ -n "${SO_NONE:-}" ]; then echo '{"items":[]}'
                     else printf '%s' "$SO_TWO"; fi ;;
-                "get scaledobject -n "*) echo '{"items":[]}' ;;
+                "get scaledobject -n "*)
+                    if [ -n "${SO_NS_LIST:-}" ]; then printf '%s' "$SO_NS_LIST"
+                    else echo '{"items":[]}'; fi ;;
                 *) return 1 ;;
             esac
         }
@@ -1115,6 +1122,45 @@ if ! printf '%s' "$out" | grep -q 'other ScaledObject'; then
 else
     fail "cluster scope: with no ScaledObjects at all, nothing may be said about other ones" "$out"
 fi
+# The scaler of another install is another scaler: a ScaledObject naming it is
+# not registered with this one, and is named among the others.
+out="$(SO_LIST='{"items":[{"metadata":{"namespace":"team-a","name":"o"},"spec":{"triggers":[{"metadata":{"scalerAddress":"wva-external-scaler.wva-system-2.svc:9090"}}]},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}' so_report cluster)"
+if printf '%s' "$out" | grep -q 'none on the cluster registered with this scaling manager yet' \
+    && printf '%s' "$out" | grep -q '1 other ScaledObject(s) on the cluster use another scaler' \
+    && ! printf '%s' "$out" | grep -q 'already registered'; then
+    ok "cluster scope: a ScaledObject naming the scaler of another install is not counted as registered here"
+else
+    fail "cluster scope: a trigger naming wva-external-scaler.wva-system-2 is another scaler, not a registration with wva-system" "$out"
+fi
+
+# Namespace scope, controller in a non-default namespace: the commands are
+# runnable as printed, NAMESPACE=<ns> in front.
+out="$(WVA_NS=team-x so_report namespace)"
+if printf '%s' "$out" | grep -q 'NAMESPACE=team-x make scaledobjects-plan WVA_DEFAULT_SO_PLAN=wva-plan.yaml' \
+    && printf '%s' "$out" | grep -q 'NAMESPACE=team-x make scaledobjects-apply WVA_DEFAULT_SO_PLAN=wva-plan.yaml'; then
+    ok "namespace scope: the registration commands name the namespace of the install"
+else
+    fail "namespace scope: the printed plan/apply commands must start NAMESPACE=team-x" "$out"
+fi
+out="$(SO_NS_LIST='{"items":[{"metadata":{"namespace":"wva-system","name":"up"},"spec":{"triggers":[{"type":"prometheus","metadata":{"serverAddress":"http://prom:9090"}}]}}]}' so_report namespace)"
+if printf '%s' "$out" | grep -q 'none in wva-system registered with this scaling manager yet' \
+    && printf '%s' "$out" | grep -q '1 other ScaledObject(s) in wva-system use another scaler'; then
+    ok "namespace scope: an upstream ScaledObject in the namespace is named"
+else
+    fail "namespace scope: with only an upstream ScaledObject, name it as using another scaler" "$out"
+fi
+
+# A list that fails is not an empty one. Forbidden folded into a count of 0
+# told a tenant who may not list ScaledObjects that none were registered.
+for scope in cluster namespace; do
+    out="$(SO_FORBID=1 so_report "$scope")"
+    if printf '%s' "$out" | grep -q '^WARN   ScaledObjects: could not list them .*(Error from server (Forbidden)' \
+        && ! printf '%s' "$out" | grep -q 'none '; then
+        ok "$scope scope: a Forbidden list is said, not reported as none"
+    else
+        fail "$scope scope: a Forbidden ScaledObject list must warn with the error and claim nothing" "$out"
+    fi
+done
 
 # The node read, with no physical limiter: the admin phase grants it, so a run
 # that includes that phase must not warn that the controller cannot list nodes.
