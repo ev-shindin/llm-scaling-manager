@@ -110,11 +110,11 @@ func storeKey(namespace, modelID, variantName string) string {
 }
 
 // Update stores or overwrites a capacity record for a specific variant and
-// stamps LearnedAt with now. Live data is always authoritative and should always be
-// written via Update, with LearnedFrom set to LearnedFromLive by the caller:
-// that is what stops LoadFromScaleTarget overwriting it while the variant runs
-// the arguments and hardware it was measured on (LoadFromScaleTarget replaces
-// it when either changes).
+// stamps LearnedAt with now. Live data is always authoritative and should
+// always be written via Update, with LearnedFrom set to LearnedFromLive by the
+// caller: that is what stops LoadFromScaleTarget overwriting it while the
+// variant runs the arguments and hardware it was measured on
+// (LoadFromScaleTarget replaces it when either changes).
 func (s *Store) Update(namespace, modelID, variantName string, record Record, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -47,6 +47,10 @@ func New(base clock.PassiveClock) *Clock {
 // taking a new one, so a nested caller cannot split one cycle into two
 // instants. The reading is dropped when the last pin is released. Calling a
 // release more than once releases once.
+//
+// Pin has one caller, the engine's optimize loop, which runs one cycle at a
+// time; readers on other goroutines are safe and see the pinned instant. Two
+// loops pinning one Clock would share a reading, so each loop needs its own.
 func (c *Clock) Pin() (release func()) {
 	if c == nil {
 		return func() {}

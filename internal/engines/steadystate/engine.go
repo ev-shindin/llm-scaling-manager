@@ -326,6 +326,12 @@ type Engine struct {
 // that do not exercise the limiter path can pass allocation.NewNoOpLimiter.
 // Panics if cfg or gpuLimiter is nil to fail fast on programming errors.
 func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Scheme, recorder record.EventRecorder, metricsRegistry *source.SourceRegistry, cfg *config.Config, gpuLimiter allocation.Limiter) *Engine {
+	return newEngine(client, apiReader, scheme, recorder, metricsRegistry, cfg, gpuLimiter, clock.RealClock{})
+}
+
+// newEngine is NewEngine with the cycle clock's base clock given: a test runs
+// the engine on a fake one.
+func newEngine(client client.Client, apiReader client.Reader, scheme *runtime.Scheme, recorder record.EventRecorder, metricsRegistry *source.SourceRegistry, cfg *config.Config, gpuLimiter allocation.Limiter, base clock.PassiveClock) *Engine {
 	if cfg == nil {
 		panic("config is nil in NewEngine - this should not happen (validated in main.go before engine creation)")
 	}
@@ -340,7 +346,7 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	}
 
 	capacityStore := capacity.NewStore()
-	cycleClock := cycleclock.New(clock.RealClock{})
+	cycleClock := cycleclock.New(base)
 	satV2 := saturation.NewSaturationAnalyzer(capacityStore).WithClock(cycleClock)
 	// How long the analyzer keeps what it learns. Configured here rather than
 	// read per-cycle: these are process-lifetime horizons, and a sweep whose
@@ -626,6 +632,9 @@ func (e *Engine) reconcileExternalAnalyzers(ctx context.Context) {
 			// The same Pod gate the builder applies, so every analyzer measures
 			// the same population -- see collector.SeriesPodIsGone.
 			a.DropSeries = e.ReplicaMetricsCollector.SeriesPodIsGone
+			// And the cycle clock, so its AnalyzedAt is on the clock liveness
+			// compares it with (updateLivenessAndSetLive).
+			a.WithClock(e.Clock())
 		}
 		if err != nil {
 			logger.Info("Skipping invalid external analyzer definition", "label", label, "error", err)
@@ -1502,17 +1511,16 @@ func (e *Engine) optimizeV2(
 	evaluated := make(map[string]bool, len(modelGroups))
 	defer func() { e.forgetForbiddenBy(evaluated) }()
 	// One clock reading for the cycle: from here until optimizeV2 returns,
-	// the analyzers and the capacity store stamp and age learned state on
-	// this one instant (e.clock). The engine's own timers -- the sticky
-	// scale-down memory below, the snapshot's write cadence, in-flight
-	// orders, borrowing and the headroom reading -- still read time.Now;
-	// they are scheduling, not learned state.
+	// the analyzers, the capacity store, the learned-state snapshot and the
+	// analyzer liveness stamp and age on this one instant (e.clock). The
+	// engine's own timers -- the sticky scale-down memory below, in-flight
+	// orders, borrowing and the headroom reading -- still read time.Now.
 	defer e.clock.Pin()()
 	e.pruneLastDecided(e.stickyAge(), time.Now())
 	// The learned-state snapshot, restored once before anything is learned or
 	// swept, and written after the cycle has learned what it will.
-	e.restoreLearnedState(ctx, time.Now())
-	defer func() { e.writeLearnedState(ctx, time.Now()) }()
+	e.restoreLearnedState(ctx, e.clock.Now())
+	defer func() { e.writeLearnedState(ctx, e.clock.Now()) }()
 
 	// Before the sweep, which would otherwise judge a variant on a stamp from
 	// before it parked: Analyze stamps too, but only after this point.

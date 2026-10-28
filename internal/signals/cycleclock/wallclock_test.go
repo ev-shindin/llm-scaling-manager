@@ -16,9 +16,11 @@ import (
 // aged on the cycle clock, relative to this one.
 var learnedStatePackages = []string{
 	"../capacity",
+	"../itl",
 	"../../engines/analyzers/saturation",
 	"../../engines/analyzers/throughput",
 	"../../engines/analyzers/slo",
+	"../../engines/analyzers/external",
 }
 
 // wallClockAllowed is every read of the wall clock those packages may keep,
