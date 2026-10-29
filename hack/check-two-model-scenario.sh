@@ -54,6 +54,87 @@ cat > "$STUB/kubectl" <<'STUBEOF'
 #!/usr/bin/env bash
 printf 'CALL[%s]\n' "$*" >> "${KCALLS:-/dev/null}"
 args="$*"
+# WIRE_STUB=1: four model ScaledObjects a-so..d-so naming the WVA scaler, and
+# their KEDA HPAs, all wired unless one of these names a ScaledObject:
+#   WIRE_CPU     its HPA scales on CPU (KEDA's default when the call failed)
+#   WIRE_NOEMN   its status.externalMetricNames is empty (HPA still External)
+#   WIRE_ABSENT  it has no HPA (KEDA deletes it while paused)
+#   WIRE_PAUSED  it carries Paused=True (its HPA still External); with
+#                WIRE_PAUSE_BY=annotation, only the paused-replicas annotation
+#                a reset writes, before KEDA sets the condition
+#   WIRE_LIVE    its HPA reports ScalingActive False, FailedGetExternalMetric
+#   WIRE_HPANAME its status.hpaName is custom-<name>, the HPA named so
+# WIRE_WARM=1 adds a warm-pool ScaledObject with no HPA, WIRE_FOREIGN=1 one
+# with a cpu trigger, and WIRE_CONN=1 a controller log of refused handshakes
+# from a KEDA Pod whose certificate does not chain to the client CA.
+if [ -n "${WIRE_STUB:-}" ]; then
+  wire_lists() {
+    # WIRE_PAUSE_LISTS=N: WIRE_PAUSED holds only for the first N reads of the
+    # ScaledObject list, as a reset's pause does until KEDA clears it.
+    local paused="${WIRE_PAUSED:-}" n
+    if [ -n "${WIRE_PAUSE_LISTS:-}" ]; then
+      n="$(cat "${KCALLS}.wire" 2>/dev/null || echo 0)"
+      [ "$n" -lt "$WIRE_PAUSE_LISTS" ] || paused=""
+    fi
+    jq -cn --arg addr "wva-external-scaler.ns-under-test.svc:9090" \
+      --arg cpu "${WIRE_CPU:-}" --arg noemn "${WIRE_NOEMN:-}" --arg absent "${WIRE_ABSENT:-}" \
+      --arg paused "$paused" --arg live "${WIRE_LIVE:-}" --arg hn "${WIRE_HPANAME:-}" \
+      --arg warm "${WIRE_WARM:-0}" --arg foreign "${WIRE_FOREIGN:-0}" --arg pauseby "${WIRE_PAUSE_BY:-condition}" '
+      def hname($n): if $n == $hn then "custom-" + $n else "keda-hpa-" + $n end;
+      def so($n): {metadata: ({name: $n}
+          + (if $n == $paused and $pauseby == "annotation"
+             then {annotations: {"autoscaling.keda.sh/paused-replicas": "1"}} else {} end)),
+        spec: {triggers: [{type: "external-push", metadata: {scalerAddress: $addr}}]},
+        status: ({externalMetricNames: (if $n == $noemn then [] else ["s0-wva-desired-replicas"] end)}
+          + (if $n == $hn then {hpaName: hname($n)} else {} end)
+          + (if $n == $paused and $pauseby == "condition"
+             then {conditions: [{type: "Paused", status: "True"}]} else {} end))};
+      def hpa($n): {metadata: {name: hname($n)},
+        spec: {metrics: [if $n == $cpu then {type: "Resource", resource: {name: "cpu"}}
+                         else {type: "External", external: {metric: {name: "s0-wva-desired-replicas"}}} end]},
+        status: {conditions: [if $n == $live
+          then {type: "ScalingActive", status: "False", reason: "FailedGetExternalMetric", message: "tls: bad certificate"}
+          else {type: "ScalingActive", status: "True", reason: "ValidMetricFound"} end]}};
+      ["a-so", "b-so", "c-so", "d-so"] as $m
+      | {items: ([$m[] | so(.)]
+          + (if $warm == "1" then [{metadata: {name: "warm-so"}, spec: {triggers: [{type: "external-push",
+               metadata: {scalerAddress: $addr, warmPoolName: "p"}}]}}] else [] end)
+          + (if $foreign == "1" then [{metadata: {name: "foreign-so"}, spec: {triggers: [{type: "cpu",
+               metadata: {value: "50"}}]}}] else [] end))},
+        {items: ([$m[] | select(. != $absent) | hpa(.)]
+          + (if $foreign == "1" then [{metadata: {name: "keda-hpa-foreign-so"}, spec: {metrics: [{type: "Resource"}]}}] else [] end))}'
+  }
+  case "$args" in
+    *"get scaledobject"*"-o json"*|*"get hpa"*"-o json"*)
+      lists="$(wire_lists)"
+      set -- $args
+      kind=""; name=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          scaledobject|hpa) kind="$1"; case "${2:-}" in -*|"") name="" ;; *) name="$2" ;; esac; break ;;
+        esac
+        shift
+      done
+      if [ "$kind" = hpa ]; then list="$(printf '%s\n' "$lists" | sed -n 2p)"; else list="$(printf '%s\n' "$lists" | sed -n 1p)"; fi
+      if [ -z "$name" ] && [ "$kind" = scaledobject ]; then
+        echo $(( $(cat "${KCALLS}.wire" 2>/dev/null || echo 0) + 1 )) > "${KCALLS}.wire"
+      fi
+      if [ -z "$name" ]; then printf '%s\n' "$list"; exit 0; fi
+      one="$(printf '%s' "$list" | jq -c --arg n "$name" '.items[] | select(.metadata.name == $n)')"
+      if [ -n "$one" ]; then printf '%s\n' "$one"; exit 0; fi
+      echo "Error from server (NotFound): $kind \"$name\" not found" >&2
+      exit 1 ;;
+    *"logs -n "*"-c manager"*)
+      [ "${WIRE_CONN:-0}" = 1 ] && echo '2026-10-28T20:21:56Z INFO external-scaler KEDA external scaler refused a TLS handshake {"remote": "10.0.9.9:45434", "reason": "remote error: tls: bad certificate"}'
+      exit 0 ;;
+    *"get pods -n keda -o json"*)
+      echo '{"items":[{"metadata":{"name":"keda-operator-x"},"status":{"podIP":"10.0.9.9"}}]}'; exit 0 ;;
+    *"get configmap wva-scaler-keda-auth"*"-o json"*)
+      echo '{"data":{"clientCert":"not a certificate"}}'; exit 0 ;;
+    *"get secret wva-external-scaler-client-tls"*"-o json"*)
+      echo '{"data":{"ca.crt":"bm90IGEgY2VydGlmaWNhdGU="}}'; exit 0 ;;
+  esac
+fi
 case "$args" in
   *"get scaledobject -o json"*)
       if [ "${PD_STUB:-0}" = "1" ]; then
@@ -336,18 +417,6 @@ case "$args" in
       if [ "${SECRET_PRESENT:-1}" = "1" ]; then echo "secret/x"; exit 0; fi
       echo 'Error from server (NotFound): secrets "mesh-pull-secret" not found' >&2
       exit 1 ;;
-  # HPA_STUB, with SIM4_STUB=1: the KEDA HPAs of the four simulator
-  # ScaledObjects. external = wired; cpu = every one on the CPU default, as
-  # KEDA leaves them when its call to the scaler fails; mixed = only
-  # qwen3-32b on the CPU default.
-  *"get hpa -o json"*)
-      [ -n "${HPA_STUB:-}" ] || exit 0
-      hpa() { printf '{"metadata":{"name":"keda-hpa-%s-so"},"spec":{"metrics":[{"type":"%s"}]}}' "$1" "$2"; }
-      t_all=External; t_d=External
-      [ "$HPA_STUB" = cpu ] && t_all=Resource && t_d=Resource
-      [ "$HPA_STUB" = mixed ] && t_d=Resource
-      echo "{\"items\":[$(hpa llama-31-8b $t_all),$(hpa qwen3-8b $t_all),$(hpa qwen3-30b-a3b $t_all),$(hpa qwen3-32b $t_d)]}"
-      exit 0 ;;
   *) exit 0 ;;
 esac
 STUBEOF
@@ -768,45 +837,127 @@ fi
 # ScaledObject Ready and every KEDA HPA on the CPU default: KEDA's operator
 # held a client certificate from an earlier install, the controller refused
 # every call, and no model ever left one replica. verify passed.
+# Judged by the installer's own wva_scaler_so_wiring (HPA metric AND the
+# ScaledObject's status.externalMetricNames), plus two live signals: the HPA
+# failing to read the metric, and the controller refusing KEDA's handshakes.
+WIRE_FIX="the ScaledObjects above are not wired to WVA"
 case_begin
-SIM4_STUB=1 HPA_STUB=cpu run_verb verify
+WIRE_STUB=1 run_verb verify
+if [ "$RC" -ne 0 ] || printf '%s' "$OUT" | grep -q "$WIRE_FIX"; then
+    fail "verify refused four wired ScaledObjects (rc $RC): $(printf '%s' "$OUT" | tail -4)"
+else
+    ok "four wired ScaledObjects pass verify"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_CPU=d-so run_verb verify
 if [ "$RC" -eq 0 ]; then
-    fail "verify passed with every model's HPA on the CPU default: WVA's decisions reach nothing and both arms run a fixed fleet"
-elif ! printf '%s' "$OUT" | grep -q 'qwen3-32b-so (HPA keda-hpa-qwen3-32b-so: scales on Resource)'; then
-    fail "verify refused without naming the unwired ScaledObject and what its HPA scales on: $OUT"
+    fail "verify passed with model D's HPA on the CPU default: WVA's decisions reach nothing for it"
+elif ! printf '%s' "$OUT" | grep -q 'd-so: HPA keda-hpa-d-so: trigger(s) 0 have no External metric'; then
+    fail "verify refused without naming the unwired ScaledObject and its trigger: $OUT"
+elif printf '%s' "$OUT" | grep -q '      a-so:'; then
+    fail "verify named a wired ScaledObject as unwired: $OUT"
 elif ! printf '%s' "$OUT" | grep -q 'rollout restart deployment/keda-operator'; then
     fail "verify refused without naming the fix (restart KEDA's operator): $OUT"
 else
-    ok "unwired ScaledObjects are refused at verify, each named, with the KEDA restart"
+    ok "an HPA on the CPU default is refused, only that model named, with the KEDA restart"
 fi
 
 case_begin
-SIM4_STUB=1 HPA_STUB=mixed run_verb verify
-if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'qwen3-32b-so (HPA'; then
-    fail "verify passed with one model's HPA on the CPU default: rc $RC"
-elif printf '%s' "$OUT" | grep -q 'llama-31-8b-so (HPA'; then
-    fail "verify named a wired ScaledObject as unwired: $OUT"
+WIRE_STUB=1 WIRE_NOEMN=c-so run_verb verify
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'c-so: HPA keda-hpa-c-so: trigger(s) 0'; then
+    fail "verify passed an HPA with the External metric whose ScaledObject lists no externalMetricNames (rc $RC): KEDA built the spec once and the call since failed"
 else
-    ok "one unwired model of four is refused, and only that one is named"
+    ok "an External HPA whose ScaledObject lists no external metric is refused"
 fi
 
 case_begin
-SIM4_STUB=1 HPA_STUB=external run_verb verify
-if printf '%s' "$OUT" | grep -q 'not wired'; then
-    fail "verify called four wired ScaledObjects unwired: $OUT"
+WIRE_STUB=1 WIRE_LIVE=b-so WIRING_TIMEOUT=2 WIRING_POLL=1 run_verb verify
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'b-so: HPA keda-hpa-b-so: tls: bad certificate (FailedGetExternalMetric'; then
+    fail "verify passed an HPA that cannot read WVA's metric now (rc $RC): $(printf '%s' "$OUT" | tail -3)"
 else
-    ok "ScaledObjects whose HPAs carry the External metric pass the wiring check"
+    ok "an HPA failing to get the external metric is refused, live"
 fi
 
 case_begin
-SIM4_STUB=1 HPA_STUB=cpu POOL_EXISTS=0 run_verb run nopool
-if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'arm nopool refused: the ScaledObjects above are not wired'; then
-    fail "an arm started with every ScaledObject unwired: rc $RC
+WIRE_STUB=1 WIRE_CONN=1 KEDA_NAMESPACE_EXPLICIT=true KEDA_NAMESPACE=keda run_verb verify
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q "refused TLS handshakes from KEDA's Pod(s) keda-operator-x"; then
+    fail "verify passed while the controller refused KEDA's handshakes (rc $RC): $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "a controller refusing KEDA's handshakes is refused, though every HPA looks wired"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_PAUSED=a-so WIRING_TIMEOUT=2 WIRING_POLL=1 run_verb verify
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'a-so: still paused after 2s'; then
+    fail "a ScaledObject still paused when the wait ran out did not refuse as paused (rc $RC): $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "a pause that is never lifted refuses once the wait runs out"
+fi
+
+# The installer's wva_scaler_so_wiring sees the Paused condition only. The
+# annotation a reset writes comes first, and KEDA may not have set the
+# condition yet: judged then, the HPA still reads as wired.
+case_begin
+WIRE_STUB=1 WIRE_PAUSED=b-so WIRE_PAUSE_BY=annotation WIRING_TIMEOUT=2 WIRING_POLL=1 run_verb verify
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'b-so: still paused after 2s'; then
+    fail "a ScaledObject paused by annotation alone passed as wired (rc $RC): $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "a pause the annotation states before the condition does is still a pause"
+fi
+
+case_begin
+rm -f "$WORK/calls.wire"
+WIRE_STUB=1 WIRE_PAUSED=a-so WIRE_PAUSE_LISTS=2 WIRING_TIMEOUT=30 WIRING_POLL=1 run_verb verify
+if [ "$RC" -ne 0 ] || printf '%s' "$OUT" | grep -q "$WIRE_FIX"; then
+    fail "a pause lifted on the third look was judged before it lifted (rc $RC): $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "the check waits for a reset's pause to clear, then passes"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_ABSENT=d-so WIRING_TIMEOUT=2 WIRING_POLL=1 run_verb verify
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'd-so: HPA keda-hpa-d-so still absent after 2s'; then
+    fail "a ScaledObject with no HPA was not refused as absent (rc $RC): $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "an HPA KEDA never rebuilt refuses as absent once the wait runs out"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_HPANAME=c-so WIRING_TIMEOUT=2 WIRING_POLL=1 run_verb verify
+if [ "$RC" -ne 0 ] || printf '%s' "$OUT" | grep -q "$WIRE_FIX"; then
+    fail "an HPA found through status.hpaName was not found (rc $RC): $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "the HPA is the one status.hpaName names, not keda-hpa-<name>"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_WARM=1 WIRING_TIMEOUT=2 WIRING_POLL=1 run_verb verify
+if [ "$RC" -ne 0 ] || printf '%s' "$OUT" | grep -q 'warm-so'; then
+    fail "a warm-pool ScaledObject was judged as a model (rc $RC): $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "a warm-pool ScaledObject is left out of the wiring check"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_FOREIGN=1 run_verb verify
+if [ "$RC" -ne 0 ]; then
+    fail "a ScaledObject naming no WVA scaler was refused rather than warned about: $(printf '%s' "$OUT" | tail -3)"
+elif ! printf '%s' "$OUT" | grep -q 'ScaledObject foreign-so names no WVA scaler (its HPA scales on Resource)'; then
+    fail "a ScaledObject naming no WVA scaler passed without a warning: $OUT"
+else
+    ok "a ScaledObject that names no WVA scaler is warned about, not refused"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_CPU=a-so POOL_EXISTS=0 VERB_TIMEOUT=30 run_verb run nopool
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q "arm nopool refused: $WIRE_FIX"; then
+    fail "an arm started with an unwired ScaledObject: rc $RC
 $(printf '%s' "$OUT" | tail -5)"
 elif grep -q 'CALL\[apply' "$CALLS" 2>/dev/null; then
-    fail "the arm created the load Job before refusing the unwired ScaledObjects"
+    fail "the arm created the load Job before refusing the unwired ScaledObject"
 else
-    ok "an arm with unwired ScaledObjects is refused before any load"
+    ok "an arm with an unwired ScaledObject is refused before any load"
 fi
 
 # ---------------------------------------------------------------------------
@@ -2145,7 +2296,7 @@ fi
 # models, every default it derives from them (the scenario, the stacks)
 # recomputed, and the given settings in force when it is read.
 nm_source() {
-    unset BENCH_SPEC STACK_C STACK_D MODEL_C MODEL_D MAX_REPLICAS_C MAX_REPLICAS_D GPUS_PER_REPLICA_C GPUS_PER_REPLICA_D HIGH_RPS_C HIGH_RPS_D LOW_RPS_C LOW_RPS_D
+    unset BENCH_SPEC STACK_C STACK_D MODEL_C MODEL_D MAX_REPLICAS_C MAX_REPLICAS_D GPUS_PER_REPLICA_C GPUS_PER_REPLICA_D HIGH_RPS HIGH_RPS_B HIGH_RPS_C HIGH_RPS_D LOW_RPS_C LOW_RPS_D
     MODEL_COUNT="$1"
     shift
     local kv
@@ -2157,6 +2308,23 @@ nm_source() {
     . "$SCRIPT" >/dev/null 2>&1
     NS=ns-under-test
 }
+
+# Every burst of a three- or four-model run needs THREE replicas, so the quota
+# of 6 binds (3 + 3 + 1 + 1 = 8). Two models keep their own 9 and 8, and a
+# rate the caller sets always wins.
+case_begin
+r4="$( (nm_source 4; printf '%s ' "$HIGH_RPS" "$HIGH_RPS_B" "$HIGH_RPS_C" "$HIGH_RPS_D" "$LOW_RPS" "$LOW_RPS_C" "$LOW_RPS_D") 2>&1)"
+r2="$( (nm_source 2; printf '%s ' "$HIGH_RPS" "$HIGH_RPS_B") 2>&1)"
+rset="$( (nm_source 4 HIGH_RPS=12 HIGH_RPS_B=11; printf '%s ' "$HIGH_RPS" "$HIGH_RPS_B") 2>&1)"
+if [ "$r4" != "19 16.5 8 5.4 3 1.5 0.5 " ]; then
+    fail "four-model rates are '$r4', not bursts 19 16.5 8 5.4 (2.2 x each one-replica ceiling) over lows 3 1.5 0.5"
+elif [ "$r2" != "9 8 " ]; then
+    fail "a two-model run lost its own burst rates: '$r2', not 9 8"
+elif [ "$rset" != "12 11 " ]; then
+    fail "a burst rate set by the caller was overridden by the four-model default: '$rset'"
+else
+    ok "four models burst at 19, 16.5, 8 and 5.4; two keep 9 and 8; a set rate wins"
+fi
 
 case_begin
 got="$( (nm_source 4; URL_C=http://10.0.0.1:80/qwen3-30b-a3b URL_D=http://10.0.0.1:80/qwen3-32b \
@@ -2292,7 +2460,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=137
+CASES_EXPECTED=147
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

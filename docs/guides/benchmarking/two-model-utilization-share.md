@@ -100,6 +100,16 @@ make benchmark-two-model-verify
 
 Do **not** create a pool: every share arm refuses to run while one exists.
 
+`verify`, and every arm before it sends load, refuse a model whose
+ScaledObject is not connected to WVA: its KEDA HPA lacks WVA's metric, cannot
+read it, or the controller is refusing KEDA's connections. Each arm first waits
+up to `WIRING_TIMEOUT` (60 s) for KEDA to settle after the reset. The usual
+cause is a reinstall in the same namespace while KEDA's operator kept running:
+it keeps the old client certificate. Restart it
+(`kubectl rollout restart deployment/keda-operator -n keda`, or stand up with
+`KEDA_RESTART=true`) and run `verify` again. A run without this check once
+spent both arms at one replica per model, with every ScaledObject `Ready`.
+
 The standup applies these to its own copy of the scenario, so nothing under
 `hack/` is edited by hand. Set them on the `preflight` line too, and re-run
 `preflight` after changing one:
@@ -213,8 +223,10 @@ read by each `run`, and every arm of one comparison must use the same ones.
 
 ## Three or four models
 
-> **Not run on GPUs yet.** The driver, the schedule and every report are
-> checked by `make lint-deploy-scripts`; no cluster run has measured them.
+> **No valid GPU result yet.** One four-model run on H200 finished, but its
+> ScaledObjects were not connected to WVA, so no model ever scaled and its
+> arms compare nothing. It did measure what one replica of each model serves
+> (the table below), which sets the rates. `verify` now refuses such a run.
 
 Two models in anti-phase are the smallest case of the claim. With more models,
 each rise has more falling models to take GPUs from. `MODEL_COUNT=3` or `4` runs
@@ -233,17 +245,30 @@ the same arms with three or four models under one quota:
 - **Per-model settings** follow the A/B names: `STACK_C`, `MODEL_C`,
   `HIGH_RPS_C`, `LOW_RPS_C`, `MAX_REPLICAS_C`, `GPUS_PER_REPLICA_C`, and the
   same with `_D`.
-- **Models C and D have their own rates**, sized like A and B: the low rate
-  well inside one replica, the burst just past what one replica serves. One
-  replica's ceiling was measured on H200 with 1000 tokens in, 500 out and
-  `maxNumSeq` 32:
+- **Every burst needs three replicas.** With three or four models the
+  defaults put each model's low rate inside one replica and its burst at about
+  2.2 times what one replica serves, measured on H200 with 1000 tokens in, 500
+  out and `maxNumSeq` 32:
 
-  | model | between bursts | burst | rps one replica serves |
-  | --- | --- | --- | --- |
-  | A, `Llama-3.1-8B-Instruct` | `LOW_RPS=3` | `HIGH_RPS=9` | 8.6 |
-  | B, `Qwen3-8B` | `LOW_RPS=3` | `HIGH_RPS_B=8` | 7.5 |
-  | C, `Qwen3-30B-A3B-FP8` | `LOW_RPS_C=1.5` | `HIGH_RPS_C=4` | 3.6 |
-  | D, `Qwen3-32B` | `LOW_RPS_D=0.5` | `HIGH_RPS_D=3` | about 2.45 (not saturated at 2) |
+  | model | between bursts | burst | rps one replica serves | burst on 3 replicas |
+  | --- | --- | --- | --- | --- |
+  | A, `Llama-3.1-8B-Instruct` | `LOW_RPS=3` | `HIGH_RPS=19` | 8.6 | 74% |
+  | B, `Qwen3-8B` | `LOW_RPS=3` | `HIGH_RPS_B=16.5` | 7.5 | 73% |
+  | C, `Qwen3-30B-A3B-FP8` | `LOW_RPS_C=1.5` | `HIGH_RPS_C=8` | 3.6 | 74% |
+  | D, `Qwen3-32B` | `LOW_RPS_D=0.5` | `HIGH_RPS_D=5.4` | about 2.45 (not saturated at 2) | 73% |
+
+  Why three: the model that burst before still holds its replicas for the
+  300 s scale-down delay, which is longer than the 90 s band. A burst that
+  needs three then asks for 3 + 3 + 1 + 1 = 8 GPUs against a quota of 6, so
+  the quota binds. A burst that needs two asks for 2 + 2 + 1 + 1 = 6 and the
+  quota never holds anyone back. This is the **expectation** the first run
+  must confirm: its report's "Refused scale-ups" table (from
+  `wva_model_scaling_blocked`) must show the quota holding a model back. D's
+  ceiling is an estimate. Two-model runs keep `HIGH_RPS=9` and
+  `HIGH_RPS_B=8`, and a rate you set always wins.
+
+  At A's 19 rps the loader container runs 32 workers. If the report refuses
+  the arm for the driver's own queueing, raise `LOAD_CPU_LIMIT` (default 4).
 
 The quota bounds above become, for N models:
 

@@ -1825,9 +1825,11 @@ else:
     ok("any two of three models bursting at once is counted; the rotation has none")
 
 
-def nm_rewrite(arm_dir, meta_fn=None, desired_fn=None):
-    """Edit an nm_arm directory in place: meta_fn(meta) changes the meta, and
-    desired_fn(k) gives the k-th GPU sample its `desired` map."""
+def nm_rewrite(arm_dir, meta_fn=None, desired_fn=None, outside=None):
+    """Edit an nm_arm directory in place: meta_fn(meta) changes the meta,
+    desired_fn(k) gives the k-th GPU sample its `desired` map, and `outside`
+    ((ts, desired), ...) adds samples at those timestamps -- before t0 or past
+    the schedule's end -- holding the last sample's Pods."""
     mp = os.path.join(arm_dir, "meta.json")
     if meta_fn:
         with open(mp) as fh:
@@ -1839,9 +1841,13 @@ def nm_rewrite(arm_dir, meta_fn=None, desired_fn=None):
         gp = os.path.join(arm_dir, "gpus.jsonl")
         with open(gp) as fh:
             rows = [json.loads(ln) for ln in fh if ln.strip()]
+        for k, row in enumerate(rows):
+            row["desired"] = desired_fn(k)
+        for ts, want in outside or ():
+            rows.append({"ts": ts, "pods": rows[-1]["pods"], "desired": want})
+        rows.sort(key=lambda r: r["ts"])
         with open(gp, "w") as fh:
-            for k, row in enumerate(rows):
-                row["desired"] = desired_fn(k)
+            for row in rows:
                 fh.write(json.dumps(row) + chr(10))
 
 
@@ -1874,8 +1880,10 @@ elif "Model C's ladder ran 200s behind" not in _err:
     fail("refused, but without naming the model whose ladder lagged: %s" % _err.strip())
 elif "BOTH models" in _err:
     fail("a four-model refusal still says BOTH models: %s" % _err.strip())
+elif any("%s with %s" % (x, y) in _err for x, y in ("AB", "AC", "AD", "BC", "BD")):
+    fail("pairs whose bursts never met are listed beside C with D: %s" % _err.strip())
 else:
-    ok("the refusal names C with D and says model C ran 200s behind")
+    ok("the refusal names C with D, and only them, and says model C ran 200s behind")
 
 case("an arm set in which nothing ever scaled is refused")
 # Both arms of that baseline sampled one replica per model in every one of 470
@@ -1907,6 +1915,27 @@ elif _rc2 != 0:
     fail("an arm set in which model B scaled was refused: %s" % _err2.strip())
 else:
     ok("every arm at a fixed fleet is refused; one desired change in one arm is enough")
+
+case("a desired change outside the run does not count as scaling")
+# The sampler also covers the preload before t0 and the report-writing tail
+# after the schedule ends. A reset scaling the fleet down there is not the
+# autoscaler acting during the run, so it must not clear the guard.
+_root = tempfile.mkdtemp()
+_today, _tot = nm_arm(_root, "today", 4)
+_share, _ = nm_arm(_root, "share", 4)
+nm_rewrite(_today, desired_fn=lambda k: dict(_flat))
+nm_rewrite(_share, desired_fn=lambda k: dict(_flat),
+           outside=((990, dict(_flat, **{"stack-b-decode": 2})),
+                    (1000 + _tot + 10, dict(_flat, **{"stack-a-decode": 2}))))
+_n, _mv = report.fleet_moved(os.path.join(_share, "gpus.jsonl"), 1000, _tot)
+_rc, _out, _err = run_quiet(report.main, ["--nopool", _today, "--baseline-name", "today",
+                                           "--arm", "share=" + _share])
+if _mv:
+    fail("fleet_moved counted desired changes before t0 and after the schedule end as the run scaling")
+elif _rc == 0 or "nothing scaled" not in _err:
+    fail("an arm whose only desired changes fell outside the run was compared: %s" % _err.strip())
+else:
+    ok("changes before t0 or after the schedule end leave the fixed-fleet refusal standing")
 
 case("four models: the repeats report has every burst, transfers and GPU-seconds by model")
 _root = tempfile.mkdtemp()

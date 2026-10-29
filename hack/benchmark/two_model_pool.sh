@@ -155,7 +155,11 @@ LOW_RPS="${LOW_RPS:-3}"
 # models' capacity, and for the slower one the run measured which arm was less
 # broken rather than what a bridge is worth. 6 sits inside both models' capacity
 # at two replicas while still needing a scale-up from one.
-HIGH_RPS="${HIGH_RPS:-9}"
+#
+# With three or four models A and B burst at 19 and 16.5 instead (below).
+nm_high_a=9 nm_high_b=8
+if [ "$MODEL_COUNT" -ge 3 ] 2>/dev/null; then nm_high_a=19 nm_high_b=16.5; fi
+HIGH_RPS="${HIGH_RPS:-$nm_high_a}"
 # Model B's burst rate, separately, because the two models do not have the same
 # per-replica capacity. MEASURED: at 9 rps Llama served comfortably once scaled
 # (steady-state p50 83ms) while Qwen drowned (steady-state p50 5717ms, an
@@ -166,27 +170,28 @@ HIGH_RPS="${HIGH_RPS:-9}"
 # It also serves the premise rather than bending it: the claim is that the SUM
 # OF DEMAND is flat, and with equal request rates against unequal capacity the
 # sum of ACCELERATOR demand is not.
-HIGH_RPS_B="${HIGH_RPS_B:-8}"
-# Models C and D's rates, in a run of three or four: each between its bursts
-# (LOW_RPS_C/D) and at its burst (HIGH_RPS_C/D). Sized like A and B: the low
-# rate well inside one replica, the burst just past what one replica serves.
+HIGH_RPS_B="${HIGH_RPS_B:-$nm_high_b}"
+# THREE OR FOUR MODELS: every burst sized to need THREE replicas, so the
+# namespace quota binds. A and B keep 9 and 8 above for two models.
 #
 # MEASURED on H200, 1000 tokens in and 500 out, maxNumSeq 32, ONE replica each
-# (a run in which nothing scaled, so every burst met a single replica):
-#   what one replica served when saturated -- A 8.6 rps (at a 9 rps burst),
-#   B 7.5 (at 8), C 3.6 (at 5: TTFT p50 48s, each burst stage draining
-#   ~90-100s late). D was NOT saturated at 2 rps (TTFT p50 0.2s, ~25 of its 32
-#   sequences busy, 12.3s a request), so its ceiling is about 32 / 13s = 2.45.
-# A and B burst at 1.05 and 1.07 times one replica, which is what drives them
-# to their peak. C and D now match: C 4 rps (1.1 x 3.6), D 3 (1.2 x 2.45,
-# the margin for an estimate). At MAX_REPLICAS (3) that is 37% of C's fleet and
-# 41% of D's, so neither is beyond what scaling can serve. The previous 5 and
-# 2 were estimates that put C at 1.4 replicas' worth (its backlog stretched
-# every stage it burst in, and its burst ran into D's) and D under one.
-# Between bursts C at 1.5 is 0.42 of a replica and D at 0.5 is 0.2.
-HIGH_RPS_C="${HIGH_RPS_C:-4}"
+# (a four-model run in which nothing scaled, so every burst met one replica):
+# one replica served, saturated, A 8.6 rps, B 7.5, C 3.6 (at a 5 rps burst its
+# TTFT p50 was 48s). D was NOT saturated at 2 rps (TTFT p50 0.2s, ~25 of 32
+# sequences busy at 12.3s a request), so its ceiling is about 32 / 13s = 2.45.
+#
+# Each burst is about 2.2 x that ceiling: A 19, B 16.5, C 8, D 5.4 -- more than
+# two replicas serve, about 73% of three. The quota of 6 then binds: a rising
+# model wants 3 while the model before it still holds its 3 through the 300s
+# scale-down stabilization, and 3 + 3 + 1 + 1 = 8 > 6. A burst at 1.1 x
+# needed 2, and 2 + 2 + 1 + 1 = 6 only met the quota. An EXPECTATION, not a
+# measurement: the first run's report must show the quota holding a model
+# back (Refused scale-ups, from wva_model_scaling_blocked), and D's ceiling is
+# an estimate. Between bursts each model stays inside one replica: A and B at
+# 3 (0.35 and 0.4), C at 1.5 (0.42), D at 0.5 (0.2).
+HIGH_RPS_C="${HIGH_RPS_C:-8}"
 LOW_RPS_C="${LOW_RPS_C:-1.5}"
-HIGH_RPS_D="${HIGH_RPS_D:-3}"
+HIGH_RPS_D="${HIGH_RPS_D:-5.4}"
 LOW_RPS_D="${LOW_RPS_D:-0.5}"
 INPUT_TOKENS="${INPUT_TOKENS:-1000}"
 OUTPUT_TOKENS="${OUTPUT_TOKENS:-500}"
@@ -471,10 +476,89 @@ controller_metric_errors() {
         | grep -iE 'prometheus|metrics' | grep -iE 'error|refused|denied|timeout|no such host' | tail -5
 }
 
-# unwired_scaledobjects: one line per model ScaledObject (warm-pool and paused
-# ones skipped) whose HPA does not carry an External metric, naming what it
-# scales on instead. Nothing when every one is wired, and nothing when the
-# HPAs cannot be read -- this refuses only what it has seen.
+# How long refuse_unwired waits for KEDA to settle -- a reset's pause lifted,
+# the HPA rebuilt, its metric readable -- before it judges, and how often it
+# looks. A wait that runs out refuses; it never passes.
+WIRING_TIMEOUT="${WIRING_TIMEOUT:-60}"
+WIRING_POLL="${WIRING_POLL:-3}"
+
+# with_scaler_lib <function> [args...]: runs it in a subshell that has the
+# installer's scaler helpers (deploy/lib), kubectl bound to KUBE_CONTEXT, so the
+# benchmark judges KEDA's wiring by the installer's own rules, not a copy.
+with_scaler_lib() {
+    (
+        # shellcheck source=../../deploy/lib/constants.sh
+        . "$ROOT/deploy/lib/constants.sh" || exit 3
+        # shellcheck source=../../deploy/lib/common.sh
+        . "$ROOT/deploy/lib/common.sh" || exit 3
+        # shellcheck source=../../deploy/lib/scaler_tls.sh
+        . "$ROOT/deploy/lib/scaler_tls.sh" || exit 3
+        kubectl() { command kubectl ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} "$@"; }
+        "$@"
+    )
+}
+
+# wiring_snapshot (inside with_scaler_lib): one "<state><TAB><ScaledObject>
+# <TAB><detail>" line per model ScaledObject in $NS, warm-pool ones left out:
+#   foreign     names no WVA scaler (detail: what its HPA scales on)
+#   paused      KEDA is told not to scale it (a reset pins it this way)
+#   absent      its HPA does not exist (KEDA deletes it while paused)
+#   failing     its HPA cannot read the metric (ScalingActive False,
+#               FailedGetExternalMetric): KEDA cannot reach the scaler now,
+#               whatever it wired when the HPA was built
+#   wired | unwired | unknown   wva_scaler_so_wiring: the HPA and the
+#               ScaledObject status.externalMetricNames both carry the metric
+# Or one "unreadable<TAB>-<TAB><why>" line when the lists cannot be read.
+wiring_snapshot() {
+    local sos hpas rows st so detail
+    sos="$(kubectl -n "$NS" get scaledobject -o json 2>&1)" || {
+        printf 'unreadable\t-\tthe ScaledObjects did not read: %s\n' "$(printf '%s\n' "$sos" | head -1)"; return 0; }
+    hpas="$(kubectl -n "$NS" get hpa -o json 2>&1)" || {
+        printf 'unreadable\t-\tthe HPAs did not read: %s\n' "$(printf '%s\n' "$hpas" | head -1)"; return 0; }
+    printf '%s' "$hpas" | jq -e '.items | type == "array"' >/dev/null 2>&1 || {
+        printf 'unreadable\t-\tthe HPAs did not read as a list\n'; return 0; }
+    rows="$(printf '%s' "$sos" | jq -r --arg ns "$WVA_NS" --argjson h "$hpas" "$WVA_SCALER_ADDRESS_JQ"'
+        ($h.items // []) as $hl
+        | .items[]?
+        | select([.spec.triggers[]?.metadata.warmPoolName] | all(. == null))
+        | .metadata.name as $n
+        | (.status.hpaName // ("keda-hpa-" + $n)) as $hn
+        | ([$hl[] | select(.metadata.name == $hn)] | .[0]) as $hpa
+        | ([.spec.triggers[]? | select((.metadata.scalerAddress // "") | wva_names_scaler($ns))] | length > 0) as $ours
+        | ([$hpa.status.conditions[]? | select(.type == "ScalingActive" and .status == "False"
+             and .reason == "FailedGetExternalMetric") | (.message // "")] | .[0]) as $failing
+        | (([.status.conditions[]? | select(.type == "Paused" and .status == "True")] | length > 0)
+           or ((.metadata.annotations // {}) | has("autoscaling.keda.sh/paused-replicas") or has("autoscaling.keda.sh/paused"))) as $paused
+        | if ($ours | not) then ["foreign", $n, ([$hpa.spec.metrics[]? | .type] | join(", "))]
+          elif $paused then ["paused", $n, $hn]
+          elif $hpa == null then ["absent", $n, $hn]
+          elif $failing != null then ["failing", $n, $hn + ": " + $failing]
+          else ["check", $n, $hn] end
+        | @tsv' 2>/dev/null)" || { printf 'unreadable\t-\tthe ScaledObjects did not parse\n'; return 0; }
+    while IFS=$'\t' read -r st so detail; do
+        [ -n "$st" ] || continue
+        if [ "$st" = check ]; then
+            st="$(wva_scaler_so_wiring "$NS" "$so")"
+            case "$st" in
+                unwired*) detail="$detail: trigger(s) ${st#unwired } have no External metric in the HPA or in the ScaledObject status.externalMetricNames"; st=unwired ;;
+            esac
+        fi
+        printf '%s\t%s\t%s\n' "$st" "$so" "$detail"
+    done <<<"$rows"
+}
+
+# keda_conn_snapshot (inside with_scaler_lib): "<state><TAB><detail>" from
+# wva_scaler_keda_conn_state -- whether the controller refused handshakes from
+# KEDA's Pods lately (stale, copy, none or unknown).
+keda_conn_snapshot() {
+    wva_scaler_keda_conn_state
+    printf '%s\t%s\n' "$WVA_SCALER_KEDA_CONN" "${WVA_SCALER_KEDA_CONN_PODS:-}${WVA_SCALER_KEDA_CONN_WHY:-}"
+}
+
+# refuse_unwired <what>: dies unless every model ScaledObject naming WVA's
+# scaler is wired and KEDA can reach the scaler now. A ScaledObject that names
+# no WVA scaler is warned about, not refused; lists that cannot be read are
+# warned about too, since this refuses only what it has seen.
 #
 # Ready is not wired. MEASURED: a four-model baseline ran both arms, an hour of
 # GPUs, with every ScaledObject Ready and every HPA on the CPU default. KEDA's
@@ -482,35 +566,44 @@ controller_metric_errors() {
 # controller refused every handshake, and no model ever left one replica. The
 # standup said "4 ScaledObject(s) still unwired" and went on; verify said
 # "every model ScaledObject reports Ready" and passed.
-unwired_scaledobjects() {
-    local sos hpas
-    sos="$(k get scaledobject -o json 2>/dev/null)" || return 0
-    hpas="$(k get hpa -o json 2>/dev/null)" || {
-        warn "could not read the HPAs in $NS, so whether KEDA wired the ScaledObjects is unchecked"
-        return 0
-    }
-    printf '%s' "$hpas" | jq -e '.items | type == "array"' >/dev/null 2>&1 || return 0
-    printf '%s' "$sos" | jq -r --argjson h "$hpas" '
-        ($h.items // []) as $hl
-        | .items[]?
-        | select([.spec.triggers[]?.metadata.warmPoolName] | all(. == null))
-        | select([.status.conditions[]? | select(.type == "Paused" and .status == "True")] | length == 0)
-        | (.status.hpaName // ("keda-hpa-" + .metadata.name)) as $hn
-        | ([$hl[] | select(.metadata.name == $hn)] | .[0]) as $hpa
-        | [$hpa.spec.metrics[]? | .type] as $types
-        | select($types | index("External") | not)
-        | .metadata.name + " (HPA " + $hn + ": "
-          + (if $hpa == null then "absent" elif ($types | length) == 0 then "no metrics"
-             else "scales on " + ($types | join(", ")) end) + ")"' 2>/dev/null
-}
-
-# refuse_unwired <what>: dies naming every unwired model ScaledObject.
+#
+# It waits first: `reset` pauses every ScaledObject, which makes KEDA delete
+# its HPA, and unpauses at the end, so an arm that starts right after can see
+# a Paused condition not yet cleared or no HPA yet. Judged mid-way, the first
+# would pass unchecked and the second refuse a healthy arm.
 refuse_unwired() {
-    local unwired
-    unwired="$(unwired_scaledobjects)"
-    [ -n "$unwired" ] || return 0
-    printf '%s\n' "$unwired" | sed 's/^/      /' >&2
-    die "$1: the ScaledObjects above are not wired -- their HPAs do not carry WVA's External metric, so WVA's decisions reach nothing and these models stay at their floor. After a reinstall in this namespace KEDA's operator keeps its old client certificate: restart it (kubectl rollout restart deployment/keda-operator -n keda, or stand up again with KEDA_RESTART=true), then run verify again."
+    local what="$1" snap end pending bad="" st so detail conn cdetail
+    end=$(( $(date +%s) + WIRING_TIMEOUT ))
+    while :; do
+        snap="$(with_scaler_lib wiring_snapshot)" || \
+            die "$what: could not load the installer's scaler helpers from $ROOT/deploy/lib, so KEDA's wiring cannot be judged"
+        pending="$(printf '%s\n' "$snap" | awk -F'\t' '$1 == "paused" || $1 == "absent" || $1 == "failing"')"
+        [ -n "$pending" ] && [ "$(date +%s)" -lt "$end" ] || break
+        sleep "$WIRING_POLL"
+    done
+    while IFS=$'\t' read -r st so detail; do
+        case "$st" in
+            ""|wired) ;;
+            unreadable) warn "KEDA wiring in $NS is unchecked: $detail" ;;
+            foreign) warn "ScaledObject $so names no WVA scaler (its HPA scales on ${detail:-nothing}); it is not judged" ;;
+            paused) bad="$bad$so: still paused after ${WIRING_TIMEOUT}s -- the pause was not lifted, so KEDA scales nothing"$'\n' ;;
+            absent) bad="$bad$so: HPA $detail still absent after ${WIRING_TIMEOUT}s -- KEDA did not rebuild it"$'\n' ;;
+            failing) bad="$bad$so: HPA $detail (FailedGetExternalMetric for ${WIRING_TIMEOUT}s) -- KEDA cannot read WVA's metric now"$'\n' ;;
+            unwired) bad="$bad$so: HPA $detail"$'\n' ;;
+            *) bad="$bad$so: its ScaledObject or HPA is unreadable ($st)"$'\n' ;;
+        esac
+    done <<<"$snap"
+    if [ -z "$bad" ] && printf '%s\n' "$snap" | grep -q '^wired'; then
+        IFS=$'\t' read -r conn cdetail <<<"$(with_scaler_lib keda_conn_snapshot)"
+        case "$conn" in
+            none) ;;
+            stale|copy) bad="the controller refused TLS handshakes from KEDA's Pod(s) $cdetail in the last 5 minutes ($conn): KEDA cannot reach the scaler, whatever its HPAs say"$'\n' ;;
+            *) warn "whether the controller refuses KEDA's handshakes is unknown: ${cdetail:-no reason given}" ;;
+        esac
+    fi
+    [ -n "$bad" ] || return 0
+    printf '%s' "$bad" | sed 's/^/      /' >&2
+    die "$1: the ScaledObjects above are not wired to WVA, so its decisions reach nothing and these models stay at their floor. After a reinstall in this namespace KEDA's operator keeps its old client certificate: restart it (kubectl rollout restart deployment/keda-operator -n keda, or stand up again with KEDA_RESTART=true), then run verify again."
 }
 
 case "$GATEWAY_REUSE" in
