@@ -17,7 +17,7 @@ export REPO_ROOT
 # The default is the image these manifests were released with: the newTag in
 # config/base/manager/kustomization.yaml, as deploy/install.sh reads it. On main
 # that is :main, a floating build of main. On a checkout of a release tag
-# (git checkout v0.10.0) it is that release, so the guides install the
+# (git checkout v0.10.2) it is that release, so the guides install the
 # release and not whatever main last pushed. Upstream WVA images do not accept
 # --external-scaler-bind-address, which these manifests pass: pointing the
 # guides at ghcr.io/llm-d/...:latest gave a CrashLoopBackOff on "unknown flag",

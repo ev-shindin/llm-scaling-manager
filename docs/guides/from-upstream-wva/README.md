@@ -148,7 +148,7 @@ controller that manages every namespace. Both would also publish the same
 # Get a release of this project. The install guides run from this checkout.
 git clone https://github.com/ev-shindin/llm-scaling-manager.git
 cd llm-scaling-manager
-git checkout v0.10.0
+git checkout v0.10.2
 ```
 <!-- guide:migrate.checkout end -->
 
