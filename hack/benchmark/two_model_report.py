@@ -733,7 +733,18 @@ def shortfall(path, t0=None, t_end=None):
 
 
 def burst_overlap(arm):
-    """Seconds during which BOTH models were at their high rate.
+    """Seconds during which any two models were at their high rate at once.
+
+    The sum of burst_overlap_pairs; None when that is None.
+    """
+    pairs = burst_overlap_pairs(arm)
+    if pairs is None:
+        return None
+    return sum(s for _, _, s in pairs)
+
+
+def burst_overlap_pairs(arm):
+    """[(role, role, seconds)] for every pair of models whose bursts overlapped.
 
     THE thing an anti-phase run must not contain, measured directly rather than
     through a proxy. Each model's real wall-clock stage boundaries are
@@ -783,14 +794,93 @@ def burst_overlap(arm):
             continue
         bursts[role] = [(s, e) for s, e, r in spans[role] if r == high]
     # Every PAIR of models: with three or four in rotation, any two bursting at
-    # once is the overlap the band exists to prevent.
-    total = 0.0
+    # once is the overlap the band exists to prevent. Kept per pair so the
+    # refusal can name the two models rather than say "both".
+    out = []
     for i, ra in enumerate(roles):
         for rb in roles[i + 1:]:
+            pair = 0.0
             for s1, e1 in bursts[ra]:
                 for s2, e2 in bursts[rb]:
-                    total += max(0.0, min(e1, e2) - max(s1, s2))
-    return total
+                    pair += max(0.0, min(e1, e2) - max(s1, s2))
+            if pair > 0:
+                out.append((ra, rb, pair))
+    return out
+
+
+def ladder_lag(arm):
+    """{role: seconds} -- how far each model's ladder fell behind the schedule.
+
+    The worst, over the run, of the model's own cumulative stage time minus the
+    scheduled end of that stage. A stage ends when its requests drain, so a
+    model that queues past what its replicas serve stretches every stage it
+    bursts in, and everything after starts that much late. MEASURED on a
+    four-model run in which no model ever scaled: the 30B MoE, held at one
+    replica against a burst above its capacity, drained 101s and 88s past its
+    two burst stages and ended 214s behind; the other three stayed within 60s.
+    Which model lags, not the spread between them, is what says where to look.
+
+    Empty when the generator reported no per-stage timing.
+    """
+    meta = arm.get("meta") or {}
+    schedule = meta.get("schedule") or []
+    windows = meta.get("windows") or {}
+    out = {}
+    for role in roles_of(meta):
+        stages = (windows.get(role) or {}).get("stages") or []
+        if not stages or len(stages) != len(schedule):
+            return {}
+        t = 0.0
+        worst = 0.0
+        for st, w in zip(schedule, stages):
+            e = w.get("elapsed")
+            if not isinstance(e, (int, float)):
+                return {}
+            t += e
+            worst = max(worst, t - st["end"])
+        out[role] = worst
+    return out
+
+
+def fleet_moved(path, t0=None, t_end=None):
+    """(samples, moved): whether any Deployment's desired replicas changed.
+
+    Read from the same sampler file as `shortfall`, over the run only. An arm
+    whose desired replicas never changed ran a fixed fleet: no autoscaler
+    acted. MEASURED: a four-model baseline ran both arms, an hour of GPUs, with
+    every ScaledObject unwired -- KEDA's operator still held a client
+    certificate from a previous install, so the controller refused every call
+    and each HPA sat on the CPU default. 470 and 473 samples, every one of
+    them one replica per model; the report compared two identical fixed fleets.
+
+    (0, False) when the file is absent or no sample carries `desired`.
+    """
+    if not os.path.exists(path):
+        return 0, False
+    n = 0
+    first = None
+    moved = False
+    for line in open(path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            s = json.loads(line)
+        except ValueError:
+            continue
+        want = s.get("desired")
+        if not want:
+            continue
+        if t0 is not None and s.get("ts") is not None:
+            off = s["ts"] - t0
+            if off < 0 or (t_end is not None and off > t_end):
+                continue
+        n += 1
+        if first is None:
+            first = want
+        elif want != first:
+            moved = True
+    return n, moved
 
 
 def phase_drift(arm):
@@ -933,16 +1023,30 @@ def admissible(arms, max_queue_delay, max_short=300.0, max_overlap=0.0,
                                    stall_note(arm.get("stalled", 0))))
         drift = phase_drift(arm)
         arm["drift"] = drift
-        overlap = burst_overlap(arm)
+        pairs = burst_overlap_pairs(arm)
+        overlap = None if pairs is None else sum(s for _, _, s in pairs)
         arm["overlap"] = overlap
         if overlap is not None and overlap > max_overlap:
-            problems.append("in the %s arm BOTH models were bursting at once for %.0fs "
-                            "(limit %.0fs). One pool covering many models is the claim "
+            lag = ladder_lag(arm)
+            worst = max(lag, key=lag.get) if lag else None
+            problems.append("in the %s arm two models were bursting at once for %.0fs in all "
+                            "(%s; limit %.0fs). One pool covering many models is the claim "
                             "under test, and it rests on their peaks not coinciding -- a "
                             "pool asked for two models at once can serve one, and would "
-                            "be recorded as failing. Raise OVERLAP_SECONDS above the "
-                            "%.0fs the two ladders drifted apart."
-                            % (arm["name"], overlap, max_overlap, drift or 0.0))
+                            "be recorded as failing.%s"
+                            % (arm["name"], overlap,
+                               ", ".join("%s with %s %.0fs" % (ra.upper(), rb.upper(), s)
+                                         for ra, rb, s in pairs),
+                               max_overlap,
+                               (" Model %s's ladder ran %.0fs behind the schedule, the most of "
+                                "any model: a stage ends only when its requests drain, so a "
+                                "model queueing past what its replicas serve stretches every "
+                                "stage it bursts in. Find out why it queued -- did it scale, "
+                                "is its burst above what MAX_REPLICAS replicas serve -- before "
+                                "widening OVERLAP_SECONDS." % (worst.upper(), lag[worst]))
+                               if worst else
+                               " Raise OVERLAP_SECONDS above the %.0fs the ladders drifted "
+                               "apart." % (drift or 0.0)))
         qd = driver_queueing(arm)
         arm["queue_p95"] = qd
         if qd is None:
@@ -958,6 +1062,25 @@ def admissible(arms, max_queue_delay, max_short=300.0, max_overlap=0.0,
                             "that is the loader's latency, not the cluster's, and it is "
                             "inside every TTFT below"
                             % (arm["name"], qd * 1000, max_queue_delay * 1000))
+    # NOTHING SCALED IN ANY ARM. Every arm ran the fleet it started with, so
+    # the comparison is of fixed fleets under different labels -- whatever the
+    # TTFT columns say. One flat arm alone can be legitimate (a floor arm held
+    # above its demand); every arm flat is an autoscaler that never acted.
+    moved = []
+    for arm in arms:
+        sched = arm["meta"].get("schedule") or []
+        n, mv = fleet_moved(os.path.join(arm["dir"], "gpus.jsonl"), arm["meta"].get("t0"),
+                            sched[-1]["end"] if sched else None)
+        if n:
+            moved.append((arm["name"], n, mv))
+    if moved and not any(mv for _, _, mv in moved):
+        problems.append("no Deployment's desired replicas changed in any arm (%s): nothing "
+                        "scaled, so every arm ran the fleet it started with and the comparison "
+                        "is of fixed fleets. Check that every model's ScaledObject is wired -- "
+                        "its HPA carries WVA's External metric, not the CPU default -- and that "
+                        "the controller logs decisions for the models, not 'No active "
+                        "VariantAutoscalings'."
+                        % ", ".join("%s %d samples" % (nm, n) for nm, n, _ in moved))
     return problems
 
 
@@ -997,7 +1120,7 @@ def main(argv):
                         "new replica takes to boot -- that gap is the phenomenon under "
                         "study, not a defect")
     p.add_argument("--max-overlap", type=float, default=0.0,
-                   help="seconds both models may be bursting at once")
+                   help="seconds any two models may be bursting at once")
     p.add_argument("--max-sampling-gap", type=float, default=0.05,
                    help="fraction of an arm's window that may be missing from the "
                         "accelerator sampling before its GPU-seconds mean nothing")
@@ -1088,7 +1211,7 @@ def main(argv):
     band = (a["meta"] or {}).get("overlap_seconds")
     for arm in arms:
         if arm.get("overlap") is not None:
-            print("- %s: both models bursting at once for %.0fs" % (arm["name"], arm["overlap"]))
+            print("- %s: two models bursting at once for %.0fs" % (arm["name"], arm["overlap"]))
     print("- the %s models drifted at most %s apart, against a %s band of both-low "
           "between bursts (a stage ends when its requests drain, and the bursting "
           "model drains slower)"

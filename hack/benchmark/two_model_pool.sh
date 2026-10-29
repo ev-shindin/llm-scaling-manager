@@ -168,22 +168,25 @@ HIGH_RPS="${HIGH_RPS:-9}"
 # sum of ACCELERATOR demand is not.
 HIGH_RPS_B="${HIGH_RPS_B:-8}"
 # Models C and D's rates, in a run of three or four: each between its bursts
-# (LOW_RPS_C/D) and at its burst (HIGH_RPS_C/D). Sized so each model needs ONE
-# replica between bursts and about MAX_REPLICAS (3) at its peak.
+# (LOW_RPS_C/D) and at its burst (HIGH_RPS_C/D). Sized like A and B: the low
+# rate well inside one replica, the burst just past what one replica serves.
 #
-# AN ESTIMATE, NOT A MEASUREMENT. The anchor is measured: with 1000 tokens in
-# and 500 out, an 8B model holds about 3 rps per replica (Llama served 9 rps on
-# three, Qwen3-8B needed 8 to stay out of an unbounded queue). Decode is
-# memory-bound, so a replica's rate scales with the bytes each step reads:
-#   C, Qwen3-30B-A3B-FP8: ~30 GB of FP8 experts, most of them touched per step
-#      at a batch of tens, against 16 GB for an 8B model -> ~1.7x slower,
-#      ~1.75 rps a replica. 1.5 rps is 0.9 of one replica; 5 rps is 2.9.
-#   D, Qwen3-32B (bf16, maxNumSeq 32, one H200): 64 GB a step -> ~4x slower,
-#      ~0.75 rps a replica. 0.5 rps is 0.7 of one replica; 2 rps is 2.7.
-# Measure them before trusting a result that leans on C or D.
-HIGH_RPS_C="${HIGH_RPS_C:-5}"
+# MEASURED on H200, 1000 tokens in and 500 out, maxNumSeq 32, ONE replica each
+# (a run in which nothing scaled, so every burst met a single replica):
+#   what one replica served when saturated -- A 8.6 rps (at a 9 rps burst),
+#   B 7.5 (at 8), C 3.6 (at 5: TTFT p50 48s, each burst stage draining
+#   ~90-100s late). D was NOT saturated at 2 rps (TTFT p50 0.2s, ~25 of its 32
+#   sequences busy, 12.3s a request), so its ceiling is about 32 / 13s = 2.45.
+# A and B burst at 1.05 and 1.07 times one replica, which is what drives them
+# to their peak. C and D now match: C 4 rps (1.1 x 3.6), D 3 (1.2 x 2.45,
+# the margin for an estimate). At MAX_REPLICAS (3) that is 37% of C's fleet and
+# 41% of D's, so neither is beyond what scaling can serve. The previous 5 and
+# 2 were estimates that put C at 1.4 replicas' worth (its backlog stretched
+# every stage it burst in, and its burst ran into D's) and D under one.
+# Between bursts C at 1.5 is 0.42 of a replica and D at 0.5 is 0.2.
+HIGH_RPS_C="${HIGH_RPS_C:-4}"
 LOW_RPS_C="${LOW_RPS_C:-1.5}"
-HIGH_RPS_D="${HIGH_RPS_D:-2}"
+HIGH_RPS_D="${HIGH_RPS_D:-3}"
 LOW_RPS_D="${LOW_RPS_D:-0.5}"
 INPUT_TOKENS="${INPUT_TOKENS:-1000}"
 OUTPUT_TOKENS="${OUTPUT_TOKENS:-500}"
@@ -466,6 +469,48 @@ controller_metric_errors() {
     [ -n "$selector" ] || return 0
     k logs -l "$selector" --tail=400 2>/dev/null \
         | grep -iE 'prometheus|metrics' | grep -iE 'error|refused|denied|timeout|no such host' | tail -5
+}
+
+# unwired_scaledobjects: one line per model ScaledObject (warm-pool and paused
+# ones skipped) whose HPA does not carry an External metric, naming what it
+# scales on instead. Nothing when every one is wired, and nothing when the
+# HPAs cannot be read -- this refuses only what it has seen.
+#
+# Ready is not wired. MEASURED: a four-model baseline ran both arms, an hour of
+# GPUs, with every ScaledObject Ready and every HPA on the CPU default. KEDA's
+# operator still presented a client certificate from an earlier install, the
+# controller refused every handshake, and no model ever left one replica. The
+# standup said "4 ScaledObject(s) still unwired" and went on; verify said
+# "every model ScaledObject reports Ready" and passed.
+unwired_scaledobjects() {
+    local sos hpas
+    sos="$(k get scaledobject -o json 2>/dev/null)" || return 0
+    hpas="$(k get hpa -o json 2>/dev/null)" || {
+        warn "could not read the HPAs in $NS, so whether KEDA wired the ScaledObjects is unchecked"
+        return 0
+    }
+    printf '%s' "$hpas" | jq -e '.items | type == "array"' >/dev/null 2>&1 || return 0
+    printf '%s' "$sos" | jq -r --argjson h "$hpas" '
+        ($h.items // []) as $hl
+        | .items[]?
+        | select([.spec.triggers[]?.metadata.warmPoolName] | all(. == null))
+        | select([.status.conditions[]? | select(.type == "Paused" and .status == "True")] | length == 0)
+        | (.status.hpaName // ("keda-hpa-" + .metadata.name)) as $hn
+        | ([$hl[] | select(.metadata.name == $hn)] | .[0]) as $hpa
+        | [$hpa.spec.metrics[]? | .type] as $types
+        | select($types | index("External") | not)
+        | .metadata.name + " (HPA " + $hn + ": "
+          + (if $hpa == null then "absent" elif ($types | length) == 0 then "no metrics"
+             else "scales on " + ($types | join(", ")) end) + ")"' 2>/dev/null
+}
+
+# refuse_unwired <what>: dies naming every unwired model ScaledObject.
+refuse_unwired() {
+    local unwired
+    unwired="$(unwired_scaledobjects)"
+    [ -n "$unwired" ] || return 0
+    printf '%s\n' "$unwired" | sed 's/^/      /' >&2
+    die "$1: the ScaledObjects above are not wired -- their HPAs do not carry WVA's External metric, so WVA's decisions reach nothing and these models stay at their floor. After a reinstall in this namespace KEDA's operator keeps its old client certificate: restart it (kubectl rollout restart deployment/keda-operator -n keda, or stand up again with KEDA_RESTART=true), then run verify again."
 }
 
 case "$GATEWAY_REUSE" in
@@ -2709,6 +2754,7 @@ verb_verify() {
     else
         ok "every model ScaledObject reports Ready"
     fi
+    refuse_unwired "verify refused"
     local errs
     errs="$(controller_metric_errors)"
     if [ -n "$errs" ]; then
@@ -3480,6 +3526,9 @@ verb_run() {
     esac
     local bad
     bad="$(check_sampler_settings)" || die "$bad"
+    # Again at every arm, not only at verify: a ScaledObject KEDA re-reads while
+    # the controller restarts (a reset between arms) can come back unwired.
+    refuse_unwired "arm $arm refused"
     # The controller log is cut from here: what the optimizer did in THIS arm,
     # policy rewrite and preload included, and nothing of the arm before.
     local run_started

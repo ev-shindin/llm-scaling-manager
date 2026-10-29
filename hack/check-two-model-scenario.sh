@@ -336,6 +336,18 @@ case "$args" in
       if [ "${SECRET_PRESENT:-1}" = "1" ]; then echo "secret/x"; exit 0; fi
       echo 'Error from server (NotFound): secrets "mesh-pull-secret" not found' >&2
       exit 1 ;;
+  # HPA_STUB, with SIM4_STUB=1: the KEDA HPAs of the four simulator
+  # ScaledObjects. external = wired; cpu = every one on the CPU default, as
+  # KEDA leaves them when its call to the scaler fails; mixed = only
+  # qwen3-32b on the CPU default.
+  *"get hpa -o json"*)
+      [ -n "${HPA_STUB:-}" ] || exit 0
+      hpa() { printf '{"metadata":{"name":"keda-hpa-%s-so"},"spec":{"metrics":[{"type":"%s"}]}}' "$1" "$2"; }
+      t_all=External; t_d=External
+      [ "$HPA_STUB" = cpu ] && t_all=Resource && t_d=Resource
+      [ "$HPA_STUB" = mixed ] && t_d=Resource
+      echo "{\"items\":[$(hpa llama-31-8b $t_all),$(hpa qwen3-8b $t_all),$(hpa qwen3-30b-a3b $t_all),$(hpa qwen3-32b $t_d)]}"
+      exit 0 ;;
   *) exit 0 ;;
 esac
 STUBEOF
@@ -750,6 +762,51 @@ if [ "$RC" -eq 0 ]; then
     fail "verify passed with TWO gateway Services; the driver would pick one and send both models' traffic at whichever stack owns it"
 else
     ok "an ambiguous gateway is refused rather than picked"
+fi
+
+# READY IS NOT WIRED. A four-model baseline ran both arms with every
+# ScaledObject Ready and every KEDA HPA on the CPU default: KEDA's operator
+# held a client certificate from an earlier install, the controller refused
+# every call, and no model ever left one replica. verify passed.
+case_begin
+SIM4_STUB=1 HPA_STUB=cpu run_verb verify
+if [ "$RC" -eq 0 ]; then
+    fail "verify passed with every model's HPA on the CPU default: WVA's decisions reach nothing and both arms run a fixed fleet"
+elif ! printf '%s' "$OUT" | grep -q 'qwen3-32b-so (HPA keda-hpa-qwen3-32b-so: scales on Resource)'; then
+    fail "verify refused without naming the unwired ScaledObject and what its HPA scales on: $OUT"
+elif ! printf '%s' "$OUT" | grep -q 'rollout restart deployment/keda-operator'; then
+    fail "verify refused without naming the fix (restart KEDA's operator): $OUT"
+else
+    ok "unwired ScaledObjects are refused at verify, each named, with the KEDA restart"
+fi
+
+case_begin
+SIM4_STUB=1 HPA_STUB=mixed run_verb verify
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'qwen3-32b-so (HPA'; then
+    fail "verify passed with one model's HPA on the CPU default: rc $RC"
+elif printf '%s' "$OUT" | grep -q 'llama-31-8b-so (HPA'; then
+    fail "verify named a wired ScaledObject as unwired: $OUT"
+else
+    ok "one unwired model of four is refused, and only that one is named"
+fi
+
+case_begin
+SIM4_STUB=1 HPA_STUB=external run_verb verify
+if printf '%s' "$OUT" | grep -q 'not wired'; then
+    fail "verify called four wired ScaledObjects unwired: $OUT"
+else
+    ok "ScaledObjects whose HPAs carry the External metric pass the wiring check"
+fi
+
+case_begin
+SIM4_STUB=1 HPA_STUB=cpu POOL_EXISTS=0 run_verb run nopool
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'arm nopool refused: the ScaledObjects above are not wired'; then
+    fail "an arm started with every ScaledObject unwired: rc $RC
+$(printf '%s' "$OUT" | tail -5)"
+elif grep -q 'CALL\[apply' "$CALLS" 2>/dev/null; then
+    fail "the arm created the load Job before refusing the unwired ScaledObjects"
+else
+    ok "an arm with unwired ScaledObjects is refused before any load"
 fi
 
 # ---------------------------------------------------------------------------
@@ -2235,7 +2292,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=133
+CASES_EXPECTED=137
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

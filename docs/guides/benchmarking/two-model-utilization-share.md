@@ -233,17 +233,17 @@ the same arms with three or four models under one quota:
 - **Per-model settings** follow the A/B names: `STACK_C`, `MODEL_C`,
   `HIGH_RPS_C`, `LOW_RPS_C`, `MAX_REPLICAS_C`, `GPUS_PER_REPLICA_C`, and the
   same with `_D`.
-- **Models C and D have their own rates**, so that each needs one replica
-  between bursts and about `MAX_REPLICAS` (3) at its burst. The defaults are an
-  **estimate**, not a measurement: an 8B model holds about 3 rps a replica
-  (measured), and decode slows with the bytes each step reads.
+- **Models C and D have their own rates**, sized like A and B: the low rate
+  well inside one replica, the burst just past what one replica serves. One
+  replica's ceiling was measured on H200 with 1000 tokens in, 500 out and
+  `maxNumSeq` 32:
 
-  | model | between bursts | burst | estimated rps a replica |
+  | model | between bursts | burst | rps one replica serves |
   | --- | --- | --- | --- |
-  | C, `Qwen3-30B-A3B-FP8` | `LOW_RPS_C=1.5` | `HIGH_RPS_C=5` | ~1.75 (30 GB of experts a step, against 16 GB) |
-  | D, `Qwen3-32B` | `LOW_RPS_D=0.5` | `HIGH_RPS_D=2` | ~0.75 (64 GB a step) |
-
-  Models A and B keep `LOW_RPS` (3), `HIGH_RPS` (9) and `HIGH_RPS_B` (8).
+  | A, `Llama-3.1-8B-Instruct` | `LOW_RPS=3` | `HIGH_RPS=9` | 8.6 |
+  | B, `Qwen3-8B` | `LOW_RPS=3` | `HIGH_RPS_B=8` | 7.5 |
+  | C, `Qwen3-30B-A3B-FP8` | `LOW_RPS_C=1.5` | `HIGH_RPS_C=4` | 3.6 |
+  | D, `Qwen3-32B` | `LOW_RPS_D=0.5` | `HIGH_RPS_D=3` | about 2.45 (not saturated at 2) |
 
 The quota bounds above become, for N models:
 

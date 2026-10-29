@@ -1824,6 +1824,90 @@ elif report.burst_overlap({"meta": nm_meta(3)}) != 0:
 else:
     ok("any two of three models bursting at once is counted; the rotation has none")
 
+
+def nm_rewrite(arm_dir, meta_fn=None, desired_fn=None):
+    """Edit an nm_arm directory in place: meta_fn(meta) changes the meta, and
+    desired_fn(k) gives the k-th GPU sample its `desired` map."""
+    mp = os.path.join(arm_dir, "meta.json")
+    if meta_fn:
+        with open(mp) as fh:
+            m = json.load(fh)
+        meta_fn(m)
+        with open(mp, "w") as fh:
+            json.dump(m, fh)
+    if desired_fn:
+        gp = os.path.join(arm_dir, "gpus.jsonl")
+        with open(gp) as fh:
+            rows = [json.loads(ln) for ln in fh if ln.strip()]
+        with open(gp, "w") as fh:
+            for k, row in enumerate(rows):
+                row["desired"] = desired_fn(k)
+                fh.write(json.dumps(row) + chr(10))
+
+
+case("four models: an overlap names the two models and the one whose ladder lagged")
+# The four-model baseline that wrote this case: model C, at one replica against
+# a burst above its capacity, drained 101s and 88s past its two burst stages,
+# so its burst ran on into model D's. The refusal said "BOTH models" and
+# "raise OVERLAP_SECONDS above the 201s the two ladders drifted apart" -- the
+# wrong pair count, and the wrong fix: the band was not too short, model C was
+# queueing.
+_root = tempfile.mkdtemp()
+_today, _ = nm_arm(_root, "today", 4)
+_share, _ = nm_arm(_root, "share", 4)
+
+
+def _lag_c(m):
+    for i, st in enumerate(m["schedule"]):
+        if st["rate_c"] > 3:
+            m["windows"]["c"]["stages"][i]["elapsed"] += 100.0
+
+
+nm_rewrite(_share, meta_fn=_lag_c)
+_rc, _out, _err = run_quiet(report.main, ["--nopool", _today, "--baseline-name", "today",
+                                           "--arm", "share=" + _share])
+if _rc == 0:
+    fail("model C's burst ran 200s into model D's and the report compared the arms")
+elif "C with D" not in _err:
+    fail("refused, but without naming the two models that overlapped: %s" % _err.strip())
+elif "Model C's ladder ran 200s behind" not in _err:
+    fail("refused, but without naming the model whose ladder lagged: %s" % _err.strip())
+elif "BOTH models" in _err:
+    fail("a four-model refusal still says BOTH models: %s" % _err.strip())
+else:
+    ok("the refusal names C with D and says model C ran 200s behind")
+
+case("an arm set in which nothing ever scaled is refused")
+# Both arms of that baseline sampled one replica per model in every one of 470
+# and 473 samples: every ScaledObject was unwired, the controller logged "No
+# active VariantAutoscalings" for the whole hour, and the report would have
+# compared two identical fixed fleets had the overlap not refused it first.
+_flat = {"stack-a-decode": 1, "stack-b-decode": 1, "stack-c-decode": 1, "stack-d-decode": 1}
+_root = tempfile.mkdtemp()
+_today, _ = nm_arm(_root, "today", 4)
+_share, _ = nm_arm(_root, "share", 4)
+nm_rewrite(_today, desired_fn=lambda k: dict(_flat))
+nm_rewrite(_share, desired_fn=lambda k: dict(_flat))
+_rc, _out, _err = run_quiet(report.main, ["--nopool", _today, "--baseline-name", "today",
+                                           "--arm", "share=" + _share])
+# Positive control: the same arms, with model B asking for a second replica
+# halfway through the share arm. B holds two Pods throughout, so no shortfall.
+_root2 = tempfile.mkdtemp()
+_today2, _ = nm_arm(_root2, "today", 4)
+_share2, _ = nm_arm(_root2, "share", 4)
+nm_rewrite(_today2, desired_fn=lambda k: dict(_flat))
+nm_rewrite(_share2, desired_fn=lambda k: dict(_flat, **({"stack-b-decode": 2} if k > 100 else {})))
+_rc2, _out2, _err2 = run_quiet(report.main, ["--nopool", _today2, "--baseline-name", "today",
+                                              "--arm", "share=" + _share2])
+if _rc == 0:
+    fail("two arms that never changed a single desired replica were compared")
+elif "nothing scaled" not in _err:
+    fail("refused, but not for the fleet that never moved: %s" % _err.strip())
+elif _rc2 != 0:
+    fail("an arm set in which model B scaled was refused: %s" % _err2.strip())
+else:
+    ok("every arm at a fixed fleet is refused; one desired change in one arm is enough")
+
 case("four models: the repeats report has every burst, transfers and GPU-seconds by model")
 _root = tempfile.mkdtemp()
 _logs = ['{"msg":"Utilization share: transfer started","id":"t1","donor":"ma","receiver":"mc"}',
