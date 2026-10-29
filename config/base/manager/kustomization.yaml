@@ -13,4 +13,4 @@ resources:
 images:
 - name: controller
   newName: ghcr.io/ev-shindin/llm-scaling-manager
-  newTag: v0.10.1
+  newTag: v0.10.2-rc1
