@@ -21,18 +21,18 @@ release. An image older than the manifests crash-loops on flags it does not
 know. Releases are listed on the
 [Releases page](https://github.com/ev-shindin/llm-scaling-manager/releases);
 the first full release is `v0.10.0`, after release candidates `-rc1` to
-`-rc4`. A checked-out release deploys its own tag, so `IMG_TAG` below only
-makes that explicit. Each release's notes list its image
+`-rc4`, and the latest is `v0.10.2`. A checked-out release deploys its own
+tag, so `IMG_TAG` below only makes that explicit. Each release's notes list its image
 digest; a digest names one build, and a tag could in principle be re-pushed.
 
 ```bash
-git checkout v0.10.0
-make deploy-wva NAMESPACE=<namespace> IMG_TAG=v0.10.0
-# or by digest (v0.10.0's, from its release notes)
+git checkout v0.10.2
+make deploy-wva NAMESPACE=<namespace> IMG_TAG=v0.10.2
+# or by digest (v0.10.2's, from its release notes)
 make deploy-wva NAMESPACE=<namespace> \
-  IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:39de69a24a19680895a9bbe7ab6282a93aac9abc8301c834dc441be8f2009424
+  IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:<v0.10.2 digest, from its release notes>
 # out-of-reach shape (the cluster admin runs it): the controller runs in wva-<namespace>
-NAMESPACE=<namespace> make deploy-wva WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace> IMG_TAG=v0.10.0
+NAMESPACE=<namespace> make deploy-wva WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace> IMG_TAG=v0.10.2
 ```
 
 `IMG_TAG` sets the tag of the default `IMG`; `IMG` replaces the whole reference.
@@ -103,6 +103,22 @@ only to change it. Limiters an admin published in a policy namespace
    # out-of-reach shape: the controller runs in wva-<namespace>
    NAMESPACE=<namespace> WVA_NS=wva-<namespace> make scaledobjects-rewire
    ```
+
+### Upgrading from v0.10.1 to v0.10.2
+
+Follow [Upgrade](#upgrade) above. No cluster-admin step is needed. Three
+changes can show after the upgrade:
+
+- **A variant that sets `--max-num-active-seqs` below `--max-num-seqs` can run
+  more replicas.** vLLM runs at most the active cap at once; v0.10.1 priced a
+  replica at `--max-num-seqs` and so ordered too few replicas for it.
+- **Utilization share can fund a second whole-node receiver.** v0.10.1 took a
+  promised GPU off the freest node instead of the node it is on, so a node that
+  was free enough for an 8-GPU pod could look one GPU short.
+- **The install can pick a different Prometheus.** It now takes the first
+  Prometheus resource that scrapes the model namespace, not the first one
+  listed, and warns when none is known to. An install that passes
+  `PROMETHEUS_URL` is unchanged.
 
 ### Upgrading from v0.10.0 to v0.10.1
 

@@ -499,13 +499,13 @@ scenario:
       #   curl -sL "https://ghcr.io/token?scope=repository:ev-shindin/llm-scaling-manager:pull" \
       #     | jq -r .token | xargs -I{} curl -sH "Authorization: Bearer {}" \
       #       https://ghcr.io/v2/ev-shindin/llm-scaling-manager/tags/list
-      # Pinned to the latest release, v0.10.0. `make benchmark-standup`
+      # Pinned to the latest release, v0.10.2. `make benchmark-standup`
       # turns this install off (wva.enabled=false) and installs the controller
       # from deploy/ with IMG instead, so to measure the release there, check
-      # out v0.10.0 and pass IMG=ghcr.io/ev-shindin/llm-scaling-manager:v0.10.0.
+      # out v0.10.2 and pass IMG=ghcr.io/ev-shindin/llm-scaling-manager:v0.10.2.
       image:
         repository: ghcr.io/ev-shindin/llm-scaling-manager
-        tag: v0.10.0
+        tag: v0.10.2
       replicaCount: 1 # WVA controller pod replicas (1 is the chart default)
       # Disable to skip installing the controller but still render the VA
       # + HPA (rare; useful when you reuse a cluster-wide controller
