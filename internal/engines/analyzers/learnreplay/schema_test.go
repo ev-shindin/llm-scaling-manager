@@ -6,59 +6,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
 
 // The recorder refuses a struct with an unexported field at run time, and
 // stops the recording on it. That is safe, and it is late: a field added to
 // an input type stops every recording on its first cycle, on a cluster. This
-// walks every type a recorded event can reach, statically, and fails on an
-// unexported field whose type does not say how to record it (RecordedValue
-// and SetRecordedValue).
-//
-// What a Raw or an interface holds is not reachable by type, so the types
-// encoded into them are listed here too: the input's policy, the capacity
-// records, the learned-state document.
-var recordedTypes = []reflect.Type{
-	reflect.TypeFor[learnrec.Start](),
-	reflect.TypeFor[learnrec.Input](),
-	reflect.TypeFor[*config.ScalingPolicy](),
-	reflect.TypeFor[map[string]*capacity.Record](),
-	reflect.TypeFor[saturation.LearnedState](),
-
-	reflect.TypeFor[saturation.AnalyzeEvent](),
-	reflect.TypeFor[saturation.PresentEvent](),
-	reflect.TypeFor[saturation.Evicted](),
-	reflect.TypeFor[saturation.ForgetVariantEvent](),
-	reflect.TypeFor[saturation.ForgottenTokenEvent](),
-	reflect.TypeFor[saturation.HoldEvent](),
-	reflect.TypeFor[saturation.RestoreEvent](),
-	reflect.TypeFor[saturation.RestoreReport](),
-	reflect.TypeFor[saturation.AcceleratorEvent](),
-	reflect.TypeFor[saturation.LineEvent](),
-
-	reflect.TypeFor[slo.AnalyzeEvent](),
-	reflect.TypeFor[slo.EvictStaleEvent](),
-	reflect.TypeFor[slo.PresentEvent](),
-	reflect.TypeFor[metrics.SLOModelSnapshot](),
-
-	reflect.TypeFor[throughput.AnalyzeEvent](),
-	reflect.TypeFor[throughput.ObserveEvent](),
-
-	reflect.TypeFor[capacity.FileScaleTargetEvent](),
-	reflect.TypeFor[capacity.EvictStaleEvent](),
-
-	reflect.TypeFor[domain.AnalyzerResult](),
-	reflect.TypeFor[domain.AnalyzerInput](),
-}
-
+// walks every type a recorded event can reach (recordedTypes), statically,
+// and fails on an unexported field whose type does not say how to record it
+// (RecordedValue and SetRecordedValue).
 func TestSchema_NoRecordedTypeHasAnUnreadableField(t *testing.T) {
 	seen := map[reflect.Type]bool{}
 	var bad []string

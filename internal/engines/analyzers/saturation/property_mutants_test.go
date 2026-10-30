@@ -13,7 +13,8 @@ import (
 
 // The 2.7 accounting and its mutants. Every finding 2.7 lists is exactly one
 // of: caught (a mutant puts the defect back and its class fails), still
-// escaping (with the reason), or waiting for #388 (the replay and goldens).
+// escaping (with the reason), or waiting for the replay's per-path counters
+// (2.5), which #388 did not build.
 //
 // A mutant puts its defect back in one of four ways, named by its level:
 //   - policy: a policy key set where the guard (the fix) stops working, on
@@ -31,7 +32,7 @@ type findingStatus string
 const (
 	statusCaught   findingStatus = "caught"
 	statusEscaping findingStatus = "still escaping"
-	statusWaits388 findingStatus = "waits for #388"
+	statusWaitsCounters findingStatus = "waits for the replay counters"
 )
 
 // finding is one row of 2.7, with its status and, unless caught, why.
@@ -73,7 +74,7 @@ var findings = []finding{
 	{row: "Imbalance audit (load moved between replicas)", status: statusCaught},
 	{row: "Settle holes: restart", status: statusCaught},
 	{row: "Settle holes: fall, rate escape, idle return, lend", status: statusEscaping, why: "only the restart and joiner events have a case; the others need the settle tracker (PR 1)"},
-	{row: "Restart fix stubbed", status: statusWaits388, why: "the per-path counter \"joined refusals with a known ReadySince\" is the replay's (2.5); the restart itself is caught as \"Settle holes: restart\""},
+	{row: "Restart fix stubbed", status: statusWaitsCounters, why: "the per-path counter \"joined refusals with a known ReadySince\" is the replay's (2.5); #388 brought the goldens and the export, not the per-path counters, so it waits for those. The restart itself is caught as \"Settle holes: restart\""},
 	{row: "'For good' self-sealing low mu", status: statusEscaping, why: "the closed-loop probe lands in PR 3"},
 }
 

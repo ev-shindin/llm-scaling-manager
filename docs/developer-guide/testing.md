@@ -293,10 +293,216 @@ go test ./internal/engines/steadystate/ -run TestLearnerRecording -v
 go test ./internal/engines/analyzers/learnreplay/ ./internal/signals/learnrec/ -v
 ```
 
+### Learner Goldens
+
+A golden is a recording committed as a test fixture, beside the outputs its
+replay produces. `make test` replays every golden and fails when an output
+has moved. The rule for when an output may move is in
+[the learner proposal](../proposals/analyzer-learner.md), section 2.5.
+
+The goldens live in `internal/engines/analyzers/learnreplay/testdata/goldens/`:
+
+- `goldens.yaml` lists every golden and every file of it. The check fails
+  when it and the directory disagree: a file it does not list, or a file it
+  lists that is missing.
+- One directory per golden holds `recording.jsonl.gz`, the exported
+  recording, and one CSV file per output: `results.csv` (each result: role
+  demand, start seconds and the rest), `variant-capacities.csv`,
+  `store-records.csv` (the capacity fields the analyzers write),
+  `lines.csv` (ITL lines published and borrowed), `slo-published.csv` and
+  `learned-state.csv` (each learned-state document, one row per key).
+
+Each row is keyed by the event kind, its time, the model (or line key, or
+learned-state section) and the variant (or key), never by a sequence number.
+Two integers must be equal. Two other numbers are equal when they differ by
+less than one part in 10^9. So two things that vary between replays of the
+same recording do not fail the check: events numbered in another order, and
+a float sum whose last bits differ.
+
+The check also fails on a golden that compares nothing: every analyzer the
+recording's start line says ran must have results, and the slo analyzer, if
+it ran, must have published. `lines.csv` and `learned-state.csv` may be
+empty: lines are published only when the policy turns learned-state reuse
+on, and documents are written only when the learned-state snapshot is on.
+The start line records neither.
+
+The `acceptance` golden is the in-process acceptance run. It covers little
+learning: twelve cycles of fixed synthetic rows. The start-time average, the
+borrow tolerance and the measured k2 and mu paths barely move in it, so a
+change to them can leave it as it is. The cluster recordings cover those.
+
+#### What a golden commits
+
+The export renames every name it can place. It refuses a recording that
+holds anything it cannot place: nothing it does not know is committed.
+
+- **Renamed**, to a pseudonym such as `variant-03`: namespaces, models,
+  variants, pods, images, revisions, forget tokens, engine-argument text and
+  unread flags, label and taint keys and values, resource names, priority
+  and weight classes, limiter names, and GPU products the code does not
+  know. A name is renamed wherever it stands: in a field, a map key, a part
+  of a composite key (by its place: in `ns|model|variant|GPU|count` the
+  first three parts are names, whatever they look like), or a message, in
+  any case (`PAYROLL` is the name `payroll`). The same name always gets the
+  same pseudonym, and names keep their sort order. Engine fingerprints are
+  recomputed from the renamed arguments.
+- **Replaced**: host names, IP addresses (v4 and v6) and URLs in messages
+  become `HOST`, `IP` and `URL`. Analyzer queries and decode errors in the
+  policy become `redacted`.
+- **Kept as they are**: every number and time; the GPU products the code
+  names (`knownAccelerators`); label keys and resource names on an exact
+  list (`knownLabels`: `nvidia.com/gpu.product`, `topology.kubernetes.io/zone`
+  and the like; `payroll.kubernetes.io/team` is renamed); the code's own
+  vocabulary (roles, reasons, dtypes); durations. The add prints the kept
+  strings; read them before you commit.
+- **Messages** are checked whole token by whole token. A token is a run of
+  letters, digits and `- _ . / : |`; anything else separates tokens. After
+  renaming, each token must be, whole: a word of the code's own messages, a
+  pseudonym (alone, or with a pod's suffix), a composite key whose every
+  part is allowed, a number, time, duration or fingerprint, or `HOST`, `IP`
+  or `URL`. A pod's suffix is only what a controller appends: digits (an
+  ordinal), five characters of Kubernetes' random alphabet
+  (`bcdfghjklmnpqrstvwxz2456789`), or a ReplicaSet hash of eight to ten of
+  them (`ns-01-7c9dfb6d84-x7k2p`). The code's words are the whole tokens of
+  the Go string literals (fmt verbs removed; import paths and struct tags
+  left out) of the analyzer, engine, signals, config and domain packages, in
+  `internal/engines/analyzers/learnreplay/message_words.txt`; a test fails
+  when the file is stale, and `make learner-message-words` writes it. A
+  name is renamed in any case, wherever it stands in a token: every run of
+  the token's segments (split at `- _ . / : |`) that is a recorded name is
+  renamed (`llm-inference-7f9c4-dbrx`, `:demand`), and so is a name glued to
+  digits (`2payroll`). A token that is none of these (`tenants-production`,
+  `ns-01-hsbc`, a host, a word in another script) stops the export. A word
+  the code itself uses (`grace`, `production`) passes on its own: the
+  export cannot tell it from the code's.
+- **Backstop**: after every rule above, every string value and map key, the
+  source and the fixture name are lowercased and searched for every
+  recorded name of four characters or more, as plain text. Any hit stops
+  the export, whatever split or glued the name (`scale@demand`,
+  `payroll-kpmgx`), and so do two recorded names that overlap in one
+  message (`payroll-team-x7k2p` holding `payroll-team` and `team-x7k2p`).
+  The one hit let through is a whole value or token that equals the name
+  and is also the code's own word (a role `decode` in a recording whose
+  namespace is `decode`); a code word that merely contains a name is not.
+  Shorter names are left to the token rules. No refusal names what it
+  refused: it names the field, or the position of the word.
+- **Refused**: any other string. The export names the field, never the
+  value. If the string is the code's own word, add it to `vocabulary` in
+  `internal/engines/analyzers/learnreplay/classify.go`; if it is a GPU
+  product or a well-known label, add it to `knownAccelerators` or
+  `knownLabels` there; if it is a name someone chose, classify its field as
+  a rename there.
+
+The numbers are kept on purpose: they are what the replay runs on. A
+recording holds every model the controller manages, so a golden commits
+every tenant's load, capacity and timing, under pseudonyms. Record on a
+cluster where that is agreed, or scope the controller to the models you
+mean to commit.
+
+#### Add a recording as a golden
+
+Record from a controller built from the commit you will add it at. The
+recording's start line holds the commit its controller was built from
+(`make build`, `make docker-build`, `make docker-buildx` and the image
+workflows set it; a binary built from a checkout without them reports the
+revision Go stamps into it). The add checks the commit first, then
+replays the recording and refuses it unless the replay reproduces it byte for
+byte. So it refuses a recording made at another commit, before replaying
+anything:
+
+```text
+the recording was made at <X> and you are at <Y>
+```
+
+The check is skipped when either side is `unknown`, for example a binary
+built without `make`.
+
+Then run one command:
+
+```bash
+make learner-golden-add RECORDING=./learner-recordings/learnrec-20260302T090000.000000000Z.jsonl NAME=e1 SOURCE="E1 benchmark scenario, recorder on, default analyzerTuning"
+```
+
+This:
+
+1. Exports the recording (see above). It first cuts the events after the
+   last `Analyze`: a recording cut short can end inside a cycle.
+2. Refuses it if it is too large (see below), before any replay.
+3. Replays the export and refuses it unless the replay reproduces it byte
+   for byte, and unless its goldens compare something.
+4. Writes `recording.jsonl.gz` and the output files under `NAME/`, then lists
+   them in `goldens.yaml`. A refusal or a failure leaves the directory as it
+   was. What a killed add left (`.add-NAME-*`) is removed by the next add
+   of the same name.
+5. Runs the golden check.
+
+`SOURCE` is how the manifest describes the recording: short, and made of
+ordinary words, for example
+`E1 benchmark scenario, recorder on, default analyzerTuning`. The add
+refuses a `SOURCE` that holds a name the recording holds (in any case, and
+split by `-` or `_`: `Payroll-team` holds `payroll`), and one that holds a
+word that is neither a word of the code's messages nor in
+`internal/engines/analyzers/learnreplay/source_words.txt`, naming the
+words by their position. Add an ordinary English word to that file,
+lowercase, when a source
+needs it; never a name. Never write a cluster name in a source.
+
+`NAME` is held the same way: each part between dashes a number, a
+scenario name such as `e1`, or an ordinary word, and no part holding a
+recorded name (`e1-tuned` passes, `2payroll` does not).
+
+Add `REPLACE=1` to overwrite a golden of the same name.
+
+#### A recording made at another commit
+
+If the controller ran an older commit than your branch:
+
+1. Check out the recording's commit in a worktree:
+   `git worktree add ../at-recording <X>`.
+2. Run `make learner-golden-add` there.
+3. Commit the new golden directory and the `goldens.yaml` entry there, and
+   cherry-pick that commit onto your branch.
+4. On your branch, `make test` replays the golden. If an output moved
+   between the two commits, the check says which; name the change, then run
+   `make learner-goldens`.
+
+#### Size
+
+A compressed recording may be at most 4 MiB. A full recording (256Mi at the
+default cap) does not fit: the acceptance run compresses about 29 to 1, so
+a full one is about twice the limit; at that ratio a head of up to about
+100 MiB fits. Cut it to
+its head with `HEAD_LINES=N`. When a recording is too large, the add says
+which `N` to use: a head that fits, ends on an `Analyze`, and holds an
+`Analyze` of every analyzer the run had. Any head
+replays.
+
+To export without adding a golden, for example to share a recording:
+
+```bash
+go run ./cmd/learnergolden export -in RAW.jsonl -out exported.jsonl.gz
+```
+
+#### When an output moves
+
+Run `make learner-goldens` only when your PR names the change: it rewrites
+every output file from a replay at your commit. Never edit a golden by hand.
+`make learner-goldens-check` runs the check alone and prints, per output, how
+many rows changed and the first change with its sign and size.
+
+#### Write the acceptance run again
+
+To write the acceptance run as a raw recording:
+
+```bash
+LEARNREC_ACCEPTANCE_OUT=$HOME/acceptance.jsonl go test ./internal/engines/steadystate/ -run TestLearnerRecording_AnExportReplaysAndNamesNothing -v
+```
+
 ## Learner Property Tests
 
-The property tests feed the analyzers' learners synthetic inputs and check
-what they learn. For example: a transient is refused, a figure does not move
+The [learner goldens](#learner-goldens) pin what the analyzers output on a
+recorded run. The property tests check something else: they feed the
+learners synthetic inputs and check what they learn. For example: a transient is refused, a figure does not move
 with N, and a genuinely slow replica counts by its weight. The classes and
 their thresholds are in
 [the learner proposal, 2.6](../proposals/analyzer-learner.md#26-property-tests).
@@ -373,7 +579,8 @@ in exactly one of these states:
 
 - **caught**: a mutant puts the defect back, and its class fails;
 - **still escaping**: with the reason;
-- **waits for #388**: the replay and goldens.
+- **waits for the replay counters**: the per-path counters of 2.5, which no
+  PR has built yet.
 
 `TestPropertyMutants` runs each mutant, and checks two more rules: a mutant
 never runs a ledgered case, and every caught row has a mutant.
