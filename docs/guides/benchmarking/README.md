@@ -234,7 +234,7 @@ is in its notes on the
 git checkout v0.10.2
 export IMG=ghcr.io/ev-shindin/llm-scaling-manager:v0.10.2
 # or the exact build
-export IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:<v0.10.2 digest, from its release notes>
+export IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:08b640117764fdcc768fc66e6ad67d4410b275e3ae9a6d7023b8e6cdcfc25a76
 ```
 
 `:main` is rebuilt on every push to `main`, so two runs against it a day apart
