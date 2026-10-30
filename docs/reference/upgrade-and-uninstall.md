@@ -30,7 +30,7 @@ git checkout v0.10.2
 make deploy-wva NAMESPACE=<namespace> IMG_TAG=v0.10.2
 # or by digest (v0.10.2's, from its release notes)
 make deploy-wva NAMESPACE=<namespace> \
-  IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:<v0.10.2 digest, from its release notes>
+  IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:08b640117764fdcc768fc66e6ad67d4410b275e3ae9a6d7023b8e6cdcfc25a76
 # out-of-reach shape (the cluster admin runs it): the controller runs in wva-<namespace>
 NAMESPACE=<namespace> make deploy-wva WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace> IMG_TAG=v0.10.2
 ```
