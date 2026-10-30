@@ -121,3 +121,10 @@ func TestLearnerRecording_EveryHeadOfTheRecordingExportsAndReplays(t *testing.T)
 	assert.Positive(t, refused.Load(), "precondition: heads with no Analyze")
 	t.Logf("%d heads: %d replayed byte for byte, %d refused (no Analyze)", len(lines), replayed.Load(), refused.Load())
 }
+
+// The committed source words hold no name the acceptance script gives.
+func TestLearnerRecording_TheSourceWordsHoldNoName(t *testing.T) {
+	for _, name := range scriptNames() {
+		assert.False(t, learnreplay.IsSourceWord(name), "source_words.txt holds the name %q", name)
+	}
+}

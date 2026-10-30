@@ -141,10 +141,13 @@ func Export(recording []byte, opts ExportOptions) ([]byte, *ExportReport, error)
 	if len(x.problems) > 0 {
 		return nil, nil, x.refusal()
 	}
-	for _, t := range opts.Text {
+	for _, t := range append([]string{opts.Source}, opts.Text...) {
 		if tok := x.nameIn(t); tok != "" {
 			return nil, nil, fmt.Errorf("learnreplay: export: the text to commit beside the export holds a name (the one behind %s)", x.lower[tok])
 		}
+	}
+	if bad := sourceRefusals(opts.Source); len(bad) > 0 {
+		return nil, nil, fmt.Errorf("learnreplay: export: the source holds words that are not ordinary words: %s. Write it short, of ordinary words, such as %q; a word it needs can be added to source_words.txt", strings.Join(bad, ", "), SourceExample)
 	}
 
 	var out bytes.Buffer
@@ -183,8 +186,12 @@ type ExportOptions struct {
 	// recording always exports to the same bytes, and the key, like the raw
 	// recording, is never committed.
 	Key []byte
-	// Text is text that will be committed beside the export (the manifest's
-	// source): the export refuses when it holds a name.
+	// Source is the manifest's account of the recording, committed beside
+	// the export: it may hold no name, and only ordinary words
+	// (sourceRefusals).
+	Source string
+	// Text is other text that will be committed beside the export (the
+	// fixture's name): it may hold no name.
 	Text []string
 }
 
@@ -596,25 +603,6 @@ func alnum(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }
 
-// renameText replaces every whole name in a message with its pseudonym,
-// whatever its case: PAYROLL and Payroll are the name payroll.
-func (x *exporter) renameText(s string) string {
-	low := asciiLower(s)
-	var b strings.Builder
-	for i := 0; i < len(s); {
-		if i == 0 || !wordByte(s[i-1]) {
-			if tok := x.tokenAt(low, i, wordByte); tok != "" {
-				b.WriteString(x.lower[tok])
-				i += len(tok)
-				continue
-			}
-		}
-		b.WriteByte(s[i])
-		i++
-	}
-	return b.String()
-}
-
 // tokenAt is the longest name, lowercased, that low holds at i, ending
 // where joined says no word goes on; "" for none.
 func (x *exporter) tokenAt(low string, i int, joined func(byte) bool) string {
@@ -646,8 +634,9 @@ var (
 	ip6Pattern  = regexp.MustCompile(`\[?[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}\]?(?::\d+)?`)
 	ipPattern   = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b`)
 	hostPattern = regexp.MustCompile(`\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+){2,}\b`)
-	wordSplit   = regexp.MustCompile(`[\s,;()\[\]{}"'=<>]+`)
-	letterRuns  = regexp.MustCompile(`[A-Za-z]+`)
+	// hostPortPattern is a host name of two labels or more with a port:
+	// "gpu-node.local:8080".
+	hostPortPattern = regexp.MustCompile(`\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+:[0-9]+\b`)
 )
 
 // scrub replaces URLs, IP addresses and host names in a message.
@@ -660,6 +649,7 @@ func scrub(s string) string {
 		}
 		return m
 	})
+	s = hostPortPattern.ReplaceAllString(s, "HOST")
 	return hostPattern.ReplaceAllString(s, "HOST")
 }
 
@@ -782,30 +772,6 @@ func (x *exporter) compositeAllowed(s string) bool {
 		}
 		if !ok {
 			return false
-		}
-	}
-	return true
-}
-
-// textAllowed reports a message every word of which is allowed: a whole
-// word that is an allowed atom or composite key, or a word every run of
-// letters in which is a word of the code's own messages (messageWords) or
-// vocabulary. Any other word -- a team, a cluster, a host part the scrub
-// did not catch -- stops the export.
-func (x *exporter) textAllowed(s string) bool {
-	for _, w := range wordSplit.Split(s, -1) {
-		w = strings.TrimRight(w, ".:")
-		if w == "" || x.atomAllowed(w) || strings.Contains(w, "|") && x.compositeAllowed(w) {
-			continue
-		}
-		if _, err := time.ParseDuration(w); err == nil {
-			continue
-		}
-		for _, run := range letterRuns.FindAllString(w, -1) {
-			low := strings.ToLower(run)
-			if !messageWords[low] && !vocabulary[run] && !vocabulary[low] {
-				return false
-			}
 		}
 	}
 	return true

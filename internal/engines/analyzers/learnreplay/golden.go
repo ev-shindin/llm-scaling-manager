@@ -783,7 +783,7 @@ func AddGolden(ctx context.Context, dir, name string, raw []byte, opts AddOption
 	if opts.HeadLines > 0 {
 		raw = headLines(raw, opts.HeadLines)
 	}
-	exported, rep, err := Export(raw, ExportOptions{Text: []string{opts.Source, name}})
+	exported, rep, err := Export(raw, ExportOptions{Source: opts.Source, Text: []string{name}})
 	if err != nil {
 		return nil, err
 	}

@@ -395,10 +395,10 @@ func TestExport_Paths(t *testing.T) {
 		assert.Contains(t, string(out), `"variant-100"`)
 	})
 	t.Run("a name is replaced only as a whole word", func(t *testing.T) {
-		rec := canaryRecording(t, struct{ Error string }{"ns records"})
+		rec := canaryRecording(t, struct{ Error string }{"ns pending"})
 		out, _, err := Export(rec, ExportOptions{})
 		require.NoError(t, err)
-		assert.Contains(t, canaryLine(out), `"Error":"ns-01 records"`)
+		assert.Contains(t, canaryLine(out), `"Error":"ns-01 pending"`)
 	})
 	t.Run("text to commit beside the export may not hold a name", func(t *testing.T) {
 		rec := probeRecording(t, "payroll", "mdl", []string{"v"}, nil, nil)

@@ -355,14 +355,21 @@ holds anything it cannot place: nothing it does not know is committed.
   and the like; `payroll.kubernetes.io/team` is renamed); the code's own
   vocabulary (roles, reasons, dtypes); durations. The add prints the kept
   strings; read them before you commit.
-- **Messages**: after renaming, every word of a message must be a
-  pseudonym, a number, or a word of the code's own messages. Those words are
-  generated from the Go string literals of the analyzer, engine, signals,
-  config and domain packages into
+- **Messages** are checked whole token by whole token. A token is a run of
+  letters, digits and `- _ . / : |`; anything else separates tokens. After
+  renaming, each token must be, whole: a word of the code's own messages, a
+  pseudonym (alone, or with a pod's suffix: `ns-01-7f9c4`), a composite key
+  whose every part is allowed, a number, time, duration or fingerprint, or
+  `HOST`, `IP` or `URL`. The code's words are the whole tokens of the Go
+  string literals (fmt verbs removed) of the analyzer, engine, signals,
+  config and domain packages, in
   `internal/engines/analyzers/learnreplay/message_words.txt`; a test fails
-  when the file is stale, and `make learner-message-words` writes it. A
-  word that is none of these (a team, a cluster, a plural of a name) stops
-  the export.
+  when the file is stale, and `make learner-message-words` writes it. A name
+  is renamed in any case, and as the start of a token when a separator or
+  digits follow (`llm-inference-7f9c4`, `production-0`). A token that is
+  none of these (`tenants-production`, a host, a word in another script)
+  stops the export. A word the code itself uses (`grace`, `production`)
+  passes on its own: the export cannot tell it from the code's.
 - **Refused**: any other string. The export names the field, never the
   value. If the string is the code's own word, add it to `vocabulary` in
   `internal/engines/analyzers/learnreplay/classify.go`; if it is a GPU
@@ -413,11 +420,15 @@ This:
    of the same name.
 5. Runs the golden check.
 
-`SOURCE` is how the manifest describes the recording: the scenario, the
-build, the policy, and what the run does not cover. The add refuses a
-`SOURCE` that holds a name the recording holds, in any case and split by
-`-` or `_` (`Payroll-team` holds `payroll`). Never write a cluster name
-in it.
+`SOURCE` is how the manifest describes the recording: short, and made of
+ordinary words, for example
+`E1 benchmark scenario, recorder on, default analyzerTuning`. The add
+refuses a `SOURCE` that holds a name the recording holds (in any case, and
+split by `-` or `_`: `Payroll-team` holds `payroll`), and one that holds a
+word that is neither a word of the code's messages nor in
+`internal/engines/analyzers/learnreplay/source_words.txt`, naming the
+words. Add an ordinary English word to that file, lowercase, when a source
+needs it; never a name. Never write a cluster name in a source.
 
 Add `REPLACE=1` to overwrite a golden of the same name.
 
