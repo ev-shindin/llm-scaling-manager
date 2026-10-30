@@ -91,6 +91,33 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		_, _, held := analyzer.fleetShapeState("test-ns", "test-model")
 		return held
 	}
+	// decodeSupply is the decode role's supply on a result: what the hold
+	// measures its no-release band against (scaleDown is 0.70 in
+	// makeAnalyzerInput).
+	decodeSupply := func(r *domain.AnalyzerResult) float64 {
+		var s float64
+		for _, vc := range r.VariantCapacities {
+			if vc.VariantName == decodeV {
+				s += float64(vc.ReplicaCount) * vc.PerReplicaCapacity
+			}
+		}
+		return s
+	}
+	// expectNotHeld is the decision on a cycle that raised no hold: decode
+	// is not floored at the band, and no held demand is recorded for it.
+	expectNotHeld := func(r *domain.AnalyzerResult, why string) {
+		GinkgoHelper()
+		Expect(r.HeldRoleDemand).NotTo(HaveKey(domain.RoleDecode), why)
+		supply := decodeSupply(r)
+		Expect(supply).To(BeNumerically(">", 0))
+		Expect(r.RoleDemand[domain.RoleDecode]).To(BeNumerically("<", 0.70*supply), why)
+	}
+	// expectHeld is the decision on a cycle a hold is outstanding on.
+	expectHeld := func(r *domain.AnalyzerResult, why string) {
+		GinkgoHelper()
+		Expect(r.HeldRoleDemand).To(HaveKey(domain.RoleDecode), why)
+		Expect(r.RoleDemand[domain.RoleDecode]).To(BeNumerically(">=", 0.70*decodeSupply(r)), why)
+	}
 	states := func(decodeN int) []domain.VariantReplicaState {
 		return []domain.VariantReplicaState{
 			{VariantName: decodeV, Role: domain.RoleDecode, AcceleratorName: "H200", CurrentReplicas: decodeN, GPUsPerReplica: 1},
@@ -199,6 +226,23 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		Expect(ok).To(BeTrue(), "the hold that raised decode records decode's demand before it")
 		Expect(before).To(BeNumerically("<", drained.RoleDemand[domain.RoleDecode]),
 			"the hold raised it, so what came before is lower")
+	})
+
+	It("holds the fleet on the very cycle that declares the change", func() {
+		// The positive side of the disabled and cooldown specs: when a hold IS
+		// raised, the cycle that declares the change already holds. The fleet
+		// is lightly loaded, so occupancy alone would release on that cycle.
+		steady := cycle(10, 17_282, 0, 1000, 6000, nil)
+		Expect(steady.HeldRoleDemand).NotTo(HaveKey(domain.RoleDecode),
+			"nothing is held before the change, or this proves nothing")
+		Expect(steady.RoleDemand[domain.RoleDecode]).To(BeNumerically("<", 0.70*decodeSupply(steady)),
+			"occupancy alone releases this fleet, or this proves nothing")
+		clock = clock.Add(15 * time.Second)
+
+		swap := cycle(10, 17_282, 0, 8000, 6000,
+			&domain.SchedulerQueueMetrics{QueueSize: 20, QueueBytes: 912_037})
+		Expect(outstanding()).To(BeTrue())
+		expectHeld(swap, "the declaring cycle is held, not just the ones after it")
 	})
 
 	It("releases the fleet once the new shape has a reading of its own", func() {
@@ -336,8 +380,10 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		Expect(outstanding()).To(BeTrue())
 
 		clock = clock.Add(ShapeChangeHoldMax + time.Second)
-		cycle(10, 17_282, 0, 8000, 5000, nil)
+		gaveUpCycle := cycle(10, 17_282, 0, 8000, 5000, nil)
 		Expect(outstanding()).To(BeFalse(), "the backstop gives up on the first hold")
+		expectNotHeld(gaveUpCycle,
+			"the cycle the backstop gives up on declares a change too, and must not hold for it")
 
 		// The slide continues, declaring a change every 90 s and never
 		// saturating, so nothing ever settles. Through the cooldown the fleet
@@ -345,19 +391,21 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		gaveUp := clock
 		for _, out := range []float64{4000, 3200, 2500} {
 			clock = clock.Add(90 * time.Second)
-			cycle(10, 17_282, 0, 8000, out, nil)
+			r := cycle(10, 17_282, 0, 8000, out, nil)
 			Expect(clock.Sub(gaveUp)).To(BeNumerically("<", ShapeChangeHoldMax),
 				"these cycles have to fall inside the cooldown or this proves nothing")
 			Expect(outstanding()).To(BeFalse(),
 				"a hold given up on is not re-raised by the next crossing of the same slide")
+			expectNotHeld(r, "nor held on the cycle that declares the crossing")
 		}
 
 		// Past the cooldown it may hold again -- the bound is a duty cycle, not
 		// a permanent disarm, so a drift that genuinely continues still gets
 		// looked at, and a fleet is released for at least half of it.
 		clock = clock.Add(ShapeChangeHoldMax)
-		cycle(10, 17_282, 0, 8000, 1800, nil)
+		rearmed := cycle(10, 17_282, 0, 8000, 1800, nil)
 		Expect(outstanding()).To(BeTrue())
+		expectHeld(rearmed, "a change that raises a hold holds on the cycle that declares it")
 	})
 
 	It("declares a drift in the arriving prompt length, not just a jump", func() {
@@ -739,8 +787,7 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		// The memo above is not what withholds release; the cycle's own flag
 		// is. It used to report the declaring cycle as held whatever the
 		// policy said, so this cycle's decode demand was raised to the band.
-		Expect(out.HeldRoleDemand).NotTo(HaveKey(domain.RoleDecode),
-			"nor on the cycle that declares the change")
+		expectNotHeld(out, "nor on the cycle that declares the change")
 	})
 
 	It("raises nothing while the shape holds still", func() {
