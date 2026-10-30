@@ -293,6 +293,55 @@ go test ./internal/engines/steadystate/ -run TestLearnerRecording -v
 go test ./internal/engines/analyzers/learnreplay/ ./internal/signals/learnrec/ -v
 ```
 
+## Learner Property Tests
+
+The property tests feed the analyzers' learners synthetic inputs and check
+what they learn: a transient is refused, a figure does not move with N, a
+genuinely slow replica counts by its weight, and so on. The classes and their
+thresholds are in
+[the learner proposal, 2.6](../proposals/analyzer-learner.md#26-property-tests).
+They run in `make test` (under a second). To run them alone:
+
+```bash
+go test ./internal/engines/analyzers/saturation/ -run 'TestLearnerProperties|TestProperty' -v
+```
+
+Each case runs on five fixed seeds. A failure names the seed and the case, as
+`class/learner/case`, so `-run 'TestLearnerProperties/<class>/<learner>/<case>'`
+reruns it.
+
+| file (in `internal/engines/analyzers/saturation/`) | what it holds |
+| --- | --- |
+| `property_test.go` | the runner and the ledger check |
+| `property_cases_test.go` | the cases, and each learner's declared estimand |
+| `property_gen_test.go` | the generators, including the time-base family |
+| `property_mutants_test.go` | one mutant per finding in 2.7, and the findings still escaping |
+| `testdata/properties/known-failures.yaml` | the known-failures ledger |
+
+### The known-failures ledger
+
+Some cases fail on today's code on purpose: they record a known defect. Each
+one is a row in `known-failures.yaml`, with its finding, the result measured
+when the row was added, and the PR that clears it (or `open`). The test is
+strict both ways:
+
+- a case in the ledger must still fail;
+- a case not in the ledger must pass;
+- a row that names no case is an error.
+
+So when a PR fixes a listed defect, the build fails until the PR removes the
+row. Keep the rows sorted by `id`. Do not add a row to make a new failure go
+away: a new failure is a bug, unless the PR names it as a known defect with an
+owner.
+
+### Mutants
+
+`TestPropertyMutants` puts each past defect back and checks that its class
+fails. Most mutants set a policy key so the guard stops working, or change the
+rows the learner sees. Where the fix was an estimator, the mutant is a small
+toy learner with the old estimator. A finding no class catches goes in
+`stillEscaping`, with the reason.
+
 ## End-to-End Tests
 
 One suite in `test/e2e/` runs on Kind with emulated GPUs, or on
