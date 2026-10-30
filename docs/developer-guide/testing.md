@@ -175,6 +175,72 @@ make test
 go test ./internal/controller/... -v
 ```
 
+## Learner Recordings
+
+The learner recorder writes every input the analyzers read, and every result
+they return, to a file of JSON lines, so a run can be replayed through the
+analyzers later (`internal/engines/analyzers/learnreplay`). The design is in
+[the learner proposal](../proposals/analyzer-learner.md), sections 2.4 and 2.5.
+It is a test aid, off by default.
+
+### Turn it on
+
+Add the `learner-recorder` component to the overlay you deploy:
+
+```yaml
+# kustomization.yaml of an overlay beside config/overlays/cluster-scoped/kubernetes
+components:
+- ../../../components/learner-recorder
+```
+
+It mounts a 600Mi `emptyDir` at `/var/lib/wva/learner-recordings`, sets
+`LEARNER_RECORDING_DIR` to it, and adds a small `recordings` sidecar that
+mounts the same volume read-only: the manager image has no `tar`, which
+`kubectl cp` needs. Without the component, set the directory with
+`--learner-recording-dir` (or `LEARNER_RECORDING_DIR`) and mount a volume there
+yourself. The controller refuses `/tmp`: it is a 64Mi `emptyDir`, and the
+kubelet evicts the pod when it fills.
+
+What it writes:
+
+- One file per controller start, named by its start time:
+  `learnrec-20260302T090000.000000000Z.jsonl`. The first line is the start
+  (how the analyzers were configured); a replay refuses a file without it.
+- At most 256Mi per recording (`--learner-recording-cap-bytes`). At the cap
+  the recording keeps what it has, stops writing, and logs how many events it
+  dropped.
+- At most two recordings at the cap in the directory. A new recording deletes
+  the oldest ones first to make room.
+- About 1-1.5 KB per replica per cycle: at a 15 s cycle, 8 replicas take about
+  five days to reach the cap and 100 replicas about eight hours.
+
+### Copy the recordings out
+
+The `emptyDir` goes with the pod. Copy the files out before you tear the
+deployment down:
+
+```bash
+NS=wva-system   # the controller's namespace
+POD=$(kubectl -n "$NS" get pod -l control-plane=controller-manager -o name | head -1)
+kubectl -n "$NS" exec "${POD#pod/}" -c recordings -- ls -l /var/lib/wva/learner-recordings
+kubectl -n "$NS" cp -c recordings "${POD#pod/}:/var/lib/wva/learner-recordings" ./learner-recordings
+```
+
+A container restart keeps the `emptyDir`, so the recording from before the
+restart is still there beside the new one.
+
+### Replay one
+
+`learnreplay.Replay` reads a recording and runs it through new analyzers and a
+new capacity store. In `Fidelity` mode, at the commit that recorded it, the
+replay must reproduce the recording byte for byte. The acceptance test for
+that is `TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult`:
+
+```bash
+go test ./internal/engines/steadystate/ -run TestLearnerRecording -v
+go test ./internal/engines/analyzers/learnreplay/ ./internal/signals/learnrec/ -v
+```
+
 ## End-to-End Tests
 
 One suite in `test/e2e/` runs on Kind with emulated GPUs, or on
