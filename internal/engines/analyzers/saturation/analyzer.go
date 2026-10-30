@@ -28,6 +28,9 @@ import (
 type SaturationAnalyzer struct {
 	// mu protects computeCapacityHistory from concurrent access.
 	mu sync.Mutex
+	// paths counts how often each learner path ran, for the replay
+	// (PathCounts).
+	paths pathCounters
 	// computeCapacityHistory stores rolling averages of observed k2 values,
 	// keyed by "namespace|variant|modelID|accelerator|gpuCount|role|outputBucket|queueThreshold"
 	// (historyKey): one variant's readings per window, never another's.
@@ -250,6 +253,11 @@ type SaturationAnalyzer struct {
 	// collector reports it, zero when unknown (replicaReadySince); tests
 	// may set it to stand in for the collector.
 	readySince func(domain.ReplicaMetrics) time.Time
+	// stubRestartFix is a mutant seam for this package's tests alone: set,
+	// k2's joined test no longer counts from a Pod's Ready time (#288), so a
+	// restart under the same name reads as the replica it replaced. Never
+	// set outside a test; its zero value is the production behaviour.
+	stubRestartFix bool
 	// horizons is how long each kind of learned state is kept. Defaulted
 	// from capacity.DefaultHorizons and overridable by configuration --
 	// which is the only way any of this is reachable on a cluster, the

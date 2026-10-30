@@ -329,7 +329,35 @@ The start line records neither.
 The `acceptance` golden is the in-process acceptance run. It covers little
 learning: twelve cycles of fixed synthetic rows. The start-time average, the
 borrow tolerance and the measured k2 and mu paths barely move in it, so a
-change to them can leave it as it is. The cluster recordings cover those.
+change to them can leave it as it is.
+
+The `mu-paths` golden is a second in-process run, for those paths. Its
+replicas saturate, so k2 records readings and mu's window takes samples,
+each the mean of the replicas read in its minute. Each of mu's three yields
+runs on a variant of its own (to the derived figure on a served bound, to
+the full siblings, and to the derived figure once stale), and one replica
+restarts under its own name. To write it again as a raw recording:
+
+```bash
+LEARNREC_MUPATHS_OUT=$HOME/mu-paths.jsonl go test ./internal/engines/steadystate/ -run TestLearnerRecording_TheMuPathsRunReachesEveryLearnerPath -v
+```
+
+#### Per-path counters
+
+The saturation analyzer counts how often each learner path runs
+(`PathCounts`, `internal/engines/analyzers/saturation/path_counts.go`), and a
+replay reports the counts (2.5). The paths are: k2 readings recorded
+(P1-obs), mu samples written, mu's three yields (served, sibling, stale),
+ITL lines from a full fit and from the pinned fit, input rows with an
+instant KV reading, input rows with a Ready time, and k2 readings refused
+as a replica that joined under a minute ago while its Ready time was known
+(the restart fix, #288).
+
+The committed goldens must run every path at least once between them:
+`make test` and `make learner-goldens-check` fail when one runs on no
+golden. A golden that never reaches a path pins nothing about it. An add or
+an update prints the paths still uncovered and does not fail on them, so a
+first golden can be added to an empty directory.
 
 #### What a golden commits
 
@@ -578,9 +606,7 @@ owner.
 in exactly one of these states:
 
 - **caught**: a mutant puts the defect back, and its class fails;
-- **still escaping**: with the reason;
-- **waits for the replay counters**: the per-path counters of 2.5, which no
-  PR has built yet.
+- **still escaping**: with the reason.
 
 `TestPropertyMutants` runs each mutant, and checks two more rules: a mutant
 never runs a ledgered case, and every caught row has a mutant.
@@ -591,6 +617,7 @@ Each mutant states its level:
 | --- | --- | --- |
 | `policy` | a policy key set where the guard stops working | that the production learner is caught |
 | `rows` | rows changed to look the way the defect read them | that the production learner is caught |
+| `stub` | one fix stubbed through an unexported field only the package's tests set (`stubRestartFix`) | that the production learner is caught |
 | `toy-learner` | a small learner with the pre-fix estimator | only that the check is sensitive to the defect |
 | `toy-output` | the production output edited the way the defect edited it | only that the check reads that output |
 

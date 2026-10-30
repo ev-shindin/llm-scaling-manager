@@ -510,6 +510,30 @@ type GoldenCheck struct {
 	// rows were compared, per output file.
 	Fixtures int
 	Rows     map[string]int
+	// Paths is how often each learner path ran, summed over the fixtures
+	// replayed (requiredPaths), and Uncovered names each required path no
+	// fixture ran. The committed goldens must leave Uncovered empty (make
+	// test and the check command hold them to it); a directory of one new
+	// golden, as an add writes it, need not.
+	Paths     map[string]int64
+	Uncovered []string
+}
+
+// requiredPaths is every learner path the goldens must run at least once
+// between them: a golden set that never reaches a path pins nothing about
+// it (analyzer-learner.md, 2.5). Each can run on this base; the settle
+// tracker's verdicts join from the PR that adds the tracker.
+func requiredPaths() []string { return saturation.PathNames() }
+
+// pathProblems names each required path the fixtures ran on no cycle.
+func pathProblems(paths map[string]int64) []string {
+	var out []string
+	for _, p := range requiredPaths() {
+		if paths[p] <= 0 {
+			out = append(out, fmt.Sprintf("no golden runs the learner path %s: a replay that never reaches a path pins nothing about it; add a recording that does (docs/developer-guide/testing.md, Learner Goldens)", p))
+		}
+	}
+	return out
 }
 
 // CheckGoldens replays every fixture dir's manifest lists and compares its
@@ -519,7 +543,7 @@ func CheckGoldens(ctx context.Context, dir string) (*GoldenCheck, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &GoldenCheck{Rows: map[string]int{}}
+	c := &GoldenCheck{Rows: map[string]int{}, Paths: map[string]int64{}}
 	problem := func(format string, args ...any) { c.Problems = append(c.Problems, fmt.Sprintf(format, args...)) }
 	if len(m.Goldens) == 0 {
 		problem("%s lists no fixture", ManifestName)
@@ -561,12 +585,15 @@ func CheckGoldens(ctx context.Context, dir string) (*GoldenCheck, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		got, err := replayFixture(ctx, dir, g)
+		got, paths, err := replayFixture(ctx, dir, g)
 		if err != nil {
 			problem("%s: %v", g.Name, err)
 			continue
 		}
 		c.Fixtures++
+		for p, n := range paths {
+			c.Paths[p] += n
+		}
 		want := map[string]bool{}
 		for _, f := range g.Outputs {
 			want[path.Base(f)] = true
@@ -600,57 +627,66 @@ func CheckGoldens(ctx context.Context, dir string) (*GoldenCheck, error) {
 			}
 		}
 	}
+	if c.Fixtures > 0 {
+		c.Uncovered = pathProblems(c.Paths)
+	}
 	return c, nil
 }
 
 // replayFixture replays one fixture as every later commit does (Normal) and
-// returns its outputs.
-func replayFixture(ctx context.Context, dir string, g ManifestEntry) (map[string][]byte, error) {
+// returns its outputs, and how often each learner path ran.
+func replayFixture(ctx context.Context, dir string, g ManifestEntry) (map[string][]byte, map[string]int64, error) {
 	gz, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(g.Recording)))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(gz) > MaxFixtureBytes {
-		return nil, fmt.Errorf("%s is %d bytes, over the %d-byte fixture limit", g.Recording, len(gz), MaxFixtureBytes)
+		return nil, nil, fmt.Errorf("%s is %d bytes, over the %d-byte fixture limit", g.Recording, len(gz), MaxFixtureBytes)
 	}
 	recording, err := gunzip(gz)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", g.Recording, err)
+		return nil, nil, fmt.Errorf("%s: %w", g.Recording, err)
 	}
-	return goldenOutputs(ctx, recording, Normal)
+	return goldenReplay(ctx, recording, Normal)
 }
 
-// goldenOutputs replays recording in mode and returns its outputs. It is an
-// error when the replay fails in its mode, and when the goldens would
-// compare nothing (comparedNothing): the same rule for the check make test
-// runs and for an add.
+// goldenOutputs is goldenReplay's outputs.
 func goldenOutputs(ctx context.Context, recording []byte, mode Mode) (map[string][]byte, error) {
+	out, _, err := goldenReplay(ctx, recording, mode)
+	return out, err
+}
+
+// goldenReplay replays recording in mode and returns its outputs and how
+// often each learner path ran. It is an error when the replay fails in its
+// mode, and when the goldens would compare nothing (comparedNothing): the
+// same rule for the check make test runs and for an add.
+func goldenReplay(ctx context.Context, recording []byte, mode Mode) (map[string][]byte, map[string]int64, error) {
 	rep, err := Replay(ctx, recording, Options{Mode: mode})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if failed := rep.Failed(); len(failed) > 0 {
-		return nil, fmt.Errorf("the replay failed: %s (%d in all)", failed[0], len(failed))
+		return nil, nil, fmt.Errorf("the replay failed: %s (%d in all)", failed[0], len(failed))
 	}
 	if mode == Fidelity && !bytes.Equal(rep.Recording, recording) {
-		return nil, fmt.Errorf("the replay did not reproduce the recording byte for byte: %s", firstDifferentLine(recording, rep.Recording))
+		return nil, nil, fmt.Errorf("the replay did not reproduce the recording byte for byte: %s", firstDifferentLine(recording, rep.Recording))
 	}
 	outputs, err := Outputs(rep.Recording)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var start learnrec.Start
 	read, err := learnrec.Read(recording)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := read.Events[0].DecodeData(&start); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if missing := comparedNothing(start, outputs); len(missing) > 0 {
-		return nil, fmt.Errorf("the goldens would compare nothing for %s", strings.Join(missing, ", "))
+		return nil, nil, fmt.Errorf("the goldens would compare nothing for %s", strings.Join(missing, ", "))
 	}
-	return outputs, nil
+	return outputs, rep.Paths, nil
 }
 
 // comparedNothing names what a fixture's goldens would not compare: a golden
@@ -879,7 +915,7 @@ func UpdateGoldens(ctx context.Context, dir string) error {
 		return err
 	}
 	for i, g := range m.Goldens {
-		outputs, err := replayFixture(ctx, dir, g)
+		outputs, _, err := replayFixture(ctx, dir, g)
 		if err != nil {
 			return fmt.Errorf("learnreplay: %s: %w", g.Name, err)
 		}

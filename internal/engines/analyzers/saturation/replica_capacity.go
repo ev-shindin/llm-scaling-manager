@@ -302,6 +302,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 					"derivedOK", derived.ok, "derivedRate", derived.rate, "servedBound", served.max, "reason", why)
 			} else {
 				a.recordSaturatedThroughputFrom(throughputKey, rm.PodName, mu)
+				a.paths.muWritten.Add(1)
 				if args != "" {
 					a.mu.Lock()
 					if _, ok := a.saturatedThroughput[throughputKey]; ok {
@@ -362,6 +363,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		// entirely and only ever reached a log line as a confusing number.
 		throughputSamples = MinDerivedThroughputSamples
 	} else if rate, ok := a.siblingYield(throughputKey, reading, served, tune); ok {
+		a.paths.yieldSibling.Add(1)
 		// A measurement under what the variant's Ready, full replicas serve
 		// is one slow replica's, not the variant's (siblingYield).
 		logger.V(logging.DEFAULT).Info("saturated-throughput-yields-to-siblings",
@@ -910,6 +912,7 @@ func (a *SaturationAnalyzer) k2Chain(
 				a.computeCapacityHistory[historyKey] = ra
 			}
 			ra.AddAt(float64(k2Observed), now)
+			a.paths.k2Obs.Add(1)
 			if args != "" {
 				a.k2WindowArgs[historyKey] = args
 			}

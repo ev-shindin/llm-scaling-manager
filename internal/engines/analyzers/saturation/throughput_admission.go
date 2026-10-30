@@ -515,6 +515,7 @@ func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading through
 			a.throughputMuChoice[key] = c
 		}
 		c.yielded = true
+		a.paths.yieldServed.Add(1)
 		return true
 	}
 	// The last reading that agreed with the measurement; the newest sample
@@ -547,5 +548,8 @@ func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading through
 		a.throughputMuChoice[key] = c
 	}
 	c.yielded = yielded
+	if yielded {
+		a.paths.yieldStale.Add(1)
+	}
 	return yielded
 }

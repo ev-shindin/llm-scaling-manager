@@ -649,10 +649,12 @@ not cover a key.
 `D/property_mutants_test.go`, and a test holds it to the mutants. Each
 finding above is in exactly one state:
 
-- **Caught:** 19 findings. For each, a mutant puts the defect back, and its
-  class fails on that mutant.
-- **Waiting:** "Restart fix stubbed" waits for the replay's per-path counters
-  (2.5). The restart itself is caught.
+- **Caught:** 20 findings. For each, a mutant puts the defect back, and its
+  class fails on that mutant. "Restart fix stubbed" is one: its mutant stubs
+  noteReady's join, the restart case fails on it, and the per-path counter
+  "joined refusals with a known ReadySince" drops to zero. The replay counts
+  that counter and the others of 2.5, and the golden check fails when a
+  counter is zero over every committed golden.
 - **Still escaping:** the rest, listed below. A row is escaping either because
   no mutant reproduces it, or because today's code already fails its class,
   so the defect is a known-failures ledger row (`D/testdata/properties/known-failures.yaml`)

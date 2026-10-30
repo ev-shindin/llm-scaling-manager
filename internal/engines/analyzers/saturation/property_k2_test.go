@@ -92,10 +92,23 @@ func checkK2LoadStep(policy func(*config.ScalingPolicy)) func(uint64) error {
 // reads a steady, plausible figure from its first cycle. Nothing is admitted
 // within a minute of its Ready time.
 func checkK2Restart(wrap func(*domain.ReplicaMetrics)) func(uint64) error {
+	return checkK2RestartOn(wrap, nil)
+}
+
+// checkK2RestartOn is checkK2Restart with edit applied to the rig's analyzer
+// first (a mutant), and counts, when it is not nil, the analyzer's path counts
+// at the end of each seed's run.
+func checkK2RestartOn(wrap func(*domain.ReplicaMetrics), edit func(*SaturationAnalyzer), counts ...func(map[string]int64)) func(uint64) error {
 	return func(seed uint64) error {
 		r := propRand(seed)
 		rig := newPropRig()
 		rig.wrap = wrap
+		if edit != nil {
+			edit(rig.a)
+		}
+		for _, c := range counts {
+			defer func() { c(rig.a.PathCounts()) }()
+		}
 		before := int64(200_000 * (1 + 0.05*r.Float64()))
 		ready := propStart.Add(-time.Hour)
 		cycle := func(tokens int64) error {

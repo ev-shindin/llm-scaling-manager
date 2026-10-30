@@ -14,14 +14,15 @@ import (
 )
 
 // The 2.7 accounting and its mutants. Every finding 2.7 lists is exactly one
-// of: caught (a mutant puts the defect back and its class fails), still
-// escaping (with the reason), or waiting for the replay's per-path counters
-// (2.5), which #388 did not build.
+// of: caught (a mutant puts the defect back and its class fails), or still
+// escaping (with the reason).
 //
-// A mutant puts its defect back in one of four ways, named by its level:
+// A mutant puts its defect back in one of five ways, named by its level:
 //   - policy: a policy key set where the guard (the fix) stops working, on
 //     the production learner;
 //   - rows: the production learner handed rows the way the defect read them;
+//   - stub: the production learner with one fix stubbed through an
+//     unexported seam only this package's tests set (stubRestartFix);
 //   - toy-learner: a small learner with the pre-fix estimator, run through the
 //     same check. It proves the check is sensitive to the defect, not that
 //     the production learner would be caught;
@@ -32,9 +33,8 @@ import (
 type findingStatus string
 
 const (
-	statusCaught        findingStatus = "caught"
-	statusEscaping      findingStatus = "still escaping"
-	statusWaitsCounters findingStatus = "waits for the replay counters"
+	statusCaught   findingStatus = "caught"
+	statusEscaping findingStatus = "still escaping"
 )
 
 // finding is one row of 2.7, with its status and, unless caught, why.
@@ -76,7 +76,7 @@ var findings = []finding{
 	{row: "Imbalance audit (load moved between replicas)", status: statusCaught},
 	{row: "Settle holes: restart", status: statusCaught},
 	{row: "Settle holes: fall, rate escape, idle return, lend", status: statusEscaping, why: "only the restart and joiner events have a case; the others need the settle tracker (PR 1)"},
-	{row: "Restart fix stubbed", status: statusWaitsCounters, why: "the per-path counter \"joined refusals with a known ReadySince\" is the replay's (2.5); #388 brought the goldens and the export, not the per-path counters, so it waits for those. The restart itself is caught as \"Settle holes: restart\""},
+	{row: "Restart fix stubbed", status: statusCaught},
 	{row: "'For good' self-sealing low mu", status: statusEscaping, why: "the closed-loop probe lands in PR 3"},
 }
 
@@ -84,6 +84,7 @@ var findings = []finding{
 const (
 	levelPolicy     = "policy"
 	levelRows       = "rows"
+	levelStub       = "stub"
 	levelToyLearner = "toy-learner"
 	levelToyOutput  = "toy-output"
 )
@@ -188,6 +189,40 @@ func propertyMutants() []propMutant {
 		{row: "Settle holes: restart", caseID: "transient/k2/restart-same-name", level: levelRows,
 			how:   "rows with ReadySince cleared: a restart under the same name is not seen",
 			check: checkK2Restart(func(rm *domain.ReplicaMetrics) { rm.ReadySince = time.Time{} })},
+		{row: "Restart fix stubbed", caseID: "transient/k2/restart-same-name", level: levelStub,
+			how:   "noteReady's join stubbed (stubRestartFix): the Ready time is read, and the joined test no longer counts from it",
+			check: checkK2RestartOn(nil, stubRestartFix)},
+	}
+}
+
+// stubRestartFix stubs the restart fix (#288) on a: noteReady's join no longer
+// counts from the Pod's Ready time.
+func stubRestartFix(a *SaturationAnalyzer) { a.stubRestartFix = true }
+
+// The restart fix's per-path counter (2.5, "joined refusals with a known
+// ReadySince") counts on the restart case, and drops to zero once the fix is
+// stubbed: the counter measures the fix, not the Ready time being known.
+func TestPropertyRestartStubZeroesTheJoinedCounter(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*SaturationAnalyzer)
+		zero bool
+	}{{"the fix", nil, false}, {"the fix stubbed", stubRestartFix, true}} {
+		var joined, ready int64
+		count := func(c map[string]int64) {
+			joined += c[PathJoinedRefusedReadySince]
+			ready += c[PathRowsReadySince]
+		}
+		if _, err := runCase(checkK2RestartOn(nil, tc.edit, count), []uint64{1, 2, 3}); err != nil {
+			t.Fatal(err)
+		}
+		if ready == 0 {
+			t.Fatalf("%s: no row carried a Ready time: the counter would be zero for that reason alone", tc.name)
+		}
+		if (joined == 0) != tc.zero {
+			t.Errorf("%s: %d joined refusals with a known Ready time over %d rows carrying one; want zero: %v", tc.name, joined, ready, tc.zero)
+		}
+		t.Logf("%s: %d joined refusals with a known Ready time, over %d rows carrying one", tc.name, joined, ready)
 	}
 }
 
