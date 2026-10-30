@@ -34,8 +34,9 @@ trap 'rm -rf "$T"' EXIT
 
 ROLES='.. | select(type == "!!map" and (has("decode") or has("prefill"))) | (.decode, .prefill) | select(type == "!!map" and has("vllm") and .enabled != false)'
 
-# The two-model scenarios: the ones the two-model driver stands up.
-for sc in "$SCEN"/two-model-*.yaml; do
+# The two-model scenarios, and the N-model one: the ones the two-model driver
+# stands up.
+for sc in "$SCEN"/two-model-*.yaml "$SCEN"/n-model-share.yaml; do
     name="$(basename "$sc" .yaml)"
 
     # --- gateway reuse ------------------------------------------------------
@@ -184,7 +185,29 @@ refuse "a node list with a name that is not one" "$SCEN/two-model-mixed-sizes.ya
 refuse "a toleration with no key (it tolerates every taint)" "$SCEN/two-model-mixed-sizes.yaml" 'BENCHMARK_DECODE_TOLERATIONS=[{"operator":"Exists"}]'
 refuse "tolerations that are not a list" "$SCEN/two-model-mixed-sizes.yaml" 'BENCHMARK_DECODE_TOLERATIONS={"key":"x"}'
 
-CASES_EXPECTED=34
+# BENCHMARK_STACKS: a three-model run on the four-stack n-model-share stands up
+# three. The stacks kept are exactly the ones named, in the scenario's order,
+# with the shared block untouched; a name the scenario lacks is refused before
+# anything is dropped, or a typo would stand up fewer models than the run drives.
+cp "$SCEN/n-model-share.yaml" "$T/n3.yaml"
+if BENCHMARK_RENDER_DRAIN=false BENCHMARK_STACKS=llama-31-8b,qwen3-8b,qwen3-30b-a3b \
+    bash "$SCRIPT" "$T/n3.yaml" > "$T/n3.out" 2>&1; then
+    got="$(yq -r '[.scenario[].name] | join(",")' "$T/n3.yaml")"
+    before="$(yq -r '[.scenario[].name] | join(",")' "$SCEN/n-model-share.yaml")"
+    yq -o=json '.shared' "$T/n3.yaml" > "$T/n3.shared"
+    yq -o=json '.shared' "$SCEN/n-model-share.yaml" > "$T/n4.shared"
+    shared_same=no
+    [ -s "$T/n4.shared" ] && cmp -s "$T/n3.shared" "$T/n4.shared" && shared_same=yes
+    [ "$before" = "llama-31-8b,qwen3-8b,qwen3-30b-a3b,qwen3-32b" ] && [ "$got" = "llama-31-8b,qwen3-8b,qwen3-30b-a3b" ] && [ "$shared_same" = yes ] \
+        && ok "BENCHMARK_STACKS keeps three of n-model-share's four stacks ($got), shared block untouched" \
+        || fail "BENCHMARK_STACKS kept '$got' of '$before' (shared block unchanged: $shared_same): $(cat "$T/n3.out")"
+else
+    fail "BENCHMARK_STACKS refused: $(cat "$T/n3.out")"
+fi
+refuse "BENCHMARK_STACKS naming a stack the scenario does not have" "$SCEN/n-model-share.yaml" BENCHMARK_STACKS=llama-31-8b,qwen3-8b,no-such-stack
+refuse "BENCHMARK_STACKS with a name that is not one" "$SCEN/n-model-share.yaml" "BENCHMARK_STACKS=llama-31-8b;x"
+
+CASES_EXPECTED=41
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     echo "FAIL $CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
     FAIL=$((FAIL + 1))

@@ -52,9 +52,9 @@ GPUs:
 The tightest value, 4, is the sharpest test: at B's peak, A must be at its
 floor, so every replica B adds beyond the free quota comes from A.
 
-The driver does **not** check these bounds, and `preflight` still asks for the
-full `2 × MAX_REPLICAS × GPUS_PER_REPLICA` placeable accelerators because it does
-not read the quota. Choose the number yourself.
+`preflight` refuses a quota below the lower bound, and places accelerators for
+the quota rather than for the ceilings. It does not check the upper bound:
+choose a number below the combined peak yourself.
 
 ## What it needs
 
@@ -100,6 +100,16 @@ make benchmark-two-model-verify
 
 Do **not** create a pool: every share arm refuses to run while one exists.
 
+`verify`, and every arm before it sends load, refuse a model whose
+ScaledObject is not connected to WVA: its KEDA HPA lacks WVA's metric, cannot
+read it, or the controller is refusing KEDA's connections. Each arm first waits
+up to `WIRING_TIMEOUT` (60 s) for KEDA to settle after the reset. The usual
+cause is a reinstall in the same namespace while KEDA's operator kept running:
+it keeps the old client certificate. Restart it
+(`kubectl rollout restart deployment/keda-operator -n keda`, or stand up with
+`KEDA_RESTART=true`) and run `verify` again. A run without this check once
+spent both arms at one replica per model, with every ScaledObject `Ready`.
+
 The standup applies these to its own copy of the scenario, so nothing under
 `hack/` is edited by hand. Set them on the `preflight` line too, and re-run
 `preflight` after changing one:
@@ -108,6 +118,7 @@ The standup applies these to its own copy of the scenario, so nothing under
 | --- | --- | --- |
 | `GATEWAY_REUSE` | `auto` | `auto` reuses the Istio the cluster already runs (an `istio.io/gateway-controller` GatewayClass exists) instead of installing `istio-base` over it, which fails part-way through. `true` and `false` force it. |
 | `GATEWAY_PROVIDER_NAMESPACE` | `istio-system` | where that control plane runs |
+| `GATEWAY_PULL_CHECK` | `1` | when reusing it, `preflight` reads the gateway proxy image the control plane hands out, and refuses if that image needs a pull secret your namespace lacks: the gateway Pod would fail with `ErrImagePull` after the model downloads. Create the secret, or set `0` if the image pulls without it. |
 | `DECODE_CPU`, `DECODE_MEMORY` | the scenario's (8, `64Gi`) | a decode Pod's request and limit. Lower them when `preflight` reports fewer placeable Pods than the run's peak because the nodes with free accelerators lack spare CPU. |
 | `BENCHMARK_RENDER_DRAIN` | `true` | the drain hook and grace go into the engines before they first start, so the drain patch after the standup finds nothing to change and no model starts twice |
 | `BENCHMARK_ENGINE_CACHE_HOSTPATH` | empty | a directory on the nodes for the engines' compile caches. Opt-in, so earlier runs stay comparable. |
@@ -209,6 +220,92 @@ The scenario (`hack/benchmark/scenarios/guides/two-model-shapes.yaml`) is
 8192, so a 20 000-token prompt fits; `make lint-deploy-scripts` checks it stays
 a copy otherwise. `BENCH_SPEC` is read by preflight and standup; the shapes are
 read by each `run`, and every arm of one comparison must use the same ones.
+
+## Three or four models
+
+> **No valid GPU result yet.** One four-model run on H200 finished, but its
+> ScaledObjects were not connected to WVA, so no model ever scaled and its
+> arms compare nothing. It did measure what one replica of each model serves
+> (the table below), which sets the rates. `verify` now refuses such a run.
+
+Two models in anti-phase are the smallest case of the claim. With more models,
+each rise has more falling models to take GPUs from. `MODEL_COUNT=3` or `4` runs
+the same arms with three or four models under one quota:
+
+- **Bursts rotate.** In each cycle every model bursts once, one at a time, in
+  the order B, C, D, A. Each burst starts one phase plus one band
+  (`PHASE_SECONDS + OVERLAP_SECONDS`) after the one before. That is the period
+  divided by the number of models. For two models it is the anti-phase run
+  above, unchanged.
+- **The scenario is `n-model-share`.** It has four stacks, each one GPU per
+  replica: the two models above, `Qwen/Qwen3-30B-A3B-FP8` (model C) and
+  `Qwen/Qwen3-32B` (model D). The standup keeps only the run's stacks, so
+  three models stand up three. Model D needs a GPU larger than 80 GB; on
+  smaller GPUs run three.
+- **Per-model settings** follow the A/B names: `STACK_C`, `MODEL_C`,
+  `HIGH_RPS_C`, `LOW_RPS_C`, `MAX_REPLICAS_C`, `GPUS_PER_REPLICA_C`, and the
+  same with `_D`.
+- **Every burst needs three replicas.** With three or four models the
+  defaults put each model's low rate inside one replica and its burst at about
+  2.2 times what one replica serves, measured on H200 with 1000 tokens in, 500
+  out and `maxNumSeq` 32:
+
+  | model | between bursts | burst | rps one replica serves | burst on 3 replicas |
+  | --- | --- | --- | --- | --- |
+  | A, `Llama-3.1-8B-Instruct` | `LOW_RPS=3` | `HIGH_RPS=19` | 8.6 | 74% |
+  | B, `Qwen3-8B` | `LOW_RPS=3` | `HIGH_RPS_B=16.5` | 7.5 | 73% |
+  | C, `Qwen3-30B-A3B-FP8` | `LOW_RPS_C=1.5` | `HIGH_RPS_C=8` | 3.6 | 74% |
+  | D, `Qwen3-32B` | `LOW_RPS_D=0.5` | `HIGH_RPS_D=5.4` | about 2.45 (not saturated at 2) | 73% |
+
+  Why three: the model that burst before still holds its replicas for the
+  300 s scale-down delay, which is longer than the 90 s band. A burst that
+  needs three then asks for 3 + 3 + 1 + 1 = 8 GPUs against a quota of 6, so
+  the quota binds. A burst that needs two asks for 2 + 2 + 1 + 1 = 6 and the
+  quota never holds anyone back. This is the **expectation** the first run
+  must confirm: its report's "Refused scale-ups" table (from
+  `wva_model_scaling_blocked`) must show the quota holding a model back. D's
+  ceiling is an estimate. Two-model runs keep `HIGH_RPS=9` and
+  `HIGH_RPS_B=8`, and a rate you set always wins.
+
+  At A's 19 rps the loader container runs 32 workers. If the report refuses
+  the arm for the driver's own queueing, raise `LOAD_CPU_LIMIT` (default 4).
+
+The quota bounds above become, for N models:
+
+- **below the sum of the peaks:** quota < `N × MAX_REPLICAS × GPUS_PER_REPLICA`;
+- **at least one peak plus every other model's floor:** quota ≥
+  `(MAX_REPLICAS + (N - 1) × MIN_REPLICAS) × GPUS_PER_REPLICA`. `preflight`
+  refuses a quota below this.
+
+With four models at the defaults that is 6 to 11 GPUs. Six is the sharpest
+test: a rising model gets its peak only from GPUs the others give back.
+
+The warm-pool comparison's `floor` arm does not fit a quota this tight: it
+holds `FLOOR_REPLICAS` (2) of every model, 8 GPUs for four models, above a
+quota of 6. Run the share arms (`today`, `shadow`, `share`) at N = 4, or give
+the floor arm a quota of at least `N × FLOOR_REPLICAS × GPUS_PER_REPLICA`.
+
+```bash
+export MODEL_COUNT=4
+WVA_QUOTAS='<accelerator>=6' make benchmark-two-model-preflight
+WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=6' make benchmark-two-model-standup
+make benchmark-two-model-verify
+SHARE_ARMS='today share' REPEATS=1 TEARDOWN_ON_EXIT=1 make benchmark-two-model-share-arms
+```
+
+One arm runs `LEAD_IN + N × CYCLES × PHASE_SECONDS + (N × CYCLES - 1) ×
+OVERLAP_SECONDS` seconds of load. For four models at the defaults
+(`CYCLES=2`) that is 4590 s, about 77 minutes; `CYCLES=1` halves it to 2310 s,
+with one burst per model instead of two. The load Pod runs one loader container
+per model, so it requests
+`N × LOAD_CPU` CPU and `N × LOAD_MEMORY` on one node.
+
+The reports cover every model: TTFT per model and per rise, held-back
+model-seconds per model, transfers by model (which model gave, which received),
+and GPU-seconds per model beside the fleet total. Each arm records which
+Deployments belong to which model (`model_deploys` in `budget.json`), so the
+split comes from the sampled Pods. An arm whose results lack a model the
+schedule drove is refused, not reported as fewer models.
 
 ## Mixed replica sizes: a 2-GPU model beside a 1-GPU model
 

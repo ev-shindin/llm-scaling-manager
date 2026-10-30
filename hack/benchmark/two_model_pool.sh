@@ -92,6 +92,13 @@
 # match the scenario spec; the load shape below. KUBECONFIG/KUBE_CONTEXT as
 # usual. BENCH_SIM=1 stands simulator stacks up instead of the harness's (a
 # kind dry run of the whole flow, no GPUs): see sim_standup.
+#
+# THREE OR FOUR MODELS: MODEL_COUNT=3|4 (default 2) adds STACK_C/MODEL_C and
+# STACK_D/MODEL_D, with HIGH_RPS_C/D, LOW_RPS_C/D, MAX_REPLICAS_C/D and GPUS_PER_REPLICA_C/D
+# beside the A/B ones. The bursts then ROTATE -- b, c, d, a, each shifted from
+# the last by period/N -- under the same quota and the same arms, and the
+# default scenario is guides/n-model-share, stood up with only the first N of
+# its stacks. MODEL_COUNT=2 is the two-model run exactly as before.
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -106,13 +113,28 @@ NS="${BENCHMARK_NAMESPACE:-}"
 # Whether the caller named the scenario: teardown trusts a recorded standup
 # spec over a default, and refuses rather than guess (see verb_teardown).
 BENCH_SPEC_GIVEN="${BENCH_SPEC:+1}"
-BENCH_SPEC="${BENCH_SPEC:-guides/two-model-warm-pool}"
+# How many models burst in rotation: 2 (the anti-phase pair), 3 or 4. Checked
+# below, once die exists.
+MODEL_COUNT="${MODEL_COUNT:-2}"
+if [ "$MODEL_COUNT" = 2 ]; then
+    BENCH_SPEC="${BENCH_SPEC:-guides/two-model-warm-pool}"
+else
+    # Four 1-GPU stacks; the standup keeps the first MODEL_COUNT of them.
+    BENCH_SPEC="${BENCH_SPEC:-guides/n-model-share}"
+fi
 # The ConfigMap the standup records its scenario in, for the teardown.
 STANDUP_RECORD="wva-two-model-standup"
 STACK_A="${STACK_A:-llama-31-8b}"
 STACK_B="${STACK_B:-qwen3-8b}"
 MODEL_A="${MODEL_A:-unsloth/Meta-Llama-3.1-8B-Instruct}"
 MODEL_B="${MODEL_B:-Qwen/Qwen3-8B}"
+# Models three and four, used only when MODEL_COUNT says so. Their defaults
+# are the third and fourth stacks of guides/n-model-share, each one GPU per
+# replica at tensor 1.
+STACK_C="${STACK_C:-qwen3-30b-a3b}"
+MODEL_C="${MODEL_C:-Qwen/Qwen3-30B-A3B-FP8}"
+STACK_D="${STACK_D:-qwen3-32b}"
+MODEL_D="${MODEL_D:-Qwen/Qwen3-32B}"
 
 # The load shape. Defaults give a ~34 minute run: 2 min lead-in, then four
 # 8-minute phases.
@@ -133,7 +155,11 @@ LOW_RPS="${LOW_RPS:-3}"
 # models' capacity, and for the slower one the run measured which arm was less
 # broken rather than what a bridge is worth. 6 sits inside both models' capacity
 # at two replicas while still needing a scale-up from one.
-HIGH_RPS="${HIGH_RPS:-9}"
+#
+# With three or four models A and B burst at 19 and 16.5 instead (below).
+nm_high_a=9 nm_high_b=8
+if [ "$MODEL_COUNT" -ge 3 ] 2>/dev/null; then nm_high_a=19 nm_high_b=16.5; fi
+HIGH_RPS="${HIGH_RPS:-$nm_high_a}"
 # Model B's burst rate, separately, because the two models do not have the same
 # per-replica capacity. MEASURED: at 9 rps Llama served comfortably once scaled
 # (steady-state p50 83ms) while Qwen drowned (steady-state p50 5717ms, an
@@ -144,7 +170,29 @@ HIGH_RPS="${HIGH_RPS:-9}"
 # It also serves the premise rather than bending it: the claim is that the SUM
 # OF DEMAND is flat, and with equal request rates against unequal capacity the
 # sum of ACCELERATOR demand is not.
-HIGH_RPS_B="${HIGH_RPS_B:-8}"
+HIGH_RPS_B="${HIGH_RPS_B:-$nm_high_b}"
+# THREE OR FOUR MODELS: every burst sized to need THREE replicas, so the
+# namespace quota binds. A and B keep 9 and 8 above for two models.
+#
+# MEASURED on H200, 1000 tokens in and 500 out, maxNumSeq 32, ONE replica each
+# (a four-model run in which nothing scaled, so every burst met one replica):
+# one replica served, saturated, A 8.6 rps, B 7.5, C 3.6 (at a 5 rps burst its
+# TTFT p50 was 48s). D was NOT saturated at 2 rps (TTFT p50 0.2s, ~25 of 32
+# sequences busy at 12.3s a request), so its ceiling is about 32 / 13s = 2.45.
+#
+# Each burst is about 2.2 x that ceiling: A 19, B 16.5, C 8, D 5.4 -- more than
+# two replicas serve, about 73% of three. The quota of 6 then binds: a rising
+# model wants 3 while the model before it still holds its 3 through the 300s
+# scale-down stabilization, and 3 + 3 + 1 + 1 = 8 > 6. A burst at 1.1 x
+# needed 2, and 2 + 2 + 1 + 1 = 6 only met the quota. An EXPECTATION, not a
+# measurement: the first run's report must show the quota holding a model
+# back (Refused scale-ups, from wva_model_scaling_blocked), and D's ceiling is
+# an estimate. Between bursts each model stays inside one replica: A and B at
+# 3 (0.35 and 0.4), C at 1.5 (0.42), D at 0.5 (0.2).
+HIGH_RPS_C="${HIGH_RPS_C:-8}"
+LOW_RPS_C="${LOW_RPS_C:-1.5}"
+HIGH_RPS_D="${HIGH_RPS_D:-5.4}"
+LOW_RPS_D="${LOW_RPS_D:-0.5}"
 INPUT_TOKENS="${INPUT_TOKENS:-1000}"
 OUTPUT_TOKENS="${OUTPUT_TOKENS:-500}"
 # Loader b's shape. Defaults to a's; a single-stack P/D run gives the two
@@ -233,10 +281,14 @@ GPUS_PER_REPLICA="${GPUS_PER_REPLICA:-1}"
 # as 3 GPUs, and preflight placed half its peak.
 GPUS_PER_REPLICA_A="${GPUS_PER_REPLICA_A:-}"
 GPUS_PER_REPLICA_B="${GPUS_PER_REPLICA_B:-}"
+GPUS_PER_REPLICA_C="${GPUS_PER_REPLICA_C:-}"
+GPUS_PER_REPLICA_D="${GPUS_PER_REPLICA_D:-}"
 # Per-model ceilings, defaulting to MAX_REPLICAS. The standup registers both at
 # the larger; every arm then sets each model's own on its ScaledObject.
 MAX_REPLICAS_A="${MAX_REPLICAS_A:-$MAX_REPLICAS}"
 MAX_REPLICAS_B="${MAX_REPLICAS_B:-$MAX_REPLICAS}"
+MAX_REPLICAS_C="${MAX_REPLICAS_C:-$MAX_REPLICAS}"
+MAX_REPLICAS_D="${MAX_REPLICAS_D:-$MAX_REPLICAS}"
 # The node every model replica is pinned to (kubernetes.io/hostname), or empty
 # for none. A 1-GPU donor set can fund a 2-GPU replica only on ONE node, and on
 # a shared cluster the scheduler otherwise spreads the small model's pods.
@@ -317,6 +369,10 @@ RESET_TIMEOUT="${RESET_TIMEOUT:-600}"
 # renders, never to the tracked file.
 GATEWAY_REUSE="${GATEWAY_REUSE:-auto}"
 GATEWAY_PROVIDER_NAMESPACE="${GATEWAY_PROVIDER_NAMESPACE:-istio-system}"
+# Whether preflight checks that the namespace has the pull secrets a reused
+# control plane names for its gateway proxy image (see gateway_pull_preflight).
+# 0 skips it, for an image that pulls without them.
+GATEWAY_PULL_CHECK="${GATEWAY_PULL_CHECK:-1}"
 # A decode Pod's CPU and memory request, for nodes whose spare CPU is smaller
 # than the scenario's. Empty keeps the scenario's own values. Applied to the
 # scenario copy at standup, and used by preflight's placement count.
@@ -336,6 +392,75 @@ kc() { kubectl ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} "$@"; }
 
 need_ns() { [ -n "$NS" ] || die "BENCHMARK_NAMESPACE is required."; }
 
+# ---------------------------------------------------------------------------
+# The models of the run: roles a, b and -- with MODEL_COUNT 3 or 4 -- c and d.
+# Every per-model setting is <NAME>_<ROLE>: STACK_C, MODEL_C, MAX_REPLICAS_C...
+# ---------------------------------------------------------------------------
+case "$MODEL_COUNT" in
+    2|3|4) ;;
+    *) die "MODEL_COUNT=$MODEL_COUNT: 2, 3 or 4 models" ;;
+esac
+[ "$MODEL_COUNT" = 2 ] || [ "${PD_SINGLE_STACK:-0}" != 1 ] || \
+    die "MODEL_COUNT=$MODEL_COUNT with PD_SINGLE_STACK=1: a single-stack P/D run drives one model"
+ROLES="$(printf '%s\n' a b c d | head -n "$MODEL_COUNT" | tr '\n' ' ')"
+ROLES="${ROLES% }"
+# The roles past the first two, which every two-model command line leaves out.
+EXTRA_ROLES="$(printf '%s\n' $ROLES | tail -n +3 | tr '\n' ' ')"
+EXTRA_ROLES="${EXTRA_ROLES% }"
+# --model-c <id> --model-d <id> for the reports, as words; empty for two models.
+MODEL_FLAGS=()
+for _r in $EXTRA_ROLES; do
+    _v="MODEL_$(printf '%s' "$_r" | tr a-z A-Z)"
+    MODEL_FLAGS+=("--model-$_r" "${!_v}")
+done
+unset _r _v
+
+# upper <role>: A for a.
+upper() { printf '%s' "$1" | tr a-z A-Z; }
+# and_list <word>...: "x and y", "x, y and z".
+and_list() {
+    local out="" i=0 x
+    for x in "$@"; do
+        i=$(( i + 1 ))
+        if [ "$i" -eq 1 ]; then out="$x"
+        elif [ "$i" -eq "$#" ]; then out="$out and $x"
+        else out="$out, $x"; fi
+    done
+    printf '%s' "$out"
+}
+# models_word: "two" for the two-model run, as every message always said; the
+# count for three or four.
+models_word() { if [ "$MODEL_COUNT" = 2 ]; then printf two; else printf '%s' "$MODEL_COUNT"; fi; }
+
+# rvar <NAME> <role>: the value of <NAME>_<ROLE>, e.g. rvar STACK c -> $STACK_C.
+rvar() { local v="${1}_$(upper "$2")"; printf '%s' "${!v:-}"; }
+
+# role_stacks: every stack of the run, in model order, one per line.
+role_stacks() { local r; for r in $ROLES; do rvar STACK "$r"; echo; done; }
+# role_models: every model id of the run, in model order, one per line.
+role_models() { local r; for r in $ROLES; do rvar MODEL "$r"; echo; done; }
+# role_of_model <model id>: the role that serves it, or nothing.
+role_of_model() { local r; for r in $ROLES; do [ "$(rvar MODEL "$r")" = "$1" ] && { printf '%s' "$r"; return; }; done; }
+
+# extra_role_flags <flag-suffix>... : for every role past b, --<suffix>-<role>
+# and the value of the matching <NAME>_<ROLE>, one word per line. Empty for a
+# two-model run, so its command lines are exactly what they always were.
+# Suffixes: model, endpoint (URL_<ROLE> in the caller), high-rps, low-rps.
+extra_role_flags() {
+    local r s
+    [ -n "$EXTRA_ROLES" ] || return 0
+    for r in $EXTRA_ROLES; do
+        for s in "$@"; do
+            case "$s" in
+                model)    printf '%s\n' "--model-$r" "$(rvar MODEL "$r")" ;;
+                high-rps) printf '%s\n' "--high-rps-$r" "$(rvar HIGH_RPS "$r")" ;;
+                low-rps)  printf '%s\n' "--low-rps-$r" "$(rvar LOW_RPS "$r")" ;;
+                endpoint) printf '%s\n' "--endpoint-$r" "$(rvar URL "$r")" ;;
+            esac
+        done
+    done
+}
+
 # The last few metric-read errors in the controller's own log, or nothing.
 #
 # Its Pods are found by ownership (controller_pods.py), not by label: warm-pool
@@ -349,6 +474,136 @@ controller_metric_errors() {
     [ -n "$selector" ] || return 0
     k logs -l "$selector" --tail=400 2>/dev/null \
         | grep -iE 'prometheus|metrics' | grep -iE 'error|refused|denied|timeout|no such host' | tail -5
+}
+
+# How long refuse_unwired waits for KEDA to settle -- a reset's pause lifted,
+# the HPA rebuilt, its metric readable -- before it judges, and how often it
+# looks. A wait that runs out refuses; it never passes.
+WIRING_TIMEOUT="${WIRING_TIMEOUT:-60}"
+WIRING_POLL="${WIRING_POLL:-3}"
+
+# with_scaler_lib <function> [args...]: runs it in a subshell that has the
+# installer's scaler helpers (deploy/lib), kubectl bound to KUBE_CONTEXT, so the
+# benchmark judges KEDA's wiring by the installer's own rules, not a copy.
+with_scaler_lib() {
+    (
+        # shellcheck source=../../deploy/lib/constants.sh
+        . "$ROOT/deploy/lib/constants.sh" || exit 3
+        # shellcheck source=../../deploy/lib/common.sh
+        . "$ROOT/deploy/lib/common.sh" || exit 3
+        # shellcheck source=../../deploy/lib/scaler_tls.sh
+        . "$ROOT/deploy/lib/scaler_tls.sh" || exit 3
+        kubectl() { command kubectl ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} "$@"; }
+        "$@"
+    )
+}
+
+# wiring_snapshot (inside with_scaler_lib): one "<state><TAB><ScaledObject>
+# <TAB><detail>" line per model ScaledObject in $NS, warm-pool ones left out:
+#   foreign     names no WVA scaler (detail: what its HPA scales on)
+#   paused      KEDA is told not to scale it (a reset pins it this way)
+#   absent      its HPA does not exist (KEDA deletes it while paused)
+#   failing     its HPA cannot read the metric (ScalingActive False,
+#               FailedGetExternalMetric): KEDA cannot reach the scaler now,
+#               whatever it wired when the HPA was built
+#   wired | unwired | unknown   wva_scaler_so_wiring: the HPA and the
+#               ScaledObject status.externalMetricNames both carry the metric
+# Or one "unreadable<TAB>-<TAB><why>" line when the lists cannot be read.
+wiring_snapshot() {
+    local sos hpas rows st so detail
+    sos="$(kubectl -n "$NS" get scaledobject -o json 2>&1)" || {
+        printf 'unreadable\t-\tthe ScaledObjects did not read: %s\n' "$(printf '%s\n' "$sos" | head -1)"; return 0; }
+    hpas="$(kubectl -n "$NS" get hpa -o json 2>&1)" || {
+        printf 'unreadable\t-\tthe HPAs did not read: %s\n' "$(printf '%s\n' "$hpas" | head -1)"; return 0; }
+    printf '%s' "$hpas" | jq -e '.items | type == "array"' >/dev/null 2>&1 || {
+        printf 'unreadable\t-\tthe HPAs did not read as a list\n'; return 0; }
+    rows="$(printf '%s' "$sos" | jq -r --arg ns "$WVA_NS" --argjson h "$hpas" "$WVA_SCALER_ADDRESS_JQ"'
+        ($h.items // []) as $hl
+        | .items[]?
+        | select([.spec.triggers[]?.metadata.warmPoolName] | all(. == null))
+        | .metadata.name as $n
+        | (.status.hpaName // ("keda-hpa-" + $n)) as $hn
+        | ([$hl[] | select(.metadata.name == $hn)] | .[0]) as $hpa
+        | ([.spec.triggers[]? | select((.metadata.scalerAddress // "") | wva_names_scaler($ns))] | length > 0) as $ours
+        | ([$hpa.status.conditions[]? | select(.type == "ScalingActive" and .status == "False"
+             and .reason == "FailedGetExternalMetric") | (.message // "")] | .[0]) as $failing
+        | (([.status.conditions[]? | select(.type == "Paused" and .status == "True")] | length > 0)
+           or ((.metadata.annotations // {}) | has("autoscaling.keda.sh/paused-replicas") or has("autoscaling.keda.sh/paused"))) as $paused
+        | if ($ours | not) then ["foreign", $n, ([$hpa.spec.metrics[]? | .type] | join(", "))]
+          elif $paused then ["paused", $n, $hn]
+          elif $hpa == null then ["absent", $n, $hn]
+          elif $failing != null then ["failing", $n, $hn + ": " + $failing]
+          else ["check", $n, $hn] end
+        | @tsv' 2>/dev/null)" || { printf 'unreadable\t-\tthe ScaledObjects did not parse\n'; return 0; }
+    while IFS=$'\t' read -r st so detail; do
+        [ -n "$st" ] || continue
+        if [ "$st" = check ]; then
+            st="$(wva_scaler_so_wiring "$NS" "$so")"
+            case "$st" in
+                unwired*) detail="$detail: trigger(s) ${st#unwired } have no External metric in the HPA or in the ScaledObject status.externalMetricNames"; st=unwired ;;
+            esac
+        fi
+        printf '%s\t%s\t%s\n' "$st" "$so" "$detail"
+    done <<<"$rows"
+}
+
+# keda_conn_snapshot (inside with_scaler_lib): "<state><TAB><detail>" from
+# wva_scaler_keda_conn_state -- whether the controller refused handshakes from
+# KEDA's Pods lately (stale, copy, none or unknown).
+keda_conn_snapshot() {
+    wva_scaler_keda_conn_state
+    printf '%s\t%s\n' "$WVA_SCALER_KEDA_CONN" "${WVA_SCALER_KEDA_CONN_PODS:-}${WVA_SCALER_KEDA_CONN_WHY:-}"
+}
+
+# refuse_unwired <what>: dies unless every model ScaledObject naming WVA's
+# scaler is wired and KEDA can reach the scaler now. A ScaledObject that names
+# no WVA scaler is warned about, not refused; lists that cannot be read are
+# warned about too, since this refuses only what it has seen.
+#
+# Ready is not wired. MEASURED: a four-model baseline ran both arms, an hour of
+# GPUs, with every ScaledObject Ready and every HPA on the CPU default. KEDA's
+# operator still presented a client certificate from an earlier install, the
+# controller refused every handshake, and no model ever left one replica. The
+# standup said "4 ScaledObject(s) still unwired" and went on; verify said
+# "every model ScaledObject reports Ready" and passed.
+#
+# It waits first: `reset` pauses every ScaledObject, which makes KEDA delete
+# its HPA, and unpauses at the end, so an arm that starts right after can see
+# a Paused condition not yet cleared or no HPA yet. Judged mid-way, the first
+# would pass unchecked and the second refuse a healthy arm.
+refuse_unwired() {
+    local what="$1" snap end pending bad="" st so detail conn cdetail
+    end=$(( $(date +%s) + WIRING_TIMEOUT ))
+    while :; do
+        snap="$(with_scaler_lib wiring_snapshot)" || \
+            die "$what: could not load the installer's scaler helpers from $ROOT/deploy/lib, so KEDA's wiring cannot be judged"
+        pending="$(printf '%s\n' "$snap" | awk -F'\t' '$1 == "paused" || $1 == "absent" || $1 == "failing"')"
+        [ -n "$pending" ] && [ "$(date +%s)" -lt "$end" ] || break
+        sleep "$WIRING_POLL"
+    done
+    while IFS=$'\t' read -r st so detail; do
+        case "$st" in
+            ""|wired) ;;
+            unreadable) warn "KEDA wiring in $NS is unchecked: $detail" ;;
+            foreign) warn "ScaledObject $so names no WVA scaler (its HPA scales on ${detail:-nothing}); it is not judged" ;;
+            paused) bad="$bad$so: still paused after ${WIRING_TIMEOUT}s -- the pause was not lifted, so KEDA scales nothing"$'\n' ;;
+            absent) bad="$bad$so: HPA $detail still absent after ${WIRING_TIMEOUT}s -- KEDA did not rebuild it"$'\n' ;;
+            failing) bad="$bad$so: HPA $detail (FailedGetExternalMetric for ${WIRING_TIMEOUT}s) -- KEDA cannot read WVA's metric now"$'\n' ;;
+            unwired) bad="$bad$so: HPA $detail"$'\n' ;;
+            *) bad="$bad$so: its ScaledObject or HPA is unreadable ($st)"$'\n' ;;
+        esac
+    done <<<"$snap"
+    if [ -z "$bad" ] && printf '%s\n' "$snap" | grep -q '^wired'; then
+        IFS=$'\t' read -r conn cdetail <<<"$(with_scaler_lib keda_conn_snapshot)"
+        case "$conn" in
+            none) ;;
+            stale|copy) bad="the controller refused TLS handshakes from KEDA's Pod(s) $cdetail in the last 5 minutes ($conn): KEDA cannot reach the scaler, whatever its HPAs say"$'\n' ;;
+            *) warn "whether the controller refuses KEDA's handshakes is unknown: ${cdetail:-no reason given}" ;;
+        esac
+    fi
+    [ -n "$bad" ] || return 0
+    printf '%s' "$bad" | sed 's/^/      /' >&2
+    die "$1: the ScaledObjects above are not wired to WVA, so its decisions reach nothing and these models stay at their floor. After a reinstall in this namespace KEDA's operator keeps its old client certificate: restart it (kubectl rollout restart deployment/keda-operator -n keda, or stand up again with KEDA_RESTART=true), then run verify again."
 }
 
 case "$GATEWAY_REUSE" in
@@ -436,20 +691,31 @@ tolerations_json() {
 # Aggregated models are priced each at its OWN size and ceiling: a 2-GPU model
 # at 3 replicas beside a 1-GPU model at 4 peaks at 10, not 2 x 3 x 1.
 peak_gpus() {
-    local models=2 per_model="$MAX_REPLICAS"
+    local models="$MODEL_COUNT" per_model="$MAX_REPLICAS"
     [ "$PD_SINGLE_STACK" != 1 ] || models=1
     if scenario_is_pd; then
         per_model=$(( MAX_PREFILL + MAX_DECODE ))
         echo $(( models * per_model * GPUS_PER_REPLICA ))
         return
     fi
-    echo $(( MAX_REPLICAS_A * $(model_gpus a) + MAX_REPLICAS_B * $(model_gpus b) ))
+    # Every model at its own ceiling and size: the sum of the peaks, which a
+    # quota below it bounds (quota_cap).
+    local r sum=0
+    for r in $ROLES; do
+        sum=$(( sum + $(rvar MAX_REPLICAS "$r") * $(model_gpus "$r") ))
+    done
+    echo "$sum"
 }
 
-# The larger of the two models' ceilings: what the standup registers both
-# ScaledObjects at, before each arm sets each model's own.
+# The largest of the models' ceilings: what the standup registers every
+# ScaledObject at, before each arm sets each model's own.
 max_ceiling() {
-    if [ "$MAX_REPLICAS_A" -gt "$MAX_REPLICAS_B" ]; then echo "$MAX_REPLICAS_A"; else echo "$MAX_REPLICAS_B"; fi
+    local r m best=0
+    for r in $ROLES; do
+        m="$(rvar MAX_REPLICAS "$r")"
+        [ "$m" -gt "$best" ] && best="$m"
+    done
+    echo "$best"
 }
 
 # scenario_stack_field <stack> <yq path under the stack entry>: one value from
@@ -503,15 +769,21 @@ scenario_gpus() {
 # no stacks to read and keeps GPUS_PER_REPLICA.
 model_gpus() {
     local v stack
-    if [ "$1" = a ]; then v="$GPUS_PER_REPLICA_A"; stack="$STACK_A"; else v="$GPUS_PER_REPLICA_B"; stack="$STACK_B"; fi
+    v="$(rvar GPUS_PER_REPLICA "$1")"; stack="$(rvar STACK "$1")"
     if [ -z "$v" ] && [ "$PD_SINGLE_STACK" != 1 ]; then
         v="$(scenario_gpus "$stack")"
     fi
     echo "${v:-$GPUS_PER_REPLICA}"
 }
 
-# mixed_sizes: whether the two models' replicas differ in GPUs.
-mixed_sizes() { [ "$PD_SINGLE_STACK" != 1 ] && [ "$(model_gpus a)" != "$(model_gpus b)" ]; }
+# model_sizes: every model's GPUs per replica, space-separated, in model order.
+model_sizes() { local r out=""; for r in $ROLES; do out="$out${out:+ }$(model_gpus "$r")"; done; printf '%s' "$out"; }
+
+# mixed_sizes: whether the models' replicas differ in GPUs.
+mixed_sizes() {
+    [ "$PD_SINGLE_STACK" != 1 ] || return 1
+    [ "$(printf '%s\n' $(model_sizes) | sort -u | wc -l)" -gt 1 ]
+}
 
 # node_data_needed: whether the share arms need node data. A 2-GPU replica is
 # funded from 1-GPU donors only when node data shows them on one node; without
@@ -531,12 +803,19 @@ node_data_needed() {
 # read (single-stack P/D).
 scenario_size_problems() {
     [ "$PD_SINGLE_STACK" != 1 ] || return 0
+    # Two roles on one stack or one model: the route sends both loaders to the
+    # same Deployment and the controller sees one model, so a third model that
+    # copied the first's settings is a two-model run reported as three.
+    local dup
+    dup="$(role_stacks | sort | uniq -d | tr '\n' ' ')"
+    [ -z "$dup" ] || echo "two models share stack(s) ${dup% }: every STACK_<role> must name its own stack"
+    dup="$(role_models | sort | uniq -d | tr '\n' ' ')"
+    [ -z "$dup" ] || echo "two models share model id(s) ${dup% }: every MODEL_<role> must name its own model"
     local file="$ROOT/hack/benchmark/scenarios/$BENCH_SPEC.yaml"
     [ -f "$file" ] && command -v yq >/dev/null 2>&1 || return 0
     local role stack model want_model req tp dl override
-    for role in a b; do
-        if [ "$role" = a ]; then stack="$STACK_A"; want_model="$MODEL_A"; override="$GPUS_PER_REPLICA_A"
-        else stack="$STACK_B"; want_model="$MODEL_B"; override="$GPUS_PER_REPLICA_B"; fi
+    for role in $ROLES; do
+        stack="$(rvar STACK "$role")"; want_model="$(rvar MODEL "$role")"; override="$(rvar GPUS_PER_REPLICA "$role")"
         if [ -z "$(scenario_stack_field "$stack" '.name')" ]; then
             echo "STACK_$(printf '%s' "$role" | tr a-z A-Z)=$stack is not a stack of $BENCH_SPEC (its stacks: $(yq -r '[.scenario[].name] | join(", ")' "$file" 2>/dev/null | tr -d '\r'))"
             continue
@@ -596,6 +875,15 @@ PY
 }
 
 pool_gpus() { echo $(( POOL_REPLICAS * GPUS_PER_REPLICA )); }
+
+# scenario_stack_count: how many stacks the scenario defines; 0 when it cannot
+# be read, which keeps every stack rather than guessing which to drop.
+scenario_stack_count() {
+    local file="$ROOT/hack/benchmark/scenarios/$BENCH_SPEC.yaml" n
+    n="$(yq -r '.scenario | length' "$file" 2>/dev/null | tr -d '\r')"
+    case "$n" in ""|*[!0-9]*) n=0 ;; esac
+    printf '%s' "$n"
+}
 
 case "$REPEAT" in
     ""|[1-9]|[1-9][0-9]) ;;
@@ -720,6 +1008,61 @@ gateway_reuse() {
     esac
 }
 
+# gateway_proxy_pull: what a reused control plane gives a gateway Pod, as
+# "<proxy image>|<pull secret> ...", read from its injector ConfigMaps in
+# GATEWAY_PROVIDER_NAMESPACE. Nothing when they cannot be read.
+gateway_proxy_pull() {
+    kc -n "$GATEWAY_PROVIDER_NAMESPACE" get configmap -o json 2>/dev/null | jq -r '
+        [.items[] | select(.metadata.name | startswith("istio-sidecar-injector"))
+         | ((.data.values // "{}") | (fromjson? // {})) | (.global // {})] as $g
+        | if ($g | length) == 0 then empty else
+            ($g[0]) as $x
+            | ($x.proxy.image // "proxyv2") as $img
+            | (if ($img | test("/")) then $img else "\($x.hub // "?")/\($img):\($x.tag // "?")" end)
+              + "|" + ([$g[] | .imagePullSecrets[]? | if type == "object" then .name else . end]
+                       | unique | join(" "))
+          end' 2>/dev/null
+}
+
+# gateway_pull_preflight: refuses a reused control plane whose gateway proxy
+# names pull secrets this namespace lacks. MEASURED on a shared H200 cluster:
+# the Istio it now runs hands every gateway Pod a proxy image from a registry
+# that needs a login, and a pull secret for it that the benchmark namespace
+# does not have. The standup downloaded four models, then found the gateway
+# Pod in ErrImagePull and aborted. The scenario was not the cause: the
+# two-model runs there had predated GATEWAY_REUSE and installed their own
+# Istio (proxy docker.io/istio/proxyv2). Read-only: a ConfigMap read and a
+# Secret existence check. A secret that cannot be read (as opposed to absent)
+# is reported, not refused.
+gateway_pull_preflight() {
+    [ "$GATEWAY_PULL_CHECK" = 1 ] || { info "  GATEWAY_PULL_CHECK=$GATEWAY_PULL_CHECK: the gateway proxy pull secrets are not checked"; return 0; }
+    local got image secrets s out missing="" unread=""
+    got="$(gateway_proxy_pull)"
+    if [ -z "$got" ]; then
+        info "  could not read the gateway proxy image the control plane in $GATEWAY_PROVIDER_NAMESPACE hands out (no readable istio-sidecar-injector ConfigMap); its pull secrets are unchecked"
+        return 0
+    fi
+    image="${got%%|*}"; secrets="${got#*|}"
+    for s in $secrets; do
+        out="$(k get secret "$s" -o name 2>&1)" && continue
+        case "$out" in
+            *NotFound*|*"not found"*) missing="$missing${missing:+ }$s" ;;
+            *) unread="$unread${unread:+ }$s" ;;
+        esac
+    done
+    if [ -n "$missing" ]; then
+        warn "the reused control plane in $GATEWAY_PROVIDER_NAMESPACE gives the gateway Pod the image"
+        warn "  $image"
+        warn "  with pull secret(s) '$missing', which $NS does not have. The gateway Pod would fail in"
+        warn "  ErrImagePull and the standup abort at gateway infra, after the model downloads. Create the"
+        warn "  secret(s) in $NS with credentials for that registry, or set GATEWAY_PULL_CHECK=0 if the image"
+        warn "  pulls without them."
+        return 1
+    fi
+    [ -z "$unread" ] || info "  could not read pull secret(s) '$unread' in $NS to tell whether they exist; the gateway proxy may not pull"
+    ok "  the gateway proxy image is $image${secrets:+ (pull secrets: $secrets)}"
+}
+
 placeable_slots() {
     # How many whole decode Pods fit, node by node, in what is left of each
     # node's CPU, memory and accelerators. Empty output when it cannot be
@@ -785,9 +1128,11 @@ node_free_gpus() {
 # largest_replica_gpus: the GPUs one replica of the larger model holds.
 largest_replica_gpus() {
     if [ "$PD_SINGLE_STACK" = 1 ] || scenario_is_pd; then echo "$GPUS_PER_REPLICA"; return; fi
-    local a b
-    a="$(model_gpus a)"; b="$(model_gpus b)"
-    if [ "$a" -ge "$b" ]; then echo "$a"; else echo "$b"; fi
+    local g best=0
+    for g in $(model_sizes); do
+        [ "$g" -gt "$best" ] && best="$g"
+    done
+    echo "$best"
 }
 
 # peak_pods <gpus>: the most model Pods the run can hold within <gpus>, each
@@ -797,14 +1142,31 @@ largest_replica_gpus() {
 peak_pods() {
     local cap="$1"
     if [ "$PD_SINGLE_STACK" = 1 ] || scenario_is_pd; then echo $(( cap / GPUS_PER_REPLICA )); return; fi
-    local ga gb a b best=0
-    ga="$(model_gpus a)"; gb="$(model_gpus b)"
-    for a in $(seq "$MIN_REPLICAS" "$MAX_REPLICAS_A"); do
-        for b in $(seq "$MIN_REPLICAS" "$MAX_REPLICAS_B"); do
-            [ $(( a * ga + b * gb )) -le "$cap" ] && [ $(( a + b )) -gt "$best" ] && best=$(( a + b ))
-        done
+    # Every combination of per-model replica counts, as nested loops over the
+    # models: for two models exactly the double loop it always was.
+    local sizes ceilings r
+    sizes="$(model_sizes)"
+    ceilings=""
+    for r in $ROLES; do ceilings="$ceilings${ceilings:+ }$(rvar MAX_REPLICAS "$r")"; done
+    _PEAK_BEST=0
+    _peak_pods_from "$cap" 0 0 "$sizes" "$ceilings"
+    echo "$_PEAK_BEST"
+}
+
+# _peak_pods_from <cap> <gpus so far> <pods so far> <sizes left> <ceilings left>:
+# the recursion behind peak_pods, keeping the best count in _PEAK_BEST.
+_peak_pods_from() {
+    local cap="$1" used="$2" pods="$3" sizes="$4" ceilings="$5" g m n
+    if [ -z "$sizes" ]; then
+        [ "$used" -le "$cap" ] && [ "$pods" -gt "$_PEAK_BEST" ] && _PEAK_BEST="$pods"
+        return 0
+    fi
+    g="${sizes%% *}"; m="${ceilings%% *}"
+    for n in $(seq "$MIN_REPLICAS" "$m"); do
+        _peak_pods_from "$cap" $(( used + n * g )) $(( pods + n )) \
+            "$( [ "$sizes" = "${sizes#* }" ] || printf '%s' "${sizes#* }")" \
+            "$( [ "$ceilings" = "${ceilings#* }" ] || printf '%s' "${ceilings#* }")"
     done
-    echo "$best"
 }
 
 # bench_nodes_fit: one JSON object per BENCH_NODES entry, in order -- whether
@@ -971,14 +1333,39 @@ verb_preflight() {
         info "the quota (WVA_QUOTAS=${WVA_QUOTAS}) holds the models to ${cap} GPU(s), below the ${want} their ceilings allow; placement is checked for ${cap}"
         want="$cap"
     fi
+    # THE QUOTA'S LOWER BOUND: one model's peak plus every other model's floor.
+    # Below it, even a perfect transfer cannot give a rising model its peak
+    # while the others keep their floors, and the arms measure how a shortage
+    # is cut rather than whether GPUs arrive in time. For two 1-GPU models of
+    # up to 3 that is 4; for four, 6.
+    if [ -n "$cap" ] && [ "$PD_SINGLE_STACK" != 1 ] && ! scenario_is_pd; then
+        local qr qo q_floors q_need=0 q_role="" q_one
+        for qr in $ROLES; do
+            q_floors=0
+            for qo in $ROLES; do
+                [ "$qo" = "$qr" ] || q_floors=$(( q_floors + MIN_REPLICAS * $(model_gpus "$qo") ))
+            done
+            q_one=$(( $(rvar MAX_REPLICAS "$qr") * $(model_gpus "$qr") + q_floors ))
+            if [ "$q_one" -gt "$q_need" ]; then q_need="$q_one"; q_role="$qr"; fi
+        done
+        if [ "$cap" -lt "$q_need" ]; then
+            warn "the quota (${cap} GPU(s)) is below one model's peak plus the others' floors: model $(upper "$q_role")"
+            warn "  at $(rvar MAX_REPLICAS "$q_role") x $(model_gpus "$q_role") GPU(s) beside $(( MODEL_COUNT - 1 )) model(s) at MIN_REPLICAS=${MIN_REPLICAS} needs ${q_need}."
+            warn "  Raise WVA_QUOTAS to at least ${q_need}, or lower MAX_REPLICAS."
+            rc=1
+        else
+            ok "the quota (${cap}) covers one model's peak plus the others' floors (${q_need})"
+        fi
+    fi
     info "accelerators: ${total:-?} schedulable, ${used:-?} held by pods on those nodes, ${free} free; this run peaks at ${want}"
     if [ "${unbound%% *}" -gt 0 ] 2>/dev/null; then
         warn "${unbound%% *} Pending pod(s) wait for ${unbound#* } accelerator(s) and hold none yet; they are not"
         warn "  counted, but whatever frees up first may go to them rather than to this run."
     fi
-    info "  nopool arm: 2 models x 1..${MAX_REPLICAS} replicas"
-    info "  floor arm:  2 models x ${FLOOR_REPLICAS}..${MAX_REPLICAS} replicas"
-    info "  pool arm:   2 models x 1..${MAX_REPLICAS} replicas + a ${POOL_REPLICAS}-Pod pool on top -- the same ceiling in every arm; the insurance is priced in GPU-seconds"
+    info "  nopool arm: ${MODEL_COUNT} models x 1..${MAX_REPLICAS} replicas"
+    info "  floor arm:  ${MODEL_COUNT} models x ${FLOOR_REPLICAS}..${MAX_REPLICAS} replicas"
+    info "  pool arm:   ${MODEL_COUNT} models x 1..${MAX_REPLICAS} replicas + a ${POOL_REPLICAS}-Pod pool on top -- the same ceiling in every arm; the insurance is priced in GPU-seconds"
+    [ "$MODEL_COUNT" = 2 ] || info "  bursts rotate over ${MODEL_COUNT} models (b, c$([ "$MODEL_COUNT" = 4 ] && echo ', d'), a), each shifted by one phase plus one band from the last"
     if scenario_is_pd; then
         info "  P/D: every model is two roles -- prefill ${MIN_PREFILL}..${MAX_PREFILL} and decode ${MIN_DECODE}..${MAX_DECODE} replicas -- and the peak counts both"
     fi
@@ -986,8 +1373,10 @@ verb_preflight() {
         warn "FLOOR_REPLICAS=${FLOOR_REPLICAS} is above a role's ceiling ($(floor_ceiling)): the floor arm will refuse to start"
     fi
     if ! scenario_is_pd; then
-        info "  model A ($STACK_A, $MODEL_A): $(model_gpus a) GPU(s) per replica (tensor $(scenario_tp "$STACK_A")), 1..${MAX_REPLICAS_A} replicas"
-        info "  model B ($STACK_B, $MODEL_B): $(model_gpus b) GPU(s) per replica (tensor $(scenario_tp "$STACK_B")), 1..${MAX_REPLICAS_B} replicas"
+        local mr
+        for mr in $ROLES; do
+            info "  model $(upper "$mr") ($(rvar STACK "$mr"), $(rvar MODEL "$mr")): $(model_gpus "$mr") GPU(s) per replica (tensor $(scenario_tp "$(rvar STACK "$mr")")), 1..$(rvar MAX_REPLICAS "$mr") replicas"
+        done
     fi
     local size_problems
     size_problems="$(scenario_size_problems)"
@@ -1001,7 +1390,7 @@ verb_preflight() {
     if node_data_needed; then
         case ",${WVA_LIMITER:-}," in
             *,gpu-inventory,*|*,inventory,*) info "the share arms need node data; WVA_LIMITER=${WVA_LIMITER} declares gpu-inventory beside the quota" ;;
-            *) warn "the two models' replicas differ in size ($(model_gpus a) and $(model_gpus b) GPUs), so the share arms need node data:"
+            *) warn "the $(models_word) models' replicas differ in size ($(model_sizes | sed 's/ / and /g') GPUs), so the share arms need node data:"
                warn "  stand up with WVA_LIMITER=gpu-inventory,quota (now '${WVA_LIMITER:-}'); the share arms refuse a policy without it." ;;
         esac
         info "  after standup an admin grants the controller node read and a cluster-wide pod list once; 'node-data' prints the exact commands"
@@ -1138,6 +1527,7 @@ verb_preflight() {
         rc=1
     elif [ "${gw_installed:-0}" -gt 0 ]; then
         ok "Istio is provided by the cluster; the standup reuses it (control plane in $GATEWAY_PROVIDER_NAMESPACE)"
+        gateway_pull_preflight || rc=1
     fi
 
     # The model cache. A pool Pod loads its warm copies through the SAME claim
@@ -1221,7 +1611,7 @@ $size_problems"
     if node_data_needed; then
         case ",${WVA_LIMITER:-}," in
             *,gpu-inventory,*|*,inventory,*) : ;;
-            *) die "the models' replicas differ in size ($(model_gpus a) and $(model_gpus b) GPUs), so the share arms need node data, and WVA_LIMITER='${WVA_LIMITER:-}' declares no gpu-inventory limiter. Stand up with WVA_LIMITER=gpu-inventory,quota WVA_QUOTAS='<accelerator>=<n>', or NODE_DATA=off to run without it (the small model can then never fund the large one)." ;;
+            *) die "the models' replicas differ in size ($(model_sizes | sed 's/ / and /g') GPUs), so the share arms need node data, and WVA_LIMITER='${WVA_LIMITER:-}' declares no gpu-inventory limiter. Stand up with WVA_LIMITER=gpu-inventory,quota WVA_QUOTAS='<accelerator>=<n>', or NODE_DATA=off to run without it (the small model can then never fund the large one)." ;;
         esac
     fi
     local nodes_bad tols
@@ -1258,9 +1648,11 @@ $size_problems"
     local allow_reuse=false epps
     epps="$(k get deploy -o name 2>/dev/null | grep -c -- '-epp' || true)"
     if [ "${epps:-0}" -gt 0 ]; then
-        if [ -n "$(stack_backend "$STACK_A")" ] && [ -n "$(stack_backend "$STACK_B")" ]; then
+        local carried=1 s
+        for s in $(role_stacks); do [ -n "$(stack_backend "$s")" ] || carried=0; done
+        if [ "$carried" = 1 ]; then
             allow_reuse=true
-            info "re-rendering: the route already carries $STACK_A and $STACK_B, so the ${epps} EPP(s) here are this scenario's"
+            info "re-rendering: the route already carries $(and_list $(role_stacks)), so the ${epps} EPP(s) here are this scenario's"
         else
             die "$NS already runs ${epps} EPP(s), and the shared route does not carry both of this scenario's stacks -- so they belong to something else. A standup would apply its own EPP, Service, InferencePool and PodMonitor over them, silently. Use a clean namespace."
         fi
@@ -1271,11 +1663,26 @@ $size_problems"
     k create configmap "$STANDUP_RECORD" --from-literal=spec="$BENCH_SPEC" \
         --dry-run=client -o yaml | k apply -f - >/dev/null \
         || die "could not record the scenario in ConfigMap $STANDUP_RECORD; the teardown would not know what to undo"
-    info "standing up both stacks from $BENCH_SPEC"
+    # The run stands up only its own stacks whenever the scenario has more: the
+    # scenario copy keeps the run's (BENCHMARK_STACKS, scenario_overrides.sh),
+    # so three models on n-model-share -- or two, with BENCH_SPEC pointed at it
+    # -- do not hold the other models' GPUs for nothing. Empty when the
+    # scenario is exactly the run's, as every two-model scenario is.
+    local keep_stacks="" n_stacks
+    n_stacks="$(scenario_stack_count)"
+    [ "$n_stacks" -gt "$MODEL_COUNT" ] && keep_stacks="$(role_stacks | paste -sd, -)"
+    if [ -n "$keep_stacks" ]; then
+        info "standing up ${MODEL_COUNT} of the ${n_stacks} stacks of $BENCH_SPEC: $keep_stacks"
+    elif [ "$MODEL_COUNT" = 2 ]; then
+        info "standing up both stacks from $BENCH_SPEC"
+    else
+        info "standing up all ${MODEL_COUNT} stacks of $BENCH_SPEC"
+    fi
     local gw_reuse
     gw_reuse="$(gateway_reuse)"
     [ "$gw_reuse" = true ] && info "reusing the cluster's gateway control plane in $GATEWAY_PROVIDER_NAMESPACE (GATEWAY_REUSE=$GATEWAY_REUSE)"
     ( cd "$ROOT" && \
+        BENCHMARK_STACKS="$keep_stacks" \
         BENCHMARK_GATEWAY_SKIP_INSTALL="$gw_reuse" \
         BENCHMARK_GATEWAY_PROVIDER_NAMESPACE="$GATEWAY_PROVIDER_NAMESPACE" \
         BENCHMARK_DECODE_CPU="$DECODE_CPU" \
@@ -1430,7 +1837,7 @@ role_deploys() {
         return
     fi
     local s d
-    for s in "$STACK_A" "$STACK_B"; do
+    for s in $(role_stacks); do
         d="$(decode_deploy_for "$s")"
         [ -n "$d" ] || continue
         echo "$d decode"
@@ -1556,7 +1963,7 @@ fi
 # sim_manifest <a|b>: one simulator stack, as YAML.
 sim_manifest() {
     local role="$1" stack model gpus sel=""
-    if [ "$role" = a ]; then stack="$STACK_A"; model="$MODEL_A"; else stack="$STACK_B"; model="$MODEL_B"; fi
+    stack="$(rvar STACK "$role")"; model="$(rvar MODEL "$role")"
     gpus="$(model_gpus "$role")"
     if [ -n "$SIM_GPU_PRODUCT" ] || [ -n "$BENCH_NODE" ]; then
         sel="      nodeSelector:"
@@ -1690,11 +2097,11 @@ sim_standup() {
         --dry-run=client -o yaml | k apply -f - >/dev/null \
         || die "could not record the standup in ConfigMap $STANDUP_RECORD"
     local role
-    for role in a b; do
+    for role in $ROLES; do
         info "simulator stack for model $role: $(model_gpus "$role") GPU(s) per replica"
         sim_manifest "$role" | k apply -f - >/dev/null || die "could not apply the simulator stack for model $role"
     done
-    for role in "$STACK_A" "$STACK_B"; do
+    for role in $(role_stacks); do
         k rollout status "deploy/${role}-decode" --timeout=600s >/dev/null || die "${role}-decode did not become ready"
     done
     # The install refuses model servers nothing scrapes, once it can tell: when
@@ -1719,8 +2126,13 @@ sim_teardown() {
     k delete job -l app.kubernetes.io/name=wva-two-model-load --ignore-not-found --timeout=120s >/dev/null 2>&1
     k delete configmap wva-two-model-load --ignore-not-found --timeout=60s >/dev/null 2>&1
     # The ScaledObjects first: left behind, KEDA would scale the Deployments
-    # back up while they are being deleted.
-    for d in "$STACK_A-decode" "$STACK_B-decode"; do
+    # back up while they are being deleted. EVERY simulator stack present, not
+    # only this invocation's models: a teardown run without the standup's
+    # MODEL_COUNT would otherwise leave models C and D's ScaledObjects behind.
+    local present
+    present="$(k get deploy -l app.kubernetes.io/part-of=wva-two-model-sim \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)"
+    for d in $( { printf '%s\n' "$present"; role_stacks | sed 's/$/-decode/'; } | grep -v '^$' | sort -u); do
         sos="$(k get scaledobject -o json 2>/dev/null | jq -r --arg d "$d" \
             '.items[] | select(.spec.scaleTargetRef.name == $d) | .metadata.name')"
         for so in $sos; do k delete scaledobject "$so" --ignore-not-found >/dev/null 2>&1; done
@@ -1737,7 +2149,7 @@ sim_teardown() {
 # (`<shortName>-router`), and the chart names its EPP `<shortName>-router-epp`.
 epp_deploys() {
     local s backend
-    for s in "$STACK_A" "$STACK_B"; do
+    for s in $(role_stacks); do
         backend="$(stack_backend "$s")"
         [ -n "$backend" ] || continue
         k get deploy "${backend}-epp" -o name >/dev/null 2>&1 && printf '%s\n' "${backend}-epp"
@@ -1947,9 +2359,11 @@ else:
             warn "  the signal exists. SKIP_FLOW_CONTROL_CHECK=1 to proceed anyway."
             return 1 ;;
     esac
-    local missing=""
+    local missing="" m
     case "$out" in *"$MODEL_A"*) : ;; *) missing="$MODEL_A" ;; esac
-    case "$out" in *"$MODEL_B"*) : ;; *) missing="$missing $MODEL_B" ;; esac
+    for m in $(role_models | tail -n +2); do
+        case "$out" in *"$m"*) : ;; *) missing="$missing $m" ;; esac
+    done
     if [ -n "$missing" ]; then
         warn "the EPP flow-control queue has NO series for:$missing"
         warn "  Prometheus returned: ${out:-<nothing>}"
@@ -1959,7 +2373,11 @@ else:
         warn "      kubectl rollout restart deploy -n $NS $(epp_deploys | tr '\n' ' ')"
         return 1
     fi
-    ok "the EPP flow-control queue is live for both models"
+    if [ "$MODEL_COUNT" = 2 ]; then
+        ok "the EPP flow-control queue is live for both models"
+    else
+        ok "the EPP flow-control queue is live for all ${MODEL_COUNT} models"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -2228,7 +2646,7 @@ check_node_data() {
     local problems
     problems="$(node_data_problems)"
     [ -n "$problems" ] || { ok "node data: gpu-inventory in the policy, node read and a cluster-wide pod list for the controller"; return 0; }
-    warn "this run needs node data (NODE_DATA=$NODE_DATA; replicas of $(model_gpus a) and $(model_gpus b) GPUs), and:"
+    warn "this run needs node data (NODE_DATA=$NODE_DATA; replicas of $(model_sizes | sed 's/ / and /g') GPUs), and:"
     printf '%s\n' "$problems" | sed 's/^/      /' >&2
     warn "an admin runs, once:"
     node_data_admin_steps >&2
@@ -2338,7 +2756,7 @@ verb_verify() {
     info "gateway: $hostport"
 
     local rc=0 d ready
-    for s in "$STACK_A" "$STACK_B"; do
+    for s in $(role_stacks); do
         d="$(decode_deploy_for "$s")"
         if [ -z "$d" ]; then
             warn "no decode Deployment matching stack '$s'"
@@ -2349,13 +2767,14 @@ verb_verify() {
         info "  $s -> $d (ready: ${ready:-0})"
         [ "${ready:-0}" -ge 1 ] || { warn "  $s has no ready replica"; rc=1; }
     done
-    [ "$rc" -eq 0 ] || die "both stacks must be serving before anything is measured"
+    [ "$rc" -eq 0 ] || die "$([ "$MODEL_COUNT" = 2 ] && echo both || echo "all $MODEL_COUNT") stacks must be serving before anything is measured"
 
     # Two EPPs, which is the topology this scenario is about. One EPP serving
     # both pools would still run, and the run would be measuring something else.
+    # (An EPP per model: three or four for a run of three or four.)
     local epps
     epps="$(k get deploy -o name 2>/dev/null | grep -c -- '-epp' || true)"
-    local want_epps=2
+    local want_epps="$MODEL_COUNT"
     [ "$PD_SINGLE_STACK" != 1 ] || want_epps=1
     # The simulator stacks have no gateway and no EPP: the loader drives each
     # simulator's Service directly.
@@ -2370,8 +2789,8 @@ verb_verify() {
     # every GPU-second and every quota bound in the report wrong.
     if ! scenario_is_pd; then
         local role held want_g
-        for role in a b; do
-            if [ "$role" = a ]; then d="$(decode_deploy_for "$STACK_A")"; else d="$(decode_deploy_for "$STACK_B")"; fi
+        for role in $ROLES; do
+            d="$(decode_deploy_for "$(rvar STACK "$role")")"
             [ -n "$d" ] || continue
             held="$(k get deploy "$d" -o json 2>/dev/null | jq -r '
                 [.spec.template.spec.containers[]?.resources.requests["nvidia.com/gpu"] // "0" | tonumber] | add // 0' 2>/dev/null)"
@@ -2392,9 +2811,10 @@ verb_verify() {
 
     # A real request per model, through its own path, before half an hour of
     # load. A 404 here is a name; a 404 at minute 12 is a wasted run.
-    local probe_rc=0
-    verify_probe "$(endpoint_for_stack "$hostport" "$STACK_A")" "$MODEL_A" || probe_rc=1
-    verify_probe "$(endpoint_for_stack "$hostport" "$STACK_B")" "$MODEL_B" || probe_rc=1
+    local probe_rc=0 pr
+    for pr in $ROLES; do
+        verify_probe "$(endpoint_for_stack "$hostport" "$(rvar STACK "$pr")")" "$(rvar MODEL "$pr")" || probe_rc=1
+    done
     [ "$probe_rc" -eq 0 ] || die "at least one model did not answer a single request"
 
     # IS THE CONTROLLER ACTUALLY READING? This is the failure that produces two
@@ -2427,6 +2847,7 @@ verb_verify() {
     else
         ok "every model ScaledObject reports Ready"
     fi
+    refuse_unwired "verify refused"
     local errs
     errs="$(controller_metric_errors)"
     if [ -n "$errs" ]; then
@@ -2664,7 +3085,7 @@ except Exception as e:
 }
 
 wait_resident() {
-    local timeout="${1:-900}" pods deadline blob have_a have_b
+    local timeout="${1:-900}" pods deadline blob r have line all
     pods="$(pool_pods)"
     if [ -z "$pods" ]; then
         warn "pool '$POOL_NAME' has no Pods"
@@ -2674,16 +3095,20 @@ wait_resident() {
     # Read once before the deadline is consulted, as in wait_share_mode.
     while :; do
         blob="$(pool_residency)"
-        have_a=0; have_b=0
         # Matched on the MODEL ID and on the stack short name, because the
         # supervisor keys instances on the variant and which of the two spellings
         # that is has never been checked against a live pool. Whichever matches,
         # matches; when neither does, the raw payload is printed rather than a
         # bare timeout, so the next run can be told what the identity really is.
-        case "$blob" in *"$MODEL_A"*|*"$STACK_A"*) have_a=1 ;; esac
-        case "$blob" in *"$MODEL_B"*|*"$STACK_B"*) have_b=1 ;; esac
-        info "  resident: A=$have_a B=$have_b"
-        if [ "$have_a" = 1 ] && [ "$have_b" = 1 ]; then
+        line=""; all=1
+        for r in $ROLES; do
+            have=0
+            case "$blob" in *"$(rvar MODEL "$r")"*|*"$(rvar STACK "$r")"*) have=1 ;; esac
+            [ "$have" = 1 ] || all=0
+            line="$line${line:+ }$(upper "$r")=$have"
+        done
+        info "  resident: $line"
+        if [ "$all" = 1 ]; then
             return 0
         fi
         [ "$(date +%s)" -lt "$deadline" ] || break
@@ -2699,8 +3124,8 @@ verb_warm() {
     k get deploy "wva-warm-pool-$POOL_NAME" >/dev/null 2>&1 || \
         die "no pool named $POOL_NAME. Run pool-create first -- there is nothing to warm."
     local rc=0
-    pin_warm_copy "$MODEL_A" || rc=1
-    pin_warm_copy "$MODEL_B" || rc=1
+    local m
+    for m in $(role_models); do pin_warm_copy "$m" || rc=1; done
     [ "$rc" -eq 0 ] || die "could not pin a warm copy for both models; the pool would rank one of them out exactly when its burst arrives."
     if [ "${SKIP_WARM_GATE:-0}" = "1" ]; then
         warn "SKIP_WARM_GATE=1: not waiting for residency. The arm will measure whatever the pool happens to hold."
@@ -2828,7 +3253,7 @@ wait_fleet_at() {
     local n="$1" waited=0 s d cur ready deploys
     while [ "$waited" -lt "$RESET_TIMEOUT" ]; do
         local settled=1
-        for s in "$STACK_A" "$STACK_B"; do
+        for s in $(role_stacks); do
             [ -n "$(decode_deploy_for "$s")" ] || settled=0
         done
         deploys="$(role_deploys)"
@@ -2838,7 +3263,7 @@ wait_fleet_at() {
             ready="$(k get deploy "$d" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"
             [ "${cur:-0}" = "$n" ] && [ "${ready:-0}" = "$n" ] || settled=0
         done <<<"$deploys"
-        [ "$settled" = 1 ] && { ok "every role of both models is at $n and ready"; return 0; }
+        [ "$settled" = 1 ] && { ok "every role of $([ "$MODEL_COUNT" = 2 ] && echo both || echo "all $MODEL_COUNT") models is at $n and ready"; return 0; }
         sleep 10
         waited=$(( waited + 10 ))
     done
@@ -2858,14 +3283,15 @@ set_arm_ceiling() {
         if [ "$MAX_PREFILL" != "$MAX_REPLICAS" ] || [ "$MAX_DECODE" != "$MAX_REPLICAS" ]; then
             role_ceiling="$(role_max "$(so_role "$so")")"
         fi
-        # Per model, when the two models' ceilings differ: the ScaledObject
-        # says which model it registers (its trigger's modelID).
-        if [ "$MAX_REPLICAS_A" != "$MAX_REPLICAS" ] || [ "$MAX_REPLICAS_B" != "$MAX_REPLICAS" ]; then
+        # Per model, when the models' ceilings differ: the ScaledObject says
+        # which model it registers (its trigger's modelID).
+        if per_model_ceilings; then
             model="$(k get scaledobject "$so" -o json 2>/dev/null | jq -r '
                 [.spec.triggers[]?.metadata.modelID // empty] | first // ""' 2>/dev/null)"
-            if [ "$model" = "$MODEL_A" ]; then role_ceiling="$MAX_REPLICAS_A"
-            elif [ "$model" = "$MODEL_B" ]; then role_ceiling="$MAX_REPLICAS_B"
-            else warn "ScaledObject $so registers model '${model:-<none>}', neither MODEL_A nor MODEL_B; it keeps ceiling $role_ceiling"
+            local mrole
+            mrole="$(role_of_model "$model")"
+            if [ -n "$mrole" ]; then role_ceiling="$(rvar MAX_REPLICAS "$mrole")"
+            else warn "ScaledObject $so registers model '${model:-<none>}', $([ "$MODEL_COUNT" = 2 ] && echo "neither MODEL_A nor MODEL_B" || echo "none of MODEL_A..MODEL_$(upper "${ROLES##* }")"); it keeps ceiling $role_ceiling"
             fi
         fi
         k patch scaledobject "$so" --type=merge \
@@ -2879,9 +3305,55 @@ set_arm_ceiling() {
     if scenario_is_pd; then
         info "arm '$arm': each model's prefill may reach ${MAX_PREFILL} replicas and its decode ${MAX_DECODE}; the pool holds ${held} Pod(s) -- ceiling $(( $(peak_gpus) + held * GPUS_PER_REPLICA )) accelerators"
     else
-        info "arm '$arm': model A may reach ${MAX_REPLICAS_A} replicas of $(model_gpus a) GPU(s), model B ${MAX_REPLICAS_B} of $(model_gpus b); the pool holds ${held} Pod(s) -- ceiling $(( $(peak_gpus) + held * GPUS_PER_REPLICA )) accelerators"
+        local reach="model A may reach ${MAX_REPLICAS_A} replicas of $(model_gpus a) GPU(s), model B ${MAX_REPLICAS_B} of $(model_gpus b)" er
+        for er in $EXTRA_ROLES; do
+            reach="$reach, model $(upper "$er") $(rvar MAX_REPLICAS "$er") of $(model_gpus "$er")"
+        done
+        info "arm '$arm': $reach; the pool holds ${held} Pod(s) -- ceiling $(( $(peak_gpus) + held * GPUS_PER_REPLICA )) accelerators"
     fi
     echo "$ceiling"
+}
+
+# add_budget_fields <budget.json>: models C and D's ceilings and sizes (in a
+# run of three or four), and model_deploys -- {role: Deployment prefix}, the
+# name every Pod of that model starts with (<prefix>-decode-..., and
+# <prefix>-prefill-... for P/D) -- which is how the reports split the sampled
+# accelerators by model. A single-stack P/D run has one model and no split.
+add_budget_fields() {
+    local f="$1" extra="{}" deploys="{}" r d
+    for r in $EXTRA_ROLES; do
+        extra="$(jq -c --arg r "$r" --argjson m "$(rvar MAX_REPLICAS "$r")" --argjson g "$(model_gpus "$r")" \
+            '. + {("max_replicas_" + $r): $m, ("gpus_per_replica_" + $r): $g}' <<<"$extra")" || return 1
+    done
+    if [ "$PD_SINGLE_STACK" != 1 ]; then
+        for r in $ROLES; do
+            d="$(decode_deploy_for "$(rvar STACK "$r")")"
+            [ -n "$d" ] || continue
+            deploys="$(jq -c --arg r "$r" --arg p "${d%-decode}" '. + {($r): $p}' <<<"$deploys")" || return 1
+        done
+        extra="$(jq -c --argjson d "$deploys" '. + {model_deploys: $d}' <<<"$extra")" || return 1
+    fi
+    jq -c --argjson e "$extra" '. + $e' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+}
+
+# all_results_written: whether the loader log on stdin carries every model's
+# RESULTS-WRITTEN-<role> marker. One container finishing is part of a run.
+all_results_written() {
+    local text r
+    text="$(cat)"
+    for r in $ROLES; do
+        printf '%s' "$text" | grep -q "RESULTS-WRITTEN-$r" || return 1
+    done
+    return 0
+}
+
+# per_model_ceilings: whether any model's ceiling differs from MAX_REPLICAS.
+per_model_ceilings() {
+    local r
+    for r in $ROLES; do
+        [ "$(rvar MAX_REPLICAS "$r")" = "$MAX_REPLICAS" ] || return 0
+    done
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -3147,6 +3619,9 @@ verb_run() {
     esac
     local bad
     bad="$(check_sampler_settings)" || die "$bad"
+    # Again at every arm, not only at verify: a ScaledObject KEDA re-reads while
+    # the controller restarts (a reset between arms) can come back unwired.
+    refuse_unwired "arm $arm refused"
     # The controller log is cut from here: what the optimizer did in THIS arm,
     # policy rewrite and preload included, and nothing of the arm before.
     local run_started
@@ -3196,6 +3671,12 @@ verb_run() {
     local url_a url_b
     url_a="$(base_url_for_stack "$hostport" "$STACK_A")"
     url_b="$(base_url_for_stack "$hostport" "$STACK_B")"
+    # Every model's base URL as URL_<ROLE>, which extra_role_flags and the
+    # load Job read for models C and D.
+    local URL_A="$url_a" URL_B="$url_b" URL_C="" URL_D="" er
+    for er in $EXTRA_ROLES; do
+        printf -v "URL_$(upper "$er")" '%s' "$(base_url_for_stack "$hostport" "$(rvar STACK "$er")")"
+    done
 
     local ceiling; ceiling="$(set_arm_ceiling "$arm")"
 
@@ -3211,6 +3692,11 @@ verb_run() {
         "$MAX_REPLICAS_A" "$MAX_REPLICAS_B" "$(model_gpus a)" "$(model_gpus b)" \
         "${BENCH_NODE:-$(bench_nodes_csv)}" \
         > "$out_dir/budget.json"
+    # Models C and D's own ceilings and sizes, and every model's Deployment
+    # prefix (model_deploys), which is how the report splits the accelerators
+    # it sampled by model. Added to the line above rather than written into it,
+    # so a two-model budget keeps every field it always had.
+    add_budget_fields "$out_dir/budget.json" || warn "could not record the per-model budget fields in $out_dir/budget.json"
     # The policy this arm ran under, kept with its results: the report refuses
     # two share arms whose limiters differ.
     if is_share_arm "$arm"; then
@@ -3234,13 +3720,17 @@ verb_run() {
             --request-timeout "$REQUEST_TIMEOUT" \
             --rise-window "$RISE_WINDOW" --overlap "$OVERLAP_SECONDS" \
             --seed "$SEED" --results-root /results
+        # Nothing at all for two models; --models N and each further model's
+        # id, endpoint, burst rate and low rate for three or four.
+        [ -z "$EXTRA_ROLES" ] || printf '%s\n' --models "$MODEL_COUNT"
+        extra_role_flags model endpoint high-rps low-rps
     }
     local pyargs; pyargs="$(profile_args)"
     # shellcheck disable=SC2046 # deliberate word splitting of the rendered flags
     python3 "$HERE/two_model_profile.py" --emit schedule $pyargs > "$out_dir/schedule.json" \
         || die "could not render the phase schedule"
     local role
-    for role in a b; do
+    for role in $ROLES; do
         python3 "$HERE/two_model_profile.py" --emit profile --role "$role" $pyargs \
             > "$out_dir/profile-$role.yaml" || die "could not render profile $role"
         [ -s "$out_dir/profile-$role.yaml" ] || die "profile $role rendered empty"
@@ -3261,9 +3751,14 @@ verb_run() {
     # Profiles go in as a ConfigMap rather than baked into an image: an edit
     # would otherwise need a build and a registry push between it and a run.
     k delete configmap wva-two-model-load --ignore-not-found >/dev/null 2>&1
+    local extra_profiles=()
+    for role in $EXTRA_ROLES; do
+        extra_profiles+=(--from-file=profile-$role.yaml="$out_dir/profile-$role.yaml")
+    done
     k create configmap wva-two-model-load \
         --from-file=profile-a.yaml="$out_dir/profile-a.yaml" \
         --from-file=profile-b.yaml="$out_dir/profile-b.yaml" \
+        ${extra_profiles[@]+"${extra_profiles[@]}"} \
         --from-file=run.sh="$HERE/two_model_harness_run.sh" >/dev/null \
         || die "could not create the loader ConfigMap"
 
@@ -3355,8 +3850,7 @@ verb_run() {
             # time. The Pod holds its results for an hour after the run and
             # they were still there when the loop gave up.
             log="$(k logs "$pod" --all-containers --request-timeout=60s 2>/dev/null)"
-            if printf '%s' "$log" | grep -q 'RESULTS-WRITTEN-a' &&
-               printf '%s' "$log" | grep -q 'RESULTS-WRITTEN-b'; then done=1; break; fi
+            if printf '%s' "$log" | all_results_written; then done=1; break; fi
             if printf '%s' "$log" | grep -q 'PRELOAD-FAILED\|RUN-FAILED'; then
                 warn "a loader container reported a failure; stopping the wait"
                 break
@@ -3398,9 +3892,8 @@ verb_run() {
     # away with both RESULTS-WRITTEN lines sitting in loader.log because this
     # decision was made from the loop's last (stalled) read instead.
     if [ "$done" -eq 0 ] && [ -s "$out_dir/loader.log" ] &&
-       grep -q 'RESULTS-WRITTEN-a' "$out_dir/loader.log" &&
-       grep -q 'RESULTS-WRITTEN-b' "$out_dir/loader.log"; then
-        warn "the wait loop gave up, but the loader log shows both results written; collecting them"
+       all_results_written < "$out_dir/loader.log"; then
+        warn "the wait loop gave up, but the loader log shows $([ "$MODEL_COUNT" = 2 ] && echo both || echo "all $MODEL_COUNT") results written; collecting them"
         done=1
     fi
     # The pool Pods' own logs, taken NOW: pool-delete follows this arm, and
@@ -3421,8 +3914,8 @@ verb_run() {
     # a report over it compares a burst against whatever the other model
     # happened to be doing.
     if [ -s "$out_dir/loader.log" ] && grep -q 'LATE-START' "$out_dir/loader.log"; then
-        warn "$(grep -o 'LATE-START-[ab] by [0-9.]*s' "$out_dir/loader.log" | sort -u | tr '\n' ' ')"
-        die "a loader missed the start barrier, so the two models were not in anti-phase. Raise PRELOAD_GRACE (now ${PRELOAD_GRACE}s) and rerun arm $arm."
+        warn "$(grep -o 'LATE-START-[abcd] by [0-9.]*s' "$out_dir/loader.log" | sort -u | tr '\n' ' ')"
+        die "a loader missed the start barrier, so the $(models_word) models were not in $([ "$MODEL_COUNT" = 2 ] && echo anti-phase || echo rotation). Raise PRELOAD_GRACE (now ${PRELOAD_GRACE}s) and rerun arm $arm."
     fi
     if [ "$done" -eq 1 ]; then
         # One emptyDir shared by both containers, so one copy takes both.
@@ -3457,8 +3950,16 @@ verb_run() {
 
     [ -d "$out_dir/harness/a" ] && [ -d "$out_dir/harness/b" ] || \
         die "no harness results for arm $arm. See $out_dir/loader.log"
+    # Models C and D: their results and ids, which harness_results.py refuses
+    # to do without when the schedule drives them.
+    local extra_results=()
+    for role in $EXTRA_ROLES; do
+        [ -d "$out_dir/harness/$role" ] || die "no harness results for model $(upper "$role") of arm $arm. See $out_dir/loader.log"
+        extra_results+=(--results-"$role" "$out_dir/harness/$role" --model-"$role" "$(rvar MODEL "$role")")
+    done
     python3 "$HERE/harness_results.py" \
         --results-a "$out_dir/harness/a" --results-b "$out_dir/harness/b" \
+        ${extra_results[@]+"${extra_results[@]}"} \
         --schedule "$out_dir/schedule.json" \
         --out "$out_dir/requests.jsonl" \
         --t0 "$start_at" --overlap "$OVERLAP_SECONDS" \
@@ -3485,6 +3986,7 @@ verb_run() {
 
 render_load_job() {
     local job="$1" arm="$2" start_at="$3" url_a="${4:-}" url_b="${5:-}"
+    # (One container per model: three or four with MODEL_COUNT.)
     # TWO CONTAINERS, ONE POD, on purpose. The models have to burst against each
     # other, so their load must come from one scheduling unit on one node with
     # one image pull: two Pods start whenever the scheduler gets to each of
@@ -3521,7 +4023,7 @@ spec:
             value: "1"
       containers:
 $(render_load_container a "$MODEL_A" "$start_at" "$url_a")
-$(render_load_container b "$MODEL_B" "$start_at" "$url_b")
+$(render_load_container b "$MODEL_B" "$start_at" "$url_b")$(for r in $EXTRA_ROLES; do echo; render_load_container "$r" "$(rvar MODEL "$r")" "$start_at" "$(rvar URL "$r")"; done)
 
       volumes:
         - name: profiles
@@ -3643,6 +4145,7 @@ verb_report() {
     python3 "$HERE/two_model_report.py" \
         --nopool "$a" "${extra[@]}" \
         --model-a "$MODEL_A" --model-b "$MODEL_B" \
+        ${MODEL_FLAGS[@]+"${MODEL_FLAGS[@]}"} \
         --json "$OUT_ROOT/report.json" \
         | tee "$OUT_ROOT/report.md"
     [ "${PIPESTATUS[0]}" -eq 0 ] || die "the report failed"
@@ -3667,6 +4170,7 @@ verb_report_share() {
         python3 "$HERE/two_model_report.py" \
             --nopool "$a" "${extra[@]}" --baseline-name today \
             --model-a "$MODEL_A" --model-b "$MODEL_B" \
+            ${MODEL_FLAGS[@]+"${MODEL_FLAGS[@]}"} \
             ${REPORT_ARGS:-} \
             --json "$root/report.json" || exit 1
         echo
@@ -3684,6 +4188,7 @@ verb_report_share() {
 verb_report_repeats() {
     python3 "$HERE/two_model_share_repeats.py" --out-root "$OUT_ROOT" \
         --model-a "$MODEL_A" --model-b "$MODEL_B" \
+        ${MODEL_FLAGS[@]+"${MODEL_FLAGS[@]}"} \
         --json "$OUT_ROOT/repeats.json" > "$OUT_ROOT/repeats.md.tmp" \
         || { cat "$OUT_ROOT/repeats.md.tmp" >&2; rm -f "$OUT_ROOT/repeats.md.tmp"; die "the repeats report failed"; }
     mv "$OUT_ROOT/repeats.md.tmp" "$OUT_ROOT/repeats.md"

@@ -811,8 +811,10 @@ BENCHMARK_ENGINE_CACHE_SEED ?= auto
 # every engine role to one node (kubernetes.io/hostname); BENCHMARK_DECODE_NODES
 # (a comma list) allows any of several, by node affinity; and
 # BENCHMARK_DECODE_TOLERATIONS (a JSON list) gives those roles tolerations,
-# never by default.
+# never by default. BENCHMARK_STACKS (a comma list) keeps only those stacks of
+# a multi-stack scenario: a three-model run on the four-stack n-model-share.
 BENCHMARK_GATEWAY_SKIP_INSTALL ?= false
+BENCHMARK_STACKS ?=
 BENCHMARK_GATEWAY_PROVIDER_NAMESPACE ?= istio-system
 BENCHMARK_DECODE_CPU ?=
 BENCHMARK_DECODE_MEMORY ?=
@@ -2098,6 +2100,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 		BENCHMARK_DECODE_NODES="$(BENCHMARK_DECODE_NODES)" \
 		BENCHMARK_DECODE_TOLERATIONS='$(BENCHMARK_DECODE_TOLERATIONS)' \
 		BENCHMARK_RENDER_DRAIN="$(BENCHMARK_RENDER_DRAIN)" \
+		BENCHMARK_STACKS="$(BENCHMARK_STACKS)" \
 		bash hack/benchmark/scenario_overrides.sh "$(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml"
 	@# Node-local weights, last of the scenario edits: the script refuses a
 	@# namespace whose model-pvc is already on another class (the harness

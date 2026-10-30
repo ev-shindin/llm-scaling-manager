@@ -22,7 +22,7 @@
 # in a terminated container, so exiting here would discard the results of every
 # successful run. The driver deletes the Job once it has copied.
 
-: "${ROLE:?ROLE must be a or b}"
+: "${ROLE:?ROLE must be a or b, or c or d in a run of three or four models}"
 : "${TOKENIZER:?TOKENIZER must be the model id to tokenize with}"
 : "${MODEL:?MODEL must be the served model id}"
 : "${BASE_URL:?BASE_URL must be this stack's endpoint, with no route appended}"

@@ -1,0 +1,754 @@
+# N MODELS, BURSTS IN ROTATION, ONE NAMESPACE QUOTA -- the standup half.
+#
+# The utilization-share comparison of two-model-warm-pool.yaml, with three or
+# four models in place of two. Driven by hack/benchmark/two_model_pool.sh with
+# MODEL_COUNT=3 or 4; the runbook is
+# docs/guides/benchmarking/two-model-utilization-share.md ("Three or four
+# models"). The standup keeps the first MODEL_COUNT stacks of this file
+# (BENCHMARK_STACKS), so a three-model run does not stand the fourth up.
+#
+# The shared block and the first two stacks are two-model-warm-pool.yaml's,
+# unchanged apart from workDir and a model claim sized for four sets of
+# weights; every note there about them applies here. The two stacks added are
+# models the other two-model scenarios already use, both at ONE GPU per
+# replica, so the four models are interchangeable to the quota: what one gives
+# back, any other can take.
+#
+#   stack            model                                GPUs  driver role
+#   llama-31-8b      unsloth/Meta-Llama-3.1-8B-Instruct   1     MODEL_A
+#   qwen3-8b         Qwen/Qwen3-8B                        1     MODEL_B
+#   qwen3-30b-a3b    Qwen/Qwen3-30B-A3B-FP8               1     MODEL_C
+#   qwen3-32b        Qwen/Qwen3-32B                       1     MODEL_D
+#
+# The stack names are the HTTPRoute path prefixes AND the driver's STACK_*
+# defaults: one fact in two files, which verify checks.
+#
+# Base: two-model-warm-pool.yaml, itself upstream
+# config/scenarios/examples/multi-model-optimized-baseline.yaml.
+
+# ============================================================================
+# SHARED - applied to every stack before per-stack overrides
+# ============================================================================
+shared:
+  # --------------------------------------------------------------------------
+  # ACCELERATOR - detect the device-plugin resource and select the matching
+  # machine profile. Explicit accelerator settings supplied by the user
+  # still win.
+  # --------------------------------------------------------------------------
+  accelerator:
+    profile: auto
+    resource: auto
+
+  # --------------------------------------------------------------------------
+  # SCRAPE - 10s, for the vllm-<model> PodMonitors the harness renders for
+  # both stacks (template 18_podmonitor reads THIS key; this scenario leaves
+  # decode.monitoring.podmonitor to the chart's default). The scale-up signal
+  # is a queue at the engine and moves only when Prometheus holds a sample
+  # that shows it, so 30s is 0-30s of jitter on every scaling decision.
+  # Measured on the anti-phase run: decision lags 25/56/56/87s at 30s,
+  # 15/60/60/76s at 10s -- the jitter goes; the queue's own formation time
+  # does not. The pool PodMonitor is 10s too (deploy/warmpool.sh), so pool and
+  # models are read alike. Every number on the measured page was taken at 10s.
+  # --------------------------------------------------------------------------
+  monitoring:
+    scrapeInterval: "10s"
+
+  # -------------------------------------------------------------------------
+  # Affinity / Node Selection
+  # By default, affinity is disabled and pods schedule on any available node.
+  # Options:
+  #   1. Leave commented out -- no node selection constraint
+  #   2. Set nodeSelector to "auto" -- auto-detects GPU labels from the cluster
+  #   3. Set explicit labels -- pods only schedule on matching nodes
+  # -------------------------------------------------------------------------
+  # affinity:
+  #   enabled: true
+  #   nodeSelector:
+  #     nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3      # OpenShift
+  #     # gpu.nvidia.com/model: H200                        # Kubernetes
+  #     # cloud.google.com/gke-accelerator: nvidia-h100-80gb  # GKE
+
+  # --------------------------------------------------------------------------
+  # VLLM COMMON - same across pools. Individual settings can be overridden
+  # per-stack below if a specific model needs different tuning.
+  # --------------------------------------------------------------------------
+  vllmCommon:
+    #      priorityClassName: nightly-gpu-critical
+    volumes:
+      - name: shared-config
+        type: emptyDir
+        emptyDir: {}
+      - name: dshm
+        type: emptyDir
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+
+    volumeMounts:
+      - name: dshm
+        mountPath: /dev/shm
+      - name: shared-config
+        mountPath: /shared-config
+
+  # --------------------------------------------------------------------------
+  # STORAGE - ONE shared model PVC for the whole scenario.
+  # Every stack's weights live in a distinct subdirectory
+  # (`{modelPvc.mountPath}/{model.path}`) on the same volume, which is the
+  # right shape for NVMe / local-directory-backed storage classes and for
+  # reusing cached weights across runs. Size it for the sum of all models
+  # this scenario will ever load.
+  # --------------------------------------------------------------------------
+  storage:
+    modelPvc:
+      size: 200Gi
+      # ReadWriteMany, explicitly. Without it the claim takes whatever the
+      # cluster default StorageClass gives, and a default of RWO block storage
+      # binds the cache to ONE NODE -- so the second replica of either model
+      # cannot mount it and never schedules. That does not fail the standup; it
+      # fails the scale-up, which is the thing this run exists to measure.
+      accessModes:
+        - ReadWriteMany
+
+  # --------------------------------------------------------------------------
+  # HARNESS + WORKDIR - harness is single-instance per scenario, so it
+  # lives in `shared` (the workload PVC it writes to is scenario-wide).
+  # --------------------------------------------------------------------------
+  workDir: "~/data/n-model-share"
+  harness:
+    name: inference-perf
+    experimentProfile: shared_prefix_synthetic.yaml
+
+  # --------------------------------------------------------------------------
+  # DEPLOYMENT METHOD - this scenario is modelservice-only.
+  # --------------------------------------------------------------------------
+  standalone:
+    enabled: false
+
+  # ==========================================================================
+  # MODELSERVICE -- Only applies when modelservice.enabled: true
+  # The following sections configure the llm-d modelservice Helm chart
+  # deployment including decode pods, prefill pods, router, and gateway.
+  # ==========================================================================
+  modelservice:
+    enabled: true
+
+    # Pinned explicitly: this scenario is multi-stack, and `epponly` (what
+    # the single-model guide uses) is single-stack only -- it has no shared
+    # Gateway / HTTPRoute to multiplex several models behind one address.
+    gateway:
+      className: istio
+
+    # ------------------------------------------------------------------------
+    # HTTPROUTE - one shared route with N URLRewrite rules, one per stack.
+    # Emitted only in the first stack's render (stackIndex == 1). Other stacks
+    # render an empty 08_httproute.yaml (step_09 skips empty files).
+    #
+    # pathPrefix is the whole client-side path segment; the gateway rewrites
+    # it to rewriteTo before the upstream pod sees the request. We route on
+    # `/{stack.name}` (e.g. `/qwen3-06b`) rather than `/{stack.name}/v1` so
+    # the smoketest can probe both `/{stack.name}/health` and
+    # `/{stack.name}/v1/models` - the vLLM `/health` endpoint lives at the
+    # root, not under `/v1`, and a narrower prefix would not match it.
+    #
+    # requestTimeout: end-to-end Gateway-API HTTPRoute timeout the istio
+    # gateway enforces per request. Long agentic turns that exceed it are
+    # aborted by the gateway with a 502 (surfaces as "connection reset by
+    # peer" on the decode routing-proxy loopback hop). Set "0s" to disable.
+    # ------------------------------------------------------------------------
+    httpRoute:
+      mode: shared
+      name: multi-model-route
+      pathPrefix: /{stack.name}
+      rewriteTo: /
+      requestTimeout: "300s"
+      backendRequestTimeout: "0s"
+
+    # ------------------------------------------------------------------------
+    # ROUTING / GAIE - the optimized-baseline scheduling profile and transport
+    # tuning, applied identically to every pool. `modelServers.matchLabels` is
+    # deliberately NOT set here so each stack gets its own pod selector.
+    # ------------------------------------------------------------------------
+    router:
+      epp:
+        replicas: 1
+        flags:
+          v: 2
+        pluginsConfigFile: "optimized-baseline-plugins.yaml"
+        pluginsCustomConfig:
+          optimized-baseline-plugins.yaml: |
+            apiVersion: llm-d.ai/v1alpha1
+            kind: EndpointPickerConfig
+            # WVA's arrival-rate and throughput analysis is driven by EPP
+            # QUEUE DEPTH, and the flowControl gate is what emits it. It is
+            # off by default, and the gaie chart's own EndpointPickerConfig
+            # has no featureGates block at all -- which is why the config is
+            # inlined here rather than patched.
+            #
+            # Without it `make benchmark-deploy-wva` REFUSES to install
+            # ("Router queue not enabled"), and that refusal is right: the
+            # controller would run on a degraded demand signal, so both arms
+            # of the comparison would scale on something other than what the
+            # scenario claims to be measuring.
+            featureGates:
+            - flowControl
+            plugins:
+            - type: queue-scorer
+            - type: kv-cache-utilization-scorer
+            - type: prefix-cache-scorer
+            - type: no-hit-lru-scorer
+            schedulingProfiles:
+            - name: default
+              plugins:
+              - pluginRef: queue-scorer
+                weight: 2
+              - pluginRef: kv-cache-utilization-scorer
+                weight: 2
+              - pluginRef: prefix-cache-scorer
+                weight: 3
+              - pluginRef: no-hit-lru-scorer
+                weight: 2
+        resources:
+          requests:
+            cpu: "4"
+            memory: 8Gi
+          limits:
+            memory: 16Gi
+      proxy:
+        # CLI args for the Envoy sidecar. Override the chart's defaults of
+        # `--log-level trace` (very expensive under load) and no `--concurrency`
+        # (Envoy spawns ~hardware_concurrency() worker threads, oversubscribing
+        # the cgroup's CPU slice). `--concurrency 8` matches the resources.limits
+        # equivalent below; trace-level logging would burn a meaningful share of
+        # the sidecar's CPU at high QPS.
+        args:
+          - "--service-node"
+          - "envoy-sidecar"
+          - "--log-level"
+          - "warn"
+          - "--concurrency"
+          - "8"
+          - "--drain-strategy"
+          - "immediate"
+          - "--drain-time-s"
+          - "60"
+          - "-c"
+          - "/etc/envoy/envoy.yaml"
+        # Resource requests and limits for the Envoy sidecar.
+        resources:
+          requests:
+            cpu: "4"
+            memory: 8Gi
+          limits:
+            memory: 16Gi
+      modelServers:
+        # NOTE: `matchLabels` is deliberately absent - see the header. Setting it
+        # here would stop `_normalize_router_block` from deriving the per-stack
+        # `llm-d.ai/model` selector, and every InferencePool would then select
+        # every stack's decode pods.
+        protocol: http
+      inferencePool:
+        failureMode: "FailOpen"
+        providerConfig:
+          destinationRule:
+            trafficPolicy:
+              connectionPool:
+                http:
+                  http1MaxPendingRequests: 256000
+                  maxRequestsPerConnection: 256000
+                  http2MaxRequests: 256000
+                  idleTimeout: "900s"
+                tcp:
+                  maxConnections: 256000
+                  maxConnectionDuration: "1800s"
+                  connectTimeout: "900s"
+      tracing:
+        otelExporterEndpoint: "http://localhost:4317"
+        sampling:
+          sampler: "parentbased_traceidratio"
+          samplerArg: "0.1"
+
+    # ------------------------------------------------------------------------
+    # PREFILL - disabled; the optimized baseline is decode-only.
+    # ------------------------------------------------------------------------
+    prefill:
+      enabled: false
+      replicas: 0
+
+    # ------------------------------------------------------------------------
+    # DECODE defaults shared across pools. `replicas` and `resources` are
+    # per-model sizing and live in each stack below.
+    # ------------------------------------------------------------------------
+    decode:
+      extraContainerConfig:
+        ports:
+          - containerPort: 5557  # NIXL side channel port
+            protocol: TCP
+          - containerPort: 8200  # Metrics port
+            name: metrics
+            protocol: TCP
+        securityContext:
+          capabilities:
+            add:
+              - "IPC_LOCK"
+              - "SYS_RAWIO"
+          runAsGroup: 0
+          runAsUser: 0
+        # IfNotPresent, not Always: the engine tag is pinned, and Always contacts the
+        # registry at every pod start -- a second when it answers, a failed start
+        # when it does not -- for a digest that cannot have changed. Pre-pull the
+        # image on the accelerator nodes with `make prepull` and the start never
+        # waits on the registry at all.
+        imagePullPolicy: IfNotPresent
+
+      vllm:
+        # `${accelerator.*}` fragments and `$MODEL_PATH` / `$MODEL_NAME` /
+        # `$VLLM_*` are resolved per stack (the former at render time against
+        # each stack's merged config, the latter in each pod's environment),
+        # so this one command string is correct for every model.
+        customCommand: |
+          ${accelerator.runtimePreamble}
+          vllm serve /model-cache/$MODEL_PATH \
+          --host 0.0.0.0 \
+          --served-model-name $MODEL_NAME \
+          --port $VLLM_METRICS_PORT \
+          ${accelerator.blockSizeArgs} \
+          --max-model-len $VLLM_MAX_MODEL_LEN \
+          --max-num-seq $VLLM_MAX_NUM_SEQ \
+          --max-num-batched-tokens $VLLM_MAX_NUM_BATCHED_TOKENS \
+          --tensor-parallel-size $TP_SIZE \
+          ${accelerator.memoryUtilizationArgs} \
+          ${accelerator.dtypeArgs} \
+          ${accelerator.executionArgs} \
+          --no-enable-log-requests \
+          --disable-uvicorn-access-log \
+          --disable-access-log-for-endpoints=/health,/metrics,/v1/models \
+          --no-enable-prefix-caching
+
+      initContainers:
+        - name: preprocess
+          imageKey: benchmark
+          imagePullPolicy: Always
+          command: ["set_llmdbench_environment.py", "-e", "/shared-config/llmdbench_env.sh", "-i"]
+          volumeMounts:
+            - name: shared-config
+              mountPath: /shared-config
+
+      parallelism:
+        tensor: 1
+        data: 1
+        dataLocal: 1
+        workers: 1
+
+      # ----------------------------------------------------------------------
+      # Extra Environment Variables
+      # No custom env vars for this scenario -- uses default ENVVARS_TO_YAML
+      # mechanism. Auto-populated vars (UCX_TLS, VLLM_NIXL_*, etc.) are set
+      # by the preprocess script at pod runtime.
+      # ----------------------------------------------------------------------
+      extraEnvVars: []
+
+      # ----------------------------------------------------------------------
+      # Additional Volume Mounts
+      # ----------------------------------------------------------------------
+      additionalVolumeMounts: []
+
+      # ----------------------------------------------------------------------
+      # Additional Volumes
+      # ----------------------------------------------------------------------
+      additionalVolumes: []
+
+
+# ============================================================================
+scenario:
+  # --------------------------------------------------------------------------
+  # LLAMA-31-8B -- unsloth/Meta-Llama-3.1-8B-Instruct
+  #
+  # The stack `name` is the PATH PREFIX the shared HTTPRoute routes on
+  # (`/llama-31-8b/v1/...`), and hack/benchmark/two_model_pool.sh builds the
+  # loader's endpoint from it -- so STACK_A there and this name are one fact
+  # written twice, and `verify` fails loudly rather than quietly if they drift.
+  #
+  # `model.shortName` is PINNED rather than derived. Left out, the harness
+  # generates `{first8}-{sha256(namespace/model)[:8]}-{last8}`, which is
+  # namespace-dependent and unguessable -- and every object in the stack is
+  # named after it, so nothing outside the harness could find the decode
+  # Deployment without reproducing that hash.
+  # --------------------------------------------------------------------------
+  - name: "llama-31-8b"
+
+    model:
+      name: unsloth/Meta-Llama-3.1-8B-Instruct
+      shortName: llama-31-8b
+      path: models/unsloth/Meta-Llama-3.1-8B-Instruct
+      huggingfaceId: unsloth/Meta-Llama-3.1-8B-Instruct
+      size: 32Gi
+      maxModelLen: 8192
+      blockSize: 64
+      gpuMemoryUtilization: 0.90
+      # THE CONCURRENCY CEILING PER REPLICA, and the reason this run scales
+      # at all. The default is 256: measured on an H200, one replica of an 8B
+      # model absorbed 40 rps of 1000-token requests without queueing, so
+      # NEITHER arm ever added a replica and the comparison had nothing to
+      # compare. A fleet that never scales cannot show a bridge.
+      #
+      # 32 is a normal production value -- operators cap concurrency to
+      # protect TTFT -- and it does not bias pool against nopool: what a pool
+      # bridges is a MODEL LOAD, whose cost is fixed by the weights and the
+      # storage, not by how many sequences a replica will batch. This changes
+      # when a scale-up is triggered, not how long the new replica takes to
+      # arrive, and it changes it identically in both arms.
+      maxNumSeq: 32
+
+    modelservice:
+      decode:
+        replicas: 1
+        # 8 CPU, not 16. FREE ACCELERATORS ARE NOT PLACEABLE ACCELERATORS, and
+        # 16 made most of this cluster's spare accelerators unusable: measured
+        # on a multi-node H200 cluster, of 16 free accelerators only FOUR sat on a node with 16
+        # spare cores -- the rest had 7 and 15. A 90-minute A/B was voided by
+        # it. The nopool arm's Deployments scaled to 3 within four minutes of
+        # the first burst and never had more than ONE replica Available,
+        # because the other two could not be placed; the pool arm ran an hour
+        # later, got everything, and the comparison was between two different
+        # fleets.
+        #
+        # At 8 the same cluster takes 6 Pods, which is this run's peak, and at
+        # 16 it took 4. Nothing about the measurement changes: 8 cores is ample
+        # for an 8B model at 9 rps with maxNumSeq 32 -- the CPU goes on
+        # tokenization, detokenization and the API server, not the forward pass
+        # -- and whatever it costs, it costs both arms identically.
+        resources:
+          limits:
+            memory: 64Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+          requests:
+            memory: 64Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+
+    # The two stacks MUST price the same. variantCost is what WVA's solver uses
+    # to decide which model to scale when they compete for the same GPUs, and a
+    # difference here would make one model win every contention -- which the
+    # report would read as the pool helping one model and not the other.
+    wva:
+      enabled: true
+      wellLitPath: optimized-baseline
+      namespace: ""
+      image:
+        repository: ghcr.io/ev-shindin/llm-scaling-manager
+        tag: main
+      replicaCount: 1
+      controller:
+        enabled: true
+      namespaceScoped: true
+      metrics:
+        enabled: true
+        port: 8443
+        secure: true
+      # NO prometheus block, deliberately. This repo's installer RESOLVES the
+      # Prometheus URL from the cluster (deploy/lib/infra_monitoring.sh: the
+      # `prometheus-operated` Service of whichever Prometheus CR it finds,
+      # with the scheme taken from the CR rather than the port number), and a
+      # value here would be a second source of truth that drifts. It is also
+      # the field that matters most to get right: pointed at a Prometheus that
+      # does not scrape this namespace, the controller reads no metrics, every
+      # variant looks idle, and NEITHER arm ever scales -- two flat runs that
+      # agree perfectly and mean nothing. `verify` checks the controller is
+      # actually reading, rather than trusting either source.
+      variantAutoscaling:
+        variantCost: "10.0"
+      hpa:
+        enabled: true
+        minReplicas: 1
+        maxReplicas: 3
+        targetAvgValue: 1
+        behavior:
+          scaleUp:
+            stabilizationWindowSeconds: 0
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 5
+          scaleDown:
+            stabilizationWindowSeconds: 300
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 120
+
+  # --------------------------------------------------------------------------
+  # QWEN3-8B -- Qwen/Qwen3-8B
+  #
+  # A different family on purpose. Two sizes of the same model would share a
+  # tokenizer and a weight layout, and a pool that held "both" would be closer
+  # to holding one -- which is not the claim being tested.
+  # --------------------------------------------------------------------------
+  - name: "qwen3-8b"
+
+    model:
+      name: Qwen/Qwen3-8B
+      shortName: qwen3-8b
+      path: models/Qwen/Qwen3-8B
+      huggingfaceId: Qwen/Qwen3-8B
+      size: 32Gi
+      maxModelLen: 8192
+      blockSize: 64
+      gpuMemoryUtilization: 0.90
+      # THE CONCURRENCY CEILING PER REPLICA, and the reason this run scales
+      # at all. The default is 256: measured on an H200, one replica of an 8B
+      # model absorbed 40 rps of 1000-token requests without queueing, so
+      # NEITHER arm ever added a replica and the comparison had nothing to
+      # compare. A fleet that never scales cannot show a bridge.
+      #
+      # 32 is a normal production value -- operators cap concurrency to
+      # protect TTFT -- and it does not bias pool against nopool: what a pool
+      # bridges is a MODEL LOAD, whose cost is fixed by the weights and the
+      # storage, not by how many sequences a replica will batch. This changes
+      # when a scale-up is triggered, not how long the new replica takes to
+      # arrive, and it changes it identically in both arms.
+      maxNumSeq: 32
+
+    modelservice:
+      decode:
+        replicas: 1
+        resources:
+          limits:
+            memory: 64Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+          requests:
+            memory: 64Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+
+    wva:
+      enabled: true
+      wellLitPath: optimized-baseline
+      namespace: ""
+      image:
+        repository: ghcr.io/ev-shindin/llm-scaling-manager
+        tag: main
+      replicaCount: 1
+      controller:
+        enabled: true
+      namespaceScoped: true
+      metrics:
+        enabled: true
+        port: 8443
+        secure: true
+      # NO prometheus block, deliberately. This repo's installer RESOLVES the
+      # Prometheus URL from the cluster (deploy/lib/infra_monitoring.sh: the
+      # `prometheus-operated` Service of whichever Prometheus CR it finds,
+      # with the scheme taken from the CR rather than the port number), and a
+      # value here would be a second source of truth that drifts. It is also
+      # the field that matters most to get right: pointed at a Prometheus that
+      # does not scrape this namespace, the controller reads no metrics, every
+      # variant looks idle, and NEITHER arm ever scales -- two flat runs that
+      # agree perfectly and mean nothing. `verify` checks the controller is
+      # actually reading, rather than trusting either source.
+      variantAutoscaling:
+        variantCost: "10.0"
+      hpa:
+        enabled: true
+        minReplicas: 1
+        maxReplicas: 3
+        targetAvgValue: 1
+        behavior:
+          scaleUp:
+            stabilizationWindowSeconds: 0
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 5
+          scaleDown:
+            stabilizationWindowSeconds: 300
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 120
+  # --------------------------------------------------------------------------
+  # QWEN3-30B-A3B -- Qwen/Qwen3-30B-A3B-FP8, MODEL_C
+  #
+  # The MoE two-model-mixed-sizes runs at tensor 2, here at tensor 1: FP8
+  # weights of about 31 GB fit one GPU with room for KV, so every model of
+  # this scenario is one GPU per replica and a GPU freed by any model funds
+  # any other.
+  # --------------------------------------------------------------------------
+  - name: "qwen3-30b-a3b"
+
+    model:
+      name: Qwen/Qwen3-30B-A3B-FP8
+      shortName: qwen3-30b-a3b
+      path: models/Qwen/Qwen3-30B-A3B-FP8
+      huggingfaceId: Qwen/Qwen3-30B-A3B-FP8
+      size: 40Gi
+      maxModelLen: 8192
+      blockSize: 64
+      gpuMemoryUtilization: 0.90
+      # THE CONCURRENCY CEILING PER REPLICA, and the reason this run scales
+      # at all. The default is 256: measured on an H200, one replica of an 8B
+      # model absorbed 40 rps of 1000-token requests without queueing, so
+      # NEITHER arm ever added a replica and the comparison had nothing to
+      # compare. A fleet that never scales cannot show a bridge.
+      #
+      # 32 is a normal production value -- operators cap concurrency to
+      # protect TTFT -- and it does not bias pool against nopool: what a pool
+      # bridges is a MODEL LOAD, whose cost is fixed by the weights and the
+      # storage, not by how many sequences a replica will batch. This changes
+      # when a scale-up is triggered, not how long the new replica takes to
+      # arrive, and it changes it identically in both arms.
+      maxNumSeq: 32
+
+    modelservice:
+      decode:
+        replicas: 1
+        resources:
+          limits:
+            memory: 64Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+          requests:
+            memory: 64Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+
+    wva:
+      enabled: true
+      wellLitPath: optimized-baseline
+      namespace: ""
+      image:
+        repository: ghcr.io/ev-shindin/llm-scaling-manager
+        tag: main
+      replicaCount: 1
+      controller:
+        enabled: true
+      namespaceScoped: true
+      metrics:
+        enabled: true
+        port: 8443
+        secure: true
+      # NO prometheus block, deliberately. This repo's installer RESOLVES the
+      # Prometheus URL from the cluster (deploy/lib/infra_monitoring.sh: the
+      # `prometheus-operated` Service of whichever Prometheus CR it finds,
+      # with the scheme taken from the CR rather than the port number), and a
+      # value here would be a second source of truth that drifts. It is also
+      # the field that matters most to get right: pointed at a Prometheus that
+      # does not scrape this namespace, the controller reads no metrics, every
+      # variant looks idle, and NEITHER arm ever scales -- two flat runs that
+      # agree perfectly and mean nothing. `verify` checks the controller is
+      # actually reading, rather than trusting either source.
+      variantAutoscaling:
+        variantCost: "10.0"
+      hpa:
+        enabled: true
+        minReplicas: 1
+        maxReplicas: 3
+        targetAvgValue: 1
+        behavior:
+          scaleUp:
+            stabilizationWindowSeconds: 0
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 5
+          scaleDown:
+            stabilizationWindowSeconds: 300
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 120
+  # --------------------------------------------------------------------------
+  # QWEN3-32B -- Qwen/Qwen3-32B, MODEL_D
+  #
+  # BF16 weights of about 65 GB: one GPU per replica on a GPU with more than
+  # 80 GB (an H200 at gpuMemoryUtilization 0.90 leaves about 60 GB of KV).
+  # On an 80 GB GPU it starts with little KV room; run three models there.
+  # It is the slowest to start of the four, so its rise window shows the
+  # largest cold-start cost -- the one a shared quota most needs to bridge.
+  # --------------------------------------------------------------------------
+  - name: "qwen3-32b"
+
+    model:
+      name: Qwen/Qwen3-32B
+      shortName: qwen3-32b
+      path: models/Qwen/Qwen3-32B
+      huggingfaceId: Qwen/Qwen3-32B
+      size: 70Gi
+      maxModelLen: 8192
+      blockSize: 64
+      gpuMemoryUtilization: 0.90
+      # THE CONCURRENCY CEILING PER REPLICA, and the reason this run scales
+      # at all. The default is 256: measured on an H200, one replica of an 8B
+      # model absorbed 40 rps of 1000-token requests without queueing, so
+      # NEITHER arm ever added a replica and the comparison had nothing to
+      # compare. A fleet that never scales cannot show a bridge.
+      #
+      # 32 is a normal production value -- operators cap concurrency to
+      # protect TTFT -- and it does not bias pool against nopool: what a pool
+      # bridges is a MODEL LOAD, whose cost is fixed by the weights and the
+      # storage, not by how many sequences a replica will batch. This changes
+      # when a scale-up is triggered, not how long the new replica takes to
+      # arrive, and it changes it identically in both arms.
+      maxNumSeq: 32
+
+    modelservice:
+      decode:
+        replicas: 1
+        # 96Gi, not the 8B stacks' 64Gi: the BF16 weights alone are about
+        # 65 GB, and the engine reads them through host memory as it loads.
+        resources:
+          limits:
+            memory: 96Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+          requests:
+            memory: 96Gi
+            cpu: "8"
+            nvidia.com/gpu: "1"
+
+    wva:
+      enabled: true
+      wellLitPath: optimized-baseline
+      namespace: ""
+      image:
+        repository: ghcr.io/ev-shindin/llm-scaling-manager
+        tag: main
+      replicaCount: 1
+      controller:
+        enabled: true
+      namespaceScoped: true
+      metrics:
+        enabled: true
+        port: 8443
+        secure: true
+      # NO prometheus block, deliberately. This repo's installer RESOLVES the
+      # Prometheus URL from the cluster (deploy/lib/infra_monitoring.sh: the
+      # `prometheus-operated` Service of whichever Prometheus CR it finds,
+      # with the scheme taken from the CR rather than the port number), and a
+      # value here would be a second source of truth that drifts. It is also
+      # the field that matters most to get right: pointed at a Prometheus that
+      # does not scrape this namespace, the controller reads no metrics, every
+      # variant looks idle, and NEITHER arm ever scales -- two flat runs that
+      # agree perfectly and mean nothing. `verify` checks the controller is
+      # actually reading, rather than trusting either source.
+      variantAutoscaling:
+        variantCost: "10.0"
+      hpa:
+        enabled: true
+        minReplicas: 1
+        maxReplicas: 3
+        targetAvgValue: 1
+        behavior:
+          scaleUp:
+            stabilizationWindowSeconds: 0
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 5
+          scaleDown:
+            stabilizationWindowSeconds: 300
+            policies:
+              - type: Percent
+                value: 100
+                periodSeconds: 120

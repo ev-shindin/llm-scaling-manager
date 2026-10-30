@@ -80,6 +80,34 @@ def fmt_ms(v):
     return "-" if v is None else "%.0f" % (v * 1000.0)
 
 
+# The models of a run, in order: a and b always, c and d in a run of three or
+# four (two_model_profile.py --models).
+ROLES = ("a", "b", "c", "d")
+
+
+def roles_of(meta):
+    """The roles a run drove, read from its schedule's rate_<role> columns.
+
+    The schedule, not the windows: the schedule is what the load ran, so a
+    third model missing from the windows is a conversion that dropped it --
+    which the report refuses -- rather than a two-model run.
+    """
+    sched = (meta or {}).get("schedule") or []
+    if not sched:
+        return ("a", "b")
+    return tuple(r for r in ROLES if "rate_" + r in sched[0])
+
+
+def burst_order(roles):
+    """The order the models burst in within a cycle: b, c, d, then a."""
+    roles = tuple(roles)
+    return roles[1:] + roles[:1]
+
+
+def model_label(role):
+    return "model %s" % role.upper()
+
+
 def rise_stages(schedule, model_key):
     """Indices of the stages where THIS model's rate went UP.
 
@@ -95,7 +123,7 @@ def rise_stages(schedule, model_key):
     """
     out = []
     prev = None
-    key = "rate_a" if model_key == "a" else "rate_b"
+    key = "rate_" + model_key
     for i, st in enumerate(schedule):
         rate = st[key]
         if prev is not None and rate > prev:
@@ -190,6 +218,77 @@ def gpu_series(path, t0):
                     lent += g
         out.append((ts - t0, total, pool, lent))
     out.sort(key=lambda r: r[0])
+    return out
+
+
+def pod_role(pod, prefixes):
+    """The role whose Deployments a sampled Pod belongs to, "pool", or None.
+
+    `prefixes` is {role: Deployment prefix} as the driver recorded it in
+    budget.json (`model_deploys`): a model's Pods are named
+    <prefix>-decode-<hash> or <prefix>-prefill-<hash>. A pool Pod belongs to
+    no model, lent or not: it serves whichever model borrowed it.
+    """
+    if pod.get("pool"):
+        return "pool"
+    name = pod.get("name", "")
+    for role, prefix in (prefixes or {}).items():
+        if prefix and (name.startswith(prefix + "-decode-") or name.startswith(prefix + "-prefill-")):
+            return role
+    return None
+
+
+def gpu_series_by_model(path, t0, prefixes, roles):
+    """[(t_offset, total, gpus of roles[0], ..., pool, unattributed)].
+
+    The per-model split of gpu_series, for clip_series and integrate: index
+    2 + i is roles[i]'s accelerators, then the pool's, then any accelerator
+    no recorded Deployment owns. The last column is what keeps the split
+    honest: a fleet total that the models do not add up to is printed, not
+    absorbed into one of them.
+    """
+    out = []
+    if not os.path.exists(path):
+        return out
+    for line in open(path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            s = json.loads(line)
+        except ValueError:
+            continue
+        ts = s.get("ts")
+        if ts is None or s.get("failed") or "stalled_since" in s:
+            continue
+        held = dict((r, 0) for r in roles)
+        pool = other = total = 0
+        for p in s.get("pods", []):
+            g = p.get("gpus") or 0
+            total += g
+            r = pod_role(p, prefixes)
+            if r == "pool":
+                pool += g
+            elif r in held:
+                held[r] += g
+            else:
+                other += g
+        out.append((ts - t0, total) + tuple(held[r] for r in roles) + (pool, other))
+    out.sort(key=lambda r: r[0])
+    return out
+
+
+def gpu_seconds_by_model(path, t0, t_end, prefixes, roles):
+    """{role: GPU-seconds, "pool": ..., "unattributed": ..., "all": ...} over
+    the run's window, or None when there are too few samples to integrate."""
+    ser = clip_series(gpu_series_by_model(path, t0, prefixes, roles), t_end)
+    if len(ser) < 2:
+        return None
+    out = {"all": integrate(ser, 1)[0]}
+    for i, r in enumerate(roles):
+        out[r] = integrate(ser, 2 + i)[0]
+    out["pool"] = integrate(ser, 2 + len(roles))[0]
+    out["unattributed"] = integrate(ser, 3 + len(roles))[0]
     return out
 
 
@@ -293,7 +392,11 @@ def clip_series(series, t_end):
 def schedule_signature(meta):
     if not meta:
         return None
-    return json.dumps({
+    # A third and fourth model join the signature only when a run has them, so
+    # a two-model signature is what it always was.
+    extra = dict(("model_" + r, meta.get("model_" + r))
+                 for r in ("c", "d") if "model_" + r in meta)
+    return json.dumps(dict(extra, **{
         "schedule": meta.get("schedule"),
         "input_tokens": meta.get("input_tokens"),
         "output_tokens": meta.get("output_tokens"),
@@ -305,7 +408,7 @@ def schedule_signature(meta):
         # The dataset is part of the traffic: a shared_prefix arm against a
         # synthetic one compares a one-replica fleet with a spread one.
         "data": meta.get("data"),
-    }, sort_keys=True)
+    }), sort_keys=True)
 
 
 def load_budget(d):
@@ -349,7 +452,8 @@ def budget_problem(a, b):
     # one model allowed another ceiling, or priced at another size, is not the
     # same experiment either.
     for key in ("max_prefill", "max_decode", "min_prefill", "min_decode",
-                "max_replicas_a", "max_replicas_b", "gpus_per_replica_a", "gpus_per_replica_b"):
+                "max_replicas_a", "max_replicas_b", "gpus_per_replica_a", "gpus_per_replica_b",
+                "max_replicas_c", "max_replicas_d", "gpus_per_replica_c", "gpus_per_replica_d"):
         if key in ba and key in bb and ba[key] != bb[key]:
             return ("the %s arm ran with %s=%s against the %s arm's %s: its roles were "
                     "bounded differently, so its TTFT differs for a reason that is not "
@@ -629,7 +733,18 @@ def shortfall(path, t0=None, t_end=None):
 
 
 def burst_overlap(arm):
-    """Seconds during which BOTH models were at their high rate.
+    """Seconds during which any two models were at their high rate at once.
+
+    The sum of burst_overlap_pairs; None when that is None.
+    """
+    pairs = burst_overlap_pairs(arm)
+    if pairs is None:
+        return None
+    return sum(s for _, _, s in pairs)
+
+
+def burst_overlap_pairs(arm):
+    """[(role, role, seconds)] for every pair of models whose bursts overlapped.
 
     THE thing an anti-phase run must not contain, measured directly rather than
     through a proxy. Each model's real wall-clock stage boundaries are
@@ -648,8 +763,9 @@ def burst_overlap(arm):
     meta = arm.get("meta") or {}
     schedule = meta.get("schedule") or []
     windows = meta.get("windows") or {}
+    roles = roles_of(meta)
     spans = {}
-    for role in ("a", "b"):
+    for role in roles:
         stages = (windows.get(role) or {}).get("stages") or []
         if len(stages) != len(schedule) or not stages:
             return None
@@ -659,7 +775,7 @@ def burst_overlap(arm):
             e = w.get("elapsed")
             if not isinstance(e, (int, float)):
                 return None
-            out.append((t, t + e, st["rate_a"] if role == "a" else st["rate_b"]))
+            out.append((t, t + e, st["rate_" + role]))
             t += e
         spans[role] = out
     # PER MODEL. A single global max would stop seeing model B's bursts the
@@ -667,7 +783,7 @@ def burst_overlap(arm):
     # overlap would silently read as zero for the very configuration that makes
     # the two models comparable.
     bursts = {}
-    for role in ("a", "b"):
+    for role in roles:
         rates = [r for _, _, r in spans[role]]
         if not rates:
             return None
@@ -677,11 +793,94 @@ def burst_overlap(arm):
             bursts[role] = []
             continue
         bursts[role] = [(s, e) for s, e, r in spans[role] if r == high]
-    total = 0.0
-    for s1, e1 in bursts["a"]:
-        for s2, e2 in bursts["b"]:
-            total += max(0.0, min(e1, e2) - max(s1, s2))
-    return total
+    # Every PAIR of models: with three or four in rotation, any two bursting at
+    # once is the overlap the band exists to prevent. Kept per pair so the
+    # refusal can name the two models rather than say "both".
+    out = []
+    for i, ra in enumerate(roles):
+        for rb in roles[i + 1:]:
+            pair = 0.0
+            for s1, e1 in bursts[ra]:
+                for s2, e2 in bursts[rb]:
+                    pair += max(0.0, min(e1, e2) - max(s1, s2))
+            if pair > 0:
+                out.append((ra, rb, pair))
+    return out
+
+
+def ladder_lag(arm):
+    """{role: seconds} -- how far each model's ladder fell behind the schedule.
+
+    The worst, over the run, of the model's own cumulative stage time minus the
+    scheduled end of that stage. A stage ends when its requests drain, so a
+    model that queues past what its replicas serve stretches every stage it
+    bursts in, and everything after starts that much late. MEASURED on a
+    four-model run in which no model ever scaled: the 30B MoE, held at one
+    replica against a burst above its capacity, drained 101s and 88s past its
+    two burst stages and ended 214s behind; the other three stayed within 60s.
+    Which model lags, not the spread between them, is what says where to look.
+
+    Empty when the generator reported no per-stage timing.
+    """
+    meta = arm.get("meta") or {}
+    schedule = meta.get("schedule") or []
+    windows = meta.get("windows") or {}
+    out = {}
+    for role in roles_of(meta):
+        stages = (windows.get(role) or {}).get("stages") or []
+        if not stages or len(stages) != len(schedule):
+            return {}
+        t = 0.0
+        worst = 0.0
+        for st, w in zip(schedule, stages):
+            e = w.get("elapsed")
+            if not isinstance(e, (int, float)):
+                return {}
+            t += e
+            worst = max(worst, t - st["end"])
+        out[role] = worst
+    return out
+
+
+def fleet_moved(path, t0=None, t_end=None):
+    """(samples, moved): whether any Deployment's desired replicas changed.
+
+    Read from the same sampler file as `shortfall`, over the run only. An arm
+    whose desired replicas never changed ran a fixed fleet: no autoscaler
+    acted. MEASURED: a four-model baseline ran both arms, an hour of GPUs, with
+    every ScaledObject unwired -- KEDA's operator still held a client
+    certificate from a previous install, so the controller refused every call
+    and each HPA sat on the CPU default. 470 and 473 samples, every one of
+    them one replica per model; the report compared two identical fixed fleets.
+
+    (0, False) when the file is absent or no sample carries `desired`.
+    """
+    if not os.path.exists(path):
+        return 0, False
+    n = 0
+    first = None
+    moved = False
+    for line in open(path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            s = json.loads(line)
+        except ValueError:
+            continue
+        want = s.get("desired")
+        if not want:
+            continue
+        if t0 is not None and s.get("ts") is not None:
+            off = s["ts"] - t0
+            if off < 0 or (t_end is not None and off > t_end):
+                continue
+        n += 1
+        if first is None:
+            first = want
+        elif want != first:
+            moved = True
+    return n, moved
 
 
 def phase_drift(arm):
@@ -700,19 +899,23 @@ def phase_drift(arm):
 
     Returns None when the generator reported no per-stage timing.
     """
-    windows = ((arm.get("meta") or {}).get("windows")) or {}
-    stages = {k: (windows.get(k) or {}).get("stages") or [] for k in ("a", "b")}
-    if not stages["a"] or len(stages["a"]) != len(stages["b"]):
+    meta = arm.get("meta") or {}
+    windows = meta.get("windows") or {}
+    roles = roles_of(meta)
+    stages = {k: (windows.get(k) or {}).get("stages") or [] for k in roles}
+    if not stages[roles[0]] or any(len(stages[k]) != len(stages[roles[0]]) for k in roles):
         return None
     worst = 0.0
-    run = {"a": 0.0, "b": 0.0}
-    for sa, sb in zip(stages["a"], stages["b"]):
-        if not isinstance(sa.get("elapsed"), (int, float)) or \
-           not isinstance(sb.get("elapsed"), (int, float)):
-            return None
-        run["a"] += sa["elapsed"]
-        run["b"] += sb["elapsed"]
-        worst = max(worst, abs(run["a"] - run["b"]))
+    run = dict((k, 0.0) for k in roles)
+    for i in range(len(stages[roles[0]])):
+        for k in roles:
+            e = stages[k][i].get("elapsed")
+            if not isinstance(e, (int, float)):
+                return None
+            run[k] += e
+        # The widest spread between any two models' clocks: for two models
+        # that is |a - b|, as it always was.
+        worst = max(worst, max(run.values()) - min(run.values()))
     return worst
 
 
@@ -736,11 +939,28 @@ def admissible(arms, max_queue_delay, max_short=300.0, max_overlap=0.0,
         problems.append("an arm has no meta.json, so nothing can check that the "
                         "runs used the same schedule")
         return problems
+    # EVERY MODEL THE SCHEDULE DROVE HAS ITS WINDOWS. A conversion that kept
+    # two of four models' results produces a complete, plausible two-model
+    # report of a four-model run, and the missing models' bursts -- and the
+    # GPUs they held -- vanish from every comparison.
+    # (A stored run from the earlier bespoke loader has no windows at all; its
+    # rows are what it is read from, and it was only ever two models.)
+    for arm in arms:
+        if "windows" not in arm["meta"]:
+            continue
+        have = arm["meta"].get("windows") or {}
+        missing = [r for r in roles_of(arm["meta"]) if not have.get(r)]
+        if missing:
+            problems.append("the %s arm's schedule drove %s but its results carry no "
+                            "windows for %s: that model's bursts would silently drop "
+                            "out of every table"
+                            % (arm["name"], ", ".join(m.upper() for m in roles_of(arm["meta"])),
+                               ", ".join(m.upper() for m in missing)))
     for b in arms[1:]:
         if schedule_signature(a["meta"]) != schedule_signature(b["meta"]):
             diffs = []
             for k in ("input_tokens", "output_tokens", "input_tokens_b", "output_tokens_b",
-                      "model_a", "model_b", "seed", "data"):
+                      "model_a", "model_b", "model_c", "model_d", "seed", "data"):
                 if a["meta"].get(k) != b["meta"].get(k):
                     diffs.append("%s: %s=%s %s=%s" % (k, a["name"], a["meta"].get(k), b["name"], b["meta"].get(k)))
             if a["meta"].get("schedule") != b["meta"].get("schedule"):
@@ -803,16 +1023,30 @@ def admissible(arms, max_queue_delay, max_short=300.0, max_overlap=0.0,
                                    stall_note(arm.get("stalled", 0))))
         drift = phase_drift(arm)
         arm["drift"] = drift
-        overlap = burst_overlap(arm)
+        pairs = burst_overlap_pairs(arm)
+        overlap = None if pairs is None else sum(s for _, _, s in pairs)
         arm["overlap"] = overlap
         if overlap is not None and overlap > max_overlap:
-            problems.append("in the %s arm BOTH models were bursting at once for %.0fs "
-                            "(limit %.0fs). One pool covering many models is the claim "
+            lag = ladder_lag(arm)
+            worst = max(lag, key=lag.get) if lag else None
+            problems.append("in the %s arm two models were bursting at once for %.0fs in all "
+                            "(%s; limit %.0fs). One pool covering many models is the claim "
                             "under test, and it rests on their peaks not coinciding -- a "
                             "pool asked for two models at once can serve one, and would "
-                            "be recorded as failing. Raise OVERLAP_SECONDS above the "
-                            "%.0fs the two ladders drifted apart."
-                            % (arm["name"], overlap, max_overlap, drift or 0.0))
+                            "be recorded as failing.%s"
+                            % (arm["name"], overlap,
+                               ", ".join("%s with %s %.0fs" % (ra.upper(), rb.upper(), s)
+                                         for ra, rb, s in pairs),
+                               max_overlap,
+                               (" Model %s's ladder ran %.0fs behind the schedule, the most of "
+                                "any model: a stage ends only when its requests drain, so a "
+                                "model queueing past what its replicas serve stretches every "
+                                "stage it bursts in. Find out why it queued -- did it scale, "
+                                "is its burst above what MAX_REPLICAS replicas serve -- before "
+                                "widening OVERLAP_SECONDS." % (worst.upper(), lag[worst]))
+                               if worst else
+                               " Raise OVERLAP_SECONDS above the %.0fs the ladders drifted "
+                               "apart." % (drift or 0.0)))
         qd = driver_queueing(arm)
         arm["queue_p95"] = qd
         if qd is None:
@@ -828,14 +1062,36 @@ def admissible(arms, max_queue_delay, max_short=300.0, max_overlap=0.0,
                             "that is the loader's latency, not the cluster's, and it is "
                             "inside every TTFT below"
                             % (arm["name"], qd * 1000, max_queue_delay * 1000))
+    # NOTHING SCALED IN ANY ARM. Every arm ran the fleet it started with, so
+    # the comparison is of fixed fleets under different labels -- whatever the
+    # TTFT columns say. One flat arm alone can be legitimate (a floor arm held
+    # above its demand); every arm flat is an autoscaler that never acted.
+    moved = []
+    for arm in arms:
+        sched = arm["meta"].get("schedule") or []
+        n, mv = fleet_moved(os.path.join(arm["dir"], "gpus.jsonl"), arm["meta"].get("t0"),
+                            sched[-1]["end"] if sched else None)
+        if n:
+            moved.append((arm["name"], n, mv))
+    if moved and not any(mv for _, _, mv in moved):
+        problems.append("no Deployment's desired replicas changed in any arm (%s): nothing "
+                        "scaled, so every arm ran the fleet it started with and the comparison "
+                        "is of fixed fleets. Check that every model's ScaledObject is wired -- "
+                        "its HPA carries WVA's External metric, not the CPU default -- and that "
+                        "the controller logs decisions for the models, not 'No active "
+                        "VariantAutoscalings'."
+                        % ", ".join("%s %d samples" % (nm, n) for nm, n, _ in moved))
     return problems
 
 
 def arm_ceiling(bud):
     models = 2 * bud["max_replicas_per_model"] * bud["gpus_per_replica"]
     if "gpus_per_replica_a" in bud:
-        models = (bud["max_replicas_a"] * bud["gpus_per_replica_a"]
-                  + bud["max_replicas_b"] * bud["gpus_per_replica_b"])
+        # Every model the budget names: a and b always, c and d in a run of
+        # three or four.
+        models = sum(bud["max_replicas_" + r] * bud["gpus_per_replica_" + r]
+                     for r in ROLES
+                     if "max_replicas_" + r in bud and "gpus_per_replica_" + r in bud)
     return models + bud.get("pool_replicas", 0) * bud["gpus_per_replica"]
 
 
@@ -854,6 +1110,8 @@ def main(argv):
                         "starting with 'floor' to the floor arm's")
     p.add_argument("--model-a", default="A")
     p.add_argument("--model-b", default="B")
+    p.add_argument("--model-c", default="C", help="model C, in a run of three or four models")
+    p.add_argument("--model-d", default="D", help="model D, in a run of four models")
     p.add_argument("--max-queue-delay", type=float, default=0.25,
                    help="p95 driver queueing above which the arms are not comparable")
     p.add_argument("--max-shortfall", type=float, default=300.0,
@@ -862,7 +1120,7 @@ def main(argv):
                         "new replica takes to boot -- that gap is the phenomenon under "
                         "study, not a defect")
     p.add_argument("--max-overlap", type=float, default=0.0,
-                   help="seconds both models may be bursting at once")
+                   help="seconds any two models may be bursting at once")
     p.add_argument("--max-sampling-gap", type=float, default=0.05,
                    help="fraction of an arm's window that may be missing from the "
                         "accelerator sampling before its GPU-seconds mean nothing")
@@ -916,20 +1174,28 @@ def main(argv):
         return 2
 
     schedule = a["meta"]["schedule"]
-    rises = {"a": rise_stages(schedule, "a"), "b": rise_stages(schedule, "b")}
-    out = {"models": {"a": args.model_a, "b": args.model_b}, "schedule": schedule,
+    roles = roles_of(a["meta"])
+    labels = dict((r, getattr(args, "model_" + r)) for r in roles)
+    # (role, label) per model, in model order: what every per-model table loops on.
+    models = [(r, labels[r]) for r in roles]
+    rises = dict((r, rise_stages(schedule, r)) for r in roles)
+    out = {"models": labels, "schedule": schedule,
            "rises": rises, "arms": {}}
 
     print("")
-    print("# Two models, anti-phase bursts: %s" % " vs ".join(arm["name"] for arm in arms))
+    if len(roles) == 2:
+        print("# Two models, anti-phase bursts: %s" % " vs ".join(arm["name"] for arm in arms))
+    else:
+        print("# %d models, bursts in rotation: %s"
+              % (len(roles), " vs ".join(arm["name"] for arm in arms)))
     print("")
-    print("- model A: `%s`" % args.model_a)
-    print("- model B: `%s`" % args.model_b)
+    for r, label in models:
+        print("- %s: `%s`" % (model_label(r), label))
     print("- schedule: %d stages, %ds total. Every latency below is the load "
           "generator's OWN per-stage distribution -- this harness records no "
           "per-request token times, so a rise window has to BE a stage."
           % (len(schedule), schedule[-1]["end"]))
-    for k, label in (("a", args.model_a), ("b", args.model_b)):
+    for k, label in models:
         print("- %s rises at: %s" % (label,
               ", ".join("%ds" % schedule[i]["start"] for i in rises[k]) or "never"))
     print("- driver queueing (p95): %s"
@@ -945,11 +1211,12 @@ def main(argv):
     band = (a["meta"] or {}).get("overlap_seconds")
     for arm in arms:
         if arm.get("overlap") is not None:
-            print("- %s: both models bursting at once for %.0fs" % (arm["name"], arm["overlap"]))
-    print("- the two models drifted at most %s apart, against a %s band of both-low "
+            print("- %s: two models bursting at once for %.0fs" % (arm["name"], arm["overlap"]))
+    print("- the %s models drifted at most %s apart, against a %s band of both-low "
           "between bursts (a stage ends when its requests drain, and the bursting "
           "model drains slower)"
-          % (" / ".join("%s %.0fs" % (arm["name"], arm["drift"])
+          % ("two" if len(roles) == 2 else "%d" % len(roles),
+             " / ".join("%s %.0fs" % (arm["name"], arm["drift"])
                         if arm.get("drift") is not None else "%s -" % arm["name"]
                         for arm in arms),
              "%ds" % band if band is not None else "(unrecorded)"))
@@ -959,7 +1226,7 @@ def main(argv):
     print("")
     print("| model | arm | served | failed | p50 | p95 | p99 | max |")
     print("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
-    for key, label in (("a", args.model_a), ("b", args.model_b)):
+    for key, label in models:
         for arm in arms:
             w = window_of(arm, key)
             rec = out["arms"].setdefault(arm["name"], {"whole": {}, "rises": {}})
@@ -990,7 +1257,7 @@ def main(argv):
     print("")
     print("| model | rise at | arm | served | failed | p50 | p95 | max |")
     print("| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |")
-    for key, label in (("a", args.model_a), ("b", args.model_b)):
+    for key, label in models:
         for i in rises[key]:
             lo = schedule[i]["start"]
             for arm in arms:
@@ -1008,7 +1275,15 @@ def main(argv):
     print("")
     for arm in arms:
         bud = arm["budget"]
-        if bud and "gpus_per_replica_a" in bud and (
+        if bud and len(roles) > 2 and "gpus_per_replica_a" in bud:
+            # Three or four models: each at its own size and ceiling.
+            print("- %s: %s, pool %d Pod(s) -- ceiling %d accelerators"
+                  % (arm["name"],
+                     ", ".join("%s up to %s replicas of %s GPU(s)"
+                               % (model_label(r), bud.get("max_replicas_" + r, "?"),
+                                  bud.get("gpus_per_replica_" + r, "?")) for r in roles),
+                     bud.get("pool_replicas", 0), arm_ceiling(bud)))
+        elif bud and "gpus_per_replica_a" in bud and (
                 bud["gpus_per_replica_a"] != bud["gpus_per_replica_b"]
                 or bud["max_replicas_a"] != bud["max_replicas_b"]):
             # Models of different sizes or ceilings: each at its own.
@@ -1047,12 +1322,43 @@ def main(argv):
             arm["name"], tot, poolgpu, max(r[1] for r in ser), lent,
             "-" if gapped == 0 else "%.0fs" % gapped))
     print("")
+    # PER MODEL, from the same samples, by the Deployments each arm recorded
+    # (budget.json model_deploys). Printed only for arms that recorded them;
+    # an older arm has the fleet total above and nothing finer.
+    split = {}
+    for arm in arms:
+        prefixes = (arm["budget"] or {}).get("model_deploys")
+        if not prefixes:
+            continue
+        sched = (arm["meta"] or {}).get("schedule") or []
+        split[arm["name"]] = gpu_seconds_by_model(
+            os.path.join(arm["dir"], "gpus.jsonl"), (arm["meta"] or {}).get("t0", 0),
+            sched[-1]["end"] if sched else None, prefixes, roles)
+    if split:
+        print("GPU-seconds by model (pool Pods are counted apart: a lent Pod serves "
+              "whichever model borrowed it; unattributed is any accelerator no "
+              "recorded Deployment owns):")
+        print("")
+        print("| arm | " + " | ".join(label for _, label in models) + " | pool | unattributed | all |")
+        print("| --- |" + " ---: |" * (len(models) + 3))
+        for arm in arms:
+            if arm["name"] not in split:
+                continue
+            g = split[arm["name"]]
+            out["arms"][arm["name"]]["gpu_seconds_by_model"] = g
+            if g is None:
+                print("| %s |" % arm["name"] + " - |" * (len(models) + 3))
+                continue
+            print("| %s | %s | %.0f | %.0f | %.0f |" % (
+                arm["name"], " | ".join("%.0f" % g[r] for r in roles),
+                g["pool"], g["unattributed"], g["all"]))
+        print("")
 
     print("## What this says")
     print("")
     for b in others:
         what = "with %s" % ("the pool" if b["name"] == "pool" else "the floor" if b["name"] == "floor" else b["name"])
-        for key, label in (("a", args.model_a), ("b", args.model_b)):
+        for key, label in models:
             for i in rises[key]:
                 lo = schedule[i]["start"]
                 sn = window_of(a, key, i) or {"p95": None, "n": 0, "failed": 0}
@@ -1088,7 +1394,7 @@ def main(argv):
     if "pool" in by_name and "floor" in by_name and totals.get("pool") and totals.get("floor"):
         gp, gf = totals["pool"], totals["floor"]
         worse = compared = 0
-        for key in ("a", "b"):
+        for key in roles:
             for i in rises[key]:
                 wp = window_of(by_name["pool"], key, i)
                 wf = window_of(by_name["floor"], key, i)
@@ -1103,7 +1409,7 @@ def main(argv):
               % (gp, gf, 100.0 * (gp - gf) / gf, worse, compared))
     # The limit of the evidence, printed every time, because a table invites a
     # conclusion the sample size does not support.
-    n_rises = len(rises["a"]) + len(rises["b"])
+    n_rises = sum(len(rises[r]) for r in roles)
     print("")
     print("**How far this goes.** %d scale-up events per arm, one run each, no repetition "
           "and no confidence interval. A difference of the same order as the spread "

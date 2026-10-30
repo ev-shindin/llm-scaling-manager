@@ -56,15 +56,46 @@ every replica the autoscaler added served 0.3-2.0%. With synthetic, an EMPTY
 second replica took 49.4% of 9 rps from its first minute (p50 TTFT 58ms). A
 result from the shared_prefix dataset is therefore about one replica per model
 whatever the table says; `--data shared_prefix` is kept only to reproduce it.
+
+THREE OR FOUR MODELS. `--models N` (2, the default, to 4) adds roles c and d.
+The bursts ROTATE: each cycle every model bursts once, one at a time, in the
+order b, c, d, a -- for two models that is b then a, the anti-phase ladder
+exactly as before -- with the same both-low band between consecutive bursts.
+Each model's burst is therefore shifted from the previous model's by
+period / N, where the period is N x (phase + band). Every schedule row carries
+one `rate_<role>` per model. Models C and D take their own burst and low rates
+(`--high-rps-c/-d`, `--low-rps-c/-d`), since a 32B model's replica serves a
+fraction of an 8B one's.
 """
 
 import argparse
 import json
 import sys
 
+# The roles, in the order a run numbers its models. Model 1 is a, model 2 b.
+ROLES = ("a", "b", "c", "d")
+
+
+def roles_for(models):
+    """The roles of a run of `models` models: ("a", "b") for two."""
+    if not 2 <= models <= len(ROLES):
+        raise ValueError("models must be 2 to %d, got %r" % (len(ROLES), models))
+    return ROLES[:models]
+
+
+def burst_order(roles):
+    """Which model bursts in each slot of a cycle: b first, a last.
+
+    For two models this is (b, a), the order the anti-phase ladder always had,
+    so a two-model schedule is unchanged.
+    """
+    roles = tuple(roles)
+    return roles[1:] + roles[:1]
+
 
 def build_schedule(phase_seconds, cycles, low_rps, high_rps, lead_in, overlap=0,
-                   high_rps_b=None):
+                   high_rps_b=None, models=2, high_rps_by_role=None,
+                   low_rps_by_role=None):
     """Anti-phase square wave: A low->high->low..., B high->low->high...
 
     `overlap` inserts a band between consecutive phases where BOTH models are
@@ -101,6 +132,22 @@ def build_schedule(phase_seconds, cycles, low_rps, high_rps, lead_in, overlap=0,
     # replicas and the other's costs one.
     if high_rps_b is None:
         high_rps_b = high_rps
+    roles = roles_for(models)
+    # Each model's burst rate: a's is high_rps, b's high_rps_b, and a third or
+    # fourth model's its own entry in high_rps_by_role, else high_rps.
+    highs = {"a": high_rps, "b": high_rps_b}
+    for r in roles[2:]:
+        v = (high_rps_by_role or {}).get(r)
+        highs[r] = high_rps if v is None else v
+    # Each model's LOW rate: low_rps for a and b, and a third or fourth model's
+    # own entry in low_rps_by_role, else low_rps. A 32B model serves on one
+    # replica a fraction of what an 8B one does, so one low rate cannot leave
+    # every model at one replica between its bursts.
+    low = {r: low_rps for r in roles}
+    for r in roles[2:]:
+        v = (low_rps_by_role or {}).get(r)
+        low[r] = low_rps if v is None else v
+    lows = tuple(low[r] for r in roles)
     phases = []
     t = 0
     if lead_in > 0:
@@ -109,17 +156,17 @@ def build_schedule(phase_seconds, cycles, low_rps, high_rps, lead_in, overlap=0,
         # scale-up: the models have never served a request, the pool has never
         # been asked for anything, and the first burst pays a first-request
         # penalty that has nothing to do with the pool.
-        phases.append((t, t + lead_in, low_rps, low_rps))
+        phases.append((t, t + lead_in) + lows)
         t += lead_in
     for cycle in range(cycles):
-        for first in (True, False):
+        for slot, burster in enumerate(burst_order(roles)):
             if phases and overlap > 0:
                 # Not before the very first burst: the lead-in already is a
                 # both-low band, and a second one would only add dead time.
-                if not (cycle == 0 and first and lead_in > 0):
-                    phases.append((t, t + overlap, low_rps, low_rps))
+                if not (cycle == 0 and slot == 0 and lead_in > 0):
+                    phases.append((t, t + overlap) + lows)
                     t += overlap
-            rates = (low_rps, high_rps_b) if first else (high_rps, low_rps)
+            rates = tuple(highs[r] if r == burster else low[r] for r in roles)
             phases.append((t, t + phase_seconds) + rates)
             t += phase_seconds
     return phases
@@ -132,12 +179,17 @@ def schedule_json(stages):
     a TTFT distribution for, so a report keyed on anything else would be
     describing windows nobody measured.
     """
-    return [{"start": s, "end": e, "rate_a": ra, "rate_b": rb}
-            for s, e, ra, rb in stages]
+    out = []
+    for st in stages:
+        row = {"start": st[0], "end": st[1]}
+        for role, rate in zip(ROLES, st[2:]):
+            row["rate_" + role] = rate
+        out.append(row)
+    return out
 
 
 def stage_map(schedule, rise_window):
-    """The STAGES both models run, as (start, end, rate_a, rate_b).
+    """The STAGES both models run, as (start, end, rate_a, rate_b, ...).
 
     Every phase after the lead-in is cut in two at `rise_window`: an opening
     sub-stage and the remainder, at the SAME rate, so the load is unchanged.
@@ -154,23 +206,24 @@ def stage_map(schedule, rise_window):
     """
     stages = []
     prev = None
-    for start, end, ra, rb in schedule:
+    for phase in schedule:
+        start, end, rates = phase[0], phase[1], tuple(phase[2:])
         # Cut only a phase some model RISES into. The lead-in and the both-low
         # overlap bands have nothing to measure a rise window of, and splitting
         # them would only spend stages.
-        rises = prev is not None and (ra > prev[0] or rb > prev[1])
-        prev = (ra, rb)
+        rises = prev is not None and any(r > p for r, p in zip(rates, prev))
+        prev = rates
         if rises and end - start > rise_window > 0:
-            stages.append((start, start + rise_window, ra, rb))
-            stages.append((start + rise_window, end, ra, rb))
+            stages.append((start, start + rise_window) + rates)
+            stages.append((start + rise_window, end) + rates)
         else:
-            stages.append((start, end, ra, rb))
+            stages.append((start, end) + rates)
     return stages
 
 
 def stages_for(stages, role):
     """One model's ladder: (rate, duration) per stage."""
-    idx = 2 if role == "a" else 3
+    idx = 2 + ROLES.index(role)
     return [(st[idx], st[1] - st[0]) for st in stages]
 
 
@@ -248,12 +301,12 @@ def yaml_quote(s):
 
 
 def render_profile(args, stages, role):
-    model = args.model_a if role == "a" else args.model_b
-    base_url = args.endpoint_a if role == "a" else args.endpoint_b
+    model = getattr(args, "model_" + role)
+    base_url = getattr(args, "endpoint_" + role)
     # Distinct seeds per role so the two models do not receive the same
     # question text at the same instant; derived from the one seed so the run
     # stays reproducible from a single knob.
-    seed = args.seed + (0 if role == "a" else 1)
+    seed = args.seed + ROLES.index(role)
 
     lines = []
     lines.append("# GENERATED by hack/benchmark/two_model_profile.py -- do not edit.")
@@ -344,12 +397,26 @@ def build_parser():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--emit", choices=("profile", "schedule"), required=True)
-    p.add_argument("--role", choices=("a", "b"),
+    p.add_argument("--role", choices=ROLES,
                    help="which model's profile to render (required with --emit profile)")
+    p.add_argument("--models", type=int, default=2,
+                   help="how many models burst in rotation, 2 to 4 (roles a..d)")
     p.add_argument("--model-a", default="A")
     p.add_argument("--model-b", default="B")
+    p.add_argument("--model-c", default="C")
+    p.add_argument("--model-d", default="D")
     p.add_argument("--endpoint-a", default="")
     p.add_argument("--endpoint-b", default="")
+    p.add_argument("--endpoint-c", default="")
+    p.add_argument("--endpoint-d", default="")
+    p.add_argument("--high-rps-c", type=float, default=None,
+                   help="model C's burst rate; defaults to --high-rps")
+    p.add_argument("--high-rps-d", type=float, default=None,
+                   help="model D's burst rate; defaults to --high-rps")
+    p.add_argument("--low-rps-c", type=float, default=None,
+                   help="model C's rate between its bursts; defaults to --low-rps")
+    p.add_argument("--low-rps-d", type=float, default=None,
+                   help="model D's rate between its bursts; defaults to --low-rps")
     p.add_argument("--phase-seconds", type=int, default=480)
     p.add_argument("--cycles", type=int, default=2)
     p.add_argument("--lead-in", type=int, default=120)
@@ -396,6 +463,29 @@ def main(argv):
     if args.emit == "profile" and not args.role:
         print("--emit profile needs --role a or --role b", file=sys.stderr)
         return 2
+    if not 2 <= args.models <= len(ROLES):
+        print("--models must be 2 to %d, got %d" % (len(ROLES), args.models), file=sys.stderr)
+        return 2
+    if args.emit == "profile" and args.role not in roles_for(args.models):
+        print("--role %s is not one of the %d models of this run" % (args.role, args.models),
+              file=sys.stderr)
+        return 2
+    extra_highs = {r: getattr(args, "high_rps_" + r) for r in roles_for(args.models)[2:]}
+    extra_lows = {r: getattr(args, "low_rps_" + r) for r in roles_for(args.models)[2:]}
+    if any(v is not None and v <= 0 for v in extra_lows.values()):
+        print("--low-rps-c and --low-rps-d must be above 0: a model with no load "
+              "between its bursts is scaled to its floor and measured cold.",
+              file=sys.stderr)
+        return 2
+    for r in extra_highs:
+        high = args.high_rps if extra_highs[r] is None else extra_highs[r]
+        low = args.low_rps if extra_lows[r] is None else extra_lows[r]
+        if high <= low:
+            print("--high-rps-c and --high-rps-d must exceed that model's low rate "
+                  "(--low-rps-c/-d, else --low-rps): the scenario is a burst, and "
+                  "with a flat rate no scale-up happens in either arm.",
+                  file=sys.stderr)
+            return 2
     if args.cycles < 1:
         print("--cycles must be at least 1: with none, neither model ever rises "
               "and there is nothing for a warm pool to be measured against.",
@@ -425,7 +515,9 @@ def main(argv):
 
     schedule = build_schedule(args.phase_seconds, args.cycles,
                               args.low_rps, args.high_rps, args.lead_in,
-                              args.overlap, args.high_rps_b)
+                              args.overlap, args.high_rps_b,
+                              models=args.models, high_rps_by_role=extra_highs,
+                              low_rps_by_role=extra_lows)
     stages = stage_map(schedule, args.rise_window)
     if args.emit == "schedule":
         json.dump(schedule_json(stages), sys.stdout, indent=2)

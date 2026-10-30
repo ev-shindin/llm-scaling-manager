@@ -54,6 +54,87 @@ cat > "$STUB/kubectl" <<'STUBEOF'
 #!/usr/bin/env bash
 printf 'CALL[%s]\n' "$*" >> "${KCALLS:-/dev/null}"
 args="$*"
+# WIRE_STUB=1: four model ScaledObjects a-so..d-so naming the WVA scaler, and
+# their KEDA HPAs, all wired unless one of these names a ScaledObject:
+#   WIRE_CPU     its HPA scales on CPU (KEDA's default when the call failed)
+#   WIRE_NOEMN   its status.externalMetricNames is empty (HPA still External)
+#   WIRE_ABSENT  it has no HPA (KEDA deletes it while paused)
+#   WIRE_PAUSED  it carries Paused=True (its HPA still External); with
+#                WIRE_PAUSE_BY=annotation, only the paused-replicas annotation
+#                a reset writes, before KEDA sets the condition
+#   WIRE_LIVE    its HPA reports ScalingActive False, FailedGetExternalMetric
+#   WIRE_HPANAME its status.hpaName is custom-<name>, the HPA named so
+# WIRE_WARM=1 adds a warm-pool ScaledObject with no HPA, WIRE_FOREIGN=1 one
+# with a cpu trigger, and WIRE_CONN=1 a controller log of refused handshakes
+# from a KEDA Pod whose certificate does not chain to the client CA.
+if [ -n "${WIRE_STUB:-}" ]; then
+  wire_lists() {
+    # WIRE_PAUSE_LISTS=N: WIRE_PAUSED holds only for the first N reads of the
+    # ScaledObject list, as a reset's pause does until KEDA clears it.
+    local paused="${WIRE_PAUSED:-}" n
+    if [ -n "${WIRE_PAUSE_LISTS:-}" ]; then
+      n="$(cat "${KCALLS}.wire" 2>/dev/null || echo 0)"
+      [ "$n" -lt "$WIRE_PAUSE_LISTS" ] || paused=""
+    fi
+    jq -cn --arg addr "wva-external-scaler.ns-under-test.svc:9090" \
+      --arg cpu "${WIRE_CPU:-}" --arg noemn "${WIRE_NOEMN:-}" --arg absent "${WIRE_ABSENT:-}" \
+      --arg paused "$paused" --arg live "${WIRE_LIVE:-}" --arg hn "${WIRE_HPANAME:-}" \
+      --arg warm "${WIRE_WARM:-0}" --arg foreign "${WIRE_FOREIGN:-0}" --arg pauseby "${WIRE_PAUSE_BY:-condition}" '
+      def hname($n): if $n == $hn then "custom-" + $n else "keda-hpa-" + $n end;
+      def so($n): {metadata: ({name: $n}
+          + (if $n == $paused and $pauseby == "annotation"
+             then {annotations: {"autoscaling.keda.sh/paused-replicas": "1"}} else {} end)),
+        spec: {triggers: [{type: "external-push", metadata: {scalerAddress: $addr}}]},
+        status: ({externalMetricNames: (if $n == $noemn then [] else ["s0-wva-desired-replicas"] end)}
+          + (if $n == $hn then {hpaName: hname($n)} else {} end)
+          + (if $n == $paused and $pauseby == "condition"
+             then {conditions: [{type: "Paused", status: "True"}]} else {} end))};
+      def hpa($n): {metadata: {name: hname($n)},
+        spec: {metrics: [if $n == $cpu then {type: "Resource", resource: {name: "cpu"}}
+                         else {type: "External", external: {metric: {name: "s0-wva-desired-replicas"}}} end]},
+        status: {conditions: [if $n == $live
+          then {type: "ScalingActive", status: "False", reason: "FailedGetExternalMetric", message: "tls: bad certificate"}
+          else {type: "ScalingActive", status: "True", reason: "ValidMetricFound"} end]}};
+      ["a-so", "b-so", "c-so", "d-so"] as $m
+      | {items: ([$m[] | so(.)]
+          + (if $warm == "1" then [{metadata: {name: "warm-so"}, spec: {triggers: [{type: "external-push",
+               metadata: {scalerAddress: $addr, warmPoolName: "p"}}]}}] else [] end)
+          + (if $foreign == "1" then [{metadata: {name: "foreign-so"}, spec: {triggers: [{type: "cpu",
+               metadata: {value: "50"}}]}}] else [] end))},
+        {items: ([$m[] | select(. != $absent) | hpa(.)]
+          + (if $foreign == "1" then [{metadata: {name: "keda-hpa-foreign-so"}, spec: {metrics: [{type: "Resource"}]}}] else [] end))}'
+  }
+  case "$args" in
+    *"get scaledobject"*"-o json"*|*"get hpa"*"-o json"*)
+      lists="$(wire_lists)"
+      set -- $args
+      kind=""; name=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          scaledobject|hpa) kind="$1"; case "${2:-}" in -*|"") name="" ;; *) name="$2" ;; esac; break ;;
+        esac
+        shift
+      done
+      if [ "$kind" = hpa ]; then list="$(printf '%s\n' "$lists" | sed -n 2p)"; else list="$(printf '%s\n' "$lists" | sed -n 1p)"; fi
+      if [ -z "$name" ] && [ "$kind" = scaledobject ]; then
+        echo $(( $(cat "${KCALLS}.wire" 2>/dev/null || echo 0) + 1 )) > "${KCALLS}.wire"
+      fi
+      if [ -z "$name" ]; then printf '%s\n' "$list"; exit 0; fi
+      one="$(printf '%s' "$list" | jq -c --arg n "$name" '.items[] | select(.metadata.name == $n)')"
+      if [ -n "$one" ]; then printf '%s\n' "$one"; exit 0; fi
+      echo "Error from server (NotFound): $kind \"$name\" not found" >&2
+      exit 1 ;;
+    *"logs -n "*"-c manager"*)
+      [ "${WIRE_CONN:-0}" = 1 ] && echo '2026-10-28T20:21:56Z INFO external-scaler KEDA external scaler refused a TLS handshake {"remote": "10.0.9.9:45434", "reason": "remote error: tls: bad certificate"}'
+      exit 0 ;;
+    *"get pods -n keda -o json"*)
+      echo '{"items":[{"metadata":{"name":"keda-operator-x"},"status":{"podIP":"10.0.9.9"}}]}'; exit 0 ;;
+    *"get configmap wva-scaler-keda-auth"*"-o json"*)
+      echo '{"data":{"clientCert":"not a certificate"}}'; exit 0 ;;
+    *"get secret wva-external-scaler-client-tls"*"-o json"*)
+      echo '{"data":{"ca.crt":"bm90IGEgY2VydGlmaWNhdGU="}}'; exit 0 ;;
+  esac
+fi
 case "$args" in
   *"get scaledobject -o json"*)
       if [ "${PD_STUB:-0}" = "1" ]; then
@@ -64,6 +145,10 @@ case "$args" in
         # model, on the Deployments the route resolves to.
         so() { printf '{"metadata":{"name":"%s-wva"},"spec":{"scaleTargetRef":{"name":"%s"},"triggers":[{"metadata":{}}]}}' "$1" "$1"; }
         echo "{\"items\":[$(so unsloth--244120d9-instruct-decode),$(so unsloth--244120d9-instruct-prefill),$(so qwen-qwe-6e036fd5-qwen3-8b-decode),$(so qwen-qwe-6e036fd5-qwen3-8b-prefill)]}"
+      elif [ "${SIM4_STUB:-0}" = "1" ]; then
+        # Four simulator stacks, one ScaledObject each.
+        so() { printf '{"metadata":{"name":"%s-so"},"spec":{"scaleTargetRef":{"name":"%s-decode"},"triggers":[{"metadata":{}}]}}' "$1" "$1"; }
+        echo "{\"items\":[$(so llama-31-8b),$(so qwen3-8b),$(so qwen3-30b-a3b),$(so qwen3-32b)]}"
       elif [ "${MIXED_SO:-0}" = "1" ]; then
         # A mixed-size run: each ScaledObject's trigger names its model.
         echo '{"items":[{"metadata":{"name":"so-a"},"spec":{"scaleTargetRef":{"name":"qwen3-30b-a3b-decode"},"triggers":[{"metadata":{"modelID":"Qwen/Qwen3-30B-A3B-FP8"}}]}},
@@ -313,6 +398,25 @@ case "$args" in
         echo '{"items":[]}'
       fi
       exit 0 ;;
+  # ISTIO_INJECTOR=login: the reused control plane hands its gateway Pods a
+  # proxy image from a registry that needs a login, and a pull secret for it.
+  # SECRET_PRESENT=0: the benchmark namespace does not have that secret.
+  *"istio-system get configmap -o json"*)
+      if [ "${ISTIO_INJECTOR:-}" = "login" ]; then
+        echo '{"items":[{"metadata":{"name":"istio-ca-root-cert"},"data":{}},
+          {"metadata":{"name":"istio-sidecar-injector"},"data":{"values":"{\"global\":{\"hub\":\"registry.example.com/mesh\",\"tag\":\"1.26\",\"imagePullSecrets\":[\"mesh-pull-secret\"],\"proxy\":{\"image\":\"registry.example.com/mesh/proxyv2@sha256:13da\"}}}"}}]}'
+      else
+        echo '{"items":[]}'
+      fi
+      exit 0 ;;
+  # SIM4_STUB=1: the four simulator Deployments a four-model kind run left.
+  *"get deploy -l app.kubernetes.io/part-of=wva-two-model-sim"*)
+      [ "${SIM4_STUB:-0}" = "1" ] && printf '%s\n' llama-31-8b-decode qwen3-8b-decode qwen3-30b-a3b-decode qwen3-32b-decode
+      exit 0 ;;
+  *"get secret "*"-o name"*)
+      if [ "${SECRET_PRESENT:-1}" = "1" ]; then echo "secret/x"; exit 0; fi
+      echo 'Error from server (NotFound): secrets "mesh-pull-secret" not found' >&2
+      exit 1 ;;
   *) exit 0 ;;
 esac
 STUBEOF
@@ -322,7 +426,7 @@ chmod +x "$STUB/kubectl"
 # teardown can be checked without running the harness's.
 cat > "$STUB/make" <<'STUBEOF'
 #!/usr/bin/env bash
-printf 'MAKE[%s] SPEC=%s\n' "$*" "${BENCHMARK_SPEC:-}" >> "${KCALLS:-/dev/null}"
+printf 'MAKE[%s] SPEC=%s STACKS=%s\n' "$*" "${BENCHMARK_SPEC:-}" "${BENCHMARK_STACKS:-}" >> "${KCALLS:-/dev/null}"
 exit 0
 STUBEOF
 chmod +x "$STUB/make"
@@ -727,6 +831,133 @@ if [ "$RC" -eq 0 ]; then
     fail "verify passed with TWO gateway Services; the driver would pick one and send both models' traffic at whichever stack owns it"
 else
     ok "an ambiguous gateway is refused rather than picked"
+fi
+
+# READY IS NOT WIRED. A four-model baseline ran both arms with every
+# ScaledObject Ready and every KEDA HPA on the CPU default: KEDA's operator
+# held a client certificate from an earlier install, the controller refused
+# every call, and no model ever left one replica. verify passed.
+# Judged by the installer's own wva_scaler_so_wiring (HPA metric AND the
+# ScaledObject's status.externalMetricNames), plus two live signals: the HPA
+# failing to read the metric, and the controller refusing KEDA's handshakes.
+WIRE_FIX="the ScaledObjects above are not wired to WVA"
+case_begin
+WIRE_STUB=1 run_verb verify
+if [ "$RC" -ne 0 ] || printf '%s' "$OUT" | grep -q "$WIRE_FIX"; then
+    fail "verify refused four wired ScaledObjects (rc $RC): $(printf '%s' "$OUT" | tail -4)"
+else
+    ok "four wired ScaledObjects pass verify"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_CPU=d-so run_verb verify
+if [ "$RC" -eq 0 ]; then
+    fail "verify passed with model D's HPA on the CPU default: WVA's decisions reach nothing for it"
+elif ! printf '%s' "$OUT" | grep -q 'd-so: HPA keda-hpa-d-so: trigger(s) 0 have no External metric'; then
+    fail "verify refused without naming the unwired ScaledObject and its trigger: $OUT"
+elif printf '%s' "$OUT" | grep -q '      a-so:'; then
+    fail "verify named a wired ScaledObject as unwired: $OUT"
+elif ! printf '%s' "$OUT" | grep -q 'rollout restart deployment/keda-operator'; then
+    fail "verify refused without naming the fix (restart KEDA's operator): $OUT"
+else
+    ok "an HPA on the CPU default is refused, only that model named, with the KEDA restart"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_NOEMN=c-so run_verb verify
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'c-so: HPA keda-hpa-c-so: trigger(s) 0'; then
+    fail "verify passed an HPA with the External metric whose ScaledObject lists no externalMetricNames (rc $RC): KEDA built the spec once and the call since failed"
+else
+    ok "an External HPA whose ScaledObject lists no external metric is refused"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_LIVE=b-so WIRING_TIMEOUT=2 WIRING_POLL=1 run_verb verify
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'b-so: HPA keda-hpa-b-so: tls: bad certificate (FailedGetExternalMetric'; then
+    fail "verify passed an HPA that cannot read WVA's metric now (rc $RC): $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "an HPA failing to get the external metric is refused, live"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_CONN=1 KEDA_NAMESPACE_EXPLICIT=true KEDA_NAMESPACE=keda run_verb verify
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q "refused TLS handshakes from KEDA's Pod(s) keda-operator-x"; then
+    fail "verify passed while the controller refused KEDA's handshakes (rc $RC): $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "a controller refusing KEDA's handshakes is refused, though every HPA looks wired"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_PAUSED=a-so WIRING_TIMEOUT=2 WIRING_POLL=1 run_verb verify
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'a-so: still paused after 2s'; then
+    fail "a ScaledObject still paused when the wait ran out did not refuse as paused (rc $RC): $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "a pause that is never lifted refuses once the wait runs out"
+fi
+
+# The installer's wva_scaler_so_wiring sees the Paused condition only. The
+# annotation a reset writes comes first, and KEDA may not have set the
+# condition yet: judged then, the HPA still reads as wired.
+case_begin
+WIRE_STUB=1 WIRE_PAUSED=b-so WIRE_PAUSE_BY=annotation WIRING_TIMEOUT=2 WIRING_POLL=1 run_verb verify
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'b-so: still paused after 2s'; then
+    fail "a ScaledObject paused by annotation alone passed as wired (rc $RC): $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "a pause the annotation states before the condition does is still a pause"
+fi
+
+case_begin
+rm -f "$WORK/calls.wire"
+WIRE_STUB=1 WIRE_PAUSED=a-so WIRE_PAUSE_LISTS=2 WIRING_TIMEOUT=30 WIRING_POLL=1 run_verb verify
+if [ "$RC" -ne 0 ] || printf '%s' "$OUT" | grep -q "$WIRE_FIX"; then
+    fail "a pause lifted on the third look was judged before it lifted (rc $RC): $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "the check waits for a reset's pause to clear, then passes"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_ABSENT=d-so WIRING_TIMEOUT=2 WIRING_POLL=1 run_verb verify
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'd-so: HPA keda-hpa-d-so still absent after 2s'; then
+    fail "a ScaledObject with no HPA was not refused as absent (rc $RC): $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "an HPA KEDA never rebuilt refuses as absent once the wait runs out"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_HPANAME=c-so WIRING_TIMEOUT=2 WIRING_POLL=1 run_verb verify
+if [ "$RC" -ne 0 ] || printf '%s' "$OUT" | grep -q "$WIRE_FIX"; then
+    fail "an HPA found through status.hpaName was not found (rc $RC): $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "the HPA is the one status.hpaName names, not keda-hpa-<name>"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_WARM=1 WIRING_TIMEOUT=2 WIRING_POLL=1 run_verb verify
+if [ "$RC" -ne 0 ] || printf '%s' "$OUT" | grep -q 'warm-so'; then
+    fail "a warm-pool ScaledObject was judged as a model (rc $RC): $(printf '%s' "$OUT" | tail -3)"
+else
+    ok "a warm-pool ScaledObject is left out of the wiring check"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_FOREIGN=1 run_verb verify
+if [ "$RC" -ne 0 ]; then
+    fail "a ScaledObject naming no WVA scaler was refused rather than warned about: $(printf '%s' "$OUT" | tail -3)"
+elif ! printf '%s' "$OUT" | grep -q 'ScaledObject foreign-so names no WVA scaler (its HPA scales on Resource)'; then
+    fail "a ScaledObject naming no WVA scaler passed without a warning: $OUT"
+else
+    ok "a ScaledObject that names no WVA scaler is warned about, not refused"
+fi
+
+case_begin
+WIRE_STUB=1 WIRE_CPU=a-so POOL_EXISTS=0 VERB_TIMEOUT=30 run_verb run nopool
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q "arm nopool refused: $WIRE_FIX"; then
+    fail "an arm started with an unwired ScaledObject: rc $RC
+$(printf '%s' "$OUT" | tail -5)"
+elif grep -q 'CALL\[apply' "$CALLS" 2>/dev/null; then
+    fail "the arm created the load Job before refusing the unwired ScaledObject"
+else
+    ok "an arm with an unwired ScaledObject is refused before any load"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1223,6 +1454,42 @@ else
     ok "the standup records its scenario before the harness runs"
 fi
 
+# A SIMULATOR TEARDOWN RUN WITHOUT THE STANDUP'S MODEL_COUNT still removes
+# every stack present: it used to walk only its own two models, and left models
+# C and D's ScaledObjects scaling Deployments being deleted.
+case_begin
+SIM4_STUB=1 STANDUP_SPEC=sim:guides/n-model-share VERB_TIMEOUT=60 run_verb teardown
+sim_dels="$(grep -o 'delete scaledobject [a-z0-9.-]*-so' "$CALLS" | sed 's/delete scaledobject //' | sort | paste -sd, -)"
+if [ "$sim_dels" != "llama-31-8b-so,qwen3-30b-a3b-so,qwen3-32b-so,qwen3-8b-so" ]; then
+    fail "a simulator teardown with MODEL_COUNT unset deleted ScaledObjects '$sim_dels', not all four stacks'"
+else
+    ok "a simulator teardown removes every stack present, whatever MODEL_COUNT it is run with"
+fi
+
+# THE STACKS THE STANDUP KEEPS: the run's own whenever the scenario has more.
+# Two models pointed at the four-stack n-model-share stood up all four.
+case_begin
+VERB_TIMEOUT=60 run_verb standup
+std_two="$(grep -o 'benchmark-standup\] SPEC=[^ ]* STACKS=.*' "$CALLS" | head -1)"
+std_two_out="$(grep -E 'MAKE|configmap' "$CALLS" | head -5)"
+BENCH_SPEC=guides/n-model-share EPP_COUNT=0 VERB_TIMEOUT=60 run_verb standup
+std_n2="$(grep -o 'benchmark-standup\] SPEC=[^ ]* STACKS=.*' "$CALLS" | head -1)"
+MODEL_COUNT=4 EPP_COUNT=0 VERB_TIMEOUT=60 run_verb standup
+std_n4="$(grep -o 'benchmark-standup\] SPEC=[^ ]* STACKS=.*' "$CALLS" | head -1)"
+MODEL_COUNT=3 EPP_COUNT=0 VERB_TIMEOUT=60 run_verb standup
+std_n3="$(grep -o 'benchmark-standup\] SPEC=[^ ]* STACKS=.*' "$CALLS" | head -1)"
+if [ "$std_two" != "benchmark-standup] SPEC=guides/two-model-warm-pool STACKS=" ]; then
+    fail "two models on their own two-stack scenario were handed a stack list: '$std_two' ($(printf '%s' "$std_two_out" | tail -4))"
+elif [ "$std_n2" != "benchmark-standup] SPEC=guides/n-model-share STACKS=llama-31-8b,qwen3-8b" ]; then
+    fail "two models on the four-stack n-model-share would stand up more than their two: '$std_n2'"
+elif [ "$std_n3" != "benchmark-standup] SPEC=guides/n-model-share STACKS=llama-31-8b,qwen3-8b,qwen3-30b-a3b" ]; then
+    fail "three models on n-model-share are not handed their three stacks: '$std_n3' ($(printf '%s' "$OUT" | tail -4))"
+elif [ "$std_n4" != "benchmark-standup] SPEC=guides/n-model-share STACKS=" ]; then
+    fail "four models on the four-stack scenario were handed a list to drop from: '$std_n4'"
+else
+    ok "the standup keeps only the run's stacks when the scenario has more: 2 and 3 of 4; all of a scenario that is the run's"
+fi
+
 # A QUOTA BELOW THE CEILINGS IS THE PEAK. The share runbook stands up under a
 # 4-GPU quota with two models of up to 3; preflight asked for 6 placeable and
 # refused a cluster with 5, though the run can never hold more than 4.
@@ -1277,6 +1544,45 @@ if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'no istio.io/gateway-contro
     fail "GATEWAY_REUSE=true on a cluster with no Istio passed preflight; the Gateway would never be Programmed: $OUT"
 else
     ok "GATEWAY_REUSE=true with no Istio on the cluster is refused"
+fi
+
+# A REUSED ISTIO WHOSE GATEWAY PROXY THIS NAMESPACE CANNOT PULL. Measured: the
+# standup downloaded four models and then aborted on a gateway Pod in
+# ErrImagePull, because the control plane named a pull secret the namespace
+# did not have. Preflight reads the injector and refuses that up front.
+case_begin
+GWCLASS=1 NODE_CPU=127 run_verb preflight
+GW_BASE_RC="$RC"
+GWCLASS=1 ISTIO_INJECTOR=login SECRET_PRESENT=0 NODE_CPU=127 run_verb preflight
+if [ "$GW_BASE_RC" -ne 0 ]; then
+    fail "the control fails: a cluster that runs Istio, injector unread, did not pass preflight (rc=$GW_BASE_RC), so a refusal below would prove nothing"
+elif [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q "pull secret(s) 'mesh-pull-secret', which ns-under-test does not have" \
+    || ! printf '%s' "$OUT" | grep -q 'registry.example.com/mesh/proxyv2@sha256:13da'; then
+    fail "a reused Istio whose proxy needs a pull secret the namespace lacks passed preflight (rc=$RC): $(printf '%s' "$OUT" | grep -iE 'gateway|pull' | head -5)"
+else
+    ok "a reused Istio whose gateway proxy needs a missing pull secret is refused, naming the image and the secret"
+fi
+
+case_begin
+GWCLASS=1 ISTIO_INJECTOR=login SECRET_PRESENT=1 NODE_CPU=127 run_verb preflight
+c1="$RC"; o1="$OUT"
+GWCLASS=1 ISTIO_INJECTOR=login SECRET_PRESENT=0 GATEWAY_PULL_CHECK=0 NODE_CPU=127 run_verb preflight
+if printf '%s' "$o1" | grep -q 'does not have' || ! printf '%s' "$o1" | grep -q 'pull secrets: mesh-pull-secret'; then
+    fail "the pull secret present still read as missing (rc=$c1): $(printf '%s' "$o1" | grep -iE 'pull' | head -3)"
+elif printf '%s' "$OUT" | grep -q 'does not have' || ! printf '%s' "$OUT" | grep -q 'GATEWAY_PULL_CHECK=0'; then
+    fail "GATEWAY_PULL_CHECK=0 did not skip the check: $(printf '%s' "$OUT" | grep -iE 'pull' | head -3)"
+elif [ "$c1" -ne 0 ] || [ "$RC" -ne 0 ]; then
+    fail "with the secret present (rc=$c1) or the check off (rc=$RC) preflight still refused: $(printf '%s' "$OUT" | grep WARN | head -3)"
+else
+    ok "the pull secret present passes, and GATEWAY_PULL_CHECK=0 skips the check"
+fi
+
+case_begin
+GWCLASS=1 NODE_CPU=127 run_verb preflight
+if [ "$RC" -ne 0 ] || ! printf '%s' "$OUT" | grep -q 'its pull secrets are unchecked'; then
+    fail "an unreadable injector was not reported as unchecked, or refused (rc=$RC): $(printf '%s' "$OUT" | grep -iE 'pull|injector' | head -3)"
+else
+    ok "an injector it cannot read is reported as unchecked, not refused"
 fi
 
 case_begin
@@ -1980,6 +2286,170 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# THREE AND FOUR MODELS (MODEL_COUNT=3|4). Each mistake here drives fewer models
+# than the run reports, or reports fewer than it drove: a load Job with two
+# containers for four models, a ceiling or a GPU peak that counts two, a
+# results wait that stops at two markers. Sourced again in a subshell with
+# MODEL_COUNT set, because the model list is fixed when the script is read.
+# ---------------------------------------------------------------------------
+# nm_source <MODEL_COUNT> [NAME=value...]: the driver re-read with that many
+# models, every default it derives from them (the scenario, the stacks)
+# recomputed, and the given settings in force when it is read.
+nm_source() {
+    unset BENCH_SPEC STACK_C STACK_D MODEL_C MODEL_D MAX_REPLICAS_C MAX_REPLICAS_D GPUS_PER_REPLICA_C GPUS_PER_REPLICA_D HIGH_RPS HIGH_RPS_B HIGH_RPS_C HIGH_RPS_D LOW_RPS_C LOW_RPS_D
+    MODEL_COUNT="$1"
+    shift
+    local kv
+    for kv in "$@"; do printf -v "${kv%%=*}" '%s' "${kv#*=}"; done
+    # Sourced with no arguments: the script's verb dispatch reads $1, which
+    # inside this function would be one of the settings above.
+    set --
+    # shellcheck disable=SC1090
+    . "$SCRIPT" >/dev/null 2>&1
+    NS=ns-under-test
+}
+
+# Every burst of a three- or four-model run needs THREE replicas, so the quota
+# of 6 binds (3 + 3 + 1 + 1 = 8). Two models keep their own 9 and 8, and a
+# rate the caller sets always wins.
+case_begin
+r4="$( (nm_source 4; printf '%s ' "$HIGH_RPS" "$HIGH_RPS_B" "$HIGH_RPS_C" "$HIGH_RPS_D" "$LOW_RPS" "$LOW_RPS_C" "$LOW_RPS_D") 2>&1)"
+r2="$( (nm_source 2; printf '%s ' "$HIGH_RPS" "$HIGH_RPS_B") 2>&1)"
+rset="$( (nm_source 4 HIGH_RPS=12 HIGH_RPS_B=11; printf '%s ' "$HIGH_RPS" "$HIGH_RPS_B") 2>&1)"
+if [ "$r4" != "19 16.5 8 5.4 3 1.5 0.5 " ]; then
+    fail "four-model rates are '$r4', not bursts 19 16.5 8 5.4 (2.2 x each one-replica ceiling) over lows 3 1.5 0.5"
+elif [ "$r2" != "9 8 " ]; then
+    fail "a two-model run lost its own burst rates: '$r2', not 9 8"
+elif [ "$rset" != "12 11 " ]; then
+    fail "a burst rate set by the caller was overridden by the four-model default: '$rset'"
+else
+    ok "four models burst at 19, 16.5, 8 and 5.4; two keep 9 and 8; a set rate wins"
+fi
+
+case_begin
+got="$( (nm_source 4; URL_C=http://10.0.0.1:80/qwen3-30b-a3b URL_D=http://10.0.0.1:80/qwen3-32b \
+         LOAD_IMAGE=ghcr.io/llm-d/llm-d-benchmark:vX; render_load_job wva-two-model-load-share share 1770000000) 2>&1)"
+names="$(printf '%s\n' "$got" | grep -o '^        - name: load-[a-z]' | sed 's/.*load-//' | paste -sd, -)"
+if [ "$names" != "a,b,c,d" ]; then
+    fail "a four-model load Job renders containers '$names', not a,b,c,d: the models without one are never driven"
+elif [ "$(printf '%s\n' "$got" | grep -c 'value: "1770000000"')" -ne 4 ]; then
+    fail "the four containers do not share one start barrier, so the rotation is offset by however far apart they started"
+elif ! printf '%s\n' "$got" | grep -A1 'name: BASE_URL' | grep -q 'http://10.0.0.1:80/qwen3-32b'; then
+    fail "model D's container is not pointed at its own stack: $(printf '%s\n' "$got" | grep -A1 'name: BASE_URL')"
+elif command -v yq >/dev/null 2>&1 && \
+     [ "$(printf '%s\n' "$got" | yq -r '[.spec.template.spec.containers[].env[] | select(.name == "ROLE") | .value] | join(",")' 2>&1)" != "a,b,c,d" ]; then
+    fail "the four-model Job does not parse to four containers with roles a..d"
+else
+    ok "four models: one Pod, four containers a..d, one barrier, each on its own stack"
+fi
+
+case_begin
+got2="$( (nm_source 2; printf '%s|%s|%s' "$ROLES" "$(extra_role_flags model endpoint high-rps low-rps)" "${#MODEL_FLAGS[@]}") 2>&1)"
+got4="$( (nm_source 4 MAX_REPLICAS_D=5; printf '%s|%s|%s|%s|%s|%s' "$ROLES" "$(peak_gpus)" "$(max_ceiling)" "$(peak_pods 8)" \
+          "$(extra_role_flags model | paste -sd' ' -)" "${MODEL_FLAGS[*]}") 2>&1)"
+if [ "$got2" != "a b||0" ]; then
+    fail "two models are no longer exactly two: roles|extra flags|report flags = '$got2'"
+elif [ "$got4" != "a b c d|14|5|8|--model-c Qwen/Qwen3-30B-A3B-FP8 --model-d Qwen/Qwen3-32B|--model-c Qwen/Qwen3-30B-A3B-FP8 --model-d Qwen/Qwen3-32B" ]; then
+    fail "four models: roles|peak GPUs|largest ceiling|pods in 8 GPUs|profile flags|report flags = '$got4', want 'a b c d|14|5|8|...' (3+3+3+5 GPUs at 1 each, ceiling 5, 8 pods)"
+else
+    ok "two models add no flag anywhere; four peak at the sum of their ceilings and pass every model to the reports"
+fi
+
+case_begin
+export MODEL_COUNT=5
+run_verb preflight
+unset MODEL_COUNT
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'MODEL_COUNT=5: 2, 3 or 4 models'; then
+    fail "MODEL_COUNT=5 was not refused (rc=$RC): $(printf '%s' "$OUT" | tail -3)"
+elif [ -s "$CALLS" ]; then
+    fail "MODEL_COUNT=5 was refused only after calling the cluster: $(head -3 "$CALLS")"
+else
+    ok "a model count other than 2, 3 or 4 is refused before anything is asked of the cluster"
+fi
+
+# THE QUOTA'S LOWER BOUND, one peak plus every other model's floor: 3 + 3 x 1 = 6
+# for four 1-GPU models of up to 3, and 3 + 1 = 4 for two. One below it is refused.
+case_begin
+MODEL_COUNT=4 WVA_QUOTAS='H200=5' NODE_CPU=127 run_verb preflight
+q5_rc="$RC"; q5="$OUT"
+MODEL_COUNT=4 WVA_QUOTAS='H200=6' NODE_CPU=127 run_verb preflight
+q6="$OUT"
+WVA_QUOTAS='H200=3' NODE_CPU=127 run_verb preflight
+q3_rc="$RC"; q3="$OUT"
+WVA_QUOTAS='H200=4' NODE_CPU=127 run_verb preflight
+if [ "$q5_rc" -eq 0 ] || ! printf '%s' "$q5" | grep -q "beside 3 model(s) at MIN_REPLICAS=1 needs 6"; then
+    fail "four models under a quota of 5 were not refused for the lower bound of 6 (rc=$q5_rc): $(printf '%s' "$q5" | grep -iE 'quota' | head -3)"
+elif ! printf '%s' "$q6" | grep -q "the quota (6) covers one model's peak plus the others' floors (6)"; then
+    fail "four models under a quota of 6 did not pass the lower bound: $(printf '%s' "$q6" | grep -iE 'quota' | head -3)"
+elif [ "$q3_rc" -eq 0 ] || ! printf '%s' "$q3" | grep -q "beside 1 model(s) at MIN_REPLICAS=1 needs 4"; then
+    fail "two models under a quota of 3 were not refused for the lower bound of 4 (rc=$q3_rc): $(printf '%s' "$q3" | grep -iE 'quota' | head -3)"
+elif ! printf '%s' "$OUT" | grep -q "the quota (4) covers one model's peak plus the others' floors (4)"; then
+    fail "two models under a quota of 4 did not pass the lower bound: $(printf '%s' "$OUT" | grep -iE 'quota' | head -3)"
+else
+    ok "a quota below one peak plus the other floors is refused: 5 for four models (needs 6), 3 for two (needs 4)"
+fi
+
+case_begin
+if command -v yq >/dev/null 2>&1; then
+    p4="$( (nm_source 4; scenario_size_problems) 2>&1)"
+    pdup="$( (nm_source 3; MODEL_C="$MODEL_A"; scenario_size_problems) 2>&1)"
+    pwrong="$( (BENCH_SPEC=guides/two-model-warm-pool; MODEL_COUNT=3; . "$SCRIPT" >/dev/null 2>&1; scenario_size_problems) 2>&1)"
+    if [ -n "$p4" ]; then
+        fail "the four-model defaults disagree with n-model-share: $p4"
+    elif ! printf '%s' "$pdup" | grep -q 'share model id'; then
+        fail "model C copied model A's id and nothing said so: '$pdup'"
+    elif ! printf '%s' "$pwrong" | grep -q 'STACK_C=qwen3-30b-a3b is not a stack of guides/two-model-warm-pool'; then
+        fail "three models against the two-stack scenario were not refused: '$pwrong'"
+    else
+        ok "four models match n-model-share; a copied model id and a two-stack scenario are refused"
+    fi
+else
+    fail "yq is required to read the scenario sizes"
+fi
+
+case_begin
+# The stack names are the route's path prefixes AND the driver's defaults --
+# for every model of n-model-share, as for the two-model scenario.
+if ! grep -q 'STACK_C="${STACK_C:-qwen3-30b-a3b}"' "$SCRIPT" || ! grep -q 'STACK_D="${STACK_D:-qwen3-32b}"' "$SCRIPT"; then
+    fail "the driver's STACK_C/STACK_D defaults changed; they must match n-model-share's stack names"
+elif [ "$(grep -cE '^  - name: "(llama-31-8b|qwen3-8b|qwen3-30b-a3b|qwen3-32b)"' "$SPEC_DIR/n-model-share.yaml")" -ne 4 ]; then
+    fail "n-model-share does not carry the four stacks the driver drives"
+elif ! grep -q 'scenarios/guides/n-model-share.yaml' "$SPEC_DIR/n-model-share.yaml.j2"; then
+    fail "n-model-share's specification points at another scenario: $(grep -A1 scenario_file "$SPEC_DIR/n-model-share.yaml.j2")"
+elif ! grep -q 'BENCHMARK_STACKS="$keep_stacks"' "$SCRIPT"; then
+    fail "the standup no longer hands the stacks it runs to the scenario copy, so a three-model run stands up four"
+else
+    ok "n-model-share's four stack names are the driver's defaults, and its specification is its own"
+fi
+
+case_begin
+printf '{"arm":"share","max_replicas_a":3,"max_replicas_b":3,"gpus_per_replica_a":1,"gpus_per_replica_b":1}\n' > "$WORK/b4.json"
+cp "$WORK/b4.json" "$WORK/b2.json"
+( nm_source 4; decode_deploy_for() { printf 'short-%s-decode' "$1"; }; add_budget_fields "$WORK/b4.json" ) >/dev/null 2>&1
+( nm_source 2; decode_deploy_for() { printf 'short-%s-decode' "$1"; }; add_budget_fields "$WORK/b2.json" ) >/dev/null 2>&1
+b4="$(jq -r '[.max_replicas_c, .gpus_per_replica_d, (.model_deploys | keys | join("")), .model_deploys.d, .arm] | map(tostring) | join("|")' "$WORK/b4.json" 2>&1)"
+b2="$(jq -r '[has("max_replicas_c"), (.model_deploys | keys | join("")), .model_deploys.b, .max_replicas_b] | map(tostring) | join("|")' "$WORK/b2.json" 2>&1)"
+if [ "$b4" != "3|1|abcd|short-qwen3-32b|share" ]; then
+    fail "a four-model budget does not record models C and D and every Deployment: '$b4'"
+elif [ "$b2" != "false|ab|short-qwen3-8b|3" ]; then
+    fail "a two-model budget changed beyond the Deployment map: '$b2'"
+else
+    ok "budget.json records models C and D and which Deployments are whose; two models keep every field"
+fi
+
+case_begin
+w3="$( (nm_source 4; printf 'RESULTS-WRITTEN-a\nRESULTS-WRITTEN-b\nRESULTS-WRITTEN-c\n' | all_results_written && echo done || echo waiting) 2>&1)"
+w4="$( (nm_source 4; printf 'RESULTS-WRITTEN-a\nRESULTS-WRITTEN-b\nRESULTS-WRITTEN-c\nRESULTS-WRITTEN-d\n' | all_results_written && echo done || echo waiting) 2>&1)"
+w2="$( (nm_source 2; printf 'RESULTS-WRITTEN-b\nRESULTS-WRITTEN-a\n' | all_results_written && echo done || echo waiting) 2>&1)"
+if [ "$w3" != waiting ]; then
+    fail "four loaders counted as done with model D's results unwritten -- the arm would be collected without them"
+elif [ "$w4" != done ] || [ "$w2" != done ]; then
+    fail "every model's marker present still reads as waiting (four: $w4, two: $w2)"
+else
+    ok "the results wait needs every model's marker: three of four is still waiting"
+fi
+
+# ---------------------------------------------------------------------------
 # The schedule and the report, executed.
 # ---------------------------------------------------------------------------
 case_begin
@@ -1990,7 +2460,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=120
+CASES_EXPECTED=147
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

@@ -47,6 +47,7 @@ import json
 import os
 import sys
 
+ROLES = ("a", "b", "c", "d")
 _PER_REQUEST = "per_request_lifecycle_metrics.json"
 _SUMMARY = "summary_lifecycle_metrics.json"
 
@@ -219,13 +220,33 @@ def planned_arrivals(schedule, key):
     return sum(int(ph[key] * (ph["end"] - ph["start"]) + 1e-9) for ph in schedule)
 
 
+def run_roles(args, schedule):
+    """The roles this arm ran, a and b always, c and d when the run had them.
+
+    Refused when the schedule and the results disagree: a schedule with a
+    rate_c and no results for c is a run whose third model would silently drop
+    out of every table, and results for c with no rate_c are a run of three
+    models reported as two.
+    """
+    roles = [r for r in ROLES if r in ("a", "b") or getattr(args, "results_" + r, None)]
+    scheduled = [r for r in ROLES if "rate_" + r in schedule[0]]
+    if scheduled != roles:
+        raise ValueError(
+            "the schedule drives models %s but results were given for %s; every model "
+            "the schedule drives needs its own results directory, or it drops out of "
+            "the report" % (", ".join(scheduled), ", ".join(roles)))
+    return roles
+
+
 def convert(args):
     schedule = load_json(args.schedule)
     if not schedule:
         raise ValueError("the schedule is empty; there are no stages to report against")
+    roles = run_roles(args, schedule)
 
     sides = {}
-    for role, root in (("a", args.results_a), ("b", args.results_b)):
+    for role in roles:
+        root = getattr(args, "results_" + role)
         # Optional: the profile turns per-request reporting off, because the
         # file is enormous and carries nothing the report needs.
         pr_path = find_one(root, _PER_REQUEST)
@@ -251,7 +272,7 @@ def convert(args):
     origin = min(starts) if starts else 0.0
 
     rows = []
-    for role in ("a", "b"):
+    for role in roles:
         rows.extend(rows_from(sides[role]["per_request"], role, origin))
     rows.sort(key=lambda r: r["t_rel"])
 
@@ -259,14 +280,14 @@ def convert(args):
     # per-request reporting off there are no rows, and a zero there would read
     # as a cluster that answered nothing.
     issued = sum(w["n"] + w["failed"]
-                 for role in ("a", "b") for w in sides[role]["stages"])
-    planned = planned_arrivals(schedule, "rate_a") + planned_arrivals(schedule, "rate_b")
+                 for role in roles for w in sides[role]["stages"])
+    planned = sum(planned_arrivals(schedule, "rate_" + role) for role in roles)
 
     # The WORST of everything the generator reported about its own lateness --
     # whole run and every stage. A driver that kept up on average while falling
     # behind through one burst was late exactly where it mattered.
     delays = []
-    for role in ("a", "b"):
+    for role in roles:
         for w in [sides[role]["overall"]] + sides[role]["stages"]:
             if isinstance(w["schedule_delay_p95"], (int, float)):
                 delays.append(w["schedule_delay_p95"])
@@ -301,16 +322,20 @@ def convert(args):
         # guard counts, and what it prints as the failure breakdown.
         "failures_by_label": {
             role: sides[role]["overall"].get("by_label") or {}
-            for role in ("a", "b")},
+            for role in roles},
         # What the report prints: the harness's own distributions, per stage
         # and over the whole run.
         "windows": {role: {"overall": sides[role]["overall"],
                            "stages": sides[role]["stages"]}
-                    for role in ("a", "b")},
+                    for role in roles},
         "sources": {role: {"per_request": sides[role]["per_request_path"],
                            "summary": sides[role]["summary_path"]}
-                    for role in ("a", "b")},
+                    for role in roles},
     }
+    # A third and fourth model, named only when the run had them, so a
+    # two-model meta is what it always was.
+    for role in roles[2:]:
+        meta["model_" + role] = getattr(args, "model_" + role, None) or role.upper()
     return rows, meta
 
 
@@ -319,6 +344,10 @@ def main(argv):
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--results-a", required=True, help="model A's inference-perf output dir")
     p.add_argument("--results-b", required=True, help="model B's inference-perf output dir")
+    p.add_argument("--results-c", help="model C's output dir, in a run of three or four models")
+    p.add_argument("--results-d", help="model D's output dir, in a run of four models")
+    p.add_argument("--model-c", default="C")
+    p.add_argument("--model-d", default="D")
     p.add_argument("--schedule", required=True, help="the stage table, as JSON")
     p.add_argument("--out", required=True, help="requests.jsonl to write")
     p.add_argument("--overlap", type=int, default=0,

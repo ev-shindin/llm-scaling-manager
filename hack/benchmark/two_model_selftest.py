@@ -1500,6 +1500,467 @@ if (_pa, _pb) != (44, 720):
 else:
     ok("planned arrivals are 44 and 720, whole requests per phase")
 
+# ---------------------------------------------------------------------------
+# THREE AND FOUR MODELS (MODEL_COUNT=3|4): the same arms, bursts in rotation
+#
+# Each claim below fails as silently as the two-model ones: a rotation whose
+# shift is wrong still renders and still reports -- two models bursting
+# together, read as the optimizer failing -- and a conversion or report that
+# keeps two of four models prints a complete two-model table of a four-model
+# run, with the other models' bursts and GPUs simply gone.
+# ---------------------------------------------------------------------------
+import two_model_share_repeats as repeats  # noqa: E402
+
+
+def rotation_problems(stages, models, phase, overlap):
+    """Why `stages` is not a rotation of `models` bursts, or [].
+
+    One model above the low rate at a time; each model once per cycle, in the
+    order b, c, d, a; and each burst starting one phase plus one band after the
+    previous one -- the period / N shift.
+    """
+    roles = profile.roles_for(models)
+    out = []
+    lows = [min(st[2 + i] for st in stages) for i in range(len(roles))]
+    starts = []      # (start, role) of each burst
+    prev = None      # the role bursting in the previous stage, or None
+    for st in stages:
+        high = [r for i, r in enumerate(roles) if st[2 + i] > lows[i]]
+        if len(high) > 1:
+            out.append("%s burst together at %ds" % ("+".join(high), st[0]))
+        now = high[0] if high else None
+        # A rise window and the rest of the burst are two stages of ONE burst.
+        if now is not None and now != prev:
+            starts.append((st[0], now))
+        prev = now
+    order = [r for _, r in starts]
+    # Written out here, not read from profile.burst_order: a check that asks
+    # the code under test what the order should be passes whatever it says.
+    want = list(roles[1:] + roles[:1]) * (len(order) // len(roles))
+    if order != want:
+        out.append("bursts ran in the order %s, not %s" % (order, want))
+    gaps = set(b[0] - a[0] for a, b in zip(starts, starts[1:]))
+    if gaps and gaps != {phase + overlap}:
+        out.append("consecutive bursts start %s apart, not %d (period / N)"
+                   % (sorted(gaps), phase + overlap))
+    return out
+
+
+for _n in (3, 4):
+    case("%d models: one burst at a time, rotating b..a, shifted by period/%d" % (_n, _n))
+    _s = profile.stage_map(profile.build_schedule(480, 2, 3, 9, 120, overlap=90, high_rps_b=8,
+                                                  models=_n), 240)
+    _bad = rotation_problems(_s, _n, 480, 90)
+    if _bad:
+        fail("the %d-model schedule is not a rotation: %s" % (_n, "; ".join(_bad)))
+    elif len(_s[0]) != 2 + _n:
+        fail("a %d-model stage carries %d rates" % (_n, len(_s[0]) - 2))
+    else:
+        ok("%d models, %d bursts, each %ds after the last" % (_n, 2 * _n, 480 + 90))
+
+case("negative control: the rotation check catches a wrong phase shift")
+# Two broken schedules the check must refuse: model c bursting WITH b (a shift
+# of zero), and the bursts in the wrong order (a first). If either passes, the
+# cases above prove nothing.
+_good = profile.build_schedule(480, 2, 3, 9, 120, overlap=90, models=3)
+_together = [tuple(p[:4]) + ((9,) if p[3] > 3 else (p[4],)) for p in _good]
+_saved_order = profile.burst_order
+profile.burst_order = lambda roles: tuple(roles)
+try:
+    _wrong_order = profile.build_schedule(480, 2, 3, 9, 120, overlap=90, models=3)
+finally:
+    profile.burst_order = _saved_order
+_p1 = rotation_problems(profile.stage_map(_together, 240), 3, 480, 90)
+_p2 = rotation_problems(profile.stage_map(_wrong_order, 240), 3, 480, 90)
+if not any("together" in x for x in _p1):
+    fail("model c bursting with b was not caught: %s" % _p1)
+elif not any("order" in x for x in _p2):
+    fail("bursts in the order a, b, c were not caught: %s" % _p2)
+else:
+    ok("a zero shift and a wrong order are both refused")
+
+case("two models are the anti-phase schedule exactly, with or without --models 2")
+if profile.build_schedule(480, 2, 3, 9, 120, 90, 8) != \
+        profile.build_schedule(480, 2, 3, 9, 120, 90, 8, models=2):
+    fail("models=2 changed the two-model schedule")
+elif [p[2:] for p in profile.build_schedule(480, 1, 3, 9, 120, 90, 8)] != [(3, 3), (3, 8), (3, 3), (9, 3)]:
+    fail("the two-model ladder is no longer lead-in, B, band, A: %s"
+         % profile.build_schedule(480, 1, 3, 9, 120, 90, 8))
+else:
+    ok("two models: lead-in, B bursts, band, A bursts -- as before")
+
+case("four models: a profile per role, each on its own column, seed and rate")
+_prof4 = ["--models", "4", "--model-a=ma", "--model-b=mb", "--model-c=mc", "--model-d=md",
+          "--endpoint-a=http://g/a", "--endpoint-b=http://g/b", "--endpoint-c=http://g/c",
+          "--endpoint-d=http://g/d", "--high-rps-b", "8", "--high-rps-c", "7", "--high-rps-d", "6",
+          "--overlap", "90"]
+_docs = {}
+_buf = io.StringIO()
+_keep = sys.stdout
+sys.stdout = _buf
+try:
+    _rc_s = profile.main(["--emit", "schedule"] + _prof4)
+    _sched4 = json.loads(_buf.getvalue())
+    for _r in "abcd":
+        _buf.seek(0); _buf.truncate()
+        if profile.main(["--emit", "profile", "--role", _r] + _prof4) == 0:
+            _docs[_r] = yaml.safe_load(_buf.getvalue())
+    _buf.seek(0); _buf.truncate()
+    _rc_bad = profile.main(["--emit", "profile", "--role", "c", "--model-c=mc"])
+finally:
+    sys.stdout = _keep
+if _rc_s != 0 or sorted(_docs) != list("abcd"):
+    fail("not every one of four profiles rendered: %s" % sorted(_docs))
+elif any([st["rate"] for st in _docs[_r]["load"]["stages"]] != [row["rate_" + _r] for row in _sched4]
+         for _r in "abcd"):
+    fail("a profile's ladder is not its own column of the schedule")
+elif len({_docs[_r]["load"]["base_seed"] for _r in "abcd"}) != 4:
+    fail("two of the four loaders share a seed, so they send the same prompts at once")
+elif [max(row["rate_" + _r] for row in _sched4) for _r in "abcd"] != [9, 8, 7, 6]:
+    fail("a model's burst is not its own rate: %s" % [max(row["rate_" + _r] for row in _sched4) for _r in "abcd"])
+elif _docs["c"]["server"]["model_name"] != "mc" or _docs["d"]["server"]["base_url"] != "http://g/d":
+    fail("models C and D were not given their own id and endpoint")
+elif _rc_bad != 2:
+    fail("a profile for role c of a TWO-model run rendered (rc=%r)" % _rc_bad)
+else:
+    ok("four ladders, one per column, four seeds, four rates; role c refused in a two-model run")
+
+case("four models: C and D keep their own low rate between bursts")
+_lo4 = profile.build_schedule(480, 1, 3, 9, 120, 90, 8, models=4,
+                              high_rps_by_role={"c": 5, "d": 2},
+                              low_rps_by_role={"c": 1.5, "d": 0.5})
+_lows = [min(p[2 + i] for p in _lo4) for i in range(4)]
+_highs = [max(p[2 + i] for p in _lo4) for i in range(4)]
+_buf = io.StringIO()
+_keep_err = sys.stderr
+sys.stderr = _buf
+try:
+    # Model C's burst no higher than its own low: a flat rate, refused.
+    _rc_flat = profile.main(["--emit", "schedule", "--models", "3", "--low-rps", "1",
+                             "--high-rps-c", "2", "--low-rps-c", "2"])
+    _rc_zero = profile.main(["--emit", "schedule", "--models", "4", "--low-rps-d", "0"])
+finally:
+    sys.stderr = _keep_err
+if _lows != [3, 3, 1.5, 0.5] or _highs != [9, 8, 5, 2]:
+    fail("per-model rates not kept: lows %s (want [3, 3, 1.5, 0.5]), highs %s (want [9, 8, 5, 2])"
+         % (_lows, _highs))
+elif _lo4[0][2:] != (3, 3, 1.5, 0.5):
+    fail("the lead-in is not every model at its own low rate: %s" % (_lo4[0][2:],))
+elif _rc_flat != 2 or _rc_zero != 2:
+    fail("a burst at its own low rate (rc=%r) or a zero low rate (rc=%r) was not refused"
+         % (_rc_flat, _rc_zero))
+elif profile.build_schedule(480, 1, 3, 9, 120, 90, 8) != \
+        profile.build_schedule(480, 1, 3, 9, 120, 90, 8, low_rps_by_role={"c": 1, "d": 1}):
+    fail("a low rate for C or D changed the two-model schedule")
+else:
+    ok("C and D idle at 1.5 and 0.5 and burst at 5 and 2; a flat or zero rate is refused; two models untouched")
+
+
+def nm_schedule(models):
+    return profile.schedule_json(profile.stage_map(
+        profile.build_schedule(480, 1, 3, 9, 120, overlap=90, models=models), 240))
+
+
+def nm_meta(models, drop=()):
+    """A converted N-model arm's meta: a window per stage per model, each the
+    stage's own length, every arrival issued."""
+    sched = nm_schedule(models)
+    roles = profile.roles_for(models)
+    wins = {}
+    for r in roles:
+        if r in drop:
+            continue
+        stages = []
+        for i, st in enumerate(sched):
+            w = harness.window_from(stage_doc(50 + i, p50=0.05 + 0.01 * i, p95=0.09 + 0.01 * i))
+            w["elapsed"] = st["end"] - st["start"]
+            stages.append(w)
+        wins[r] = {"overall": harness.window_from(stage_doc(500)), "stages": stages}
+    meta = {"schedule": sched, "t0": 1000, "input_tokens": 1000, "output_tokens": 500,
+            "model_a": "ma", "model_b": "mb", "seed": 1729, "data": "synthetic",
+            "planned": 10, "issued": 10, "queue_delay_p95": 0.01, "overlap_seconds": 90,
+            "failures_by_label": {}, "windows": wins}
+    for r in roles[2:]:
+        meta["model_" + r] = "m" + r
+    return meta
+
+
+def nm_arm(root, name, models, drop=(), log_lines=()):
+    """One arm directory of an N-model run: meta, budget with model_deploys,
+    a GPU sampler file in which model i holds i+1 GPUs throughout, the
+    per-engine work, and optionally a controller log."""
+    d = os.path.join(root, name)
+    os.makedirs(d)
+    roles = profile.roles_for(models)
+    meta = nm_meta(models, drop)
+    with open(os.path.join(d, "meta.json"), "w") as fh:
+        json.dump(meta, fh)
+    open(os.path.join(d, "requests.jsonl"), "w").close()
+    bud = {"arm": name, "max_replicas_per_model": 3, "min_replicas_per_model": 1,
+           "pool_replicas": 0, "gpus_per_replica": 1,
+           "model_deploys": dict((r, "stack-" + r) for r in roles)}
+    for r in roles:
+        bud["max_replicas_" + r] = 3
+        bud["gpus_per_replica_" + r] = 1
+    with open(os.path.join(d, "budget.json"), "w") as fh:
+        json.dump(bud, fh)
+    total = meta["schedule"][-1]["end"]
+    with open(os.path.join(d, "gpus.jsonl"), "w") as fh:
+        for k in range(0, total // 10 + 1):
+            pods = [{"name": "stack-%s-decode-5f6d7c8b9-x%d" % (r, j), "gpus": 1, "node": "n1"}
+                    for i, r in enumerate(roles) for j in range(i + 1)]
+            fh.write(json.dumps({"ts": 1000 + 10 * k, "pods": pods}) + chr(10))
+    with open(os.path.join(d, "podwork.before"), "w") as fh:
+        for p in ("pod-1", "pod-2"):
+            fh.write("%s 0\n" % p)
+    with open(os.path.join(d, "podwork.after"), "w") as fh:
+        fh.write("pod-1 5000\npod-2 4800\n")
+    if log_lines:
+        with open(os.path.join(d, "controller.log"), "w") as fh:
+            for line in log_lines:
+                fh.write(line + chr(10))
+    return d, total
+
+
+def run_quiet(fn, argv):
+    """fn(argv) with stdout and stderr captured: (rc, out, err)."""
+    keep_o, keep_e = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+    saved = report.BASELINE
+    try:
+        rc = fn(argv)
+        return rc, sys.stdout.getvalue(), sys.stderr.getvalue()
+    finally:
+        out_o, out_e = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = keep_o, keep_e
+        report.BASELINE = saved
+        del out_o, out_e
+
+
+case("the conversion keeps every model of a four-model run, and refuses one it would drop")
+_sf = os.path.join(tempfile.mkdtemp(), "schedule.json")
+_s4 = nm_schedule(4)
+with open(_sf, "w") as fh:
+    json.dump(_s4, fh)
+_dirs = dict((r, harness_dir([], [stage_doc(20)] * len(_s4))) for r in "abcd")
+_cargs = convert_args(_dirs["a"], _dirs["b"])
+_cargs.schedule = _sf
+_cargs.results_c, _cargs.results_d = _dirs["c"], _dirs["d"]
+_cargs.model_c, _cargs.model_d = "mc", "md"
+_, _m4 = harness.convert(_cargs)
+_drop = convert_args(_dirs["a"], _dirs["b"])
+_drop.schedule = _sf
+_drop.results_c = _dirs["c"]
+try:
+    harness.convert(_drop)
+    _dropped = None
+except ValueError as e:
+    _dropped = str(e)
+if sorted(_m4["windows"]) != list("abcd") or _m4.get("model_d") != "md":
+    fail("the four-model conversion kept %s" % sorted(_m4["windows"]))
+elif _m4["planned"] != sum(harness.planned_arrivals(_s4, "rate_" + r) for r in "abcd"):
+    fail("planned arrivals do not count all four models: %s" % _m4["planned"])
+elif not _dropped or "drops out" not in _dropped:
+    fail("a four-model schedule converted with model D's results missing (%r)" % _dropped)
+else:
+    ok("four models converted; a missing fourth is refused, not dropped")
+
+case("two-model conversion is unchanged: no model_c, no new keys")
+if any(k in conv_meta for k in ("model_c", "model_d")) or sorted(conv_meta["windows"]) != ["a", "b"]:
+    fail("a two-model meta grew keys: %s" % sorted(conv_meta))
+else:
+    ok("a two-model meta has exactly the two models")
+
+for _n in (3, 4):
+    case("%d models: the share report has every model's TTFT, rises and GPU-seconds" % _n)
+    _root = tempfile.mkdtemp()
+    _today, _tot = nm_arm(_root, "today", _n)
+    _share, _ = nm_arm(_root, "share", _n)
+    _labels = ["--model-a", "ma", "--model-b", "mb", "--model-c", "mc", "--model-d", "md"]
+    _rc, _out, _err = run_quiet(report.main, ["--nopool", _today, "--baseline-name", "today",
+                                               "--arm", "share=" + _share] + _labels)
+    _roles = profile.roles_for(_n)
+    _gpu_row = [ln for ln in _out.splitlines() if ln.startswith("| today | ")
+                and ln.count("|") == len(_roles) + 5]
+    _want_gpu = "| today | %s | 0 | 0 | %d |" % (
+        " | ".join("%d" % ((i + 1) * _tot) for i in range(_n)), sum(range(1, _n + 1)) * _tot)
+    if _rc != 0:
+        fail("the %d-model report refused: %s" % (_n, _err.strip()))
+    elif any("| m%s | today |" % r not in _out for r in _roles):
+        fail("the whole-run TTFT table is missing a model: %s"
+             % [r for r in _roles if "| m%s | today |" % r not in _out])
+    elif any(len(report.rise_stages(nm_schedule(_n), r)) != 1 for r in _roles):
+        fail("a model has no rise in a one-cycle %d-model run" % _n)
+    elif any("| m%s | %ds | share |" % (r, nm_schedule(_n)[report.rise_stages(nm_schedule(_n), r)[0]]["start"])
+             not in _out for r in _roles):
+        fail("a model's rise row is missing from the per-rise table")
+    elif _want_gpu not in _out:
+        fail("GPU-seconds by model is not %s; got %s" % (_want_gpu, _gpu_row))
+    else:
+        ok("%d models in every TTFT table, one rise each, GPU-seconds %s" % (_n, _want_gpu))
+
+case("negative control: a report that would drop model C is refused")
+_root = tempfile.mkdtemp()
+_today, _ = nm_arm(_root, "today", 3)
+_share, _ = nm_arm(_root, "share", 3, drop=("c",))
+_rc, _out, _err = run_quiet(report.main, ["--nopool", _today, "--baseline-name", "today",
+                                           "--arm", "share=" + _share])
+if _rc == 0:
+    fail("the share arm's results lost model C and the report compared it anyway")
+elif "no windows for C" not in _err:
+    fail("refused, but not for the missing model: %s" % _err.strip())
+else:
+    ok("an arm whose results lost a scheduled model is refused, naming it")
+
+case("negative control: a third model bursting with another is an overlap")
+_m = nm_meta(3)
+for _i, _st in enumerate(_m["schedule"]):
+    if _st["rate_b"] > 3:
+        _st["rate_c"] = 9   # c bursts with b
+if not report.burst_overlap({"meta": _m}):
+    fail("model C bursting together with B read as no overlap")
+elif report.burst_overlap({"meta": nm_meta(3)}) != 0:
+    fail("the clean three-model rotation reads as overlapping")
+else:
+    ok("any two of three models bursting at once is counted; the rotation has none")
+
+
+def nm_rewrite(arm_dir, meta_fn=None, desired_fn=None, outside=None):
+    """Edit an nm_arm directory in place: meta_fn(meta) changes the meta,
+    desired_fn(k) gives the k-th GPU sample its `desired` map, and `outside`
+    ((ts, desired), ...) adds samples at those timestamps -- before t0 or past
+    the schedule's end -- holding the last sample's Pods."""
+    mp = os.path.join(arm_dir, "meta.json")
+    if meta_fn:
+        with open(mp) as fh:
+            m = json.load(fh)
+        meta_fn(m)
+        with open(mp, "w") as fh:
+            json.dump(m, fh)
+    if desired_fn:
+        gp = os.path.join(arm_dir, "gpus.jsonl")
+        with open(gp) as fh:
+            rows = [json.loads(ln) for ln in fh if ln.strip()]
+        for k, row in enumerate(rows):
+            row["desired"] = desired_fn(k)
+        for ts, want in outside or ():
+            rows.append({"ts": ts, "pods": rows[-1]["pods"], "desired": want})
+        rows.sort(key=lambda r: r["ts"])
+        with open(gp, "w") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + chr(10))
+
+
+case("four models: an overlap names the two models and the one whose ladder lagged")
+# The four-model baseline that wrote this case: model C, at one replica against
+# a burst above its capacity, drained 101s and 88s past its two burst stages,
+# so its burst ran on into model D's. The refusal said "BOTH models" and
+# "raise OVERLAP_SECONDS above the 201s the two ladders drifted apart" -- the
+# wrong pair count, and the wrong fix: the band was not too short, model C was
+# queueing.
+_root = tempfile.mkdtemp()
+_today, _ = nm_arm(_root, "today", 4)
+_share, _ = nm_arm(_root, "share", 4)
+
+
+def _lag_c(m):
+    for i, st in enumerate(m["schedule"]):
+        if st["rate_c"] > 3:
+            m["windows"]["c"]["stages"][i]["elapsed"] += 100.0
+
+
+nm_rewrite(_share, meta_fn=_lag_c)
+_rc, _out, _err = run_quiet(report.main, ["--nopool", _today, "--baseline-name", "today",
+                                           "--arm", "share=" + _share])
+if _rc == 0:
+    fail("model C's burst ran 200s into model D's and the report compared the arms")
+elif "C with D" not in _err:
+    fail("refused, but without naming the two models that overlapped: %s" % _err.strip())
+elif "Model C's ladder ran 200s behind" not in _err:
+    fail("refused, but without naming the model whose ladder lagged: %s" % _err.strip())
+elif "BOTH models" in _err:
+    fail("a four-model refusal still says BOTH models: %s" % _err.strip())
+elif any("%s with %s" % (x, y) in _err for x, y in ("AB", "AC", "AD", "BC", "BD")):
+    fail("pairs whose bursts never met are listed beside C with D: %s" % _err.strip())
+else:
+    ok("the refusal names C with D, and only them, and says model C ran 200s behind")
+
+case("an arm set in which nothing ever scaled is refused")
+# Both arms of that baseline sampled one replica per model in every one of 470
+# and 473 samples: every ScaledObject was unwired, the controller logged "No
+# active VariantAutoscalings" for the whole hour, and the report would have
+# compared two identical fixed fleets had the overlap not refused it first.
+_flat = {"stack-a-decode": 1, "stack-b-decode": 1, "stack-c-decode": 1, "stack-d-decode": 1}
+_root = tempfile.mkdtemp()
+_today, _ = nm_arm(_root, "today", 4)
+_share, _ = nm_arm(_root, "share", 4)
+nm_rewrite(_today, desired_fn=lambda k: dict(_flat))
+nm_rewrite(_share, desired_fn=lambda k: dict(_flat))
+_rc, _out, _err = run_quiet(report.main, ["--nopool", _today, "--baseline-name", "today",
+                                           "--arm", "share=" + _share])
+# Positive control: the same arms, with model B asking for a second replica
+# halfway through the share arm. B holds two Pods throughout, so no shortfall.
+_root2 = tempfile.mkdtemp()
+_today2, _ = nm_arm(_root2, "today", 4)
+_share2, _ = nm_arm(_root2, "share", 4)
+nm_rewrite(_today2, desired_fn=lambda k: dict(_flat))
+nm_rewrite(_share2, desired_fn=lambda k: dict(_flat, **({"stack-b-decode": 2} if k > 100 else {})))
+_rc2, _out2, _err2 = run_quiet(report.main, ["--nopool", _today2, "--baseline-name", "today",
+                                              "--arm", "share=" + _share2])
+if _rc == 0:
+    fail("two arms that never changed a single desired replica were compared")
+elif "nothing scaled" not in _err:
+    fail("refused, but not for the fleet that never moved: %s" % _err.strip())
+elif _rc2 != 0:
+    fail("an arm set in which model B scaled was refused: %s" % _err2.strip())
+else:
+    ok("every arm at a fixed fleet is refused; one desired change in one arm is enough")
+
+case("a desired change outside the run does not count as scaling")
+# The sampler also covers the preload before t0 and the report-writing tail
+# after the schedule ends. A reset scaling the fleet down there is not the
+# autoscaler acting during the run, so it must not clear the guard.
+_root = tempfile.mkdtemp()
+_today, _tot = nm_arm(_root, "today", 4)
+_share, _ = nm_arm(_root, "share", 4)
+nm_rewrite(_today, desired_fn=lambda k: dict(_flat))
+nm_rewrite(_share, desired_fn=lambda k: dict(_flat),
+           outside=((990, dict(_flat, **{"stack-b-decode": 2})),
+                    (1000 + _tot + 10, dict(_flat, **{"stack-a-decode": 2}))))
+_n, _mv = report.fleet_moved(os.path.join(_share, "gpus.jsonl"), 1000, _tot)
+_rc, _out, _err = run_quiet(report.main, ["--nopool", _today, "--baseline-name", "today",
+                                           "--arm", "share=" + _share])
+if _mv:
+    fail("fleet_moved counted desired changes before t0 and after the schedule end as the run scaling")
+elif _rc == 0 or "nothing scaled" not in _err:
+    fail("an arm whose only desired changes fell outside the run was compared: %s" % _err.strip())
+else:
+    ok("changes before t0 or after the schedule end leave the fixed-fleet refusal standing")
+
+case("four models: the repeats report has every burst, transfers and GPU-seconds by model")
+_root = tempfile.mkdtemp()
+_logs = ['{"msg":"Utilization share: transfer started","id":"t1","donor":"ma","receiver":"mc"}',
+         '{"msg":"Utilization share: transfer started","id":"t2","donor":"mb","receiver":"md"}',
+         '{"msg":"Utilization share: transfer ended","id":"t1","outcome":"done"}']
+_, _tot4 = nm_arm(os.path.join(_root, "rep1"), "today", 4)
+nm_arm(os.path.join(_root, "rep1"), "share", 4, log_lines=_logs)
+_want4 = "| rep1 | today | %s | 0 | 0 | %d |" % (
+    " | ".join("%d" % (k * _tot4) for k in (1, 2, 3, 4)), 10 * _tot4)
+_rc, _out, _err = run_quiet(repeats.main, ["--out-root", _root, "--model-a", "ma", "--model-b", "mb",
+                                            "--model-c", "mc", "--model-d", "md"])
+_order = [ln.split(" (")[0].replace("| ", "") for ln in _out.splitlines()
+          if ln.startswith("| model ") and "burst 1 | rep1 | today |" in ln]
+if _rc != 0:
+    fail("the four-model repeats report failed: %s" % _err.strip())
+elif _order != ["model B", "model C", "model D", "model A"]:
+    fail("bursts listed as %s, not in the rotation b, c, d, a" % _order)
+elif "| rep1 | share | gave 1, got 0 | gave 1, got 0 | gave 0, got 1 | gave 0, got 1 |" not in _out:
+    fail("transfers by model are not ma->mc and mb->md")
+elif _want4 not in _out:
+    fail("GPU-seconds by model are not 1, 2, 3 and 4 GPUs over the run: want %s" % _want4)
+else:
+    ok("bursts in rotation order, who gave and got, and each model's GPU-seconds")
+
 print("")
 if FAIL:
     print("two-model self-test FAILED (%d of %d cases)" % (FAIL, CASES))
