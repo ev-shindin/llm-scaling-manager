@@ -15,8 +15,8 @@ import (
 // its default by at least one property case: a case's policy sets it
 // (propCase.policy, nonDefaultKeys). The analyzerTuning keys are named
 // without their "analyzerTuning." prefix, the loadImbalance keys with theirs.
-// Every analyzerTuning and loadImbalance key is here or in notLearnerKeys
-// (TestPropertyPolicyKeysCoverTheTuningStructs).
+// Every key of the scaling policy is here or in notLearnerKeys
+// (TestPropertyPolicyKeysCoverThePolicy).
 var policyKeys = []string{
 	// analyzerTuning.
 	"itlBand.minObservableK", "itlBand.maxObservableK", "itlBand.capMaxPreemptionRate",
@@ -36,12 +36,30 @@ var policyKeys = []string{
 	keyReuse, keyDisableK2Borrow, keyPrefillBound,
 }
 
-// notLearnerKeys are the analyzerTuning and loadImbalance keys no learner
-// here reads, and why.
+// notLearnerKeys are the scaling policy's keys no learner here reads, and
+// why. With policyKeys it is every key of the policy, top level and nested
+// (TestPropertyPolicyKeysCoverThePolicy): a key added to the policy must be
+// placed in one of the two.
 var notLearnerKeys = map[string]string{
 	"loadImbalance.idleAfterReady": "read by the load-balance diagnostic (internal/signals/balance), not a learner",
 	"loadImbalance.sustainFor":     "read by the load-balance diagnostic, not a learner",
 	"loadImbalance.clearAfter":     "read by the load-balance diagnostic, not a learner",
+	"model_id":                     "selects the policy entry a model takes",
+	"namespace":                    "selects the policy entry a namespace takes",
+	"enableRescale":                "an actuation switch of the engine, read after the analyzers",
+	"analyzerName":                 "names the analyzer an entry configures",
+	"scaleDownBoundary":            "the release threshold the composite applies to a figure; the shape hold floors demand at it, and learns nothing from it",
+	"priority":                     "the optimizer's ordering between models",
+	"analyzers":                    "which analyzers run, and their weights",
+	"slo":                          "the SLO analyzer's targets, which it prices against and learns nothing from",
+	"scaleToZero":                  "the scale-to-zero envelope, read by the engine",
+	"scaleFromZero":                "the scale-from-zero envelope, read by the engine",
+	"analyzerDefinitions":          "external analyzers' queries",
+	"defaultPolicy":                "names the default entry",
+	"limiters":                     "the quota limiters, read by the optimizer",
+	"optimizer":                    "the optimizer's configuration",
+	"weightClass":                  "the share optimizer's weight class",
+	"weight":                       "the share optimizer's weight",
 }
 
 // tuningPolicy is a policy that sets t and nothing else.
@@ -49,13 +67,16 @@ func tuningPolicy(t config.AnalyzerTuning) *config.ScalingPolicy {
 	return &config.ScalingPolicy{AnalyzerTuning: t}
 }
 
-// yamlName is a struct field's yaml key, "" when it has none.
-func yamlName(f reflect.StructField) string {
-	name, _, _ := strings.Cut(f.Tag.Get("yaml"), ",")
+// yamlName is a struct field's yaml key, and whether the field has a yaml
+// tag at all. A tag of "-" is a field kept out of the yaml on purpose, and
+// has no key.
+func yamlName(f reflect.StructField) (string, bool) {
+	tag, tagged := f.Tag.Lookup("yaml")
+	name, _, _ := strings.Cut(tag, ",")
 	if name == "-" {
-		return ""
+		return "", true
 	}
-	return name
+	return name, tagged && name != ""
 }
 
 // policyKeyPrefix is the prefix a policy key under a nested field takes:
@@ -72,28 +93,38 @@ func policyKeyPrefix(name string) (string, bool) {
 }
 
 // policyLeaves walks v, a ScalingPolicy or one of its tuning structs, and
-// calls fn with each leaf key and its value.
-func policyLeaves(v reflect.Value, prefix string, top bool, fn func(key string, v reflect.Value)) {
+// calls fn with each leaf key and its value. It returns the exported fields
+// it met with no yaml key: a field the walk cannot name is a key no test
+// would see, so the caller fails on it rather than skip it.
+func policyLeaves(v reflect.Value, prefix string, top bool, fn func(key string, v reflect.Value)) (untagged []string) {
 	t := v.Type()
 	for i := range t.NumField() {
 		f := t.Field(i)
-		name := yamlName(f)
-		if name == "" || !f.IsExported() {
+		if !f.IsExported() {
 			continue
+		}
+		name, tagged := yamlName(f)
+		if !tagged {
+			untagged = append(untagged, prefix+f.Name)
+			continue
+		}
+		if name == "" {
+			continue // yaml:"-"
 		}
 		fv := v.Field(i)
 		if top {
 			if p, nested := policyKeyPrefix(name); nested {
-				policyLeaves(fv, p, false, fn)
+				untagged = append(untagged, policyLeaves(fv, p, false, fn)...)
 				continue
 			}
 		}
 		if !top && fv.Kind() == reflect.Struct {
-			policyLeaves(fv, prefix+name+".", false, fn)
+			untagged = append(untagged, policyLeaves(fv, prefix+name+".", false, fn)...)
 			continue
 		}
 		fn(prefix+name, fv)
 	}
+	return untagged
 }
 
 // nonDefaultKeys is the keys p sets away from their defaults: the fields it
@@ -111,20 +142,40 @@ func nonDefaultKeys(p *config.ScalingPolicy) []string {
 	return out
 }
 
-// tuningKeys is every analyzerTuning and loadImbalance key, by the structs'
-// yaml tags.
-func tuningKeys() []string {
-	var out []string
-	policyLeaves(reflect.ValueOf(config.ScalingPolicy{}), "", true, func(key string, _ reflect.Value) {
-		out = append(out, key)
+// policyKeysOf is every key of the scaling policy type t, top level and
+// nested, and the exported fields it found with no yaml key.
+func policyKeysOf(t reflect.Type) (keys, untagged []string) {
+	untagged = policyLeaves(reflect.New(t).Elem(), "", true, func(key string, _ reflect.Value) {
+		keys = append(keys, key)
 	})
-	var tuned []string
-	for _, k := range out {
-		if strings.Contains(k, ".") {
-			tuned = append(tuned, k)
+	return keys, untagged
+}
+
+// checkPolicyCoverage holds a policy's keys to the two lists: every key is a
+// learner's (policyKeys) or says why not (notLearnerKeys), every listed key
+// is a key of the policy, and no exported field lacks a yaml key.
+func checkPolicyCoverage(all, untagged, learner []string, not map[string]string) []error {
+	var errs []error
+	for _, f := range untagged {
+		errs = append(errs, fmt.Errorf("%s has no yaml key: name it, or tag it yaml:\"-\"", f))
+	}
+	for _, k := range all {
+		_, exempt := not[k]
+		if !slices.Contains(learner, k) && !exempt {
+			errs = append(errs, fmt.Errorf("%s is neither in policyKeys nor in notLearnerKeys", k))
 		}
 	}
-	return tuned
+	for _, k := range learner {
+		if !slices.Contains(all, k) {
+			errs = append(errs, fmt.Errorf("policyKeys lists %s, which is no key of the scaling policy", k))
+		}
+	}
+	for k := range not {
+		if !slices.Contains(all, k) {
+			errs = append(errs, fmt.Errorf("notLearnerKeys lists %s, which is no key of the scaling policy", k))
+		}
+	}
+	return errs
 }
 
 // checkPolicyKeys holds the cases to keys both ways: each key has a case
@@ -165,32 +216,51 @@ func TestPropertyPolicyKeysEachRunNonDefault(t *testing.T) {
 	}
 }
 
-// Every analyzerTuning and loadImbalance key, read from the structs' yaml
-// tags, is a learner's key or says why it is not, and every key policyKeys
-// lists is a key of the scaling policy: a key added to the tuning structs
-// cannot be left out of the property tests silently.
-func TestPropertyPolicyKeysCoverTheTuningStructs(t *testing.T) {
-	tuned := tuningKeys()
-	if len(tuned) < 20 {
-		t.Fatalf("the walk found %d tuning keys: %v", len(tuned), tuned)
+// Every key of the scaling policy, top level and nested, read from the yaml
+// tags, is a learner's key or says why it is not; every listed key is a key
+// of the policy; and every exported field has a yaml key. A key added to the
+// policy cannot be left out of the property tests silently.
+func TestPropertyPolicyKeysCoverThePolicy(t *testing.T) {
+	all, untagged := policyKeysOf(reflect.TypeFor[config.ScalingPolicy]())
+	if len(all) < 40 {
+		t.Fatalf("the walk found %d policy keys: %v", len(all), all)
 	}
-	for _, k := range tuned {
-		_, exempt := notLearnerKeys[k]
-		if !slices.Contains(policyKeys, k) && !exempt {
-			t.Errorf("%s is neither in policyKeys nor in notLearnerKeys", k)
+	for _, e := range checkPolicyCoverage(all, untagged, policyKeys, notLearnerKeys) {
+		t.Error(e)
+	}
+}
+
+// The coverage check's negative controls, on types shaped like the policy:
+// a scalar placed directly in analyzerTuning, a new top-level field, and an
+// exported field with no yaml tag are each reported.
+func TestPropertyPolicyCoverageNegativeControls(t *testing.T) {
+	type tuningWithScalar struct {
+		Probe float64         `yaml:"probeBar"`
+		Band  struct{ A int } `yaml:"band"`
+	}
+	type policy struct {
+		Kv     float64          `yaml:"kv"`
+		Tuning tuningWithScalar `yaml:"analyzerTuning"`
+		Top    float64          `yaml:"probeTop"`
+		Bare   float64
+		Hidden float64 `yaml:"-"`
+	}
+	all, untagged := policyKeysOf(reflect.TypeFor[policy]())
+	slices.Sort(all)
+	if want := []string{"kv", "probeBar", "probeTop"}; !slices.Equal(all, want) {
+		t.Fatalf("keys %v, want %v", all, want)
+	}
+	errs := fmt.Sprint(checkPolicyCoverage(all, untagged, []string{"kv"}, map[string]string{}))
+	for _, want := range []string{"probeBar is neither", "probeTop is neither", "Bare has no yaml key", "band.A has no yaml key"} {
+		if !strings.Contains(errs, want) {
+			t.Errorf("not reported: %s (got %s)", want, errs)
 		}
 	}
-	var all []string
-	policyLeaves(reflect.ValueOf(config.ScalingPolicy{}), "", true, func(key string, _ reflect.Value) { all = append(all, key) })
-	for _, k := range policyKeys {
-		if !slices.Contains(all, k) {
-			t.Errorf("policyKeys lists %s, which is no key of the scaling policy", k)
-		}
+	if strings.Contains(errs, "Hidden") {
+		t.Errorf("a field tagged yaml:\"-\" was reported: %s", errs)
 	}
-	for k := range notLearnerKeys {
-		if !slices.Contains(tuned, k) {
-			t.Errorf("notLearnerKeys lists %s, which is no tuning key", k)
-		}
+	if errs := checkPolicyCoverage([]string{"kv"}, nil, []string{"kv"}, map[string]string{}); len(errs) != 0 {
+		t.Errorf("a covered policy is clean: %v", errs)
 	}
 }
 

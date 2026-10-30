@@ -136,3 +136,26 @@ func zzLeakAt(t *testing.T, rec []byte, where string, secret string) {
 	assert.True(t, strings.Contains(err.Error(), where), "a refusal that does not name %s: %v", where, err)
 	t.Logf("REFUSED: %v", err)
 }
+
+// A recorded name that is all digits, or q and digits, is refused in a count
+// or a queue slot, where a figure would pass: the verification probes P05 and
+// P07 of #390. A small figure that is also a name (maxFigureDigits) still
+// exports, since the controller writes those there.
+func TestExportLeak_ANumericNameInAFigureSlot(t *testing.T) {
+	for _, tc := range []struct{ name, ns, key string }{
+		{"P05 digits in the count slot", "4155550123", "x|v|mdl|H100|4155550123|decode|medium|q5"},
+		{"P07 q and digits in the queue slot", "q4155550123", "q4155550123|v|mdl|H100|1|decode|medium|q4155550123"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := zzRec(t, zzOpts{ns: tc.ns, before: func(_ *learnrec.Recorder, f *fixture) {
+				f.sat.RestoreLearnedState(saturation.LearnedState{K2: map[string]capacity.RollingAverageSnapshot{tc.key: {}}})
+			}})
+			zzLeakAt(t, rec, "a key of K2 in saturation.RestoreLearnedState", tc.ns)
+		})
+	}
+	for _, ns := range []string{"8", "q5"} {
+		_, err := exportState(t, ns, saturation.LearnedState{K2: map[string]capacity.RollingAverageSnapshot{
+			ns + "|v|mdl|H100|8|decode|medium|q5": {}}})
+		assert.NoError(t, err, "namespace %q: a small figure that is also a name", ns)
+	}
+}

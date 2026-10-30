@@ -834,11 +834,14 @@ func (x *exporter) compositeAllowed(s string) bool {
 		case partAccelerator:
 			ok = knownAccelerators[part] || x.pseudonyms[part]
 		case partCount:
-			ok = part != "" && strings.Trim(part, "0123456789") == ""
+			ok = part != "" && strings.Trim(part, "0123456789") == "" && !x.figureIsAName(part, part)
 		case partFingerprint:
 			ok = isFingerprint(part)
 		case partShape:
 			ok = shapePart(part)
+			if q, isQ := strings.CutPrefix(part, "q"); ok && isQ {
+				ok = !x.figureIsAName(part, q)
+			}
 		default:
 			ok = x.pseudonyms[part]
 			if !ok {
@@ -853,6 +856,24 @@ func (x *exporter) compositeAllowed(s string) bool {
 		}
 	}
 	return true
+}
+
+// maxFigureDigits is the most digits a count or a queue threshold in a key
+// may have and still pass as a figure when it is also a recorded name. The
+// figures the controller writes there are small integers -- a replica's GPU
+// count, the queue threshold (qN) -- and a name of three digits or fewer
+// identifies nothing. A longer number that is a recorded name -- a
+// namespace named after a phone number, say -- is the name, and is refused.
+const maxFigureDigits = 3
+
+// figureIsAName reports whether part, a count or a queue threshold whose
+// number is n, is a recorded name the export would let through as a figure:
+// a name of more than maxFigureDigits, or not a whole number.
+func (x *exporter) figureIsAName(part, n string) bool {
+	if _, named := x.names[part]; !named {
+		return false
+	}
+	return !(n != "" && len(n) <= maxFigureDigits && strings.Trim(n, "0123456789") == "")
 }
 
 // shapeBuckets are the length buckets a window key names
