@@ -44,7 +44,7 @@ func TestRecordingOff_WritesNothing(t *testing.T) {
 		a.NoteVariantsPresent("ns", "m", []string{"v"})
 		a.EvictStaleHistory()
 	}
-	events, err := learnrec.Read(buf.Bytes())
+	events, err := readEvents(buf.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,4 +54,10 @@ func TestRecordingOff_WritesNothing(t *testing.T) {
 	if off.rec != nil {
 		t.Fatal("an analyzer built without a recorder has one")
 	}
+}
+
+// readEvents is learnrec.Read's events.
+func readEvents(b []byte) ([]learnrec.RawEvent, error) {
+	r, err := learnrec.Read(b)
+	return r.Events, err
 }

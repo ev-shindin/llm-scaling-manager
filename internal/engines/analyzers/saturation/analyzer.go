@@ -258,6 +258,9 @@ type SaturationAnalyzer struct {
 	// rec records every call the engine makes, with what it returned
 	// (recording.go); nil when recording is off.
 	rec *learnrec.Recorder
+	// lastExport is the digest of the last ExportLearnedState document
+	// recorded, so an unchanged one is not recorded again.
+	lastExport [32]byte
 }
 
 // Evicted is what one sweep of the analyzer's learned state removed, counted
@@ -944,7 +947,7 @@ func (a *SaturationAnalyzer) publishLine(
 		fromVariant: variantKey,
 		learnedAt:   now,
 	}
-	if a.rec != nil {
+	if a.rec.Active() {
 		a.rec.Record(KindPublishLine, now, LineEvent{PhysicsKey: physicsKey, Variant: variantKey, A: model.A, B: model.B})
 	}
 }
@@ -967,7 +970,7 @@ func (a *SaturationAnalyzer) borrowLine(physicsKey, variantKey string) (itl.Mode
 	if !ok || line.model.IsZero() || line.fromVariant == variantKey {
 		return itl.Model{}, "", false
 	}
-	if a.rec != nil {
+	if a.rec.Active() {
 		a.rec.Record(KindBorrowLine, a.now(), LineEvent{PhysicsKey: physicsKey, Variant: variantKey,
 			From: line.fromVariant, A: line.model.A, B: line.model.B})
 	}

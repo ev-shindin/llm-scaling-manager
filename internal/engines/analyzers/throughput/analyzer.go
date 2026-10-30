@@ -83,8 +83,9 @@ func (a *ThroughputAnalyzer) Name() string {
 	return AnalyzerName
 }
 
-// observeAt processes one reconcile cycle for a model. It groups metrics by
-// VariantName and, for each variant:
+// observeDefaultBand is observe over the default ITL band. It processes one
+// reconcile cycle for a model, grouping metrics by
+// VariantName, and for each variant:
 //  1. Runs sanity checks; skips the variant if any issue is found.
 //  2. Computes the variant-average IL, OL, and prefix hit rate.
 //  3. Updates the shape tracker; clears the observation window on shape change.
@@ -93,7 +94,7 @@ func (a *ThroughputAnalyzer) Name() string {
 //
 // Returns a map of variantName → SanityReport for logging. An empty SanityReport
 // (report.OK() == true) means that variant's metrics were healthy this cycle.
-func (a *ThroughputAnalyzer) observeAt(
+func (a *ThroughputAnalyzer) observeDefaultBand(
 	ctx context.Context,
 	now time.Time,
 	modelID, namespace string,
@@ -254,7 +255,7 @@ func (a *ThroughputAnalyzer) analyze(
 
 	// Analyze is assumed single-flight per model; concurrent VariantState() snapshots
 	// may observe partial state across the lock gaps below.
-	// Update variant roles so state.role is current when Observe() runs.
+	// Update variant roles so state.role is current when observe runs.
 	a.mu.Lock()
 	for _, vs := range input.VariantStates {
 		key := variantKey(input.Namespace, input.ModelID, vs.VariantName)
@@ -282,7 +283,7 @@ func (a *ThroughputAnalyzer) analyze(
 	// arrival rate, which already includes whatever a bridge is serving.
 	ownMetrics := ownReplicasOnly(input.ReplicaMetrics)
 
-	// Observe updates internal state (acquires/releases a.mu internally).
+	// observe updates internal state (acquires/releases a.mu internally).
 	lo, hi := itl.DefaultMinObservableK, itl.DefaultMaxObservableK
 	// Read through an interface: internal/config's tests import this package,
 	// so importing config here would be a cycle. *config.ScalingPolicy
@@ -334,7 +335,7 @@ func (a *ThroughputAnalyzer) analyze(
 		}
 
 		// TODO(#1261): skip variant when state.lastSanityReport is not OK — stale/invalid
-		// metrics from Observe() do not currently block demand computation here.
+		// metrics from observe do not currently block demand computation here.
 		// Gating demand on the sanity report is deferred to the per-analyzer status-return
 		// PR; it requires the engine contract to accept an AnalyzerStatus opt-out signal.
 		//

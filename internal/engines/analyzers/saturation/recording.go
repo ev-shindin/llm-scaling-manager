@@ -2,7 +2,7 @@ package saturation
 
 import (
 	"context"
-	"fmt"
+	"crypto/sha256"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
@@ -99,7 +99,7 @@ type LineEvent struct {
 // WithRecorder records the analyzer's calls to rec; nil turns recording off.
 // Call it before the analyzer is used.
 func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAnalyzer {
-	a.rec = rec
+	a.rec, a.lastExport = rec, [32]byte{}
 	return a
 }
 
@@ -108,16 +108,13 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // No switch exists yet, so the only set it accepts is the empty one. Never
 // called on a production path; a test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
-	for name := range switches {
-		return fmt.Errorf("saturation: no replay switch %q", name)
-	}
-	return nil
+	return learnrec.UnknownSwitches("saturation", switches)
 }
 
 // Analyze computes capacity signals for a model across all its variants
 // (analyze), and records the call.
 func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*domain.AnalyzerResult, error) {
-	if a.rec == nil {
+	if !a.rec.Active() {
 		return a.analyze(ctx, input)
 	}
 	now := a.now()
@@ -132,7 +129,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 // NoteVariantsPresent refreshes the liveness stamp of every variant named
 // (noteVariantsPresent), and records the call.
 func (a *SaturationAnalyzer) NoteVariantsPresent(namespace, modelID string, variantNames []string) {
-	if a.rec != nil {
+	if a.rec.Active() {
 		a.rec.Record(KindNoteVariantsPresent, a.now(), PresentEvent{Namespace: namespace, ModelID: modelID, Variants: variantNames})
 	}
 	a.noteVariantsPresent(namespace, modelID, variantNames)
@@ -141,7 +138,7 @@ func (a *SaturationAnalyzer) NoteVariantsPresent(namespace, modelID string, vari
 // EvictStaleHistory removes learned state past its horizon
 // (evictStaleHistory), and records the call with what it removed.
 func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
-	if a.rec == nil {
+	if !a.rec.Active() {
 		return a.evictStaleHistory()
 	}
 	now := a.now()
@@ -153,7 +150,7 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 // ForgetVariant drops everything learned for one variant (forgetVariant),
 // and records the call.
 func (a *SaturationAnalyzer) ForgetVariant(namespace, modelID, variant, token string) int {
-	if a.rec == nil {
+	if !a.rec.Active() {
 		return a.forgetVariant(namespace, modelID, variant, token)
 	}
 	now := a.now()
@@ -166,7 +163,7 @@ func (a *SaturationAnalyzer) ForgetVariant(namespace, modelID, variant, token st
 // ForgottenToken is the last forget token acted on for a variant
 // (forgottenToken), and records the call: reading it refreshes the mark.
 func (a *SaturationAnalyzer) ForgottenToken(namespace, variant string) string {
-	if a.rec == nil {
+	if !a.rec.Active() {
 		return a.forgottenToken(namespace, variant)
 	}
 	now := a.now()
@@ -178,28 +175,41 @@ func (a *SaturationAnalyzer) ForgottenToken(namespace, variant string) string {
 // HoldLowerBounds holds every lower bound as it stands while held is true
 // (holdLowerBounds), and records the call.
 func (a *SaturationAnalyzer) HoldLowerBounds(held bool) {
-	if a.rec != nil {
+	if a.rec.Active() {
 		a.rec.Record(KindHoldLowerBounds, a.now(), HoldEvent{Held: held})
 	}
 	a.holdLowerBounds(held)
 }
 
 // ExportLearnedState copies what the analyzer has learned
-// (exportLearnedState), and records the document.
+// (exportLearnedState), and records the document when it differs from the
+// last one recorded. The engine exports every cycle and the document is the
+// largest event there is; an export changes nothing, so an unchanged one is
+// left out and a replay, which skips it the same way, loses nothing.
 func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
-	if a.rec == nil {
+	if !a.rec.Active() {
 		return a.exportLearnedState()
 	}
 	now := a.now()
 	s := a.exportLearnedState()
-	a.rec.Record(KindExportLearnedState, now, s)
+	doc := a.rec.Fragment(s)
+	digest := sha256.Sum256(doc)
+	a.mu.Lock()
+	changed := doc != nil && digest != a.lastExport
+	if changed {
+		a.lastExport = digest
+	}
+	a.mu.Unlock()
+	if changed {
+		a.rec.Record(KindExportLearnedState, now, doc)
+	}
 	return s
 }
 
 // RestoreLearnedState takes a stored state in (restoreLearnedState), and
 // records the document as it was received, with the report.
 func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
-	if a.rec == nil {
+	if !a.rec.Active() {
 		return a.restoreLearnedState(s)
 	}
 	now := a.now()
@@ -212,7 +222,7 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 // TakeRestoreOutcomes returns and resets the restore outcome counts
 // (takeRestoreOutcomes), and records the call.
 func (a *SaturationAnalyzer) TakeRestoreOutcomes() map[string]int {
-	if a.rec == nil {
+	if !a.rec.Active() {
 		return a.takeRestoreOutcomes()
 	}
 	now := a.now()
@@ -224,7 +234,7 @@ func (a *SaturationAnalyzer) TakeRestoreOutcomes() map[string]int {
 // ForgetLearnedState drops everything learned and everything pending
 // (forgetLearnedState), and records the call.
 func (a *SaturationAnalyzer) ForgetLearnedState() {
-	if a.rec != nil {
+	if a.rec.Active() {
 		a.rec.Record(KindForgetLearnedState, a.now(), struct{}{})
 	}
 	a.forgetLearnedState()
@@ -233,7 +243,7 @@ func (a *SaturationAnalyzer) ForgetLearnedState() {
 // StableAcceleratorFor reports the accelerator a variant's learned state is
 // keyed under (stableAcceleratorFor), and records the call with its answer.
 func (a *SaturationAnalyzer) StableAcceleratorFor(namespace, variantName, accelerator string) string {
-	if a.rec == nil {
+	if !a.rec.Active() {
 		return a.stableAcceleratorFor(namespace, variantName, accelerator)
 	}
 	now := a.now()

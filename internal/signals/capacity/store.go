@@ -218,7 +218,7 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 // and the live record it keeps, and the prior capacity it carries, come from
 // that store's own analyzer writes rather than the run's.
 func (s *Store) FileScaleTarget(namespace, modelID, variantName, accelerator string, gpuCount int, params EngineParams, rolling bool, now time.Time) {
-	if s.rec != nil {
+	if s.rec.Active() {
 		s.rec.Record(KindFileScaleTarget, now, FileScaleTargetEvent{
 			Namespace: namespace, ModelID: modelID, Variant: variantName,
 			Accelerator: accelerator, GpuCount: gpuCount, Params: params, RollingOut: rolling,
@@ -362,7 +362,7 @@ func (s *Store) Delete(namespace, modelID, variantName string) bool {
 // from its own records.
 func (s *Store) EvictStale(now time.Time, timeout time.Duration) int {
 	n := s.evictStale(now, timeout)
-	if s.rec != nil {
+	if s.rec.Active() {
 		s.rec.Record(KindEvictStale, now, EvictStaleEvent{Timeout: timeout, Removed: n})
 	}
 	return n

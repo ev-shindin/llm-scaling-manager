@@ -271,36 +271,46 @@ func (r *replayer) checkStore(ev learnrec.RawEvent, input domain.AnalyzerInput, 
 	return nil
 }
 
+// mismatch reports a divergence at ev. Every kind fails the replay except an
+// evict count outside Fidelity, which is reported only (2.4).
 func (r *replayer) mismatch(ev learnrec.RawEvent, what, detail string) {
-	r.rep.Mismatches = append(r.rep.Mismatches, Mismatch{Seq: ev.Seq, Kind: ev.Kind, What: what, Detail: detail})
+	fatal := what != "evict" || r.opts.Mode == Fidelity
+	r.rep.Mismatches = append(r.rep.Mismatches, Mismatch{Seq: ev.Seq, Kind: ev.Kind, What: what, Detail: detail, Fatal: fatal})
 }
 
-// compareLines holds a replay's recording to the original, line by line.
-func compareLines(want []learnrec.RawEvent, got []byte) []Mismatch {
-	gotEvents, err := learnrec.Read(got)
+// compareEvents holds a replay's recording to the events of the original it
+// drives, event by event: the kind, the clock and the data, byte for byte.
+// Sequence numbers are not compared, so events of owners the replay does not
+// drive, left out of want, do not shift every line after them.
+func compareEvents(want []learnrec.RawEvent, got []byte) []Mismatch {
+	read, err := learnrec.Read(got)
 	if err != nil {
-		return []Mismatch{{What: "line", Detail: fmt.Sprintf("the replay's recording does not read back: %v", err)}}
+		return []Mismatch{{What: "line", Fatal: true, Detail: fmt.Sprintf("the replay's recording does not read back: %v", err)}}
 	}
+	gotEvents := read.Events
 	var out []Mismatch
 	n := min(len(want), len(gotEvents))
 	for i := 0; i < n; i++ {
-		if want[i].Line != gotEvents[i].Line {
-			out = append(out, Mismatch{Seq: want[i].Seq, Kind: want[i].Kind, What: "line",
-				Detail: describeLines(want[i], gotEvents[i])})
+		w, g := want[i], gotEvents[i]
+		if w.Kind != g.Kind || !w.Now.Equal(g.Now) || !bytes.Equal(w.Data, g.Data) {
+			out = append(out, Mismatch{Seq: w.Seq, Kind: w.Kind, What: "line", Fatal: true, Detail: describe(w, g)})
 		}
 	}
 	if len(want) != len(gotEvents) {
-		out = append(out, Mismatch{What: "line", Detail: fmt.Sprintf("the run recorded %d events, the replay %d%s",
+		out = append(out, Mismatch{What: "line", Fatal: true, Detail: fmt.Sprintf("the run recorded %d events, the replay %d%s",
 			len(want), len(gotEvents), extraKinds(want, gotEvents, n))})
 	}
 	return out
 }
 
-func describeLines(want, got learnrec.RawEvent) string {
-	if want.Kind != got.Kind {
+func describe(want, got learnrec.RawEvent) string {
+	switch {
+	case want.Kind != got.Kind:
 		return fmt.Sprintf("the replay recorded %s here", got.Kind)
+	case !want.Now.Equal(got.Now):
+		return fmt.Sprintf("the replay read the clock at %s, the run at %s", got.Now, want.Now)
 	}
-	return firstDiff(want.Line, got.Line)
+	return firstDiff(string(want.Data), string(got.Data))
 }
 
 func extraKinds(want, got []learnrec.RawEvent, from int) string {

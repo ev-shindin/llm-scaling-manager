@@ -204,6 +204,9 @@ type Engine struct {
 	LearnerRecording learnrec.Options
 	// learnRec is the open recording; nil when recording is off.
 	learnRec *learnrec.Recorder
+	// learnRecStarted is whether this process has opened a recording: one
+	// per controller start (startLearnerRecording).
+	learnRecStarted bool
 
 	// clock is the cycle clock: pinned once per optimize cycle (optimizeV2),
 	// it is what the analyzers and the capacity store stamp and age their

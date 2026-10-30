@@ -2,7 +2,6 @@ package throughput
 
 import (
 	"context"
-	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -53,15 +52,12 @@ func (a *ThroughputAnalyzer) WithRecorder(rec *learnrec.Recorder) *ThroughputAna
 // No switch exists yet, so the only set it accepts is the empty one. Never
 // called on a production path; a test holds that.
 func (a *ThroughputAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
-	for name := range switches {
-		return fmt.Errorf("throughput: no replay switch %q", name)
-	}
-	return nil
+	return learnrec.UnknownSwitches("throughput", switches)
 }
 
 // Analyze implements domain.Analyzer (analyze), and records the call.
 func (a *ThroughputAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*domain.AnalyzerResult, error) {
-	if a.rec == nil {
+	if !a.rec.Active() {
 		return a.analyze(ctx, input)
 	}
 	now := a.clock.Now()
@@ -71,7 +67,7 @@ func (a *ThroughputAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	return res, err
 }
 
-// Observe processes one reconcile cycle for a model (observeAt), and records
+// Observe processes one reconcile cycle for a model (observeDefaultBand), and records
 // the call. The engine does not call it today; Analyze observes on its own.
 func (a *ThroughputAnalyzer) Observe(
 	ctx context.Context,
@@ -79,11 +75,11 @@ func (a *ThroughputAnalyzer) Observe(
 	modelID, namespace string,
 	metrics []domain.ReplicaMetrics,
 ) map[string]SanityReport {
-	if a.rec == nil {
-		return a.observeAt(ctx, now, modelID, namespace, metrics)
+	if !a.rec.Active() {
+		return a.observeDefaultBand(ctx, now, modelID, namespace, metrics)
 	}
 	rows := a.rec.Fragment(metrics)
-	reports := a.observeAt(ctx, now, modelID, namespace, metrics)
+	reports := a.observeDefaultBand(ctx, now, modelID, namespace, metrics)
 	a.rec.Record(KindObserve, a.clock.Now(), ObserveEvent{Now: now, ModelID: modelID, Namespace: namespace,
 		Metrics: rows, Reports: sortedReports(reports)})
 	return reports

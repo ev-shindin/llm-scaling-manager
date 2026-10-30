@@ -352,8 +352,12 @@ func main() {
 			"start, for replay. Empty (the default) is off. Must be its own volume, never /tmp "+
 			"(config/components/learner-recorder). Defaults to $LEARNER_RECORDING_DIR.")
 	learnerRecordingCap := flag.Int64("learner-recording-cap-bytes", learnrec.DefaultCapBytes,
-		"The most one recording writes; past it the recording keeps its head and drops the rest. "+
-			"The directory holds at most two recordings at this cap.")
+		"The most one recording writes, at least 64Ki; past it the recording keeps its head and "+
+			"drops the rest.")
+	learnerRecordingDirBytes := flag.Int64("learner-recording-dir-bytes", 0,
+		"The most all recordings in the directory hold together, at least twice the cap (the "+
+			"default, 0). The volume under the directory must hold at least this much: set its "+
+			"emptyDir sizeLimit to no less.")
 
 	// Leader election timeout configuration flags
 	// These can be overridden in manager.yaml to tune for different environments
@@ -385,12 +389,14 @@ func main() {
 
 	setupLog := ctrl.Log.WithName("setup")
 	setupLog.Info("Logger initialized")
-	if *learnerRecordingDir != "" {
-		if err := learnrec.CheckDir(*learnerRecordingDir); err != nil {
-			setupLog.Error(err, "Invalid --learner-recording-dir", "dir", *learnerRecordingDir)
-			logging.Sync() //nolint:errcheck
-			os.Exit(1)     //nolint:gocritic // exitAfterDefer: Sync() called explicitly above
-		}
+	// A test aid never stops scaling: options a recording cannot start with
+	// are logged, and the controller runs without one.
+	learnerRecording := learnrec.Options{Dir: *learnerRecordingDir, CapBytes: *learnerRecordingCap,
+		DirBytes: *learnerRecordingDirBytes}
+	if err := learnerRecording.Check(); err != nil {
+		setupLog.Error(err, "Learner recording is off: its options are invalid", "dir", *learnerRecordingDir,
+			"capBytes", *learnerRecordingCap, "dirBytes", *learnerRecordingDirBytes)
+		learnerRecording = learnrec.Options{}
 	}
 
 	// The process's ONE signal context. ctrl.SetupSignalHandler may be called only
@@ -921,7 +927,7 @@ func main() {
 		// watch was a cluster-wide informer; the registry knows the same thing for a
 		// better reason — these are the namespaces WVA has actually been called about.
 		engine.VariantEnricher.Tracker = ds
-		engine.LearnerRecording = learnrec.Options{Dir: *learnerRecordingDir, CapBytes: *learnerRecordingCap}
+		engine.LearnerRecording = learnerRecording
 		// Rebuild the limiter live when the saturation ConfigMap's limiters: list
 		// changes — no restart required. The builder re-reads the effective config.
 		engine.SetLimiterBuilder(func() (allocation.Limiter, error) {

@@ -165,8 +165,9 @@ func TestCoverage_EachRecordedCallWritesOneEvent(t *testing.T) {
 			// A filed record, so the analyzers have a configuration to read.
 			f.store.FileScaleTarget("ns", "m", "v", "H100", 1, capacity.EngineParams{Engine: inferenceengine.EngineVLLM, MaxNumSeqs: 64}, false, at)
 			f.buf.Reset()
+			f.attach(learnrec.New(f.buf, 0))
 			c.do(f)
-			events, err := learnrec.Read(f.buf.Bytes())
+			events, err := readEvents(f.buf.Bytes())
 			require.NoError(t, err)
 			var own, other []string
 			for _, ev := range events {
@@ -204,6 +205,8 @@ type fixture struct {
 	sat   *saturation.SaturationAnalyzer
 	slo   *slo.Analyzer
 	tp    *throughput.ThroughputAnalyzer
+	clk   *clocktesting.FakePassiveClock
+	rec   *learnrec.Recorder
 }
 
 type nilRouter struct{}
@@ -219,6 +222,8 @@ func newFixture(at time.Time) *fixture {
 	store := capacity.NewStore().WithRecorder(rec)
 	return &fixture{
 		buf:   buf,
+		clk:   clk,
+		rec:   rec,
 		store: store,
 		sat:   saturation.NewSaturationAnalyzer(store).WithClock(clk).WithRecorder(rec),
 		slo:   slo.New(nilRouter{}, store).WithClock(clk).WithRecorder(rec),
@@ -305,4 +310,19 @@ func moduleRoot(t *testing.T) string {
 		require.NotEqual(t, dir, parent, "no go.mod above the test")
 		dir = parent
 	}
+}
+
+// readEvents is learnrec.Read's events.
+func readEvents(b []byte) ([]learnrec.RawEvent, error) {
+	r, err := learnrec.Read(b)
+	return r.Events, err
+}
+
+// attach hands rec to all four recorded types.
+func (f *fixture) attach(rec *learnrec.Recorder) {
+	f.rec = rec
+	f.store.WithRecorder(rec)
+	f.sat.WithRecorder(rec)
+	f.slo.WithRecorder(rec)
+	f.tp.WithRecorder(rec)
 }

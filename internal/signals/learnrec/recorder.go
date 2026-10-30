@@ -10,8 +10,9 @@
 // implementation, so a nested call is recorded once.
 //
 // This package knows nothing of the analyzers: an event's data is whatever
-// the recording package hands it, encoded by Marshal. The replay that reads
-// a recording back lives in internal/engines/analyzers/learnreplay.
+// the recording package hands it, encoded by Marshal. Each package exports
+// its event types for one consumer, the replay that reads a recording back
+// (internal/engines/analyzers/learnreplay).
 package learnrec
 
 import (
@@ -58,8 +59,10 @@ type Recorder struct {
 	full    bool
 	dropped uint64
 	// err is the first write or encode error; the recording stops on it.
-	err  error
-	name string
+	err error
+	// closed is set by Close: nothing is written after it.
+	closed bool
+	name   string
 }
 
 // New returns a recorder that writes to w, stopping once limit bytes are
@@ -68,18 +71,37 @@ func New(w io.Writer, limit int64) *Recorder {
 	return &Recorder{w: w, limit: limit, name: "stream"}
 }
 
+// Active reports whether the recorder still writes: false for a nil
+// recorder, and once the cap, an error or Close stopped it. A caller skips
+// the work of building an event when it is not.
+func (r *Recorder) Active() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.activeLocked()
+}
+
+func (r *Recorder) activeLocked() bool {
+	return !r.full && r.err == nil && !r.closed
+}
+
 // Record writes one event of kind, read at now, with data, and returns its
-// sequence number (0 when nothing was written). A sequence number is handed
-// out whether or not the line fits, so a gap after the cap is visible as
-// the dropped count rather than as renumbered events.
+// sequence number (0 when nothing was written). A closed recorder writes
+// nothing and numbers nothing; until then a sequence number is handed out
+// whether or not the line fits, and what does not is counted as dropped.
 func (r *Recorder) Record(kind string, now time.Time, data any) uint64 {
 	if r == nil {
 		return 0
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return 0
+	}
 	r.seq++
-	if r.full || r.err != nil {
+	if !r.activeLocked() {
 		r.dropped++
 		return 0
 	}
@@ -94,27 +116,36 @@ func (r *Recorder) Record(kind string, now time.Time, data any) uint64 {
 		r.full = true
 		r.dropped++
 		ctrl.Log.WithName("learnrec").Info("Recording reached its cap; keeping its head and dropping every later event",
-			"recording", r.name, "capBytes", r.limit, "writtenBytes", r.written, "firstDroppedSeq", r.seq)
+			"recording", r.name, "capBytes", r.limit, "writtenBytes", r.written, "firstDroppedSeq", r.seq,
+			"dropped", r.dropped)
 		return 0
 	}
 	n, err := r.w.Write(line)
-	r.written += int64(n)
 	if err != nil {
+		// A torn line would make the recording's tail unreadable: cut it
+		// back to the last whole line when the sink can.
+		if t, ok := r.w.(interface{ Truncate(int64) error }); ok && n > 0 {
+			_ = t.Truncate(r.written)
+		} else {
+			r.written += int64(n)
+		}
 		r.fail(fmt.Errorf("writing %s: %w", kind, err))
 		r.dropped++
 		return 0
 	}
+	r.written += int64(n)
 	return r.seq
 }
 
 // Fragment encodes v now, for an event written later: what a call read,
-// encoded before the call can change it. An encoding error stops the
-// recording, as it would have at Record.
+// encoded before the call can change it. It does nothing once the recorder
+// is not Active. An encoding error stops the recording, as it would have at
+// Record.
 func (r *Recorder) Fragment(v any) Raw {
-	if r == nil {
+	if !r.Active() {
 		return nil
 	}
-	b, err := Fragment(v)
+	b, err := Marshal(v)
 	if err != nil {
 		r.mu.Lock()
 		if r.err == nil {
@@ -131,22 +162,16 @@ func (r *Recorder) fail(err error) {
 	ctrl.Log.WithName("learnrec").Error(err, "Recording stopped", "recording", r.name, "seq", r.seq)
 }
 
-// Dropped is how many events were not written: past the cap, or after an
-// error stopped the recording.
-func (r *Recorder) Dropped() uint64 {
-	if r == nil {
-		return 0
-	}
+// droppedCount is how many events were not written: past the cap, or after
+// an error stopped the recording.
+func (r *Recorder) droppedCount() uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.dropped
 }
 
-// Written is the bytes written so far.
-func (r *Recorder) Written() int64 {
-	if r == nil {
-		return 0
-	}
+// writtenBytes is the bytes written so far.
+func (r *Recorder) writtenBytes() int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.written
@@ -162,14 +187,19 @@ func (r *Recorder) Err() error {
 	return r.err
 }
 
-// Close ends the recording, logs what it dropped, and closes the file the
-// recorder opened, if any.
+// Close ends the recording: nothing is recorded or encoded after it. It logs
+// what was dropped and closes the file the recorder opened, if any. Closing
+// twice is safe.
 func (r *Recorder) Close() error {
 	if r == nil {
 		return nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return nil
+	}
+	r.closed = true
 	if r.dropped > 0 {
 		ctrl.Log.WithName("learnrec").Info("Recording closed with events dropped",
 			"recording", r.name, "dropped", r.dropped, "writtenBytes", r.written, "capBytes", r.limit)

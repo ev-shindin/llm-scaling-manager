@@ -2,10 +2,7 @@ package learnrec
 
 import (
 	"bytes"
-	"errors"
 	"math"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -148,7 +145,7 @@ func TestRecorder_NumbersEventsFromOne(t *testing.T) {
 	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	assert.Equal(t, uint64(1), r.Record("a", at, 1))
 	assert.Equal(t, uint64(2), r.Record("b", at, 2))
-	events, err := Read(buf.Bytes())
+	events, err := readEvents(buf.Bytes())
 	require.NoError(t, err)
 	require.Len(t, events, 2)
 	assert.Equal(t, "b", events[1].Kind)
@@ -162,7 +159,7 @@ func TestRecorder_ANilRecorderRecordsNothing(t *testing.T) {
 	var r *Recorder
 	assert.Zero(t, r.Record("a", time.Time{}, 1))
 	assert.Nil(t, r.Fragment(1))
-	assert.Zero(t, r.Dropped())
+	assert.False(t, r.Active())
 	assert.NoError(t, r.Close())
 }
 
@@ -179,13 +176,13 @@ func TestRecorder_TheCapKeepsTheHeadAndCountsWhatItDrops(t *testing.T) {
 	// The fourth would pass the cap; so does every line after it, short or not.
 	assert.Zero(t, r.Record("k", at, 1))
 	assert.Zero(t, r.Record("k", at, nil))
-	assert.Equal(t, uint64(2), r.Dropped())
-	events, err := Read(buf.Bytes())
+	assert.Equal(t, uint64(2), r.droppedCount())
+	events, err := readEvents(buf.Bytes())
 	require.NoError(t, err)
 	require.Len(t, events, 3, "the head is kept whole")
 	assert.Equal(t, uint64(3), events[2].Seq)
-	assert.Equal(t, int64(buf.Len()), r.Written())
-	assert.LessOrEqual(t, r.Written(), int64(3*(len(line)+1)))
+	assert.Equal(t, int64(buf.Len()), r.writtenBytes())
+	assert.LessOrEqual(t, r.writtenBytes(), int64(3*(len(line)+1)))
 }
 
 func TestRecorder_AnEncodingErrorStopsTheRecording(t *testing.T) {
@@ -194,73 +191,32 @@ func TestRecorder_AnEncodingErrorStopsTheRecording(t *testing.T) {
 	r.Record("bad", time.Time{}, struct{ hidden int }{1})
 	require.Error(t, r.Err())
 	assert.Zero(t, r.Record("good", time.Time{}, 1), "nothing is written after the error")
-	assert.Equal(t, uint64(2), r.Dropped())
+	assert.Equal(t, uint64(2), r.droppedCount())
 }
 
-func TestOpen_RefusesTmp(t *testing.T) {
-	for _, dir := range []string{"/tmp", "/tmp/recordings", "/tmp/../tmp/x"} {
-		_, err := Open(Options{Dir: dir}, time.Now())
-		assert.True(t, errors.Is(err, ErrTmp), "%s: %v", dir, err)
-		assert.True(t, errors.Is(CheckDir(dir), ErrTmp), dir)
+// readEvents is Read's events.
+func readEvents(b []byte) ([]RawEvent, error) {
+	r, err := Read(b)
+	return r.Events, err
+}
+
+// A Raw reads back as the bytes it was written with, whatever their key
+// order: Marshal writes struct fields in declaration order, which a sorted
+// re-encoding would not keep.
+func TestCodec_ARawKeepsItsBytes(t *testing.T) {
+	type inner struct{ Zeta, Alpha float64 }
+	type outer struct {
+		Before string
+		Doc    Raw
 	}
-	assert.NoError(t, CheckDir("/var/lib/wva/recordings"))
-	assert.NoError(t, CheckDir("/tmpfoo"), "a sibling of /tmp is not /tmp")
-}
-
-// recordingDir is a directory outside /tmp (t.TempDir is under it on Linux).
-func recordingDir(t *testing.T) string {
-	t.Helper()
-	base, err := os.UserCacheDir()
+	doc, err := Marshal(inner{Zeta: 1, Alpha: 0.5})
 	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(base, 0o755))
-	dir, err := os.MkdirTemp(base, "learnrec-test-")
+	b, err := Marshal(outer{Before: "x", Doc: Raw(doc)})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
-}
-
-// A new recording is named by its start; to make room under the volume
-// ceiling the oldest closed recordings go first.
-func TestOpen_DeletesTheOldestRecordingFirst(t *testing.T) {
-	dir := recordingDir(t)
-	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	const capBytes = 100
-	// Three closed recordings, oldest first, two of them full; and a file
-	// that is not a recording, which is never touched.
-	for i, size := range []int{capBytes, capBytes, 40} {
-		name := filepath.Join(dir, FileName(t0.Add(time.Duration(i)*time.Hour)))
-		require.NoError(t, os.WriteFile(name, bytes.Repeat([]byte("x"), size), 0o644))
-	}
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("keep"), 0o644))
-
-	r, err := Open(Options{Dir: dir, CapBytes: capBytes}, t0.Add(5*time.Hour))
+	var back outer
+	require.NoError(t, Unmarshal(b, &back))
+	assert.Equal(t, string(doc), string(back.Doc))
+	again, err := Marshal(back)
 	require.NoError(t, err)
-	require.NoError(t, r.Close())
-
-	left := make([]string, 0, 3)
-	entries, err := os.ReadDir(dir)
-	require.NoError(t, err)
-	for _, e := range entries {
-		left = append(left, e.Name())
-	}
-	// Ceiling 200 bytes, the new one reserves 100: of the 240 already there,
-	// the two oldest go, which leaves 40.
-	assert.ElementsMatch(t, []string{
-		FileName(t0.Add(2 * time.Hour)), FileName(t0.Add(5 * time.Hour)), "notes.txt",
-	}, left)
-}
-
-func TestOpen_WritesToAFileNamedByItsStart(t *testing.T) {
-	dir := recordingDir(t)
-	at := time.Date(2026, 4, 5, 6, 7, 8, 9, time.UTC)
-	r, err := Open(Options{Dir: dir}, at)
-	require.NoError(t, err)
-	r.Record(KindStart, at, Start{})
-	require.NoError(t, r.Close())
-	b, err := os.ReadFile(filepath.Join(dir, "learnrec-20260405T060708.000000009Z.jsonl"))
-	require.NoError(t, err)
-	events, err := Read(b)
-	require.NoError(t, err)
-	require.Len(t, events, 1)
-	assert.Equal(t, KindStart, events[0].Kind)
+	assert.Equal(t, string(b), string(again))
 }

@@ -56,9 +56,18 @@ func TestReplay_ReproducesASmallRecording(t *testing.T) {
 }
 
 func TestReplay_RefusesARecordingWithoutAStart(t *testing.T) {
+	// Its first line cut off: the numbering no longer starts at 1.
 	rec := smallRecording(t, defaultStart())
 	_, rest, _ := bytes.Cut(rec, []byte("\n"))
 	_, err := Replay(context.Background(), rest, Options{Mode: Fidelity})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sequence number 2, want 1")
+
+	// Numbered from 1, and the first event is not a start.
+	var buf bytes.Buffer
+	r := learnrec.New(&buf, 0)
+	r.Record(capacity.KindEvictStale, replayAt, capacity.EvictStaleEvent{Timeout: time.Hour})
+	_, err = Replay(context.Background(), buf.Bytes(), Options{Mode: Fidelity})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no start line")
 }
@@ -153,7 +162,8 @@ func TestReplay_FidelityNamesTheFirstDifference(t *testing.T) {
 // back: the replay says so rather than analyzing with none.
 func TestReplay_RefusesAConfigItCannotRebuild(t *testing.T) {
 	type other struct{ domain.AnalyzerConfig }
-	raw, err := learnrec.Fragment(learnrec.InputOf(domain.AnalyzerInput{Config: other{}}))
+	b, err := learnrec.Marshal(learnrec.InputOf(domain.AnalyzerInput{Config: other{}}))
+	raw := learnrec.Raw(b)
 	require.NoError(t, err)
 	_, err = decodeInput(raw)
 	require.Error(t, err)

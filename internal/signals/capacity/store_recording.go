@@ -114,8 +114,5 @@ func EngineSuppliedDiff(got, want *Record) string {
 // No switch exists yet, so the only set it accepts is the empty one. Never
 // called on a production path; a test holds that.
 func (s *Store) SetSwitchesForReplay(switches map[string]bool) error {
-	for name := range switches {
-		return fmt.Errorf("capacity: no replay switch %q", name)
-	}
-	return nil
+	return learnrec.UnknownSwitches("capacity", switches)
 }

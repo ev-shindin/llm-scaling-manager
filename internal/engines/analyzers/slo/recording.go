@@ -2,7 +2,6 @@ package slo
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -84,15 +83,12 @@ func (a *Analyzer) SlopeHoldFor() time.Duration { return a.slopeHoldFor }
 // No switch exists yet, so the only set it accepts is the empty one. Never
 // called on a production path; a test holds that.
 func (a *Analyzer) SetSwitchesForReplay(switches map[string]bool) error {
-	for name := range switches {
-		return fmt.Errorf("slo: no replay switch %q", name)
-	}
-	return nil
+	return learnrec.UnknownSwitches("slo", switches)
 }
 
 // Analyze implements domain.Analyzer (analyze), and records the call.
 func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*domain.AnalyzerResult, error) {
-	if a.rec == nil {
+	if !a.rec.Active() {
 		res, _, err := a.analyze(ctx, input)
 		return res, err
 	}
@@ -112,17 +108,19 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 // EvictStale forgets the learned state not analyzed or reported present for
 // the state timeout (evictStale), and records the call.
 func (a *Analyzer) EvictStale(now time.Time) Evicted {
-	ev := a.evictStale(now)
-	if a.rec != nil {
-		a.rec.Record(KindEvictStale, a.now(), EvictStaleEvent{Now: now, Evicted: ev})
+	if !a.rec.Active() {
+		return a.evictStale(now)
 	}
+	at := a.now()
+	ev := a.evictStale(now)
+	a.rec.Record(KindEvictStale, at, EvictStaleEvent{Now: now, Evicted: ev})
 	return ev
 }
 
 // BeginCycle marks the start of an engine cycle (beginCycle), and records
 // the call.
 func (a *Analyzer) BeginCycle() {
-	if a.rec != nil {
+	if a.rec.Active() {
 		a.rec.Record(KindBeginCycle, a.now(), struct{}{})
 	}
 	a.beginCycle()
@@ -131,7 +129,7 @@ func (a *Analyzer) BeginCycle() {
 // NoteVariantsPresent stamps the learned state of a model's variants that
 // were discovered this cycle (noteVariantsPresent), and records the call.
 func (a *Analyzer) NoteVariantsPresent(namespace, modelID string, variantNames []string) {
-	if a.rec != nil {
+	if a.rec.Active() {
 		a.rec.Record(KindNoteVariantsPresent, a.now(), PresentEvent{Namespace: namespace, ModelID: modelID, Variants: variantNames})
 	}
 	a.noteVariantsPresent(namespace, modelID, variantNames)

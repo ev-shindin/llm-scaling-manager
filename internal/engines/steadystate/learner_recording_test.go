@@ -379,7 +379,7 @@ func recordRun(t *testing.T, start time.Time, record bool) ([]byte, [][]allocati
 // kindCounts counts a recording's events by kind.
 func kindCounts(t *testing.T, recording []byte) map[string]int {
 	t.Helper()
-	events, err := learnrec.Read(recording)
+	events, err := readEvents(recording)
 	require.NoError(t, err)
 	out := map[string]int{}
 	for _, ev := range events {
@@ -395,18 +395,32 @@ func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing
 
 	// The run covered what the acceptance names; a recording that missed one
 	// would pass a replay without testing it.
+	// Pinned, so a change in what the run records is a reviewed change: 12
+	// cycles over 3 models (the departed one for the first 4), 28 Analyzes
+	// per analyzer, 5 variants filed every cycle and the departed one for 4.
 	kinds := kindCounts(t, recording)
-	for _, kind := range []string{
-		learnrec.KindStart, saturation.KindAnalyze, slo.KindAnalyze, throughput.KindAnalyze,
-		capacity.KindFileScaleTarget, capacity.KindEvictStale,
-		saturation.KindRestoreLearnedState, saturation.KindForgetVariant, saturation.KindForgottenToken,
-		saturation.KindEvictStaleHistory, saturation.KindNoteVariantsPresent, saturation.KindHoldLowerBounds,
-		saturation.KindExportLearnedState, saturation.KindTakeRestoreOutcomes, saturation.KindStableAcceleratorFor,
-		saturation.KindPublishLine, saturation.KindBorrowLine,
-		slo.KindBeginCycle, slo.KindEvictStale, slo.KindNoteVariantsPresent,
-	} {
-		assert.Positive(t, kinds[kind], "the scripted run recorded no %s event", kind)
-	}
+	require.Equal(t, map[string]int{
+		learnrec.KindStart:                  1,
+		saturation.KindAnalyze:              28,
+		slo.KindAnalyze:                     28,
+		throughput.KindAnalyze:              28,
+		capacity.KindFileScaleTarget:        64,
+		capacity.KindEvictStale:             12,
+		saturation.KindRestoreLearnedState:  1,
+		saturation.KindForgetVariant:        1,
+		saturation.KindForgottenToken:       6,
+		saturation.KindEvictStaleHistory:    12,
+		saturation.KindNoteVariantsPresent:  28,
+		saturation.KindHoldLowerBounds:      2,
+		saturation.KindExportLearnedState:   5,
+		saturation.KindTakeRestoreOutcomes:  12,
+		saturation.KindStableAcceleratorFor: 64,
+		saturation.KindPublishLine:          9,
+		saturation.KindBorrowLine:           11,
+		slo.KindBeginCycle:                  12,
+		slo.KindEvictStale:                  12,
+		slo.KindNoteVariantsPresent:         28,
+	}, kinds, "the events the scripted run records")
 	t.Logf("recorded %d bytes: %v", len(recording), kinds)
 	assertResultsPriced(t, recording)
 	assertSweepsEvicted(t, recording)
@@ -418,13 +432,168 @@ func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing
 	for i := range 3 {
 		rep, err := learnreplay.Replay(context.Background(), recording, learnreplay.Options{Mode: learnreplay.Fidelity})
 		require.NoError(t, err)
-		require.Empty(t, mismatchText(rep.Mismatches, 5), "replay %d diverged from the recording", i+1)
+		require.Empty(t, mismatchText(rep.Mismatches), "replay %d diverged from the recording", i+1)
 		require.Equal(t, string(recording), string(rep.Recording), "replay %d: the replay's recording", i+1)
 		assert.Positive(t, rep.StoreChecks, "no store check ran")
 		assert.Equal(t, kinds[saturation.KindAnalyze], rep.Analyzes[saturation.KindAnalyze])
 		assert.Equal(t, kinds[slo.KindAnalyze], rep.Analyzes[slo.KindAnalyze])
 		assert.Equal(t, kinds[throughput.KindAnalyze], rep.Analyzes[throughput.KindAnalyze])
 	}
+
+	// Every replay that is not at the recording's commit runs in Normal mode;
+	// at the same commit it must find nothing to fail on either.
+	rep, err := learnreplay.Replay(context.Background(), recording, learnreplay.Options{Mode: learnreplay.Normal})
+	require.NoError(t, err)
+	require.Empty(t, mismatchText(rep.Failed()), "a Normal replay at the same commit failed")
+	assert.Positive(t, rep.StoreChecks)
+	assert.Equal(t, kinds[saturation.KindAnalyze], rep.Analyzes[saturation.KindAnalyze])
+
+	// What is measured, for the size the docs state: bytes per replica per
+	// cycle over the recorded controller's cycles.
+	replicaCycles := 0
+	events, err := readEvents(recording)
+	require.NoError(t, err)
+	byKind := map[string]int{}
+	for _, ev := range events {
+		byKind[ev.Kind] += len(ev.Line) + 1
+		if ev.Kind == saturation.KindAnalyze {
+			var d saturation.AnalyzeEvent
+			require.NoError(t, ev.DecodeData(&d))
+			var in learnrec.Input
+			require.NoError(t, d.Input.Decode(&in))
+			replicaCycles += len(in.ReplicaMetrics)
+		}
+	}
+	t.Logf("measured: %d bytes over %d replica-cycles, %.0f bytes per replica per cycle",
+		len(recording), replicaCycles, float64(len(recording))/float64(replicaCycles))
+	t.Logf("bytes by kind: %v", byKind)
+}
+
+// Every event decodes into its own type and encodes back to the bytes it
+// was written with: a replay reads exactly what the run wrote.
+func TestLearnerRecording_EveryEventRoundTripsByteForByte(t *testing.T) {
+	recording, _ := recordRun(t, recStart, true)
+	events, err := readEvents(recording)
+	require.NoError(t, err)
+	types := map[string]func() any{
+		learnrec.KindStart:                  func() any { return &learnrec.Start{} },
+		saturation.KindAnalyze:              func() any { return &saturation.AnalyzeEvent{} },
+		saturation.KindNoteVariantsPresent:  func() any { return &saturation.PresentEvent{} },
+		saturation.KindEvictStaleHistory:    func() any { return &saturation.Evicted{} },
+		saturation.KindForgetVariant:        func() any { return &saturation.ForgetVariantEvent{} },
+		saturation.KindForgottenToken:       func() any { return &saturation.ForgottenTokenEvent{} },
+		saturation.KindHoldLowerBounds:      func() any { return &saturation.HoldEvent{} },
+		saturation.KindExportLearnedState:   func() any { return &saturation.LearnedState{} },
+		saturation.KindRestoreLearnedState:  func() any { return &saturation.RestoreEvent{} },
+		saturation.KindTakeRestoreOutcomes:  func() any { return &map[string]int{} },
+		saturation.KindStableAcceleratorFor: func() any { return &saturation.AcceleratorEvent{} },
+		saturation.KindPublishLine:          func() any { return &saturation.LineEvent{} },
+		saturation.KindBorrowLine:           func() any { return &saturation.LineEvent{} },
+		slo.KindAnalyze:                     func() any { return &slo.AnalyzeEvent{} },
+		slo.KindEvictStale:                  func() any { return &slo.EvictStaleEvent{} },
+		slo.KindBeginCycle:                  func() any { return &struct{}{} },
+		slo.KindNoteVariantsPresent:         func() any { return &slo.PresentEvent{} },
+		throughput.KindAnalyze:              func() any { return &throughput.AnalyzeEvent{} },
+		capacity.KindFileScaleTarget:        func() any { return &capacity.FileScaleTargetEvent{} },
+		capacity.KindEvictStale:             func() any { return &capacity.EvictStaleEvent{} },
+	}
+	checked := map[string]int{}
+	for _, ev := range events {
+		mk, ok := types[ev.Kind]
+		require.True(t, ok, "no type for %s", ev.Kind)
+		v := mk()
+		require.NoError(t, ev.DecodeData(v), "seq %d %s", ev.Seq, ev.Kind)
+		b, err := learnrec.Marshal(v)
+		require.NoError(t, err)
+		require.Equal(t, string(ev.Data), string(b), "seq %d %s does not encode back to its bytes", ev.Seq, ev.Kind)
+		checked[ev.Kind]++
+	}
+	// The raw input and records inside an Analyze, decoded all the way down.
+	for _, ev := range events {
+		if ev.Kind != saturation.KindAnalyze {
+			continue
+		}
+		var d saturation.AnalyzeEvent
+		require.NoError(t, ev.DecodeData(&d))
+		var in struct {
+			ModelID, Namespace string
+			ReplicaMetrics     []domain.ReplicaMetrics
+			VariantStates      []domain.VariantReplicaState
+			Config             *config.ScalingPolicy
+			ConfigType         string
+			SchedulerQueue     *domain.SchedulerQueueMetrics
+			ArrivalRate        float64
+		}
+		require.NoError(t, d.Input.Decode(&in))
+		b, err := learnrec.Marshal(in)
+		require.NoError(t, err)
+		require.Equal(t, string(d.Input), string(b), "seq %d: the input does not encode back to its bytes", ev.Seq)
+		var recs map[string]*capacity.Record
+		require.NoError(t, d.Records.Decode(&recs))
+		b, err = learnrec.Marshal(recs)
+		require.NoError(t, err)
+		require.Equal(t, string(d.Records), string(b), "seq %d: the records do not encode back to their bytes", ev.Seq)
+		checked["input"]++
+	}
+	assert.Equal(t, len(events)+checked["input"], sum(checked))
+}
+
+func sum(m map[string]int) int {
+	n := 0
+	for _, v := range m {
+		n += v
+	}
+	return n
+}
+
+// An optimizer block in the policy, which keeps a decode error behind an
+// unexported field, is recorded, and replays.
+func TestLearnerRecording_APolicyWithAnOptimizerRecords(t *testing.T) {
+	s := newRecScript(recStart)
+	s.policy.Optimizer = &config.OptimizerConfig{Type: "utilization-share"}
+	e := s.engine(t)
+	var buf bytes.Buffer
+	e.recordLearners(learnrec.New(&buf, 0))
+	s.cycle(t, e, 0, recStart)
+	require.NoError(t, e.learnRec.Err(), "the recording stopped on the policy")
+	kinds := kindCounts(t, buf.Bytes())
+	require.Positive(t, kinds[saturation.KindAnalyze])
+	rep, err := learnreplay.Replay(context.Background(), buf.Bytes(), learnreplay.Options{Mode: learnreplay.Fidelity})
+	require.NoError(t, err)
+	require.Empty(t, mismatchText(rep.Failed()))
+}
+
+// Stopping the loop closes the recording and takes it back from the store
+// and the analyzers; starting the loop again in the same process opens no
+// second one, and nothing writes to the first.
+func TestLearnerRecording_StartStopStart(t *testing.T) {
+	s := newRecScript(recStart)
+	e := s.engine(t)
+	dir := recordingDir(t)
+	e.LearnerRecording = learnrec.Options{Dir: dir}
+	e.startLearnerRecording()
+	require.NotNil(t, e.learnRec)
+	s.cycle(t, e, 0, recStart)
+	e.stopLearnerRecording()
+	require.Nil(t, e.learnRec, "stop left the recording on the engine")
+
+	files, err := filepathGlob(dir)
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	before := files[0].data
+
+	e.startLearnerRecording()
+	assert.Nil(t, e.learnRec, "a second start in one process opened a recording")
+	s.cycle(t, e, 1, recStart.Add(15*time.Second))
+	e.stopLearnerRecording()
+
+	files, err = filepathGlob(dir)
+	require.NoError(t, err)
+	require.Len(t, files, 1, "a second recording was opened")
+	assert.Equal(t, string(before), string(files[0].data), "something wrote to the closed recording")
+	events, err := readEvents(before)
+	require.NoError(t, err)
+	assert.Positive(t, len(events))
 }
 
 // The same run thirty days later records the same results: nothing an
@@ -435,7 +604,7 @@ func TestLearnerRecording_ThirtyDaysLaterTheResultsAreTheSame(t *testing.T) {
 	for _, rec := range [][]byte{now, later} {
 		rep, err := learnreplay.Replay(context.Background(), rec, learnreplay.Options{Mode: learnreplay.Fidelity})
 		require.NoError(t, err)
-		require.Empty(t, mismatchText(rep.Mismatches, 5))
+		require.Empty(t, mismatchText(rep.Mismatches))
 	}
 	a, b := analyzeResults(t, now), analyzeResults(t, later)
 	require.NotEmpty(t, a)
@@ -449,7 +618,7 @@ func TestLearnerRecording_ThirtyDaysLaterTheResultsAreTheSame(t *testing.T) {
 // the input (whose instants move with the run).
 func analyzeResults(t *testing.T, recording []byte) []string {
 	t.Helper()
-	events, err := learnrec.Read(recording)
+	events, err := readEvents(recording)
 	require.NoError(t, err)
 	out := make([]string, 0, len(events))
 	for _, ev := range events {
@@ -485,8 +654,10 @@ func analyzeResults(t *testing.T, recording []byte) []string {
 func TestLearnerRecording_RecordingChangesNoResult(t *testing.T) {
 	_, on := recordRun(t, recStart, true)
 	_, off := recordRun(t, recStart, false)
+	require.Len(t, on, len(recSchedule(recStart)), "a result set per cycle")
 	require.Equal(t, len(off), len(on))
 	for i := range on {
+		require.NotEmpty(t, on[i], "cycle %d returned no results", i)
 		require.Equal(t, namedResultsText(t, off[i]), namedResultsText(t, on[i]), "cycle %d", i)
 	}
 }
@@ -554,12 +725,13 @@ func TestLearnerRecording_TheControllerStartOpensOneRecording(t *testing.T) {
 	assert.Equal(t, 1, kinds[learnrec.KindStart])
 	assert.Positive(t, kinds[saturation.KindAnalyze])
 	assert.Positive(t, kinds[capacity.KindFileScaleTarget])
-	events, err := learnrec.Read(files[0].data)
+	events, err := readEvents(files[0].data)
 	require.NoError(t, err)
 	assert.Equal(t, learnrec.KindStart, events[0].Kind, "the first line is the start")
 }
 
-func mismatchText(ms []learnreplay.Mismatch, limit int) string {
+func mismatchText(ms []learnreplay.Mismatch) string {
+	const limit = 5
 	parts := make([]string, 0, limit+1)
 	for i, m := range ms {
 		if i == limit {
@@ -574,7 +746,7 @@ func mismatchText(ms []learnreplay.Mismatch, limit int) string {
 // assertSweepsEvicted holds the script to sweeps that removed something.
 func assertSweepsEvicted(t *testing.T, recording []byte) {
 	t.Helper()
-	events, err := learnrec.Read(recording)
+	events, err := readEvents(recording)
 	require.NoError(t, err)
 	var history, records int
 	for _, ev := range events {
@@ -598,7 +770,7 @@ func assertSweepsEvicted(t *testing.T, recording []byte) {
 // assertRouterServed holds the script to an slo Analyze that read a latency.
 func assertRouterServed(t *testing.T, recording []byte) {
 	t.Helper()
-	events, err := learnrec.Read(recording)
+	events, err := readEvents(recording)
 	require.NoError(t, err)
 	served := 0
 	for _, ev := range events {
@@ -619,7 +791,7 @@ func assertRouterServed(t *testing.T, recording []byte) {
 // rewritten rows could not run it again.
 func assertDecodeRewriteRecordedRaw(t *testing.T, recording []byte) {
 	t.Helper()
-	events, err := learnrec.Read(recording)
+	events, err := readEvents(recording)
 	require.NoError(t, err)
 	for _, ev := range events {
 		if ev.Kind != saturation.KindAnalyze {
@@ -682,7 +854,7 @@ func recordingDir(t *testing.T) string {
 // reproducing.
 func assertResultsPriced(t *testing.T, recording []byte) {
 	t.Helper()
-	events, err := learnrec.Read(recording)
+	events, err := readEvents(recording)
 	require.NoError(t, err)
 	priced := map[string]int{}
 	for _, ev := range events {
@@ -716,4 +888,51 @@ func assertResultsPriced(t *testing.T, recording []byte) {
 		assert.Positive(t, priced[kind], "no %s result priced a variant", kind)
 	}
 	t.Logf("variants priced per analyzer: %v", priced)
+}
+
+// readEvents is learnrec.Read's events.
+func readEvents(b []byte) ([]learnrec.RawEvent, error) {
+	r, err := learnrec.Read(b)
+	return r.Events, err
+}
+
+// A recording cut short -- at its cap, or by a crash mid-write -- still
+// replays: the check events of an Analyze the cut lost are left out, and a
+// torn last line is dropped and reported.
+func TestLearnerRecording_ARecordingCutShortReplays(t *testing.T) {
+	recording, _ := recordRun(t, recStart, true)
+	events, err := readEvents(recording)
+	require.NoError(t, err)
+	// Cut right after the first line a variant published: its Analyze, and
+	// everything after, is gone.
+	cut := -1
+	for i, ev := range events {
+		if ev.Kind == saturation.KindPublishLine {
+			cut = i
+			break
+		}
+	}
+	require.Positive(t, cut, "precondition: the run publishes a line")
+	var head bytes.Buffer
+	for _, ev := range events[:cut+1] {
+		head.WriteString(ev.Line + "\n")
+	}
+	rep, err := learnreplay.Replay(context.Background(), head.Bytes(), learnreplay.Options{Mode: learnreplay.Fidelity})
+	require.NoError(t, err)
+	require.Empty(t, mismatchText(rep.Failed()))
+	assert.Equal(t, 1, rep.TrimmedChecks)
+
+	torn := append(bytes.Clone(head.Bytes()), events[cut+1].Line[:40]...)
+	rep, err = learnreplay.Replay(context.Background(), torn, learnreplay.Options{Mode: learnreplay.Fidelity})
+	require.NoError(t, err)
+	require.Empty(t, mismatchText(rep.Failed()))
+	assert.Equal(t, events[cut+1].Line[:40], rep.TornTail)
+
+	// The same cut made by the recorder's own cap.
+	var capped bytes.Buffer
+	r := learnrec.New(&capped, int64(head.Len()))
+	for _, ev := range events {
+		r.Record(ev.Kind, ev.Now, learnrec.Raw(ev.Data))
+	}
+	require.Equal(t, head.String(), capped.String(), "the cap keeps the same head")
 }
