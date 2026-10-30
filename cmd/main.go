@@ -73,6 +73,7 @@ import (
 	prometheusutil "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/prometheus"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/scaler"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/crd"
 	poolutil "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/pool"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/warmpool"
@@ -344,6 +345,15 @@ func main() {
 			"of waiting for each to miss. Popularity is share of desired replicas, which "+
 			"tracks share of requests. 0 disables preloading, leaving admission to parking "+
 			"and the frequency filter.")
+	// The learner recorder: a test aid that records every input the analyzers
+	// read, for replay (docs/developer-guide/testing.md). Off unless named.
+	learnerRecordingDir := flag.String("learner-recording-dir", os.Getenv("LEARNER_RECORDING_DIR"),
+		"Record the analyzers' inputs and results to this directory, one file per controller "+
+			"start, for replay. Empty (the default) is off. Must be its own volume, never /tmp "+
+			"(config/components/learner-recorder). Defaults to $LEARNER_RECORDING_DIR.")
+	learnerRecordingCap := flag.Int64("learner-recording-cap-bytes", learnrec.DefaultCapBytes,
+		"The most one recording writes; past it the recording keeps its head and drops the rest. "+
+			"The directory holds at most two recordings at this cap.")
 
 	// Leader election timeout configuration flags
 	// These can be overridden in manager.yaml to tune for different environments
@@ -375,6 +385,13 @@ func main() {
 
 	setupLog := ctrl.Log.WithName("setup")
 	setupLog.Info("Logger initialized")
+	if *learnerRecordingDir != "" {
+		if err := learnrec.CheckDir(*learnerRecordingDir); err != nil {
+			setupLog.Error(err, "Invalid --learner-recording-dir", "dir", *learnerRecordingDir)
+			logging.Sync() //nolint:errcheck
+			os.Exit(1)     //nolint:gocritic // exitAfterDefer: Sync() called explicitly above
+		}
+	}
 
 	// The process's ONE signal context. ctrl.SetupSignalHandler may be called only
 	// once (a second call panics), so it is taken here and handed to every
@@ -904,6 +921,7 @@ func main() {
 		// watch was a cluster-wide informer; the registry knows the same thing for a
 		// better reason — these are the namespaces WVA has actually been called about.
 		engine.VariantEnricher.Tracker = ds
+		engine.LearnerRecording = learnrec.Options{Dir: *learnerRecordingDir, CapBytes: *learnerRecordingCap}
 		// Rebuild the limiter live when the saturation ConfigMap's limiters: list
 		// changes — no restart required. The builder re-reads the effective config.
 		engine.SetLimiterBuilder(func() (allocation.Limiter, error) {
