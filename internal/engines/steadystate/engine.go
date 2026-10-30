@@ -62,6 +62,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/balance"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/cycleclock"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
@@ -195,6 +196,17 @@ type Engine struct {
 
 	// capacityStore is shared with the V2 analyzer for caching capacity knowledge.
 	capacityStore *capacity.Store
+
+	// LearnerRecording turns the learner recorder on when it names a
+	// directory: every input the analyzers and the capacity store read, and
+	// every result, one recording per controller start
+	// (learner_recording.go). Set before StartOptimizeLoop. Off by default.
+	LearnerRecording learnrec.Options
+	// learnRec is the open recording; nil when recording is off.
+	learnRec *learnrec.Recorder
+	// learnRecStarted is whether this process has opened a recording: one
+	// per controller start (startLearnerRecording).
+	learnRecStarted bool
 
 	// clock is the cycle clock: pinned once per optimize cycle (optimizeV2),
 	// it is what the analyzers and the capacity store stamp and age their
@@ -698,6 +710,9 @@ func (e *Engine) StartOptimizeLoop(ctx context.Context) {
 	e.analyzersSnapshot = make([]analyzerEntry, len(e.analyzers))
 	copy(e.analyzersSnapshot, e.analyzers)
 	e.started = true
+	// Before the first cycle, once every analyzer is registered.
+	e.startLearnerRecording()
+	defer e.stopLearnerRecording()
 
 	e.recordActiveOptimizer() // record active optimizer
 	metrics.SetConfigOptimizationInterval(float64(e.Config.OptimizationInterval().Seconds()))

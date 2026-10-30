@@ -65,7 +65,7 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 		// reads a variant whose pods sit on two products as unresolved, and
 		// that flips with placement. A raw lookup then missed a record filed
 		// under the product on alternate cycles.
-		accelerator := a.StableAcceleratorFor(namespace, vs.VariantName, vs.AcceleratorName)
+		accelerator := a.stableAcceleratorFor(namespace, vs.VariantName, vs.AcceleratorName)
 
 		readyCount := vs.CurrentReplicas - vs.PendingReplicas
 		if readyCount < 0 {

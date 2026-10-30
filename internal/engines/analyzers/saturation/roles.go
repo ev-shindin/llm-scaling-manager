@@ -63,7 +63,7 @@ func (a *SaturationAnalyzer) stableAccelerator(namespace, variantName, accelerat
 	return accelerator
 }
 
-// StableAcceleratorFor reports the accelerator a variant's learned state is
+// stableAcceleratorFor reports the accelerator a variant's learned state is
 // keyed under, WITHOUT recording or touching anything.
 //
 // For the metric that explains the key. wva_engine_config was publishing the
@@ -77,7 +77,7 @@ func (a *SaturationAnalyzer) stableAccelerator(namespace, variantName, accelerat
 // through it would make the memo live as long as the metric publishes rather
 // than as long as the variant is analysed -- which is precisely the coupling
 // the per-cycle sweep was changed to avoid.
-func (a *SaturationAnalyzer) StableAcceleratorFor(namespace, variantName, accelerator string) string {
+func (a *SaturationAnalyzer) stableAcceleratorFor(namespace, variantName, accelerator string) string {
 	if constants.IsAcceleratorResolved(accelerator) {
 		return accelerator
 	}

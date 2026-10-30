@@ -1,0 +1,58 @@
+# Strategic-merge patch that turns the learner recorder on in an installed
+# controller (docs/developer-guide/testing.md, "Learner Recordings"):
+#   kubectl -n <ns> patch deployment wva-controller-manager --type strategic \
+#     --patch-file config/components/learner-recorder/learner-recorder-deployment.yaml
+# It changes no image and no other field of the manager. The name is the
+# installed one (the overlays prefix wva-); kustomize, which targets the
+# unprefixed name, ignores it. On OpenShift use
+# ../learner-recorder-openshift/learner-recorder-openshift-deployment.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wva-controller-manager
+spec:
+  template:
+    spec:
+      containers:
+      - name: manager
+        env:
+        - name: LEARNER_RECORDING_DIR
+          value: /var/lib/wva/learner-recordings
+        volumeMounts:
+        - name: learner-recordings
+          mountPath: /var/lib/wva/learner-recordings
+      # Holds the volume open for `kubectl cp`, which needs tar in the
+      # container it copies from; the manager image is distroless. Reads only.
+      # It is a container of the controller's pod: until its image is pulled
+      # and it runs, the pod is not Ready, and a rollout of the controller
+      # waits on it.
+      - name: recordings
+        image: registry.k8s.io/e2e-test-images/busybox:1.36.1-1@sha256:a9155b13325b2abef48e71de77bb8ac015412a566829f621d06bfae5c699b1b9
+        command: ["sh", "-c", "trap 'exit 0' TERM; while true; do sleep 3600 & wait $!; done"]
+        securityContext:
+          runAsNonRoot: true
+          # The busybox image runs as root unless told otherwise. OpenShift's
+          # restricted-v2 SCC assigns the user and refuses a fixed one: there,
+          # use ../learner-recorder-openshift, the same patch without this line.
+          runAsUser: 65532
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 1m
+            memory: 8Mi
+          limits:
+            memory: 32Mi
+        volumeMounts:
+        - name: learner-recordings
+          mountPath: /var/lib/wva/learner-recordings
+          readOnly: true
+      volumes:
+      # Local disk of the node, and gone with the pod. At least the
+      # directory ceiling (--learner-recording-dir-bytes, twice the 256Mi cap
+      # by default).
+      - name: learner-recordings
+        emptyDir:
+          sizeLimit: 600Mi

@@ -445,7 +445,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		// a mixed fleet and a compatible parked sibling on the same model; filed
 		// under the raw reading instead, the record matched no sibling at all.
 		a.capacityStore.Update(namespace, modelID, rm.VariantName, capacity.Record{
-			AcceleratorName:       a.StableAcceleratorFor(namespace, rm.VariantName, accelerator),
+			AcceleratorName:       a.stableAcceleratorFor(namespace, rm.VariantName, accelerator),
 			GpuCount:              gpuCount,
 			NumGpuBlocks:          rm.NumGpuBlocks,
 			BlockSize:             rm.BlockSize,

@@ -12,6 +12,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
 
 // The analyzer itself: its state, its lifecycle, and the lookups that belong
@@ -254,6 +255,12 @@ type SaturationAnalyzer struct {
 	// which is the only way any of this is reachable on a cluster, the
 	// shortest of them being a day.
 	horizons capacity.Horizons
+	// rec records every call the engine makes, with what it returned
+	// (recording.go); nil when recording is off.
+	rec *learnrec.Recorder
+	// lastExport is the digest of the last ExportLearnedState document
+	// recorded, so an unchanged one is not recorded again.
+	lastExport [32]byte
 }
 
 // Evicted is what one sweep of the analyzer's learned state removed, counted
@@ -459,7 +466,7 @@ func (a *SaturationAnalyzer) variantIsStale(key string, now time.Time, timeout t
 	return !ok || now.Sub(seen) > timeout
 }
 
-// NoteVariantsPresent refreshes the liveness stamp of every variant named, for
+// noteVariantsPresent refreshes the liveness stamp of every variant named, for
 // each key it has learned state under, and its accelerator memo. The engine
 // calls it once per cycle, before the sweep, for every variant that still
 // exists -- active or parked at zero replicas.
@@ -480,7 +487,7 @@ func (a *SaturationAnalyzer) variantIsStale(key string, now time.Time, timeout t
 // keeps every key that variant has, and only that variant's -- the trailing
 // separator keeps "v" from matching "v2". A variant that is deleted stops being
 // named, and its state is swept as before.
-func (a *SaturationAnalyzer) NoteVariantsPresent(namespace, modelID string, variantNames []string) {
+func (a *SaturationAnalyzer) noteVariantsPresent(namespace, modelID string, variantNames []string) {
 	if len(variantNames) == 0 {
 		return
 	}
@@ -530,7 +537,7 @@ func (a *SaturationAnalyzer) NoteVariantsPresent(namespace, modelID string, vari
 	a.notePendingPresent(namespace, prefixes, variantNames, now)
 }
 
-// EvictStaleHistory removes learned state that is past its horizon, which
+// evictStaleHistory removes learned state that is past its horizon, which
 // prevents unbounded memory growth from deleted models, renamed variants and
 // workload buckets that are no longer active.
 //
@@ -565,7 +572,7 @@ func (a *SaturationAnalyzer) NoteVariantsPresent(namespace, modelID string, vari
 // have meant -- "the demand floor just lost its mu" -- was not counted at all.
 // Each field names the map it came from, and the caller in steadystate logs
 // them under those names.
-func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
+func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	variantTimeout, bucketRetention := a.horizons.VariantTimeout, a.horizons.BucketRetention
@@ -940,6 +947,9 @@ func (a *SaturationAnalyzer) publishLine(
 		fromVariant: variantKey,
 		learnedAt:   now,
 	}
+	if a.rec.Active() {
+		a.rec.Record(KindPublishLine, now, LineEvent{PhysicsKey: physicsKey, Variant: variantKey, A: model.A, B: model.B})
+	}
 }
 
 // borrowLine returns the line last measured for this engine configuration by
@@ -959,6 +969,10 @@ func (a *SaturationAnalyzer) borrowLine(physicsKey, variantKey string) (itl.Mode
 	line, ok := a.itlLines[physicsKey]
 	if !ok || line.model.IsZero() || line.fromVariant == variantKey {
 		return itl.Model{}, "", false
+	}
+	if a.rec.Active() {
+		a.rec.Record(KindBorrowLine, a.now(), LineEvent{PhysicsKey: physicsKey, Variant: variantKey,
+			From: line.fromVariant, A: line.model.A, B: line.model.B})
 	}
 	return line.model, line.fromVariant, true
 }

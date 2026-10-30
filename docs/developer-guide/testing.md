@@ -175,6 +175,124 @@ make test
 go test ./internal/controller/... -v
 ```
 
+## Learner Recordings
+
+The learner recorder writes every input the analyzers read, and every result
+they return, to a file of JSON lines, so a run can be replayed through the
+analyzers later (`internal/engines/analyzers/learnreplay`). The design is in
+[the learner proposal](../proposals/analyzer-learner.md), sections 2.4 and 2.5.
+It is a test aid, off by default.
+
+Before you start:
+
+- Recordings go to the node's local disk, in an `emptyDir`. A new pod has
+  a new, empty one, so anything that replaces the pod deletes them: turning
+  the recorder on or off, a `kubectl rollout restart`, an upgrade or any
+  change to the pod template, an eviction, a node drain, an uninstall. A
+  container restart (a crash, an OOM) keeps them. There is no other sink in
+  this release.
+- Re-running the installer does not turn the recorder off and, when it
+  changes nothing else, does not replace the pod: it applies client-side,
+  and the fields the patch adds are not in what it applied before. Measured
+  against an API server (`test/recorderpatch`): after the installer's apply
+  the recorder is still there, and the Deployment's generation has not
+  moved.
+- A recording starts only when the controller starts. It keeps the head of a
+  run: once full, it stops. For a new recording, restart the controller.
+
+### Turn it on
+
+Patch the installed controller. The patch adds an environment variable, a
+volume and a small `recordings` sidecar; it changes no image and no other
+setting of the manager:
+
+```bash
+NS=wva-system   # the controller's namespace
+kubectl -n "$NS" patch deployment wva-controller-manager --type strategic --patch-file config/components/learner-recorder/learner-recorder-deployment.yaml
+kubectl -n "$NS" rollout status deployment/wva-controller-manager
+```
+
+On OpenShift, use
+`config/components/learner-recorder-openshift/learner-recorder-openshift-deployment.yaml`
+instead: the same patch without the sidecar's fixed `runAsUser`, which the
+restricted-v2 SCC refuses (it assigns one). For an overlay you render
+yourself, the components `config/components/learner-recorder` and
+`config/components/learner-recorder-openshift` apply the same patches.
+
+The patch mounts a 600Mi `emptyDir` at `/var/lib/wva/learner-recordings` and
+sets `LEARNER_RECORDING_DIR` to it. The sidecar mounts the same volume
+read-only, because the manager image has no `tar`, which `kubectl cp` needs.
+Without the patch, set the directory with `--learner-recording-dir` (or
+`LEARNER_RECORDING_DIR`) and mount a volume there yourself. Never `/tmp`: it
+is a 64Mi `emptyDir`, and the kubelet evicts the pod when it fills. Options a
+recording cannot start with (`/tmp`, a cap under 64Ki, a directory ceiling
+under two caps, a size that is not a whole number) are logged at startup,
+and the controller runs without recording.
+
+To change the sizes on an installed controller, set them in the manager's
+environment (in bytes); this replaces the pod, so copy the recordings out
+first. Keep the volume's `sizeLimit` (600Mi in the patch) at least the
+directory ceiling:
+
+```bash
+kubectl -n "$NS" set env deployment/wva-controller-manager -c manager LEARNER_RECORDING_CAP_BYTES=134217728 LEARNER_RECORDING_DIR_BYTES=268435456
+```
+
+What it writes:
+
+- One file per controller start, named by its start time:
+  `learnrec-20260302T090000.000000000Z.jsonl`. The first line is the start
+  (how the analyzers were configured); a replay refuses a file without it.
+- At most 256Mi per recording (`LEARNER_RECORDING_CAP_BYTES`, or
+  `--learner-recording-cap-bytes`). At the cap the recording keeps what it
+  has, stops writing, and logs how many events it dropped.
+- At most twice the cap in the directory (`LEARNER_RECORDING_DIR_BYTES`, or
+  `--learner-recording-dir-bytes`). To make room, a new recording first
+  deletes the tiny ones (under 64Ki) a crash loop leaves. Then, if a full
+  cap does not fit, it takes what is left, down to 64Ki, and deletes no
+  recording with data. Only when less than 64Ki would be left do the older
+  recordings with data go, oldest first, and the newest of them last.
+- Measured on the in-process acceptance run: about 1.7 KB per replica per
+  cycle for each analyzer a model lists (each `Analyze` carries its input).
+  At a 15 s cycle, with saturation alone, 8 replicas fill 256Mi in about 3.4
+  days and 100 replicas in about 6.5 hours; with saturation, slo and
+  throughput listed, in about 27 hours and 2.1 hours.
+
+### Copy the recordings out
+
+Copy the files out before anything replaces the pod:
+
+```bash
+POD=$(kubectl -n "$NS" get pod -l control-plane=controller-manager -o name | head -1)
+kubectl -n "$NS" exec "${POD#pod/}" -c recordings -- ls -l /var/lib/wva/learner-recordings
+kubectl -n "$NS" cp -c recordings "${POD#pod/}:/var/lib/wva/learner-recordings" ./learner-recordings
+```
+
+### Turn it off
+
+Copy the recordings out first: this replaces the pod, and the new one has a
+new, empty volume. The same command on OpenShift.
+
+```bash
+kubectl -n "$NS" patch deployment wva-controller-manager --type strategic --patch-file config/components/learner-recorder/learner-recorder-off-deployment.yaml
+kubectl -n "$NS" set env deployment/wva-controller-manager -c manager LEARNER_RECORDING_CAP_BYTES- LEARNER_RECORDING_DIR_BYTES-
+```
+
+The second command is needed only if you set the sizes. Re-running the
+installer does not turn the recorder off (see above); uninstalling does.
+
+### Replay one
+
+`learnreplay.Replay` reads a recording and runs it through new analyzers and a
+new capacity store. In `Fidelity` mode, at the commit that recorded it, the
+replay must reproduce the recording byte for byte. The acceptance test for
+that is `TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult`:
+
+```bash
+go test ./internal/engines/steadystate/ -run TestLearnerRecording -v
+go test ./internal/engines/analyzers/learnreplay/ ./internal/signals/learnrec/ -v
+```
+
 ## End-to-End Tests
 
 One suite in `test/e2e/` runs on Kind with emulated GPUs, or on

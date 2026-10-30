@@ -315,7 +315,7 @@ func (a *SaturationAnalyzer) BorrowTickGap() time.Duration {
 	return max(a.borrowTickGap, BorrowedK2TickGap)
 }
 
-// HoldLowerBounds holds every lower bound as it stands while held is true: a
+// holdLowerBounds holds every lower bound as it stands while held is true: a
 // serving cycle reads a bound, but does not arm, advance, re-arm or end one.
 // The engine holds them from its first cycle until the learned-state snapshot
 // has been read: a cycle that ran while the first read failed armed a bound
@@ -324,7 +324,7 @@ func (a *SaturationAnalyzer) BorrowTickGap() time.Duration {
 // relaxation of extra replicas. A bound read while held is priced as an
 // unarmed one, at full strength: the conservative side, for as long as the
 // engine holds them.
-func (a *SaturationAnalyzer) HoldLowerBounds(held bool) {
+func (a *SaturationAnalyzer) holdLowerBounds(held bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.boundsHeld = held

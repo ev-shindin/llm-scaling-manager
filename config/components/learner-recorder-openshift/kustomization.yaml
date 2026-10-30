@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# The learner recorder on OpenShift: ../learner-recorder with the sidecar's
+# fixed runAsUser left out, which the restricted-v2 SCC would refuse; it
+# assigns one from the namespace's range. See ../learner-recorder for the
+# rest, and docs/developer-guide/testing.md, "Learner Recordings".
+patches:
+- path: learner-recorder-openshift-deployment.yaml
+  target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: controller-manager

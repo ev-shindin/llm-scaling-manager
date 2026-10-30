@@ -446,7 +446,7 @@ test: manifests generate fmt vet setup-envtest helm check-import-direction check
 	@# The race detector on the packages whose concurrency spec only it can
 	@# check (a few seconds): without -race that spec proves no deadlock and
 	@# nothing more.
-	CGO_ENABLED=1 go test -race -count=1 ./internal/engines/analyzers/slo/ ./internal/signals/itl/
+	CGO_ENABLED=1 go test -race -count=1 ./internal/engines/analyzers/slo/ ./internal/signals/itl/ ./internal/signals/learnrec/
 
 # Creates a multi-node Kind cluster
 # Adds emulated GPU labels and capacities per node

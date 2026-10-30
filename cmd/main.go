@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -73,6 +74,7 @@ import (
 	prometheusutil "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/prometheus"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/scaler"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/crd"
 	poolutil "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/pool"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/warmpool"
@@ -344,6 +346,19 @@ func main() {
 			"of waiting for each to miss. Popularity is share of desired replicas, which "+
 			"tracks share of requests. 0 disables preloading, leaving admission to parking "+
 			"and the frequency filter.")
+	// The learner recorder: a test aid that records every input the analyzers
+	// read, for replay (docs/developer-guide/testing.md). Off unless named.
+	learnerRecordingDir := flag.String("learner-recording-dir", os.Getenv("LEARNER_RECORDING_DIR"),
+		"Record the analyzers' inputs and results to this directory, one file per controller "+
+			"start, for replay. Empty (the default) is off. Must be its own volume, never /tmp "+
+			"(config/components/learner-recorder). Defaults to $LEARNER_RECORDING_DIR.")
+	learnerRecordingCap := flag.Int64("learner-recording-cap-bytes", envBytes("LEARNER_RECORDING_CAP_BYTES", learnrec.DefaultCapBytes),
+		"The most one recording writes, at least 64Ki; past it the recording keeps its head and "+
+			"drops the rest. Defaults to $LEARNER_RECORDING_CAP_BYTES.")
+	learnerRecordingDirBytes := flag.Int64("learner-recording-dir-bytes", envBytes("LEARNER_RECORDING_DIR_BYTES", 0),
+		"The most all recordings in the directory hold together, at least twice the cap (the "+
+			"default, 0). The volume under the directory must hold at least this much: set its "+
+			"emptyDir sizeLimit to no less. Defaults to $LEARNER_RECORDING_DIR_BYTES.")
 
 	// Leader election timeout configuration flags
 	// These can be overridden in manager.yaml to tune for different environments
@@ -375,6 +390,15 @@ func main() {
 
 	setupLog := ctrl.Log.WithName("setup")
 	setupLog.Info("Logger initialized")
+	// A test aid never stops scaling: options a recording cannot start with
+	// are logged, and the controller runs without one.
+	learnerRecording := learnrec.Options{Dir: *learnerRecordingDir, CapBytes: *learnerRecordingCap,
+		DirBytes: *learnerRecordingDirBytes}
+	if err := learnerRecording.Check(); err != nil {
+		setupLog.Error(err, "Learner recording is off: its options are invalid", "dir", *learnerRecordingDir,
+			"capBytes", *learnerRecordingCap, "dirBytes", *learnerRecordingDirBytes)
+		learnerRecording = learnrec.Options{}
+	}
 
 	// The process's ONE signal context. ctrl.SetupSignalHandler may be called only
 	// once (a second call panics), so it is taken here and handed to every
@@ -904,6 +928,7 @@ func main() {
 		// watch was a cluster-wide informer; the registry knows the same thing for a
 		// better reason — these are the namespaces WVA has actually been called about.
 		engine.VariantEnricher.Tracker = ds
+		engine.LearnerRecording = learnerRecording
 		// Rebuild the limiter live when the saturation ConfigMap's limiters: list
 		// changes — no restart required. The builder re-reads the effective config.
 		engine.SetLimiterBuilder(func() (allocation.Limiter, error) {
@@ -1611,4 +1636,21 @@ func runWarmPool(
 		"gpuMemoryUtilization", *warmPoolGPUUtil,
 		"preloadTop", *warmPoolPreloadTop)
 	return reconciler.Start(ctx)
+}
+
+// envBytes is the byte count in the environment variable name, for a flag's
+// default: def when it is unset, and 1 when it is not a whole number, which
+// learnrec.Options.Check refuses as below its minimum, so a typo turns the
+// recorder off with an error logged rather than recording with a default
+// nobody asked for.
+func envBytes(name string, def int64) int64 {
+	v, ok := os.LookupEnv(name)
+	if !ok || v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 1
+	}
+	return n
 }

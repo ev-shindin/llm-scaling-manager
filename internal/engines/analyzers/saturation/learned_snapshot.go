@@ -476,10 +476,10 @@ func variantOfKey(key string) (variant, model string, ok bool) {
 
 func finitePositive(v float64) bool { return v > 0 && !math.IsInf(v, 0) && !math.IsNaN(v) }
 
-// ExportLearnedState copies what the analyzer has learned, with the engine
+// exportLearnedState copies what the analyzer has learned, with the engine
 // configuration each of its variants runs now. Safe to call concurrently with
 // analysis.
-func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
+func (a *SaturationAnalyzer) exportLearnedState() LearnedState {
 	a.mu.Lock()
 	s := LearnedState{
 		K2:               make(map[string]capacity.RollingAverageSnapshot, len(a.computeCapacityHistory)),
@@ -757,12 +757,12 @@ func mergeAbsent[V any](dst, src map[string]V) {
 	}
 }
 
-// RestoreLearnedState takes a stored state in. The shared ITL lines, whose key
+// restoreLearnedState takes a stored state in. The shared ITL lines, whose key
 // IS the configuration, are installed now; per-variant entries -- the
 // accelerator memo among them -- are held until installRestored checks their
 // variant's configuration. Nothing already learned in this process is
 // overwritten.
-func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
+func (a *SaturationAnalyzer) restoreLearnedState(s LearnedState) RestoreReport {
 	var rep RestoreReport
 	now := a.now()
 	a.mu.Lock()
@@ -1437,9 +1437,9 @@ func (a *SaturationAnalyzer) notePendingPresent(namespace string, prefixes, vari
 	}
 }
 
-// TakeRestoreOutcomes returns how many variants' restored state installRestored
+// takeRestoreOutcomes returns how many variants' restored state installRestored
 // decided since it was last called, by outcome, and resets the counts.
-func (a *SaturationAnalyzer) TakeRestoreOutcomes() map[string]int {
+func (a *SaturationAnalyzer) takeRestoreOutcomes() map[string]int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	out := make(map[string]int, len(a.restoreOutcomes))
@@ -1450,12 +1450,12 @@ func (a *SaturationAnalyzer) TakeRestoreOutcomes() map[string]int {
 	return out
 }
 
-// ForgetLearnedState drops everything learned and everything pending, for an
+// forgetLearnedState drops everything learned and everything pending, for an
 // operator who deleted the stored snapshot: written back from memory, the
 // deletion would undo nothing. The working memories a flush is not about
 // (learnedMap.flushed) stay: the decode-saturation memory dropped mid-episode
 // let a queued prefill replica record decode's back-pressure as its own k2.
-func (a *SaturationAnalyzer) ForgetLearnedState() {
+func (a *SaturationAnalyzer) forgetLearnedState() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, m := range a.learnedMapsLocked() {

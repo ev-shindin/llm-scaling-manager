@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# The learner recorder: every input the analyzers read, and every result they
+# return, written to a volume of its own for replay. A test aid. Not part of
+# any shipped overlay.
+#
+# On an installed controller, apply learner-recorder-deployment.yaml as a
+# strategic-merge patch (docs/developer-guide/testing.md, "Learner
+# Recordings"); learner-recorder-off-deployment.yaml takes it out again. This
+# component applies the same patch for an overlay built by hand, such as a
+# test harness that renders its own. On OpenShift use ../learner-recorder-openshift
+# instead: the same patch without the sidecar's fixed runAsUser.
+#
+# The volume is a separate emptyDir, never the controller's /tmp: that is a
+# 64Mi emptyDir and the kubelet evicts the pod when it fills.
+patches:
+- path: learner-recorder-deployment.yaml
+  target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: controller-manager

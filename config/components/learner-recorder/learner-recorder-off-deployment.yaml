@@ -1,0 +1,25 @@
+# Strategic-merge patch that turns the learner recorder off again
+# (docs/developer-guide/testing.md, "Turn it off"). Copy the recordings out
+# first: the new pod this rolls out has a new, empty volume.
+#   kubectl -n <ns> patch deployment wva-controller-manager --type strategic \
+#     --patch-file config/components/learner-recorder/learner-recorder-off-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wva-controller-manager
+spec:
+  template:
+    spec:
+      containers:
+      - name: manager
+        env:
+        - name: LEARNER_RECORDING_DIR
+          $patch: delete
+        volumeMounts:
+        - mountPath: /var/lib/wva/learner-recordings
+          $patch: delete
+      - name: recordings
+        $patch: delete
+      volumes:
+      - name: learner-recordings
+        $patch: delete
