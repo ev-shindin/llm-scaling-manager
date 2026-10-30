@@ -1,0 +1,58 @@
+# Known failures of the learner property tests (docs/proposals/analyzer-learner.md, 2.6).
+#
+# Each row is a property case that fails on today's code. TestLearnerProperties
+# runs it and requires it to still fail: once it passes, the build breaks until
+# its row is removed. A row naming no case is an error. A PR that fixes a row
+# removes it in the same change. Nothing here is skipped, and no tolerance is
+# widened to pass a defect.
+#
+# id is class/learner/case, as the test names it; rows are sorted by id.
+# owner is the PR of #341 that clears the row, or "open".
+- id: contamination-heterogeneity/mu/half-served-max-slow-pod
+  class: contamination-heterogeneity
+  learner: mu
+  finding: "A genuinely slow pod under half the fastest's rate is refused (half the served max, a section-5 value estimator), so mu is its siblings' mean: over the fleet's, the SLO side. Declared: it starts to over-price once one pod serves under half the fastest."
+  measured: "fleet {1, 1, 1, 0.34}: mean 0.835, admitted readings price 1.000, 20 % over (seed 1)"
+  owner: "PR 3"
+- id: contamination-heterogeneity/mu/sibling-yield-slow-pod
+  class: contamination-heterogeneity
+  learner: mu
+  finding: "The sibling yield prices the full siblings' lower median when the reading on record is a genuinely slow pod's: over the fleet's mean, the SLO side. Declared: it starts to over-price once the slow pod reads under siblingMuTolerance (0.8) of its siblings."
+  measured: "fleet {1, 1, 1, 0.57}: mean 0.892, the yield prices 1.000, 12 % over (seed 1)"
+  owner: "PR 3"
+- id: edges/idle/idle-line-030
+  class: edges
+  learner: idle
+  finding: "Idle room has a 2 min dwell and no hysteresis band on the 0.30 idle line (loadImbalance.idleKvUsage): a peak KV sitting on the line with 30 s-correlated noise settles idle and clears again."
+  measured: "the idle-room verdict reversed 6 times in 116 cycles with the noise-free path on the line (seed 1)"
+  owner: "open"
+- id: edges/k2/key-on-output-boundary
+  class: edges
+  learner: k2
+  finding: "The k2 key's output-length bucket has no hysteresis of its own: a fleet's tracked output length on the 500-token medium/long boundary moves the k2 key and back."
+  measured: "the k2 key changed 2 times in 80 cycles with 6 % autocorrelated noise on the boundary (seed 2)"
+  owner: "open"
+- id: first-sample/k2/second-reading
+  class: first-sample
+  learner: k2
+  finding: "k2 prices its first admitted reading at once; the window mean then moves by half the second reading's difference."
+  measured: "296 552 from the first reading, 264 778 after a second: 11 % (seed 1)"
+  owner: "open"
+- id: first-sample/start-time/second-pod
+  class: first-sample
+  learner: start-time
+  finding: "The start-time estimator's first measurement replaces the 70 s default (DefaultReplicaStartSeconds); the second pod's EWMA step moves it by more than the band."
+  measured: "first pod 89 s set 88.7 s; a second at 48 s moved it to 76.4 s: 14 % (seed 1)"
+  owner: "PR 5"
+- id: liveness/k2/flow-control-on
+  class: liveness
+  learner: k2
+  finding: "k2 is learned only from an engine queue at or over the threshold. Under flow control the queue stands at the scheduler and the engines' own queues read empty, so P1-obs never fires and the variant prices from k1."
+  measured: "two decode replicas full for 3 min with 40 requests at the scheduler: no k2 written (seed 1)"
+  owner: "open"
+- id: n-dependence/prefill-bound/iid-max
+  class: n-dependence
+  learner: prefill-bound
+  finding: "The prefill bound writes through mu's fold under one empty pod name, so within a minute it keeps the max of every prefill pod's reading: its expectation grows with N."
+  measured: "E[bound] at N=4 is 1.0875 against 0.9814 at N=1: +10.8 % (seed 1)"
+  owner: "open"
