@@ -319,7 +319,7 @@ const (
 func propertyCases() []propCase {
 	out := make([]propCase, 0, 192)
 	for _, part := range [][]propCase{itlCases(), k2Cases(), muCases(), floorCases(), otherCases(),
-		learnerCases(), edgeCases(), moreCases()} {
+		learnerCases(), edgeCases(), moreCases(), reviewEdgeCases()} {
 		out = append(out, part...)
 	}
 	return out

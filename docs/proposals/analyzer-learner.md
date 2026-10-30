@@ -649,15 +649,17 @@ not cover a key.
 `D/property_mutants_test.go`, and a test holds it to the mutants. Each
 finding above is in exactly one state:
 
-- **Caught:** 20 findings. For each, a mutant puts the defect back, and its
-  class fails on that mutant. For 12 a mutant runs the production learner
+- **Caught:** 21 findings. For each, a mutant puts the defect back, and its
+  class fails on that mutant. For 13 a mutant runs the production learner
   (a policy key, rows, or a stub); 8 are caught only by a toy, and the code
   table marks them "caught (toy)". "Restart fix stubbed" is caught: its
   mutant stubs the Ready time through the analyzer's `readySince` seam, the
   restart case fails on it, and the per-path counter "joined refusals with a
-  known ReadySince" drops to zero. The replay counts
-  that counter and the others of 2.5, and the golden check fails when a
-  counter is zero over every committed golden.
+  known ReadySince" drops to zero. "Prefill never learns (#144)" is caught
+  too: behind a full decode the prefill bound learns a mu within 3 min, and
+  with `enablePrefillThroughputBound` off, its default, prefill learns
+  none. The replay counts that counter and the others of 2.5, and the golden
+  check fails when a counter is zero over every committed golden.
 - **Still escaping:** the rest, listed below. A row is escaping either because
   no mutant reproduces it, or because today's code already fails its class,
   so the defect is a known-failures ledger row (`D/testdata/properties/known-failures.yaml`)
@@ -675,7 +677,6 @@ finding above is in exactly one state:
 | Prefill double scrape | a ledger row: the prefill bound's max takes a pod read at 2x |
 | Demand falls when λ lags a step | the trajectory passes; no pre-fix floor is reproduced |
 | No floor under flow control (#144) | a ledger row for k2; no case drives mu or the floor under flow control |
-| Prefill never learns (#144) | no liveness case for a prefill role yet |
 | Settle holes: fall, rate escape, idle return, lend | need the settle tracker (PR 1) |
 | "For good" self-sealing low mu | the closed-loop probe (PR 3) |
 | Share swing and cancel (#272 F1/F2 and the d3 reviews) | the share ledger (#14, #15) is not recorded or replayed. Out of scope for PR 0 |

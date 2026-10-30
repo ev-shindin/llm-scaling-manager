@@ -19,7 +19,7 @@ type coverage struct {
 
 var propCoverage = []coverage{
 	{learner: "itl", classes: []propClass{classTransient, classFirstSample, classStale, classMissing, classHeterogeneity, classKnownTruth, classLiveness, classEdges},
-		gap: "row 1. Not covered: redistribution, N-dependence, scale, monotonicity (the line is a per-key fit, and the cases move no load between keys); the carry (steadyGate.carry) as an edge of its own: it is run at a non-default value through the joiner and B cases, not held at the boundary"},
+		gap: "row 1. Not covered: redistribution, N-dependence, scale, monotonicity (the line is a per-key fit, and the cases move no load between keys)"},
 	{learner: "slo-itl", classes: []propClass{classTransient, classFirstSample, classStale, classMissing, classKnownTruth},
 		gap: "row 13, through slo.Analyzer: its admission wiring (the policy's band and steady gate) on the shared tracker. The tracker's own edges are the itl learner's"},
 	{learner: "k2", classes: []propClass{classTransient, classFirstSample, classStale, classMissing, classRedistribution, classKnownTruth, classScale, classLiveness, classEdges},
@@ -27,7 +27,7 @@ var propCoverage = []coverage{
 	{learner: "demand", classes: []propClass{classRedistribution},
 		gap: "the per-pod KV peak against instant KV only"},
 	{learner: "mu", classes: []propClass{classTransient, classFirstSample, classMissing, classHeterogeneity, classNDependence, classKnownTruth, classScale, classLiveness, classEdges},
-		gap: "not covered: stale value (freshFor and lowHoldFor are held as edges), redistribution, monotonicity; the sibling yield's full-cache line and the lower median's mass point as edges; mu under flow control"},
+		gap: "not covered: stale value (freshFor and lowHoldFor are held as edges), redistribution, monotonicity; mu under flow control"},
 	{learner: "prefill-bound", classes: []propClass{classHeterogeneity, classNDependence, classLiveness},
 		gap: "the N-dependence case drives the write path; heterogeneity and liveness also run through a P/D Analyze with enablePrefillThroughputBound"},
 	{learner: "floor", classes: []propClass{classKnownTruth, classMonotonicity, classEdges},
@@ -41,7 +41,7 @@ var propCoverage = []coverage{
 	{learner: "borrowed-k2", classes: []propClass{classMissing, classRedistribution, classKnownTruth, classLiveness, classMonotonicity, classEdges},
 		gap: "row 4. Not covered: the bound across a controller restart (the snapshot's tests hold it)"},
 	{learner: "shape-hold", classes: []propClass{classTransient, classFirstSample, classStale, classMissing, classEdges},
-		gap: "row 8. The arriving-prompt axis (the scheduler queue) has no case; the backstop's cooldown is not an edge of its own"},
+		gap: "row 8. The arriving-prompt axis (the scheduler queue) has no case; the backstop's cooldown is an edge, a ledger row of #391"},
 	{learner: "decode-memory", classes: []propClass{classTransient, classMissing, classRedistribution, classEdges},
 		gap: "row 9"},
 	{learner: "throughput-itl", gap: "row 16 (throughput/analyzer.go resolveITLModel) lives in another package and has none of #273's fixes; its cases come with PR 4b"},

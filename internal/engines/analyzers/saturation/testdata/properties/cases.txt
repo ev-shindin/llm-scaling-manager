@@ -33,6 +33,8 @@ edges/itl/band-upper-edge
 edges/itl/bimodal-fit
 edges/itl/cap-preemption
 edges/itl/cap-preemption-nondefault
+edges/itl/carry
+edges/itl/carry-nondefault
 edges/itl/idle-rows
 edges/itl/idle-rows-nondefault
 edges/itl/max-k-drift
@@ -71,9 +73,12 @@ edges/mu/max-tokens-over-completions-nondefault
 edges/mu/min-measured-of-derived
 edges/mu/min-measured-of-derived-nondefault
 edges/mu/pricing-k-across-min-measured
+edges/mu/sibling-full-cache-line
+edges/mu/sibling-median-mass-point
 edges/mu/sibling-tolerance
 edges/mu/sibling-tolerance-nondefault
 edges/mu/stale-agreement-2x
+edges/shape-hold/backstop-cooldown
 edges/shape-hold/hold-disabled
 edges/shape-hold/tolerance-20pct
 edges/shared-line/reuse-switch
@@ -108,6 +113,7 @@ liveness/k2/prefill-role
 liveness/k2/tp2-dp4-whole-node
 liveness/k2/tp8-whole-node
 liveness/mu/n2-aggregated
+liveness/prefill-bound/behind-full-decode
 liveness/prefill-bound/pd-analyze
 liveness/shared-line/sibling-borrows
 missing-duplicated/borrowed-k2/pause-is-not-serving

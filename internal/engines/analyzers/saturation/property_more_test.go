@@ -1,13 +1,16 @@
 package saturation
 
 import (
+	"errors"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"strings"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 )
 
 // The cases #389 listed as gaps on the classes it had: liveness for 8-GPU
@@ -30,6 +33,8 @@ func moreCases() []propCase {
 		{class: classLiveness, learner: "k2", name: "tp8-whole-node", family: familyDirect, tuning: tunedDefault, check: checkK2Ranks(1, 8)},
 		{class: classLiveness, learner: "k2", name: "prefill-role", family: familyDirect, tuning: tunedDefault, check: checkK2Prefill},
 		{class: classLiveness, learner: "itl", name: "line-within-3-min", family: familyDirect, tuning: tunedDefault, check: checkITLLiveness(def)},
+		{class: classLiveness, learner: "prefill-bound", name: "behind-full-decode", family: familyDirect, tuning: tunedPolicy,
+			policy: prefillBoundPolicy, check: checkBoundAnalyzeOn(1, true, prefillBoundPolicy)},
 		{class: classLiveness, learner: "prefill-bound", name: "pd-analyze", family: familyDirect, tuning: tunedPolicy,
 			policy: prefillBoundPolicy, check: checkBoundAnalyze(1)},
 		// Scale.
@@ -441,18 +446,30 @@ func checkFloorMonotoneTimeBase(seed uint64) error {
 // the declared estimand: factor 1 is liveness, 2 the double scrape seen
 // through a whole Analyze.
 func checkBoundAnalyze(factor float64) func(uint64) error {
+	return checkBoundAnalyzeOn(factor, false, prefillBoundPolicy)
+}
+
+// checkBoundAnalyzeOn is checkBoundAnalyze with decode full and queued when
+// decodeFull is set -- the fleet whose prefill readings computeK2 discards as
+// decode's back-pressure, and which learned no prefill mu at all before the
+// bound (#144) -- under pol's enablePrefillThroughputBound.
+func checkBoundAnalyzeOn(factor float64, decodeFull bool, pol *config.ScalingPolicy) func(uint64) error {
 	return func(seed uint64) error {
 		r := propRand(seed)
 		rig := newPropRig()
 		rig.policy = func(p *config.ScalingPolicy) {
-			p.EnablePrefillThroughputBound = prefillBoundPolicy.EnablePrefillThroughputBound
+			p.EnablePrefillThroughputBound = pol.EnablePrefillThroughputBound
 		}
 		states := []domain.VariantReplicaState{decodeStates(1)[0],
 			{VariantName: "p", AcceleratorName: "H200", CurrentReplicas: 4, GPUsPerReplica: 1, Role: domain.RolePrefill}}
 		level := 3000 + 1000*r.Float64()
 		for range 13 {
 			rows := make([]domain.ReplicaMetrics, 0, 5)
-			rows = append(rows, fullDecode("d0", 0.3, 0))
+			if decodeFull {
+				rows = append(rows, fullDecode("d0", 0.95, 10))
+			} else {
+				rows = append(rows, fullDecode("d0", 0.3, 0))
+			}
 			for p := range 4 {
 				rm := satRow(fmt.Sprintf("p%d", p), int64(float64(propKv)*0.9), 10, 3)
 				rm.VariantName = "p"
@@ -486,4 +503,88 @@ func (r *propRig) boundTokens() float64 {
 		}
 	}
 	return 0
+}
+
+// --- the thresholds the review added ---
+
+func reviewEdgeCases() []propCase {
+	return []propCase{
+		edgeCase("itl", "carry", tunedDefault, nil,
+			edge3("a steady reading kept past the main window, at its age in s", probeCarry(tuningDefault), 285, 300, 315, [3]bool{true, true, false})),
+		edgeCase("itl", "carry-nondefault", tunedNonDefault, tuningPolicy(tuningNonDefault),
+			edge3("a steady reading kept past the main window, at its age in s", probeCarry(tuningNonDefault), 885, 900, 915, [3]bool{true, true, false})),
+		edgeCase("mu", "sibling-full-cache-line", tunedDefault, nil,
+			edge3("an unqueued sibling counted full at KV", probeSiblingFull, 0.79, 0.80, 0.81, [3]bool{false, true, true})),
+		edgeCase("mu", "sibling-median-mass-point", tunedDefault, nil,
+			edge3("the siblings' lower median is the slow rate with slow replicas among four", probeMassPoint, 1, 2, 3, [3]bool{false, true, true})),
+		edgeCase("shape-hold", "backstop-cooldown", tunedDefault, nil,
+			edge3("a change reported outstanding at s after the backstop gave up", probeShapeCooldown, 285, 300, 315, [3]bool{false, true, true})),
+	}
+}
+
+// probeCarry: a steady reading, then the main window filled with twenty
+// newer readings, then the window read s seconds after the steady one: the
+// steady window keeps it up to carry past the main window's oldest.
+func probeCarry(tn config.AnalyzerTuning) probe {
+	return func(_ *rand.Rand, s float64) (bool, error) {
+		adm := itl.Admission{Steady: steadinessOf(tn)}
+		tr := itl.NewTracker()
+		tr.Observe(propITLKey, "v", fleetAt([]float64{0.4}), adm, propStart)
+		joiners := make([]domain.ReplicaMetrics, 0, 20)
+		for j := range 20 {
+			joiners = append(joiners, itlRow(fmt.Sprintf("j%d", j), 0.5, propITL(0.5)))
+		}
+		tr.Observe(propITLKey, "v", joiners, adm, propStart.Add(propCycle))
+		r := tr.Observe(propITLKey, "v", nil, adm, propStart.Add(time.Duration(s)*time.Second))
+		return r.SteadyHeld == 1, nil
+	}
+}
+
+// probeSiblingFull: an unqueued sibling at KV x beside a slow replica full and
+// queued: it counts as a full sibling, opening the yield, from the
+// kvCacheThreshold line.
+func probeSiblingFull(r *rand.Rand, x float64) (bool, error) {
+	slow := fullDecode("d0", 0.95, 10)
+	slow.RequestRate, slow.GenerationTokenRate = 1, 500
+	sib := fullDecode("d1", x, 0)
+	rate := 1.5 + r.Float64()
+	sib.RequestRate, sib.GenerationTokenRate = rate, rate*500
+	t := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
+	got := t.servedBounds([]domain.ReplicaMetrics{slow, sib}, map[string]string{"v": domain.RoleDecode}, 5, 0.8, 500, 1000, 500, 0)
+	return got["v"].unqueued, nil
+}
+
+// probeMassPoint: four full replicas, n of them slow: the siblings' lower
+// median is the slow rate from half of them.
+func probeMassPoint(r *rand.Rand, n float64) (bool, error) {
+	slow, fast := 1+r.Float64(), 3+r.Float64()
+	reads := map[string]float64{}
+	for i := range 4 {
+		reads[fmt.Sprintf("p%d", i)] = fast
+		if i < int(n) {
+			reads[fmt.Sprintf("p%d", i)] = slow
+		}
+	}
+	return lowerMedian(reads) == slow, nil
+}
+
+// probeShapeCooldown: a shape change whose hold the backstop gave up on after
+// its 5 min, then the shape changes again s seconds later: inside the
+// cooldown (holdFor after the give-up) no hold is raised, so nothing is
+// outstanding; from its end a hold is.
+func probeShapeCooldown(_ *rand.Rand, s float64) (bool, error) {
+	rig := newShapeRig()
+	for range 4 {
+		rig.note(1000, 1000, ShapeChangeHoldMax)
+	}
+	changedAt := rig.clock
+	if _, _, held := rig.note(1000, 2000, ShapeChangeHoldMax); !held {
+		return false, errors.New("precondition: the first change raised no hold")
+	}
+	gaveUp := changedAt.Add(ShapeChangeHoldMax)
+	for rig.clock.Before(gaveUp.Add(time.Duration(s) * time.Second)) {
+		rig.note(1000, 2000, ShapeChangeHoldMax)
+	}
+	_, _, held := rig.note(1000, 3000, ShapeChangeHoldMax)
+	return held, nil
 }

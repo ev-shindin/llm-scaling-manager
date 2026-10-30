@@ -601,7 +601,7 @@ one is a row in `known-failures.yaml` with these fields:
 | `expect` | the violation kind the case fails with |
 | `finding` | the defect |
 | `measured` | how often it failed, and the first failure, when the row was written |
-| `owner` | the PR that clears it, or `open` |
+| `owner` | what clears it: a PR of the plan (`PR 3`), an issue (`#391`), or `open` |
 
 The test is strict both ways:
 
