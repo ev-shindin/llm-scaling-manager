@@ -2,11 +2,14 @@
 # controller (docs/developer-guide/testing.md, "Learner Recordings"):
 #   kubectl -n <ns> patch deployment wva-controller-manager --type strategic \
 #     --patch-file config/components/learner-recorder/learner-recorder-deployment.yaml
-# It changes no image and no other field of the manager.
+# It changes no image and no other field of the manager. The name is the
+# installed one (the overlays prefix wva-); kustomize, which targets the
+# unprefixed name, ignores it. On OpenShift use
+# ../learner-recorder-openshift/learner-recorder-openshift-deployment.yaml.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: controller-manager
+  name: wva-controller-manager
 spec:
   template:
     spec:
@@ -28,9 +31,9 @@ spec:
         command: ["sh", "-c", "trap 'exit 0' TERM; while true; do sleep 3600 & wait $!; done"]
         securityContext:
           runAsNonRoot: true
-          # The busybox image runs as root unless told otherwise. On OpenShift
-          # the restricted-v2 SCC assigns the user and refuses this one:
-          # delete the line there (testing.md says so).
+          # The busybox image runs as root unless told otherwise. OpenShift's
+          # restricted-v2 SCC assigns the user and refuses a fixed one: there,
+          # use ../learner-recorder-openshift, the same patch without this line.
           runAsUser: 65532
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
