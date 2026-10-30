@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -731,10 +732,15 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		in := makeAnalyzerInput([]domain.ReplicaMetrics{rm}, states(4))
 		in.ArrivalRate = 5.68
 		in.Config.(*config.ScalingPolicy).DisableShapeChangeHold = true
-		_, err := analyzer.Analyze(ctx, in)
+		out, err := analyzer.Analyze(ctx, in)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(outstanding()).To(BeFalse(),
 			"the change is tracked but holds nothing")
+		// The memo above is not what withholds release; the cycle's own flag
+		// is. It used to report the declaring cycle as held whatever the
+		// policy said, so this cycle's decode demand was raised to the band.
+		Expect(out.HeldRoleDemand).NotTo(HaveKey(domain.RoleDecode),
+			"nor on the cycle that declares the change")
 	})
 
 	It("raises nothing while the shape holds still", func() {
@@ -747,6 +753,57 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 			Expect(out.HeldRoleDemand).To(BeNil(), "and records no held demand")
 			clock = clock.Add(15 * time.Second)
 		}
+	})
+})
+
+var _ = Describe("noteFleetShape's outstanding flag", func() {
+	// What the cycle holds on is this return value, not the memo's state, so
+	// it must agree with the memo on the cycle that declares a change too.
+	var (
+		analyzer *SaturationAnalyzer
+		clock    time.Time
+	)
+	BeforeEach(func() {
+		analyzer = NewSaturationAnalyzer(capacity.NewStore())
+		clock = time.Date(2026, 9, 21, 20, 59, 38, 0, time.UTC)
+		analyzer.now = func() time.Time { return clock }
+	})
+	note := func(in, out float64, holdFor time.Duration) bool {
+		_, _, outstanding := analyzer.noteFleetShape("test-ns", "test-model",
+			in, out, 0, false, holdFor, logr.Discard())
+		return outstanding
+	}
+	changedWithin := func() bool {
+		return analyzer.shapeChangedWithin("test-ns", "test-model", time.Second, clock)
+	}
+
+	It("is false on a declared change when the hold is disabled", func() {
+		Expect(note(1000, 6000, 0)).To(BeFalse())
+		clock = clock.Add(15 * time.Second)
+		Expect(note(8000, 1000, 0)).To(BeFalse(),
+			"a hold of zero raises nothing, so the declaring cycle holds nothing")
+		Expect(changedWithin()).To(BeTrue(),
+			"the change is still declared; only the hold is off")
+	})
+
+	It("is false on a declared change inside a given-up hold's cooldown", func() {
+		hold := ShapeChangeHoldMax
+		Expect(note(1000, 6000, hold)).To(BeFalse())
+		clock = clock.Add(15 * time.Second)
+		Expect(note(1000, 4000, hold)).To(BeTrue(), "the first change raises a hold")
+
+		// Past the backstop, on a cycle that also declares: the hold is given
+		// up on and the cooldown starts, so this change raises nothing.
+		clock = clock.Add(hold + time.Second)
+		Expect(note(1000, 3000, hold)).To(BeFalse(),
+			"the backstop gave up on the hold; the same cycle's change must not re-hold")
+		Expect(changedWithin()).To(BeTrue(), "the cycle did declare a change")
+
+		// And the drift that follows, still inside the cooldown.
+		clock = clock.Add(90 * time.Second)
+		Expect(note(1000, 2200, hold)).To(BeFalse(),
+			"a change inside the cooldown raises no hold, so it holds nothing")
+		Expect(changedWithin()).To(BeTrue(), "the cycle did declare a change")
 	})
 })
 

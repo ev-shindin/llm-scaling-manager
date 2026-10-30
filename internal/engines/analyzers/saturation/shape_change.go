@@ -439,7 +439,11 @@ func (a *SaturationAnalyzer) noteFleetShape(namespace, modelID string, in, out f
 		"arrivingPromptTokens", arriving, "arrivingRead", arrivingOK,
 		"hadShape", hadShape, "tolerance", shape.DefaultChangeTolerance,
 		"reason", "the shape the capacity figures were learned under is no longer the one arriving; the fleet is not released until the new shape has a reading of its own")
-	return stableOut, stableIn, true
+	// The hold's own state, as on the no-change path above, not "changed": a
+	// change declared with the hold disabled, or inside a given-up hold's
+	// cooldown, raised no hold, and reporting it outstanding here held the
+	// fleet anyway for the one cycle that declared it.
+	return stableOut, stableIn, !memo.changedAt.IsZero()
 }
 
 // fleetHasMeasuredItself reports whether every variant with a replica has a
