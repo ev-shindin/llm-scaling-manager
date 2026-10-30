@@ -44,11 +44,35 @@ func TestGoldens_APathNoGoldenRunsIsAProblem(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, c.Problems, "the acceptance golden alone still reproduces")
 	got := strings.Join(c.Uncovered, "\n")
-	for _, path := range []string{saturation.PathK2ObsAdmitted, saturation.PathMuSampleWritten,
-		saturation.PathMuYieldServed, saturation.PathMuYieldSibling, saturation.PathMuYieldStale,
-		saturation.PathJoinedRefusedReadySince} {
-		assert.Contains(t, got, "no golden runs the learner path "+path)
+	// The paths named are exactly those the acceptance golden ran on no
+	// cycle, by its own counts.
+	var zero []string
+	for _, p := range saturation.PathNames() {
+		if c.Paths[p] == 0 {
+			zero = append(zero, p)
+		}
 	}
-	assert.Len(t, c.Uncovered, 6, "only the six paths the acceptance run misses: %s", got)
+	require.NotEmpty(t, zero, "precondition: the acceptance golden alone leaves a path uncovered")
+	require.Len(t, c.Uncovered, len(zero), got)
+	for _, p := range zero {
+		assert.Contains(t, got, "no golden runs the learner path "+p)
+	}
 	t.Log(got)
+}
+
+// Each counter's zero-check: with every path counted but one, the check
+// names exactly that one.
+func TestGoldens_EachPathAtZeroIsNamedAlone(t *testing.T) {
+	for _, zero := range saturation.PathNames() {
+		paths := map[string]int64{}
+		for _, p := range saturation.PathNames() {
+			paths[p] = 1
+		}
+		paths[zero] = 0
+		got := pathProblems(paths)
+		if assert.Len(t, got, 1, "%s at zero", zero) {
+			assert.Contains(t, got[0], "learner path "+zero+":", "%s at zero", zero)
+		}
+	}
+	assert.Len(t, pathProblems(map[string]int64{}), len(saturation.PathNames()))
 }

@@ -176,6 +176,11 @@ func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate
 		}
 	}
 	ra.AddAt(rate, now)
+	if pod != "" {
+		// A replica's rate started a sample of mu's window; the prefill
+		// bound writes under no pod and is not mu.
+		a.paths.add(pathMuWritten, 1)
+	}
 	a.throughputSampledAt[key] = now
 	a.throughputPodReads[key] = podReads{at: now, pods: map[string]float64{pod: rate}}
 }

@@ -70,6 +70,7 @@ edges/mu/max-tokens-over-completions
 edges/mu/max-tokens-over-completions-nondefault
 edges/mu/min-measured-of-derived
 edges/mu/min-measured-of-derived-nondefault
+edges/mu/pricing-k-across-min-measured
 edges/mu/sibling-tolerance
 edges/mu/sibling-tolerance-nondefault
 edges/mu/stale-agreement-2x

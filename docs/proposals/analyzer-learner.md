@@ -650,9 +650,12 @@ not cover a key.
 finding above is in exactly one state:
 
 - **Caught:** 20 findings. For each, a mutant puts the defect back, and its
-  class fails on that mutant. "Restart fix stubbed" is one: its mutant stubs
-  noteReady's join, the restart case fails on it, and the per-path counter
-  "joined refusals with a known ReadySince" drops to zero. The replay counts
+  class fails on that mutant. For 12 a mutant runs the production learner
+  (a policy key, rows, or a stub); 8 are caught only by a toy, and the code
+  table marks them "caught (toy)". "Restart fix stubbed" is caught: its
+  mutant stubs the Ready time through the analyzer's `readySince` seam, the
+  restart case fails on it, and the per-path counter "joined refusals with a
+  known ReadySince" drops to zero. The replay counts
   that counter and the others of 2.5, and the golden check fails when a
   counter is zero over every committed golden.
 - **Still escaping:** the rest, listed below. A row is escaping either because

@@ -12,6 +12,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
 
 // Edges by enumeration (2.6): the operating point on each threshold of 2.6's
@@ -42,13 +43,18 @@ func edge3(what string, p probe, below, at, above float64, want [3]bool) func(ui
 }
 
 // edgeCase is one enumerated threshold as a property case.
-func edgeCase(learner, name string, tn propTuning, keys []string, check func(uint64) error) propCase {
+func edgeCase(learner, name string, tn propTuning, pol *config.ScalingPolicy, check func(uint64) error) propCase {
 	return propCase{class: classEdges, learner: learner, name: name, family: familyDirect, tuning: tn,
-		keys: keys, seeds: 5, check: check}
+		policy: pol, seeds: 5, check: check}
 }
 
 func edgeCases() []propCase {
 	nd := tuningWith
+	polOf := tuningPolicy
+	queuePol := &config.ScalingPolicy{QueueLengthThreshold: 10}
+	kvPol := &config.ScalingPolicy{KvCacheThreshold: 0.9}
+	idlePol := &config.ScalingPolicy{LoadImbalance: config.LoadImbalance{IdleKvUsage: 0.2}}
+	scaleUpPol := &config.ScalingPolicy{ScaleUpThreshold: 0.9}
 	band := nd(func(t *config.AnalyzerTuning) { t.ITLBand.MinObservableK, t.ITLBand.MaxObservableK = 0.10, 0.90 })
 	capRate := 0.05
 	capped := nd(func(t *config.AnalyzerTuning) { t.ITLBand.CapMaxPreemptionRate = &capRate })
@@ -73,91 +79,97 @@ func edgeCases() []propCase {
 		edgeCase("itl", "ols-min-rows", tunedDefault, nil, edge3("OLS at n steady rows", probeOLSRows, 9, 10, 11, [3]bool{false, true, true})),
 		edgeCase("itl", "ols-min-spread", tunedDefault, nil, edge3("OLS at spread", probeOLSSpread, 0.29, 0.30, 0.31, [3]bool{false, true, true})),
 		edgeCase("itl", "min-settled-samples", tunedDefault, nil, edge3("pinned fit at n settled readings", probeSettled(tuningDefault), 2, 3, 4, [3]bool{false, true, true})),
-		edgeCase("itl", "min-settled-samples-nondefault", tunedPolicy, []string{"steadyGate.minSettledSamples"},
+		edgeCase("itl", "min-settled-samples-nondefault", tunedPolicy, polOf(settled),
 			edge3("pinned fit at n settled readings", probeSettled(settled), 4, 5, 6, [3]bool{false, true, true})),
 		edgeCase("itl", "steady-for", tunedDefault, nil, edge3("a joiner settling after s", probeSteadyFor(tuningDefault), 105, 120, 135, [3]bool{true, false, false})),
-		edgeCase("itl", "steady-for-nondefault", tunedNonDefault, []string{"steadyGate.steadyFor", "steadyGate.carry"},
+		edgeCase("itl", "steady-for-nondefault", tunedNonDefault, polOf(tuningNonDefault),
 			edge3("a joiner settling after s", probeSteadyFor(tuningNonDefault), 585, 600, 615, [3]bool{true, false, false})),
 		edgeCase("itl", "max-k-drift", tunedDefault, nil, edge3("steady after a drift of", probeDrift(tuningDefault), 0.09, 0.10, 0.11, [3]bool{true, true, false})),
-		edgeCase("itl", "max-k-drift-nondefault", tunedPolicy, []string{"steadyGate.maxKDrift"},
+		edgeCase("itl", "max-k-drift-nondefault", tunedPolicy, polOf(drift),
 			edge3("steady after a drift of", probeDrift(drift), 0.19, 0.20, 0.21, [3]bool{true, true, false})),
 		edgeCase("itl", "idle-rows", tunedDefault, nil, edge3("restarted as a joiner after idle rows", probeIdleRows(tuningDefault), 1, 2, 3, [3]bool{false, true, true})),
-		edgeCase("itl", "idle-rows-nondefault", tunedNonDefault, []string{"steadyGate.idleRows"},
+		edgeCase("itl", "idle-rows-nondefault", tunedNonDefault, polOf(idle5),
 			edge3("restarted as a joiner after idle rows", probeIdleRows(idle5), 4, 5, 6, [3]bool{false, true, true})),
 		edgeCase("itl", "band-lower-edge", tunedDefault, nil, edge3("a reading at k", probeBand(tuningDefault), 0.149, 0.15, 0.151, [3]bool{false, true, true})),
 		edgeCase("itl", "band-upper-edge", tunedDefault, nil, edge3("a reading at k", probeBand(tuningDefault), 0.799, 0.80, 0.801, [3]bool{true, true, false})),
-		edgeCase("itl", "band-edges-nondefault", tunedPolicy, []string{"itlBand.minObservableK", "itlBand.maxObservableK"},
+		edgeCase("itl", "band-edges-nondefault", tunedPolicy, polOf(band),
 			func(seed uint64) error {
 				if err := edge3("a reading at k", probeBand(band), 0.099, 0.10, 0.101, [3]bool{false, true, true})(seed); err != nil {
 					return err
 				}
 				return edge3("a reading at k", probeBand(band), 0.899, 0.90, 0.901, [3]bool{true, true, false})(seed)
 			}),
+		// The default cap is 0 and a preemption rate is never negative, so this
+		// threshold has no lower side: below is the threshold itself. The
+		// non-default case below has one.
 		edgeCase("itl", "cap-preemption", tunedDefault, nil, edge3("a capped reading at preemption rate", probeCap(tuningDefault), 0, 0, 0.001, [3]bool{true, true, false})),
-		edgeCase("itl", "cap-preemption-nondefault", tunedPolicy, []string{"itlBand.capMaxPreemptionRate"},
+		edgeCase("itl", "cap-preemption-nondefault", tunedPolicy, polOf(capped),
 			edge3("a capped reading at preemption rate", probeCap(capped), 0.049, 0.05, 0.051, [3]bool{true, true, false})),
 		edgeCase("itl", "window-20-rows", tunedDefault, nil, edge3("window holds every reading of", probeWindowRows, 19, 20, 21, [3]bool{true, true, false})),
 		edgeCase("itl", "window-30-min", tunedDefault, nil, edge3("a reading kept at age min", probeWindowAge, 29.75, 30, 30.25, [3]bool{true, true, false})),
 		// k2.
 		edgeCase("k2", "queue-threshold", tunedDefault, nil, edge3("k2 learned at queue", probeK2Queue(0), 4, 5, 6, [3]bool{false, true, true})),
-		edgeCase("k2", "queue-threshold-nondefault", tunedPolicy, []string{"queueLengthThreshold"},
-			edge3("k2 learned at queue", probeK2Queue(10), 9, 10, 11, [3]bool{false, true, true})),
-		edgeCase("k2", "joined-1-min", tunedDefault, nil, edge3("k2 learned from a replica Ready s before", probeJoined, 45, 60, 75, [3]bool{false, true, true})),
+		edgeCase("k2", "queue-threshold-nondefault", tunedPolicy, queuePol,
+			edge3("k2 learned at queue", probeK2Queue(queuePol.QueueLengthThreshold), 9, 10, 11, [3]bool{false, true, true})),
+		edgeCase("k2", "joined-1-min", tunedDefault, nil, edge3("k2 learned from a replica Ready s before", probeJoined, 59, 60, 61, [3]bool{false, true, true})),
 		edgeCase("k2", "rate-fraction", tunedDefault, nil, edge3("a suspect reading admitted at a rate fraction", probeRateFraction(tuningDefault), 0.69, 0.70, 0.71, [3]bool{false, true, true})),
-		edgeCase("k2", "rate-fraction-nondefault", tunedPolicy, []string{"k2Settle.rateFraction"},
+		edgeCase("k2", "rate-fraction-nondefault", tunedPolicy, polOf(rate),
 			edge3("a suspect reading admitted at a rate fraction", probeRateFraction(rate), 0.49, 0.50, 0.51, [3]bool{false, true, true})),
 		edgeCase("k2", "max-rise", tunedDefault, nil, edge3("a suspect reading admitted after a rise of", probeMaxRise(tuningDefault), 0.24, 0.25, 0.26, [3]bool{true, true, false})),
-		edgeCase("k2", "max-rise-nondefault", tunedPolicy, []string{"k2Settle.maxRise"},
+		edgeCase("k2", "max-rise-nondefault", tunedPolicy, polOf(rise),
 			edge3("a suspect reading admitted after a rise of", probeMaxRise(rise), 0.39, 0.40, 0.41, [3]bool{true, true, false})),
 		edgeCase("k2", "window-10", tunedDefault, nil, edge3("k2 window holds every reading of", probeK2Window, 9, 10, 11, [3]bool{true, true, false})),
 		edgeCase("k2", "episode-gap-24h", tunedDefault, nil, edge3("k2 window continues after a gap of h", probeEpisodeGap, 23.9, 24, 24.1, [3]bool{true, true, false})),
 		// Borrowed k2.
 		edgeCase("borrowed-k2", "kv-total-3pct", tunedDefault, nil, edge3("borrowed across a KV total gap of", probeBorrowKv, 0.029, 0.03, 0.031, [3]bool{true, true, false})),
 		edgeCase("borrowed-k2", "hold-30-min", tunedDefault, nil, edge3("still at full strength after min", probeBorrowHold, 29, 30, 31, [3]bool{true, true, false})),
-		edgeCase("borrowed-k2", "relax-6h", tunedDefault, nil, edge3("still priced after the hold and h of relaxation", probeBorrowRelax, 5.9, 5.99, 6.1, [3]bool{true, true, false})),
+		edgeCase("borrowed-k2", "relax-6h", tunedDefault, nil, edge3("still priced after the hold and h of relaxation", probeBorrowRelax, 5.99, 6.0, 6.01, [3]bool{true, false, false})),
 		edgeCase("borrowed-k2", "rearm-20pct", tunedDefault, nil, edge3("a spent bound re-armed by a figure at a ratio of", probeBorrowRearm, 0.79, 0.80, 0.81, [3]bool{true, false, false})),
 		// mu.
 		edgeCase("mu", "half-of-served", tunedDefault, nil, edge3("a reading admitted at a ratio to served of", probeServed(tuningDefault), 0.49, 0.50, 0.51, [3]bool{false, true, true})),
-		edgeCase("mu", "half-of-served-nondefault", tunedPolicy, []string{"muChoice.maxRatio"},
+		edgeCase("mu", "half-of-served-nondefault", tunedPolicy, polOf(ratio4),
 			edge3("a reading admitted at a ratio to served of", probeServed(ratio4), 0.24, 0.25, 0.26, [3]bool{false, true, true})),
 		edgeCase("mu", "min-measured-of-derived", tunedDefault, nil, edge3("a reading admitted at a ratio to derived of", probeDerived(tuningDefault), 0.49, 0.50, 0.51, [3]bool{false, true, true})),
-		edgeCase("mu", "min-measured-of-derived-nondefault", tunedPolicy, []string{"muChoice.minMeasuredOfDerived"},
+		edgeCase("mu", "min-measured-of-derived-nondefault", tunedPolicy, polOf(minDer),
 			edge3("a reading admitted at a ratio to derived of", probeDerived(minDer), 0.29, 0.30, 0.31, [3]bool{false, true, true})),
+		edgeCase("mu", "pricing-k-across-min-measured", tunedPolicy, scaleUpPol,
+			edge3("a reading at half the derived mu priced at scaleUpThreshold 0.9, admitted at scaleUpThreshold",
+				probePricingK(scaleUpPol.ScaleUpThreshold), 0.89, scaleUpPol.ScaleUpThreshold, 0.91, [3]bool{true, true, false})),
 		edgeCase("mu", "low-confirm-2-min", tunedDefault, nil, edge3("a low reading confirmed after s", probeLowConfirm, 105, 120, 135, [3]bool{false, true, true})),
 		edgeCase("mu", "max-tokens-over-completions", tunedDefault, nil, edge3("a replica filling at a token ratio of", probeFilling(tuningDefault), 1.14, 1.15, 1.16, [3]bool{false, false, true})),
-		edgeCase("mu", "max-tokens-over-completions-nondefault", tunedPolicy, []string{"admission.maxTokensOverCompletions"},
+		edgeCase("mu", "max-tokens-over-completions-nondefault", tunedPolicy, polOf(tokens),
 			edge3("a replica filling at a token ratio of", probeFilling(tokens), 1.49, 1.50, 1.51, [3]bool{false, false, true})),
 		edgeCase("mu", "sibling-tolerance", tunedDefault, nil, edge3("yields to its siblings at a ratio of", probeSibling(tuningDefault), 0.79, 0.80, 0.81, [3]bool{true, false, false})),
-		edgeCase("mu", "sibling-tolerance-nondefault", tunedPolicy, []string{"admission.siblingMuTolerance"},
+		edgeCase("mu", "sibling-tolerance-nondefault", tunedPolicy, polOf(sib),
 			edge3("yields to its siblings at a ratio of", probeSibling(sib), 0.59, 0.60, 0.61, [3]bool{true, false, false})),
 		edgeCase("mu", "fresh-for", tunedDefault, nil, edge3("a high measurement yields after min", probeStale(tuningDefault, 3), 4.75, 5, 5.25, [3]bool{false, true, true})),
-		edgeCase("mu", "fresh-for-nondefault", tunedPolicy, []string{"muChoice.freshFor"},
+		edgeCase("mu", "fresh-for-nondefault", tunedPolicy, polOf(fresh),
 			edge3("a high measurement yields after min", probeStale(fresh, 3), 9.75, 10, 10.25, [3]bool{false, true, true})),
 		edgeCase("mu", "low-hold-for", tunedDefault, nil, edge3("a low measurement yields after min", probeStale(tuningDefault, 1.0/3), 29.75, 30, 30.25, [3]bool{false, true, true})),
-		edgeCase("mu", "low-hold-for-nondefault", tunedPolicy, []string{"muChoice.lowHoldFor"},
+		edgeCase("mu", "low-hold-for-nondefault", tunedPolicy, polOf(low),
 			edge3("a low measurement yields after min", probeStale(low, 1.0/3), 44.75, 45, 45.25, [3]bool{false, true, true})),
 		edgeCase("mu", "latch-return", tunedDefault, nil, edge3("a latched measurement still yields at a ratio of", probeLatch(tuningDefault), 1.59, 1.60, 1.61, [3]bool{false, false, true})),
-		edgeCase("mu", "latch-return-nondefault", tunedPolicy, []string{"muChoice.returnRatio"},
+		edgeCase("mu", "latch-return-nondefault", tunedPolicy, polOf(ret),
 			edge3("a latched measurement still yields at a ratio of", probeLatch(ret), 1.29, 1.30, 1.31, [3]bool{false, false, true})),
 		edgeCase("mu", "stale-agreement-2x", tunedDefault, nil, edge3("a reading at a ratio to the median keeps it fresh", probeAgreement, 1.99, 2, 2.01, [3]bool{true, true, false})),
 		// Floor.
 		edgeCase("floor", "trust-blend", tunedDefault, nil, func(seed uint64) error { return checkTrust(tuningDefault, 0.5, 0.8) }),
-		edgeCase("floor", "trust-blend-nondefault", tunedPolicy, []string{"floorTrust.lagFraction", "floorTrust.trustFraction"},
+		edgeCase("floor", "trust-blend-nondefault", tunedPolicy, polOf(trust),
 			func(seed uint64) error { return checkTrust(trust, 0.3, 0.9) }),
 		edgeCase("floor", "growth-band", tunedDefault, nil, func(seed uint64) error { return checkGrowth(tuningDefault, 2, 0.10) }),
-		edgeCase("floor", "growth-band-nondefault", tunedPolicy, []string{"backlogGrowth.minRequests", "backlogGrowth.fraction"},
+		edgeCase("floor", "growth-band-nondefault", tunedPolicy, polOf(growth),
 			func(seed uint64) error { return checkGrowth(growth, 5, 0.2) }),
 		// Idle room and the decode memory.
 		edgeCase("idle", "settled-2-min", tunedDefault, nil, edge3("idle room settled after s", probeIdleSettled, 105, 120, 135, [3]bool{false, true, true})),
 		edgeCase("idle", "gap-1-min", tunedDefault, nil, edge3("an idle run survives a gap of s", probeIdleGap, 45, 60, 75, [3]bool{true, true, false})),
 		edgeCase("idle", "idle-kv-usage", tunedDefault, nil, edge3("idle at KV", probeIdleKv(0), 0.29, 0.30, 0.31, [3]bool{true, false, false})),
-		edgeCase("idle", "idle-kv-usage-nondefault", tunedPolicy, []string{"loadImbalance.idleKvUsage"},
-			edge3("idle at KV", probeIdleKv(0.2), 0.19, 0.20, 0.21, [3]bool{true, false, false})),
+		edgeCase("idle", "idle-kv-usage-nondefault", tunedPolicy, idlePol,
+			edge3("idle at KV", probeIdleKv(idlePol.IdleKvUsage()), 0.19, 0.20, 0.21, [3]bool{true, false, false})),
 		edgeCase("decode-memory", "memory-1-min", tunedDefault, nil, edge3("decode remembered full after s", probeDecodeMemory, 45, 60, 75, [3]bool{true, false, false})),
 		edgeCase("decode-memory", "queue-threshold", tunedDefault, nil, edge3("decode full at queue", probeDecodeQueue, 4, 5, 6, [3]bool{false, true, true})),
 		edgeCase("decode-memory", "kv-threshold", tunedDefault, nil, edge3("decode full at KV", probeDecodeKv(0.8), 0.79, 0.80, 0.81, [3]bool{false, true, true})),
-		edgeCase("decode-memory", "kv-threshold-nondefault", tunedPolicy, []string{"kvCacheThreshold"},
-			edge3("decode full at KV", probeDecodeKv(0.9), 0.89, 0.90, 0.91, [3]bool{false, true, true})),
+		edgeCase("decode-memory", "kv-threshold-nondefault", tunedPolicy, kvPol,
+			edge3("decode full at KV", probeDecodeKv(kvPol.KvCacheThreshold), 0.89, 0.90, 0.91, [3]bool{false, true, true})),
 		// Shape.
 		edgeCase("shape-hold", "tolerance-20pct", tunedDefault, nil, edge3("a change declared at an output change of", probeShapeTolerance, 0.19, shapeTolerance, 0.21, [3]bool{false, false, true})),
 		// Start time.
@@ -335,7 +347,8 @@ func probeK2Queue(threshold float64) probe {
 }
 
 // probeJoined: a replica Ready s seconds before its first saturated reading,
-// on the analyzer's first cycle: k2 learns from it once a minute has passed.
+// on the analyzer's first cycle: k2 learns from it once a minute has passed,
+// at 60 s and not at 59 s.
 func probeJoined(r *rand.Rand, s float64) (bool, error) {
 	rig := newPropRig()
 	rm := satRow("r0", int64(float64(propKv)*(0.88+0.05*r.Float64())), 10, 6)
@@ -435,11 +448,11 @@ func probeBorrowHold(_ *rand.Rand, m float64) (bool, error) {
 }
 
 // probeBorrowRelax: a bound served through its hold and h hours more: priced
-// until the relaxation has run.
+// until the relaxation has run, and spent at exactly its 6 h.
 func probeBorrowRelax(_ *rand.Rand, h float64) (bool, error) {
 	rig := newBorrowRig(7000, 0, 0)
 	rig.at(14_000, 0)
-	rig.serve(14_000, BorrowedK2Hold+time.Duration(h*60)*time.Minute)
+	rig.serve(14_000, BorrowedK2Hold+time.Duration(h*float64(time.Hour)))
 	_, ok := rig.at(14_000, 0)
 	return ok, nil
 }
@@ -730,4 +743,27 @@ func probeStartZero(_ *rand.Rand, s float64) (bool, error) {
 	st := newStartRig()
 	st.add(100)
 	return st.add(s) != 100, nil
+}
+
+// probePricingK: a measured reading at half the derived mu priced at the
+// pricing k center's scaleUpThreshold gives (kvCacheThreshold x
+// scaleUpThreshold, pricingK); with scaleUpThreshold at x, the derived mu
+// moves with the k it is priced at, so the reading is admitted at and under
+// center and refused over it (minMeasuredOfDerived). The cache holds more
+// sequences than the cap at every k here, so the rate rises with k.
+func probePricingK(center float64) probe {
+	derived := func(scaleUp float64) float64 {
+		cfg := &config.ScalingPolicy{KvCacheThreshold: config.DefaultKvCacheThreshold, ScaleUpThreshold: scaleUp}
+		return deriveMu(tracedModel, &capacity.EngineParams{MaxNumSeqs: 4096}, 1, tracedKv,
+			shape.New(1000, 500, 0), pricingK(cfg), 500).rate
+	}
+	return func(_ *rand.Rand, x float64) (bool, error) {
+		d := derived(x)
+		if !(d > 0) {
+			return false, errors.New("no derived mu")
+		}
+		measured := 0.5 * derived(center)
+		t := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
+		return t.throughputRefusal(1, measured, derivedMu{rate: d, ok: true}, 0, false) == "", nil
+	}
 }

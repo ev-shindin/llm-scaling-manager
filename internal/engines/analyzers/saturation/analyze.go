@@ -36,7 +36,6 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 	if !ok {
 		return nil, fmt.Errorf("expected *ScalingPolicy, got %T", input.Config)
 	}
-	a.paths.countInputRows(input.ReplicaMetrics)
 
 	// Learned state restored after a controller restart waits for this: the
 	// engine has just loaded each variant's configuration from its scale

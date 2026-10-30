@@ -64,23 +64,23 @@
   class: edges
   learner: shape-hold
   expect: moved
-  finding: "With disableShapeChangeHold (a hold of zero) noteFleetShape still reports the change outstanding on the cycle it is declared, so applyFloorAndHolds floors every role's demand at the no-release band that cycle unless the fleet has measured itself. The code's own comment says a hold of zero leaves nothing outstanding."
+  finding: "With disableShapeChangeHold (a hold of zero) noteFleetShape still reports the change outstanding on the cycle it is declared, so applyFloorAndHolds floors every role's demand at the no-release band that cycle unless the fleet has measured itself. The code's own comment says a hold of zero leaves nothing outstanding. The same return reports a change outstanding inside the backstop's cooldown (gaveUpAt), where no hold is raised either: the fix is to return whether a hold is outstanding (#391)."
   measured: "100/100 seeds; seed 1: held true on the change cycle, key 1774 (the key follows the change, as it should)"
-  owner: "open"
+  owner: "#391"
 - id: first-sample/k2/second-reading
   class: first-sample
   learner: k2
   expect: adopted-raw
   finding: "k2 prices its first admitted reading at once; the window mean then moves by half the second reading's difference."
   measured: "20/20 seeds; seed 1: 296 552 from the first reading, 264 778 after a second, 11 %"
-  owner: "open"
+  owner: "#392"
 - id: first-sample/mu/joiner-rate-timebase
   class: first-sample
   learner: mu
   expect: adopted-raw
-  finding: "On the time base, a replica's first saturated rate[1m] covers only the part of the minute it served. Served for half the minute or more, the reading is at least half the derived mu and passes minMeasuredOfDerived, so a second reading moves the figure by up to half. The joined test refuses this for a replica Ready under a minute, not for one routed to late."
+  finding: "On the time base, a replica's first saturated rate[1m] covers only the part of the minute it served. Served for half the minute or more, the reading is at least half the derived mu and passes minMeasuredOfDerived, so a second reading moves the figure by up to half. The joined test refuses this for a replica Ready under a minute, not for one routed to late. Measured on throughputRefusal alone, so an upper bound: the analyzer's full path also applies tokensOutrunCompletions and the served bound, which may refuse some of these readings."
   measured: "51/100 seeds; seed 3: served 30 s of its first minute, rate[1m] 0.1095 against a derived 0.2118, admitted"
-  owner: "open"
+  owner: "#392"
 - id: first-sample/start-time/between-sample-and-default
   class: first-sample
   learner: start-time

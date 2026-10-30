@@ -17,6 +17,9 @@ import (
 
 const keyPrefillBound = "enablePrefillThroughputBound"
 
+// prefillBoundPolicy is the policy the bound's Analyze cases run.
+var prefillBoundPolicy = &config.ScalingPolicy{EnablePrefillThroughputBound: true}
+
 func moreCases() []propCase {
 	def := func() itlLearner { return newTrackerITL(steadinessOf(tuningDefault)) }
 	real := func() muLearner { return newAnalyzerMu() }
@@ -28,7 +31,7 @@ func moreCases() []propCase {
 		{class: classLiveness, learner: "k2", name: "prefill-role", family: familyDirect, tuning: tunedDefault, check: checkK2Prefill},
 		{class: classLiveness, learner: "itl", name: "line-within-3-min", family: familyDirect, tuning: tunedDefault, check: checkITLLiveness(def)},
 		{class: classLiveness, learner: "prefill-bound", name: "pd-analyze", family: familyDirect, tuning: tunedPolicy,
-			keys: []string{keyPrefillBound}, check: checkBoundAnalyze(1)},
+			policy: prefillBoundPolicy, check: checkBoundAnalyze(1)},
 		// Scale.
 		{class: classScale, learner: "k2", name: "gpus-per-replica", family: familyDirect, tuning: tunedDefault, check: checkK2ScaleGPUs},
 		{class: classScale, learner: "k2", name: "output-length", family: familyDirect, tuning: tunedDefault, check: checkK2ScaleOutput},
@@ -42,7 +45,7 @@ func moreCases() []propCase {
 		{class: classMonotonicity, learner: "floor", name: "lambda-rise-timebase", family: familyTimeBase, tuning: tunedDefault, check: checkFloorMonotoneTimeBase},
 		// The prefill bound through a P/D Analyze.
 		{class: classHeterogeneity, learner: "prefill-bound", name: "one-pod-doubled-analyze", family: familyDirect, tuning: tunedPolicy,
-			keys: []string{keyPrefillBound}, check: checkBoundAnalyze(2)},
+			policy: prefillBoundPolicy, check: checkBoundAnalyze(2)},
 	}
 }
 
@@ -441,7 +444,9 @@ func checkBoundAnalyze(factor float64) func(uint64) error {
 	return func(seed uint64) error {
 		r := propRand(seed)
 		rig := newPropRig()
-		rig.policy = func(p *config.ScalingPolicy) { p.EnablePrefillThroughputBound = true }
+		rig.policy = func(p *config.ScalingPolicy) {
+			p.EnablePrefillThroughputBound = prefillBoundPolicy.EnablePrefillThroughputBound
+		}
 		states := []domain.VariantReplicaState{decodeStates(1)[0],
 			{VariantName: "p", AcceleratorName: "H200", CurrentReplicas: 4, GPUsPerReplica: 1, Role: domain.RolePrefill}}
 		level := 3000 + 1000*r.Float64()

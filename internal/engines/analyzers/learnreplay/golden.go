@@ -650,7 +650,10 @@ func replayFixture(ctx context.Context, dir string, g ManifestEntry) (map[string
 	return goldenReplay(ctx, recording, Normal)
 }
 
-// goldenOutputs is goldenReplay's outputs.
+// goldenOutputs is goldenReplay without the path counts, for the callers that
+// compare outputs and not coverage: an add, which checks a Fidelity and a
+// Normal replay produce the same files, and the tests. The coverage of the
+// committed set is CheckGoldens' business, over every fixture together.
 func goldenOutputs(ctx context.Context, recording []byte, mode Mode) (map[string][]byte, error) {
 	out, _, err := goldenReplay(ctx, recording, mode)
 	return out, err

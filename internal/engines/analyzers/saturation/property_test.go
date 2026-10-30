@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"sigs.k8s.io/yaml"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 )
 
 // Property tests for the analyzers' learners (docs/proposals/analyzer-learner.md,
@@ -126,10 +128,12 @@ type propCase struct {
 	name    string
 	family  propFamily
 	tuning  propTuning
-	// keys are the policy keys the case runs at a value other than the
-	// default (policyKeys): 2.6 requires one such case per key a learner
-	// reads.
-	keys []string
+	// policy is the policy the case runs, set where it sets any key away
+	// from its default, nil otherwise. The check reads the same value, so
+	// the keys it sets (nonDefaultKeys) are the keys the case runs at a
+	// non-default value: 2.6 requires one such case per key a learner reads
+	// (policyKeys).
+	policy *config.ScalingPolicy
 	// seeds is how many seeds the case runs on; zero is defaultSeeds.
 	seeds int
 	check func(seed uint64) error

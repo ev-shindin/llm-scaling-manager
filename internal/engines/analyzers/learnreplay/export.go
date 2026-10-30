@@ -273,7 +273,7 @@ func (s site) keyRule() (rule, bool) {
 	return r, ok
 }
 
-// compositeSite reports whether the string at at is a composite key, by its
+// compositeSite reports whether the string at a site is a composite key, by its
 // rule.
 func (x *exporter) compositeSite(at site) bool {
 	r, ok := at.valueRule()

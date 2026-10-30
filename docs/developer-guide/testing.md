@@ -346,12 +346,23 @@ LEARNREC_MUPATHS_OUT=$HOME/mu-paths.jsonl go test ./internal/engines/steadystate
 
 The saturation analyzer counts how often each learner path runs
 (`PathCounts`, `internal/engines/analyzers/saturation/path_counts.go`), and a
-replay reports the counts (2.5). The paths are: k2 readings recorded
-(P1-obs), mu samples written, mu's three yields (served, sibling, stale),
-ITL lines from a full fit and from the pinned fit, input rows with an
-instant KV reading, input rows with a Ready time, and k2 readings refused
-as a replica that joined under a minute ago while its Ready time was known
-(the restart fix, #288).
+replay reports the counts (2.5). Each counts where its path does its work,
+not where its input arrives:
+
+- k2 readings recorded in the window (P1-obs);
+- mu samples started in the window (a reading within the minute folds into
+  the sample and is not counted);
+- mu's three yields: to the derived figure on a served bound, to the full
+  siblings, and to the derived figure once stale;
+- ITL lines from a full fit, and from the pinned fit;
+- rows whose instant KV a learner read: a reading the ITL line took, or a
+  replica demand charged at its instant KV;
+- rows whose Pod Ready time k2's joined test read;
+- k2 readings refused as a joiner because of the Ready time: the restart
+  fix (#288), not the first sight, decided the refusal.
+
+The names are one table in `path_counts.go`; `PathCounts` and `PathNames`
+read it.
 
 The committed goldens must run every path at least once between them:
 `make test` and `make learner-goldens-check` fail when one runs on no
@@ -612,7 +623,11 @@ owner.
 `findings` in `property_mutants_test.go` lists every row of 2.7. Each row is
 in exactly one of these states:
 
-- **caught**: a mutant puts the defect back, and its class fails;
+- **caught**: a mutant puts the defect back, and its class fails; at least
+  one of its mutants is not a toy;
+- **caught (toy)**: every mutant of the row is a toy (`toy-learner` or
+  `toy-output`), which shows the check is sensitive to the defect and not
+  that the production learner would be caught;
 - **still escaping**: with the reason.
 
 `TestPropertyMutants` runs each mutant, and checks two more rules: a mutant
@@ -624,7 +639,7 @@ Each mutant states its level:
 | --- | --- | --- |
 | `policy` | a policy key set where the guard stops working | that the production learner is caught |
 | `rows` | rows changed to look the way the defect read them | that the production learner is caught |
-| `stub` | one fix stubbed through an unexported field only the package's tests set (`stubRestartFix`) | that the production learner is caught |
+| `stub` | one fix stubbed through a seam the analyzer already has for tests (its `readySince` func) | that the production learner is caught |
 | `toy-learner` | a small learner with the pre-fix estimator | only that the check is sensitive to the defect |
 | `toy-output` | the production output edited the way the defect edited it | only that the check reads that output |
 

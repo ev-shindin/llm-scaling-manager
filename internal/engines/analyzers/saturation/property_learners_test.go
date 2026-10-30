@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -33,11 +34,11 @@ func learnerCases() []propCase {
 	return []propCase{
 		// Row 2.
 		{class: classLiveness, learner: "shared-line", name: "sibling-borrows", family: familyDirect, tuning: tunedPolicy,
-			keys: []string{keyReuse}, check: checkSharedLineLiveness},
+			policy: reusePolicy, check: checkSharedLineLiveness},
 		{class: classKnownTruth, learner: "shared-line", name: "borrowed-is-the-lenders", family: familyDirect, tuning: tunedPolicy,
-			keys: []string{keyReuse}, check: checkSharedLineTruth},
+			policy: reusePolicy, check: checkSharedLineTruth},
 		{class: classEdges, learner: "shared-line", name: "reuse-switch", family: familyDirect, tuning: tunedPolicy,
-			keys: []string{keyReuse}, seeds: 5, check: checkSharedLineSwitch},
+			policy: reusePolicy, seeds: 5, check: checkSharedLineSwitch},
 		{class: classStale, learner: "shared-line", name: "held-slope-not-republished", family: familyDirect, tuning: tunedDefault,
 			seeds: cheapSeeds, check: checkSharedLineHeldNotRepublished},
 		// Row 4.
@@ -50,7 +51,7 @@ func learnerCases() []propCase {
 		{class: classLiveness, learner: "borrowed-k2", name: "expires-to-own", family: familyDirect, tuning: tunedDefault,
 			seeds: cheapSeeds, check: checkBorrowExpires},
 		{class: classRedistribution, learner: "borrowed-k2", name: "disable-borrow-keeps-own", family: familyDirect, tuning: tunedPolicy,
-			keys: []string{keyDisableK2Borrow}, seeds: cheapSeeds, check: checkBorrowDisabled},
+			policy: borrowOffPolicy, seeds: cheapSeeds, check: checkBorrowDisabled},
 		// Row 8.
 		{class: classFirstSample, learner: "shape-hold", name: "first-shape-no-change", family: familyDirect, tuning: tunedDefault,
 			seeds: cheapSeeds, check: checkShapeFirst},
@@ -59,11 +60,11 @@ func learnerCases() []propCase {
 		{class: classTransient, learner: "shape-hold", name: "wobble-in-band", family: familyDirect, tuning: tunedDefault,
 			seeds: cheapSeeds, check: checkShapeWobble},
 		{class: classStale, learner: "shape-hold", name: "hold-released", family: familyDirect, tuning: tunedDefault,
-			seeds: cheapSeeds, check: checkShapeHoldReleased(0)},
+			seeds: cheapSeeds, check: checkShapeHoldReleased(&config.ScalingPolicy{})},
 		{class: classStale, learner: "shape-hold", name: "hold-released-nondefault", family: familyDirect, tuning: tunedPolicy,
-			keys: []string{keyShapeHoldSeconds}, seeds: cheapSeeds, check: checkShapeHoldReleased(600)},
+			policy: holdLongPolicy, seeds: cheapSeeds, check: checkShapeHoldReleased(holdLongPolicy)},
 		{class: classEdges, learner: "shape-hold", name: "hold-disabled", family: familyDirect, tuning: tunedPolicy,
-			keys: []string{keyDisableShapeHold}, seeds: cheapSeeds, check: checkShapeHoldDisabled},
+			policy: holdOffPolicy, seeds: cheapSeeds, check: checkShapeHoldDisabled},
 		// Row 9.
 		{class: classRedistribution, learner: "decode-memory", name: "row-order", family: familyDirect, tuning: tunedDefault,
 			seeds: cheapSeeds, check: checkDecodeMemoryOrder},
@@ -75,8 +76,8 @@ func learnerCases() []propCase {
 		{class: classTransient, learner: "slo-itl", name: "joiner-warmup", family: familyDirect, tuning: tunedDefault,
 			check: checkITLJoiner(sloDef, 1, 20*time.Minute)},
 		{class: classTransient, learner: "slo-itl", name: "joiner-warmup-nondefault", family: familyDirect, tuning: tunedNonDefault,
-			keys:  []string{"steadyGate.steadyFor", "steadyGate.carry", "steadyGate.idleRows"},
-			check: checkITLJoiner(sloNon, 1, 30*time.Minute)},
+			policy: tuningPolicy(tuningNonDefault),
+			check:  checkITLJoiner(sloNon, 1, 30*time.Minute)},
 		{class: classFirstSample, learner: "slo-itl", name: "one-reading", family: familyDirect, tuning: tunedDefault,
 			check: checkITLOneReading(sloDef)},
 		{class: classStale, learner: "slo-itl", name: "b-converges-n2", family: familyDirect, tuning: tunedDefault,
@@ -161,6 +162,15 @@ func (l *sloITL) baseline() (float64, bool) { return l.b, l.haveB }
 
 // --- row 2: the shared and borrowed line ---
 
+// The policies the row 2, 4 and 8 cases run, each read by its check: the
+// keys a case runs at a non-default value are the keys these set.
+var (
+	reusePolicy     = &config.ScalingPolicy{EnableLearnedStateReuse: true}
+	borrowOffPolicy = &config.ScalingPolicy{DisableK2Borrow: true}
+	holdLongPolicy  = &config.ScalingPolicy{ShapeChangeHoldSeconds: 600}
+	holdOffPolicy   = &config.ScalingPolicy{DisableShapeChangeHold: true}
+)
+
 // Policy keys (non-default values a case runs; property_policy_test.go).
 const (
 	keyReuse            = "enableLearnedStateReuse"
@@ -175,6 +185,11 @@ const (
 type sharedRig struct {
 	a     *SaturationAnalyzer
 	clock time.Time
+	// below puts the lender's replicas under the ITL band: its window then
+	// takes no reading, ages out, and its line is held.
+	below bool
+	// lenderHeld is whether the lender's line was a held slope last cycle.
+	lenderHeld bool
 }
 
 func sharedParams() *capacity.EngineParams {
@@ -192,9 +207,13 @@ func newSharedRig() *sharedRig {
 	return r
 }
 
+// sharedB is the intercept of the lender's line.
+const sharedB = 0.008
+
 // cycle runs one Analyze of the two variants with the lender's line
-// ITL(k) = a k + b, and returns the starved variant's line and its lender.
-func (r *sharedRig) cycle(reuse bool, a, b float64, jitter func() float64) (itl.Model, string, itl.Model, error) {
+// ITL(k) = a k + sharedB, and returns the starved variant's line, its lender,
+// and the lender's own line.
+func (r *sharedRig) cycle(reuse bool, a float64, jitter func() float64) (itl.Model, string, itl.Model, error) {
 	states := []domain.VariantReplicaState{
 		{VariantName: "lender", Role: domain.RoleDecode, AcceleratorName: "H100", CurrentReplicas: 10, GPUsPerReplica: 1},
 		{VariantName: "starved", Role: domain.RoleDecode, AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},
@@ -202,9 +221,12 @@ func (r *sharedRig) cycle(reuse bool, a, b float64, jitter func() float64) (itl.
 	rows := make([]domain.ReplicaMetrics, 0, 11)
 	for i := range 10 {
 		k := 0.20 + 0.05*float64(i)
+		if r.below {
+			k = 0.05 + 0.005*float64(i)
+		}
 		rm := makeReplicaMetrics(fmt.Sprintf("lender-%d", i), "lender", 5000, 16000, 0, 6000, 1000)
 		rm.KvUsageInstant, rm.KvUsageInstantKnown = k, true
-		rm.AvgITL, rm.AvgITLKnown = (a*k+b)*(1+jitter()), true
+		rm.AvgITL, rm.AvgITLKnown = (a*k+sharedB)*(1+jitter()), true
 		rows = append(rows, rm)
 	}
 	s := makeReplicaMetrics("starved-0", "starved", 1000, 16000, 0, 6000, 1000)
@@ -219,6 +241,7 @@ func (r *sharedRig) cycle(reuse bool, a, b float64, jitter func() float64) (itl.
 	c.observeFleetShape()
 	c.resolvePricing()
 	c.fitLines()
+	r.lenderHeld = c.itlHeld["lender"]
 	r.clock = r.clock.Add(propCycle)
 	return c.itlModels["starved"], c.itlBorrowedFrom["starved"], c.itlModels["lender"], nil
 }
@@ -229,7 +252,7 @@ func checkSharedLineLiveness(seed uint64) error {
 	r := propRand(seed)
 	rig := newSharedRig()
 	for range 13 {
-		got, from, _, err := rig.cycle(true, 0.04+0.02*r.Float64(), 0.008, func() float64 { return 0.005 * r.NormFloat64() })
+		got, from, _, err := rig.cycle(reusePolicy.EnableLearnedStateReuse, 0.04+0.02*r.Float64(), func() float64 { return 0.005 * r.NormFloat64() })
 		if err != nil {
 			return err
 		}
@@ -247,7 +270,7 @@ func checkSharedLineTruth(seed uint64) error {
 	rig := newSharedRig()
 	a := 0.04 + 0.02*r.Float64()
 	for range 13 {
-		got, from, own, err := rig.cycle(true, a, 0.008, func() float64 { return 0.005 * r.NormFloat64() })
+		got, from, own, err := rig.cycle(reusePolicy.EnableLearnedStateReuse, a, func() float64 { return 0.005 * r.NormFloat64() })
 		if err != nil {
 			return err
 		}
@@ -263,11 +286,11 @@ func checkSharedLineTruth(seed uint64) error {
 // starved variant never borrows; on, it does.
 func checkSharedLineSwitch(seed uint64) error {
 	r := propRand(seed)
-	for _, reuse := range []bool{false, true} {
+	for _, reuse := range []bool{false, reusePolicy.EnableLearnedStateReuse} {
 		rig := newSharedRig()
 		borrowed := false
 		for range 13 {
-			_, from, _, err := rig.cycle(reuse, 0.05, 0.008, func() float64 { return 0.005 * r.NormFloat64() })
+			_, from, _, err := rig.cycle(reuse, 0.05, func() float64 { return 0.005 * r.NormFloat64() })
 			if err != nil {
 				return err
 			}
@@ -280,25 +303,58 @@ func checkSharedLineSwitch(seed uint64) error {
 	return nil
 }
 
-// checkSharedLineHeldNotRepublished: a held slope is never published as a
-// line: a figure from some time ago must not reach a sibling stamped now.
-// The line published is the last one fitted, with its own time.
+// checkSharedLineHeldNotRepublished: a lender whose replicas fall under the
+// band keeps pricing on its held slope, and the held slope is never
+// published: the line on record for the configuration stays the last one
+// fitted, stamped when it was fitted, through every cycle it is held.
 func checkSharedLineHeldNotRepublished(seed uint64) error {
 	r := propRand(seed)
-	a := NewSaturationAnalyzer(capacity.NewStore())
-	fitted := itl.Model{A: 0.04 + 0.02*r.Float64(), B: 0.008}
-	a.publishLine("phys", "lender", fitted, propStart)
-	// The held line is a reading the caller does not publish (fitLines);
-	// what borrowLine returns is the fitted one, from when it was fitted.
-	got, from, ok := a.borrowLine("phys", "starved")
-	if !ok {
-		return violation(kindNotLearned, "nothing to borrow after a publish")
+	rig := newSharedRig()
+	jitter := func() float64 { return 0.005 * r.NormFloat64() }
+	a := 0.04 + 0.02*r.Float64()
+	for range 13 {
+		if _, _, _, err := rig.cycle(reusePolicy.EnableLearnedStateReuse, a, jitter); err != nil {
+			return err
+		}
 	}
-	a.mu.Lock()
-	at := a.itlLines["phys"].learnedAt
-	a.mu.Unlock()
-	return holds(got == fitted && from == "lender" && at.Equal(propStart), kindStale,
-		"borrowed %+v from %q learned at %s, against %+v from lender at %s", got, from, at, fitted, propStart)
+	published := func() (learnedLine, bool) {
+		rig.a.mu.Lock()
+		defer rig.a.mu.Unlock()
+		for _, l := range rig.a.itlLines {
+			if strings.HasPrefix(l.fromVariant, "test-ns|test-model|lender|") {
+				return l, true
+			}
+		}
+		return learnedLine{}, false
+	}
+	if _, ok := published(); !ok {
+		return violation(kindNotLearned, "the lender published no line in 3 min")
+	}
+	rig.below = true
+	held := 0
+	var fitted learnedLine
+	for range 140 { // 35 min: the window's 30 min age-out, and held cycles after it
+		at := rig.clock
+		if _, _, _, err := rig.cycle(reusePolicy.EnableLearnedStateReuse, a, jitter); err != nil {
+			return err
+		}
+		if !rig.lenderHeld {
+			continue
+		}
+		now, _ := published()
+		if held == 0 {
+			fitted = now
+			if !fitted.learnedAt.Before(at) {
+				return violation(kindStale, "the first held cycle stamped the line on record at %s", fitted.learnedAt.Format(time.TimeOnly))
+			}
+		}
+		held++
+		if now.model != fitted.model || !now.learnedAt.Equal(fitted.learnedAt) {
+			return violation(kindStale, "held cycle %d: the line on record moved to A %.5f at %s, from A %.5f at %s", held,
+				now.model.A, now.learnedAt.Format(time.TimeOnly), fitted.model.A, fitted.learnedAt.Format(time.TimeOnly))
+		}
+	}
+	return holds(held > 0, kindNotLearned, "the lender's line was never held under the band")
 }
 
 // --- row 4: the borrowed k2 lower bound ---
@@ -334,7 +390,9 @@ func (r *borrowRig) at(own, kv int64) (k2Borrow, bool) {
 // serve advances the clock by d in one-minute serving cycles.
 func (r *borrowRig) serve(own int64, d time.Duration) {
 	for end := r.clock.Add(d); r.clock.Before(end); {
-		r.clock = r.clock.Add(time.Minute)
+		// The last cycle lands on end exactly, so a threshold is probed at
+		// the threshold and not a minute past it.
+		r.clock = r.clock.Add(min(time.Minute, end.Sub(r.clock)))
 		r.at(own, 0)
 	}
 }
@@ -424,7 +482,7 @@ func checkBorrowDisabled(seed uint64) error {
 	r := propRand(seed)
 	own := int64(14_000)
 	rig := newBorrowRig(float64(own)*(0.3+0.6*r.Float64()), 0, 0)
-	b, ok := rig.a.borrowedK2WithKv(rig.own, "test-model", own, mtParams(256, "vllm:v1"), 0, true, false)
+	b, ok := rig.a.borrowedK2WithKv(rig.own, "test-model", own, mtParams(256, "vllm:v1"), 0, true, !borrowOffPolicy.DisableK2Borrow)
 	return holds(!ok, kindMoved, "disableK2Borrow: a sibling's %d was still offered", b.k2)
 }
 
@@ -508,10 +566,9 @@ func checkShapeWobble(seed uint64) error {
 
 // checkShapeHoldReleased: a change raises a hold, which the backstop releases
 // once its span has passed (shapeChangeHoldSeconds, or 5 min), and not before.
-func checkShapeHoldReleased(holdSeconds int) func(uint64) error {
+func checkShapeHoldReleased(p *config.ScalingPolicy) func(uint64) error {
 	return func(seed uint64) error {
 		r := propRand(seed)
-		p := config.ScalingPolicy{ShapeChangeHoldSeconds: holdSeconds}
 		hold, _ := p.ShapeChangeHold(ShapeChangeHoldMax)
 		rig := newShapeRig()
 		for range 4 {
@@ -535,8 +592,7 @@ func checkShapeHoldReleased(holdSeconds int) func(uint64) error {
 // follows) and raises no hold.
 func checkShapeHoldDisabled(seed uint64) error {
 	r := propRand(seed)
-	p := config.ScalingPolicy{DisableShapeChangeHold: true}
-	hold, _ := p.ShapeChangeHold(ShapeChangeHoldMax)
+	hold, _ := holdOffPolicy.ShapeChangeHold(ShapeChangeHoldMax)
 	rig := newShapeRig()
 	for range 4 {
 		rig.note(1000, 1000, hold)

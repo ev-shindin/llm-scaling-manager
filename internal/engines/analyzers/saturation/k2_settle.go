@@ -141,6 +141,9 @@ type settleMemo struct {
 // cycle the memo first saw it, zero on the memo's first cycle.
 type readySighting struct {
 	readyAt, firstSeen time.Time
+	// restarted is set when the sighting began because the Pod's Ready time
+	// changed under a name already seen: a restart the Ready time revealed.
+	restarted bool
 }
 
 // newSettleMemo is an empty memo in its first cycle.
@@ -194,11 +197,10 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 		memo = newSettleMemo()
 		a.k2Settle[model] = memo
 	}
-	readyAt := in.readyAt
-	if a.stubRestartFix {
-		readyAt = time.Time{}
+	joined, byReadyAt := memo.noteReady(pod, in.ready, in.readyAt, now)
+	if !in.readyAt.IsZero() {
+		a.paths.add(pathReadySince, 1)
 	}
-	joined := memo.noteReady(pod, in.ready, readyAt, now)
 	trace := memo.pods[pod]
 	settled := in.tune.settledOverWindow(trace, now, in.tokens, in.threshold)
 	trace = append(trace, settleReading{at: now, queue: in.queue, tokens: in.tokens})
@@ -226,8 +228,8 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	// says: its one-minute gauges still hold the minute before it was routed
 	// to (throughput_admission.go).
 	if joined {
-		if !in.readyAt.IsZero() {
-			a.paths.joinedReady.Add(1)
+		if byReadyAt {
+			a.paths.add(pathJoinedReady, 1)
 		}
 		return k2UnsettledJoined
 	}
