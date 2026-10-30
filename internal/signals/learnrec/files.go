@@ -83,16 +83,19 @@ func (o Options) Check() error {
 	return checkDir(o.Dir)
 }
 
-// Open starts a new recording in opts.Dir, named by start. To make room
-// under the directory ceiling it deletes the recordings already there --
-// every one is closed: a recording starts only at a controller start, and
-// the one before it ended with its process -- in this order: the tiny ones
-// (under MinCapBytes, such as a crash loop leaves), oldest first; then the
-// older ones with data, oldest first, never the newest of them. If what is
-// left is less than a full cap, the new recording is capped at what is left;
-// only when that would be under MinCapBytes does the newest go too. So a
-// controller that restarts again and again keeps the recording from before
-// the first restart.
+// Open starts a new recording in opts.Dir, named by start, making room
+// under the directory ceiling first. Every recording already there is
+// closed: a recording starts only at a controller start, and the one before
+// it ended with its process. Room is made in this order:
+//   - the tiny recordings (under MinCapBytes, such as a crash loop leaves)
+//     go, oldest first, until a full cap fits;
+//   - short of a full cap, the new recording is capped at what is left, as
+//     long as that is at least MinCapBytes, and nothing with data goes;
+//   - only below that do the older recordings with data go, oldest first,
+//     and the newest of them last.
+//
+// So a restart never deletes a recording with data while the new one can
+// still have MinCapBytes.
 func Open(opts Options, start time.Time) (*Recorder, error) {
 	if opts.Dir == "" {
 		return nil, errors.New("learnrec: no recording directory")
@@ -167,9 +170,9 @@ func underTmp(dir string) bool {
 	return d == "/tmp" || strings.HasPrefix(d, "/tmp/")
 }
 
-// makeRoom deletes recordings in dir, in Open's order, until those left
-// leave room under ceiling for a recording capped at capBytes, and returns
-// the cap the new recording gets.
+// makeRoom deletes recordings in dir, in Open's order, and returns the cap
+// the new recording gets: capBytes, or what is left under ceiling when that
+// is less but at least MinCapBytes.
 func makeRoom(dir string, ceiling, capBytes int64) (int64, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -220,7 +223,7 @@ func makeRoom(dir string, ceiling, capBytes int64) (int64, error) {
 		}
 	}
 	for i, r := range recs {
-		if total+capBytes <= ceiling {
+		if ceiling-total >= MinCapBytes {
 			break
 		}
 		if r.size >= MinCapBytes && i != newest {

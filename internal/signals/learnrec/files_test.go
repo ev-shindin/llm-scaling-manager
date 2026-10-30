@@ -155,12 +155,12 @@ func TestOpen_ACrashLoopKeepsTheRecordingFromBeforeIt(t *testing.T) {
 	}
 }
 
-// Room is made in order: tiny recordings first, then older ones with data,
-// and the newest with data only when what is left would be under the floor;
-// short of a full cap, the new recording is capped at what is left.
+// Room is made in order: tiny recordings first; then, short of a full cap,
+// the new recording takes what is left down to the floor; only below it do
+// older recordings with data go, and the newest with data last.
 func TestOpen_MakesRoomInOrder(t *testing.T) {
 	const capBytes = 4 * MinCapBytes
-	t.Run("tiny first, then older, never the newest", func(t *testing.T) {
+	t.Run("tiny first, then what is left, keeping all with data", func(t *testing.T) {
 		dir := recordingDir(t)
 		older := writeRecording(t, dir, t0, capBytes)
 		tiny := writeRecording(t, dir, t0.Add(time.Minute), 100)
@@ -173,11 +173,23 @@ func TestOpen_MakesRoomInOrder(t *testing.T) {
 		require.NoError(t, r.Close())
 		files := listDir(t, dir)
 		assert.NotContains(t, files, tiny)
-		assert.NotContains(t, files, older)
+		assert.Contains(t, files, older, "a recording with data stays while what is left is at least the floor")
 		assert.Contains(t, files, newest)
 		assert.Contains(t, files, "notes.txt")
 		assert.Contains(t, files, fileName(t0.Add(3*time.Minute)))
-		assert.Equal(t, capBytes, r.limit, "after the older one goes, a full cap fits")
+		assert.Equal(t, 2*capBytes-capBytes-MinCapBytes, r.limit, "the new one gets what is left")
+	})
+	t.Run("below the floor, older ones with data go, oldest first, never the newest", func(t *testing.T) {
+		dir := recordingDir(t)
+		oldest := writeRecording(t, dir, t0, capBytes)
+		newest := writeRecording(t, dir, t0.Add(time.Minute), capBytes-MinCapBytes/2)
+		r, err := Open(Options{Dir: dir, CapBytes: capBytes}, t0.Add(time.Hour))
+		require.NoError(t, err)
+		require.NoError(t, r.Close())
+		files := listDir(t, dir)
+		assert.NotContains(t, files, oldest)
+		assert.Contains(t, files, newest)
+		assert.Equal(t, capBytes, r.limit)
 	})
 	t.Run("short of a cap, the new one gets what is left", func(t *testing.T) {
 		dir := recordingDir(t)
@@ -324,4 +336,25 @@ func TestRead_TornTailAndGaps(t *testing.T) {
 
 	_, err = Read([]byte(lines[0] + "{broken\n" + lines[1]))
 	require.Error(t, err, "a bad line that is not the last")
+}
+
+// Restarts that each write a recording with data do not delete the one from
+// before them while the next can still have the floor: with a 256Ki cap, a
+// 255Ki recording from before the restarts, and 102Ki written after each,
+// the second restart takes the 155Ki left.
+func TestOpen_RestartsWithDataKeepTheRecordingBeforeThem(t *testing.T) {
+	dir := recordingDir(t)
+	const capBytes = 256 << 10
+	before := writeRecording(t, dir, t0, 255<<10)
+	for i := 1; i <= 2; i++ {
+		r, err := Open(Options{Dir: dir, CapBytes: capBytes}, t0.Add(time.Duration(i)*time.Minute))
+		require.NoError(t, err, "restart %d", i)
+		_, err = r.w.Write(bytes.Repeat([]byte("x"), 102<<10))
+		require.NoError(t, err)
+		require.NoError(t, r.Close())
+		require.Contains(t, listDir(t, dir), before, "restart %d deleted the recording from before the restarts", i)
+		if i == 2 {
+			assert.Equal(t, int64(2*capBytes-255<<10-102<<10), r.limit, "restart 2 gets what is left")
+		}
+	}
 }
