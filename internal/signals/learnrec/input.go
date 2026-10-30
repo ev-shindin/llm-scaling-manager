@@ -2,6 +2,7 @@ package learnrec
 
 import (
 	"fmt"
+	"runtime/debug"
 	"sort"
 	"time"
 
@@ -103,7 +104,19 @@ type Start struct {
 	// starts only at a controller start, when the store is new and empty; a
 	// replay refuses any other count, since it has no way to file them.
 	StoreRecords int
+	// Commit is the commit the controller was built from (BuildCommit),
+	// "unknown" when the build did not say. A golden is added only at the
+	// commit that recorded it, since its replay must reproduce it byte for
+	// byte.
+	Commit string
 }
+
+// BuildCommit is the commit this binary was built from, set at link time:
+//
+//	go build -ldflags "-X github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec.BuildCommit=$(git rev-parse HEAD)"
+//
+// make build, the Dockerfile and the image workflows set it.
+var BuildCommit = "unknown"
 
 // SaturationStart is what WithHorizons and WithOptimizationInterval set: the
 // horizons in force, and the borrow clock's longest counted gap
@@ -119,4 +132,21 @@ type SaturationStart struct {
 type SLOStart struct {
 	StateTimeout, SlopeHoldFor time.Duration
 	Judging                    bool
+}
+
+// Commit is the commit this binary was built from: BuildCommit when the
+// build set it, else the revision Go stamps into a binary built from a
+// checkout (vcs.revision), else "unknown".
+func Commit() string {
+	if BuildCommit != "" && BuildCommit != "unknown" {
+		return BuildCommit
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.revision" && s.Value != "" {
+				return s.Value
+			}
+		}
+	}
+	return "unknown"
 }

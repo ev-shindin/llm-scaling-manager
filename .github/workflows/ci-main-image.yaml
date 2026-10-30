@@ -111,6 +111,7 @@ jobs:
             --annotation "index:org.opencontainers.image.licenses=Apache-2.0" \
             --annotation "index:org.opencontainers.image.revision=${{ github.sha }}" \
             --build-arg "IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}" \
+            --build-arg "GIT_COMMIT=${{ github.sha }}" \
             -t ${{ steps.img.outputs.image }}:${{ steps.img.outputs.tag }} .
 
       - name: Summarise
