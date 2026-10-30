@@ -440,19 +440,33 @@ const (
 	partAccelerator
 	partCount
 	partFingerprint
+	// partShape is a role, a length bucket or a queue threshold: the shape
+	// parts of a k2 or throughput window key (shapePart).
+	partShape
 )
 
 // compositeLayout is what each '|'-separated part of a composite key is,
 // by the number of parts: the variant key (namespace|model|variant|
 // accelerator|GPUs, saturation.itlWindowKey), the physics key
-// (model|accelerator|GPUs|fingerprint, capacity.LearnedStateKey), and a
+// (model|accelerator|GPUs|fingerprint, capacity.LearnedStateKey), the k2
+// window key (namespace|variant|model|accelerator|GPUs|role|output
+// bucket|qN, saturation's historyKey) and the throughput window key (the
+// same with the input bucket before the output one, throughputKey), and a
 // key of names alone otherwise (namespace/variant).
+//
+// Without the window keys' layouts every part of one was a name: the GPU
+// count of a k2 window was renamed as a name, and every variant key
+// holding the same count then failed its count part.
 func compositeLayout(parts int) []keyPart {
 	switch parts {
 	case 5:
 		return []keyPart{partName, partName, partName, partAccelerator, partCount}
 	case 4:
 		return []keyPart{partName, partAccelerator, partCount, partFingerprint}
+	case 8:
+		return []keyPart{partName, partName, partName, partAccelerator, partCount, partShape, partShape, partShape}
+	case 9:
+		return []keyPart{partName, partName, partName, partAccelerator, partCount, partShape, partShape, partShape, partShape}
 	}
 	out := make([]keyPart, parts)
 	return out
@@ -485,7 +499,7 @@ func (x *exporter) harvestComposites(composites []string) {
 					x.add("accelerator", part)
 					known[part] = true
 				}
-			case partCount, partFingerprint:
+			case partCount, partFingerprint, partShape:
 			default:
 				if known[part] || part == "" {
 					continue
@@ -776,6 +790,8 @@ func (x *exporter) compositeAllowed(s string) bool {
 			ok = part != "" && strings.Trim(part, "0123456789") == ""
 		case partFingerprint:
 			ok = isFingerprint(part)
+		case partShape:
+			ok = shapePart(part)
 		default:
 			ok = x.pseudonyms[part]
 			if !ok {
@@ -790,6 +806,25 @@ func (x *exporter) compositeAllowed(s string) bool {
 		}
 	}
 	return true
+}
+
+// shapeBuckets are the length buckets a window key names
+// (saturation.classifyOutputLength, classifyInputLength, and prefill's
+// own output bucket).
+var shapeBuckets = setOf("short", "medium", "long", "xlong", "xxlong", "huge", "noout")
+
+// shapePart reports whether part is a shape part of a window key: a role, a
+// length bucket (an input one prefixed i), or a queue threshold (q and a
+// number). A stash key's last part carries the stash's '#' suffix, a
+// fingerprint.
+func shapePart(part string) bool {
+	if base, tag, stashed := strings.Cut(part, "#"); stashed {
+		return isFingerprint(tag) && shapePart(base)
+	}
+	if q, ok := strings.CutPrefix(part, "q"); ok && isNumber(q) {
+		return true
+	}
+	return vocabulary[part] || shapeBuckets[part] || shapeBuckets[strings.TrimPrefix(part, "i")]
 }
 
 // check holds the string at a site, after the export, to the allowlist.
