@@ -656,9 +656,14 @@ func goldenOutputs(ctx context.Context, recording []byte, mode Mode) (map[string
 // comparedNothing names what a fixture's goldens would not compare: a golden
 // that compares nothing passes whatever changes. Every analyzer the start
 // says ran must have results, and the results must price variants and read
-// the store; the slo analyzer, when it ran, must have published. An output
-// may be empty only because its analyzer did not run (lines and learned
-// state come only from what the run did: a published line, a snapshot).
+// the store; the slo analyzer, when it ran, must have published.
+//
+// Two outputs may be empty whatever ran, and the start cannot say when:
+// lines.csv holds ITL lines published and borrowed, which happen only when
+// the policy turns reuse on (EnableLearnedStateReuse) and a variant fits a
+// line; learned-state.csv holds the snapshot documents, written only when
+// the controller's learned-state snapshot is on. Both are the run's
+// configuration, not an analyzer's, and the start line records neither.
 func comparedNothing(start learnrec.Start, outputs map[string][]byte) []string {
 	count := func(name string, kind string) int {
 		rows, err := readRows(outputs[name])
@@ -767,6 +772,14 @@ func AddGolden(ctx context.Context, dir, name string, raw []byte, opts AddOption
 	if _, err := os.Stat(fixture); err == nil && !listed {
 		return nil, fmt.Errorf("learnreplay: %s exists and %s does not list it; it is not this tool's to replace", fixture, ManifestName)
 	}
+	// The commit first, before anything else reads the recording: one made
+	// at another commit need not replay here, and need not even export.
+	if recorded := recordedCommit(raw); knownCommit(recorded) && knownCommit(opts.Commit) && recorded != opts.Commit {
+		return nil, fmt.Errorf("learnreplay: the recording was made at %s and you are at %s: its replay here need not reproduce it. Add it from a checkout of %s and carry the fixture over (docs/developer-guide/testing.md)", recorded, opts.Commit, recorded)
+	}
+	if err := removeStaleAdds(dir, name); err != nil {
+		return nil, err
+	}
 	if opts.HeadLines > 0 {
 		raw = headLines(raw, opts.HeadLines)
 	}
@@ -774,16 +787,16 @@ func AddGolden(ctx context.Context, dir, name string, raw []byte, opts AddOption
 	if err != nil {
 		return nil, err
 	}
-	if known := func(c string) bool { return c != "" && c != "unknown" }; known(rep.Commit) && known(opts.Commit) && rep.Commit != opts.Commit {
-		return nil, fmt.Errorf("learnreplay: the recording was made at %s and you are at %s: its replay here need not reproduce it. Add it from a checkout of %s and carry the fixture over (docs/developer-guide/testing.md)", rep.Commit, opts.Commit, rep.Commit)
-	}
 	gz, err := Gzip(exported)
 	if err != nil {
 		return nil, err
 	}
 	if len(gz) > MaxFixtureBytes {
-		return nil, fmt.Errorf("learnreplay: the export of %s is %d bytes compressed, over the %d-byte fixture limit; cut it to its head, for example HEAD_LINES=%d",
-			name, len(gz), MaxFixtureBytes, suggestHead(exported, len(gz), MaxFixtureBytes))
+		head := suggestHead(exported, len(gz), MaxFixtureBytes)
+		if head == 0 {
+			return nil, fmt.Errorf("learnreplay: the export of %s is %d bytes compressed, over the %d-byte fixture limit, and no head that fits holds an Analyze of every analyzer the run had", name, len(gz), MaxFixtureBytes)
+		}
+		return nil, fmt.Errorf("learnreplay: the export of %s is %d bytes compressed, over the %d-byte fixture limit; cut it to its head, for example HEAD_LINES=%d", name, len(gz), MaxFixtureBytes, head)
 	}
 	outputs, err := goldenOutputs(ctx, exported, Fidelity)
 	if err != nil {
@@ -856,27 +869,6 @@ func restore(err error, old, fixture string) error {
 	return err
 }
 
-// suggestHead is a HEAD_LINES that fits limit, snapped back to the
-// last line of an Analyze, from how well this export compressed.
-func suggestHead(exported []byte, compressed, limit int) int {
-	budget := int(float64(len(exported)) * 0.9 * float64(limit) / float64(compressed))
-	read, err := learnrec.Read(exported)
-	if err != nil {
-		return 1
-	}
-	best, size := 1, 0
-	for i, ev := range read.Events {
-		size += len(ev.Line) + 1
-		if size > budget {
-			break
-		}
-		if strings.HasSuffix(ev.Kind, ".Analyze") {
-			best = i + 1
-		}
-	}
-	return best
-}
-
 // UpdateGoldens rewrites every fixture's golden files from a Normal replay at
 // this commit: what a PR that names a golden change runs. It repairs what
 // the check reports: a moved output, a missing file, an output the manifest
@@ -944,4 +936,68 @@ func gunzip(b []byte) ([]byte, error) {
 	}
 	defer func() { _ = r.Close() }()
 	return io.ReadAll(r)
+}
+
+// suggestHead is a HEAD_LINES that fits limit, from how well this export
+// compressed, snapped back to the last line of an Analyze after which
+// every analyzer the start says ran has analyzed: a head whose goldens
+// would compare nothing (comparedNothing) is no suggestion. Zero when no
+// head fits that holds them all.
+func suggestHead(exported []byte, compressed, limit int) int {
+	budget := int(float64(len(exported)) * 0.9 * float64(limit) / float64(compressed))
+	read, err := learnrec.Read(exported)
+	if err != nil || len(read.Events) == 0 {
+		return 0
+	}
+	var start learnrec.Start
+	if err := read.Events[0].DecodeData(&start); err != nil {
+		return 0
+	}
+	need := map[string]bool{saturation.KindAnalyze: true}
+	if start.SLO != nil {
+		need[slo.KindAnalyze] = true
+	}
+	if start.Throughput {
+		need[throughput.KindAnalyze] = true
+	}
+	best, size := 0, 0
+	for i, ev := range read.Events {
+		size += len(ev.Line) + 1
+		if size > budget {
+			break
+		}
+		delete(need, ev.Kind)
+		if strings.HasSuffix(ev.Kind, ".Analyze") && len(need) == 0 {
+			best = i + 1
+		}
+	}
+	return best
+}
+
+// recordedCommit is the commit a raw recording's start line names, "" when
+// it names none or cannot be read.
+func recordedCommit(raw []byte) string {
+	line, _, _ := bytes.Cut(raw, []byte("\n"))
+	n, err := parseNode(line)
+	if err != nil || n.get("Kind").str() != learnrec.KindStart {
+		return ""
+	}
+	return n.get("Data").get("Commit").str()
+}
+
+func knownCommit(c string) bool { return c != "" && c != "unknown" }
+
+// removeStaleAdds deletes what an add of name that was killed midway left:
+// the temporary directories it owns (".add-<name>-*").
+func removeStaleAdds(dir, name string) error {
+	stale, err := filepath.Glob(filepath.Join(dir, ".add-"+name+"-*"))
+	if err != nil {
+		return err
+	}
+	for _, s := range stale {
+		if err := os.RemoveAll(s); err != nil {
+			return fmt.Errorf("learnreplay: a killed add left %s, and it could not be removed: %w", s, err)
+		}
+	}
+	return nil
 }

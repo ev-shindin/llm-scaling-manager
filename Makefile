@@ -451,7 +451,7 @@ test: manifests generate fmt vet setup-envtest helm check-import-direction check
 # The commit a build is made from, recorded in each learner recording's start
 # line (learnrec.BuildCommit), so a golden is added only at the commit that
 # recorded it.
-GIT_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+GIT_COMMIT ?= $(shell git rev-parse --verify -q HEAD 2>/dev/null || echo unknown)
 LEARNREC_LDFLAGS = -X github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec.BuildCommit=$(GIT_COMMIT)
 
 # The learner goldens (docs/developer-guide/testing.md, Learner Goldens). The
@@ -469,6 +469,10 @@ learner-goldens: ## Rewrite every learner golden from a replay at this commit (o
 .PHONY: learner-goldens-check
 learner-goldens-check: ## Replay every learner golden and fail when one no longer reproduces or the manifest disagrees with the directory
 	go run -ldflags "$(LEARNREC_LDFLAGS)" ./cmd/learnergolden check
+
+.PHONY: learner-message-words
+learner-message-words: ## Rewrite the words the learner export allows in a message, from the code's own string literals
+	LEARNREPLAY_WRITE_MESSAGE_WORDS=1 go test ./internal/engines/analyzers/learnreplay/ -run TestMessageWords_AreCurrent -count=1
 
 # Creates a multi-node Kind cluster
 # Adds emulated GPU labels and capacities per node
@@ -3300,7 +3304,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name workload-variant-autoscaler-builder
 	$(CONTAINER_TOOL) buildx use workload-variant-autoscaler-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg GIT_COMMIT=$(GIT_COMMIT) --tag ${IMG} -f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm workload-variant-autoscaler-builder
 	rm Dockerfile.cross
 

@@ -321,7 +321,10 @@ a float sum whose last bits differ.
 
 The check also fails on a golden that compares nothing: every analyzer the
 recording's start line says ran must have results, and the slo analyzer, if
-it ran, must have published.
+it ran, must have published. `lines.csv` and `learned-state.csv` may be
+empty: lines are published only when the policy turns learned-state reuse
+on, and documents are written only when the learned-state snapshot is on.
+The start line records neither.
 
 The `acceptance` golden is the in-process acceptance run. It covers little
 learning: twelve cycles of fixed synthetic rows. The start-time average, the
@@ -334,25 +337,38 @@ The export renames every name it can place. It refuses a recording that
 holds anything it cannot place: nothing it does not know is committed.
 
 - **Renamed**, to a pseudonym such as `variant-03`: namespaces, models,
-  variants, pods, images, revisions, forget tokens, engine-argument text,
-  label and taint keys and values outside Kubernetes' and the GPU vendors'
-  own, resource names, priority and weight classes and limiter names. A
-  name is renamed wherever it stands: in a field, a map key, a part of a
-  composite key, or a message. The same name always gets the same
-  pseudonym, and names keep their sort order. Engine fingerprints are
+  variants, pods, images, revisions, forget tokens, engine-argument text and
+  unread flags, label and taint keys and values, resource names, priority
+  and weight classes, limiter names, and GPU products the code does not
+  know. A name is renamed wherever it stands: in a field, a map key, a part
+  of a composite key (by its place: in `ns|model|variant|GPU|count` the
+  first three parts are names, whatever they look like), or a message, in
+  any case (`PAYROLL` is the name `payroll`). The same name always gets the
+  same pseudonym, and names keep their sort order. Engine fingerprints are
   recomputed from the renamed arguments.
-- **Replaced**: host names, IP addresses and URLs in messages become `HOST`,
-  `IP` and `URL`. Analyzer queries and decode errors in the policy become
-  `redacted`.
-- **Kept as they are**: every number and time, accelerator product names
-  (such as `NVIDIA-H100-80GB-HBM3`), the code's own vocabulary (roles,
-  reasons, dtypes), durations and well-known labels such as
-  `nvidia.com/gpu.product`. The add prints the kept strings; read them
-  before you commit.
+- **Replaced**: host names, IP addresses (v4 and v6) and URLs in messages
+  become `HOST`, `IP` and `URL`. Analyzer queries and decode errors in the
+  policy become `redacted`.
+- **Kept as they are**: every number and time; the GPU products the code
+  names (`knownAccelerators`); label keys and resource names on an exact
+  list (`knownLabels`: `nvidia.com/gpu.product`, `topology.kubernetes.io/zone`
+  and the like; `payroll.kubernetes.io/team` is renamed); the code's own
+  vocabulary (roles, reasons, dtypes); durations. The add prints the kept
+  strings; read them before you commit.
+- **Messages**: after renaming, every word of a message must be a
+  pseudonym, a number, or a word of the code's own messages. Those words are
+  generated from the Go string literals of the analyzer, engine, signals,
+  config and domain packages into
+  `internal/engines/analyzers/learnreplay/message_words.txt`; a test fails
+  when the file is stale, and `make learner-message-words` writes it. A
+  word that is none of these (a team, a cluster, a plural of a name) stops
+  the export.
 - **Refused**: any other string. The export names the field, never the
   value. If the string is the code's own word, add it to `vocabulary` in
-  `internal/engines/analyzers/learnreplay/classify.go`; if it is a name
-  someone chose, classify its field as a rename there.
+  `internal/engines/analyzers/learnreplay/classify.go`; if it is a GPU
+  product or a well-known label, add it to `knownAccelerators` or
+  `knownLabels` there; if it is a name someone chose, classify its field as
+  a rename there.
 
 The numbers are kept on purpose: they are what the replay runs on. A
 recording holds every model the controller manages, so a golden commits
@@ -364,7 +380,9 @@ mean to commit.
 
 Record from a controller built from the commit you will add it at. The
 recording's start line holds the commit its controller was built from
-(`make build`, `make docker-build` and the image workflows set it). The add
+(`make build`, `make docker-build`, `make docker-buildx` and the image
+workflows set it; a binary built from a checkout without them reports the
+revision Go stamps into it). The add checks the commit first, then
 replays the recording and refuses it unless the replay reproduces it byte for
 byte. So it refuses a recording made at another commit, before replaying
 anything:
@@ -391,12 +409,14 @@ This:
    for byte, and unless its goldens compare something.
 4. Writes `recording.jsonl.gz` and the output files under `NAME/`, then lists
    them in `goldens.yaml`. A refusal or a failure leaves the directory as it
-   was.
+   was. What a killed add left (`.add-NAME-*`) is removed by the next add
+   of the same name.
 5. Runs the golden check.
 
 `SOURCE` is how the manifest describes the recording: the scenario, the
 build, the policy, and what the run does not cover. The add refuses a
-`SOURCE` that holds a name the recording holds. Never write a cluster name
+`SOURCE` that holds a name the recording holds, in any case and split by
+`-` or `_` (`Payroll-team` holds `payroll`). Never write a cluster name
 in it.
 
 Add `REPLACE=1` to overwrite a golden of the same name.
@@ -421,7 +441,8 @@ default cap) does not fit: the acceptance run compresses about 29 to 1, so
 a full one is about twice the limit; at that ratio a head of up to about
 100 MiB fits. Cut it to
 its head with `HEAD_LINES=N`. When a recording is too large, the add says
-which `N` to use: a head that ends on an `Analyze` and fits. Any head
+which `N` to use: a head that fits, ends on an `Analyze`, and holds an
+`Analyze` of every analyzer the run had. Any head
 replays.
 
 To export without adding a golden, for example to share a recording:

@@ -79,13 +79,13 @@ func Export(recording []byte, opts ExportOptions) ([]byte, *ExportReport, error)
 		key = sum[:]
 	}
 	x := &exporter{
-		names:        map[string]string{},
-		pseudonyms:   map[string]bool{},
-		byCategory:   map[string]map[string]bool{},
-		accelerators: map[string]bool{},
-		kept:         map[string]bool{},
-		keyed:        map[string]string{},
-		mac:          hmac.New(sha256.New, key),
+		names:      map[string]string{},
+		pseudonyms: map[string]bool{},
+		byCategory: map[string]map[string]bool{},
+		lower:      map[string]string{},
+		kept:       map[string]bool{},
+		keyed:      map[string]string{},
+		mac:        hmac.New(sha256.New, key),
 	}
 	trees := make([]*node, len(events))
 	for i, ev := range events {
@@ -143,7 +143,7 @@ func Export(recording []byte, opts ExportOptions) ([]byte, *ExportReport, error)
 	}
 	for _, t := range opts.Text {
 		if tok := x.nameIn(t); tok != "" {
-			return nil, nil, fmt.Errorf("learnreplay: export: the text to commit beside the export holds a name (the one behind %s)", x.names[tok])
+			return nil, nil, fmt.Errorf("learnreplay: export: the text to commit beside the export holds a name (the one behind %s)", x.lower[tok])
 		}
 	}
 
@@ -276,7 +276,15 @@ func (x *exporter) walkAt(n *node, at site, depth int, fn func(site, *string)) {
 			x.walkAt(v, at, depth, fn)
 		}
 	case nodeObject:
-		if isStruct(n) {
+		keyName := at.field + strings.Repeat("{}", depth)
+		if at.field == "" {
+			keyName = at.kind
+		}
+		// A map-typed field is a map whatever its keys look like: a node
+		// selector whose keys are spelled like Go fields is still a map.
+		_, mapped := keyRules[keyName]
+		isMap := mapped && !structSites[keyName]
+		if !isMap && isStruct(n) {
 			for i, k := range n.keys {
 				child := site{kind: at.kind, field: k, parent: at.field}
 				x.walkAt(n.vals[i], child, 0, fn)
@@ -285,10 +293,7 @@ func (x *exporter) walkAt(n *node, at site, depth int, fn func(site, *string)) {
 		}
 		keyAt := at
 		keyAt.isKey = true
-		keyAt.key = at.field + strings.Repeat("{}", depth)
-		if at.field == "" {
-			keyAt.key = at.kind
-		}
+		keyAt.key = keyName
 		changed := false
 		for i := range n.keys {
 			before := n.keys[i]
@@ -323,13 +328,12 @@ type exporter struct {
 	byCategory map[string]map[string]bool
 	names      map[string]string
 	pseudonyms map[string]bool
-	// tokens is names' keys that are not digits alone, longest first, for
-	// renaming inside a message: a pod name is replaced before the variant
-	// name it starts with.
+	// lower is every name, lowercased, with its pseudonym, for renaming
+	// inside a message whatever its case; tokens is lower's keys, longest
+	// first, so a pod name is replaced before the variant name it starts
+	// with.
+	lower  map[string]string
 	tokens []string
-	// accelerators are the values of the accelerator fields, allowed
-	// wherever they stand.
-	accelerators map[string]bool
 	// kept is every string kept as vocabulary, for the report.
 	kept         map[string]bool
 	fingerprints map[string]string
@@ -402,17 +406,53 @@ func (x *exporter) harvest(at site, s string, composites *[]string) {
 		}
 		*composites = append(*composites, s)
 	case classAccelerator:
-		x.accelerators[s] = true
+		if !knownAccelerators[s] {
+			x.add(r.category, s)
+		}
 	case classLabelKey, classResource:
-		if !wellKnownLabel(s) && !vocabulary[s] {
+		if !knownLabels[s] {
 			x.add(r.category, s)
 		}
 	}
 }
 
-// harvestComposites names each part of a composite key that is not a name
-// already, nor allowed as it is: a name only a key holds (a variant of
-// another namespace in a restored snapshot) is still a name.
+// keyPart is what one part of a composite key is, by its place.
+type keyPart int
+
+const (
+	partName keyPart = iota
+	partAccelerator
+	partCount
+	partFingerprint
+)
+
+// compositeLayout is what each '|'-separated part of a composite key is,
+// by the number of parts: the variant key (namespace|model|variant|
+// accelerator|GPUs, saturation.itlWindowKey), the physics key
+// (model|accelerator|GPUs|fingerprint, capacity.LearnedStateKey), and a
+// key of names alone otherwise (namespace/variant).
+func compositeLayout(parts int) []keyPart {
+	switch parts {
+	case 5:
+		return []keyPart{partName, partName, partName, partAccelerator, partCount}
+	case 4:
+		return []keyPart{partName, partAccelerator, partCount, partFingerprint}
+	}
+	out := make([]keyPart, parts)
+	return out
+}
+
+// splitComposite splits a composite key into its parts and their places.
+func splitComposite(s string) ([]string, []keyPart) {
+	parts := strings.Split(s, "|")
+	return parts, compositeLayout(len(parts))
+}
+
+// harvestComposites names every name part of a composite key that is not a
+// name already: a name only a key holds (a variant of another namespace in
+// a restored snapshot) is still a name, whatever it looks like -- a number,
+// a vocabulary word, a product name. A name part that is no name whole is
+// split at '/', and each piece is a name.
 func (x *exporter) harvestComposites(composites []string) {
 	known := map[string]bool{}
 	for _, set := range x.byCategory {
@@ -420,19 +460,25 @@ func (x *exporter) harvestComposites(composites []string) {
 			known[s] = true
 		}
 	}
-	allowed := func(a string) bool {
-		return a == "" || known[a] || isNumber(a) || isTime(a) || isHex16(a) || vocabulary[a] || x.accelerators[a] ||
-			strings.HasPrefix(a, capacity.IncompleteArgsPrefix) && isHex16(strings.TrimPrefix(a, capacity.IncompleteArgsPrefix))
-	}
 	for _, c := range composites {
-		for _, part := range strings.Split(c, "|") {
-			if allowed(part) {
-				continue
-			}
-			for _, a := range strings.Split(part, "/") {
-				if !allowed(a) {
-					x.add("name", a)
-					known[a] = true
+		parts, layout := splitComposite(c)
+		for i, part := range parts {
+			switch layout[i] {
+			case partAccelerator:
+				if !knownAccelerators[part] && !known[part] {
+					x.add("accelerator", part)
+					known[part] = true
+				}
+			case partCount, partFingerprint:
+			default:
+				if known[part] || part == "" {
+					continue
+				}
+				for _, a := range strings.Split(part, "/") {
+					if a != "" && !known[a] {
+						x.add("name", a)
+						known[a] = true
+					}
 				}
 			}
 		}
@@ -441,13 +487,13 @@ func (x *exporter) harvestComposites(composites []string) {
 
 // categoryOrder settles a name found under two categories: the first wins.
 var categoryOrder = []string{"ns", "model", "variant", "pod", "image", "revision", "token", "arg", "label",
-	"labelkey", "resource", "priority", "weightclass", "limiter", "name"}
+	"labelkey", "resource", "accelerator", "priority", "weightclass", "limiter", "name"}
 
 // assign gives every name its pseudonym.
 func (x *exporter) assign() error {
-	// A label value that names an accelerator is hardware, not a name.
+	// A label value that names a known accelerator is hardware, not a name.
 	for s := range x.byCategory["label"] {
-		if x.accelerators[s] {
+		if knownAccelerators[s] {
 			delete(x.byCategory["label"], s)
 		}
 	}
@@ -474,10 +520,9 @@ func (x *exporter) assign() error {
 			return fmt.Errorf("learnreplay: export: the recording already holds a name shaped like a pseudonym (%s); it cannot be told apart after the export", p)
 		}
 		x.pseudonyms[p] = true
-		if strings.Trim(s, "0123456789") != "" {
-			x.tokens = append(x.tokens, s)
-		}
+		x.lower[asciiLower(s)] = p
 	}
+	x.tokens = slices.Collect(maps.Keys(x.lower))
 	slices.SortFunc(x.tokens, func(a, b string) int {
 		if len(a) != len(b) {
 			return len(b) - len(a)
@@ -503,7 +548,7 @@ func (x *exporter) rename(at site, s string) string {
 		return s
 	}
 	switch r.class {
-	case classRename, classLabelKey, classResource:
+	case classRename, classLabelKey, classResource, classAccelerator:
 		if p, ok := x.names[s]; ok {
 			return p
 		}
@@ -517,14 +562,16 @@ func (x *exporter) rename(at site, s string) string {
 	return s
 }
 
-// renameComposite renames each part of a key joined by '|', and each part
-// of a part joined by '/' when the whole part is not a name (a model ID has
-// a '/' of its own).
+// renameComposite renames each name part of a composite key: whole when it
+// is a name, else each piece between '/'.
 func (x *exporter) renameComposite(s string) string {
-	parts := strings.Split(s, "|")
+	parts, layout := splitComposite(s)
 	for i, part := range parts {
 		if p, ok := x.names[part]; ok {
 			parts[i] = p
+			continue
+		}
+		if layout[i] != partName {
 			continue
 		}
 		sub := strings.Split(part, "/")
@@ -549,16 +596,15 @@ func alnum(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }
 
-// renameText replaces every whole name in a message with its pseudonym.
+// renameText replaces every whole name in a message with its pseudonym,
+// whatever its case: PAYROLL and Payroll are the name payroll.
 func (x *exporter) renameText(s string) string {
-	if p, ok := x.names[s]; ok {
-		return p
-	}
+	low := asciiLower(s)
 	var b strings.Builder
 	for i := 0; i < len(s); {
 		if i == 0 || !wordByte(s[i-1]) {
-			if tok := x.tokenAt(s, i); tok != "" {
-				b.WriteString(x.names[tok])
+			if tok := x.tokenAt(low, i, wordByte); tok != "" {
+				b.WriteString(x.lower[tok])
 				i += len(tok)
 				continue
 			}
@@ -569,20 +615,25 @@ func (x *exporter) renameText(s string) string {
 	return b.String()
 }
 
-func (x *exporter) tokenAt(s string, i int) string {
+// tokenAt is the longest name, lowercased, that low holds at i, ending
+// where joined says no word goes on; "" for none.
+func (x *exporter) tokenAt(low string, i int, joined func(byte) bool) string {
 	for _, tok := range x.tokens {
-		if strings.HasPrefix(s[i:], tok) && (i+len(tok) == len(s) || !wordByte(s[i+len(tok)])) {
+		if strings.HasPrefix(low[i:], tok) && (i+len(tok) == len(low) || !joined(low[i+len(tok)])) {
 			return tok
 		}
 	}
 	return ""
 }
 
-// nameIn is the first name that text holds as a whole word, "" for none.
+// nameIn is the first name that text holds, "" for none. Case does not
+// matter, and '-', '_' and '.' separate words: "Payroll-team" holds the
+// name payroll.
 func (x *exporter) nameIn(text string) string {
-	for i := 0; i < len(text); i++ {
-		if i == 0 || !wordByte(text[i-1]) {
-			if tok := x.tokenAt(text, i); tok != "" {
+	low := asciiLower(text)
+	for i := 0; i < len(low); i++ {
+		if i == 0 || !alnum(low[i-1]) {
+			if tok := x.tokenAt(low, i, alnum); tok != "" {
 				return tok
 			}
 		}
@@ -592,16 +643,23 @@ func (x *exporter) nameIn(text string) string {
 
 var (
 	urlPattern  = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s"'<>]+`)
+	ip6Pattern  = regexp.MustCompile(`\[?[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}\]?(?::\d+)?`)
 	ipPattern   = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b`)
 	hostPattern = regexp.MustCompile(`\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+){2,}\b`)
 	wordSplit   = regexp.MustCompile(`[\s,;()\[\]{}"'=<>]+`)
-	alphaWord   = regexp.MustCompile(`^[A-Za-z]+$`)
+	letterRuns  = regexp.MustCompile(`[A-Za-z]+`)
 )
 
 // scrub replaces URLs, IP addresses and host names in a message.
 func scrub(s string) string {
 	s = urlPattern.ReplaceAllString(s, "URL")
 	s = ipPattern.ReplaceAllString(s, "IP")
+	s = ip6Pattern.ReplaceAllStringFunc(s, func(m string) string {
+		if strings.Count(m, ":") >= 2 && strings.ContainsAny(m, "0123456789abcdefABCDEF") {
+			return "IP"
+		}
+		return m
+	})
 	return hostPattern.ReplaceAllString(s, "HOST")
 }
 
@@ -691,38 +749,64 @@ func (x *exporter) replaceFingerprints(s string) string {
 	return b.String()
 }
 
-// atomAllowed reports a string allowed as it is, wherever it stands.
+// atomAllowed reports a string allowed as it is outside a composite key:
+// a pseudonym, a number, a time, a fingerprint, vocabulary or a known
+// accelerator.
 func (x *exporter) atomAllowed(a string) bool {
-	return a == "" || x.pseudonyms[a] || isNumber(a) || isTime(a) || isHex16(a) || vocabulary[a] || x.accelerators[a] ||
-		strings.HasPrefix(a, capacity.IncompleteArgsPrefix) && isHex16(strings.TrimPrefix(a, capacity.IncompleteArgsPrefix))
+	return a == "" || x.pseudonyms[a] || isNumber(a) || isTime(a) || isFingerprint(a) || vocabulary[a] || knownAccelerators[a]
 }
 
-// compositeAllowed reports a composite key whose every part is allowed.
+// compositeAllowed reports a composite key whose every part is allowed for
+// its place: a name part a pseudonym (or pseudonyms between '/'), an
+// accelerator part a known accelerator or a pseudonym, a count digits, a
+// fingerprint a fingerprint.
 func (x *exporter) compositeAllowed(s string) bool {
-	for _, part := range strings.Split(s, "|") {
-		if x.atomAllowed(part) {
-			continue
-		}
-		for _, a := range strings.Split(part, "/") {
-			if !x.atomAllowed(a) {
-				return false
+	parts, layout := splitComposite(s)
+	for i, part := range parts {
+		var ok bool
+		switch layout[i] {
+		case partAccelerator:
+			ok = knownAccelerators[part] || x.pseudonyms[part]
+		case partCount:
+			ok = part != "" && strings.Trim(part, "0123456789") == ""
+		case partFingerprint:
+			ok = isFingerprint(part)
+		default:
+			ok = x.pseudonyms[part]
+			if !ok {
+				ok = true
+				for _, a := range strings.Split(part, "/") {
+					ok = ok && x.pseudonyms[a]
+				}
 			}
+		}
+		if !ok {
+			return false
 		}
 	}
 	return true
 }
 
-// textAllowed reports a message whose every word is a plain word or allowed.
+// textAllowed reports a message every word of which is allowed: a whole
+// word that is an allowed atom or composite key, or a word every run of
+// letters in which is a word of the code's own messages (messageWords) or
+// vocabulary. Any other word -- a team, a cluster, a host part the scrub
+// did not catch -- stops the export.
 func (x *exporter) textAllowed(s string) bool {
 	for _, w := range wordSplit.Split(s, -1) {
 		w = strings.TrimRight(w, ".:")
-		if w == "" || alphaWord.MatchString(w) || x.compositeAllowed(w) {
+		if w == "" || x.atomAllowed(w) || strings.Contains(w, "|") && x.compositeAllowed(w) {
 			continue
 		}
 		if _, err := time.ParseDuration(w); err == nil {
 			continue
 		}
-		return false
+		for _, run := range letterRuns.FindAllString(w, -1) {
+			low := strings.ToLower(run)
+			if !messageWords[low] && !vocabulary[run] && !vocabulary[low] {
+				return false
+			}
+		}
 	}
 	return true
 }
@@ -760,41 +844,49 @@ func (x *exporter) allowed(r rule, v string) bool {
 	if v == "" {
 		return true
 	}
+	keep := func(ok bool) bool {
+		if ok {
+			x.kept[v] = true
+		}
+		return ok
+	}
 	switch r.class {
 	case classRename:
 		return x.pseudonyms[v] || r.category == "revision" && strings.Trim(v, "0123456789") == "" ||
-			r.category == "label" && x.accelerators[v]
+			r.category == "label" && keep(knownAccelerators[v])
 	case classVocab:
-		x.kept[v] = vocabulary[v]
-		return vocabulary[v]
+		return keep(vocabulary[v])
 	case classAccelerator:
-		x.kept[v] = true
-		return acceleratorShape.MatchString(v)
+		return x.pseudonyms[v] || keep(knownAccelerators[v])
 	case classDuration:
 		_, err := time.ParseDuration(v)
-		x.kept[v] = err == nil
-		return err == nil
-	case classFlag:
-		x.kept[v] = true
-		return flagShape.MatchString(v)
+		return keep(err == nil)
+	case classFingerprint:
+		return isFingerprint(v)
 	case classTypeName:
-		x.kept[v] = true
-		return typeNameShape.MatchString(v)
+		return keep(knownConfigTypes[v])
 	case classLabelKey, classResource:
-		if wellKnownLabel(v) || vocabulary[v] {
-			x.kept[v] = true
-			return true
-		}
-		return x.pseudonyms[v]
+		return x.pseudonyms[v] || keep(knownLabels[v] || vocabulary[v])
 	case classComposite:
 		return x.compositeAllowed(v)
 	case classText:
 		return x.textAllowed(v)
 	case classCommit:
-		x.kept[v] = true
-		return commitShape.MatchString(v)
+		return keep(commitShape.MatchString(v))
 	case classRedact:
 		return v == "redacted"
 	}
 	return false
+}
+
+// asciiLower lowercases ASCII letters only, so every byte keeps its place:
+// a message is matched lowercased and rewritten at the same offsets.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }

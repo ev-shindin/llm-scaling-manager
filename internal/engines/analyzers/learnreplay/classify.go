@@ -3,7 +3,6 @@ package learnreplay
 import (
 	"reflect"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -107,18 +106,23 @@ const (
 	classRename class = iota + 1
 	// classVocab: a value the code defines; it must be in vocabulary.
 	classVocab
-	// classAccelerator: a hardware product name, kept.
+	// classAccelerator: a GPU product name; kept when the code knows it
+	// (knownAccelerators), renamed otherwise.
 	classAccelerator
 	// classDuration: a Go duration, kept.
 	classDuration
-	// classFlag: an engine flag name, kept.
-	classFlag
-	// classTypeName: a Go type name, kept.
+	// classFingerprint: an engine fingerprint (ArgsTag): 16 hex digits,
+	// maybe behind capacity.IncompleteArgsPrefix.
+	classFingerprint
+	// classTypeName: the Go type of a recorded policy: one the replay can
+	// decode (knownConfigTypes).
 	classTypeName
-	// classLabelKey: a label or taint key; kept under a well-known prefix,
+	// classLabelKey: a label or taint key; kept when it is one of
+	// knownLabels exactly,
 	// renamed otherwise.
 	classLabelKey
-	// classResource: a resource name; kept when well known, renamed
+	// classResource: a resource name; kept when it is one of knownLabels,
+	// renamed
 	// otherwise.
 	classResource
 	// classComposite: a key built from names and figures, joined by '|' and
@@ -173,23 +177,23 @@ var valueRules = map[string]rule{
 	"Quantization": {class: classVocab}, "KVConnector": {class: classVocab},
 	"KVOffloadingBackend": {class: classVocab}, "MemoryLayout": {class: classVocab},
 
-	"Accelerator": {class: classAccelerator}, "AcceleratorName": {class: classAccelerator},
-	"Answer": {class: classAccelerator}, "Accelerators.Name": {class: classAccelerator},
+	"Accelerator": {classAccelerator, "accelerator"}, "AcceleratorName": {classAccelerator, "accelerator"},
+	"Answer": {classAccelerator, "accelerator"}, "Accelerators.Name": {classAccelerator, "accelerator"},
 
 	"BorrowCooldown": {class: classDuration}, "FlappingWindow": {class: classDuration},
 	"LenderDebounce": {class: classDuration}, "PlacementTimeout": {class: classDuration},
 	"RefreshInterval": {class: classDuration}, "RetentionPeriod": {class: classDuration},
 	"WaitBeforeReverseMove": {class: classDuration},
 
-	"Unresolved": {class: classFlag},
+	"Unresolved": rename("arg"),
 	"ConfigType": {class: classTypeName},
 	"Commit":     {class: classCommit},
 	"Key":        {classLabelKey, "labelkey"}, "TopologyKey": {classLabelKey, "labelkey"},
 	"Resources": {classResource, "resource"},
 
-	"Args": {class: classComposite}, "Config": {class: classComposite}, "From": {class: classComposite},
+	"Args": {class: classFingerprint}, "Config": {class: classFingerprint}, "From": {class: classComposite},
 	"FromVariant": {class: classComposite}, "PhysicsKey": {class: classComposite},
-	"K2Args": {class: classComposite}, "ThroughputArgs": {class: classComposite},
+	"K2Args": {class: classFingerprint}, "ThroughputArgs": {class: classFingerprint},
 
 	"Error": {class: classText}, "Issues": {class: classText},
 
@@ -265,38 +269,44 @@ func setOf(names ...string) map[string]bool {
 	return out
 }
 
-// wellKnownLabelDomains are the label and resource prefixes kept as they
-// are: Kubernetes' own and the GPU vendors'.
-var wellKnownLabelDomains = []string{"kubernetes.io", "k8s.io", "nvidia.com", "amd.com", "intel.com",
-	"habana.ai", "cloud.google.com", "amazonaws.com", "azure.com", "karpenter.sh", "openshift.io",
-	"x-k8s.io", "llm-d.ai"}
-
-// wellKnownLabel reports a label key, or resource name, of Kubernetes or a
-// GPU vendor: "nvidia.com/gpu.product", "topology.kubernetes.io/zone",
-// "cpu".
-func wellKnownLabel(k string) bool {
-	switch k {
-	case "cpu", "memory", "ephemeral-storage", "pods":
-		return true
-	}
-	domain, _, ok := strings.Cut(k, "/")
-	if !ok {
-		return false
-	}
-	for _, d := range wellKnownLabelDomains {
-		if domain == d || strings.HasSuffix(domain, "."+d) {
-			return true
-		}
-	}
-	return false
-}
-
-var (
-	acceleratorShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
-	flagShape        = regexp.MustCompile(`^--?[a-z0-9][a-z0-9_-]*$`)
-	typeNameShape    = regexp.MustCompile(`^\*?[a-z][a-z0-9]*\.[A-Z][A-Za-z0-9]*$`)
-	commitShape      = regexp.MustCompile(`^([0-9a-f]{7,40}|unknown)$`)
+// knownLabels are the label keys and resource names kept as they are: exact
+// strings, Kubernetes' and the GPU vendors' own. Any other key is renamed,
+// whatever its domain: a name after a well-known domain is still a name.
+var knownLabels = setOf(
+	"cpu", "memory", "ephemeral-storage", "pods",
+	"nvidia.com/gpu", "nvidia.com/gpu.product", "nvidia.com/gpu.count", "nvidia.com/gpu.memory",
+	"nvidia.com/gpu.family", "nvidia.com/gpu.machine", "nvidia.com/mig.config", "nvidia.com/gpu.present",
+	"amd.com/gpu", "amd.com/gpu.product-name", "intel.com/gpu", "habana.ai/gaudi",
+	"kubernetes.io/hostname", "kubernetes.io/arch", "kubernetes.io/os",
+	"topology.kubernetes.io/zone", "topology.kubernetes.io/region", "node.kubernetes.io/instance-type",
+	"node-role.kubernetes.io/worker", "node-role.kubernetes.io/control-plane",
+	"node.kubernetes.io/not-ready", "node.kubernetes.io/unreachable", "node.kubernetes.io/unschedulable",
+	"cloud.google.com/gke-accelerator", "cloud.google.com/gke-nodepool", "karpenter.sh/capacity-type",
+	"karpenter.sh/nodepool", "kueue.x-k8s.io/queue-name", "kueue.x-k8s.io/priority-class",
+	"leaderworkerset.sigs.k8s.io/name",
 )
+
+// knownAccelerators are the GPU product names the code and its docs name.
+// Any other accelerator is renamed: a product name the code does not know
+// is as likely a node pool someone named.
+var knownAccelerators = setOf(
+	"H100", "H200", "A100", "A10G", "L4", "L40S", "T4", "V100", "B200", "GB200", "MI300X", "MI250", "Gaudi-2",
+	"NVIDIA-H100", "NVIDIA-H100-80GB-HBM3", "NVIDIA-H100-SXM5-80GB", "NVIDIA-H100-PCIE-80GB", "NVIDIA-H100-NVL",
+	"NVIDIA-H200", "NVIDIA-H200-141GB-HBM3e", "NVIDIA-A100", "NVIDIA-A100-PCIE-80GB", "NVIDIA-A100-SXM4-80GB",
+	"NVIDIA-A100-PCIE-40GB", "NVIDIA-A100-SXM4-40GB", "NVIDIA-A10G", "NVIDIA-L4", "NVIDIA-L40S",
+	"NVIDIA-B200", "NVIDIA-GB200", "NVIDIA-V100-PCIE-16GB", "Tesla-T4", "Tesla-V100-SXM2-16GB",
+	"AMD-MI300X", "AMD-MI300X-192G", "AMD-MI250-128G", "AMD_Instinct_MI300X_OAM", "Intel-Gaudi-2-96GB",
+)
+
+// knownConfigTypes are the policy types a replay decodes.
+var knownConfigTypes = setOf("*config.ScalingPolicy")
+
+var commitShape = regexp.MustCompile(`^([0-9a-f]{7,40}|unknown)$`)
+
+// numberShape is a decimal number as the recorder or a message writes one:
+// no hex floats, no "Inf" or "NaN" words (those are the recorder's exact
+// "NaN", "+Inf" and "-Inf", checked apart).
+var numberShape = regexp.MustCompile(`^[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$`)
 
 // isNumber reports a string that is a number, or a float the recorder
 // writes as a string.
@@ -305,8 +315,7 @@ func isNumber(s string) bool {
 	case "NaN", "+Inf", "-Inf":
 		return true
 	}
-	_, err := strconv.ParseFloat(s, 64)
-	return err == nil
+	return numberShape.MatchString(s)
 }
 
 // isTime reports a recorded time.
@@ -331,3 +340,59 @@ func isHex16(s string) bool {
 	}
 	return true
 }
+
+// isFingerprint reports an ArgsTag: a fingerprint, maybe marked incomplete.
+func isFingerprint(s string) bool {
+	return isHex16(strings.TrimPrefix(s, capacity.IncompleteArgsPrefix))
+}
+
+// structSites are the places, named as keyRules names a map ("<field>"
+// plus "{}" per map level inside it), where some recorded type has a
+// struct. A place in keyRules and not here is always a map, whatever its
+// keys look like; a place in both (LearnedState.Config is a map,
+// Input.Config a policy) is told apart by its keys (isStruct).
+var structSites = func() map[string]bool {
+	out := map[string]bool{}
+	type visit struct {
+		t     reflect.Type
+		field string
+		depth int
+	}
+	seen := map[visit]bool{}
+	var walk func(t reflect.Type, field string, depth int)
+	walk = func(t reflect.Type, field string, depth int) {
+		v := visit{t, field, depth}
+		if seen[v] {
+			return
+		}
+		seen[v] = true
+		if t.Kind() != reflect.Pointer && t.Kind() != reflect.Interface {
+			if _, ok := t.MethodByName("RecordedValue"); ok {
+				if set, ok := reflect.PointerTo(t).MethodByName("SetRecordedValue"); ok && set.Type.NumIn() == 2 {
+					walk(set.Type.In(1), field, depth)
+				}
+				return
+			}
+		}
+		switch t.Kind() {
+		case reflect.Pointer, reflect.Slice, reflect.Array:
+			walk(t.Elem(), field, depth)
+		case reflect.Map:
+			walk(t.Elem(), field, depth+1)
+		case reflect.Struct:
+			if t == reflect.TypeFor[time.Time]() {
+				return
+			}
+			out[field+strings.Repeat("{}", depth)] = true
+			for i := range t.NumField() {
+				walk(t.Field(i).Type, t.Field(i).Name, 0)
+			}
+		}
+	}
+	for _, t := range recordedTypes {
+		walk(t, "", 0)
+	}
+	// The policy and the input are written under these fields as Raw.
+	out["Config"], out["Input"], out["State"] = true, true, true
+	return out
+}()

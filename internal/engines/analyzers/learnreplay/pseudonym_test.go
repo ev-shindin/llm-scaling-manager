@@ -142,7 +142,8 @@ func canaryRecording(t *testing.T, data any) []byte {
 	return mixedRecordingWith(t, func(r *learnrec.Recorder) { r.Record("composite.Canary", replayAt, data) })
 }
 
-// nest builds {A: {B: value}} for the site "A.B", {B: value} for "B".
+// nest builds {A: {B: value}} for the site "A.B", {B: value} for "B", and
+// {A: {"ns/v": {B: value}}} when A is always a map.
 func nest(site string, value reflect.Value) any {
 	parts := strings.Split(site, ".")
 	v := value
@@ -151,6 +152,14 @@ func nest(site string, value reflect.Value) any {
 		s := reflect.New(typ).Elem()
 		s.Field(0).Set(v)
 		v = s
+		// A parent that is always a map holds the struct under a key.
+		if i > 0 {
+			if _, mapped := keyRules[parts[i-1]]; mapped && !structSites[parts[i-1]] {
+				m := reflect.MakeMap(reflect.MapOf(reflect.TypeFor[string](), v.Type()))
+				m.SetMapIndex(reflect.ValueOf("ns/v"), v)
+				v = m
+			}
+		}
 	}
 	return v.Interface()
 }
@@ -177,8 +186,7 @@ func canaryOutcome(t *testing.T, data any) string {
 }
 
 // Every classified field and map holds a canary in turn: each is renamed or
-// refused, and only the accelerator fields keep it, by design (a hardware
-// product name is kept as it is).
+// refused: none keeps it.
 func TestExport_ACanaryInEachFieldIsRenamedOrRefused(t *testing.T) {
 	survived := map[string]bool{}
 	outcomes := map[string]int{}
@@ -188,7 +196,7 @@ func TestExport_ACanaryInEachFieldIsRenamedOrRefused(t *testing.T) {
 		if o == outcomeSurvived {
 			survived[site] = true
 		}
-		if r.class == classRename || r.class == classLabelKey || r.class == classResource {
+		if r.class == classRename || r.class == classLabelKey || r.class == classResource || r.class == classAccelerator {
 			assert.Equal(t, "renamed", o, "%s", site)
 		}
 	}
@@ -215,7 +223,7 @@ func TestExport_ACanaryInEachFieldIsRenamedOrRefused(t *testing.T) {
 			assert.Equal(t, "renamed", o, "a key of %s", name)
 		}
 	}
-	assert.Equal(t, map[string]bool{"Accelerator": true, "AcceleratorName": true, "Answer": true, "Accelerators.Name": true},
+	assert.Equal(t, map[string]bool{},
 		survived, "what keeps a canary")
 	t.Logf("outcomes: %v", outcomes)
 }
@@ -239,16 +247,30 @@ func TestExport_RefusesAnUnclassifiedField(t *testing.T) {
 // A host name, an IP address and a URL in a message are replaced; a message
 // word that is still not allowed stops the export.
 func TestExport_MessagesAreScrubbedOrRefused(t *testing.T) {
-	rec := canaryRecording(t, struct{ Error string }{"Get https://thanos.acme.example.com/api: dial 10.20.30.40:443 refused for svc.mdl.cluster.local"})
+	assert.Equal(t, "Get URL dial IP refused for HOST, IP",
+		scrub("Get https://thanos.acme.example.com/api: dial 10.20.30.40:443 refused for svc.mdl.cluster.local, [fd00::1]:9090"))
+
+	// A message of the code's own words, names and numbers is renamed and
+	// kept; PAYROLL is the name payroll, whatever its case.
+	rec := probeRecording(t, "payroll", "mdl", []string{"v"}, nil, func(r *learnrec.Recorder, _ *fixture) {
+		r.Record("composite.Plan", replayAt, struct{ Error string }{"variant v of PAYROLL has no line after 3 cycles"})
+	})
 	out, _, err := Export(rec, ExportOptions{})
 	require.NoError(t, err)
-	last := canaryLine(out)
-	assert.Contains(t, last, `"Error":"Get URL dial IP refused for HOST"`)
+	assert.Contains(t, string(out), `"Error":"variant variant-01 of ns-01 has no line after 3 cycles"`)
 
-	rec = canaryRecording(t, struct{ Error string }{"quota of team-payroll2 exhausted"})
-	_, _, err = Export(rec, ExportOptions{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Error in composite.Canary holds a value that is not allowed")
+	// Any other word stops the export, and the refusal does not repeat it.
+	for _, msg := range []string{
+		"quota of team-payroll2 exhausted",
+		"lookup prometheus in somewhere failed: team=finance",
+		"quota of payrolls exhausted",
+	} {
+		rec = canaryRecording(t, struct{ Error string }{msg})
+		_, _, err = Export(rec, ExportOptions{})
+		require.Error(t, err, msg)
+		assert.Contains(t, err.Error(), "Error in composite.Canary holds a value that is not allowed")
+		assert.NotContains(t, err.Error(), "finance")
+	}
 }
 
 // Names keep their order within a category, a renamed map is re-sorted as

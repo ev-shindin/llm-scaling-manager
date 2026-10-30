@@ -2,6 +2,7 @@ package learnrec
 
 import (
 	"fmt"
+	"runtime/debug"
 	"sort"
 	"time"
 
@@ -131,4 +132,21 @@ type SaturationStart struct {
 type SLOStart struct {
 	StateTimeout, SlopeHoldFor time.Duration
 	Judging                    bool
+}
+
+// Commit is the commit this binary was built from: BuildCommit when the
+// build set it, else the revision Go stamps into a binary built from a
+// checkout (vcs.revision), else "unknown".
+func Commit() string {
+	if BuildCommit != "" && BuildCommit != "unknown" {
+		return BuildCommit
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.revision" && s.Value != "" {
+				return s.Value
+			}
+		}
+	}
+	return "unknown"
 }

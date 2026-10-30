@@ -80,7 +80,7 @@ func (e *Engine) recordLearners(rec *learnrec.Recorder) {
 	e.learnRec = rec
 	e.learnRecStarted = true
 	e.attachLearnerRecorder(rec)
-	start := learnrec.Start{Commit: learnrec.BuildCommit}
+	start := learnrec.Start{Commit: learnrec.Commit()}
 	if e.capacityStore != nil {
 		start.StoreRecords = e.capacityStore.Len()
 	}

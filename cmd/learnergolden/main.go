@@ -11,7 +11,7 @@
 // golden fixture with its outputs. update rewrites every fixture's outputs
 // from a replay at this commit. check is the golden check make test runs.
 // Run from the module root; the make targets do, and set the commit the
-// add compares with (learnrec.BuildCommit).
+// add compares with (learnrec.Commit).
 package main
 
 import (
@@ -101,7 +101,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return err
 		}
 		rep, err := learnreplay.AddGolden(ctx, *dir, *name, raw, learnreplay.AddOptions{
-			Source: *source, HeadLines: *head, Replace: *replace, Commit: learnrec.BuildCommit})
+			Source: *source, HeadLines: *head, Replace: *replace, Commit: learnrec.Commit()})
 		if err != nil {
 			return err
 		}
