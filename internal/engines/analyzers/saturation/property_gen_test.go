@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
@@ -111,8 +112,9 @@ func itlRow(pod string, k, itlSec float64) domain.ReplicaMetrics {
 	}
 }
 
-// steadinessDefault and steadinessNonDefault are the steady gate at its
-// defaults and at the non-default policy 2.6 names (steadyFor 10m, idleRows 5;
+// steadinessOf is the ITL steady gate a policy tuning gives; tuningDefault and
+// tuningNonDefault are the defaults and the non-default policy 2.6 names
+// (steadyFor 10m, idleRows 5;
 // carry raised with steadyFor, as the policy's crossed-pair repair requires).
 func steadinessOf(tn config.AnalyzerTuning) itl.Steadiness {
 	return tuning{AnalyzerTuning: tn.WithDefaults()}.steadiness()
@@ -178,6 +180,10 @@ type propRig struct {
 	clock  time.Time
 	policy func(*config.ScalingPolicy)
 	wrap   func(*domain.ReplicaMetrics)
+	// ctx carries the logger Analyze writes to; context.Background when nil.
+	ctx context.Context
+	// input edits the AnalyzerInput last (a scheduler queue, say).
+	input func(*domain.AnalyzerInput)
 }
 
 func newPropRig() *propRig {
@@ -200,7 +206,14 @@ func (r *propRig) analyze(rows []domain.ReplicaMetrics, states []domain.VariantR
 	if r.policy != nil {
 		r.policy(in.Config.(*config.ScalingPolicy))
 	}
-	res, err := r.a.Analyze(context.Background(), in)
+	if r.input != nil {
+		r.input(&in)
+	}
+	ctx := r.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	res, err := r.a.Analyze(ctx, in)
 	r.clock = r.clock.Add(step)
 	return res, err
 }
@@ -212,7 +225,7 @@ func (r *propRig) k2(role string) float64 {
 	defer r.a.mu.Unlock()
 	keys := make([]string, 0, len(r.a.computeCapacityHistory))
 	for k, ra := range r.a.computeCapacityHistory {
-		if ra.Len() > 0 && (role == "" || containsRole(k, role)) {
+		if ra.Len() > 0 && (role == "" || strings.Contains(k, "|"+role+"|")) {
 			keys = append(keys, k)
 		}
 	}
@@ -225,15 +238,6 @@ func (r *propRig) k2(role string) float64 {
 		sum += r.a.computeCapacityHistory[k].Average()
 	}
 	return sum / float64(len(keys))
-}
-
-func containsRole(key, role string) bool {
-	for i := 0; i+len(role)+2 <= len(key); i++ {
-		if key[i] == '|' && key[i+1:i+1+len(role)] == role && key[i+1+len(role)] == '|' {
-			return true
-		}
-	}
-	return false
 }
 
 // propKv is one replica's KV cache in tokens.
@@ -262,7 +266,12 @@ func aggStates(n int) []domain.VariantReplicaState {
 	}
 }
 
+// relErr is |got - want| / |want|, and +Inf when either is NaN, so a NaN never
+// passes a tolerance.
 func relErr(got, want float64) float64 {
+	if math.IsNaN(got) || math.IsNaN(want) {
+		return math.Inf(1)
+	}
 	if want == 0 {
 		return math.Abs(got)
 	}
@@ -280,4 +289,37 @@ func reversals(v []bool) int {
 	return n
 }
 
-func (r *propRig) ctx() context.Context { return context.Background() }
+// Declared estimands and tolerances (2.6). A class has no target without its
+// learner's estimand:
+//   - ITL line: the k-weighted ratio (ITL - B) / k, priced as ITL at kPrice;
+//   - k2: per replica, the KV a saturated replica holds;
+//   - measured mu: the arithmetic mean of the pods' mu_i (fleet capacity is
+//     their sum);
+//   - the floor: lambda / (mu x target) replicas at steady state;
+//   - start time: the mean start of the variant's pods.
+const (
+	// propBand is the first-sample band: how far a second identifying
+	// reading may move a figure.
+	propBand = 0.05
+	// propTransientTol is how far a refused or stamped transient may move a
+	// figure against the same run without it.
+	propTransientTol = 0.03
+	// propTruthTol is known truth's epsilon: priced capacity at most truth x
+	// (1 + epsilon).
+	propTruthTol = 0.05
+	// propNDepBias is the declared bias of an estimate's expectation, against
+	// the truth, across N in {1, 2, 4, 16}.
+	propNDepBias = 0.03
+	// propKPrice is where the ITL line is priced (itl.DefaultKSat).
+	propKPrice = itl.DefaultKSat
+)
+
+// propertyCases is every property case, real learners only. Mutants reuse the
+// check functions with a learner that carries a past defect.
+func propertyCases() []propCase {
+	out := make([]propCase, 0, 64)
+	for _, part := range [][]propCase{itlCases(), k2Cases(), muCases(), floorCases(), otherCases()} {
+		out = append(out, part...)
+	}
+	return out
+}
