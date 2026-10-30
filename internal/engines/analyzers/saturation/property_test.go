@@ -75,6 +75,9 @@ type propTuning string
 const (
 	tunedDefault    propTuning = "default"
 	tunedNonDefault propTuning = "steadyFor 10m, carry 15m, idleRows 5"
+	// tunedPolicy is a case that runs the policy keys it lists (propCase.keys)
+	// at values other than their defaults.
+	tunedPolicy propTuning = "non-default policy keys"
 )
 
 // Violation kinds. A ledger row names the kind its case is expected to fail
@@ -92,6 +95,7 @@ const (
 	kindFell        = "fell"               // demand fell along a rising trajectory
 	kindUnbounded   = "unbounded"          // demand over what the fleet can drain
 	kindNotDetected = "not-detected"       // a refusal the property needs did not happen
+	kindWrongSide   = "wrong-side"         // a verdict on the wrong side of its threshold
 )
 
 // propViolation is a broken property: the kind, and what was measured.
@@ -122,6 +126,10 @@ type propCase struct {
 	name    string
 	family  propFamily
 	tuning  propTuning
+	// keys are the policy keys the case runs at a value other than the
+	// default (policyKeys): 2.6 requires one such case per key a learner
+	// reads.
+	keys []string
 	// seeds is how many seeds the case runs on; zero is defaultSeeds.
 	seeds int
 	check func(seed uint64) error

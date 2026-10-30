@@ -558,12 +558,19 @@ the cases it ran.
 | `property_itl_test.go`, `property_k2_test.go`, `property_mu_test.go`, `property_floor_test.go`, `property_other_test.go` | the cases, one file per learner |
 | `property_gen_test.go` | the generators, including the time-base family, and the declared estimands |
 | `property_mutants_test.go` | the 2.7 findings, with each one's status, and the mutants |
+| `property_learners_test.go` | the shared and borrowed ITL line, the borrowed k2 lower bound, the fleet shape hold, the decode-saturation memory, and the SLO analyzer's line through `slo.Analyzer` |
+| `property_edges_test.go` | one case per threshold of 2.6's table, held at the threshold and either side of it, and at a non-default value where the threshold is a policy key |
+| `property_more_test.go` | liveness per topology (8-GPU ranks, a prefill role, the ITL line), scale over GPUs per replica and output length, the time-base cases, and the prefill bound through a P/D `Analyze` |
+| `property_policy_test.go` | every policy key a learner reads, each of which some case runs at a non-default value |
 | `property_coverage_test.go` | what each learner's cases cover and do not, and the classes with no time-base case |
 | `testdata/properties/known-failures.yaml` | the known-failures ledger |
 | `testdata/properties/cases.txt` | the registered case ids, pinned |
 
 A new case also goes in `cases.txt` and in the coverage table, or the tests
-fail.
+fail. A case that runs a policy key at a value other than its default names
+the key in its `keys`, and every key in `policyKeys` needs such a case: 2.6
+does not count a key tested at its default alone. A learner that starts
+reading a new key adds it to `policyKeys`.
 
 ### Violations and errors
 

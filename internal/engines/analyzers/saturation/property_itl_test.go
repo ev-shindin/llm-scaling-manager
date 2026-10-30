@@ -19,7 +19,8 @@ func itlCases() []propCase {
 	non := func() itlLearner { return newTrackerITL(sNon) }
 	return []propCase{
 		{class: classTransient, learner: "itl", name: "joiner-warmup", family: familyDirect, tuning: tunedDefault, check: checkITLJoiner(def, 1, 20*time.Minute)},
-		{class: classTransient, learner: "itl", name: "joiner-warmup-nondefault", family: familyDirect, tuning: tunedNonDefault, check: checkITLJoiner(non, 1, 30*time.Minute)},
+		{class: classTransient, learner: "itl", name: "joiner-warmup-nondefault", family: familyDirect, tuning: tunedNonDefault,
+			keys: []string{"steadyGate.steadyFor", "steadyGate.carry", "steadyGate.idleRows"}, check: checkITLJoiner(non, 1, 30*time.Minute)},
 		{class: classFirstSample, learner: "itl", name: "one-reading", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkITLOneReading(def)},
 		{class: classStale, learner: "itl", name: "b-converges-n2", family: familyDirect, tuning: tunedDefault, check: checkITLStaleB(def, 2, 10*time.Minute)},
 		{class: classStale, learner: "itl", name: "b-converges-n4", family: familyDirect, tuning: tunedDefault, check: checkITLStaleB(def, 4, 10*time.Minute)},
