@@ -498,6 +498,106 @@ To write the acceptance run as a raw recording:
 LEARNREC_ACCEPTANCE_OUT=$HOME/acceptance.jsonl go test ./internal/engines/steadystate/ -run TestLearnerRecording_AnExportReplaysAndNamesNothing -v
 ```
 
+## Learner Property Tests
+
+The [learner goldens](#learner-goldens) pin what the analyzers output on a
+recorded run. The property tests check something else: they feed the
+learners synthetic inputs and check what they learn. For example: a transient is refused, a figure does not move
+with N, and a genuinely slow replica counts by its weight. The classes and
+their thresholds are in
+[the learner proposal, 2.6](../proposals/analyzer-learner.md#26-property-tests).
+They run in `make test` and take about a second. To run them alone:
+
+```bash
+go test ./internal/engines/analyzers/saturation/ -run 'TestLearnerProperties|TestProperty' -v
+```
+
+Each case runs on many fixed seeds: 100 for cheap cases, 20 for cases that
+drive the analyzer for minutes, and 10 for the N-dependence cases. A failure
+names the case (`class/learner/case`), the seed and the violation. To rerun
+one case on one seed:
+
+```bash
+PROPSEED=7 go test ./internal/engines/analyzers/saturation/ -run 'TestLearnerProperties/edges/k2/key-near-output-boundary' -v
+```
+
+Each case is judged inside its own subtest, so a filtered `-run` judges only
+the cases it ran.
+
+| file (in `internal/engines/analyzers/saturation/`) | what it holds |
+| --- | --- |
+| `property_test.go` | the runner, the violation kinds and the ledger check |
+| `property_itl_test.go`, `property_k2_test.go`, `property_mu_test.go`, `property_floor_test.go`, `property_other_test.go` | the cases, one file per learner |
+| `property_gen_test.go` | the generators, including the time-base family, and the declared estimands |
+| `property_mutants_test.go` | the 2.7 findings, with each one's status, and the mutants |
+| `property_coverage_test.go` | what each learner's cases cover and do not, and the classes with no time-base case |
+| `testdata/properties/known-failures.yaml` | the known-failures ledger |
+| `testdata/properties/cases.txt` | the registered case ids, pinned |
+
+A new case also goes in `cases.txt` and in the coverage table, or the tests
+fail.
+
+### Violations and errors
+
+A check returns a violation when the learner breaks the property. A violation
+has a kind, such as `transient-admitted`, `over-priced` or `not-learned`. Any
+other error means the case could not run, and it fails the subtest whatever
+the ledger says. Every check first makes sure the learner learned something:
+a figure of zero or NaN is a `not-learned` violation, not a pass.
+
+### The known-failures ledger
+
+Some cases fail on today's code on purpose: they record a known defect. Each
+one is a row in `known-failures.yaml` with these fields:
+
+| field | what it holds |
+| --- | --- |
+| `expect` | the violation kind the case fails with |
+| `finding` | the defect |
+| `measured` | how often it failed, and the first failure, when the row was written |
+| `owner` | the PR that clears it, or `open` |
+
+The test is strict both ways:
+
+- A case in the ledger must fail with its `expect` kind. Failing with another
+  kind is a new failure.
+- A ledgered case that passes on every seed fails the build, so a PR that
+  fixes a listed defect also removes the row. (With `PROPSEED` set, a ledgered
+  case that passes on that one seed is not an error.)
+- A case not in the ledger must pass.
+- A row that names no case is an error.
+
+Keep the rows sorted by `id`. If you change a generator, the seeds that fail
+change too: update `measured`. Do not add a row to make a new failure go away.
+A new failure is a bug, unless the PR names it as a known defect with an
+owner.
+
+### Mutants and the 2.7 accounting
+
+`findings` in `property_mutants_test.go` lists every row of 2.7. Each row is
+in exactly one of these states:
+
+- **caught**: a mutant puts the defect back, and its class fails;
+- **still escaping**: with the reason;
+- **waits for the replay counters**: the per-path counters of 2.5, which no
+  PR has built yet.
+
+`TestPropertyMutants` runs each mutant, and checks two more rules: a mutant
+never runs a ledgered case, and every caught row has a mutant.
+
+Each mutant states its level:
+
+| level | how the defect is put back | what it proves |
+| --- | --- | --- |
+| `policy` | a policy key set where the guard stops working | that the production learner is caught |
+| `rows` | rows changed to look the way the defect read them | that the production learner is caught |
+| `toy-learner` | a small learner with the pre-fix estimator | only that the check is sensitive to the defect |
+| `toy-output` | the production output edited the way the defect edited it | only that the check reads that output |
+
+If a mutant starts to pass, the check no longer detects its defect. Look for
+a change that weakened the learner or the case before you touch the
+accounting.
+
 ## End-to-End Tests
 
 One suite in `test/e2e/` runs on Kind with emulated GPUs, or on

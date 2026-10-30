@@ -1,0 +1,90 @@
+# Known failures of the learner property tests (docs/proposals/analyzer-learner.md, 2.6).
+#
+# Each row is a property case that fails on today's code, and the violation
+# kind it fails with (expect). TestLearnerProperties requires a listed case to
+# fail with that kind: failing with another kind is a new failure, and passing
+# on every seed breaks the build until the row is removed. A row naming no
+# case is an error. A PR that fixes a row removes it; one that changes a case
+# or its generator restates measured. Nothing here is skipped, and no
+# tolerance is widened to pass a defect.
+#
+# id is class/learner/case, as the test names it; rows are sorted by id.
+# measured is the fail rate over the case's seeds and the first failure, when
+# the row was written. owner is the PR of #341 that clears the row, or "open".
+- id: contamination-heterogeneity/mu/half-served-max-slow-pod
+  class: contamination-heterogeneity
+  learner: mu
+  expect: over-priced
+  finding: "A genuinely slow pod under half the fastest's rate is refused (half the served max, a section-5 value estimator), so mu is its siblings' mean: over the fleet's, the SLO side. Declared: it starts to over-price once one pod serves under half the fastest."
+  measured: "100/100 seeds; seed 1: fleet {1, 1, 1, 0.341}, mean 0.835, priced 1.000, 20 % over"
+  owner: "PR 3"
+- id: contamination-heterogeneity/mu/sibling-yield-slow-pod
+  class: contamination-heterogeneity
+  learner: mu
+  expect: over-priced
+  finding: "The sibling yield prices the full siblings' lower median when the reading on record is a genuinely slow pod's: over the fleet's mean, the SLO side. Declared: it starts to over-price once the slow pod reads under siblingMuTolerance (0.8) of its siblings."
+  measured: "100/100 seeds; seed 1: fleet {1, 1, 1, 0.569}, mean 0.892, priced 1.000, 12 % over"
+  owner: "PR 3"
+- id: contamination-heterogeneity/prefill-bound/one-pod-doubled
+  class: contamination-heterogeneity
+  learner: prefill-bound
+  expect: biased
+  finding: "The prefill bound keeps the max of every prefill pod's reading within a minute (it writes through mu's fold under one empty pod name), so one pod read at 2x -- the prefill double scrape -- sets the bound."
+  measured: "100/100 seeds; seed 1: 1.548 against the mean 0.968"
+  owner: "open"
+- id: contamination-heterogeneity/prefill-bound/one-slow-pod-n4
+  class: contamination-heterogeneity
+  learner: prefill-bound
+  expect: biased
+  finding: "The prefill bound's max ignores a genuinely slow pod: the bound is the fastest pod's rate, not the mean."
+  measured: "100/100 seeds; seed 1: 0.774 against the mean 0.677"
+  owner: "open"
+- id: edges/idle/idle-line-030
+  class: edges
+  learner: idle
+  expect: flipped
+  finding: "Idle room has a 2 min dwell and no hysteresis band on the 0.30 idle line (loadImbalance.idleKvUsage): a peak KV sitting on the line with 30 s-correlated noise settles idle and clears again."
+  measured: "98/100 seeds; seed 1: 6 reversals in 116 cycles"
+  owner: "open"
+- id: edges/k2/key-near-output-boundary
+  class: edges
+  learner: k2
+  expect: flipped
+  finding: "The k2 key's output-length bucket has no hysteresis of its own: with the noise-free output length 6 % above the 500-token medium/long boundary, autocorrelated noise moves the key the analyzer selects, and back."
+  measured: "17/50 seeds; seed 2: the selected key changed 2 times in 112 cycles"
+  owner: "open"
+- id: first-sample/k2/second-reading
+  class: first-sample
+  learner: k2
+  expect: adopted-raw
+  finding: "k2 prices its first admitted reading at once; the window mean then moves by half the second reading's difference."
+  measured: "20/20 seeds; seed 1: 296 552 from the first reading, 264 778 after a second, 11 %"
+  owner: "open"
+- id: first-sample/start-time/between-sample-and-default
+  class: first-sample
+  learner: start-time
+  expect: adopted-raw
+  finding: "The start-time estimator's first measurement replaces the 70 s default (DefaultReplicaStartSeconds). PR 5's acceptance: with no seed, the estimate sits strictly between the sample and 70 s."
+  measured: "100/100 seeds; seed 1: a first sample of 487 s set the estimate to 487.2 s"
+  owner: "PR 5"
+- id: known-truth/itl/line-at-kprice-timebase
+  class: known-truth
+  learner: itl
+  expect: biased
+  finding: "#273 A5: k is the instant reading and ITL a rate[1m]. With the batch swinging inside the minute, the pinned fit on the pairs prices ITL at kPrice low, the side that over-prices derived mu."
+  measured: "3/100 seeds; seed 38: ITL(0.85) 0.04295 s against a true 0.05250 s, 18.2 % low"
+  owner: "open"
+- id: liveness/k2/flow-control-on
+  class: liveness
+  learner: k2
+  expect: not-learned
+  finding: "k2 is learned only from an engine queue at or over the threshold. Under flow control the queue stands at the scheduler and the engines' own queues read empty, so P1-obs never fires and the variant prices from k1."
+  measured: "20/20 seeds; two decode replicas full for 3 min with 40 requests at the scheduler: no k2"
+  owner: "open"
+- id: n-dependence/prefill-bound/iid-max
+  class: n-dependence
+  learner: prefill-bound
+  expect: n-dependent
+  finding: "The prefill bound's max across pods grows with N under iid noise."
+  measured: "10/10 seeds; seed 1: E at N=2 is 1.031 against a true 1, +3.1 %"
+  owner: "open"
