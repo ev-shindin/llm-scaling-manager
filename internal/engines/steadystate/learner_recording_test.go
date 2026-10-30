@@ -434,7 +434,7 @@ func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing
 		require.NoError(t, err)
 		require.Empty(t, mismatchText(rep.Mismatches), "replay %d diverged from the recording", i+1)
 		require.Equal(t, string(recording), string(rep.Recording), "replay %d: the replay's recording", i+1)
-		assert.Positive(t, rep.StoreChecks, "no store check ran")
+		assert.Equal(t, 128, rep.StoreChecks, "store checks")
 		assert.Equal(t, kinds[saturation.KindAnalyze], rep.Analyzes[saturation.KindAnalyze])
 		assert.Equal(t, kinds[slo.KindAnalyze], rep.Analyzes[slo.KindAnalyze])
 		assert.Equal(t, kinds[throughput.KindAnalyze], rep.Analyzes[throughput.KindAnalyze])
@@ -445,7 +445,7 @@ func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing
 	rep, err := learnreplay.Replay(context.Background(), recording, learnreplay.Options{Mode: learnreplay.Normal})
 	require.NoError(t, err)
 	require.Empty(t, mismatchText(rep.Failed()), "a Normal replay at the same commit failed")
-	assert.Positive(t, rep.StoreChecks)
+	assert.Equal(t, 128, rep.StoreChecks, "store checks, Normal")
 	assert.Equal(t, kinds[saturation.KindAnalyze], rep.Analyzes[saturation.KindAnalyze])
 
 	// What is measured, for the size the docs state: bytes per replica per
@@ -557,7 +557,7 @@ func TestLearnerRecording_APolicyWithAnOptimizerRecords(t *testing.T) {
 	s.cycle(t, e, 0, recStart)
 	require.NoError(t, e.learnRec.Err(), "the recording stopped on the policy")
 	kinds := kindCounts(t, buf.Bytes())
-	require.Positive(t, kinds[saturation.KindAnalyze])
+	require.Equal(t, 3, kinds[saturation.KindAnalyze], "analyzes, optimizer run")
 	rep, err := learnreplay.Replay(context.Background(), buf.Bytes(), learnreplay.Options{Mode: learnreplay.Fidelity})
 	require.NoError(t, err)
 	require.Empty(t, mismatchText(rep.Failed()))
@@ -593,7 +593,7 @@ func TestLearnerRecording_StartStopStart(t *testing.T) {
 	assert.Equal(t, string(before), string(files[0].data), "something wrote to the closed recording")
 	events, err := readEvents(before)
 	require.NoError(t, err)
-	assert.Positive(t, len(events))
+	assert.Len(t, events, 36, "events of the one recorded cycle")
 }
 
 // The same run thirty days later records the same results: nothing an
@@ -723,8 +723,8 @@ func TestLearnerRecording_TheControllerStartOpensOneRecording(t *testing.T) {
 	require.Len(t, files, 1)
 	kinds := kindCounts(t, files[0].data)
 	assert.Equal(t, 1, kinds[learnrec.KindStart])
-	assert.Positive(t, kinds[saturation.KindAnalyze])
-	assert.Positive(t, kinds[capacity.KindFileScaleTarget])
+	assert.Equal(t, 3, kinds[saturation.KindAnalyze], "analyzes, controller start")
+	assert.Equal(t, 6, kinds[capacity.KindFileScaleTarget], "filings, controller start")
 	events, err := readEvents(files[0].data)
 	require.NoError(t, err)
 	assert.Equal(t, learnrec.KindStart, events[0].Kind, "the first line is the start")
@@ -763,8 +763,8 @@ func assertSweepsEvicted(t *testing.T, recording []byte) {
 			records += d.Removed
 		}
 	}
-	assert.Positive(t, history, "no saturation sweep evicted anything")
-	assert.Positive(t, records, "no store sweep evicted a record")
+	assert.Equal(t, 2, history, "saturation sweeps that evicted")
+	assert.Equal(t, 6, records, "records the store sweeps evicted")
 }
 
 // assertRouterServed holds the script to an slo Analyze that read a latency.
@@ -783,7 +783,7 @@ func assertRouterServed(t *testing.T, recording []byte) {
 			served++
 		}
 	}
-	assert.Positive(t, served, "no slo Analyze read a router latency")
+	assert.Equal(t, 12, served, "slo Analyzes served a router latency")
 }
 
 // assertDecodeRewriteRecordedRaw holds the recording to the raw decode rows:
@@ -884,10 +884,8 @@ func assertResultsPriced(t *testing.T, recording []byte) {
 			}
 		}
 	}
-	for _, kind := range []string{saturation.KindAnalyze, slo.KindAnalyze, throughput.KindAnalyze} {
-		assert.Positive(t, priced[kind], "no %s result priced a variant", kind)
-	}
-	t.Logf("variants priced per analyzer: %v", priced)
+	assert.Equal(t, map[string]int{saturation.KindAnalyze: 64, slo.KindAnalyze: 22, throughput.KindAnalyze: 52}, priced,
+		"variants priced per analyzer")
 }
 
 // readEvents is learnrec.Read's events.

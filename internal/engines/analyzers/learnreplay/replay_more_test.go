@@ -166,3 +166,39 @@ func TestCompareEvents_Branches(t *testing.T) {
 		assert.True(t, m.Fatal)
 	}
 }
+
+// Exports that found nothing new are not recorded; a replay, which exports
+// only where the run recorded one, skips them the same way and reproduces
+// the recording exactly.
+func TestReplay_ARecordingWithSkippedExportsReplays(t *testing.T) {
+	f := newFixture(replayAt)
+	f.buf.Reset()
+	rec := learnrec.New(f.buf, 0)
+	f.attach(rec)
+	rec.Record(learnrec.KindStart, replayAt, defaultStart())
+	calls := 0
+	export := func() { f.sat.ExportLearnedState(); calls++ }
+	export()
+	export()
+	f.sat.NoteVariantsPresent("ns", "m", []string{"v"})
+	export()
+	f.sat.ForgetVariant("ns", "m", "v", "t1")
+	export()
+	export()
+	recording := bytes.Clone(f.buf.Bytes())
+	events, err := readEvents(recording)
+	require.NoError(t, err)
+	exports := 0
+	for _, ev := range events {
+		if ev.Kind == "saturation.ExportLearnedState" {
+			exports++
+		}
+	}
+	require.Equal(t, 5, calls)
+	require.Equal(t, 2, exports, "precondition: three exports found nothing new and were skipped")
+
+	rep, err := Replay(context.Background(), recording, Options{Mode: Fidelity})
+	require.NoError(t, err)
+	require.Empty(t, rep.Failed())
+	assert.Equal(t, string(recording), string(rep.Recording))
+}
