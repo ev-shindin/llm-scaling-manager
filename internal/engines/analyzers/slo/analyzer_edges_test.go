@@ -487,8 +487,9 @@ var _ = Describe("Analyzer state and inputs", func() {
 
 var _ = Describe("judge's sample minimums and labels", func() {
 	judge := func(rl *domain.RouterLatency, slo *config.SLOPolicy) []metrics.SLOObjectiveReading {
-		return New(fakeRouter{latency: rl}, nil).judge(context.Background(),
+		out, _, _ := New(fakeRouter{latency: rl}, nil).judge(context.Background(),
 			domain.AnalyzerInput{ModelID: "m", Namespace: "ns"}, slo)
+		return out
 	}
 
 	It("reports no TPOT mean from fewer than 50 requests, and none from zero", func() {
@@ -550,7 +551,7 @@ var _ = Describe("judge's sample minimums and labels", func() {
 var _ = Describe("judge's request counts", func() {
 	It("reports how many requests the router saw, even below the minimum", func() {
 		slo := policy(100*time.Millisecond, 3*time.Second).SLO
-		out := New(fakeRouter{latency: &domain.RouterLatency{WindowSeconds: 300,
+		out, _, _ := New(fakeRouter{latency: &domain.RouterLatency{WindowSeconds: 300,
 			TPOTSumRate: 0.008, TPOTCountRate: 0.1, TTFTBuckets: buckets(1, 0.18, 3, 0.19, inf, 0.2)}}, nil).
 			judge(context.Background(), domain.AnalyzerInput{ModelID: "m", Namespace: "ns"}, slo)
 		Expect(out[0].Requests).To(BeNumerically("~", 30, 1e-9))
@@ -560,7 +561,7 @@ var _ = Describe("judge's request counts", func() {
 	})
 
 	It("reports no request count when the router reported nothing", func() {
-		out := New(fakeRouter{}, nil).judge(context.Background(),
+		out, _, _ := New(fakeRouter{}, nil).judge(context.Background(),
 			domain.AnalyzerInput{ModelID: "m", Namespace: "ns"}, policy(0, 3*time.Second).SLO)
 		Expect(math.IsNaN(out[0].Requests)).To(BeTrue())
 	})

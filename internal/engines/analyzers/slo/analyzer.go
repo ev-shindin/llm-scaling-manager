@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
 
@@ -87,6 +88,10 @@ type Analyzer struct {
 	// transients is each model's recent fleet history, keyed namespace/model,
 	// for the transient exclusion (transient.go).
 	transients map[string]*transientMemo
+
+	// rec records every call the engine makes, with what it returned
+	// (recording.go); nil when recording is off.
+	rec *learnrec.Recorder
 }
 
 type acceleratorMemo struct {
@@ -154,13 +159,14 @@ func (a *Analyzer) Name() string { return domain.SLOAnalyzerName }
 // variants, and every objective stays unjudged.
 func (a *Analyzer) Judging() bool { return a.router != nil }
 
-// Analyze implements domain.Analyzer.
-func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*domain.AnalyzerResult, error) {
+// analyze is Analyze, and what the call read from the router and published,
+// for the recorder.
+func (a *Analyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*domain.AnalyzerResult, judged, error) {
 	logger := ctrl.LoggerFrom(ctx)
 	now := a.now()
 	cfg, _ := input.Config.(*config.ScalingPolicy)
 	if cfg == nil {
-		return nil, fmt.Errorf("slo analyzer: config is %T, want *config.ScalingPolicy", input.Config)
+		return nil, judged{}, fmt.Errorf("slo analyzer: config is %T, want *config.ScalingPolicy", input.Config)
 	}
 	result := &domain.AnalyzerResult{
 		AnalyzerName: domain.SLOAnalyzerName,
@@ -230,7 +236,8 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 		}
 	}
 
-	snap.Objectives = a.judge(ctx, input, cfg.SLO)
+	var j judged
+	snap.Objectives, j.Latency, j.RouterCalled = a.judge(ctx, input, cfg.SLO)
 	// A window that covered a wake or a starting replica is not judged: the
 	// requests in it waited out capacity no steady-state sizing could have had
 	// ready. The request count is still published, and the reason is.
@@ -266,7 +273,8 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 			"demandTokensPerSec", demand, "outputTokens", fleet.shape.AvgOutputTokens)
 	}
 	metrics.PublishSLO(snap, now)
-	return result, nil
+	j.Published = snap
+	return result, j, nil
 }
 
 // pricingDetail is what a variant was priced from, for its log line.
@@ -435,10 +443,11 @@ const defaultRouterWindowSeconds = 300.0
 
 // judge reads the router's latency for the model and reports each objective:
 // the TPOT mean, and the TTFT percentile with its attainment. A figure from too
-// few requests is NaN, which is not published.
-func (a *Analyzer) judge(ctx context.Context, input domain.AnalyzerInput, slo *config.SLOPolicy) []metrics.SLOObjectiveReading {
+// few requests is NaN, which is not published. It returns, for the recorder, the
+// latency it read and whether it asked the router at all.
+func (a *Analyzer) judge(ctx context.Context, input domain.AnalyzerInput, slo *config.SLOPolicy) ([]metrics.SLOObjectiveReading, *domain.RouterLatency, bool) {
 	if slo.Empty() {
-		return nil
+		return nil, nil, false
 	}
 	var rl *domain.RouterLatency
 	if a.router != nil {
@@ -486,7 +495,7 @@ func (a *Analyzer) judge(ctx context.Context, input domain.AnalyzerInput, slo *c
 		}
 		out = append(out, r)
 	}
-	return out
+	return out, rl, a.router != nil
 }
 
 // linesUnderArgs forgets key's line -- its window, intercept and held slope --
@@ -522,14 +531,14 @@ func (a *Analyzer) engineParams(namespace, modelID, variant string) *capacity.En
 	return nil
 }
 
-// EvictStale forgets the learned state of variants and models not analyzed or
+// evictStale forgets the learned state of variants and models not analyzed or
 // reported present for the state timeout. The engine calls it with the
 // saturation analyzer's sweep on every cycle that has a model to plan, whether
 // or not any model lists this analyzer, so each key is visited once per cycle
 // rather than once per analyzed model. A cycle with no active model does not
 // sweep (the engine returns before it), so the timeout counts reconciled time,
 // as the saturation analyzer's does.
-func (a *Analyzer) EvictStale(now time.Time) Evicted {
+func (a *Analyzer) evictStale(now time.Time) Evicted {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	stale := func(key string) bool {
@@ -573,20 +582,20 @@ func (e Evicted) Any() bool {
 	return e.Lines+e.Baselines+e.Transients+e.Accelerators > 0
 }
 
-// BeginCycle marks the start of an engine cycle. The engine calls it once per
+// beginCycle marks the start of an engine cycle. The engine calls it once per
 // cycle, before any model is analyzed and whether or not any is: a model not
 // analyzed on the cycle before the one it is analyzed in was skipped, and its
 // window is not judged (unobserved).
-func (a *Analyzer) BeginCycle() {
+func (a *Analyzer) beginCycle() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.cycle++
 }
 
-// NoteVariantsPresent stamps the learned state of a model's variants that
+// noteVariantsPresent stamps the learned state of a model's variants that
 // were discovered this cycle, analyzed or not: a variant parked at zero is
 // not analyzed, and must not lose its line for it.
-func (a *Analyzer) NoteVariantsPresent(namespace, modelID string, variantNames []string) {
+func (a *Analyzer) noteVariantsPresent(namespace, modelID string, variantNames []string) {
 	now := a.now()
 	a.mu.Lock()
 	defer a.mu.Unlock()

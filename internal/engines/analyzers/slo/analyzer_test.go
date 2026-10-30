@@ -284,7 +284,7 @@ var _ = Describe("judge", func() {
 
 	judgeWith := func(rl *domain.RouterLatency, slo *config.SLOPolicy) []float64 {
 		a := New(fakeRouter{latency: rl}, nil)
-		out := a.judge(context.Background(), domain.AnalyzerInput{ModelID: "m", Namespace: "ns"}, slo)
+		out, _, _ := a.judge(context.Background(), domain.AnalyzerInput{ModelID: "m", Namespace: "ns"}, slo)
 		Expect(out).To(HaveLen(1))
 		return []float64{out[0].Observed, out[0].Attainment}
 	}

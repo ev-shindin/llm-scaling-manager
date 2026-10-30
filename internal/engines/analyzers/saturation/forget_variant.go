@@ -32,7 +32,7 @@ type ForgetMarkSnapshot struct {
 	Seen  time.Time `json:"seen"`
 }
 
-// ForgetVariant drops everything learned for one variant -- every map
+// forgetVariant drops everything learned for one variant -- every map
 // learnedMapsLocked lists under the variant's keys: its k2 and throughput
 // windows and what is kept beside them, its ITL window, baseline and the line
 // it published, its start estimate, its accelerator memo, anything pending
@@ -51,7 +51,7 @@ type ForgetMarkSnapshot struct {
 // Siblings keep their own windows, and what they borrowed from it they read
 // again from its window each cycle, which is gone. The ITL line it published
 // is dropped too, so a sibling that read that line has none next cycle.
-func (a *SaturationAnalyzer) ForgetVariant(namespace, modelID, variant, token string) int {
+func (a *SaturationAnalyzer) forgetVariant(namespace, modelID, variant, token string) int {
 	// The two key shapes a variant's state is filed under (variantOfKey).
 	// The trailing separator keeps "v" from matching "v2".
 	k2Prefix := namespace + "|" + variant + "|" + modelID + "|"
@@ -79,10 +79,10 @@ func (a *SaturationAnalyzer) ForgetVariant(namespace, modelID, variant, token st
 	return n
 }
 
-// ForgottenToken is the last forget token acted on for a variant, or "".
+// forgottenToken is the last forget token acted on for a variant, or "".
 // Reading it keeps the mark alive: the engine reads it every cycle the
 // variant's scale target carries the annotation.
-func (a *SaturationAnalyzer) ForgottenToken(namespace, variant string) string {
+func (a *SaturationAnalyzer) forgottenToken(namespace, variant string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	m, ok := a.forgotten[namespace+"/"+variant]

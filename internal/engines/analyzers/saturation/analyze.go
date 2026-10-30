@@ -25,13 +25,13 @@ import (
 // See docs/proposals/analyzer-structure.md. The stages were already here as
 // 155 consecutive lines; naming them changed no arithmetic and no ordering.
 
-// Analyze computes capacity signals for a model across all its variants.
+// analyze computes capacity signals for a model across all its variants.
 //
 // The stages run in this order and the order matters: the shape has to be
 // observed before mu can be priced at it, replicas have to be priced before
 // the fleet can be said to have measured itself, and the floor and the holds
 // come last because they only ever raise a demand the stages above computed.
-func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*domain.AnalyzerResult, error) {
+func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerInput) (*domain.AnalyzerResult, error) {
 	satConfig, ok := input.Config.(*config.ScalingPolicy)
 	if !ok {
 		return nil, fmt.Errorf("expected *ScalingPolicy, got %T", input.Config)

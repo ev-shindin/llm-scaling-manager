@@ -14,6 +14,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/fleet"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
 
@@ -30,6 +31,9 @@ type ThroughputAnalyzer struct {
 	// clock is what Analyze stamps observations and ages variant state
 	// on: the engine's cycle clock (WithClock), the wall clock by default.
 	clock clock.PassiveClock
+	// rec records every call the engine makes, with what it returned
+	// (recording.go); nil when recording is off.
+	rec *learnrec.Recorder
 }
 
 // variantState holds the cross-cycle calibration state for a single variant.
@@ -79,7 +83,7 @@ func (a *ThroughputAnalyzer) Name() string {
 	return AnalyzerName
 }
 
-// Observe processes one reconcile cycle for a model. It groups metrics by
+// observeAt processes one reconcile cycle for a model. It groups metrics by
 // VariantName and, for each variant:
 //  1. Runs sanity checks; skips the variant if any issue is found.
 //  2. Computes the variant-average IL, OL, and prefix hit rate.
@@ -89,7 +93,7 @@ func (a *ThroughputAnalyzer) Name() string {
 //
 // Returns a map of variantName → SanityReport for logging. An empty SanityReport
 // (report.OK() == true) means that variant's metrics were healthy this cycle.
-func (a *ThroughputAnalyzer) Observe(
+func (a *ThroughputAnalyzer) observeAt(
 	ctx context.Context,
 	now time.Time,
 	modelID, namespace string,
@@ -196,7 +200,7 @@ func (a *ThroughputAnalyzer) observe(
 	return reports
 }
 
-// Analyze implements domain.Analyzer. It calls Observe to update internal
+// analyze is Analyze. It calls observe to update internal
 // state, then computes a supply vs demand scaling signal for each variant using
 // a two-tier ITL model resolution strategy:
 //
@@ -232,7 +236,7 @@ func (a *ThroughputAnalyzer) observe(
 // (TotalSupply, TotalAnticipatedSupply, TotalDemand); RC/SC per role are also
 // left zero for the engine post-step. Prefill TotalDemand is negligible after
 // the OL guard in computeLocalDemand.
-func (a *ThroughputAnalyzer) Analyze(
+func (a *ThroughputAnalyzer) analyze(
 	ctx context.Context,
 	input domain.AnalyzerInput,
 ) (*domain.AnalyzerResult, error) {
