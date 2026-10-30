@@ -1,0 +1,19 @@
+# The learner goldens: each fixture is an exported recording and the output
+# files its replay produces (docs/developer-guide/testing.md, Learner Goldens).
+# Written by make learner-golden-add and make learner-goldens; never by hand.
+# The golden check (make test) fails when a golden no longer reproduces, or
+# when this list and the directory disagree.
+goldens:
+- name: acceptance
+  outputs:
+  - acceptance/learned-state.csv
+  - acceptance/lines.csv
+  - acceptance/results.csv
+  - acceptance/slo-published.csv
+  - acceptance/store-records.csv
+  - acceptance/variant-capacities.csv
+  recording: acceptance/recording.jsonl.gz
+  source: 'The in-process acceptance run (TestLearnerRecording_AnExportReplaysAndNamesNothing):
+    three models, a controller restart that restores a snapshot, an ITL line published
+    and borrowed, a forget, sweeps that evict, P/D decode, slo judging with a router,
+    throughput.'

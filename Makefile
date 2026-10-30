@@ -448,6 +448,22 @@ test: manifests generate fmt vet setup-envtest helm check-import-direction check
 	@# nothing more.
 	CGO_ENABLED=1 go test -race -count=1 ./internal/engines/analyzers/slo/ ./internal/signals/itl/ ./internal/signals/learnrec/
 
+# The learner goldens (docs/developer-guide/testing.md, Learner Goldens). The
+# golden check itself is a test, TestGoldens_EveryCommittedGoldenReproduces,
+# so `make test` runs it; learner-goldens-check runs it alone.
+.PHONY: learner-golden-add
+learner-golden-add: ## Commit a raw learner recording as a golden: RECORDING=<file> NAME=<fixture> SOURCE="<scenario, build, policy>" [HEAD_LINES=N] [REPLACE=1]
+	@if [ -z "$(RECORDING)" ] || [ -z "$(NAME)" ] || [ -z "$(SOURCE)" ]; then echo 'usage: make learner-golden-add RECORDING=<raw .jsonl> NAME=<fixture> SOURCE="<scenario, build, policy>" [HEAD_LINES=N] [REPLACE=1]'; exit 1; fi
+	go run ./cmd/learnrec add -in "$(RECORDING)" -name "$(NAME)" -source "$(SOURCE)" $(if $(HEAD_LINES),-head-lines $(HEAD_LINES)) $(if $(REPLACE),-replace)
+
+.PHONY: learner-goldens
+learner-goldens: ## Rewrite every learner golden from a replay at this commit (only for a golden change the PR names)
+	go run ./cmd/learnrec update
+
+.PHONY: learner-goldens-check
+learner-goldens-check: ## Replay every learner golden and fail when one no longer reproduces or the manifest disagrees with the directory
+	go run ./cmd/learnrec check
+
 # Creates a multi-node Kind cluster
 # Adds emulated GPU labels and capacities per node
 .PHONY: create-kind-cluster

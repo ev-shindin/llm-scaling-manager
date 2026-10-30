@@ -293,6 +293,85 @@ go test ./internal/engines/steadystate/ -run TestLearnerRecording -v
 go test ./internal/engines/analyzers/learnreplay/ ./internal/signals/learnrec/ -v
 ```
 
+### Learner Goldens
+
+A golden is a recording committed as a test fixture, beside the outputs its
+replay produces. `make test` replays every golden and fails when an output
+has moved. The rule for when an output may move is in
+[the learner proposal](../proposals/analyzer-learner.md), section 2.5.
+
+The goldens live in `internal/engines/analyzers/learnreplay/testdata/goldens/`:
+
+- `goldens.yaml` lists every golden and every file of it. The check fails
+  when it and the directory disagree: a file it does not list, or a file it
+  lists that is missing.
+- One directory per golden holds `recording.jsonl.gz`, the exported
+  recording, and one CSV file per output: `results.csv` (each result: role
+  demand, start seconds and the rest), `variant-capacities.csv`,
+  `store-records.csv` (the capacity fields the analyzers write),
+  `lines.csv` (ITL lines published and borrowed), `slo-published.csv` and
+  `learned-state.csv` (each learned-state document, one row per key).
+
+Each row is keyed by the event kind, its time, the model (or line key, or
+learned-state section) and the variant (or key), never by a sequence number.
+Two numbers are equal when they differ by less than one part in 10^9. So two
+things that vary between replays of the same recording do not fail the check:
+events numbered in another order, and a float sum whose last bits differ.
+
+#### Add a recording as a golden
+
+Take the recording from a build of the commit you are on: the add replays it,
+and refuses it unless the replay reproduces it byte for byte. Then run one
+command:
+
+```bash
+make learner-golden-add RECORDING=./learner-recordings/learnrec-20260302T090000.000000000Z.jsonl NAME=e1 SOURCE="E1 benchmark scenario, recorder on, default analyzerTuning"
+```
+
+This:
+
+1. Exports the recording: every namespace, model, variant, pod, image,
+   revision, forget token, engine-argument text and placement label value
+   becomes a pseudonym such as `variant-03`. The same name always gets the
+   same pseudonym, and names keep their sort order. Engine fingerprints are
+   recomputed from the renamed arguments. The export stops, and writes
+   nothing, if a string field is one it does not know or if any original
+   name is still in its output.
+2. Replays the export and refuses it unless the replay reproduces it byte
+   for byte.
+3. Writes `recording.jsonl.gz` and the output files under `NAME/`, and lists
+   them in `goldens.yaml`.
+4. Runs the golden check.
+
+`SOURCE` is how the manifest describes the recording: the scenario, the
+build and the policy. Never write a cluster or namespace name in it.
+
+A compressed recording may be at most 4 MiB. Add `HEAD_LINES=N` to keep only
+the first N lines of a longer one; a recording cut short still replays.
+Add `REPLACE=1` to overwrite a golden of the same name.
+
+To export without adding a golden, for example to share a recording:
+
+```bash
+go run ./cmd/learnrec export -in RAW.jsonl -out exported.jsonl.gz
+```
+
+#### When an output moves
+
+Run `make learner-goldens` only when your PR names the change: it rewrites
+every output file from a replay at your commit. Never edit a golden by hand.
+`make learner-goldens-check` runs the check alone and prints, per output, how
+many rows changed and the first change with its sign and size.
+
+#### The acceptance golden
+
+The `acceptance` golden is the in-process acceptance run. To write that run
+again, as a raw recording:
+
+```bash
+LEARNREC_ACCEPTANCE_OUT=$HOME/acceptance.jsonl go test ./internal/engines/steadystate/ -run TestLearnerRecording_AnExportReplaysAndNamesNothing -v
+```
+
 ## End-to-End Tests
 
 One suite in `test/e2e/` runs on Kind with emulated GPUs, or on
