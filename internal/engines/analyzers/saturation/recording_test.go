@@ -78,7 +78,7 @@ func TestExportLearnedState_RecordsOnlyAChangedDocument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var kinds []string
+	kinds := make([]string, 0, len(events))
 	for _, ev := range events {
 		kinds = append(kinds, ev.Kind)
 	}
