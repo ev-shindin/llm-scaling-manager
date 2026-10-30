@@ -59,9 +59,18 @@ func MessageWords(root string) (string, error) {
 			if err != nil {
 				return err
 			}
+			skip := map[*ast.BasicLit]bool{}
 			ast.Inspect(f, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.ImportSpec:
+					return false // an import path is not message text
+				case *ast.Field:
+					if n.Tag != nil {
+						skip[n.Tag] = true // nor is a struct tag
+					}
+				}
 				lit, ok := n.(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
+				if !ok || lit.Kind != token.STRING || skip[lit] {
 					return true
 				}
 				s, err := strconv.Unquote(lit.Value)

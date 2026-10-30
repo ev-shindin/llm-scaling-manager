@@ -141,13 +141,16 @@ func Export(recording []byte, opts ExportOptions) ([]byte, *ExportReport, error)
 	if len(x.problems) > 0 {
 		return nil, nil, x.refusal()
 	}
-	for _, t := range append([]string{opts.Source}, opts.Text...) {
-		if tok := x.nameIn(t); tok != "" {
-			return nil, nil, fmt.Errorf("learnreplay: export: the text to commit beside the export holds a name (the one behind %s)", x.lower[tok])
-		}
+	if tok := x.nameIn(opts.Source); tok != "" {
+		return nil, nil, fmt.Errorf("learnreplay: export: the source holds a name (the one behind %s)", x.lower[tok])
 	}
 	if bad := sourceRefusals(opts.Source); len(bad) > 0 {
 		return nil, nil, fmt.Errorf("learnreplay: export: the source holds words that are not ordinary words: %s. Write it short, of ordinary words, such as %q; a word it needs can be added to source_words.txt", strings.Join(bad, ", "), SourceExample)
+	}
+	for _, t := range opts.Text {
+		if err := x.checkFixtureName(t); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	var out bytes.Buffer

@@ -358,18 +358,23 @@ holds anything it cannot place: nothing it does not know is committed.
 - **Messages** are checked whole token by whole token. A token is a run of
   letters, digits and `- _ . / : |`; anything else separates tokens. After
   renaming, each token must be, whole: a word of the code's own messages, a
-  pseudonym (alone, or with a pod's suffix: `ns-01-7f9c4`), a composite key
-  whose every part is allowed, a number, time, duration or fingerprint, or
-  `HOST`, `IP` or `URL`. The code's words are the whole tokens of the Go
-  string literals (fmt verbs removed) of the analyzer, engine, signals,
-  config and domain packages, in
+  pseudonym (alone, or with a pod's suffix), a composite key whose every
+  part is allowed, a number, time, duration or fingerprint, or `HOST`, `IP`
+  or `URL`. A pod's suffix is only what a controller appends: digits (an
+  ordinal), five characters of Kubernetes' random alphabet
+  (`bcdfghjklmnpqrstvwxz2456789`), or a ReplicaSet hash of eight to ten of
+  them (`ns-01-7c9dfb6d84-x7k2p`). The code's words are the whole tokens of
+  the Go string literals (fmt verbs removed; import paths and struct tags
+  left out) of the analyzer, engine, signals, config and domain packages, in
   `internal/engines/analyzers/learnreplay/message_words.txt`; a test fails
-  when the file is stale, and `make learner-message-words` writes it. A name
-  is renamed in any case, and as the start of a token when a separator or
-  digits follow (`llm-inference-7f9c4`, `production-0`). A token that is
-  none of these (`tenants-production`, a host, a word in another script)
-  stops the export. A word the code itself uses (`grace`, `production`)
-  passes on its own: the export cannot tell it from the code's.
+  when the file is stale, and `make learner-message-words` writes it. A
+  name is renamed in any case, wherever it stands in a token: every run of
+  the token's segments (split at `- _ . / : |`) that is a recorded name is
+  renamed (`llm-inference-7f9c4-dbrx`, `:demand`), and so is a name glued to
+  digits (`2payroll`). A token that is none of these (`tenants-production`,
+  `ns-01-hsbc`, a host, a word in another script) stops the export. A word
+  the code itself uses (`grace`, `production`) passes on its own: the
+  export cannot tell it from the code's.
 - **Refused**: any other string. The export names the field, never the
   value. If the string is the code's own word, add it to `vocabulary` in
   `internal/engines/analyzers/learnreplay/classify.go`; if it is a GPU
@@ -429,6 +434,10 @@ word that is neither a word of the code's messages nor in
 `internal/engines/analyzers/learnreplay/source_words.txt`, naming the
 words. Add an ordinary English word to that file, lowercase, when a source
 needs it; never a name. Never write a cluster name in a source.
+
+`NAME` is held the same way: each part between dashes a number, a
+scenario name such as `e1`, or an ordinary word, and no part holding a
+recorded name (`e1-tuned` passes, `2payroll` does not).
 
 Add `REPLACE=1` to overwrite a golden of the same name.
 
