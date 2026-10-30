@@ -183,23 +183,39 @@ analyzers later (`internal/engines/analyzers/learnreplay`). The design is in
 [the learner proposal](../proposals/analyzer-learner.md), sections 2.4 and 2.5.
 It is a test aid, off by default.
 
+Before you start:
+
+- Recordings go to the node's local disk, in an `emptyDir`. Any new pod
+  deletes them: a rollout, a reinstall, an eviction, a node drain, and the
+  patch that turns the recorder off. A container restart (a crash, an OOM)
+  keeps them. There is no other sink in this release.
+- A recording starts only when the controller starts. It keeps the head of a
+  run: once full, it stops. For a new recording, restart the controller.
+
 ### Turn it on
 
-Add the `learner-recorder` component to the overlay you deploy:
+Patch the installed controller. The patch adds an environment variable, a
+volume and a small `recordings` sidecar; it changes no image and no other
+setting of the manager:
 
-```yaml
-# kustomization.yaml of an overlay beside config/overlays/cluster-scoped/kubernetes
-components:
-- ../../../components/learner-recorder
+```bash
+NS=wva-system   # the controller's namespace
+kubectl -n "$NS" patch deployment wva-controller-manager --type strategic --patch-file config/components/learner-recorder/learner-recorder-deployment.yaml
+kubectl -n "$NS" rollout status deployment/wva-controller-manager
 ```
 
-It mounts a 600Mi `emptyDir` at `/var/lib/wva/learner-recordings`, sets
-`LEARNER_RECORDING_DIR` to it, and adds a small `recordings` sidecar that
-mounts the same volume read-only: the manager image has no `tar`, which
-`kubectl cp` needs. Without the component, set the directory with
-`--learner-recording-dir` (or `LEARNER_RECORDING_DIR`) and mount a volume there
-yourself. The controller refuses `/tmp`: it is a 64Mi `emptyDir`, and the
-kubelet evicts the pod when it fills.
+On OpenShift, first delete the `runAsUser: 65532` line from the sidecar in
+that file: the restricted-v2 SCC assigns the user and refuses a fixed one.
+
+The patch mounts a 600Mi `emptyDir` at `/var/lib/wva/learner-recordings` and
+sets `LEARNER_RECORDING_DIR` to it. The sidecar mounts the same volume
+read-only, because the manager image has no `tar`, which `kubectl cp` needs.
+Without the patch, set the directory with `--learner-recording-dir` (or
+`LEARNER_RECORDING_DIR`) and mount a volume there yourself. Never `/tmp`: it
+is a 64Mi `emptyDir`, and the kubelet evicts the pod when it fills. Options a
+recording cannot start with (`/tmp`, a cap under 64Ki, a directory ceiling
+under two caps) are logged at startup, and the controller runs without
+recording.
 
 What it writes:
 
@@ -209,25 +225,38 @@ What it writes:
 - At most 256Mi per recording (`--learner-recording-cap-bytes`). At the cap
   the recording keeps what it has, stops writing, and logs how many events it
   dropped.
-- At most two recordings at the cap in the directory. A new recording deletes
-  the oldest ones first to make room.
-- About 1-1.5 KB per replica per cycle: at a 15 s cycle, 8 replicas take about
-  five days to reach the cap and 100 replicas about eight hours.
+- At most `--learner-recording-dir-bytes` in the directory, twice the cap by
+  default; the volume's `sizeLimit` must be at least that. To make room, a new
+  recording deletes the tiny recordings a crash loop leaves first, then older
+  ones, never the newest one with data: a controller that restarts again and
+  again keeps the recording from before the first restart. If what is left is
+  less than a cap, the new recording gets what is left.
+- Measured on the in-process acceptance run: about 1.7 KB per replica per
+  cycle for each analyzer a model lists (each `Analyze` carries its input).
+  At a 15 s cycle, with saturation alone, 8 replicas fill 256Mi in about 3.4
+  days and 100 replicas in about 6.5 hours; with saturation, slo and
+  throughput listed, in about 27 hours and 2.1 hours.
 
 ### Copy the recordings out
 
-The `emptyDir` goes with the pod. Copy the files out before you tear the
-deployment down:
+Copy the files out before anything replaces the pod:
 
 ```bash
-NS=wva-system   # the controller's namespace
 POD=$(kubectl -n "$NS" get pod -l control-plane=controller-manager -o name | head -1)
 kubectl -n "$NS" exec "${POD#pod/}" -c recordings -- ls -l /var/lib/wva/learner-recordings
 kubectl -n "$NS" cp -c recordings "${POD#pod/}:/var/lib/wva/learner-recordings" ./learner-recordings
 ```
 
-A container restart keeps the `emptyDir`, so the recording from before the
-restart is still there beside the new one.
+### Turn it off
+
+Copy the recordings out first: this rolls out a new pod, with a new, empty
+volume.
+
+```bash
+kubectl -n "$NS" patch deployment wva-controller-manager --type strategic --patch-file config/components/learner-recorder/learner-recorder-off-deployment.yaml
+```
+
+Reinstalling the controller turns it off as well.
 
 ### Replay one
 

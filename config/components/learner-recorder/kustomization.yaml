@@ -1,19 +1,18 @@
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 
-# Turns the learner recorder on: every input the analyzers read, and every
-# result they return, written to a volume of its own for replay
-# (docs/developer-guide/testing.md, "Learner Recordings"). A test aid. Not part
-# of any shipped overlay; add it by hand to the overlay of a run you want to
-# record.
+# The learner recorder: every input the analyzers read, and every result they
+# return, written to a volume of its own for replay. A test aid. Not part of
+# any shipped overlay.
+#
+# On an installed controller, apply learner-recorder-deployment.yaml as a
+# strategic-merge patch (docs/developer-guide/testing.md, "Learner
+# Recordings"); learner-recorder-off-deployment.yaml takes it out again. This
+# component applies the same patch for an overlay built by hand, such as a
+# test harness that renders its own.
 #
 # The volume is a separate emptyDir, never the controller's /tmp: that is a
-# 64Mi emptyDir and the kubelet evicts the pod when it fills. 600Mi holds two
-# recordings at the 256Mi cap the controller keeps, with room to spare.
-#
-# The manager image is distroless, with no tar for `kubectl cp`, so a busybox
-# sidecar mounts the same volume read-only and is what you copy from:
-#   kubectl -n <ns> cp -c recordings <pod>:/var/lib/wva/learner-recordings ./out
+# 64Mi emptyDir and the kubelet evicts the pod when it fills.
 patches:
 - path: learner-recorder-deployment.yaml
   target:
