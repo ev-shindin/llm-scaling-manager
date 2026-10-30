@@ -9,6 +9,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
@@ -93,6 +94,9 @@ type Record struct {
 type Store struct {
 	mu      sync.RWMutex
 	records map[string]*Record
+	// rec records the engine's writes (FileScaleTarget, EvictStale); nil
+	// when recording is off (WithRecorder).
+	rec *learnrec.Recorder
 }
 
 // NewStore creates an empty capacity store.
@@ -193,16 +197,41 @@ func (s *Store) IsStale(namespace, modelID, variantName string, now time.Time) b
 // "live" record is kept while the variant runs the arguments and hardware it
 // was measured on (an image-only change re-tags its parameters), and replaced
 // when either changes.
+//
+// It parses and files, nothing more: the filing is FileScaleTarget, which is
+// what a recording holds and what a replay calls (learnrec).
 func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator string, gpuCount int, scaleTarget scaletarget.ScaleTargetAccessor, now time.Time) {
 	if scaleTarget == nil {
 		return
 	}
+	params := ParseEngineArgs(inferenceengine.Detect(scaleTarget), scaleTarget)
+	// Every rollout the scale target reports, read afresh each cycle (see
+	// Record.RollingOut).
+	rolling := scaletarget.RollingOut(scaleTarget)
+	s.FileScaleTarget(namespace, modelID, variantName, accelerator, gpuCount, params, rolling, now)
+}
 
+// FileScaleTarget files what the engine read from a variant's scale target --
+// its parsed engine arguments, the accelerator and GPU count it runs on, and
+// whether it is rolling out -- by LoadFromScaleTarget's rules. Separate from
+// the parse so a replay files the values a run recorded on a store of its own,
+// and the live record it keeps, and the prior capacity it carries, come from
+// that store's own analyzer writes rather than the run's.
+func (s *Store) FileScaleTarget(namespace, modelID, variantName, accelerator string, gpuCount int, params EngineParams, rolling bool, now time.Time) {
+	if s.rec != nil {
+		s.rec.Record(KindFileScaleTarget, now, FileScaleTargetEvent{
+			Namespace: namespace, ModelID: modelID, Variant: variantName,
+			Accelerator: accelerator, GpuCount: gpuCount, Params: params, RollingOut: rolling,
+		})
+	}
+	s.fileScaleTarget(namespace, modelID, variantName, accelerator, gpuCount, params, rolling, now)
+}
+
+func (s *Store) fileScaleTarget(namespace, modelID, variantName, accelerator string, gpuCount int, params EngineParams, rolling bool, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	key := storeKey(namespace, modelID, variantName)
-	params := ParseEngineArgs(inferenceengine.Detect(scaleTarget), scaleTarget)
 
 	// Live data is not overwritten -- while it describes the engine that is
 	// running. The live write carries the existing EngineParams forward, so
@@ -240,9 +269,6 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 	var priorLiveAt time.Time
 	existing, ok := s.records[key]
 	sameHW := ok && sameHardware(existing, accelerator, gpuCount)
-	// Every rollout the scale target reports, read afresh each cycle (see
-	// Record.RollingOut).
-	rolling := scaletarget.RollingOut(scaleTarget)
 	if ok && existing.LearnedFrom == LearnedFromLive {
 		if existing.EngineParams == nil {
 			return
@@ -331,7 +357,18 @@ func (s *Store) Delete(namespace, modelID, variantName string) bool {
 // long-unused variants. Use a long timeout (EvictionTimeout, seven days)
 // since historical capacity data is valuable for zero-replica estimation.
 // Called once per cycle from steadystate.evictStaleLearnedState.
+//
+// Recorded with what it removed, as a check: a replay recomputes the removal
+// from its own records.
 func (s *Store) EvictStale(now time.Time, timeout time.Duration) int {
+	n := s.evictStale(now, timeout)
+	if s.rec != nil {
+		s.rec.Record(KindEvictStale, now, EvictStaleEvent{Timeout: timeout, Removed: n})
+	}
+	return n
+}
+
+func (s *Store) evictStale(now time.Time, timeout time.Duration) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	evicted := 0
