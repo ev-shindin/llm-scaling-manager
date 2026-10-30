@@ -244,3 +244,18 @@ func encodeStruct(buf *bytes.Buffer, v reflect.Value) error {
 	buf.WriteByte('}')
 	return nil
 }
+
+// WriteString writes s as a JSON string, escaped as Marshal escapes one.
+func WriteString(buf *bytes.Buffer, s string) {
+	writeString(buf, s)
+}
+
+// Line is one recording line, as Record writes it, for an event whose data
+// is already encoded: what a tool that rewrites a recording writes back.
+func Line(seq uint64, now time.Time, kind string, data []byte) ([]byte, error) {
+	b, err := Marshal(Event{Seq: seq, Now: now, Kind: kind, Data: Raw(data)})
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}

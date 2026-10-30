@@ -14,15 +14,17 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/yaml"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
 
 // Goldens (docs/proposals/analyzer-learner.md, 2.5): each committed fixture
@@ -43,8 +45,9 @@ import (
 //     key.
 //   - The last bits of a float. A sum over three or more variants taken in
 //     map order can differ in its last bits. Each row's data is compared as
-//     JSON, and two numbers are equal within a relative 1e-9 (FloatTolerance);
-//     everything else is compared exactly.
+//     JSON; two integers must be equal, and two other numbers are equal
+//     within a relative 1e-9 (FloatTolerance). Everything else is compared
+//     exactly.
 
 // GoldenDir is where the committed goldens live, from the module root.
 const GoldenDir = "internal/engines/analyzers/learnreplay/testdata/goldens"
@@ -61,8 +64,8 @@ const RecordingName = "recording.jsonl.gz"
 // recording replays.
 const MaxFixtureBytes = 4 << 20
 
-// FloatTolerance is the relative difference under which two numbers in a
-// golden row are equal.
+// FloatTolerance is the relative difference under which two non-integer
+// numbers in a golden row are equal.
 const FloatTolerance = 1e-9
 
 // The outputs, one file each, so a diff names the output.
@@ -87,8 +90,10 @@ const (
 )
 
 // OutputNames is every output, in the order the manifest lists them.
-var OutputNames = []string{OutputLearnedState, OutputLines, OutputResults, OutputSLOPublished,
-	OutputStoreRecords, OutputVariantCapacities}
+func OutputNames() []string {
+	return []string{OutputLearnedState, OutputLines, OutputResults, OutputSLOPublished,
+		OutputStoreRecords, OutputVariantCapacities}
+}
 
 // storeOutputFields are the capacity record's fields an analyzer writes: the
 // store's golden output. The rest the engine supplied, and the replay checks
@@ -112,8 +117,8 @@ func Outputs(recording []byte) (map[string][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[string][]byte, len(OutputNames))
-	for _, name := range OutputNames {
+	out := make(map[string][]byte)
+	for _, name := range OutputNames() {
 		b, err := writeRows(rows[name])
 		if err != nil {
 			return nil, err
@@ -124,28 +129,32 @@ func Outputs(recording []byte) (map[string][]byte, error) {
 }
 
 func outputRows(recording []byte) (map[string][]row, error) {
-	read, err := readRecording(recording)
+	read, err := learnrec.Read(recording)
 	if err != nil {
 		return nil, err
 	}
 	rows := map[string][]row{}
-	for _, ev := range read {
-		now := ev.now
-		switch ev.kind {
+	for _, ev := range read.Events {
+		data, err := parseNode(ev.Data)
+		if err != nil {
+			return nil, fmt.Errorf("learnreplay: seq %d: %w", ev.Seq, err)
+		}
+		now := ev.Now.Format(time.RFC3339Nano)
+		switch ev.Kind {
 		case saturation.KindAnalyze, slo.KindAnalyze, throughput.KindAnalyze:
-			in := ev.data.get("Input")
+			in := data.get("Input")
 			group := in.get("Namespace").str() + "/" + in.get("ModelID").str()
-			res := ev.data.get("Result")
-			summary := &node{kind: nodeObject, keys: []string{"Error", "Result"}, vals: []*node{ev.data.get("Error"), res}}
+			res := data.get("Result")
+			summary := &node{kind: nodeObject, keys: []string{"Error", "Result"}, vals: []*node{data.get("Error"), res}}
 			if res != nil && res.kind == nodeObject {
 				summary.vals[1] = res.without("VariantCapacities")
 				for _, vc := range res.get("VariantCapacities").items() {
 					rows[OutputVariantCapacities] = append(rows[OutputVariantCapacities],
-						row{ev.kind, now, group, vc.get("VariantName").str(), string(vc.bytes())})
+						row{ev.Kind, now, group, vc.get("VariantName").str(), string(vc.bytes())})
 				}
 			}
-			rows[OutputResults] = append(rows[OutputResults], row{ev.kind, now, group, "", string(summary.bytes())})
-			if recs := ev.data.get("Records"); recs != nil && recs.kind == nodeObject {
+			rows[OutputResults] = append(rows[OutputResults], row{ev.Kind, now, group, "", string(summary.bytes())})
+			if recs := data.get("Records"); recs != nil && recs.kind == nodeObject {
 				for i, variant := range recs.keys {
 					rec := recs.vals[i]
 					picked := &node{kind: nodeNull}
@@ -158,29 +167,29 @@ func outputRows(recording []byte) (map[string][]row, error) {
 							}
 						}
 					}
-					rows[OutputStoreRecords] = append(rows[OutputStoreRecords], row{ev.kind, now, group, variant, string(picked.bytes())})
+					rows[OutputStoreRecords] = append(rows[OutputStoreRecords], row{ev.Kind, now, group, variant, string(picked.bytes())})
 				}
 			}
-			if pub := ev.data.get("Published"); pub != nil && pub.kind != nodeNull {
-				rows[OutputSLOPublished] = append(rows[OutputSLOPublished], row{ev.kind, now, group, "", string(pub.bytes())})
+			if pub := data.get("Published"); pub != nil && pub.kind != nodeNull {
+				rows[OutputSLOPublished] = append(rows[OutputSLOPublished], row{ev.Kind, now, group, "", string(pub.bytes())})
 			}
 		case saturation.KindPublishLine, saturation.KindBorrowLine:
 			rows[OutputLines] = append(rows[OutputLines],
-				row{ev.kind, now, ev.data.get("PhysicsKey").str(), ev.data.get("Variant").str(), string(ev.data.bytes())})
+				row{ev.Kind, now, data.get("PhysicsKey").str(), data.get("Variant").str(), string(data.bytes())})
 		case saturation.KindExportLearnedState:
-			if ev.data.kind != nodeObject {
+			if data.kind != nodeObject {
 				continue
 			}
-			for i, section := range ev.data.keys {
-				v := ev.data.vals[i]
+			for i, section := range data.keys {
+				v := data.vals[i]
 				switch v.kind {
 				case nodeNull:
 				case nodeObject:
 					for j, k := range v.keys {
-						rows[OutputLearnedState] = append(rows[OutputLearnedState], row{ev.kind, now, section, k, string(v.vals[j].bytes())})
+						rows[OutputLearnedState] = append(rows[OutputLearnedState], row{ev.Kind, now, section, k, string(v.vals[j].bytes())})
 					}
 				default:
-					rows[OutputLearnedState] = append(rows[OutputLearnedState], row{ev.kind, now, section, "", string(v.bytes())})
+					rows[OutputLearnedState] = append(rows[OutputLearnedState], row{ev.Kind, now, section, "", string(v.bytes())})
 				}
 			}
 		}
@@ -204,38 +213,12 @@ func (n *node) items() []*node {
 	return n.vals
 }
 
-// event is a recorded event with its data parsed.
-type event struct {
-	kind, now string
-	data      *node
-}
-
-func readRecording(recording []byte) ([]event, error) {
-	var out []event
-	for i, line := range bytes.Split(recording, []byte("\n")) {
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
-		n, err := parseNode(line)
-		if err != nil {
-			return nil, fmt.Errorf("learnreplay: line %d: %w", i+1, err)
-		}
-		data := n.get("Data")
-		if data == nil {
-			data = &node{kind: nodeNull}
-		}
-		out = append(out, event{kind: n.get("Kind").str(), now: n.get("Now").str(), data: data})
-	}
-	return out, nil
-}
-
 func sortRows(rows []row) {
-	sort.SliceStable(rows, func(i, j int) bool {
-		a, b := rows[i], rows[j]
-		if a.key() != b.key() {
-			return a.key() < b.key()
+	slices.SortStableFunc(rows, func(a, b row) int {
+		if c := strings.Compare(a.key(), b.key()); c != 0 {
+			return c
 		}
-		return a.data < b.data
+		return strings.Compare(a.data, b.data)
 	})
 }
 
@@ -302,16 +285,19 @@ func compareOutput(name string, want, got []byte) (*OutputDiff, error) {
 		return nil, fmt.Errorf("%s: replay: %w", name, err)
 	}
 	wk, gk := numbered(w), numbered(g)
-	keys := make([]string, 0, len(wk)+len(gk))
-	for k := range wk {
-		keys = append(keys, k)
-	}
-	for k := range gk {
-		if _, ok := wk[k]; !ok {
-			keys = append(keys, k)
+	keys := slices.Collect(func(yield func(string) bool) {
+		for k := range wk {
+			if !yield(k) {
+				return
+			}
 		}
-	}
-	sort.Strings(keys)
+		for k := range gk {
+			if _, ok := wk[k]; !ok && !yield(k) {
+				return
+			}
+		}
+	})
+	slices.Sort(keys)
 	d := &OutputDiff{Output: name, Rows: len(w)}
 	note := func(s string) {
 		if d.First == "" {
@@ -365,8 +351,8 @@ func describeKey(r row) string {
 	return strings.Join(parts, " ")
 }
 
-// sameData compares two rows' data as JSON, numbers within FloatTolerance,
-// and describes the first difference ("" when equal).
+// sameData compares two rows' data as JSON and describes the first
+// difference ("" when equal).
 func sameData(want, got string) string {
 	if want == got {
 		return ""
@@ -382,6 +368,28 @@ func sameData(want, got string) string {
 	return diffNode("", w, g)
 }
 
+// sameNumber reports whether two numbers' texts are equal outputs: two
+// integers exactly, anything else within FloatTolerance.
+func sameNumber(want, got string) bool {
+	if want == got {
+		return true
+	}
+	if isInteger(want) && isInteger(got) {
+		return false
+	}
+	a, errA := strconv.ParseFloat(want, 64)
+	b, errB := strconv.ParseFloat(got, 64)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return a == b || math.Abs(a-b) <= FloatTolerance*math.Max(math.Abs(a), math.Abs(b))
+}
+
+func isInteger(s string) bool {
+	_, err := strconv.ParseInt(s, 10, 64)
+	return err == nil
+}
+
 func diffNode(at string, w, g *node) string {
 	if at == "" {
 		at = "."
@@ -391,16 +399,13 @@ func diffNode(at string, w, g *node) string {
 	}
 	switch w.kind {
 	case nodeNumber:
+		if sameNumber(w.text, g.text) {
+			return ""
+		}
 		a, errA := strconv.ParseFloat(w.text, 64)
 		b, errB := strconv.ParseFloat(g.text, 64)
 		if errA != nil || errB != nil {
-			if w.text != g.text {
-				return fmt.Sprintf("%s: %s, was %s", at, g.text, w.text)
-			}
-			return ""
-		}
-		if a == b || math.Abs(a-b) <= FloatTolerance*math.Max(math.Abs(a), math.Abs(b)) {
-			return ""
+			return fmt.Sprintf("%s: %s, was %s", at, g.text, w.text)
 		}
 		change := fmt.Sprintf("%+g", b-a)
 		if a != 0 {
@@ -417,7 +422,7 @@ func diffNode(at string, w, g *node) string {
 			}
 		}
 	case nodeObject:
-		if strings.Join(w.keys, "\x00") != strings.Join(g.keys, "\x00") {
+		if !slices.Equal(w.keys, g.keys) {
 			return fmt.Sprintf("%s: fields %v, were %v", at, g.keys, w.keys)
 		}
 		for i, k := range w.keys {
@@ -452,7 +457,9 @@ type ManifestEntry struct {
 	// Name is the fixture's directory under the golden directory.
 	Name string `json:"name"`
 	// Source says where the recording came from, in words: the scenario,
-	// the build, the policy it ran under. No cluster or namespace names.
+	// the build, the policy it ran under, and what it does not cover. No
+	// cluster or namespace names; the add refuses a name the recording
+	// holds.
 	Source string `json:"source"`
 	// Recording is the exported recording, and Outputs the golden files,
 	// each relative to the golden directory.
@@ -481,23 +488,26 @@ func ReadManifest(dir string) (*Manifest, error) {
 }
 
 func writeManifest(dir string, m *Manifest) error {
-	sort.Slice(m.Goldens, func(i, j int) bool { return m.Goldens[i].Name < m.Goldens[j].Name })
+	slices.SortFunc(m.Goldens, func(a, b ManifestEntry) int { return strings.Compare(a.Name, b.Name) })
 	b, err := yaml.Marshal(m)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, ManifestName), append([]byte(manifestHeader), b...), 0o644)
+	tmp := filepath.Join(dir, "."+ManifestName+".tmp")
+	if err := os.WriteFile(tmp, append([]byte(manifestHeader), b...), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(dir, ManifestName))
 }
 
 // GoldenCheck is what a golden check found.
 type GoldenCheck struct {
 	// Problems is every failure: a file the manifest does not list, a listed
 	// file missing, a fixture over the size limit, a replay that failed, an
-	// output that moved. Empty is a pass.
+	// output that moved, a golden that compares nothing. Empty is a pass.
 	Problems []string
 	// Fixtures is how many fixtures were replayed, and Rows how many golden
-	// rows were compared, per output file: a check that compared nothing is
-	// not a pass, and the caller can see that it did not.
+	// rows were compared, per output file.
 	Fixtures int
 	Rows     map[string]int
 }
@@ -569,6 +579,12 @@ func CheckGoldens(ctx context.Context, dir string) (*GoldenCheck, error) {
 				problem("%s: %s is not an output a replay produces", g.Name, f)
 				continue
 			}
+			rows, err := readRows(b)
+			if err != nil {
+				problem("%s: %s: %v", g.Name, f, err)
+				continue
+			}
+			c.Rows[f] = len(rows)
 			d, err := compareOutput(f, b, out)
 			if err != nil {
 				problem("%s: %v", g.Name, err)
@@ -577,10 +593,8 @@ func CheckGoldens(ctx context.Context, dir string) (*GoldenCheck, error) {
 			if d != nil {
 				problem("%s: golden no longer reproduces: %s", g.Name, d)
 			}
-			rows, _ := readRows(b)
-			c.Rows[f] = len(rows)
 		}
-		for _, name := range OutputNames {
+		for _, name := range OutputNames() {
 			if !want[name] {
 				problem("%s: the output %s has no golden file in %s", g.Name, name, ManifestName)
 			}
@@ -606,39 +620,122 @@ func replayFixture(ctx context.Context, dir string, g ManifestEntry) (map[string
 	return goldenOutputs(ctx, recording, Normal)
 }
 
-// goldenOutputs replays recording in mode and returns its outputs; a replay
-// that fails in its mode, or analyzes nothing, is an error.
+// goldenOutputs replays recording in mode and returns its outputs. It is an
+// error when the replay fails in its mode, and when the goldens would
+// compare nothing (comparedNothing): the same rule for the check make test
+// runs and for an add.
 func goldenOutputs(ctx context.Context, recording []byte, mode Mode) (map[string][]byte, error) {
 	rep, err := Replay(ctx, recording, Options{Mode: mode})
 	if err != nil {
 		return nil, err
 	}
 	if failed := rep.Failed(); len(failed) > 0 {
-		return nil, fmt.Errorf("the replay failed: %s (and %d more)", failed[0], len(failed)-1)
+		return nil, fmt.Errorf("the replay failed: %s (%d in all)", failed[0], len(failed))
 	}
 	if mode == Fidelity && !bytes.Equal(rep.Recording, recording) {
-		return nil, errors.New("the replay did not reproduce the recording byte for byte")
+		return nil, fmt.Errorf("the replay did not reproduce the recording byte for byte: %s", firstDifferentLine(recording, rep.Recording))
 	}
-	n := 0
-	for _, c := range rep.Analyzes {
-		n += c
+	outputs, err := Outputs(rep.Recording)
+	if err != nil {
+		return nil, err
 	}
-	if n == 0 {
-		return nil, errors.New("the replay analyzed nothing")
+	var start learnrec.Start
+	read, err := learnrec.Read(recording)
+	if err != nil {
+		return nil, err
 	}
-	return Outputs(rep.Recording)
+	if err := read.Events[0].DecodeData(&start); err != nil {
+		return nil, err
+	}
+	if missing := comparedNothing(start, outputs); len(missing) > 0 {
+		return nil, fmt.Errorf("the goldens would compare nothing for %s", strings.Join(missing, ", "))
+	}
+	return outputs, nil
+}
+
+// comparedNothing names what a fixture's goldens would not compare: a golden
+// that compares nothing passes whatever changes. Every analyzer the start
+// says ran must have results, and the results must price variants and read
+// the store; the slo analyzer, when it ran, must have published. An output
+// may be empty only because its analyzer did not run (lines and learned
+// state come only from what the run did: a published line, a snapshot).
+func comparedNothing(start learnrec.Start, outputs map[string][]byte) []string {
+	count := func(name string, kind string) int {
+		rows, err := readRows(outputs[name])
+		if err != nil {
+			return 0
+		}
+		n := 0
+		for _, r := range rows {
+			if kind == "" || r.kind == kind {
+				n++
+			}
+		}
+		return n
+	}
+	var missing []string
+	need := func(ok bool, what string) {
+		if !ok {
+			missing = append(missing, what)
+		}
+	}
+	need(count(OutputResults, saturation.KindAnalyze) > 0, "saturation results")
+	need(count(OutputVariantCapacities, "") > 0, "variant capacities")
+	need(count(OutputStoreRecords, "") > 0, "store records")
+	if start.SLO != nil {
+		need(count(OutputResults, slo.KindAnalyze) > 0, "slo results")
+		need(count(OutputSLOPublished, "") > 0, "slo published")
+	}
+	if start.Throughput {
+		need(count(OutputResults, throughput.KindAnalyze) > 0, "throughput results")
+	}
+	return missing
+}
+
+// firstDifferentLine names the first line where two recordings differ, by
+// its sequence number and kind.
+func firstDifferentLine(want, got []byte) string {
+	w := bytes.Split(want, []byte("\n"))
+	g := bytes.Split(got, []byte("\n"))
+	for i := 0; i < max(len(w), len(g)); i++ {
+		var a, b []byte
+		if i < len(w) {
+			a = w[i]
+		}
+		if i < len(g) {
+			b = g[i]
+		}
+		if bytes.Equal(a, b) {
+			continue
+		}
+		line := a
+		if len(line) == 0 {
+			line = b
+		}
+		n, err := parseNode(line)
+		if err != nil {
+			return fmt.Sprintf("line %d", i+1)
+		}
+		return fmt.Sprintf("first at seq %s (%s)", n.get("Seq").text, n.get("Kind").str())
+	}
+	return "no line differs"
 }
 
 // AddOptions configure AddGolden.
 type AddOptions struct {
-	// Source is the manifest's account of where the recording came from.
+	// Source is the manifest's account of where the recording came from. It
+	// may not hold a name the recording holds.
 	Source string
 	// HeadLines, when positive, keeps only the recording's first lines: a
-	// long run cut to fit MaxFixtureBytes. The cut replays (Replay trims the
-	// checks of an Analyze the cut lost).
+	// long run cut to fit MaxFixtureBytes. The export cuts what follows the
+	// last Analyze, so any head replays.
 	HeadLines int
 	// Replace lets a fixture of the same name be overwritten.
 	Replace bool
+	// Commit is the commit the add runs at (learnrec.BuildCommit). A
+	// recording made at another commit is refused: its replay need not
+	// reproduce it. "unknown" on either side skips the check.
+	Commit string
 }
 
 // fixtureName is what a fixture's directory may be called.
@@ -646,18 +743,47 @@ var fixtureName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // AddGolden exports a raw recording (Export), holds the export to a Fidelity
 // replay at this commit -- a recording that does not reproduce byte for byte
-// is not committed -- and writes it as the fixture name with its goldens, and
-// lists it in the manifest. It returns the export's report.
+// is not committed -- and writes it as the fixture name with its goldens,
+// listed in the manifest. The cheap refusals come first: the name, the
+// commit, the size. The fixture is written to a temporary directory and
+// moved into place, and the manifest is written last, so a refusal or a
+// failure leaves the golden directory as it was.
 func AddGolden(ctx context.Context, dir, name string, raw []byte, opts AddOptions) (*ExportReport, error) {
 	if !fixtureName.MatchString(name) {
 		return nil, fmt.Errorf("learnreplay: a fixture name is lowercase letters, digits and dashes: %q", name)
 	}
+	m, err := ReadManifest(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		m, err = &Manifest{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	listed := slices.ContainsFunc(m.Goldens, func(g ManifestEntry) bool { return g.Name == name })
+	if listed && !opts.Replace {
+		return nil, fmt.Errorf("learnreplay: the fixture %s exists; replace it explicitly", name)
+	}
+	fixture := filepath.Join(dir, name)
+	if _, err := os.Stat(fixture); err == nil && !listed {
+		return nil, fmt.Errorf("learnreplay: %s exists and %s does not list it; it is not this tool's to replace", fixture, ManifestName)
+	}
 	if opts.HeadLines > 0 {
 		raw = headLines(raw, opts.HeadLines)
 	}
-	exported, rep, err := Export(raw, ExportOptions{})
+	exported, rep, err := Export(raw, ExportOptions{Text: []string{opts.Source, name}})
 	if err != nil {
 		return nil, err
+	}
+	if known := func(c string) bool { return c != "" && c != "unknown" }; known(rep.Commit) && known(opts.Commit) && rep.Commit != opts.Commit {
+		return nil, fmt.Errorf("learnreplay: the recording was made at %s and you are at %s: its replay here need not reproduce it. Add it from a checkout of %s and carry the fixture over (docs/developer-guide/testing.md)", rep.Commit, opts.Commit, rep.Commit)
+	}
+	gz, err := Gzip(exported)
+	if err != nil {
+		return nil, err
+	}
+	if len(gz) > MaxFixtureBytes {
+		return nil, fmt.Errorf("learnreplay: the export of %s is %d bytes compressed, over the %d-byte fixture limit; cut it to its head, for example HEAD_LINES=%d",
+			name, len(gz), MaxFixtureBytes, suggestHead(exported, len(gz), MaxFixtureBytes))
 	}
 	outputs, err := goldenOutputs(ctx, exported, Fidelity)
 	if err != nil {
@@ -669,61 +795,92 @@ func AddGolden(ctx context.Context, dir, name string, raw []byte, opts AddOption
 	if err != nil {
 		return nil, fmt.Errorf("learnreplay: the export of %s, Normal: %w", name, err)
 	}
-	for _, o := range OutputNames {
+	for _, o := range OutputNames() {
 		if !bytes.Equal(outputs[o], normal[o]) {
 			return nil, fmt.Errorf("learnreplay: the export of %s: %s differs between a Fidelity and a Normal replay", name, o)
 		}
 	}
-	gz, err := Gzip(exported)
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	tmp, err := os.MkdirTemp(dir, ".add-"+name+"-")
 	if err != nil {
 		return nil, err
 	}
-	if len(gz) > MaxFixtureBytes {
-		return nil, fmt.Errorf("learnreplay: the export of %s is %d bytes compressed, over the %d-byte fixture limit; cut it with a head", name, len(gz), MaxFixtureBytes)
-	}
-	m, err := ReadManifest(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		m, err = &Manifest{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	kept := m.Goldens[:0]
-	for _, g := range m.Goldens {
-		if g.Name == name {
-			if !opts.Replace {
-				return nil, fmt.Errorf("learnreplay: the fixture %s exists; replace it explicitly", name)
-			}
-			continue
-		}
-		kept = append(kept, g)
-	}
-	m.Goldens = kept
-	fixture := filepath.Join(dir, name)
-	if opts.Replace {
-		if err := os.RemoveAll(fixture); err != nil {
-			return nil, err
-		}
-	}
-	if err := os.MkdirAll(fixture, 0o755); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(filepath.Join(fixture, RecordingName), gz, 0o644); err != nil {
+	defer func() { _ = os.RemoveAll(tmp) }()
+	if err := os.WriteFile(filepath.Join(tmp, RecordingName), gz, 0o644); err != nil {
 		return nil, err
 	}
 	entry := ManifestEntry{Name: name, Source: opts.Source, Recording: path.Join(name, RecordingName)}
-	for _, o := range OutputNames {
-		if err := os.WriteFile(filepath.Join(fixture, o), outputs[o], 0o644); err != nil {
+	for _, o := range OutputNames() {
+		if err := os.WriteFile(filepath.Join(tmp, o), outputs[o], 0o644); err != nil {
 			return nil, err
 		}
 		entry.Outputs = append(entry.Outputs, path.Join(name, o))
 	}
+	old := ""
+	if listed {
+		old = filepath.Join(tmp, "old")
+		if err := os.Rename(fixture, old); err != nil {
+			return nil, err
+		}
+	}
+	fresh := filepath.Join(dir, ".add-"+name+"-ready")
+	if err := os.Rename(tmp, fresh); err != nil {
+		return nil, restore(err, old, fixture)
+	}
+	tmp = fresh // cleaned up by the deferred RemoveAll if anything below fails
+	if err := os.Rename(fresh, fixture); err != nil {
+		return nil, restore(err, filepath.Join(fresh, "old"), fixture)
+	}
+	tmp = ""
+	if old != "" {
+		if err := os.RemoveAll(filepath.Join(fixture, "old")); err != nil {
+			return nil, err
+		}
+	}
+	m.Goldens = slices.DeleteFunc(m.Goldens, func(g ManifestEntry) bool { return g.Name == name })
 	m.Goldens = append(m.Goldens, entry)
 	return rep, writeManifest(dir, m)
 }
 
+// restore moves a replaced fixture back after a failed move, and returns
+// the failure.
+func restore(err error, old, fixture string) error {
+	if old != "" {
+		if rerr := os.Rename(old, fixture); rerr != nil {
+			return fmt.Errorf("%w; and the old fixture could not be put back from %s: %v", err, old, rerr)
+		}
+	}
+	return err
+}
+
+// suggestHead is a HEAD_LINES that fits limit, snapped back to the
+// last line of an Analyze, from how well this export compressed.
+func suggestHead(exported []byte, compressed, limit int) int {
+	budget := int(float64(len(exported)) * 0.9 * float64(limit) / float64(compressed))
+	read, err := learnrec.Read(exported)
+	if err != nil {
+		return 1
+	}
+	best, size := 1, 0
+	for i, ev := range read.Events {
+		size += len(ev.Line) + 1
+		if size > budget {
+			break
+		}
+		if strings.HasSuffix(ev.Kind, ".Analyze") {
+			best = i + 1
+		}
+	}
+	return best
+}
+
 // UpdateGoldens rewrites every fixture's golden files from a Normal replay at
-// this commit: what a PR that names a golden change runs.
+// this commit: what a PR that names a golden change runs. It repairs what
+// the check reports: a moved output, a missing file, an output the manifest
+// leaves out. A fixture whose replay fails leaves its files as they were.
 func UpdateGoldens(ctx context.Context, dir string) error {
 	m, err := ReadManifest(dir)
 	if err != nil {
@@ -740,7 +897,7 @@ func UpdateGoldens(ctx context.Context, dir string) error {
 			}
 		}
 		m.Goldens[i].Outputs = nil
-		for _, o := range OutputNames {
+		for _, o := range OutputNames() {
 			if err := os.WriteFile(filepath.Join(dir, g.Name, o), outputs[o], 0o644); err != nil {
 				return err
 			}
@@ -750,6 +907,7 @@ func UpdateGoldens(ctx context.Context, dir string) error {
 	return writeManifest(dir, m)
 }
 
+// headLines is b's first n lines.
 func headLines(b []byte, n int) []byte {
 	off := 0
 	for i := 0; i < n; i++ {

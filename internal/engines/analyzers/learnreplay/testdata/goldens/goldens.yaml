@@ -16,4 +16,6 @@ goldens:
   source: 'The in-process acceptance run (TestLearnerRecording_AnExportReplaysAndNamesNothing):
     three models, a controller restart that restores a snapshot, an ITL line published
     and borrowed, a forget, sweeps that evict, P/D decode, slo judging with a router,
-    throughput.'
+    throughput. It exercises little learning: twelve cycles of fixed synthetic rows,
+    so the start-time average, the borrow tolerance and the measured k2 and mu paths
+    barely move, and a change to them can leave these goldens as they are.'

@@ -314,15 +314,69 @@ The goldens live in `internal/engines/analyzers/learnreplay/testdata/goldens/`:
 
 Each row is keyed by the event kind, its time, the model (or line key, or
 learned-state section) and the variant (or key), never by a sequence number.
-Two numbers are equal when they differ by less than one part in 10^9. So two
-things that vary between replays of the same recording do not fail the check:
-events numbered in another order, and a float sum whose last bits differ.
+Two integers must be equal. Two other numbers are equal when they differ by
+less than one part in 10^9. So two things that vary between replays of the
+same recording do not fail the check: events numbered in another order, and
+a float sum whose last bits differ.
+
+The check also fails on a golden that compares nothing: every analyzer the
+recording's start line says ran must have results, and the slo analyzer, if
+it ran, must have published.
+
+The `acceptance` golden is the in-process acceptance run. It covers little
+learning: twelve cycles of fixed synthetic rows. The start-time average, the
+borrow tolerance and the measured k2 and mu paths barely move in it, so a
+change to them can leave it as it is. The cluster recordings cover those.
+
+#### What a golden commits
+
+The export renames every name it can place. It refuses a recording that
+holds anything it cannot place: nothing it does not know is committed.
+
+- **Renamed**, to a pseudonym such as `variant-03`: namespaces, models,
+  variants, pods, images, revisions, forget tokens, engine-argument text,
+  label and taint keys and values outside Kubernetes' and the GPU vendors'
+  own, resource names, priority and weight classes and limiter names. A
+  name is renamed wherever it stands: in a field, a map key, a part of a
+  composite key, or a message. The same name always gets the same
+  pseudonym, and names keep their sort order. Engine fingerprints are
+  recomputed from the renamed arguments.
+- **Replaced**: host names, IP addresses and URLs in messages become `HOST`,
+  `IP` and `URL`. Analyzer queries and decode errors in the policy become
+  `redacted`.
+- **Kept as they are**: every number and time, accelerator product names
+  (such as `NVIDIA-H100-80GB-HBM3`), the code's own vocabulary (roles,
+  reasons, dtypes), durations and well-known labels such as
+  `nvidia.com/gpu.product`. The add prints the kept strings; read them
+  before you commit.
+- **Refused**: any other string. The export names the field, never the
+  value. If the string is the code's own word, add it to `vocabulary` in
+  `internal/engines/analyzers/learnreplay/classify.go`; if it is a name
+  someone chose, classify its field as a rename there.
+
+The numbers are kept on purpose: they are what the replay runs on. A
+recording holds every model the controller manages, so a golden commits
+every tenant's load, capacity and timing, under pseudonyms. Record on a
+cluster where that is agreed, or scope the controller to the models you
+mean to commit.
 
 #### Add a recording as a golden
 
-Take the recording from a build of the commit you are on: the add replays it,
-and refuses it unless the replay reproduces it byte for byte. Then run one
-command:
+Record from a controller built from the commit you will add it at. The
+recording's start line holds the commit its controller was built from
+(`make build`, `make docker-build` and the image workflows set it). The add
+replays the recording and refuses it unless the replay reproduces it byte for
+byte. So it refuses a recording made at another commit, before replaying
+anything:
+
+```text
+the recording was made at <X> and you are at <Y>
+```
+
+The check is skipped when either side is `unknown`, for example a binary
+built without `make`.
+
+Then run one command:
 
 ```bash
 make learner-golden-add RECORDING=./learner-recordings/learnrec-20260302T090000.000000000Z.jsonl NAME=e1 SOURCE="E1 benchmark scenario, recorder on, default analyzerTuning"
@@ -330,30 +384,50 @@ make learner-golden-add RECORDING=./learner-recordings/learnrec-20260302T090000.
 
 This:
 
-1. Exports the recording: every namespace, model, variant, pod, image,
-   revision, forget token, engine-argument text and placement label value
-   becomes a pseudonym such as `variant-03`. The same name always gets the
-   same pseudonym, and names keep their sort order. Engine fingerprints are
-   recomputed from the renamed arguments. The export stops, and writes
-   nothing, if a string field is one it does not know or if any original
-   name is still in its output.
-2. Replays the export and refuses it unless the replay reproduces it byte
-   for byte.
-3. Writes `recording.jsonl.gz` and the output files under `NAME/`, and lists
-   them in `goldens.yaml`.
-4. Runs the golden check.
+1. Exports the recording (see above). It first cuts the events after the
+   last `Analyze`: a recording cut short can end inside a cycle.
+2. Refuses it if it is too large (see below), before any replay.
+3. Replays the export and refuses it unless the replay reproduces it byte
+   for byte, and unless its goldens compare something.
+4. Writes `recording.jsonl.gz` and the output files under `NAME/`, then lists
+   them in `goldens.yaml`. A refusal or a failure leaves the directory as it
+   was.
+5. Runs the golden check.
 
 `SOURCE` is how the manifest describes the recording: the scenario, the
-build and the policy. Never write a cluster or namespace name in it.
+build, the policy, and what the run does not cover. The add refuses a
+`SOURCE` that holds a name the recording holds. Never write a cluster name
+in it.
 
-A compressed recording may be at most 4 MiB. Add `HEAD_LINES=N` to keep only
-the first N lines of a longer one; a recording cut short still replays.
 Add `REPLACE=1` to overwrite a golden of the same name.
+
+#### A recording made at another commit
+
+If the controller ran an older commit than your branch:
+
+1. Check out the recording's commit in a worktree:
+   `git worktree add ../at-recording <X>`.
+2. Run `make learner-golden-add` there.
+3. Commit the new golden directory and the `goldens.yaml` entry there, and
+   cherry-pick that commit onto your branch.
+4. On your branch, `make test` replays the golden. If an output moved
+   between the two commits, the check says which; name the change, then run
+   `make learner-goldens`.
+
+#### Size
+
+A compressed recording may be at most 4 MiB. A full recording (256Mi at the
+default cap) does not fit: the acceptance run compresses about 29 to 1, so
+a full one is about twice the limit; at that ratio a head of up to about
+100 MiB fits. Cut it to
+its head with `HEAD_LINES=N`. When a recording is too large, the add says
+which `N` to use: a head that ends on an `Analyze` and fits. Any head
+replays.
 
 To export without adding a golden, for example to share a recording:
 
 ```bash
-go run ./cmd/learnrec export -in RAW.jsonl -out exported.jsonl.gz
+go run ./cmd/learnergolden export -in RAW.jsonl -out exported.jsonl.gz
 ```
 
 #### When an output moves
@@ -363,10 +437,9 @@ every output file from a replay at your commit. Never edit a golden by hand.
 `make learner-goldens-check` runs the check alone and prints, per output, how
 many rows changed and the first change with its sign and size.
 
-#### The acceptance golden
+#### Write the acceptance run again
 
-The `acceptance` golden is the in-process acceptance run. To write that run
-again, as a raw recording:
+To write the acceptance run as a raw recording:
 
 ```bash
 LEARNREC_ACCEPTANCE_OUT=$HOME/acceptance.jsonl go test ./internal/engines/steadystate/ -run TestLearnerRecording_AnExportReplaysAndNamesNothing -v

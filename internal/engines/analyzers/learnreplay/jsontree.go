@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
+	"slices"
+	"strings"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
 
 // node is one JSON value of a recording, held so that writing it back gives
@@ -117,7 +120,7 @@ func (n *node) encode(buf *bytes.Buffer) {
 	case nodeBool, nodeNumber:
 		buf.WriteString(n.text)
 	case nodeString:
-		writeJSONString(buf, n.text)
+		learnrec.WriteString(buf, n.text)
 	case nodeList:
 		buf.WriteByte('[')
 		for i, v := range n.vals {
@@ -133,7 +136,7 @@ func (n *node) encode(buf *bytes.Buffer) {
 			if i > 0 {
 				buf.WriteByte(',')
 			}
-			writeJSONString(buf, k)
+			learnrec.WriteString(buf, k)
 			buf.WriteByte(':')
 			n.vals[i].encode(buf)
 		}
@@ -146,11 +149,6 @@ func (n *node) bytes() []byte {
 	var buf bytes.Buffer
 	n.encode(&buf)
 	return buf.Bytes()
-}
-
-func writeJSONString(buf *bytes.Buffer, s string) {
-	b, _ := json.Marshal(s) // a string always encodes
-	buf.Write(b)
 }
 
 // get is an object's member named key, nil when n is not an object or has
@@ -171,13 +169,7 @@ func (n *node) get(key string) *node {
 func (n *node) without(drop ...string) *node {
 	out := &node{kind: nodeObject}
 	for i, k := range n.keys {
-		skip := false
-		for _, d := range drop {
-			if k == d {
-				skip = true
-			}
-		}
-		if !skip {
+		if !slices.Contains(drop, k) {
 			out.keys = append(out.keys, k)
 			out.vals = append(out.vals, n.vals[i])
 		}
@@ -187,15 +179,16 @@ func (n *node) without(drop ...string) *node {
 
 // sortKeys orders an object's members by key, as learnrec writes a map.
 func (n *node) sortKeys() {
-	idx := make([]int, len(n.keys))
-	for i := range idx {
-		idx[i] = i
+	type member struct {
+		key string
+		val *node
 	}
-	sort.SliceStable(idx, func(a, b int) bool { return n.keys[idx[a]] < n.keys[idx[b]] })
-	keys := make([]string, len(idx))
-	vals := make([]*node, len(idx))
-	for i, j := range idx {
-		keys[i], vals[i] = n.keys[j], n.vals[j]
+	ms := make([]member, len(n.keys))
+	for i := range n.keys {
+		ms[i] = member{n.keys[i], n.vals[i]}
 	}
-	n.keys, n.vals = keys, vals
+	slices.SortStableFunc(ms, func(a, b member) int { return strings.Compare(a.key, b.key) })
+	for i, m := range ms {
+		n.keys[i], n.vals[i] = m.key, m.val
+	}
 }

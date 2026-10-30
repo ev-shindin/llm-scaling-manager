@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,7 +40,10 @@ func TestLearnerRecording_AnExportReplaysAndNamesNothing(t *testing.T) {
 	again, _, err := learnreplay.Export(recording, learnreplay.ExportOptions{Key: key})
 	require.NoError(t, err)
 	require.Equal(t, string(exported), string(again), "the same recording and key export differently")
-	assert.Equal(t, kindCounts(t, recording), kindCounts(t, exported), "the export has other events")
+	lines := bytes.SplitAfter(recording, []byte("\n"))
+	kept := bytes.Join(lines[:len(lines)-1-rep.Trimmed], nil)
+	assert.Equal(t, 2, rep.Trimmed, "events after the last Analyze")
+	assert.Equal(t, kindCounts(t, kept), kindCounts(t, exported), "the export has other events")
 
 	replayed, err := learnreplay.Replay(context.Background(), exported, learnreplay.Options{Mode: learnreplay.Fidelity})
 	require.NoError(t, err)
@@ -80,4 +85,39 @@ func scriptNames() []string {
 		}
 	}
 	return out
+}
+
+// Every head of the acceptance recording exports and replays byte for byte:
+// the export cuts what follows the last Analyze, so a head cut anywhere --
+// inside a cycle, after a line published with no Analyze behind it -- is
+// a fixture. A head with no Analyze at all is refused.
+func TestLearnerRecording_EveryHeadOfTheRecordingExportsAndReplays(t *testing.T) {
+	recording, _ := recordRun(t, recStart, true)
+	lines := bytes.SplitAfter(recording, []byte("\n"))
+	if len(lines[len(lines)-1]) == 0 {
+		lines = lines[:len(lines)-1]
+	}
+	var refused, replayed atomic.Int32
+	t.Run("heads", func(t *testing.T) {
+		for n := 1; n <= len(lines); n++ {
+			t.Run(strconv.Itoa(n), func(t *testing.T) {
+				t.Parallel()
+				head := bytes.Join(lines[:n], nil)
+				exported, rep, err := learnreplay.Export(head, learnreplay.ExportOptions{Key: []byte("k")})
+				if err != nil {
+					require.ErrorContains(t, err, "no Analyze event")
+					refused.Add(1)
+					return
+				}
+				r, err := learnreplay.Replay(context.Background(), exported, learnreplay.Options{Mode: learnreplay.Fidelity})
+				require.NoError(t, err)
+				require.Empty(t, mismatchText(r.Mismatches))
+				require.Equal(t, string(exported), string(r.Recording), "%d cut after the last Analyze", rep.Trimmed)
+				replayed.Add(1)
+			})
+		}
+	})
+	assert.Equal(t, int32(len(lines)), refused.Load()+replayed.Load())
+	assert.Positive(t, refused.Load(), "precondition: heads with no Analyze")
+	t.Logf("%d heads: %d replayed byte for byte, %d refused (no Analyze)", len(lines), replayed.Load(), refused.Load())
 }

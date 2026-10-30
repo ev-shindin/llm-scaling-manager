@@ -448,21 +448,27 @@ test: manifests generate fmt vet setup-envtest helm check-import-direction check
 	@# nothing more.
 	CGO_ENABLED=1 go test -race -count=1 ./internal/engines/analyzers/slo/ ./internal/signals/itl/ ./internal/signals/learnrec/
 
+# The commit a build is made from, recorded in each learner recording's start
+# line (learnrec.BuildCommit), so a golden is added only at the commit that
+# recorded it.
+GIT_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+LEARNREC_LDFLAGS = -X github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec.BuildCommit=$(GIT_COMMIT)
+
 # The learner goldens (docs/developer-guide/testing.md, Learner Goldens). The
 # golden check itself is a test, TestGoldens_EveryCommittedGoldenReproduces,
 # so `make test` runs it; learner-goldens-check runs it alone.
 .PHONY: learner-golden-add
 learner-golden-add: ## Commit a raw learner recording as a golden: RECORDING=<file> NAME=<fixture> SOURCE="<scenario, build, policy>" [HEAD_LINES=N] [REPLACE=1]
 	@if [ -z "$(RECORDING)" ] || [ -z "$(NAME)" ] || [ -z "$(SOURCE)" ]; then echo 'usage: make learner-golden-add RECORDING=<raw .jsonl> NAME=<fixture> SOURCE="<scenario, build, policy>" [HEAD_LINES=N] [REPLACE=1]'; exit 1; fi
-	go run ./cmd/learnrec add -in "$(RECORDING)" -name "$(NAME)" -source "$(SOURCE)" $(if $(HEAD_LINES),-head-lines $(HEAD_LINES)) $(if $(REPLACE),-replace)
+	go run -ldflags "$(LEARNREC_LDFLAGS)" ./cmd/learnergolden add -in "$(RECORDING)" -name "$(NAME)" -source "$(SOURCE)" $(if $(HEAD_LINES),-head-lines $(HEAD_LINES)) $(if $(REPLACE),-replace)
 
 .PHONY: learner-goldens
 learner-goldens: ## Rewrite every learner golden from a replay at this commit (only for a golden change the PR names)
-	go run ./cmd/learnrec update
+	go run -ldflags "$(LEARNREC_LDFLAGS)" ./cmd/learnergolden update
 
 .PHONY: learner-goldens-check
 learner-goldens-check: ## Replay every learner golden and fail when one no longer reproduces or the manifest disagrees with the directory
-	go run ./cmd/learnrec check
+	go run -ldflags "$(LEARNREC_LDFLAGS)" ./cmd/learnergolden check
 
 # Creates a multi-node Kind cluster
 # Adds emulated GPU labels and capacities per node
@@ -3254,7 +3260,7 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
-	go build -o bin/manager cmd/main.go
+	go build -ldflags "$(LEARNREC_LDFLAGS)" -o bin/manager cmd/main.go
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
@@ -3265,7 +3271,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+	$(CONTAINER_TOOL) build --build-arg GIT_COMMIT=$(GIT_COMMIT) -t ${IMG} .
 
 .PHONY: docker-build-warmpool-proxy
 docker-build-warmpool-proxy: ## Build the warm-pool proxy image. WARMPOOL_PROXY_IMG=<ref>
