@@ -30,8 +30,8 @@ import (
 type findingStatus string
 
 const (
-	statusCaught   findingStatus = "caught"
-	statusEscaping findingStatus = "still escaping"
+	statusCaught        findingStatus = "caught"
+	statusEscaping      findingStatus = "still escaping"
 	statusWaitsCounters findingStatus = "waits for the replay counters"
 )
 
