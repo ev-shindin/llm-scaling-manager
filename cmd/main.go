@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -351,13 +352,13 @@ func main() {
 		"Record the analyzers' inputs and results to this directory, one file per controller "+
 			"start, for replay. Empty (the default) is off. Must be its own volume, never /tmp "+
 			"(config/components/learner-recorder). Defaults to $LEARNER_RECORDING_DIR.")
-	learnerRecordingCap := flag.Int64("learner-recording-cap-bytes", learnrec.DefaultCapBytes,
+	learnerRecordingCap := flag.Int64("learner-recording-cap-bytes", envBytes("LEARNER_RECORDING_CAP_BYTES", learnrec.DefaultCapBytes),
 		"The most one recording writes, at least 64Ki; past it the recording keeps its head and "+
-			"drops the rest.")
-	learnerRecordingDirBytes := flag.Int64("learner-recording-dir-bytes", 0,
+			"drops the rest. Defaults to $LEARNER_RECORDING_CAP_BYTES.")
+	learnerRecordingDirBytes := flag.Int64("learner-recording-dir-bytes", envBytes("LEARNER_RECORDING_DIR_BYTES", 0),
 		"The most all recordings in the directory hold together, at least twice the cap (the "+
 			"default, 0). The volume under the directory must hold at least this much: set its "+
-			"emptyDir sizeLimit to no less.")
+			"emptyDir sizeLimit to no less. Defaults to $LEARNER_RECORDING_DIR_BYTES.")
 
 	// Leader election timeout configuration flags
 	// These can be overridden in manager.yaml to tune for different environments
@@ -1635,4 +1636,21 @@ func runWarmPool(
 		"gpuMemoryUtilization", *warmPoolGPUUtil,
 		"preloadTop", *warmPoolPreloadTop)
 	return reconciler.Start(ctx)
+}
+
+// envBytes is the byte count in the environment variable name, for a flag's
+// default: def when it is unset, and 1 when it is not a whole number, which
+// learnrec.Options.Check refuses as below its minimum, so a typo turns the
+// recorder off with an error logged rather than recording with a default
+// nobody asked for.
+func envBytes(name string, def int64) int64 {
+	v, ok := os.LookupEnv(name)
+	if !ok || v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 1
+	}
+	return n
 }
