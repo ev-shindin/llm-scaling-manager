@@ -403,7 +403,7 @@ func TestExport_Paths(t *testing.T) {
 	t.Run("text to commit beside the export may not hold a name", func(t *testing.T) {
 		rec := probeRecording(t, "payroll", "mdl", []string{"v"}, nil, nil)
 		_, _, err := Export(rec, ExportOptions{Text: []string{"E1 on payroll"}})
-		require.ErrorContains(t, err, "holds a name (the one behind ns-01)")
+		require.ErrorContains(t, err, "holds a recorded name")
 	})
 }
 

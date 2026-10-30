@@ -144,8 +144,11 @@ func Export(recording []byte, opts ExportOptions) ([]byte, *ExportReport, error)
 	if tok := x.nameIn(opts.Source); tok != "" {
 		return nil, nil, fmt.Errorf("learnreplay: export: the source holds a name (the one behind %s)", x.lower[tok])
 	}
+	if x.holdsName(opts.Source) {
+		return nil, nil, errors.New("learnreplay: export: the source holds a recorded name")
+	}
 	if bad := sourceRefusals(opts.Source); len(bad) > 0 {
-		return nil, nil, fmt.Errorf("learnreplay: export: the source holds words that are not ordinary words: %s. Write it short, of ordinary words, such as %q; a word it needs can be added to source_words.txt", strings.Join(bad, ", "), SourceExample)
+		return nil, nil, fmt.Errorf("learnreplay: export: the source holds words that are not ordinary words (%s). Write it short, of ordinary words, such as %q; a word it needs can be added to source_words.txt", strings.Join(bad, ", "), SourceExample)
 	}
 	for _, t := range opts.Text {
 		if err := x.checkFixtureName(t); err != nil {
@@ -342,8 +345,11 @@ type exporter struct {
 	// inside a message whatever its case; tokens is lower's keys, longest
 	// first, so a pod name is replaced before the variant name it starts
 	// with.
-	lower  map[string]string
-	tokens []string
+	lower map[string]string
+	// longNames are the lowercased names of minBackstopName characters or
+	// more, for the backstop (holdsName).
+	longNames []string
+	tokens    []string
 	// kept is every string kept as vocabulary, for the report.
 	kept         map[string]bool
 	fingerprints map[string]string
@@ -531,6 +537,9 @@ func (x *exporter) assign() error {
 		}
 		x.pseudonyms[p] = true
 		x.lower[asciiLower(s)] = p
+		if len(s) >= minBackstopName && s != p {
+			x.longNames = append(x.longNames, asciiLower(s))
+		}
 	}
 	x.tokens = slices.Collect(maps.Keys(x.lower))
 	slices.SortFunc(x.tokens, func(a, b string) int {
@@ -565,6 +574,9 @@ func (x *exporter) rename(at site, s string) string {
 	case classComposite:
 		return x.renameComposite(s)
 	case classText:
+		if x.namesOverlap(s) {
+			x.problem("%s holds two recorded names that overlap", at.where())
+		}
 		return scrub(x.renameText(s))
 	case classRedact:
 		return "redacted"
@@ -782,6 +794,14 @@ func (x *exporter) compositeAllowed(s string) bool {
 
 // check holds the string at a site, after the export, to the allowlist.
 func (x *exporter) check(at site, s *string) {
+	if x.holdsName(*s) {
+		x.problem("%s holds a recorded name after the export", at.where())
+	}
+	x.checkRule(at, s)
+}
+
+// checkRule holds the string at a site to its rule.
+func (x *exporter) checkRule(at site, s *string) {
 	v := *s
 	if at.isKey {
 		r, ok := at.keyRule()

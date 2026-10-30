@@ -58,7 +58,7 @@ func TestExportLeak3_APodOfARecordedNameIsRenamed(t *testing.T) {
 // other word is refused by name.
 func TestExportLeak3_SourceWords(t *testing.T) {
 	assert.Empty(t, sourceRefusals(SourceExample))
-	assert.Equal(t, []string{"zorblax"}, sourceRefusals("E1 run on zorblax"))
+	assert.Equal(t, []string{"word 4"}, sourceRefusals("E1 run on zorblax"))
 	assert.Equal(t, []string{"a non-ASCII character"}, sourceRefusals("E1 Ромашка"))
 	for w := range sourceWords {
 		assert.Equal(t, asciiLower(w), w, "source_words.txt holds a capital: %q", w)
@@ -66,7 +66,7 @@ func TestExportLeak3_SourceWords(t *testing.T) {
 	}
 	rec := zzRec(t, zzOpts{ns: "payroll"})
 	_, _, err := Export(rec, ExportOptions{Source: "E1 benchmark on zorblax"})
-	require.ErrorContains(t, err, "not ordinary words: zorblax")
+	require.ErrorContains(t, err, "not ordinary words (word 4)")
 	_, _, err = Export(rec, ExportOptions{Source: SourceExample})
 	require.NoError(t, err)
 }

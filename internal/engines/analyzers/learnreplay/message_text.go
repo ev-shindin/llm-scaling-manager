@@ -1,6 +1,7 @@
 package learnreplay
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -187,42 +188,115 @@ func (x *exporter) pseudonymToken(t string) bool {
 	return true
 }
 
-// sourceRefusals are the tokens of a text a person wrote to commit beside a
-// fixture (the manifest's source) that are not ordinary words: a word of
-// the code's messages or the committed source words (sourceWords), in any
-// case; a number; a scenario name such as E1.
+// sourceRefusals says which tokens of a text a person wrote to commit
+// beside a fixture (the manifest's source) are not ordinary words -- a word
+// of the code's messages or the committed source words (sourceWords), in
+// any case; a number; a scenario name such as E1 -- by position, never by
+// the word: a word that is not allowed may be a name.
 func sourceRefusals(text string) []string {
 	var out []string
-	for i := 0; i < len(text); i++ {
-		if text[i] >= 0x80 {
-			return []string{"a non-ASCII character"}
-		}
+	if !isASCII(text) {
+		return []string{"a non-ASCII character"}
 	}
-	for _, t := range tokens(text) {
+	for i, t := range tokens(text) {
 		low := asciiLower(t)
 		if messageWords[t] || messageWords[low] || sourceWords[low] || isNumber(t) || scenarioID.MatchString(t) {
 			continue
 		}
-		out = append(out, t)
+		out = append(out, fmt.Sprintf("word %d", i+1))
 	}
 	return out
 }
 
-// checkFixtureName holds a fixture's name to what a source may hold: each
-// part between dashes a number, a scenario name (E1) or an ordinary word,
-// and no part holding a recorded name anywhere inside it ("2payroll",
-// "e1-payrollrun").
+// checkFixtureName holds a fixture's name to what a source may hold: no
+// recorded name in it, whole or inside a part ("scale-test-e1",
+// "2payroll"); each part between dashes a number, a scenario name (e1) or
+// an ordinary word. The error says where, never what.
 func (x *exporter) checkFixtureName(name string) error {
-	for _, part := range strings.Split(name, "-") {
+	if tok := x.nameIn(name); tok != "" || x.holdsName(name) {
+		return errors.New("learnreplay: export: the fixture name holds a recorded name")
+	}
+	for i, part := range strings.Split(name, "-") {
 		low := asciiLower(part)
 		for _, tok := range x.tokens {
 			if strings.Contains(low, tok) {
-				return fmt.Errorf("learnreplay: export: the fixture name holds a name (the one behind %s)", x.lower[tok])
+				return fmt.Errorf("learnreplay: export: the fixture name's part %d holds a recorded name", i+1)
 			}
 		}
 		if !isNumber(part) && !scenarioID.MatchString(part) && !messageWords[low] && !sourceWords[low] {
-			return fmt.Errorf("learnreplay: export: the fixture name's part %q is not a number, a scenario name such as e1, or an ordinary word", part)
+			return fmt.Errorf("learnreplay: export: the fixture name's part %d is not a number, a scenario name such as e1, or an ordinary word", i+1)
 		}
 	}
 	return nil
+}
+
+// minBackstopName is the shortest recorded name the backstop looks for: a
+// shorter one is too likely to be part of an ordinary word, and stays on
+// the token rules.
+const minBackstopName = 4
+
+// holdsName is the backstop behind every token rule: whether s, lowercased,
+// holds a recorded name of minBackstopName characters or more anywhere, as
+// plain text -- glued to letters ("payroll-kpmgx"), split by a character
+// no rule splits at ("scale@demand"), or overlapping another name. One
+// occurrence is let through: one that is a whole token of s, equal to the
+// name, that is also the code's own word -- a role "decode" in a recording
+// whose namespace is decode is the code's word, not the name. A code word
+// that merely contains a name is not let through.
+func (x *exporter) holdsName(s string) bool {
+	low := asciiLower(s)
+	for _, n := range x.longNames {
+		for off := 0; ; {
+			i := strings.Index(low[off:], n)
+			if i < 0 {
+				break
+			}
+			i += off
+			end := i + len(n)
+			whole := (i == 0 || !tokenByte(low[i-1])) && (end == len(low) || !tokenByte(low[end]))
+			if !whole || !isCodeToken(s[i:end]) {
+				return true
+			}
+			off = i + 1
+		}
+	}
+	return false
+}
+
+// tokenByte is a byte a message token holds (tokenPattern).
+func tokenByte(c byte) bool {
+	return alnum(c) || strings.IndexByte("_.:/|-", c) >= 0
+}
+
+// isCodeToken reports a string that is, whole, a word of the code's own.
+func isCodeToken(t string) bool {
+	return messageWords[t] || vocabulary[t] || knownLabels[t] || knownAccelerators[t] || knownConfigTypes[t]
+}
+
+// namesOverlap reports a message in which two recorded names of
+// minBackstopName characters or more overlap, neither inside the other
+// ("payroll-team-x7k2p" holding payroll-team and team-x7k2p): renaming one
+// leaves a piece of the other, so the message is refused.
+func (x *exporter) namesOverlap(s string) bool {
+	low := asciiLower(s)
+	type span struct{ from, to int }
+	var spans []span
+	for _, n := range x.longNames {
+		for off := 0; ; {
+			i := strings.Index(low[off:], n)
+			if i < 0 {
+				break
+			}
+			spans = append(spans, span{off + i, off + i + len(n)})
+			off += i + 1
+		}
+	}
+	for _, a := range spans {
+		for _, b := range spans {
+			if a.from < b.from && b.from < a.to && a.to < b.to {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -375,6 +375,17 @@ holds anything it cannot place: nothing it does not know is committed.
   `ns-01-hsbc`, a host, a word in another script) stops the export. A word
   the code itself uses (`grace`, `production`) passes on its own: the
   export cannot tell it from the code's.
+- **Backstop**: after every rule above, every string value and map key, the
+  source and the fixture name are lowercased and searched for every
+  recorded name of four characters or more, as plain text. Any hit stops
+  the export, whatever split or glued the name (`scale@demand`,
+  `payroll-kpmgx`), and so do two recorded names that overlap in one
+  message (`payroll-team-x7k2p` holding `payroll-team` and `team-x7k2p`).
+  The one hit let through is a whole value or token that equals the name
+  and is also the code's own word (a role `decode` in a recording whose
+  namespace is `decode`); a code word that merely contains a name is not.
+  Shorter names are left to the token rules. No refusal names what it
+  refused: it names the field, or the position of the word.
 - **Refused**: any other string. The export names the field, never the
   value. If the string is the code's own word, add it to `vocabulary` in
   `internal/engines/analyzers/learnreplay/classify.go`; if it is a GPU
@@ -432,7 +443,8 @@ refuses a `SOURCE` that holds a name the recording holds (in any case, and
 split by `-` or `_`: `Payroll-team` holds `payroll`), and one that holds a
 word that is neither a word of the code's messages nor in
 `internal/engines/analyzers/learnreplay/source_words.txt`, naming the
-words. Add an ordinary English word to that file, lowercase, when a source
+words by their position. Add an ordinary English word to that file,
+lowercase, when a source
 needs it; never a name. Never write a cluster name in a source.
 
 `NAME` is held the same way: each part between dashes a number, a
