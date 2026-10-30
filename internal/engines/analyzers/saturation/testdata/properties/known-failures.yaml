@@ -107,13 +107,13 @@
   class: liveness
   learner: k2
   expect: not-learned
-  finding: "k2 is learned only from an engine queue at or over the threshold. Under flow control the queue stands at the scheduler and the engines' own queues read empty, so P1-obs never fires and the variant prices from k1."
+  finding: "k2 is learned only from an engine queue at or over the threshold. Under flow control the queue stands at the scheduler and the engines' own queues read empty, so P1-obs never fires and the variant prices from k1. Here the true capacity is above k1, so a learned k2 could not move capacity: what the row measures is the mu written beside a P1-obs reading, which flow control leaves unwritten. The under-provisioning when a fleet is sequence-bound is #399."
   measured: "20/20 seeds; two decode replicas full for 3 min with 40 requests at the scheduler: no k2"
   owner: "#394"
 - id: n-dependence/prefill-bound/iid-max
   class: n-dependence
   learner: prefill-bound
   expect: n-dependent
-  finding: "The prefill bound's max across pods grows with N under iid noise."
+  finding: "The prefill bound's max across pods grows with N under iid noise. The bound is a running max over time by design (#397). This case drives boundMu, the write path; re-measured through the production notePrefillBound the bias is about +16 % already at N=1. A later PR moves the case onto the production path."
   measured: "10/10 seeds; seed 1: E at N=2 is 1.031 against a true 1, +3.1 %"
-  owner: "#395"
+  owner: "#397"
