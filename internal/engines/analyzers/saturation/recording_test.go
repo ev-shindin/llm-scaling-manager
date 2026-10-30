@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
@@ -60,4 +61,29 @@ func TestRecordingOff_WritesNothing(t *testing.T) {
 func readEvents(b []byte) ([]learnrec.RawEvent, error) {
 	r, err := learnrec.Read(b)
 	return r.Events, err
+}
+
+// An export that found nothing new is not recorded again: the engine exports
+// every interval, and the document is the largest event there is.
+func TestExportLearnedState_RecordsOnlyAChangedDocument(t *testing.T) {
+	var buf bytes.Buffer
+	a := NewSaturationAnalyzer(capacity.NewStore()).WithRecorder(learnrec.New(&buf, 0))
+	a.ExportLearnedState()
+	a.ExportLearnedState()
+	a.NoteVariantsPresent("ns", "m", []string{"v"})
+	a.ExportLearnedState()
+	a.ForgetVariant("ns", "m", "v", "t1")
+	a.ExportLearnedState()
+	events, err := readEvents(buf.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	for _, ev := range events {
+		kinds = append(kinds, ev.Kind)
+	}
+	want := []string{KindExportLearnedState, KindNoteVariantsPresent, KindForgetVariant, KindExportLearnedState}
+	if strings.Join(kinds, " ") != strings.Join(want, " ") {
+		t.Fatalf("recorded %v, want %v", kinds, want)
+	}
 }
