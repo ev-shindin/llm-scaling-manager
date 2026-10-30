@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -35,6 +36,7 @@ func k2Cases() []propCase {
 		{class: classLiveness, learner: "k2", name: "pd-decode", family: familyDirect, tuning: tunedDefault, check: checkK2Liveness("pd")},
 		{class: classLiveness, learner: "k2", name: "flow-control-on", family: familyDirect, tuning: tunedDefault, check: checkK2Liveness("flow-control")},
 		{class: classEdges, learner: "k2", name: "key-near-output-boundary", family: familyDirect, tuning: tunedDefault, seeds: 50, check: checkK2KeyEdge},
+		{class: classEdges, learner: "k2", name: "key-follows-output-length", family: familyDirect, tuning: tunedDefault, check: checkK2KeyFollows(nil)},
 	}
 }
 
@@ -59,6 +61,12 @@ func (r *propRig) runK2(readings ...k2Reading) error {
 // checkK2LoadStep is TestK2Settle_ALoadStepIsNotALimit with seeded levels: a
 // deep queue lands on an idle replica, which reads 8 % of its cache. The
 // step's reading is refused.
+//
+// It assumes one saturated reading is admitted: the k2 on record before the
+// step comes from a single reading. The fix for first-sample/k2/second-reading
+// (withhold until a second reading) breaks that premise, and this case then
+// fails as not-learned. The owner of that ledger row reworks this case in the
+// same PR, with two saturated readings before the step.
 func checkK2LoadStep(policy func(*config.ScalingPolicy)) func(uint64) error {
 	return func(seed uint64) error {
 		r := propRand(seed)
@@ -438,25 +446,24 @@ func checkK2Liveness(topology string) func(uint64) error {
 	}
 }
 
-// checkK2KeyEdge: a saturated fleet whose output length sits 6 % above the
-// 500-token medium/long boundary, with 6 % autocorrelated noise. The
-// noise-free length never crosses, so the k2 key the analyzer selects --
-// counted once it has selected one for two minutes -- never changes.
-func checkK2KeyEdge(seed uint64) error {
-	r := propRand(seed)
+// selectedK2Keys runs a two-replica saturated fleet through one cycle per
+// output length, and returns the k2 key the analyzer selected each cycle, as
+// its k2-decision line names it (historyKey, in logContract). wrap edits each
+// row (a mutant).
+func selectedK2Keys(lengths []float64, wrap func(*domain.ReplicaMetrics)) ([]string, error) {
 	rig := newPropRig()
+	rig.wrap = wrap
 	core, logs := observer.New(zapcore.Level(-perReplicaLogLevel))
 	rig.ctx = logr.NewContext(context.Background(), zapr.NewLogger(zap.New(core)))
-	noise := arNoise(r, 120, 0.06, 0.9)
-	keys := make([]string, 0, len(noise))
-	for _, e := range noise {
+	keys := make([]string, 0, len(lengths))
+	for _, l := range lengths {
 		rows := make([]domain.ReplicaMetrics, 2)
 		for p := range rows {
 			rows[p] = satRow(fmt.Sprintf("r%d", p), 330_000, 10, 6)
-			rows[p].AvgOutputTokens = 530 * (1 + e)
+			rows[p].AvgOutputTokens = l
 		}
 		if _, err := rig.analyze(rows, decodeStates(2), 12, propCycle); err != nil {
-			return err
+			return nil, err
 		}
 		key := ""
 		for _, entry := range logs.TakeAll() {
@@ -468,15 +475,89 @@ func checkK2KeyEdge(seed uint64) error {
 		}
 		keys = append(keys, key)
 	}
-	const settle = 8 // two minutes: the tracked length exists by then
+	return keys, nil
+}
+
+// keySettle is two minutes of cycles: the fleet's tracked length exists by
+// then, so key changes are counted from it.
+const keySettle = 8
+
+// keyChanges counts the selected key's changes after keySettle, and is a
+// not-learned violation when a cycle selected none.
+func keyChanges(keys []string) (int, error) {
 	changes := 0
-	for i := settle + 1; i < len(keys); i++ {
+	for i := keySettle + 1; i < len(keys); i++ {
 		if keys[i] == "" || keys[i-1] == "" {
-			return violation(kindNotLearned, "cycle %d selected no k2 key", i)
+			return 0, violation(kindNotLearned, "cycle %d selected no k2 key", i)
 		}
 		if keys[i] != keys[i-1] {
 			changes++
 		}
 	}
-	return holds(changes == 0, kindFlipped, "output length 6 %% above the 500-token boundary: the selected k2 key changed %d times in %d cycles", changes, len(keys)-settle)
+	return changes, nil
+}
+
+// checkK2KeyEdge: a saturated fleet whose output length sits 6 % above the
+// 500-token medium/long boundary, with 6 % autocorrelated noise. The
+// noise-free length never crosses, so the k2 key the analyzer selects --
+// counted once it has selected one for two minutes -- never changes.
+func checkK2KeyEdge(seed uint64) error {
+	noise := arNoise(propRand(seed), 120, 0.06, 0.9)
+	lengths := make([]float64, len(noise))
+	for i, e := range noise {
+		lengths[i] = 530 * (1 + e)
+	}
+	keys, err := selectedK2Keys(lengths, nil)
+	if err != nil {
+		return err
+	}
+	changes, err := keyChanges(keys)
+	if err != nil {
+		return err
+	}
+	return holds(changes == 0, kindFlipped, "output length 6 %% above the 500-token boundary: the selected k2 key changed %d times in %d cycles", changes, len(keys)-keySettle)
+}
+
+// checkK2KeyFollows is checkK2KeyEdge's positive control: the noise-free
+// length steps from 400 to 700 tokens, clearly across the 500-token
+// boundary, with 2 % noise. The selected key must change: a key that ignores
+// the output length would pass checkK2KeyEdge for the wrong reason, and fails
+// here.
+func checkK2KeyFollows(wrap func(*domain.ReplicaMetrics)) func(uint64) error {
+	return func(seed uint64) error {
+		noise := arNoise(propRand(seed), 60, 0.02, 0.9)
+		lengths := make([]float64, len(noise))
+		for i, e := range noise {
+			lengths[i] = 400 * (1 + e)
+			if i >= 30 {
+				lengths[i] = 700 * (1 + e)
+			}
+		}
+		keys, err := selectedK2Keys(lengths, wrap)
+		if err != nil {
+			return err
+		}
+		changes, err := keyChanges(keys)
+		if err != nil {
+			return err
+		}
+		return holds(changes >= 1, kindNotDetected, "the output length stepped 400 -> 700 across the 500-token boundary, and the selected k2 key never changed")
+	}
+}
+
+// The k2-key edge case's positive control. edges/k2/key-near-output-boundary
+// passes when the selected key never changes, which an analyzer whose key
+// ignores the output length would do too. Such an analyzer -- here, rows whose
+// output length the key reads held at 530 -- fails the non-ledgered
+// edges/k2/key-follows-output-length.
+func TestPropertyK2KeyPositiveControl(t *testing.T) {
+	ignores := func(rm *domain.ReplicaMetrics) { rm.AvgOutputTokens = 530 }
+	run, err := runCase(checkK2KeyFollows(ignores), []uint64{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.failures) != 3 {
+		t.Errorf("a k2 key that ignores the output length: %s; want every seed to fail", run)
+	}
+	t.Logf("a k2 key that ignores the output length: %s", run)
 }

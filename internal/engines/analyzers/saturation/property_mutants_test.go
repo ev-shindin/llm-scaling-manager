@@ -2,7 +2,9 @@ package saturation
 
 import (
 	"math"
+	"regexp"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,7 +65,7 @@ var findings = []finding{
 	{row: "the rules together always pick the higher mu", status: statusCaught},
 	{row: "KV and throughput units mixed", status: statusCaught},
 	{row: "Max across replicas (+13.6 % at 16)", status: statusCaught},
-	{row: "Prefill double scrape", status: statusEscaping, why: "the production prefill bound fails heterogeneity/prefill-bound/one-pod-doubled (a ledger row, open); mu's mean fold passes it"},
+	{row: "Prefill double scrape", status: statusEscaping, why: "the production prefill bound fails contamination-heterogeneity/prefill-bound/one-pod-doubled (a ledger row, open); mu's mean fold passes it"},
 	{row: "Demand falls when lambda lags a step", status: statusEscaping, why: "the monotonicity trajectory passes on today's code and no pre-fix floor is reproduced"},
 	{row: "local queue priced as drainable", status: statusCaught},
 	{row: "Weighted median flapping between modes", status: statusCaught},
@@ -189,20 +191,32 @@ func propertyMutants() []propMutant {
 	}
 }
 
-// checkAccounting holds the mutants to the 2.7 table: every mutant's row is a
-// caught finding, every caught finding has a mutant, every other finding says
-// why, and no mutant runs a ledgered case (a ledgered case fails without the
-// defect, so it would prove nothing).
-func checkAccounting(muts []propMutant, cases map[string]bool, ledger map[string]*ledgerRow) []string {
+// citedCase matches a property case id cited in a finding's reason.
+var citedCase = regexp.MustCompile(`\b[a-z0-9-]+/[a-z0-9-]+/[a-z0-9-]+\b`)
+
+// checkAccounting holds the mutants to the 2.7 table fs: every row is listed
+// once; every mutant's row is a caught finding, every caught finding has a
+// mutant, and every other finding says why; no mutant runs a ledgered case (a
+// ledgered case fails without the defect, so it would prove nothing); a case a
+// reason cites exists, and is a ledger row when the reason says it is one.
+func checkAccounting(fs []finding, muts []propMutant, cases map[string]bool, ledger map[string]*ledgerRow) []string {
 	var errs []string
 	status := map[string]finding{}
-	for _, f := range findings {
+	for _, f := range fs {
 		if _, dup := status[f.row]; dup {
-			errs = append(errs, "2.7 row listed twice: "+f.row)
+			errs = append(errs, f.row+": 2.7 row listed twice")
 		}
 		status[f.row] = f
 		if f.status != statusCaught && f.why == "" {
 			errs = append(errs, f.row+": "+string(f.status)+" needs a reason")
+		}
+		for _, id := range citedCase.FindAllString(f.why, -1) {
+			switch {
+			case !cases[id]:
+				errs = append(errs, f.row+": the reason cites "+id+", which is no property case")
+			case strings.Contains(f.why, "ledger row") && ledger[id] == nil:
+				errs = append(errs, f.row+": the reason calls "+id+" a ledger row, and the ledger does not list it")
+			}
 		}
 	}
 	mutated := map[string]bool{}
@@ -222,7 +236,7 @@ func checkAccounting(muts []propMutant, cases map[string]bool, ledger map[string
 		}
 		mutated[m.row] = true
 	}
-	for _, f := range findings {
+	for _, f := range fs {
 		if f.status == statusCaught && !mutated[f.row] {
 			errs = append(errs, f.row+" is marked caught and has no mutant")
 		}
@@ -238,7 +252,7 @@ func TestPropertyMutants(t *testing.T) {
 		cases[c.id()] = true
 	}
 	muts := propertyMutants()
-	for _, e := range checkAccounting(muts, cases, loadLedger(t)) {
+	for _, e := range checkAccounting(findings, muts, cases, loadLedger(t)) {
 		t.Error(e)
 	}
 	for _, f := range findings {
@@ -268,24 +282,42 @@ func TestPropertyMutants(t *testing.T) {
 
 // The accounting's negative controls.
 func TestPropertyAccountingNegativeControls(t *testing.T) {
-	cases := map[string]bool{"transient/itl/joiner-warmup": true}
-	good := []propMutant{{row: "pinned B from unsteady readings", caseID: "transient/itl/joiner-warmup"}}
-	if errs := checkAccounting(good, cases, nil); len(errs) == 0 {
-		t.Error("caught findings with no mutant passed the accounting")
+	const joiner = "transient/itl/joiner-warmup"
+	cases := map[string]bool{joiner: true}
+	caught := finding{row: "pinned B from unsteady readings", status: statusCaught}
+	escaping := finding{row: "the 0.30 idle line", status: statusEscaping, why: "no case"}
+	fs := []finding{caught, escaping}
+	good := []propMutant{{row: caught.row, caseID: joiner}}
+	if errs := checkAccounting(fs, good, cases, nil); len(errs) != 0 {
+		t.Fatalf("a matching table is clean: %v", errs)
+	}
+	if errs := checkAccounting(fs, nil, cases, nil); !containsPrefix(errs, caught.row+" is marked caught") {
+		t.Errorf("a caught finding with no mutant was not reported: %v", errs)
 	}
 	for name, m := range map[string]propMutant{
-		"a mutant for an escaping row": {row: "the 0.30 idle line", caseID: "transient/itl/joiner-warmup"},
-		"a mutant for no 2.7 row":      {row: "no such finding", caseID: "transient/itl/joiner-warmup"},
-		"a mutant naming no case":      {row: "pinned B from unsteady readings", caseID: "gone"},
+		"a mutant for an escaping row": {row: escaping.row, caseID: joiner},
+		"a mutant for no 2.7 row":      {row: "no such finding", caseID: joiner},
+		"a mutant naming no case":      {row: caught.row, caseID: "gone"},
 	} {
-		errs := checkAccounting([]propMutant{m}, cases, nil)
-		if !containsPrefix(errs, m.row) {
+		if errs := checkAccounting(fs, append([]propMutant{m}, good...), cases, nil); !containsPrefix(errs, m.row) {
 			t.Errorf("%s: not reported: %v", name, errs)
 		}
 	}
-	ledgered := map[string]*ledgerRow{"transient/itl/joiner-warmup": {}}
-	if errs := checkAccounting(good, cases, ledgered); !containsPrefix(errs, good[0].row+": mutant runs") {
+	if errs := checkAccounting(fs, good, cases, map[string]*ledgerRow{joiner: {}}); !containsPrefix(errs, caught.row+": mutant runs") {
 		t.Errorf("a mutant on a ledgered case was not reported: %v", errs)
+	}
+	for name, tc := range map[string]struct {
+		f      finding
+		prefix string
+	}{
+		"a row listed twice":                {escaping, escaping.row + ": 2.7 row listed twice"},
+		"an escaping row with no reason":    {finding{row: "x", status: statusEscaping}, "x: still escaping needs a reason"},
+		"a reason citing no case":           {finding{row: "y", status: statusEscaping, why: "edges/k2/gone fails"}, "y: the reason cites"},
+		"a reason citing an unledgered row": {finding{row: "z", status: statusEscaping, why: joiner + " fails on today's code (a ledger row, open)"}, "z: the reason calls"},
+	} {
+		if errs := checkAccounting(append(append([]finding{}, fs...), tc.f), good, cases, nil); !containsPrefix(errs, tc.prefix) {
+			t.Errorf("%s: not reported: %v", name, errs)
+		}
 	}
 }
 

@@ -39,7 +39,8 @@ import (
 var logContract = map[string][]string{
 	"k2-decision": {
 		"modelID", "namespace", "variant", // join keys
-		"priority", // the report's Priority column
+		"priority",   // the report's Priority column
+		"historyKey", // the k2 window the replica was priced from; the k2-key property cases read it
 	},
 	"replica-capacity-decision": {
 		"modelID", "namespace", "variant", // join keys

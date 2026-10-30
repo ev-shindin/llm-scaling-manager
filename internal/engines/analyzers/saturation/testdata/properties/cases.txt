@@ -10,6 +10,7 @@ contamination-heterogeneity/prefill-bound/one-slow-pod-n4
 edges/floor/backlog-grew
 edges/idle/idle-line-030
 edges/itl/bimodal-fit
+edges/k2/key-follows-output-length
 edges/k2/key-near-output-boundary
 edges/mu/latch-at-2x
 edges/start-time/outlier-3x
