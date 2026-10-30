@@ -273,6 +273,16 @@ func (s site) keyRule() (rule, bool) {
 	return r, ok
 }
 
+// compositeSite reports whether the string at at is a composite key, by its
+// rule.
+func (x *exporter) compositeSite(at site) bool {
+	r, ok := at.valueRule()
+	if at.isKey {
+		r, ok = at.keyRule()
+	}
+	return ok && r.class == classComposite
+}
+
 // walk calls fn on every string value and every map key under n, with where
 // it stands. A map whose keys fn changed is re-sorted.
 func (x *exporter) walk(n *node, kind string, fn func(site, *string)) {
@@ -472,11 +482,38 @@ func compositeLayout(parts int) []keyPart {
 	return out
 }
 
-// splitComposite splits a composite key into its parts and their places.
-func splitComposite(s string) ([]string, []keyPart) {
-	parts := strings.Split(s, "|")
-	return parts, compositeLayout(len(parts))
+// splitComposite splits a composite key into its parts and their places,
+// and the stash tag a window put aside under other engine arguments carries
+// after a '#' (saturation's stashKey: key + "#" + the arguments' tag), with
+// whether it has one. The layout is the key's without the tag, so a stashed
+// variant key (ITLBaselineStash) or window key has its own key's places.
+func splitComposite(s string) (parts []string, layout []keyPart, tag string, tagged bool) {
+	key, tag, tagged := strings.Cut(s, "#")
+	parts = strings.Split(key, "|")
+	return parts, compositeLayout(len(parts)), tag, tagged
 }
+
+// joinComposite puts a key split by splitComposite back together.
+func joinComposite(parts []string, tag string, tagged bool) string {
+	out := strings.Join(parts, "|")
+	if tagged {
+		out += "#" + tag
+	}
+	return out
+}
+
+// stashTag reports whether tag is a stash key's tag: an engine arguments'
+// fingerprint, possibly of a configuration not read completely
+// (capacity.IncompleteArgsPrefix), or the tag a restore gives a window of a
+// document that recorded no arguments (saturation's legacyArgsPrefix,
+// "legacy:", before such a fingerprint).
+func stashTag(tag string) bool {
+	return isFingerprint(strings.TrimPrefix(tag, legacyArgsPrefix))
+}
+
+// legacyArgsPrefix is saturation's legacyArgsPrefix, which it does not
+// export.
+const legacyArgsPrefix = "legacy:"
 
 // harvestComposites names every name part of a composite key that is not a
 // name already: a name only a key holds (a variant of another namespace in
@@ -491,7 +528,7 @@ func (x *exporter) harvestComposites(composites []string) {
 		}
 	}
 	for _, c := range composites {
-		parts, layout := splitComposite(c)
+		parts, layout, _, _ := splitComposite(c)
 		for i, part := range parts {
 			switch layout[i] {
 			case partAccelerator:
@@ -599,10 +636,17 @@ func (x *exporter) rename(at site, s string) string {
 }
 
 // renameComposite renames each name part of a composite key: whole when it
-// is a name, else each piece between '/'.
+// is a name, else each piece between '/'. The accelerator part is renamed
+// whole when it is a name. A count, a shape part, a fingerprint and the stash
+// tag are never renamed: they are figures and code words, and a namespace
+// that happens to be called "medium" or "decode" must not rename the bucket
+// or the role of every key.
 func (x *exporter) renameComposite(s string) string {
-	parts, layout := splitComposite(s)
+	parts, layout, tag, tagged := splitComposite(s)
 	for i, part := range parts {
+		if layout[i] != partName && layout[i] != partAccelerator {
+			continue
+		}
 		if p, ok := x.names[part]; ok {
 			parts[i] = p
 			continue
@@ -618,7 +662,7 @@ func (x *exporter) renameComposite(s string) string {
 		}
 		parts[i] = strings.Join(sub, "/")
 	}
-	return strings.Join(parts, "|")
+	return joinComposite(parts, tag, tagged)
 }
 
 // wordByte is a byte a name runs on through: a name in a message matches
@@ -780,7 +824,10 @@ func (x *exporter) atomAllowed(a string) bool {
 // accelerator part a known accelerator or a pseudonym, a count digits, a
 // fingerprint a fingerprint.
 func (x *exporter) compositeAllowed(s string) bool {
-	parts, layout := splitComposite(s)
+	parts, layout, tag, tagged := splitComposite(s)
+	if tagged && !stashTag(tag) {
+		return false
+	}
 	for i, part := range parts {
 		var ok bool
 		switch layout[i] {
@@ -815,12 +862,8 @@ var shapeBuckets = setOf("short", "medium", "long", "xlong", "xxlong", "huge", "
 
 // shapePart reports whether part is a shape part of a window key: a role, a
 // length bucket (an input one prefixed i), or a queue threshold (q and a
-// number). A stash key's last part carries the stash's '#' suffix, a
-// fingerprint.
+// number). A stash key's '#' tag is split off before (splitComposite).
 func shapePart(part string) bool {
-	if base, tag, stashed := strings.Cut(part, "#"); stashed {
-		return isFingerprint(tag) && shapePart(base)
-	}
 	if q, ok := strings.CutPrefix(part, "q"); ok && isNumber(q) {
 		return true
 	}
@@ -829,7 +872,19 @@ func shapePart(part string) bool {
 
 // check holds the string at a site, after the export, to the allowlist.
 func (x *exporter) check(at site, s *string) {
-	if x.holdsName(*s) {
+	if x.compositeSite(at) {
+		// A composite key is held part by part: its name parts must hold no
+		// name, and its other parts are figures and code words that
+		// compositeAllowed holds to their own rules. Read whole, a bucket
+		// named like a namespace ("medium") would read as that name.
+		parts, layout, _, _ := splitComposite(*s)
+		for i, part := range parts {
+			if (layout[i] == partName || layout[i] == partAccelerator) && x.holdsName(part) {
+				x.problem("%s holds a recorded name after the export", at.where())
+				break
+			}
+		}
+	} else if x.holdsName(*s) {
 		x.problem("%s holds a recorded name after the export", at.where())
 	}
 	x.checkRule(at, s)
