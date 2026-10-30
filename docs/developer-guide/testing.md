@@ -185,10 +185,18 @@ It is a test aid, off by default.
 
 Before you start:
 
-- Recordings go to the node's local disk, in an `emptyDir`. Any new pod
-  deletes them: a rollout, a reinstall, an eviction, a node drain, and the
-  patch that turns the recorder off. A container restart (a crash, an OOM)
-  keeps them. There is no other sink in this release.
+- Recordings go to the node's local disk, in an `emptyDir`. A new pod has
+  a new, empty one, so anything that replaces the pod deletes them: turning
+  the recorder on or off, a `kubectl rollout restart`, an upgrade or any
+  change to the pod template, an eviction, a node drain, an uninstall. A
+  container restart (a crash, an OOM) keeps them. There is no other sink in
+  this release.
+- Re-running the installer does not turn the recorder off and, when it
+  changes nothing else, does not replace the pod: it applies client-side,
+  and the fields the patch adds are not in what it applied before. Measured
+  against an API server (`test/recorderpatch`): after the installer's apply
+  the recorder is still there, and the Deployment's generation has not
+  moved.
 - A recording starts only when the controller starts. It keeps the head of a
   run: once full, it stops. For a new recording, restart the controller.
 
@@ -204,8 +212,12 @@ kubectl -n "$NS" patch deployment wva-controller-manager --type strategic --patc
 kubectl -n "$NS" rollout status deployment/wva-controller-manager
 ```
 
-On OpenShift, first delete the `runAsUser: 65532` line from the sidecar in
-that file: the restricted-v2 SCC assigns the user and refuses a fixed one.
+On OpenShift, use
+`config/components/learner-recorder-openshift/learner-recorder-openshift-deployment.yaml`
+instead: the same patch without the sidecar's fixed `runAsUser`, which the
+restricted-v2 SCC refuses (it assigns one). For an overlay you render
+yourself, the components `config/components/learner-recorder` and
+`config/components/learner-recorder-openshift` apply the same patches.
 
 The patch mounts a 600Mi `emptyDir` at `/var/lib/wva/learner-recordings` and
 sets `LEARNER_RECORDING_DIR` to it. The sidecar mounts the same volume
@@ -214,23 +226,32 @@ Without the patch, set the directory with `--learner-recording-dir` (or
 `LEARNER_RECORDING_DIR`) and mount a volume there yourself. Never `/tmp`: it
 is a 64Mi `emptyDir`, and the kubelet evicts the pod when it fills. Options a
 recording cannot start with (`/tmp`, a cap under 64Ki, a directory ceiling
-under two caps) are logged at startup, and the controller runs without
-recording.
+under two caps, a size that is not a whole number) are logged at startup,
+and the controller runs without recording.
+
+To change the sizes on an installed controller, set them in the manager's
+environment (in bytes); this replaces the pod, so copy the recordings out
+first. Keep the volume's `sizeLimit` (600Mi in the patch) at least the
+directory ceiling:
+
+```bash
+kubectl -n "$NS" set env deployment/wva-controller-manager -c manager LEARNER_RECORDING_CAP_BYTES=134217728 LEARNER_RECORDING_DIR_BYTES=268435456
+```
 
 What it writes:
 
 - One file per controller start, named by its start time:
   `learnrec-20260302T090000.000000000Z.jsonl`. The first line is the start
   (how the analyzers were configured); a replay refuses a file without it.
-- At most 256Mi per recording (`--learner-recording-cap-bytes`). At the cap
-  the recording keeps what it has, stops writing, and logs how many events it
-  dropped.
-- At most `--learner-recording-dir-bytes` in the directory, twice the cap by
-  default; the volume's `sizeLimit` must be at least that. To make room, a new
-  recording deletes the tiny recordings a crash loop leaves first, then older
-  ones, never the newest one with data: a controller that restarts again and
-  again keeps the recording from before the first restart. If what is left is
-  less than a cap, the new recording gets what is left.
+- At most 256Mi per recording (`LEARNER_RECORDING_CAP_BYTES`, or
+  `--learner-recording-cap-bytes`). At the cap the recording keeps what it
+  has, stops writing, and logs how many events it dropped.
+- At most twice the cap in the directory (`LEARNER_RECORDING_DIR_BYTES`, or
+  `--learner-recording-dir-bytes`). To make room, a new recording first
+  deletes the tiny ones (under 64Ki) a crash loop leaves. Then, if a full
+  cap does not fit, it takes what is left, down to 64Ki, and deletes no
+  recording with data. Only when less than 64Ki would be left do the older
+  recordings with data go, oldest first, and the newest of them last.
 - Measured on the in-process acceptance run: about 1.7 KB per replica per
   cycle for each analyzer a model lists (each `Analyze` carries its input).
   At a 15 s cycle, with saturation alone, 8 replicas fill 256Mi in about 3.4
@@ -249,14 +270,16 @@ kubectl -n "$NS" cp -c recordings "${POD#pod/}:/var/lib/wva/learner-recordings" 
 
 ### Turn it off
 
-Copy the recordings out first: this rolls out a new pod, with a new, empty
-volume.
+Copy the recordings out first: this replaces the pod, and the new one has a
+new, empty volume. The same command on OpenShift.
 
 ```bash
 kubectl -n "$NS" patch deployment wva-controller-manager --type strategic --patch-file config/components/learner-recorder/learner-recorder-off-deployment.yaml
+kubectl -n "$NS" set env deployment/wva-controller-manager -c manager LEARNER_RECORDING_CAP_BYTES- LEARNER_RECORDING_DIR_BYTES-
 ```
 
-Reinstalling the controller turns it off as well.
+The second command is needed only if you set the sizes. Re-running the
+installer does not turn the recorder off (see above); uninstalling does.
 
 ### Replay one
 
