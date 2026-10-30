@@ -71,7 +71,7 @@ Options:
 
 The default image tag is the `newTag` in `config/base/manager/kustomization.yaml`:
 `main` on a checkout of `main`, the release tag on a checkout of a release. So
-`git checkout v0.10.1` installs `:v0.10.1` without `-i`. See
+`git checkout v0.10.2` installs `:v0.10.2` without `-i`. See
 [Pin the version](upgrade-and-uninstall.md#pin-the-version).
 
 `--check` is what `make check-prereqs` runs. Run it before a real install. It
@@ -149,11 +149,11 @@ yourself, or when a GitOps tool owns the manifests. Otherwise use Method 1.
 ```bash
 # Use the manifests of the release you install. A release checkout already
 # names its own image, so the image line below only makes it explicit.
-git checkout v0.10.1
+git checkout v0.10.2
 
 # Set the controller image: the release tag, or its digest from the release notes
 cd config/base/manager
-kustomize edit set image controller=ghcr.io/ev-shindin/llm-scaling-manager:v0.10.1
+kustomize edit set image controller=ghcr.io/ev-shindin/llm-scaling-manager:v0.10.2
 # kustomize edit set image controller=ghcr.io/ev-shindin/llm-scaling-manager@sha256:<digest>
 
 # Apply the overlay for your scope and platform
