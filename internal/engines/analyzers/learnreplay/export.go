@@ -873,7 +873,7 @@ func (x *exporter) figureIsAName(part, n string) bool {
 	if _, named := x.names[part]; !named {
 		return false
 	}
-	return !(n != "" && len(n) <= maxFigureDigits && strings.Trim(n, "0123456789") == "")
+	return n == "" || len(n) > maxFigureDigits || strings.Trim(n, "0123456789") != ""
 }
 
 // shapeBuckets are the length buckets a window key names
