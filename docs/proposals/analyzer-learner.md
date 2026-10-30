@@ -645,13 +645,34 @@ not cover a key.
 | Restart fix stubbed | per-path counter "joined refusals with a known ReadySince", required from 0b (the Ready time is on since #288) |
 | "For good" self-sealing low mu | closed-loop probe (PR 3) |
 
-Every row above has a mutant ([2.6](#26-property-tests)); a row whose class
-does not fail its mutant is moved to "still escaping".
+**Where each row stands after 0b.** The code table is `findings` in
+`D/property_mutants_test.go`, and a test holds it to the mutants. Each
+finding above is in exactly one state:
+
+- **Caught:** 19 findings. For each, a mutant puts the defect back, and its
+  class fails on that mutant.
+- **Waiting:** "Restart fix stubbed" waits for the replay's per-path counters
+  (2.5). The restart itself is caught.
+- **Still escaping:** the rest, listed below. A row is escaping either because
+  no mutant reproduces it, or because today's code already fails its class,
+  so the defect is a known-failures ledger row (`D/testdata/properties/known-failures.yaml`)
+  rather than something a mutant can put back.
 
 **Still escaping:**
 
 | finding | why |
 | --- | --- |
+| k == 0 unsettles (#273 A4) | a settle-tracker defect; its negative control is PR 1's (2.3) |
+| Router queue without engine metrics | the missing-values case passes, and no row edit reproduces the pre-fix reading |
+| Instant k against a rate[1m] ITL (#273 A5) | a ledger row: known truth on the time base fails on 3 of 100 seeds |
+| k2 key flips on the output-length boundary | a ledger row: the selected key flips on about a third of seeds |
+| The 0.30 idle line | a ledger row: the idle-room verdict flips on the line |
+| Prefill double scrape | a ledger row: the prefill bound's max takes a pod read at 2x |
+| Demand falls when λ lags a step | the trajectory passes; no pre-fix floor is reproduced |
+| No floor under flow control (#144) | a ledger row for k2; no case drives mu or the floor under flow control |
+| Prefill never learns (#144) | no liveness case for a prefill role yet |
+| Settle holes: fall, rate escape, idle return, lend | need the settle tracker (PR 1) |
+| "For good" self-sealing low mu | the closed-loop probe (PR 3) |
 | Share swing and cancel (#272 F1/F2 and the d3 reviews) | the share ledger (#14, #15) is not recorded or replayed. Out of scope for PR 0 |
 | Alert debounce and sustain (#283 M2/M3) | not a learner |
 | Speculative decoding; shape dependence of the ITL line (#274) | no generator models them |
