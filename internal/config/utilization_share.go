@@ -114,6 +114,36 @@ func (o *OptimizerConfig) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
+// RecordedOptimizer is an OptimizerConfig as the learner recorder writes it
+// (internal/signals/learnrec): its fields, and the decode error's text when
+// the block failed to decode.
+type RecordedOptimizer struct {
+	Type             string
+	UtilizationShare *UtilizationShareConfig
+	DecodeErr        string
+}
+
+// RecordedValue is the optimizer block as a learner recording holds it: the
+// decode error is unexported, and the recorder refuses a struct it would
+// write without it.
+func (o OptimizerConfig) RecordedValue() any {
+	r := RecordedOptimizer{Type: o.Type, UtilizationShare: o.UtilizationShare}
+	if o.decodeErr != nil {
+		r.DecodeErr = o.decodeErr.Error()
+	}
+	return r
+}
+
+// SetRecordedValue reads an optimizer block back from a learner recording,
+// the inverse of RecordedValue. A decode error comes back with its text.
+func (o *OptimizerConfig) SetRecordedValue(r RecordedOptimizer) error {
+	*o = OptimizerConfig{Type: r.Type, UtilizationShare: r.UtilizationShare}
+	if r.DecodeErr != "" {
+		o.decodeErr = errors.New(r.DecodeErr)
+	}
+	return nil
+}
+
 // UtilizationShareConfig is the operator-facing configuration of the
 // utilization-share optimizer: nine optional keys (the stabilization block
 // counts as one), each a decision only an
