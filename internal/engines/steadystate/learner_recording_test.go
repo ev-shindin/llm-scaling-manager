@@ -372,6 +372,13 @@ func recSchedule(start time.Time) []time.Time {
 // result the restarted controller's analyzers returned.
 func recordRun(t *testing.T, start time.Time, record bool) ([]byte, [][]allocation.NamedAnalyzerResult) {
 	t.Helper()
+	recording, results, _ := recordRunEngine(t, start, record)
+	return recording, results
+}
+
+// recordRunEngine is recordRun, with the engine that recorded.
+func recordRunEngine(t *testing.T, start time.Time, record bool) ([]byte, [][]allocation.NamedAnalyzerResult, *Engine) {
+	t.Helper()
 	s := newRecScript(start)
 	first := s.engine(t)
 	// Long enough apart for each snapshot write to land.
@@ -389,10 +396,43 @@ func recordRun(t *testing.T, start time.Time, record bool) ([]byte, [][]allocati
 		results = append(results, s.cycle(t, second, i, at))
 	}
 	if !record {
-		return nil, results
+		return nil, results, second
 	}
 	require.NoError(t, second.learnRec.Err())
-	return buf.Bytes(), results
+	return buf.Bytes(), results, second
+}
+
+// assertSettleVerdicts holds a replay's settle counters to the engine's
+// verdicts, reason by reason.
+func assertSettleVerdicts(t *testing.T, what string, want map[settle.Reason]int64, paths map[string]int64) {
+	t.Helper()
+	total := int64(0)
+	for r, n := range want {
+		total += n
+		assert.Equal(t, n, paths["settle-"+string(r)], "%s: settle verdict %s", what, r)
+	}
+	assert.Positive(t, total, "%s: the engine reached no settle verdict", what)
+}
+
+// withoutKind is recording with every event of kind left out, and the rest
+// numbered again from 1, as a recording that never had them is.
+func withoutKind(t *testing.T, recording []byte, kind string) []byte {
+	t.Helper()
+	const prefix = `{"Seq":`
+	var out []byte
+	seq := 0
+	for _, line := range bytes.SplitAfter(recording, []byte("\n")) {
+		if len(line) == 0 || bytes.Contains(line, []byte(`"Kind":"`+kind+`"`)) {
+			continue
+		}
+		require.True(t, bytes.HasPrefix(line, []byte(prefix)), "a line that does not start with its sequence number")
+		end := bytes.IndexByte(line, ',')
+		require.Positive(t, end)
+		seq++
+		out = append(out, fmt.Sprintf("%s%d", prefix, seq)...)
+		out = append(out, line[end:]...)
+	}
+	return out
 }
 
 // kindCounts counts a recording's events by kind.
@@ -410,7 +450,7 @@ func kindCounts(t *testing.T, recording []byte) map[string]int {
 var recStart = time.Date(2026, 3, 2, 9, 0, 0, 0, time.UTC)
 
 func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing.T) {
-	recording, _ := recordRun(t, recStart, true)
+	recording, _, recorder := recordRunEngine(t, recStart, true)
 
 	// The run covered what the acceptance names; a recording that missed one
 	// would pass a replay without testing it.
@@ -467,6 +507,20 @@ func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing
 	rep, err := learnreplay.Replay(context.Background(), recording, learnreplay.Options{Mode: learnreplay.Normal})
 	require.NoError(t, err)
 	require.Empty(t, mismatchText(rep.Failed()), "a Normal replay at the same commit failed")
+
+	// Review r1 (S4): the replay's settle tracker reaches the engine's
+	// verdicts, from the recorded observations, and, with them stripped as a
+	// recording made before they existed would be, from the fallback that
+	// observes at each saturation Analyze's clock: over three models and
+	// many replicas, not one.
+	engineVerdicts := recorder.settleTracker().Verdicts()
+	assertSettleVerdicts(t, "recorded observations", engineVerdicts, rep.Paths)
+	stripped := withoutKind(t, recording, settle.KindObserve)
+	require.Less(t, len(stripped), len(recording), "precondition: the recording has settle observations")
+	old, err := learnreplay.Replay(context.Background(), stripped, learnreplay.Options{Mode: learnreplay.Normal})
+	require.NoError(t, err)
+	require.Empty(t, mismatchText(old.Failed()), "a replay with the observations stripped failed")
+	assertSettleVerdicts(t, "observations stripped", engineVerdicts, old.Paths)
 	assert.Equal(t, 128, rep.StoreChecks, "store checks, Normal")
 	assert.Equal(t, kinds[saturation.KindAnalyze], rep.Analyzes[saturation.KindAnalyze])
 

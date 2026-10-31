@@ -97,12 +97,12 @@ func (e *Engine) loadBalanceTracker() *balance.Tracker {
 	return e.loadBalance
 }
 
-// loadBalanceClock is the instant the settle tracker and the load-balance
+// observeClock is the instant the settle tracker and the load-balance
 // tracker read: the cycle clock, the one instant every analyzer of the cycle
 // reads too.
-func (e *Engine) loadBalanceClock() time.Time {
-	if e.loadBalanceNow != nil {
-		return e.loadBalanceNow()
+func (e *Engine) observeClock() time.Time {
+	if e.observeNow != nil {
+		return e.observeNow()
 	}
 	return e.clock.Now()
 }
@@ -115,8 +115,8 @@ func (e *Engine) loadBalanceClock() time.Time {
 // minutes kept it from ever paging. Once collection has failed on every cycle
 // for balance.StaleAfter the series are deleted, so a page does not stand on
 // figures nothing measures any more.
-func (e *Engine) loadBalanceCollectionFailed(namespace, modelID string) {
-	if e.loadBalanceTracker().Failed(utils.GetNamespacedKey(namespace, modelID), e.loadBalanceClock()) {
+func (e *Engine) loadBalanceCollectionFailed(namespace, modelID string, now time.Time) {
+	if e.loadBalanceTracker().Failed(utils.GetNamespacedKey(namespace, modelID), now) {
 		e.forgetLoadBalance(namespace, modelID)
 	}
 }

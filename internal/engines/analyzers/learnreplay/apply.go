@@ -202,6 +202,13 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 		}
 		r.settle.observe(d, ev.Now)
 		r.rec.Record(settle.KindObserve, ev.Now, d)
+	case settle.KindHold:
+		var d settle.ObserveEvent
+		if err := ev.DecodeData(&d); err != nil {
+			return err
+		}
+		r.settle.hold(d, ev.Now)
+		r.rec.Record(settle.KindHold, ev.Now, d)
 
 	default:
 		if r.engine == nil || !r.engine.Owns(ev.Kind) {

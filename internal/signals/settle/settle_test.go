@@ -368,3 +368,63 @@ func TestReplicasAreTrackedApartAndCopied(t *testing.T) {
 		t.Error("a Replica read shares its returns with the tracker")
 	}
 }
+
+// Review r1 (B1): the tolerance is a minute, or one missed cycle and half a
+// cycle of slack, whichever is longer; the tracker judges absence and idle
+// runs by it.
+func TestToleranceFollowsTheInterval(t *testing.T) {
+	for _, tc := range []struct{ interval, want time.Duration }{
+		{15 * time.Second, Period}, {24 * time.Second, Period}, {30 * time.Second, 75 * time.Second},
+		{60 * time.Second, 150 * time.Second}, {61 * time.Second, 152500 * time.Millisecond},
+	} {
+		if got := Tolerance(tc.interval); got != tc.want {
+			t.Errorf("Tolerance(%v) = %v, want %v", tc.interval, got, tc.want)
+		}
+	}
+	tr := NewTracker()
+	tr.SetInterval(61 * time.Second)
+	for i := range 4 {
+		tr.Observe(model, []Row{idle("d")}, t0.Add(time.Duration(i)*61*time.Second))
+	}
+	tr.Observe(model, []Row{busy("d")}, t0.Add(4*61*time.Second))
+	r := replicaOf(t, tr, "d")
+	if r.Reason != Joined || len(r.Returns) != 1 || r.Returns[0].IdleRows != 4 {
+		t.Errorf("4 idle rows 61 s apart, then load: settle %s, returns %v; want the join and one return after 4 rows", r.Reason, r.Returns)
+	}
+}
+
+// Review r1 (S1): a cycle that read no rows of a model holds the sightings
+// of the replicas read last, so an outage is not an absence. A replica
+// already missing before it stays missing, and a model not observed for
+// TraceHorizon is forgotten.
+func TestHoldKeepsTheSightingsOfTheLastRows(t *testing.T) {
+	tr := NewTracker()
+	tr.Observe(model, []Row{busy("a"), busy("b")}, t0)
+	tr.Observe(model, []Row{busy("a")}, t0.Add(cycle))
+	for i := 2; i <= 9; i++ {
+		tr.Hold(model, t0.Add(time.Duration(i)*cycle))
+	}
+	tr.Observe(model, []Row{busy("a"), busy("b")}, t0.Add(10*cycle))
+	if r := replicaOf(t, tr, "a"); r.Reason != Joined || !r.Since.Equal(t0) {
+		t.Errorf("a replica held through 2 min of failed cycles: settle %s at %v, want the join at %v", r.Reason, r.Since, t0)
+	}
+	if r := replicaOf(t, tr, "b"); r.Reason != Rejoined {
+		t.Errorf("a replica missing before the outage: settle %s, want rejoined", r.Reason)
+	}
+	tr.Hold(model, t0.Add(10*cycle+TraceHorizon+cycle))
+	if _, ok := tr.Replica(model, Key{Pod: "a", Variant: "dec"}); ok {
+		t.Error("a model held for longer than TraceHorizon is still known")
+	}
+}
+
+// Review r1 (N4): Observe runs once per model per cycle; a second Observe at
+// the same instant reads nothing twice.
+func TestASecondObserveAtTheSameInstantCountsNothing(t *testing.T) {
+	tr := NewTracker()
+	tr.Observe(model, []Row{busy("d")}, t0)
+	tr.Observe(model, []Row{idle("d")}, t0.Add(cycle))
+	tr.Observe(model, []Row{idle("d")}, t0.Add(cycle))
+	if r := replicaOf(t, tr, "d"); r.IdleRows != 1 || len(tr.Trace(model, r.Key)) != 2 {
+		t.Errorf("the same idle row observed twice: %d idle rows, %d samples; want 1 and 2", r.IdleRows, len(tr.Trace(model, r.Key)))
+	}
+}

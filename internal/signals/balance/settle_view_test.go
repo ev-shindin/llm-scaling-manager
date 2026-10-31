@@ -21,6 +21,12 @@ func newTestTracker() testTracker {
 	return testTracker{Tracker: NewTracker(st), settle: st}
 }
 
+// SetInterval sets both trackers' interval, as the engine does.
+func (t testTracker) SetInterval(d time.Duration) {
+	t.Tracker.SetInterval(d)
+	t.settle.SetInterval(d)
+}
+
 // Measure observes rows into the settle tracker, then measures them.
 func (t testTracker) Measure(key string, rows []domain.ReplicaMetrics, rolesByVariant map[string]string,
 	th Thresholds, now time.Time) map[string]Distribution {
@@ -33,9 +39,16 @@ func (t testTracker) Measure(key string, rows []domain.ReplicaMetrics, rolesByVa
 // with edit applied to empty from the cycle it names on. It returns how long
 // after the first cycle empty first read idle, -1 for never.
 func firstIdle(empty domain.ReplicaMetrics, absent map[int]bool, editFrom int, edit func(*domain.ReplicaMetrics)) time.Duration {
+	return firstIdleEvery(cycle, empty, absent, editFrom, edit)
+}
+
+// firstIdleEvery is firstIdle with the cycles interval apart.
+func firstIdleEvery(interval time.Duration, empty domain.ReplicaMetrics, absent map[int]bool, editFrom int,
+	edit func(*domain.ReplicaMetrics)) time.Duration {
 	tr := newTestTracker()
-	for i := 1; i <= int(20*time.Minute/cycle); i++ {
-		now := t0.Add(time.Duration(i-1) * cycle)
+	tr.SetInterval(interval)
+	for i := 1; i <= int(20*time.Minute/interval); i++ {
+		now := t0.Add(time.Duration(i-1) * interval)
 		if edit != nil && i == editFrom {
 			edit(&empty)
 		}
@@ -61,10 +74,11 @@ func cycles(from, to int) map[int]bool {
 
 // Learner PR 1's named change (analyzer-learner.md, 4.2): the grace is read
 // from the settle tracker, which keeps a sighting across an absence of up to
-// settle.Period. #283's tracker rebuilt its sightings from each cycle's rows,
-// so one missed scrape restarted a replica's grace and put the role's report
-// back by IdleAfterReady. A replica missing for up to the period keeps its
-// grace; one missing for longer starts again from its return.
+// its tolerance (a minute at a 15 s interval). #283's tracker rebuilt its
+// sightings from each cycle's rows, so one missed scrape restarted a
+// replica's grace and put the role's report back by IdleAfterReady. A
+// replica missing for up to two cycles keeps its grace; one missing for
+// longer than the tolerance starts again from its return.
 //
 // On the parent the kept cases fail: any absence restarted the grace.
 func TestTrackerKeepsTheGraceThroughAnAbsenceOfUpToThePeriod(t *testing.T) {
@@ -79,7 +93,7 @@ func TestTrackerKeepsTheGraceThroughAnAbsenceOfUpToThePeriod(t *testing.T) {
 		kept    bool
 	}{
 		{"one missed scrape", 1, true},
-		{"absent for the period", int(settle.Period/cycle) - 1, true},
+		{"two missed scrapes", 2, true},
 		{"absent just past the period", int(settle.Period / cycle), false},
 		{"absent for two minutes", int(2 * time.Minute / cycle), false},
 	} {
@@ -96,6 +110,31 @@ func TestTrackerKeepsTheGraceThroughAnAbsenceOfUpToThePeriod(t *testing.T) {
 					tc.missing, time.Duration(tc.missing+1)*cycle, got, want)
 			}
 		})
+	}
+}
+
+// Review r1 (B1): the tolerance follows the optimize interval. With it fixed
+// at a minute, every cycle of a 61 s interval was an absence: the replica
+// settled again on every cycle and never read idle, so wva_load_imbalanced
+// went silent. At each interval the replica reads idle on the first cycle at
+// least IdleAfterReady after it was first seen, and one missed scrape keeps
+// that.
+//
+// On 9e8f275ce the 61 s cases fail (never idle), and so do the missed-scrape
+// cases at 45 s and 60 s.
+func TestTrackerEndsTheGraceAtLongIntervals(t *testing.T) {
+	empty := row("dec-new", "dec", 0, 0)
+	empty.ReadySince = t0
+	for _, interval := range []time.Duration{45 * time.Second, 60 * time.Second, 61 * time.Second} {
+		// The first cycle at least IdleAfterReady after the first.
+		n := (IdleAfterReady + interval - 1) / interval
+		want := n * interval
+		if got := firstIdleEvery(interval, empty, nil, 0, nil); got != want {
+			t.Errorf("interval %v: idle %v after the first cycle, want %v", interval, got, want)
+		}
+		if got := firstIdleEvery(interval, empty, cycles(2, 2), 0, nil); got != want {
+			t.Errorf("interval %v, one missed scrape: idle %v after the first cycle, want %v", interval, got, want)
+		}
 	}
 }
 

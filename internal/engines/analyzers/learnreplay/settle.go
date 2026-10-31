@@ -3,6 +3,7 @@ package learnreplay
 import (
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
@@ -17,7 +18,9 @@ import (
 //
 // A recording made before the engine recorded its observations has none.
 // There the replay observes at each saturation Analyze's own clock: the
-// cycle clock, which is the instant the engine observes at.
+// cycle clock, which is the instant the engine observes at, at the default
+// optimize interval. A cycle whose collection failed (settle.KindHold) is in
+// no such recording, so the fallback cannot hold through one.
 //
 // No replayed analyzer reads the tracker yet; the replay counts its verdicts
 // per reason (2.5), so a golden set that never reaches one says so.
@@ -35,15 +38,16 @@ func settlePathNames() []string {
 	return out
 }
 
-// requiredSettlePaths is the settle verdicts the committed recordings
-// reach, which the goldens must therefore keep reaching. A rollout under a
-// Pod's own name occurs in no recording yet: the settle suite
-// (internal/signals/settle) covers it until one does.
+// requiredSettlePaths is the settle verdicts the goldens must keep
+// reaching: a join, and a warm-pool lend. The committed recordings reach a
+// restart and a rejoin too, but only through their synthetic generators
+// (rows whose Ready time moves every cycle, clocks that jump), so requiring
+// them would pin the generators, not the tracker; a rollout under a Pod's
+// own name is in no recording. The settle suite (internal/signals/settle)
+// covers all three until a cluster recording reaches them.
 func requiredSettlePaths() []string {
 	return []string{
 		settlePathPrefix + string(settle.Joined),
-		settlePathPrefix + string(settle.Rejoined),
-		settlePathPrefix + string(settle.Restarted),
 		settlePathPrefix + string(settle.Lent),
 	}
 }
@@ -61,13 +65,23 @@ type settleReplay struct {
 }
 
 func newSettleReplay() *settleReplay {
-	return &settleReplay{tracker: settle.NewTracker(), pending: map[string]time.Time{}}
+	t := settle.NewTracker()
+	t.SetInterval(config.DefaultOptimizationInterval)
+	return &settleReplay{tracker: t, pending: map[string]time.Time{}}
 }
 
 // observe notes a recorded observation of a model at now.
 func (s *settleReplay) observe(d settle.ObserveEvent, now time.Time) {
 	s.recorded = true
+	s.tracker.SetInterval(d.Interval)
 	s.pending[utils.GetNamespacedKey(d.Namespace, d.ModelID)] = now
+}
+
+// hold applies a recorded hold of a model at now.
+func (s *settleReplay) hold(d settle.ObserveEvent, now time.Time) {
+	s.recorded = true
+	s.tracker.SetInterval(d.Interval)
+	s.tracker.Hold(utils.GetNamespacedKey(d.Namespace, d.ModelID), now)
 }
 
 // analyze applies the observation waiting for a saturation Analyze's rows,

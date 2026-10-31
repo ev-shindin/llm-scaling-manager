@@ -289,10 +289,10 @@ type Engine struct {
 	// one replica saturated beside an idle one (observeLoadBalance). Built on
 	// first use.
 	loadBalance *balance.Tracker
-	// loadBalanceNow is the clock the settle observation and
+	// observeNow is the clock the settle observation and
 	// observeLoadBalance read, once per model per cycle; nil is the cycle
 	// clock. A test sets it to step cycles without waiting for them.
-	loadBalanceNow func() time.Time
+	observeNow func() time.Time
 	// settle is when each replica last started to settle (settle.go): the
 	// engine writes it at the top of runAnalyzers, and the load-balance
 	// tracker reads it. Built on first use.
@@ -1512,10 +1512,11 @@ func (e *Engine) optimizeV2(
 		if err != nil {
 			msg := "Model data preparation failed"
 			logger.Error(err, msg, "modelID", modelID)
-			// Nothing measured the load this cycle: the series go once
-			// collection has failed for balance.StaleAfter, not on one
-			// failed cycle (loadBalanceCollectionFailed).
-			e.loadBalanceCollectionFailed(namespace, modelID)
+			// Nothing measured the load this cycle: the settle tracker
+			// holds its sightings, and the series go once collection has
+			// failed for balance.StaleAfter, not on one failed cycle
+			// (modelCollectionFailed).
+			e.modelCollectionFailed(namespace, modelID)
 			e.recordOptimizationFailedEvent(modelVAs, msg)
 			e.emitSafetyNetMetrics(ctx, modelVAs, currentAllocations, nil)
 			reportSignalReason(namespace, modelID, nil)

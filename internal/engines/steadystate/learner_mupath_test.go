@@ -170,6 +170,9 @@ func TestLearnerRecording_TheMuPathsRunReachesEveryLearnerPath(t *testing.T) {
 	rep, err := learnreplay.Replay(context.Background(), recording, learnreplay.Options{Mode: learnreplay.Fidelity})
 	require.NoError(t, err)
 	require.Empty(t, mismatchText(rep.Mismatches), "the mu-paths replay diverged from the recording")
+	// The saturation analyzer's paths only: the settle and engine counters
+	// the replay adds are not the analyzer's, and are held elsewhere
+	// (TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult).
 	replayed := map[string]int64{}
 	for _, p := range saturation.PathNames() {
 		replayed[p] = rep.Paths[p]

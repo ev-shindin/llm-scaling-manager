@@ -178,7 +178,7 @@ func (e *Engine) runAnalyzers(
 	// The settle tracker first (settle.go), ahead of everything that reads
 	// the cycle's rows: the load-balance diagnostic reads each replica's
 	// grace from it (#345 step 1 left this slot for it).
-	now := e.loadBalanceClock()
+	now := e.observeClock()
 	e.observeSettle(namespace, modelID, replicaMetrics, variantStates, now)
 
 	// Observe only: how evenly the router loads each role (load_balance.go).
@@ -619,6 +619,9 @@ func (e *Engine) onNothingObserved(namespace, modelID string) {
 	// No ready replica, so no distribution: a parked role must not keep
 	// reporting the imbalance it had.
 	e.forgetLoadBalance(namespace, modelID)
+	// No rows either: the settle tracker holds what it saw last, so an
+	// outage that drops every series is not an absence (holdSettle).
+	e.holdSettle(namespace, modelID, e.observeClock())
 }
 
 // zeroObservedReplicas sets wva_analyzer_observed_replicas to 0 for every
