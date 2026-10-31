@@ -137,7 +137,10 @@ max by (model_name, instance, pod) (vllm:kv_cache_usage_perc{namespace="..."})
 
 **What it measures:** Instantaneous KV cache utilization fraction per pod (0.0–1.0).
 
-**TA notation:** k* — the current operating point in the ITL model `ITL(k) = A·k + B`.
+**TA notation:** k* — the replica's current operating point. Local demand, the sanity check
+and the GPS check read it. The observation window, its band check and both fits read
+`k = KvUsageForITL()` instead: the minute's mean (`QueryKvUsageMean`) when the collector read
+it, else k* (issue #403).
 
 **ReplicaMetrics field:** `KvUsageInstant`
 
@@ -182,8 +185,10 @@ the window the ITL rate is taken over (`ITLWindow`).
 **Used by:** `itl.Tracker`, the ITL line the saturation and SLO analyzers fit, and this
 analyzer's own observation window, its band check and its tier-2 fit. Each `(k, ITL)` reading
 pairs the minute's mean `k` with the minute's ITL (issues #393, #403). Without the mean, `k` is
-`KvUsageInstant`. This analyzer's local demand, sanity and GPS checks still read
-`KvUsageInstant`.
+`KvUsageInstant`. Local demand and the sanity check read `KvUsageInstant` because they want the
+fill now. The GPS check also still reads `KvUsageInstant`, although it compares it with 1-minute
+rates (`GenerationTokenRate`, and `AvgITL` near saturation): the same mismatch, left to the
+plan's PR 4b. The mean-`k` line lowers its error, so window clears get rarer, not more frequent.
 
 ---
 
@@ -255,6 +260,7 @@ reported but does not gate a scaling decision.
 |---|---|---|---|---|
 | `QueryGenerationTokenRate` | vLLM | `sum by (model_name, instance, pod)` | 1m rate | μ_dec^obs per pod (observability) |
 | `QueryKvUsageInstant` | vLLM | `max by (model_name, instance, pod)` | instant | k* (no max_over_time) |
+| `QueryKvUsageMean` | vLLM | `avg by (model_name, instance, pod)` | 1m avg_over_time | k of each `(k, ITL_obs)` reading, via `KvUsageForITL()` |
 | `QueryRequestRate` | vLLM | `sum by (model_name, instance, pod)` | 1m rate | Fallback λ_req; histogram weight |
 | `TotalKvCapacityTokens` | `registration.QueryCacheConfigInfo` labels | derived | static | KV_max = blocks × block_size |
 | `AvgITL` | `QueryAvgITL` | `max by (model_name, instance, pod)` | 1m rate | ITL_obs for OLS calibration |
@@ -317,7 +323,8 @@ Maintains the current workload shape bucket `(IL, OL, IL_eff, KVreq)`. Detects s
 - `KVreq = IL_eff + OL/2` — time-averaged KV footprint per decode request
 
 **ObservationWindow (`signals/itl/window.go`)**  
-Rolling window of `(k*, ITL_obs)` pairs collected per replica per cycle. Filters observations
+Rolling window of `(k, ITL_obs)` pairs collected per replica per cycle, with
+`k = KvUsageForITL()`: the minute's mean fill when the collector read it, else k*. Filters observations
 to `k ∈ [0.15, 0.85]` (reliable linear-model range). Reports `Ready()` when ≥ 10 samples with
 ≥ 0.30 k-spread are accumulated within the 30-minute default window.
 
@@ -362,7 +369,7 @@ On leader failover the incoming leader starts with an empty analyzer. During war
   │        │                                         KVreq, IL_eff                │
   │        │                                         shape change──► Window.Clear │
   │        │                                                                      │
-  │        ├─(k*, ITL_obs per replica)──────────────► ObservationWindow           │
+  │        ├─(KvUsageForITL, ITL_obs)───────────────► ObservationWindow           │
   │        │                                               │                      │
   │        │                                        Ready? yes──► OLS fit         │
   │        │                                               │    no──► constrained │
@@ -404,6 +411,7 @@ On leader failover the incoming leader starts with an empty analyzer. During war
 └──────┬─────┘
        │ vllm:request_generation_tokens_sum      (QueryGenerationTokenRate   → GenerationTokenRate)
        │ vllm:kv_cache_usage_perc                (QueryKvUsageInstant          → KvUsageInstant)
+       │ vllm:kv_cache_usage_perc [1m avg]       (QueryKvUsageMean             → KvUsageMean)
        │ vllm:request_generation_tokens_count    (QueryRequestRate           → RequestRate)
        │ vllm:cache_config_info                  (QueryCacheConfigInfo       → TotalKvCapacityTokens)
        │ vllm:inter_token_latency_seconds_*      (QueryAvgITL               → AvgITL)
@@ -479,8 +487,9 @@ When the window is not ready, A is estimated with B pinned and only A fitted:
 A = Σ((ITL_i − B) · k_i) / Σ(k_i²)
 ```
 
-This is least-squares with B fixed, applied to all replicas with k* > 0. For a single replica
-it reduces to the single-point formula `A = (ITL − B) / k*`. For multiple replicas it is
+This is least-squares with B fixed, applied to all replicas with k > 0, where
+`k = KvUsageForITL()` as in the window. For a single replica it reduces to the single-point
+formula `A = (ITL − B) / k`. For multiple replicas it is
 strictly better — same OLS criterion as tier-1 but with one fewer degree of freedom. The
 resulting `(A, B)` is accepted through the same `itl.ValidModel` predicate as Tier 1, so Tier 2
 cannot accept a model Tier 1 would reject.

@@ -67,6 +67,13 @@ func TestITLPairsTheMinuteMeanKVFill(t *testing.T) {
 			if st.SampleCount != tc.samples {
 				t.Errorf("window kept %d readings, want %d", st.SampleCount, tc.samples)
 			}
+			// The k the window stores is the one tier 1 fits and its B is
+			// remembered from, so it must be the k the band judged.
+			for _, o := range a.getOrCreateVariantState(variantKey("ns", "m", "v1")).observationWindow.Observations() {
+				if o.K != tc.k {
+					t.Errorf("window stored k %g, want %g", o.K, tc.k)
+				}
+			}
 
 			// Tier 2 pins B and fits A over the same k: A = (ITL - B) / k.
 			model, _, ok := a.resolveITLModel(ctx, a.getOrCreateVariantState(variantKey("ns", "m", "v1")), []domain.ReplicaMetrics{m}, "ns", "m", "v1")
