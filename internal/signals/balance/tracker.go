@@ -112,7 +112,9 @@ func (t *Tracker) model(key string) *modelState {
 // lend. The settle tracker must have observed rows, under the same key,
 // first.
 //
-// A replica missing from a cycle's rows for up to settle.Period keeps its
+// A replica missing from a cycle's rows for up to the settle tracker's
+// absence tolerance (settle.Tolerance: one minute, or two and a half
+// optimize intervals if longer) keeps its
 // grace: one missed scrape does not restart it. One missing for longer starts
 // again, and so does a Pod handed back and lent again, by its new lend time
 // (domain.ReplicaMetrics.LentSince), however briefly it was gone. A row with

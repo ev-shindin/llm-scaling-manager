@@ -22,6 +22,13 @@ import (
 // optimize interval. A cycle whose collection failed (settle.KindHold) is in
 // no such recording, so the fallback cannot hold through one.
 //
+// A known gap: an observation applies only with the next saturation Analyze
+// of its model. A cycle the engine observed and then did not analyze (an
+// error between the observation and the Analyze) leaves its observation
+// pending, and the next one replaces it, so the replay's tracker misses
+// rows the engine's saw. None of the committed recordings has such a cycle;
+// no reader depends on the replay's tracker in this PR.
+//
 // No replayed analyzer reads the tracker yet; the replay counts its verdicts
 // per reason (2.5), so a golden set that never reaches one says so.
 

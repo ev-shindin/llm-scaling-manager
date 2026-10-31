@@ -417,6 +417,48 @@ func TestHoldKeepsTheSightingsOfTheLastRows(t *testing.T) {
 	}
 }
 
+// Review r2 (N1): a hold does not touch the idle runs. A run continues
+// across held cycles spanning no more than the tolerance, as across missing
+// rows, and ends across a longer hold.
+func TestHoldLeavesIdleRunsToTheTolerance(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		holds int
+		runs  bool
+	}{{"two held cycles", 2, true}, {"five held cycles", 5, false}} {
+		tr := NewTracker()
+		tr.Observe(model, []Row{idle("d")}, t0)
+		for i := 1; i <= tc.holds; i++ {
+			tr.Hold(model, t0.Add(time.Duration(i)*cycle))
+		}
+		back := t0.Add(time.Duration(tc.holds+1) * cycle)
+		tr.Observe(model, []Row{idle("d")}, back)
+		if r := replicaOf(t, tr, "d"); (r.IdleRows == 2) != tc.runs || r.Reason != Joined {
+			t.Errorf("%s: an idle run of %d rows, settle %s; want the run continued %v and the join kept",
+				tc.name, r.IdleRows, r.Reason, tc.runs)
+		}
+	}
+}
+
+// Review r2 (Go N2): at an interval over 2 min the tolerance is longer than
+// TraceHorizon; a model held through two failed 3 min cycles (6 min) is still
+// within its 7.5 min tolerance, and is not forgotten.
+func TestHoldForgetsOnlyPastTheToleranceAtLongIntervals(t *testing.T) {
+	tr := NewTracker()
+	tr.SetInterval(3 * time.Minute)
+	tr.Observe(model, []Row{busy("d")}, t0)
+	tr.Hold(model, t0.Add(3*time.Minute))
+	tr.Hold(model, t0.Add(6*time.Minute))
+	tr.Observe(model, []Row{busy("d")}, t0.Add(9*time.Minute))
+	if r := replicaOf(t, tr, "d"); r.Reason != Joined || !r.Since.Equal(t0) {
+		t.Errorf("held through two failed 3 min cycles: settle %s at %v, want the join at %v", r.Reason, r.Since, t0)
+	}
+	tr.Hold(model, t0.Add(9*time.Minute+Tolerance(3*time.Minute)+time.Second))
+	if _, ok := tr.Replica(model, Key{Pod: "d", Variant: "dec"}); ok {
+		t.Error("a model held past its tolerance is still known")
+	}
+}
+
 // Review r1 (N4): Observe runs once per model per cycle; a second Observe at
 // the same instant reads nothing twice.
 func TestASecondObserveAtTheSameInstantCountsNothing(t *testing.T) {

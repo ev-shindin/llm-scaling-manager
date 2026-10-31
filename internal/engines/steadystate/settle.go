@@ -39,8 +39,9 @@ func (e *Engine) observeSettle(namespace, modelID string, rows []domain.ReplicaM
 		settlerow.Of(rows, variantRoles(states)), now)
 }
 
-// holdSettle records a cycle that read no rows of the model, its collection
-// failed or returned nothing, at now, and records the hold when a learner
+// holdSettle records a cycle that read no rows of the model (its collection
+// failed or returned nothing, or its namespace's scaling policy was not
+// loaded yet) at now, and records the hold when a learner
 // recording is open. The replicas seen last keep their sighting through it
 // (settle.Tracker.Hold): a Prometheus outage is not an absence.
 func (e *Engine) holdSettle(namespace, modelID string, now time.Time) {

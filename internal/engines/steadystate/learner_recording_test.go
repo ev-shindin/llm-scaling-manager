@@ -86,6 +86,11 @@ type recScript struct {
 	// external is an external analyzer each controller registers, nil for
 	// none.
 	external domain.Analyzer
+	// failModel's collection fails on cycle failAt: the engine holds its
+	// settle sightings (modelCollectionFailed) and nothing analyzes it. ""
+	// for none.
+	failModel string
+	failAt    int
 }
 
 // scriptedRouter answers with a latency that moves with the cycle.
@@ -306,6 +311,10 @@ func (s *recScript) cycle(t *testing.T, e *Engine, n int, at time.Time) []alloca
 
 	out := make([]allocation.NamedAnalyzerResult, 0, 3*len(models))
 	for _, m := range models {
+		if m == s.failModel && n == s.failAt {
+			e.modelCollectionFailed(recNS, m)
+			continue
+		}
 		rows := make([]domain.ReplicaMetrics, 0, 16)
 		states := make([]domain.VariantReplicaState, 0, len(byModel[m]))
 		targets := map[string]scaletarget.ScaleTargetAccessor{}
@@ -400,6 +409,32 @@ func recordRunEngine(t *testing.T, start time.Time, record bool) ([]byte, [][]al
 	}
 	require.NoError(t, second.learnRec.Err())
 	return buf.Bytes(), results, second
+}
+
+// Review r2 (S2): a cycle whose collection fails records a settle.Hold, and
+// a replay at the same commit applies it and records it again byte for
+// byte, its settle verdicts the engine's. A short run of its own: the
+// scripted run's pinned counts stay as they are. A recording made before the
+// settle events has no hold to apply; its fallback cannot hold through such
+// a cycle, which is a stated limit (learnreplay/settle.go).
+func TestLearnerRecording_AFailedCollectionIsRecordedAsAHold(t *testing.T) {
+	s := newRecScript(recStart)
+	s.failModel, s.failAt = "acme/agg", 2
+	e := s.engine(t)
+	var buf bytes.Buffer
+	e.recordLearners(learnrec.New(&buf, 0))
+	for i, at := range recSchedule(recStart)[:5] {
+		s.cycle(t, e, i, at)
+	}
+	require.NoError(t, e.learnRec.Err())
+	recording := buf.Bytes()
+	require.Equal(t, 1, kindCounts(t, recording)[settle.KindHold], "the failed cycle records one hold")
+
+	rep, err := learnreplay.Replay(context.Background(), recording, learnreplay.Options{Mode: learnreplay.Fidelity})
+	require.NoError(t, err)
+	require.Empty(t, mismatchText(rep.Mismatches), "the replay diverged from the recording")
+	require.Equal(t, string(recording), string(rep.Recording), "the replay's recording")
+	assertSettleVerdicts(t, "a recording with a hold", e.settleTracker().Verdicts(), rep.Paths)
 }
 
 // assertSettleVerdicts holds a replay's settle counters to the engine's
@@ -573,6 +608,7 @@ func TestLearnerRecording_EveryEventRoundTripsByteForByte(t *testing.T) {
 		capacity.KindFileScaleTarget:        func() any { return &capacity.FileScaleTargetEvent{} },
 		capacity.KindEvictStale:             func() any { return &capacity.EvictStaleEvent{} },
 		settle.KindObserve:                  func() any { return &settle.ObserveEvent{} },
+		settle.KindHold:                     func() any { return &settle.ObserveEvent{} },
 	}
 	checked := map[string]int{}
 	for _, ev := range events {

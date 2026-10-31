@@ -1509,6 +1509,10 @@ func (e *Engine) optimizeV2(
 		if len(saturationConfigMap) == 0 {
 			logger.Info("Saturation scaling config not loaded yet for namespace, skipping model",
 				"namespace", namespace, "modelID", modelID)
+			// No rows read this cycle: the settle tracker holds its
+			// sightings, so a policy missing for a while does not settle
+			// every replica again when it returns (holdSettle).
+			e.holdSettle(namespace, modelID, e.observeClock())
 			continue
 		}
 

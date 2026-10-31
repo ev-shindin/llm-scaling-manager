@@ -172,3 +172,21 @@ func TestTrackerRestartsTheGraceOfAPodLentAgain(t *testing.T) {
 			got, want)
 	}
 }
+
+// Review r2 (N2): the tolerance ends. At 45 s it is 112.5 s; two missed
+// scrapes are a 135 s gap, so the replica starts its grace again from its
+// return.
+func TestTrackerRestartsTheGraceAfterTwoMissedScrapesAt45s(t *testing.T) {
+	interval := 45 * time.Second
+	empty := row("dec-new", "dec", 0, 0)
+	empty.ReadySince = t0
+	// Missing on cycles 2 and 3; back on cycle 4, at 135 s.
+	back := 3 * interval
+	want := back
+	for want < back+IdleAfterReady {
+		want += interval
+	}
+	if got := firstIdleEvery(interval, empty, cycles(2, 3), 0, nil); got != want {
+		t.Errorf("two missed scrapes at 45 s: idle %v after the first cycle, want %v (the grace from the return)", got, want)
+	}
+}

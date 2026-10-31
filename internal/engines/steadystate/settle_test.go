@@ -5,9 +5,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
+	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
 )
 
 // settleEngine is an engine with a saturation analyzer that always answers,
@@ -116,3 +125,58 @@ func TestSettle_TheEngineSweepsTheTrackerWithTheModel(t *testing.T) {
 		t.Error("a cycle with no model kept a settle record")
 	}
 }
+
+// Review r2 (S1): the hold reaches production through optimizeV2's three
+// paths that read no rows of a model: a collection that fails
+// (modelCollectionFailed), one that returns nothing (onNothingObserved), and
+// a namespace whose scaling policy is not loaded yet. Five such cycles at
+// 15 s are a 90 s gap, past the minute's tolerance; held, the replica keeps
+// its join. Switching the failed-collection call site back to
+// loadBalanceCollectionFailed fails the first case.
+func TestSettle_OptimizeV2HoldsOnEveryPathWithNoRows(t *testing.T) {
+	start := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		source source.MetricsSource
+		policy bool
+	}{
+		{"collection failed", failingMetricsSource{}, true},
+		{"nothing collected", emptyMetricsSource{}, true},
+		{"scaling policy not loaded", emptyMetricsSource{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _ := engineConfigEngine(t)
+			e.Config = config.NewTestConfig()
+			if tc.policy {
+				e.Config.UpdateScalingPolicyConfig(map[string]config.ScalingPolicy{config.GlobalDefaultsKey: {}})
+			}
+			e.optimizer = allocation.NewCostAwareOptimizer()
+			e.client = fake.NewClientBuilder().WithObjects(parkedTarget()).Build()
+			e.Recorder = record.NewFakeRecorder(100)
+			e.ReplicaMetricsCollector = collector.NewReplicaMetricsCollector(tc.source, nil, nil, record.NewFakeRecorder(100), nil)
+			now := start.Add(cycleOf15s)
+			e.observeNow = func() time.Time {
+				now = now.Add(cycleOf15s)
+				return now
+			}
+			row := settle.Row{Key: settle.Key{Pod: "d-0", Variant: "v"}, Ready: true, ReadySince: start.Add(-time.Hour)}
+			e.settleTracker().Observe("ns/m", []settle.Row{row}, start)
+			e.settleTracker().Observe("ns/m", []settle.Row{row}, start.Add(cycleOf15s))
+			for range 5 {
+				e.optimizeV2(context.Background(), map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling{
+					"ns/m": {parkedVA()},
+				}, nil)
+			}
+			back := e.observeClock()
+			require.Greater(t, back.Sub(start.Add(cycleOf15s)), settle.Tolerance(cycleOf15s),
+				"precondition: the failed cycles span more than the tolerance")
+			e.settleTracker().Observe("ns/m", []settle.Row{row}, back)
+			r, ok := e.settleTracker().Replica("ns/m", row.Key)
+			require.True(t, ok)
+			assert.Equal(t, settle.Joined, r.Reason, "five cycles with no rows settled the replica again")
+			assert.Equal(t, start, r.Since)
+		})
+	}
+}
+
+const cycleOf15s = 15 * time.Second

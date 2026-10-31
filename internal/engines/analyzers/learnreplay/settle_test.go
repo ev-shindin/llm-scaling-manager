@@ -56,3 +56,34 @@ func TestSettleReplay_RequiredPathsAreCounted(t *testing.T) {
 		assert.True(t, counted[p], "%s is required and not counted", p)
 	}
 }
+
+// Review r2 (S2): a recorded hold is applied as the engine applied it. Five
+// failed 15 s cycles between two observations are a 90 s gap, past the
+// minute's tolerance; held, the replica keeps its join.
+func TestSettleReplay_AppliesARecordedHold(t *testing.T) {
+	at := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	in := domain.AnalyzerInput{Namespace: "ns", ModelID: "m",
+		ReplicaMetrics: []domain.ReplicaMetrics{{PodName: "p", VariantName: "v", Ready: true}}}
+	ev := settle.ObserveEvent{Namespace: "ns", ModelID: "m", Interval: 15 * time.Second}
+	key := settle.Key{Pod: "p", Variant: "v"}
+	for _, held := range []bool{true, false} {
+		s := newSettleReplay()
+		s.observe(ev, at)
+		s.analyze(in, at)
+		if held {
+			for i := 1; i <= 5; i++ {
+				s.hold(ev, at.Add(time.Duration(i)*15*time.Second))
+			}
+		}
+		s.observe(ev, at.Add(90*time.Second))
+		s.analyze(in, at.Add(90*time.Second))
+		r, ok := s.tracker.Replica("ns/m", key)
+		want := settle.Rejoined
+		if held {
+			want = settle.Joined
+		}
+		if !ok || r.Reason != want {
+			t.Errorf("held %v: settle %s, want %s", held, r.Reason, want)
+		}
+	}
+}

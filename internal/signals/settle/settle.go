@@ -328,6 +328,14 @@ func (t *Tracker) SetInterval(d time.Duration) {
 	t.tolerance = Tolerance(d)
 }
 
+// forgetAfter is how long a replica, or a model under Hold, may go without
+// an observation before it is forgotten: TraceHorizon, or the tolerance if
+// that is longer, so that at an interval over 2 min a replica within its
+// tolerance is never forgotten before it can be judged. Callers hold t.mu.
+func (t *Tracker) forgetAfter() time.Duration {
+	return max(TraceHorizon, t.tolerance)
+}
+
 // replicaOf is the replica key of model, nil when unknown. Callers hold t.mu.
 func (t *Tracker) replicaOf(name string, key Key) *replica {
 	if m := t.models[name]; m != nil {
@@ -346,7 +354,8 @@ func (t *Tracker) replicaOf(name string, key Key) *replica {
 // settle, and a run of them, however long, does not restart it while the
 // Pod stays listed. A replica missing from rows keeps its sighting for up
 // to the tolerance (SetInterval); back after longer it settles again
-// (Rejoined). One absent TraceHorizon is forgotten.
+// (Rejoined). One absent for longer than the forget horizon (forgetAfter:
+// TraceHorizon, or the tolerance if longer) is forgotten.
 func (t *Tracker) Observe(name string, rows []Row, now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -375,7 +384,8 @@ func (t *Tracker) Observe(name string, rows []Row, now time.Time) {
 		r.Tolerance = t.tolerance
 		t.activity(r, row, now)
 	}
-	maps.DeleteFunc(m.replicas, func(_ Key, r *replica) bool { return now.Sub(r.LastSeen) > TraceHorizon })
+	forget := t.forgetAfter()
+	maps.DeleteFunc(m.replicas, func(_ Key, r *replica) bool { return now.Sub(r.LastSeen) > forget })
 	if len(m.replicas) == 0 {
 		delete(t.models, name)
 	}
@@ -385,9 +395,12 @@ func (t *Tracker) Observe(name string, rows []Row, now time.Time) {
 // failed, or returned nothing. Every replica in the rows read last keeps its
 // sighting through it, so a Prometheus outage that leaves the engine with no
 // rows at all is not an absence, and does not settle the fleet again when
-// it ends. Nothing else moves: no idle run continues across the held
-// cycles, and a replica already missing before them stays missing. A model
-// not observed for longer than TraceHorizon is forgotten instead.
+// it ends. A replica already missing before the held cycles stays missing.
+// The idle runs are not touched: a run continues across held cycles that
+// span no more than the tolerance, as it does across missing rows, and ends
+// across a longer hold, as across a longer absence. A model not observed for
+// longer than the forget horizon (TraceHorizon, or the tolerance if longer)
+// is forgotten instead.
 func (t *Tracker) Hold(name string, now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -395,7 +408,7 @@ func (t *Tracker) Hold(name string, now time.Time) {
 	if m == nil || !now.After(m.last) {
 		return
 	}
-	if now.Sub(m.observed) > TraceHorizon {
+	if now.Sub(m.observed) > t.forgetAfter() {
 		delete(t.models, name)
 		return
 	}
