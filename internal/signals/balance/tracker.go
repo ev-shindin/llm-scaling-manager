@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
 )
 
 // StaleAfter is how long a model's collection must fail, on every cycle,
@@ -36,10 +38,15 @@ type Reading struct {
 // Tracker remembers, per model and role, since when the role has read
 // imbalanced, and since when a role reported imbalanced has read balanced. It
 // is safe for concurrent use.
+//
+// It keeps no replica of its own: each replica's IdleAfterReady grace is read
+// from the settle tracker's view (internal/signals/settle), which the engine
+// writes before Measure reads it.
 type Tracker struct {
 	mu       sync.Mutex
 	interval time.Duration
 	models   map[string]*modelState
+	settle   settle.View
 }
 
 type modelState struct {
@@ -47,28 +54,12 @@ type modelState struct {
 	// observedAt is the cycle Observe last read the model, zero before the
 	// first.
 	observedAt time.Time
-	// seen is, per replica (replicaKey), the Ready time Measure last read on
-	// it and the first cycle it read that Ready time.
-	seen map[replicaKey]sighting
 	// failedSince is the first cycle of the current run of failed
 	// collections, zero outside one.
 	failedSince time.Time
 	// th is the thresholds Measure last read the model with: its policy.
 	// Observe and Failed take their timings from it.
 	th Thresholds
-}
-
-// replicaKey names one replica of a model as Measure grades it. A warm-pool
-// Pod lent to a variant is a replica of that variant from the cycle it is lent,
-// so the variant and the bridge flag are part of it.
-type replicaKey struct {
-	pod, variant string
-	bridge       bool
-}
-
-type sighting struct {
-	readySince time.Time
-	firstSeen  time.Time
 }
 
 type roleState struct {
@@ -81,9 +72,10 @@ type roleState struct {
 	sustained     bool
 }
 
-// NewTracker returns an empty Tracker that assumes DefaultInterval.
-func NewTracker() *Tracker {
-	return &Tracker{interval: DefaultInterval, models: map[string]*modelState{}}
+// NewTracker returns an empty Tracker that assumes DefaultInterval and reads
+// replicas through view. A nil view knows no replica, so none is ever idle.
+func NewTracker(view settle.View) *Tracker {
+	return &Tracker{interval: DefaultInterval, models: map[string]*modelState{}, settle: view}
 }
 
 // SetInterval sets the optimize interval the tracker's readings are taken at.
@@ -114,37 +106,41 @@ func (t *Tracker) model(key string) *modelState {
 }
 
 // Measure is the package Measure for the model named by key, with each
-// replica's IdleAfterReady grace run from the later of its ReadySince and the
-// first cycle the tracker saw that ReadySince on it. A replica absent from
-// rows is forgotten, so one that returns, a warm-pool Pod lent again among
-// them, starts its grace again.
+// replica's IdleAfterReady grace run from graceFrom: the later of its
+// ReadySince and the first cycle the settle tracker read that ReadySince on
+// it, and, for a warm-pool bridge, of the first cycle it read the current
+// lend. The settle tracker must have observed rows, under the same key,
+// first.
+//
+// A replica missing from a cycle's rows for up to settle.Period keeps its
+// grace: one missed scrape does not restart it. One missing for longer starts
+// again, and so does a Pod handed back and lent again, by its new lend time
+// (domain.ReplicaMetrics.LentSince), however briefly it was gone. A row with
+// no ReadySince is never idle.
 func (t *Tracker) Measure(key string, rows []domain.ReplicaMetrics, rolesByVariant map[string]string,
 	th Thresholds, now time.Time) map[string]Distribution {
 	t.mu.Lock()
-	m := t.model(key)
-	seen := make(map[replicaKey]sighting, len(rows))
-	graceFrom := make(map[replicaKey]time.Time, len(rows))
-	for _, rm := range rows {
-		if rm.ReadySince.IsZero() {
-			continue
-		}
-		k := replicaKey{pod: rm.PodName, variant: rm.VariantName, bridge: rm.FromWarmPool}
-		s, ok := m.seen[k]
-		if !ok || !s.readySince.Equal(rm.ReadySince) {
-			s = sighting{readySince: rm.ReadySince, firstSeen: now}
-		}
-		seen[k] = s
-		graceFrom[k] = rm.ReadySince
-		if s.firstSeen.After(rm.ReadySince) {
-			graceFrom[k] = s.firstSeen
-		}
-	}
-	m.seen = seen
-	m.th = th
+	t.model(key).th = th
 	t.mu.Unlock()
 	return measure(rows, rolesByVariant, th, now, func(rm domain.ReplicaMetrics) time.Time {
-		return graceFrom[replicaKey{pod: rm.PodName, variant: rm.VariantName, bridge: rm.FromWarmPool}]
+		return t.graceFrom(key, rm)
 	})
+}
+
+// graceFrom is when rm's IdleAfterReady grace runs from, zero when unknown.
+func (t *Tracker) graceFrom(key string, rm domain.ReplicaMetrics) time.Time {
+	if rm.ReadySince.IsZero() || t.settle == nil {
+		return time.Time{}
+	}
+	r, ok := t.settle.Replica(key, settlerow.Key(rm))
+	if !ok {
+		return time.Time{}
+	}
+	from := r.ReadyFrom()
+	if r.Bridge && r.LentSeen.After(from) {
+		from = r.LentSeen
+	}
+	return from
 }
 
 // Observe folds the distributions of one cycle at now for the model named by

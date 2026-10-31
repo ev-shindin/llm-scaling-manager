@@ -82,7 +82,7 @@ func (s e8Sample) rows(t *testing.T) []domain.ReplicaMetrics {
 func TestMeasuredDecodeBacklogWithoutPrefillReadsImbalanced(t *testing.T) {
 	queueOnly := Thresholds{KvUsage: 0.90, Queue: policy.Queue}
 	roles := map[string]string{"qwen32b-decode": domain.RoleDecode}
-	tr := NewTracker()
+	tr := newTestTracker()
 	tr.SetInterval(cycle)
 	start := e8Samples[0].time(t)
 	warnAfter := start.Add(IdleAfterReady + SustainFor)
