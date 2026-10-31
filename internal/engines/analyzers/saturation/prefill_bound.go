@@ -31,7 +31,10 @@ import (
 // shows then is AT MOST what it can sustain. That is a lower bound on mu, and
 // the max of lower bounds is the tightest one; so this window reads its MAX,
 // where the measured window reads a median, and a lower reading never
-// displaces a higher one (notePrefillBound).
+// displaces a higher one (notePrefillBound). The max is over minutes, not
+// over pods: one minute's readings fold into one sample as mu's do, at the
+// mean across pods, since a fleet serves the sum of its pods' rates and the
+// fastest pod's reading over-states what each one serves.
 //
 // The window holds computed TOKENS per second, not requests per second, and
 // is converted at the prompt length being served when it is read. Its key's
@@ -86,6 +89,13 @@ func prefillBoundKey(throughputKey string) string {
 	return strings.Join(f, "|")
 }
 
+// isPrefillBoundKey reports whether key is a lower bound's window key, one
+// prefillBoundKey made.
+func isPrefillBoundKey(key string) bool {
+	f := strings.Split(key, "|")
+	return len(f) == 9 && f[5] == prefillBoundRole
+}
+
 // prefillBoundReading is what the bound offers one replica: a rate, how many
 // spaced readings the window holds, and whether it is usable at all.
 type prefillBoundReading struct {
@@ -130,8 +140,15 @@ func (a *SaturationAnalyzer) notePrefillBound(rm domain.ReplicaMetrics, cfg *con
 		if ra, ok := a.saturatedThroughput[key]; ok {
 			prior = ra.Max()
 		}
+		sampledAt, sampled := a.throughputSampledAt[key]
 		a.mu.Unlock()
-		a.recordSaturatedThroughput(key, tokens)
+		// Under the pod's name, so the readings of one minute fold as mu's
+		// do: a max over one pod's re-reads and the mean across pods
+		// (recordSaturatedThroughputFrom). Under one name for every pod, the
+		// fold kept the fastest pod's reading, and one pod read at twice its
+		// rate -- a doubled series -- or one fast pod set the whole fleet's
+		// bound (#395).
+		a.recordSaturatedThroughputFrom(key, rm.PodName, tokens)
 		a.mu.Lock()
 		if ra, ok := a.saturatedThroughput[key]; ok {
 			if args != "" {
@@ -145,8 +162,18 @@ func (a *SaturationAnalyzer) notePrefillBound(rm domain.ReplicaMetrics, cfg *con
 			// on the smaller figure: every decode episode at the same load
 			// grew prefill again, by at least 1/scaleUp. Each reading is a
 			// lower bound on the same rate, so the highest one stays true.
-			if ra.Max() < prior {
-				ra.RaiseLastAt(prior, a.now())
+			//
+			// It rises against the minutes BEFORE this one: the window's max
+			// when this minute's sample started, kept with the sample. Judged
+			// against the max now, which holds the sample itself, it restored
+			// the sample to its first pod's reading and undid the fold.
+			reads := a.throughputPodReads[key]
+			if at, ok := a.throughputSampledAt[key]; ok && reads.at.Equal(at) && (!sampled || !at.Equal(sampledAt)) {
+				reads.floor = prior
+				a.throughputPodReads[key] = reads
+			}
+			if ra.Last() < reads.floor {
+				ra.RaiseLastAt(reads.floor, a.now())
 			}
 		}
 		a.mu.Unlock()

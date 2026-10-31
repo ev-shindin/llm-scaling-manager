@@ -411,3 +411,58 @@ var _ = Describe("a prefill lower bound across prompt lengths in one input bucke
 			"24,000 tokens/s at 12,000-token prompts, not the 4 req/s of the 6000-token episode")
 	})
 })
+
+// Issue #395. The bound wrote every prefill pod's reading under one name, so
+// mu's fold kept the fastest pod's within a minute: one pod read at twice its
+// rate -- a series doubled inside PromQL -- set the bound for the whole
+// fleet, and the floor ordered half the prefill the load needed. Within a
+// minute the pods fold by their mean, as mu's do; across minutes the bound
+// still only rises.
+var _ = Describe("notePrefillBound across the pods of one minute", func() {
+	const (
+		key    = "ns|prefill-v|m|H200|1|prefill|ihuge|noout|q5"
+		prompt = 6000.0
+	)
+	var (
+		analyzer *SaturationAnalyzer
+		clock    time.Time
+		cfg      *config.ScalingPolicy
+	)
+	BeforeEach(func() {
+		analyzer = NewSaturationAnalyzer(capacity.NewStore())
+		clock = time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+		analyzer.now = func() time.Time { return clock }
+		cfg = &config.ScalingPolicy{EnablePrefillThroughputBound: true, QueueLengthThreshold: 5}
+	})
+	// minute reads each pod once, saturated, a second apart, and returns the
+	// bound in prompt tokens/s as notePrefillBound prices it after the last.
+	minute := func(computed ...float64) float64 {
+		var got prefillBoundReading
+		for i, c := range computed {
+			rm := makeReplicaMetrics(fmt.Sprintf("prefill-%d", i), "prefill-v", 300_000, 1_149_312, 30, prompt, 1)
+			rm.PrefillComputedTokenRate = c
+			got = analyzer.notePrefillBound(rm, cfg, domain.RolePrefill, key, "", prompt, admission{}, GinkgoLogr)
+			clock = clock.Add(time.Second)
+		}
+		return got.rate * prompt
+	}
+
+	It("prices the mean of four pods when one reads at twice its rate, not the doubled pod", func() {
+		Expect(minute(4000, 4000, 4000, 8000)).To(BeNumerically("~", 5000, 1e-6))
+	})
+	It("prices the mean of four pods when one is genuinely slow, not the fastest", func() {
+		Expect(minute(4000, 4000, 4000, 2000)).To(BeNumerically("~", 3500, 1e-6))
+	})
+	It("still only rises across minutes: a later, lower minute keeps the earlier figure", func() {
+		Expect(minute(4000, 4000)).To(BeNumerically("~", 4000, 1e-6))
+		clock = clock.Add(ThroughputSampleSpacing)
+		Expect(minute(3000, 3200)).To(BeNumerically("~", 4000, 1e-6))
+		clock = clock.Add(ThroughputSampleSpacing)
+		Expect(minute(4400, 4800)).To(BeNumerically("~", 4600, 1e-6))
+	})
+	It("keeps the earlier figure through a minute that starts a new window after EpisodeGap", func() {
+		Expect(minute(4000, 4000)).To(BeNumerically("~", 4000, 1e-6))
+		clock = clock.Add(capacity.EpisodeGap + time.Minute)
+		Expect(minute(3000, 3200)).To(BeNumerically("~", 4000, 1e-6))
+	})
+})
