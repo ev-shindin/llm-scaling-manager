@@ -12,6 +12,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/enginerec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/steadystate"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 )
 
 // engineFixture is the committed golden that carries the engine layer.
@@ -67,7 +68,8 @@ func TestEngineGoldens_AnEditedEngineGoldenFails(t *testing.T) {
 }
 
 // Negative control: without the engine fixture, no golden runs an engine
-// path, and the check names each.
+// path, and the check names each. The engine fixture is also the only one
+// with a warm-pool bridge, so the settle tracker's lend verdict goes with it.
 func TestEngineGoldens_WithoutTheEngineFixtureNoEnginePathRuns(t *testing.T) {
 	dir := copyGoldens(t)
 	require.NoError(t, os.RemoveAll(filepath.Join(dir, engineFixture)))
@@ -84,8 +86,9 @@ func TestEngineGoldens_WithoutTheEngineFixtureNoEnginePathRuns(t *testing.T) {
 	c, err := CheckGoldens(context.Background(), dir)
 	require.NoError(t, err)
 	require.Empty(t, c.Problems, "the analyzer goldens alone still reproduce")
-	require.Len(t, c.Uncovered, len(steadystate.LearnerReplayPathNames()))
-	for _, p := range steadystate.LearnerReplayPathNames() {
+	want := append(steadystate.LearnerReplayPathNames(), settlePathPrefix+string(settle.Lent))
+	require.Len(t, c.Uncovered, len(want))
+	for _, p := range want {
 		assert.Contains(t, strings.Join(c.Uncovered, "\n"), "learner path "+p+":")
 	}
 }

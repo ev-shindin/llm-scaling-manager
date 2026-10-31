@@ -25,9 +25,12 @@ func (e *Engine) settleTracker() *settle.Tracker {
 	return e.settle
 }
 
-// observeSettle observes one model's rows into the settle tracker at now.
+// observeSettle observes one model's rows into the settle tracker at now,
+// and records the observation when a learner recording is open: the model
+// and now, the rows being the ones the model's Analyze events record.
 func (e *Engine) observeSettle(namespace, modelID string, rows []domain.ReplicaMetrics,
 	states []domain.VariantReplicaState, now time.Time) {
+	e.learnRec.Record(settle.KindObserve, now, settle.ObserveEvent{Namespace: namespace, ModelID: modelID})
 	e.settleTracker().Observe(utils.GetNamespacedKey(namespace, modelID),
 		settlerow.Of(rows, variantRoles(states)), now)
 }

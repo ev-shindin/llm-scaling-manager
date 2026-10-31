@@ -170,5 +170,9 @@ func TestLearnerRecording_TheMuPathsRunReachesEveryLearnerPath(t *testing.T) {
 	rep, err := learnreplay.Replay(context.Background(), recording, learnreplay.Options{Mode: learnreplay.Fidelity})
 	require.NoError(t, err)
 	require.Empty(t, mismatchText(rep.Mismatches), "the mu-paths replay diverged from the recording")
-	assert.Equal(t, counted, rep.Paths, "the replay counts the paths the run did")
+	replayed := map[string]int64{}
+	for _, p := range saturation.PathNames() {
+		replayed[p] = rep.Paths[p]
+	}
+	assert.Equal(t, counted, replayed, "the replay counts the paths the run did")
 }

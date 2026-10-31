@@ -114,7 +114,8 @@ func TestRun_AddCheckUpdate(t *testing.T) {
 	// measured paths: an add and an update say so, the check fails on it.
 	assert.Contains(t, out, "no golden runs the learner path "+saturation.PathMuSampleWritten)
 	out, err = runOut("check", "-dir", dir)
-	// Six of saturation's paths, and every engine path: the acceptance
-	// recording carries no engine events.
-	require.ErrorContains(t, err, fmt.Sprintf("%d learner paths no golden runs", 6+len(steadystate.LearnerReplayPathNames())), out)
+	// Six of saturation's paths, every engine path (the acceptance recording
+	// carries no engine events), and the settle tracker's lend (it lends no
+	// bridge).
+	require.ErrorContains(t, err, fmt.Sprintf("%d learner paths no golden runs", 6+1+len(steadystate.LearnerReplayPathNames())), out)
 }

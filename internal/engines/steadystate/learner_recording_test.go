@@ -36,6 +36,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
@@ -416,6 +417,8 @@ func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing
 	// Pinned, so a change in what the run records is a reviewed change: 12
 	// cycles over 3 models (the departed one for the first 4), 28 Analyzes
 	// per analyzer, 5 variants filed every cycle and the departed one for 4.
+	// The engine observes the settle tracker once per model per cycle, before
+	// its analyzers: 28 observations.
 	kinds := kindCounts(t, recording)
 	require.Equal(t, map[string]int{
 		learnrec.KindStart:                  1,
@@ -438,6 +441,7 @@ func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing
 		slo.KindBeginCycle:                  12,
 		slo.KindEvictStale:                  12,
 		slo.KindNoteVariantsPresent:         28,
+		settle.KindObserve:                  28,
 	}, kinds, "the events the scripted run records")
 	t.Logf("recorded %d bytes: %v", len(recording), kinds)
 	assertResultsPriced(t, recording)
@@ -514,6 +518,7 @@ func TestLearnerRecording_EveryEventRoundTripsByteForByte(t *testing.T) {
 		throughput.KindAnalyze:              func() any { return &throughput.AnalyzeEvent{} },
 		capacity.KindFileScaleTarget:        func() any { return &capacity.FileScaleTargetEvent{} },
 		capacity.KindEvictStale:             func() any { return &capacity.EvictStaleEvent{} },
+		settle.KindObserve:                  func() any { return &settle.ObserveEvent{} },
 	}
 	checked := map[string]int{}
 	for _, ev := range events {
@@ -611,7 +616,8 @@ func TestLearnerRecording_StartStopStart(t *testing.T) {
 	assert.Equal(t, string(before), string(files[0].data), "something wrote to the closed recording")
 	events, err := readEvents(before)
 	require.NoError(t, err)
-	assert.Len(t, events, 36, "events of the one recorded cycle")
+	// 36, and the settle observation of each of the cycle's 3 models.
+	assert.Len(t, events, 39, "events of the one recorded cycle")
 }
 
 // The same run thirty days later records the same results: nothing an

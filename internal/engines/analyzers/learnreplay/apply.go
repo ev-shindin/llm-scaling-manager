@@ -14,6 +14,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 )
 
 // checkKinds are made inside a replayed call, never applied: the replay
@@ -60,6 +61,7 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 		if err := r.checkStore(ev, input, d.Records); err != nil {
 			return err
 		}
+		r.settle.analyze(input, ev.Now)
 		r.rep.Analyzes[ev.Kind]++
 		res, err := r.sat.Analyze(ctx, input)
 		r.noteResult(domain.SaturationAnalyzerName, input.Namespace, input.ModelID, res, err)
@@ -192,6 +194,14 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 			return err
 		}
 		r.tp.Observe(ctx, d.Now, d.ModelID, d.Namespace, rows)
+
+	case settle.KindObserve:
+		var d settle.ObserveEvent
+		if err := ev.DecodeData(&d); err != nil {
+			return err
+		}
+		r.settle.observe(d, ev.Now)
+		r.rec.Record(settle.KindObserve, ev.Now, d)
 
 	default:
 		if r.engine == nil || !r.engine.Owns(ev.Kind) {

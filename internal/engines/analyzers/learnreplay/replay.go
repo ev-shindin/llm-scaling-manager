@@ -74,11 +74,12 @@ func build(start learnrec.Start, now time.Time, opts Options, rec *learnrec.Reco
 		return nil, fmt.Errorf("learnreplay: the recording started with %d capacity records; a recording starts at a controller start, with an empty store", start.StoreRecords)
 	}
 	r := &replayer{
-		opts:  opts,
-		clock: clocktesting.NewFakePassiveClock(now),
-		store: capacity.NewStore().WithRecorder(rec),
-		rep:   &Report{Analyzes: map[string]int{}, Ignored: map[string]int{}},
-		rec:   rec,
+		opts:   opts,
+		clock:  clocktesting.NewFakePassiveClock(now),
+		store:  capacity.NewStore().WithRecorder(rec),
+		rep:    &Report{Analyzes: map[string]int{}, Ignored: map[string]int{}},
+		rec:    rec,
+		settle: newSettleReplay(),
 	}
 	if r.engine = opts.Engine; r.engine == nil {
 		r.engine = registeredEngine()
