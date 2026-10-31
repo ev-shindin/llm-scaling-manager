@@ -179,9 +179,11 @@ the window the ITL rate is taken over (`ITLWindow`).
 
 **ReplicaMetrics field:** `KvUsageMean` (`KvUsageMeanKnown`), read through `KvUsageForITL()`.
 
-**Used by:** `itl.Tracker`, the ITL line the saturation and SLO analyzers fit. Each `(k, ITL)`
-reading pairs the minute's mean `k` with the minute's ITL (issue #393). This analyzer's own
-window still reads `KvUsageInstant`.
+**Used by:** `itl.Tracker`, the ITL line the saturation and SLO analyzers fit, and this
+analyzer's own observation window, its band check and its tier-2 fit. Each `(k, ITL)` reading
+pairs the minute's mean `k` with the minute's ITL (issues #393, #403). Without the mean, `k` is
+`KvUsageInstant`. This analyzer's local demand, sanity and GPS checks still read
+`KvUsageInstant`.
 
 ---
 
@@ -454,6 +456,11 @@ On leader failover the incoming leader starts with an empty analyzer. During war
 
 The ITL model `ITL(k) = A·k + B` captures how inter-token latency grows with KV cache
 utilization k. It is calibrated independently per variant (different hardware → different A, B).
+
+`AvgITL` is a `rate[1m]` mean, so the `k` paired with it is `ReplicaMetrics.KvUsageForITL()`:
+the KV fill averaged over the same minute (`KvUsageMean`) when the collector read it, otherwise
+the instant fill. The band check, the window and the tier-2 fit below all use that one `k`
+(issue #403).
 
 ### Tier 1 — OLS Fit
 
