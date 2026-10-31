@@ -19,6 +19,27 @@ goldens:
     learning: twelve cycles of fixed synthetic rows, so the start-time average, the
     borrow tolerance and the measured k2 and mu paths barely move, and a change to
     them can leave these goldens as they are.'
+- name: e1
+  outputs:
+  - e1/learned-state.csv
+  - e1/lines.csv
+  - e1/results.csv
+  - e1/slo-published.csv
+  - e1/store-records.csv
+  - e1/variant-capacities.csv
+  recording: e1/recording.jsonl.gz
+  source: E1 benchmark scenario, recorder on, default analyzerTuning
+- name: e1-tuned
+  outputs:
+  - e1-tuned/learned-state.csv
+  - e1-tuned/lines.csv
+  - e1-tuned/results.csv
+  - e1-tuned/slo-published.csv
+  - e1-tuned/store-records.csv
+  - e1-tuned/variant-capacities.csv
+  recording: e1-tuned/recording.jsonl.gz
+  source: E1 benchmark scenario, recorder on, analyzerTuning steadyFor 3 minutes,
+    idle rows 3, idle after ready 3 minutes
 - name: engine
   outputs:
   - engine/learned-state.csv
