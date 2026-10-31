@@ -157,8 +157,8 @@ func sharedTargetCycle(t *testing.T, e *Engine, vaNames []string, results []allo
 			},
 		}
 	}
-	_, err := e.runV2AnalysisOnly(
-		context.Background(), "m", "ns", nil,
+	_, err := e.buildInputAndRunSaturation(
+		context.Background(),
 		config.ScalingPolicy{
 			KvCacheThreshold:     0.8,
 			QueueLengthThreshold: 5,
@@ -166,9 +166,8 @@ func sharedTargetCycle(t *testing.T, e *Engine, vaNames []string, results []allo
 			ScaleUpThreshold:     0.85,
 			ScaleDownBoundary:    0.70,
 		},
-		nil,
 		map[string]scaletarget.ScaleTargetAccessor{utils.GetNamespacedKey("ns", "d"): st},
-		vas, nil, 0,
+		vas,
 	)
 	require.NoError(t, err)
 	e.recordAnalyzerMetrics("ns", "m", results)
@@ -179,7 +178,7 @@ func sharedTargetCycle(t *testing.T, e *Engine, vaNames []string, results []allo
 // while saturation, and its VariantAutoscaling, still kept it.
 func TestEngineConfig_SurvivesOneAnalyzerDroppingAVariant(t *testing.T) {
 	e, registry := engineConfigEngine(t)
-	e.saturationV2Analyzer = saturation.NewSaturationAnalyzer(e.capacityStore)
+	e.setSaturation(saturation.NewSaturationAnalyzer(e.capacityStore))
 
 	second := [][]string{{"v1", "v2"}, {"v1"}, {"v1", "v2"}, {"v1", "v2"}}
 	got := make([][]string, 0, len(second))
@@ -200,7 +199,7 @@ func TestEngineConfig_SurvivesEveryAnalyzerDroppingAVariantItsVAKeeps(t *testing
 	// The VA is still enumerated and its configuration published: no
 	// analyzer reporting it does not mean it left.
 	e, registry := engineConfigEngine(t)
-	e.saturationV2Analyzer = saturation.NewSaturationAnalyzer(e.capacityStore)
+	e.setSaturation(saturation.NewSaturationAnalyzer(e.capacityStore))
 
 	sharedTargetCycle(t, e, []string{"v1", "v2"}, []allocation.NamedAnalyzerResult{
 		namedResult("saturation", nil, 5, "v1", "v2"),
@@ -216,7 +215,7 @@ func TestEngineConfig_GoesWhenTheVariantLeaves(t *testing.T) {
 	// v2's VA is gone and no analyzer reports it: its configuration goes in
 	// the same cycle, through the real publish path.
 	e, registry := engineConfigEngine(t)
-	e.saturationV2Analyzer = saturation.NewSaturationAnalyzer(e.capacityStore)
+	e.setSaturation(saturation.NewSaturationAnalyzer(e.capacityStore))
 
 	sharedTargetCycle(t, e, []string{"v1", "v2"}, []allocation.NamedAnalyzerResult{
 		namedResult("saturation", nil, 5, "v1", "v2"),
@@ -291,13 +290,13 @@ func TestEvictAllAnalyzerSeries_ClearsEveryConfigSeries(t *testing.T) {
 		"an idle cycle must not leave a configuration published with nothing to refresh it")
 }
 
-// TestRunV2AnalysisOnly_PublishesEachVariantsConfig drives the real call site.
+// TestBuildAnalyzerInput_PublishesEachVariantsConfig drives the real call site.
 // Everything above tests publishEngineConfig; this tests that something CALLS
 // it, which is the gap that let the borrow flag silently stop reaching the
 // record in the sibling package.
-func TestRunV2AnalysisOnly_PublishesEachVariantsConfig(t *testing.T) {
+func TestBuildAnalyzerInput_PublishesEachVariantsConfig(t *testing.T) {
 	e, registry := engineConfigEngine(t)
-	e.saturationV2Analyzer = saturation.NewSaturationAnalyzer(e.capacityStore)
+	e.setSaturation(saturation.NewSaturationAnalyzer(e.capacityStore))
 
 	va := &llmdVariantAutoscalingV1alpha1.VariantAutoscaling{
 		ObjectMeta: metav1.ObjectMeta{Name: "v1", Namespace: "ns"},
@@ -309,9 +308,8 @@ func TestRunV2AnalysisOnly_PublishesEachVariantsConfig(t *testing.T) {
 	st := scaletarget.NewDeploymentAccessor(deployWithArgs(
 		"--max-num-seqs=128", "--dtype=bfloat16"))
 
-	_, err := e.runV2AnalysisOnly(
-		context.Background(), "m", "ns",
-		nil, // no replica metrics: the publication happens before any analysis
+	_, err := e.buildInputAndRunSaturation(
+		context.Background(), // no replica metrics: the publication happens before any analysis
 		config.ScalingPolicy{
 			KvCacheThreshold:     0.8,
 			QueueLengthThreshold: 5,
@@ -319,12 +317,10 @@ func TestRunV2AnalysisOnly_PublishesEachVariantsConfig(t *testing.T) {
 			ScaleUpThreshold:     0.85,
 			ScaleDownBoundary:    0.70,
 		},
-		nil,
 		map[string]scaletarget.ScaleTargetAccessor{
 			utils.GetNamespacedKey("ns", "d"): st,
 		},
 		map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling{"ns/v1": va},
-		nil, 0,
 	)
 	require.NoError(t, err)
 
@@ -334,16 +330,17 @@ func TestRunV2AnalysisOnly_PublishesEachVariantsConfig(t *testing.T) {
 			"pre-populates the capacity store from")
 
 	// The accelerator label is published under the stabilised reading, reached
-	// through an assertion on this field. The compile-time var beside the
-	// interface pins the concrete TYPE; this pins the FIELD, which is what the
-	// assertion actually tests -- engine.go builds the analyzer through
-	// WithHorizons, and a wrapper returned from there would satisfy the var and
-	// fail here. It is the only spec that CHECKS the field:
+	// through the capability the registry resolved for the analyzer
+	// registered. The compile-time var beside the interface pins the concrete
+	// TYPE; this pins the CAPABILITY, which is what the input builder actually
+	// reads -- engine.go builds the analyzer through WithHorizons, and a
+	// wrapper returned from there would satisfy the var and fail here. It is
+	// the only spec that CHECKS the capability:
 	// PublishesNothingForAVariantWithNoScaleTarget below also wires the real
 	// analyzer, but its scale-target map is empty so the loop continues before
 	// reaching this path at all.
-	stabiliser, stabilises := e.saturationV2Analyzer.(acceleratorStabiliser)
-	require.True(t, stabilises,
+	stabiliser := e.analyzers.saturationCaps().stabiliser
+	require.NotNil(t, stabiliser,
 		"the real analyzer stopped satisfying acceleratorStabiliser, so the "+
 			"metric is publishing the raw accelerator and nothing else noticed")
 
@@ -356,7 +353,7 @@ func TestRunV2AnalysisOnly_PublishesEachVariantsConfig(t *testing.T) {
 	// unchanged -- stable EQUALS raw -- and this comparison would therefore
 	// still pass if the publish site regressed to the raw reading, which is
 	// the very bug the series exists to fix. What has teeth in this spec is
-	// the field assertion above. The divergence case needs a warmed memo and
+	// the capability check above. The divergence case needs a warmed memo and
 	// is covered by TestPublishedAcceleratorIsTheOneTheKeyUses.
 	raw := accelerator.GetAcceleratorNameFromScaleTarget(va, st)
 	assert.ElementsMatch(t, []string{stabiliser.StableAcceleratorFor("ns", "v1", raw)},
@@ -375,11 +372,11 @@ func TestRunV2AnalysisOnly_PublishesEachVariantsConfig(t *testing.T) {
 		seriesLabels(t, registry, constants.WVAEngineConfig, constants.LabelFingerprint))
 }
 
-func TestRunV2AnalysisOnly_PublishesNothingForAVariantWithNoScaleTarget(t *testing.T) {
+func TestBuildAnalyzerInput_PublishesNothingForAVariantWithNoScaleTarget(t *testing.T) {
 	// The path that logs "No scale target found" and continues: there is no
 	// configuration to publish, and an absent series is the honest signal.
 	e, registry := engineConfigEngine(t)
-	e.saturationV2Analyzer = saturation.NewSaturationAnalyzer(e.capacityStore)
+	e.setSaturation(saturation.NewSaturationAnalyzer(e.capacityStore))
 
 	// THE SEED IS WHAT MAKES THIS A TEST. publishEngineConfig no-ops when the
 	// store holds no record for the variant, so an empty registry is also
@@ -414,8 +411,8 @@ func TestRunV2AnalysisOnly_PublishesNothingForAVariantWithNoScaleTarget(t *testi
 		},
 	}
 
-	_, err := e.runV2AnalysisOnly(
-		context.Background(), "m", "ns", nil,
+	_, err := e.buildInputAndRunSaturation(
+		context.Background(),
 		config.ScalingPolicy{
 			KvCacheThreshold:     0.8,
 			QueueLengthThreshold: 5,
@@ -423,10 +420,8 @@ func TestRunV2AnalysisOnly_PublishesNothingForAVariantWithNoScaleTarget(t *testi
 			ScaleUpThreshold:     0.85,
 			ScaleDownBoundary:    0.70,
 		},
-		nil,
 		map[string]scaletarget.ScaleTargetAccessor{}, // none resolvable
 		map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling{"ns/v1": va},
-		nil, 0,
 	)
 	require.NoError(t, err)
 

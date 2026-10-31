@@ -8,7 +8,6 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/enginerec"
@@ -54,10 +53,10 @@ func (e *Engine) recordComposite(in compositeInputs, composite allocation.NamedA
 // results, so the composite event does not record them again.
 func (e *Engine) replayedAnalyzers() map[string]bool {
 	out := map[string]bool{}
-	if _, ok := e.saturationV2Analyzer.(*saturation.SaturationAnalyzer); ok {
+	if e.analyzers.saturationCaps().recorded != nil {
 		out[domain.SaturationAnalyzerName] = true
 	}
-	for _, entry := range e.analyzers {
+	for _, entry := range e.analyzers.builtins() {
 		switch entry.analyzer.(type) {
 		case *slo.Analyzer, *throughput.ThroughputAnalyzer:
 			out[entry.name] = true

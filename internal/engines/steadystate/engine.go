@@ -18,11 +18,9 @@ package steadystate
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -67,14 +65,6 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
 )
-
-// analyzerEntry binds a registered analyzer to its name. The engine stores
-// these in registration order so runAnalyzers iterates analyzers
-// deterministically.
-type analyzerEntry struct {
-	name     string
-	analyzer domain.Analyzer
-}
 
 type Engine struct {
 	client client.Client
@@ -176,10 +166,11 @@ type Engine struct {
 	// still inside their freshness window.
 	VariantEnricher *registry.Enricher
 
-	// saturationV2Analyzer is the V2 token-based saturation analyzer (initialized once).
-	// Also pre-registered in analyzers under domain.SaturationAnalyzerName.
-	// Typed as domain.Analyzer to allow injection in tests.
-	saturationV2Analyzer domain.Analyzer
+	// analyzers is the engine's one analyzer registry: the built-ins, the
+	// saturation analyzer among them with its capabilities, and the external
+	// analyzers reconciled from the catalog (analyzer_registry.go). Nil in
+	// tests that build an Engine by hand and run no analyzer.
+	analyzers *analyzerRegistry
 
 	// sloAnalyzer is the built-in slo analyzer, also registered in analyzers
 	// under domain.SLOAnalyzerName: held here so the per-cycle sweeps reach its
@@ -285,35 +276,6 @@ type Engine struct {
 	// it, because the producer that would clear it never runs for that model
 	// again. See pruneBlockedModels.
 	lastBlockedModels map[string]blockedModelRef
-
-	// analyzers is the engine's analyzer registry, mutated only during setup
-	// (NewEngine + RegisterAnalyzer). After StartOptimizeLoop it is frozen —
-	// further RegisterAnalyzer calls return an error. The optimize goroutine reads
-	// analyzersSnapshot, never analyzers, so iteration is race-free without
-	// runtime locking.
-	analyzers []analyzerEntry
-
-	// analyzersSnapshot is the frozen, registration-ordered view that
-	// runAnalyzers iterates. Built from analyzers in StartOptimizeLoop
-	// before the goroutine launches. Saturation always runs; every other
-	// registered analyzer runs when the policy lists it, and the composite
-	// combines what they return (buildComposite).
-	analyzersSnapshot []analyzerEntry
-
-	// started transitions to true in StartOptimizeLoop. Late RegisterAnalyzer
-	// calls return an error so the contract "register before Start" is enforced
-	// rather than just documented.
-	started bool
-
-	// externalMu guards externalAnalyzers, which — unlike the frozen built-in
-	// registry above — may change while the optimize goroutine runs.
-	externalMu sync.RWMutex
-	// externalAnalyzers holds config-driven external analyzers keyed by name.
-	// It is mutated at runtime (UpsertExternalAnalyzer/RemoveExternalAnalyzer)
-	// when the analyzer catalog changes, and read under RLock each cycle. This is
-	// the "analyzers can be added at run-time" path; the built-in snapshot stays
-	// frozen and lock-free.
-	externalAnalyzers map[string]domain.Analyzer
 
 	// optimizer is the V2 scaling optimizer that produces VariantDecisions from
 	// AnalyzerResults. Selected per-cycle from the declared limiters:
@@ -445,7 +407,6 @@ func newEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 		GPULimiter:              gpuLimiter,
 		policies:                scalingpolicy.NewChangeReporter(),
 		metricsRegistry:         metricsRegistry,
-		saturationV2Analyzer:    satV2,
 		sloAnalyzer:             sloAnalyzer,
 		capacityStore:           capacityStore,
 		clock:                   cycleClock,
@@ -454,8 +415,10 @@ func newEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 		lastBlockedModels:       make(map[string]blockedModelRef),
 		optimizer:               scalingOptimizer,
 		metricsEmitter:          metrics.NewMetricsEmitter(),
-		analyzers: []analyzerEntry{
-			{name: domain.SaturationAnalyzerName, analyzer: satV2},
+		analyzers: newAnalyzerRegistry(
+			// Runs first every cycle, listed or not: the composite takes its
+			// variant list and its units from saturation's result.
+			analyzerEntry{name: domain.SaturationAnalyzerName, analyzer: satV2},
 			// Built in and always registered: it runs only for a model whose
 			// policy lists it under analyzers:, and its router queries run only
 			// for such a model, so registering it costs nothing elsewhere, and
@@ -463,9 +426,8 @@ func newEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 			// published and, unlike the other listed analyzers, never sizes a
 			// model: the composite leaves it out (docs/proposals/slo-tiers.md,
 			// phase 0).
-			{name: domain.SLOAnalyzerName, analyzer: sloAnalyzer},
-		},
-		externalAnalyzers: make(map[string]domain.Analyzer),
+			analyzerEntry{name: domain.SLOAnalyzerName, analyzer: sloAnalyzer},
+		),
 	}
 
 	engine.executor = executor.NewPollingExecutor(executor.PollingConfig{
@@ -504,11 +466,6 @@ func (e *Engine) Clock() clock.PassiveClock {
 	return e.clock
 }
 
-// RegisterAnalyzer adds an external analyzer to the engine's analyzer
-// registry. Returns an error if called after StartOptimizeLoop or if name
-// is already registered — callers must check the error. The analyzer is
-// appended in registration order.
-
 // addWarmPoolGPUs charges each namespace's warm pools into the managed usage
 // about to be published, and returns the version of the pool figure it charged.
 //
@@ -535,66 +492,45 @@ func addWarmPoolGPUs(byType map[string]int, byNamespace map[string]map[string]in
 	return version
 }
 
+// RegisterAnalyzer adds a built-in analyzer to the engine's analyzer
+// registry. Returns an error if called after StartOptimizeLoop or if name
+// is already registered — callers must check the error. The analyzer is
+// appended in registration order.
 func (e *Engine) RegisterAnalyzer(name string, a domain.Analyzer) error {
-	if e.started {
-		return errors.New("RegisterAnalyzer: called after StartOptimizeLoop")
+	return e.ensureAnalyzers().register(name, a)
+}
+
+// ensureAnalyzers is the engine's registry, created empty for an Engine a
+// test built by hand with none, so registering and starting work on it as
+// they did before the registry existed.
+func (e *Engine) ensureAnalyzers() *analyzerRegistry {
+	if e.analyzers == nil {
+		e.analyzers = newAnalyzerRegistry()
 	}
-	for i := range e.analyzers {
-		if e.analyzers[i].name == name {
-			return fmt.Errorf("RegisterAnalyzer: duplicate analyzer name %q", name)
-		}
-	}
-	e.analyzers = append(e.analyzers, analyzerEntry{name: name, analyzer: a})
-	return nil
+	return e.analyzers
 }
 
 // UpsertExternalAnalyzer registers or replaces a config-driven external analyzer
 // by name. Unlike RegisterAnalyzer it is safe to call while the optimize loop is
 // running (the analyzer participates from the next cycle), so the analyzer
 // catalog can change without a restart. A name that collides with a built-in
-// analyzer is still stored here but never runs — the built-in wins in
+// analyzer is still stored but never runs — the built-in wins in
 // analyzerRunEntries.
 func (e *Engine) UpsertExternalAnalyzer(name string, a domain.Analyzer) {
-	e.externalMu.Lock()
-	defer e.externalMu.Unlock()
-	e.externalAnalyzers[name] = a
+	e.ensureAnalyzers().upsert(name, a)
 }
 
 // RemoveExternalAnalyzer retires a runtime external analyzer. Idempotent.
 func (e *Engine) RemoveExternalAnalyzer(name string) {
-	e.externalMu.Lock()
-	defer e.externalMu.Unlock()
-	delete(e.externalAnalyzers, name)
+	e.analyzers.remove(name)
 }
 
-// analyzerRunEntries returns the analyzers to run this cycle: the frozen built-in
-// snapshot followed by the runtime external analyzers (sorted by name for a
-// deterministic order). An external analyzer whose name collides with a built-in
-// is skipped — the built-in registry wins name resolution.
+// analyzerRunEntries returns the analyzers to run this cycle: the built-ins in
+// registration order followed by the runtime external analyzers (sorted by
+// name for a deterministic order). An external analyzer whose name collides
+// with a built-in is skipped — the built-in wins name resolution.
 func (e *Engine) analyzerRunEntries() []analyzerEntry {
-	builtinNames := make(map[string]struct{}, len(e.analyzersSnapshot))
-	for _, en := range e.analyzersSnapshot {
-		builtinNames[en.name] = struct{}{}
-	}
-
-	e.externalMu.RLock()
-	defer e.externalMu.RUnlock()
-
-	names := make([]string, 0, len(e.externalAnalyzers))
-	for name := range e.externalAnalyzers {
-		if _, dup := builtinNames[name]; dup {
-			continue // built-in wins name resolution
-		}
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	entries := make([]analyzerEntry, 0, len(e.analyzersSnapshot)+len(names))
-	entries = append(entries, e.analyzersSnapshot...)
-	for _, name := range names {
-		entries = append(entries, analyzerEntry{name: name, analyzer: e.externalAnalyzers[name]})
-	}
-	return entries
+	return e.analyzers.runEntries()
 }
 
 // reconcileExternalAnalyzers rebuilds the runtime external-analyzer registry from
@@ -613,14 +549,9 @@ func (e *Engine) reconcileExternalAnalyzers(ctx context.Context) {
 	logger := ctrl.LoggerFrom(ctx)
 	catalog := e.Config.ExternalAnalyzerCatalog()
 
-	builtin := make(map[string]struct{}, len(e.analyzersSnapshot))
-	for _, en := range e.analyzersSnapshot {
-		builtin[en.name] = struct{}{}
-	}
-
 	desired := make(map[string]struct{}, len(catalog))
 	for label, def := range catalog {
-		if _, isBuiltin := builtin[label]; isBuiltin {
+		if e.analyzers.isBuiltin(label) {
 			// Once per name at the default level, not every cycle at DEBUG:
 			// a catalog entry that stopped running because a built-in took
 			// its name (slo did) must be visible in a default log.
@@ -667,13 +598,7 @@ func (e *Engine) reconcileExternalAnalyzers(ctx context.Context) {
 // externalAnalyzerNames returns the names of the currently registered runtime
 // external analyzers.
 func (e *Engine) externalAnalyzerNames() []string {
-	e.externalMu.RLock()
-	defer e.externalMu.RUnlock()
-	names := make([]string, 0, len(e.externalAnalyzers))
-	for name := range e.externalAnalyzers {
-		names = append(names, name)
-	}
-	return names
+	return e.analyzers.externalNames()
 }
 
 // toExternalDefinition converts a catalog entry to an external.Definition,
@@ -702,14 +627,12 @@ func toExternalDefinition(label string, def config.ExternalAnalyzerDef) (externa
 // StartOptimizeLoop starts the optimization loop for the saturation engine.
 // It runs until the context is cancelled.
 //
-// Before launching the goroutine, the registered analyzers are snapshotted
-// to a frozen slice that runAnalyzers iterates. The started flag is
-// flipped so subsequent RegisterAnalyzer calls return an error. The snapshot is the
-// natural place to invoke any future per-analyzer Init(ctx) hook.
+// Before launching the goroutine, the built-in analyzers are frozen: a
+// later RegisterAnalyzer returns an error. External analyzers still come and
+// go with the catalog. This is the natural place to invoke any future
+// per-analyzer Init(ctx) hook.
 func (e *Engine) StartOptimizeLoop(ctx context.Context) {
-	e.analyzersSnapshot = make([]analyzerEntry, len(e.analyzers))
-	copy(e.analyzersSnapshot, e.analyzers)
-	e.started = true
+	e.ensureAnalyzers().start()
 	// Before the first cycle, once every analyzer is registered.
 	e.startLearnerRecording()
 	defer e.stopLearnerRecording()

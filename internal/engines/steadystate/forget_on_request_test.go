@@ -19,13 +19,13 @@ import (
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
 )
 
-// TestRunV2AnalysisOnly_ForgetsOneVariantOnRequest drives the real call site:
+// TestBuildAnalyzerInput_ForgetsOneVariantOnRequest drives the real call site:
 // the annotation on the scale target, read where the engine loads the
 // variant's capacity record, acted on once per token.
-func TestRunV2AnalysisOnly_ForgetsOneVariantOnRequest(t *testing.T) {
+func TestBuildAnalyzerInput_ForgetsOneVariantOnRequest(t *testing.T) {
 	e, _ := engineConfigEngine(t)
 	analyzer := saturation.NewSaturationAnalyzer(e.capacityStore)
-	e.saturationV2Analyzer = analyzer
+	e.setSaturation(analyzer)
 
 	va := &llmdVariantAutoscalingV1alpha1.VariantAutoscaling{
 		ObjectMeta: metav1.ObjectMeta{Name: "v1", Namespace: "ns"},
@@ -39,16 +39,14 @@ func TestRunV2AnalysisOnly_ForgetsOneVariantOnRequest(t *testing.T) {
 		if token != "" {
 			deploy.Annotations = map[string]string{annotations.ForgetLearnedState: token}
 		}
-		_, err := e.runV2AnalysisOnly(
-			context.Background(), "m", "ns", nil,
+		_, err := e.buildInputAndRunSaturation(
+			context.Background(),
 			config.ScalingPolicy{KvCacheThreshold: 0.8, QueueLengthThreshold: 5, AnalyzerName: "saturation",
 				ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70},
-			nil,
 			map[string]scaletarget.ScaleTargetAccessor{
 				utils.GetNamespacedKey("ns", "d"): scaletarget.NewDeploymentAccessor(deploy),
 			},
 			map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling{"ns/v1": va},
-			nil, 0,
 		)
 		require.NoError(t, err)
 	}

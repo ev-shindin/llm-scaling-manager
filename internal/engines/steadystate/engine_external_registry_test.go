@@ -19,12 +19,7 @@ import (
 var _ = Describe("external analyzer runtime registry", func() {
 	makeEngine := func() *Engine {
 		sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{}}
-		return &Engine{
-			saturationV2Analyzer: sat,
-			analyzersSnapshot:    []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: sat}},
-			externalAnalyzers:    make(map[string]domain.Analyzer),
-			started:              true,
-		}
+		return &Engine{analyzers: testAnalyzers(sat)}
 	}
 
 	cfgWithExt := config.ScalingPolicy{
@@ -132,10 +127,9 @@ var _ = Describe("reconcileExternalAnalyzers", func() {
 		cfg = config.NewTestConfig()
 		sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{}}
 		e = &Engine{
-			Config:            cfg,
-			metricsRegistry:   reg,
-			analyzersSnapshot: []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: sat}},
-			externalAnalyzers: make(map[string]domain.Analyzer),
+			Config:          cfg,
+			metricsRegistry: reg,
+			analyzers:       testAnalyzers(sat),
 		}
 	})
 

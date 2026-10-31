@@ -151,8 +151,7 @@ func TestCompositeSaturationsOwnGraceIsUnchanged(t *testing.T) {
 func TestCompositeGraceCoversAnAnalyzerThatReturnedNothing(t *testing.T) {
 	sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: liveEntry(domain.SaturationAnalyzerName, 0, 200).Result}
 	tp := &fakeAnalyzerWithResult{analyzerName: "throughput", result: liveEntry("throughput", 0, 200).Result}
-	e := &Engine{saturationV2Analyzer: sat, started: true, analyzersSnapshot: []analyzerEntry{
-		{name: domain.SaturationAnalyzerName, analyzer: sat}, {name: "throughput", analyzer: tp}}}
+	e := &Engine{analyzers: testAnalyzers(sat, analyzerEntry{name: "throughput", analyzer: tp})}
 	cfg := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70,
 		Analyzers: []config.AnalyzerScoreConfig{{Name: domain.SaturationAnalyzerName}, {Name: "throughput"}}}
 	cycle := func() *allocation.ModelScalingRequest {

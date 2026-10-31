@@ -32,22 +32,41 @@ import (
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
 )
 
-// runV2AnalysisOnly runs the saturation analyzer and returns the raw AnalyzerResult
-// without building targets. The optimizer handles target building across all models.
-func (e *Engine) runV2AnalysisOnly(
+// buildAnalyzerInput is the input builder: it prepares the cycle's state for
+// one model and returns the one AnalyzerInput every analyzer of the model
+// receives, built before any of them runs.
+//
+// Per variant, in this order, before any Analyze:
+//
+//  1. forget on request (forgetOnRequest), so a forgotten variant's capacity
+//     record is refiled from the scale target this cycle and nothing
+//     restored for it is installed;
+//  2. file the scale target's engine parameters in the capacity store
+//     (LoadFromScaleTarget);
+//  3. publish wva_engine_config from the record just filed
+//     (publishEngineConfig).
+//
+// The input carries the rows, the variant states and their discovery
+// metadata, the merged policy, the scheduler queue and the arrival rate.
+// Learning capacity stays in the analyzers; what the capacity-build step
+// derives from their results (the role join, the clamp to the scale target,
+// supply and the scaling signals) still runs after Analyze, in
+// buildCapacities.
+func (e *Engine) buildAnalyzerInput(
 	ctx context.Context,
 	modelID, namespace string,
 	replicaMetrics []domain.ReplicaMetrics,
 	config config.ScalingPolicy,
 	variantStates []domain.VariantReplicaState,
+	variantMetadata []domain.VariantMetadata,
 	scaleTargets map[string]scaletarget.ScaleTargetAccessor,
 	variantAutoscalings map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
 	schedulerQueue *domain.SchedulerQueueMetrics,
 	arrivalRate float64,
-) (*domain.AnalyzerResult, error) {
+) domain.AnalyzerInput {
 	logger := ctrl.LoggerFrom(ctx)
+	sat := e.analyzers.saturationCaps()
 
-	// 1. Pre-populate capacity store with scale target-derived params
 	for _, va := range variantAutoscalings {
 		key := utils.GetNamespacedKey(va.Namespace, va.GetScaleTargetName())
 		scaleTarget := scaleTargets[key]
@@ -67,11 +86,12 @@ func (e *Engine) runV2AnalysisOnly(
 		// built with, not the raw reading: the two differ on a fleet whose pods
 		// disagree, and that is the fleet an operator is reading this metric to
 		// understand -- and the one where a record filed under the raw value
-		// was missed by the analyzer's stabilised lookup. A missing analyzer
-		// leaves the raw value, which is what a test-built engine gets.
+		// was missed by the analyzer's stabilised lookup. A saturation analyzer
+		// without the capability leaves the raw value, which is what a
+		// test-built engine gets.
 		publishAccel := accelerator
-		if s, ok := e.saturationV2Analyzer.(acceleratorStabiliser); ok {
-			publishAccel = s.StableAcceleratorFor(namespace, va.Name, accelerator)
+		if sat.stabiliser != nil {
+			publishAccel = sat.stabiliser.StableAcceleratorFor(namespace, va.Name, accelerator)
 		}
 		e.capacityStore.LoadFromScaleTarget(namespace, modelID, va.Name, publishAccel, gpuCount, scaleTarget, e.clock.Now())
 		logger.V(logging.DEBUG).Info("Pre-populated capacity store from scale target",
@@ -90,26 +110,29 @@ func (e *Engine) runV2AnalysisOnly(
 		e.publishEngineConfig(namespace, modelID, va.Name, publishAccel, gpuCount)
 	}
 
-	// 2. Build AnalyzerInput
-	input := domain.AnalyzerInput{
-		ModelID:        modelID,
-		Namespace:      namespace,
-		ReplicaMetrics: replicaMetrics,
-		VariantStates:  variantStates,
-		Config:         &config,
-		SchedulerQueue: schedulerQueue,
-		ArrivalRate:    arrivalRate,
+	return domain.AnalyzerInput{
+		ModelID:         modelID,
+		Namespace:       namespace,
+		ReplicaMetrics:  replicaMetrics,
+		VariantStates:   variantStates,
+		VariantMetadata: variantMetadata,
+		Config:          &config,
+		SchedulerQueue:  schedulerQueue,
+		ArrivalRate:     arrivalRate,
 	}
+}
 
-	// 3. Run V2 analyzer
-	result, err := e.saturationV2Analyzer.Analyze(ctx, input)
+// runSaturation runs the saturation analyzer on the cycle's input and
+// returns its raw AnalyzerResult. Its failure fails the model's cycle: the
+// composite takes its variant list from saturation's result.
+func (e *Engine) runSaturation(ctx context.Context, input domain.AnalyzerInput) (*domain.AnalyzerResult, error) {
+	result, err := e.analyzers.saturationCaps().analyzer.Analyze(ctx, input)
 	if err != nil {
 		return nil, fmt.Errorf("V2 saturation analysis failed: %w", err)
 	}
-
 	// Analysis results are logged by the caller (runAnalyzers) after the
-	// applyUniversalThreshold post-step, so the single Info line can include the
-	// real RequiredCapacity/SpareCapacity. They are left zero here, so logging
+	// capacity-build step, so the single Info line can include the real
+	// RequiredCapacity/SpareCapacity. They are left zero here, so logging
 	// them at this point would always report 0 and be misleading.
 	return result, nil
 }
@@ -121,17 +144,18 @@ func (e *Engine) runV2AnalysisOnly(
 // TODO: make configurable if needed.
 const analyzerLivenessStaleCycles = 3
 
-// runAnalyzers runs the V2 saturation analyzer plus every other registered,
-// enabled analyzer, builds a NamedAnalyzerResult for each, runs liveness
-// tracking and logs each, and returns the full slice. It records no metrics:
-// the caller does, once.
+// runAnalyzers builds the cycle's input (buildAnalyzerInput), runs the
+// saturation analyzer plus every other registered, enabled analyzer on it,
+// builds a NamedAnalyzerResult for each, runs liveness tracking and logs
+// each, and returns the full slice. It records no metrics: the caller does,
+// once.
 //
 // Saturation always runs; every other registered analyzer runs only if
 // config.AnalyzerEnabled. The capacity-build step (buildNamedResult) runs
-// once per analyzer. Per-variant identity (cost, accelerator, role) comes
-// from discovery (variantMetadata), not from any analyzer. Saturation runs
-// unlisted too because buildComposite takes its variant list and its units
-// from saturation's result.
+// once per analyzer, after it. Per-variant identity (cost, accelerator, role)
+// comes from discovery (variantMetadata), not from any analyzer. Saturation
+// runs unlisted too because buildComposite takes its variant list and its
+// units from saturation's result.
 func (e *Engine) runAnalyzers(
 	ctx context.Context,
 	modelID, namespace string,
@@ -158,24 +182,16 @@ func (e *Engine) runAnalyzers(
 	e.observeLoadBalance(logger, namespace, modelID, replicaMetrics, variantStates,
 		loadBalanceThresholds(config))
 
+	// One input, complete before any analyzer runs, shared by all of them.
+	// Each reports demand and capacity only: the engine applies the
+	// thresholds after it runs (buildNamedResult).
+	input := e.buildAnalyzerInput(ctx, modelID, namespace, replicaMetrics, config,
+		variantStates, variantMetadata, scaleTargets, variantAutoscalings, schedulerQueue, arrivalRate)
+
 	// Run saturation analyzer (always needed for PerReplicaCapacity).
-	baseResult, err := e.runV2AnalysisOnly(ctx, modelID, namespace, replicaMetrics, config,
-		variantStates, scaleTargets, variantAutoscalings, schedulerQueue, arrivalRate)
+	baseResult, err := e.runSaturation(ctx, input)
 	if err != nil {
 		return nil, err
-	}
-
-	// Build AnalyzerInput once; shared by all non-saturation analyzers. Each
-	// reports demand and capacity only: the engine applies the thresholds
-	// after it runs (buildNamedResult).
-	input := domain.AnalyzerInput{
-		ModelID:        modelID,
-		Namespace:      namespace,
-		ReplicaMetrics: replicaMetrics,
-		VariantStates:  variantStates,
-		Config:         &config,
-		SchedulerQueue: schedulerQueue,
-		ArrivalRate:    arrivalRate,
 	}
 
 	// Run every analyzer and build its NamedAnalyzerResult. Saturation is
@@ -372,76 +388,22 @@ func (e *Engine) publishEngineConfig(namespace, modelID, variantName, accelerato
 	published.variants[variantName] = struct{}{}
 }
 
-// acceleratorStabiliser is the part of the saturation analyzer the engine-config
-// metric needs: the accelerator a variant's learned state is actually keyed
-// under. Reached through an assertion for the same reason staleHistoryEvictor
-// is -- saturationV2Analyzer is typed domain.Analyzer so tests can inject.
-//
-// Without it the metric published the raw reading while the key used the
-// stabilised one, which on a heterogeneous fleet made the label disagree with
-// the key it exists to explain.
-type acceleratorStabiliser interface {
-	StableAcceleratorFor(namespace, variantName, accelerator string) string
-}
-
-// Ensure SaturationAnalyzer implements acceleratorStabiliser.
-//
-// A dynamic assertion that nothing pins is a fallback waiting to become
-// permanent. Measured: renaming the method on the concrete type and updating
-// that package's own tests leaves `go build`, `go vet`, saturation 339/339 and
-// the whole 157-spec steadystate suite green, while runV2AnalysisOnly silently
-// goes back to publishing the raw accelerator for good. This line turns that
-// into a build error that names the missing method.
-var _ acceleratorStabiliser = (*saturation.SaturationAnalyzer)(nil)
-
-// staleHistoryEvictor is the part of the saturation analyzer this file needs.
-// saturationV2Analyzer is typed domain.Analyzer so tests can inject, so the
-// eviction entry point is reached through an assertion rather than a direct
-// call.
-// Ensure SaturationAnalyzer implements staleHistoryEvictor.
-//
-// The same hole as above, and here it is not hypothetical: this entry point
-// was written with no caller anywhere on the reconcile path, so the analyzer
-// kept one entry per variant it had ever seen for the lifetime of the process.
-// An unpinned assertion is how that reaches production looking healthy.
-var _ staleHistoryEvictor = (*saturation.SaturationAnalyzer)(nil)
-
-type staleHistoryEvictor interface {
-	EvictStaleHistory() saturation.Evicted
-}
-
-// variantForgetter is the part of the saturation analyzer forgetOnRequest
-// needs, reached through an assertion like the others here.
-type variantForgetter interface {
-	ForgottenToken(namespace, variant string) string
-	ForgetVariant(namespace, modelID, variant, token string) int
-}
-
-// Pinned at compile time, for the same reason as presenceNoter.
-var _ variantForgetter = (*saturation.SaturationAnalyzer)(nil)
-
 // forgetOnRequest forgets one variant's learned state when its scale target
 // carries the ForgetLearnedState annotation with a token not yet acted on.
+// Nothing is forgotten when the saturation analyzer cannot forget.
 func (e *Engine) forgetOnRequest(ctx context.Context, namespace, modelID, variant string, target scaletarget.ScaleTargetAccessor) {
 	token := scaletarget.Annotations(target)[annotations.ForgetLearnedState]
 	if token == "" {
 		return
 	}
-	f, ok := e.saturationV2Analyzer.(variantForgetter)
-	if !ok || f.ForgottenToken(namespace, variant) == token {
+	f := e.analyzers.saturationCaps().forgetter
+	if f == nil || f.ForgottenToken(namespace, variant) == token {
 		return
 	}
 	n := f.ForgetVariant(namespace, modelID, variant, token)
 	ctrl.LoggerFrom(ctx).Info("Learned state forgotten for one variant, on request",
 		"namespace", namespace, "modelID", modelID, "variant", variant,
 		"annotation", annotations.ForgetLearnedState, "token", token, "entries", n)
-}
-
-// presenceNoter is the part of the saturation analyzer notePresentVariants
-// needs, reached through an assertion for the same reason as
-// staleHistoryEvictor.
-type presenceNoter interface {
-	NoteVariantsPresent(namespace, modelID string, variantNames []string)
 }
 
 // beginSLOCycle starts a cycle for the slo analyzer: its cycle count, by
@@ -491,11 +453,6 @@ type sloStateKeeper interface {
 
 var _ sloStateKeeper = (*slo.Analyzer)(nil)
 
-// Pinned at compile time: the assertion in notePresentVariants fails silently
-// at run time, so a rename of the method would otherwise let a parked fleet's
-// learned state age out again with every test green.
-var _ presenceNoter = (*saturation.SaturationAnalyzer)(nil)
-
 // notePresentVariants stamps every variant that still exists as present, ahead
 // of the sweep that would otherwise take its learned state (see
 // SaturationAnalyzer.NoteVariantsPresent). It runs before the sweep because
@@ -516,7 +473,7 @@ func (e *Engine) notePresentVariants(
 	modelGroups map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
 ) {
 	var noters []presenceNoter
-	if noter, ok := e.saturationV2Analyzer.(presenceNoter); ok {
+	if noter := e.analyzers.saturationCaps().noter; noter != nil {
 		noters = append(noters, noter)
 	}
 	if e.sloAnalyzer != nil {
@@ -585,7 +542,7 @@ func (e *Engine) notePresentVariants(
 func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 	logger := ctrl.LoggerFrom(ctx)
 	var history saturation.Evicted
-	if evictor, ok := e.saturationV2Analyzer.(staleHistoryEvictor); ok {
+	if evictor := e.analyzers.saturationCaps().evictor; evictor != nil {
 		// The horizons live on the analyzer, which is what configuration can
 		// reach and what owns the state they govern. They are logged once at
 		// startup rather than on every sweep -- see engine.go, where the

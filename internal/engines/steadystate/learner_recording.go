@@ -3,7 +3,6 @@ package steadystate
 import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
@@ -59,10 +58,10 @@ func (e *Engine) attachLearnerRecorder(rec *learnrec.Recorder) {
 	if e.capacityStore != nil {
 		e.capacityStore.WithRecorder(rec)
 	}
-	if sat, ok := e.saturationV2Analyzer.(*saturation.SaturationAnalyzer); ok {
+	if sat := e.analyzers.saturationCaps().recorded; sat != nil {
 		sat.WithRecorder(rec)
 	}
-	for _, entry := range e.analyzers {
+	for _, entry := range e.analyzers.builtins() {
 		switch a := entry.analyzer.(type) {
 		case *slo.Analyzer:
 			a.WithRecorder(rec)
@@ -84,12 +83,12 @@ func (e *Engine) recordLearners(rec *learnrec.Recorder) {
 	if e.capacityStore != nil {
 		start.StoreRecords = e.capacityStore.Len()
 	}
-	if sat, ok := e.saturationV2Analyzer.(*saturation.SaturationAnalyzer); ok {
+	if sat := e.analyzers.saturationCaps().recorded; sat != nil {
 		h := sat.Horizons()
 		start.Saturation = learnrec.SaturationStart{EpisodeGap: h.EpisodeGap, VariantTimeout: h.VariantTimeout,
 			BucketRetention: h.BucketRetention, BorrowTickGap: sat.BorrowTickGap()}
 	}
-	for _, entry := range e.analyzers {
+	for _, entry := range e.analyzers.builtins() {
 		switch a := entry.analyzer.(type) {
 		case *slo.Analyzer:
 			start.SLO = &learnrec.SLOStart{StateTimeout: a.StateTimeout(), SlopeHoldFor: a.SlopeHoldFor(), Judging: a.Judging()}

@@ -380,13 +380,11 @@ var _ = Describe("runAnalyzersAndScore call ordering", func() {
 		ta := &spyAnalyzer{name: "throughput"}
 		slo := &spyAnalyzer{name: "slo"}
 		e := &Engine{
-			saturationV2Analyzer: fakeSat,
-			analyzersSnapshot: []analyzerEntry{
-				{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
-				{name: "throughput", analyzer: ta},
-				{name: "slo", analyzer: slo},
-			},
-			started: true,
+			analyzers: testAnalyzers(fakeSat,
+				analyzerEntry{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
+				analyzerEntry{name: "throughput", analyzer: ta},
+				analyzerEntry{name: "slo", analyzer: slo},
+			),
 		}
 		cfg := config.ScalingPolicy{
 			ScaleUpThreshold:  0.85,
@@ -402,8 +400,8 @@ var _ = Describe("runAnalyzersAndScore call ordering", func() {
 		Expect(results).NotTo(BeEmpty())
 		Expect(ta.callCount).To(Equal(1))
 		Expect(slo.callCount).To(Equal(1))
-		// saturationV2Analyzer is called via runV2AnalysisOnly, not the loop;
-		// the snapshot entry for saturation is skipped by the name guard.
+		// Saturation is run first by runSaturation, not the loop; its
+		// registry entry is skipped by the name guard.
 		Expect(fakeSat.Name()).To(Equal(domain.SaturationAnalyzerName)) // sanity
 	})
 })
@@ -417,12 +415,10 @@ var _ = Describe("runAnalyzersAndScore disabled-analyzer gate", func() {
 		}
 		spy := &spyAnalyzer{name: "spy"}
 		e := &Engine{
-			saturationV2Analyzer: fakeSat,
-			analyzersSnapshot: []analyzerEntry{
-				{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
-				{name: "spy", analyzer: spy},
-			},
-			started: true,
+			analyzers: testAnalyzers(fakeSat,
+				analyzerEntry{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
+				analyzerEntry{name: "spy", analyzer: spy},
+			),
 		}
 		f := false
 		cfg := config.ScalingPolicy{
@@ -448,11 +444,9 @@ var _ = Describe("collectV2ModelRequest Disaggregated flag", func() {
 			result:       &domain.AnalyzerResult{},
 		}
 		e := &Engine{
-			saturationV2Analyzer: fakeSat,
-			analyzersSnapshot: []analyzerEntry{
-				{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
-			},
-			started: true,
+			analyzers: testAnalyzers(fakeSat,
+				analyzerEntry{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
+			),
 		}
 		cfg := config.ScalingPolicy{
 			ScaleUpThreshold:  0.85,
@@ -474,11 +468,9 @@ var _ = Describe("collectV2ModelRequest Disaggregated flag", func() {
 			result:       &domain.AnalyzerResult{},
 		}
 		e := &Engine{
-			saturationV2Analyzer: fakeSat,
-			analyzersSnapshot: []analyzerEntry{
-				{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
-			},
-			started: true,
+			analyzers: testAnalyzers(fakeSat,
+				analyzerEntry{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
+			),
 		}
 		cfg := config.ScalingPolicy{
 			ScaleUpThreshold:  0.85,
@@ -500,11 +492,7 @@ var _ = Describe("collectV2ModelRequest Disaggregated flag", func() {
 var _ = Describe("collectV2ModelRequest weight", func() {
 	collect := func(cfg config.ScalingPolicy) *allocation.ModelScalingRequest {
 		fakeSat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{}}
-		e := &Engine{
-			saturationV2Analyzer: fakeSat,
-			analyzersSnapshot:    []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: fakeSat}},
-			started:              true,
-		}
+		e := &Engine{analyzers: testAnalyzers(fakeSat)}
 		cfg.ScaleUpThreshold, cfg.ScaleDownBoundary = 0.85, 0.70
 		req, err := e.collectV2ModelRequest(context.Background(), "m", "ns", nil, cfg,
 			[]domain.VariantReplicaState{{VariantName: "v1"}}, nil, nil, nil, nil, 0)

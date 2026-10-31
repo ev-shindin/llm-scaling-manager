@@ -146,7 +146,7 @@ func TestOneClock_NewEngineSharesTheClockWithItsAnalyzers(t *testing.T) {
 	input := domain.AnalyzerInput{ModelID: "m", Namespace: "chat", Config: &config.ScalingPolicy{}}
 
 	seen := map[string]bool{}
-	for _, a := range e.analyzers {
+	for _, a := range e.analyzers.builtins() {
 		res, err := a.analyzer.Analyze(context.Background(), input)
 		require.NoError(t, err, a.name)
 		assert.Equal(t, pin, res.AnalyzedAt, "the %s analyzer reads the engine's clock", a.name)
@@ -189,12 +189,12 @@ func TestOneClock_AnExternalAnalyzerReadsTheEngineClock(t *testing.T) {
 	e := &Engine{
 		Config:                  cfg,
 		metricsRegistry:         registry,
-		externalAnalyzers:       make(map[string]domain.Analyzer),
+		analyzers:               newAnalyzerRegistry(),
 		ReplicaMetricsCollector: collector.NewReplicaMetricsCollector(src, k8s, nil, nil, variantOfPodLocator{}),
 		clock:                   cycleclock.New(base),
 	}
 	e.reconcileExternalAnalyzers(context.Background())
-	a, ok := e.externalAnalyzers["ttft-slo"]
+	a, ok := e.analyzers.externalAnalyzer("ttft-slo")
 	require.True(t, ok, "precondition: the catalog analyzer was built")
 
 	release := e.clock.Pin()

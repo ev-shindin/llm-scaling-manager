@@ -66,8 +66,8 @@ func unresolvedVariant() (*llmdVariantAutoscalingV1alpha1.VariantAutoscaling, sc
 
 func runWithAnalyzer(t *testing.T, e *Engine, va *llmdVariantAutoscalingV1alpha1.VariantAutoscaling, st scaletarget.ScaleTargetAccessor) {
 	t.Helper()
-	_, err := e.runV2AnalysisOnly(
-		context.Background(), "m", "ns", nil,
+	_, err := e.buildInputAndRunSaturation(
+		context.Background(),
 		config.ScalingPolicy{
 			KvCacheThreshold:     0.8,
 			QueueLengthThreshold: 5,
@@ -75,10 +75,8 @@ func runWithAnalyzer(t *testing.T, e *Engine, va *llmdVariantAutoscalingV1alpha1
 			ScaleUpThreshold:     0.85,
 			ScaleDownBoundary:    0.70,
 		},
-		nil,
 		map[string]scaletarget.ScaleTargetAccessor{utils.GetNamespacedKey("ns", "d"): st},
 		map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling{"ns/v1": va},
-		nil, 0,
 	)
 	require.NoError(t, err)
 }
@@ -86,7 +84,7 @@ func runWithAnalyzer(t *testing.T, e *Engine, va *llmdVariantAutoscalingV1alpha1
 func TestPublishedAcceleratorIsTheOneTheKeyUses(t *testing.T) {
 	e, registry := engineConfigEngine(t)
 	spy := &stabiliserSpy{stable: "NVIDIA-H200"}
-	e.saturationV2Analyzer = spy
+	e.setSaturation(spy)
 
 	va, st := unresolvedVariant()
 
@@ -121,7 +119,7 @@ func TestPublishedAcceleratorIsTheOneTheKeyUses(t *testing.T) {
 // accelerator label entirely.
 func TestPublishedAcceleratorFallsBackWithoutAStabiliser(t *testing.T) {
 	e, registry := engineConfigEngine(t)
-	e.saturationV2Analyzer = plainAnalyzer{}
+	e.setSaturation(plainAnalyzer{})
 
 	va, st := unresolvedVariant()
 	raw := accelerator.GetAcceleratorNameFromScaleTarget(va, st)

@@ -28,7 +28,7 @@ var _ = Describe("learned-state horizons reach the analyzer the engine builds", 
 		Expect(sourceRegistry.Register("prometheus", source.NewNoOpSource())).To(Succeed())
 		engine := NewEngine(k8sClient, k8sClient, k8sClient.Scheme(), nil, sourceRegistry, cfg,
 			allocation.NewNoOpLimiter("test"))
-		sat, ok := engine.saturationV2Analyzer.(*saturation.SaturationAnalyzer)
+		sat, ok := engine.saturationAnalyzer().(*saturation.SaturationAnalyzer)
 		Expect(ok).To(BeTrue(), "the V2 analyzer is the one that owns the horizons")
 		return sat
 	}

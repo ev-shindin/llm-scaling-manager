@@ -23,12 +23,10 @@ import (
 // (analyzerLivenessStaleCycles=3 → 90s window).
 func demandLivenessEngine(sat, tp domain.Analyzer) *Engine {
 	return &Engine{
-		saturationV2Analyzer: sat,
-		analyzersSnapshot: []analyzerEntry{
-			{name: domain.SaturationAnalyzerName, analyzer: sat},
-			{name: throughput.AnalyzerName, analyzer: tp},
-		},
-		started: true,
+		analyzers: testAnalyzers(sat,
+			analyzerEntry{name: domain.SaturationAnalyzerName, analyzer: sat},
+			analyzerEntry{name: throughput.AnalyzerName, analyzer: tp},
+		),
 	}
 }
 
@@ -140,7 +138,7 @@ func TestDetectDemandLiveness_ColdStartNoWarn(t *testing.T) {
 // the synthetic demand key. A model whose only entry is the demand key, with a
 // non-informative supply result, stays non-live.
 func TestDetectDemandLiveness_SyntheticKeyNeverFlipsLive(t *testing.T) {
-	e := &Engine{started: true}
+	e := &Engine{analyzers: testAnalyzers(nil)}
 	modelKey := utils.GetNamespacedKey("ns", "m")
 	demandKey := throughput.AnalyzerName + demandLatchSuffix
 	e.lastGoodAnalysis = map[string]map[string]time.Time{

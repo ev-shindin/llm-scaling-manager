@@ -259,17 +259,12 @@ func (s *recScript) engine(t *testing.T) *Engine {
 	registry := source.NewSourceRegistry()
 	registry.MustRegister("prometheus", replicaSource{modelID: "acme/agg"})
 	e := newEngine(s.k8s, s.k8s, clientgoscheme.Scheme, nil, registry, cfg, allocation.NewNoOpLimiter("test"), s.base)
-	sat := e.saturationV2Analyzer.(*saturation.SaturationAnalyzer)
+	sat := e.saturationAnalyzer().(*saturation.SaturationAnalyzer)
 	judging := slo.New(s.router, e.capacityStore).WithClock(e.clock).
 		WithStateTimeout(sat.Horizons().VariantTimeout).WithSlopeHoldFor(sat.Horizons().BucketRetention)
 	e.sloAnalyzer = judging
-	for i := range e.analyzers {
-		if e.analyzers[i].name == "slo" {
-			e.analyzers[i].analyzer = judging
-		}
-	}
+	e.analyzers.replaceBuiltin(domain.SLOAnalyzerName, judging)
 	require.NoError(t, e.RegisterAnalyzer(throughput.AnalyzerName, throughput.NewThroughputAnalyzer().WithClock(e.Clock())))
-	e.analyzersSnapshot = slices.Clone(e.analyzers)
 	if s.external != nil {
 		e.UpsertExternalAnalyzer(s.external.Name(), s.external)
 	}
@@ -708,24 +703,24 @@ func namedResultsText(t *testing.T, results []allocation.NamedAnalyzerResult) st
 	return strings.Join(parts, "\n")
 }
 
-// The engine reaches six capabilities by type assertion; with recording on
-// every one still holds, and each is the recorded analyzer itself.
-func TestLearnerRecording_TheEnginesTypeAssertionsHoldWithRecordingOn(t *testing.T) {
+// The engine reaches the saturation analyzer's capabilities through the
+// registry; with recording on every one is still there, and each is the
+// recorded analyzer itself.
+func TestLearnerRecording_TheSaturationCapabilitiesHoldWithRecordingOn(t *testing.T) {
 	s := newRecScript(recStart)
 	e := s.engine(t)
 	e.recordLearners(learnrec.New(&bytes.Buffer{}, 0))
-	_, ok := e.saturationV2Analyzer.(variantForgetter)
-	assert.True(t, ok, "variantForgetter")
-	_, ok = e.saturationV2Analyzer.(staleHistoryEvictor)
-	assert.True(t, ok, "staleHistoryEvictor")
-	_, ok = e.saturationV2Analyzer.(learnedStater)
-	assert.True(t, ok, "learnedStater")
-	_, ok = e.saturationV2Analyzer.(acceleratorStabiliser)
-	assert.True(t, ok, "acceleratorStabiliser")
-	_, ok = e.saturationV2Analyzer.(presenceNoter)
-	assert.True(t, ok, "presenceNoter")
+	caps := e.analyzers.saturationCaps()
+	sat := e.saturationAnalyzer()
+	for name, c := range map[string]any{
+		"variantForgetter": caps.forgetter, "staleHistoryEvictor": caps.evictor,
+		"learnedStater": caps.learned, "acceleratorStabiliser": caps.stabiliser,
+		"presenceNoter": caps.noter, "saturationRecorded": caps.recorded,
+	} {
+		assert.Same(t, sat, c, name)
+	}
 	var keeper any = e.sloAnalyzer
-	_, ok = keeper.(sloStateKeeper)
+	_, ok := keeper.(sloStateKeeper)
 	assert.True(t, ok, "sloStateKeeper")
 }
 

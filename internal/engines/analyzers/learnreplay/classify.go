@@ -53,7 +53,6 @@ var recordedTypes = []reflect.Type{
 	reflect.TypeFor[capacity.EvictStaleEvent](),
 
 	reflect.TypeFor[domain.AnalyzerResult](),
-	reflect.TypeFor[domain.AnalyzerInput](),
 
 	reflect.TypeFor[enginerec.CompositeEvent](),
 }

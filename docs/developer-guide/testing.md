@@ -412,6 +412,19 @@ capacity-build step reads no other. To write it again as a raw recording:
 LEARNREC_ENGINE_OUT=$HOME/engine.jsonl go test ./internal/engines/steadystate/ -run TestLearnerRecording_TheEngineLayerReplaysByteForByte -v
 ```
 
+The input builder (`buildAnalyzerInput`) is held by the same engine run.
+`TestInputBuilder_TheEngineRunRecordsTheSameEventsInTheSamePhases` asserts
+that every forget and scale-target load of a model comes before the model's
+saturation `Analyze`. It also compares the count of each event kind per
+cycle with `internal/engines/steadystate/testdata/engine-run-event-counts.txt`.
+That file is a golden under the same rule as the learner goldens:
+
+- A PR that changes it names the change in its `goldens:` section.
+- A PR that claims zero golden change leaves it untouched.
+
+Rewrite it with `ENGINE_RUN_EVENT_COUNTS_WRITE=1` on the test, locally. The
+test refuses the write when `CI` is set.
+
 An external analyzer's name is a name someone chose, so the export renames
 it to an `analyzer` pseudonym (`analyzer-01`) wherever it stands: the policy,
 an entry, a result, a grace entry, and a hold reason

@@ -320,7 +320,7 @@ var _ = Describe("Saturation Engine", func() {
 				SaturationAnalyzer: saturation.NewSaturationAnalyzer(capacity.NewStore()),
 				noted:              map[string][]string{},
 			}
-			engine.saturationV2Analyzer = spy
+			engine.setSaturation(spy)
 
 			Expect(engine.optimize(ctx)).To(Succeed())
 
