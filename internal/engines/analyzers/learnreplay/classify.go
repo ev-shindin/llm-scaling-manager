@@ -192,7 +192,7 @@ var valueRules = map[string]rule{
 	// The engine's composite events: analyzer names, and why a role is held.
 	"Entries.Name": {class: classAnalyzer}, "Grace.Name": {class: classAnalyzer}, "Composite.Name": {class: classVocab},
 	"HoldReasons": {class: classHoldReason},
-	"Effect": {class: classVocab}, "KvCacheDtype": {class: classVocab}, "WeightDtype": {class: classVocab},
+	"Effect":      {class: classVocab}, "KvCacheDtype": {class: classVocab}, "WeightDtype": {class: classVocab},
 	"Quantization": {class: classVocab}, "KVConnector": {class: classVocab},
 	"KVOffloadingBackend": {class: classVocab}, "MemoryLayout": {class: classVocab},
 
