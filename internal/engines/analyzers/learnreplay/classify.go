@@ -8,7 +8,6 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
@@ -258,7 +257,7 @@ var keyRules = map[string]rule{
 // may hold. A value not here stops the export, naming the field: add the
 // word here when it is the code's own, or classify the field as a rename
 // when it is a name someone chose.
-var vocabulary = setOf(
+var vocabulary = withWords(enginerec.Words(), setOf(
 	// Roles and analyzers.
 	"both", "decode", "prefill", "saturation", "slo", "throughput", "saturation-token-based",
 	"queueing-model", "default",
@@ -282,14 +281,18 @@ var vocabulary = setOf(
 	"fp8_e5m2", "int8", "awq", "gptq", "marlin", "awq_marlin", "gptq_marlin", "compressed-tensors",
 	"modelopt", "bitsandbytes", "NixlConnector", "LMCacheConnectorV1", "OffloadingConnector",
 	"MultiConnector", "P2pNcclConnector", "native", "lmcache", "cpu",
-	// The composite: its name, its decision paths, and why it holds a role
-	// (steadystate's hold reasons; an analyzer's grace names the analyzer).
-	allocation.CompositeSignalName, string(allocation.DecisionAgree), string(allocation.DecisionSingle),
-	string(allocation.DecisionNoSignal),
-	enginerec.HoldUnsized, enginerec.HoldOtherRoleUnsized, enginerec.HoldSaturationHolds,
 	// The redaction marker.
 	"redacted",
-)
+))
+
+// withWords adds words to a set and returns it: the composite's own words
+// (enginerec.Words), read from the code that writes them.
+func withWords(words []string, set map[string]bool) map[string]bool {
+	for _, w := range words {
+		set[w] = true
+	}
+	return set
+}
 
 func setOf(names ...string) map[string]bool {
 	out := make(map[string]bool, len(names))

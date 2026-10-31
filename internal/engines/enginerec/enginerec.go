@@ -58,6 +58,15 @@ func HoldReasons() []string {
 	return []string{HoldUnsized, HoldOtherRoleUnsized, HoldSaturationHolds}
 }
 
+// Words is every word the composite writes into a recording that the
+// export must keep as it is: the composite's name, its decision paths, and
+// the hold reasons that are whole words. The export reads them here,
+// beside the code that writes them, rather than retyping them.
+func Words() []string {
+	return append([]string{allocation.CompositeSignalName, string(allocation.DecisionAgree),
+		string(allocation.DecisionSingle), string(allocation.DecisionNoSignal)}, HoldReasons()...)
+}
+
 // Replayed is what a replay has reproduced when it reaches an engine event:
 // each analyzer's last result for a model, and the policy the model's last
 // Analyze received.

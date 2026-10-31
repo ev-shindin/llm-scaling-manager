@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"reflect"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -52,7 +52,7 @@ func newEngineScript(start time.Time) *recScript {
 	s.policy.Analyzers = append(s.policy.Analyzers, config.AnalyzerScoreConfig{Name: "ext"})
 	s.external = &scriptedExternal{calls: map[string]int{}}
 	for i := range s.variants {
-		if s.variants[i].name != "agg-a" {
+		if s.variants[i].name != recScaledVariant {
 			continue
 		}
 		rows := s.variants[i].rows
@@ -95,6 +95,10 @@ func (x *scriptedExternal) Analyze(_ context.Context, in domain.AnalyzerInput) (
 // replicas stay at ten, so a clamp that read them would not clamp.
 const recScaledDownAt = 6
 
+// recScaledVariant is the variant the engine script lends a bridge to and
+// scales below its rows.
+const recScaledVariant = "agg-a"
+
 // recMetadata is the discovery metadata of a model's variants in a cycle,
 // from their states. Every field is set, most to filler values: the
 // recording keeps only the three the capacity-build step reads (enginerec.
@@ -107,7 +111,7 @@ func recMetadata(states []domain.VariantReplicaState, model string, cycle int) [
 		m.VariantName, m.ModelID, m.Namespace, m.Role = vs.VariantName, model, recNS, vs.Role
 		m.Cost, m.AcceleratorName, m.Engine, m.GPUsPerReplica = 10+float64(i), vs.AcceleratorName, "vllm", vs.GPUsPerReplica
 		m.CurrentReplicas, m.DesiredReplicas, m.ReadyReplicas = vs.CurrentReplicas, vs.DesiredReplicas, vs.CurrentReplicas
-		if vs.VariantName == "agg-a" && cycle >= recScaledDownAt {
+		if vs.VariantName == recScaledVariant && cycle >= recScaledDownAt {
 			m.CurrentReplicas, m.DesiredReplicas = vs.CurrentReplicas-2, vs.CurrentReplicas-2
 		}
 		out = append(out, m)
@@ -161,7 +165,7 @@ func fillNonZero(v reflect.Value) {
 // has only those three, and every composite still matches, the clamped
 // cycles included.
 func TestLearnerRecording_TheCapacityBuildReadsOnlyTheRecordedMetadata(t *testing.T) {
-	states := []domain.VariantReplicaState{{VariantName: "agg-a", Role: domain.RoleBoth, CurrentReplicas: 10, DesiredReplicas: 10,
+	states := []domain.VariantReplicaState{{VariantName: recScaledVariant, Role: domain.RoleBoth, CurrentReplicas: 10, DesiredReplicas: 10,
 		AcceleratorName: "NVIDIA-H100-80GB-HBM3", GPUsPerReplica: 1}}
 	m := recMetadata(states, "acme/agg", recScaledDownAt)[0]
 	mv := reflect.ValueOf(m)
