@@ -216,6 +216,8 @@ little. These limits keep that small:
   does not add prefill for decode's shortfall.
 - The bound only rises. A later reading behind a full decode is lower once
   prefill has grown, and does not replace a higher one.
+- Within a minute the bound is the average of the queued prefill replicas,
+  not the fastest one.
 - Prefill's own reading replaces the bound as soon as prefill saturates while
   decode is fine.
 

@@ -176,9 +176,9 @@ func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate
 		}
 	}
 	ra.AddAt(rate, now)
-	if pod != "" {
+	if pod != "" && !isPrefillBoundKey(key) {
 		// A replica's rate started a sample of mu's window; the prefill
-		// bound writes under no pod and is not mu.
+		// bound writes its own window through this fold and is not mu.
 		a.paths.add(pathMuWritten, 1)
 	}
 	a.throughputSampledAt[key] = now
@@ -190,6 +190,9 @@ func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate
 type podReads struct {
 	at   time.Time
 	pods map[string]float64
+	// floor is the prefill bound's window max when the sample started: the
+	// figure the sample may not fall below (notePrefillBound). Zero for mu.
+	floor float64
 }
 
 // meanOf is the mean of the readings, zero when there are none.

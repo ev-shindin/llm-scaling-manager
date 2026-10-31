@@ -15,7 +15,7 @@ import (
 // replica start time (row 12).
 
 func otherCases() []propCase {
-	bound := func() muLearner { return newBoundMu() }
+	bound := func() muLearner { return newBoundMu(nil) }
 	return []propCase{
 		{class: classHeterogeneity, learner: "prefill-bound", name: "one-pod-doubled", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkMuDoubled(bound)},
 		{class: classHeterogeneity, learner: "prefill-bound", name: "one-slow-pod-n4", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkMuOneSlowPod(bound, 4)},
@@ -27,17 +27,42 @@ func otherCases() []propCase {
 	}
 }
 
-// boundMu is the prefill bound's write path: recordSaturatedThroughput writes
-// through mu's fold under one empty pod name, so within a minute it keeps the
-// max of every prefill pod's reading (notePrefillBound).
-type boundMu struct{ *analyzerMu }
+// boundMu is the prefill bound end to end: each reading goes through
+// notePrefillBound, a saturated prefill row of the named pod, and the figure
+// is the bound notePrefillBound last priced -- its window's max over the
+// effective prompt length.
+type boundMu struct {
+	*analyzerMu
+	cfg  *config.ScalingPolicy
+	edit func(*domain.ReplicaMetrics)
+	last float64
+}
 
-func newBoundMu() boundMu { return boundMu{newAnalyzerMu()} }
+const (
+	propBoundKey   = "test-ns|v|test-model|H200|1|prefill|ihuge|noout|q5"
+	propBoundIleff = 1000.0
+)
 
-func (m boundMu) read(_ string, rate float64) {
-	m.a.recordSaturatedThroughput(propMuKey, rate)
+// newBoundMu is the bound with edit, when given, applied to every row before
+// notePrefillBound reads it (a mutant that reintroduces an input defect).
+func newBoundMu(edit func(*domain.ReplicaMetrics)) *boundMu {
+	return &boundMu{analyzerMu: newAnalyzerMu(), edit: edit,
+		cfg: &config.ScalingPolicy{EnablePrefillThroughputBound: true, QueueLengthThreshold: 5}}
+}
+
+// read is one saturated prefill row of pod computing rate requests/s at
+// propBoundIleff tokens each.
+func (m *boundMu) read(pod string, rate float64) {
+	rm := makeReplicaMetrics(pod, "v", 100_000, propKv, 10, propBoundIleff, 1)
+	rm.PrefillComputedTokenRate = rate * propBoundIleff
+	if m.edit != nil {
+		m.edit(&rm)
+	}
+	m.last = m.a.notePrefillBound(rm, m.cfg, domain.RolePrefill, propBoundKey, "", propBoundIleff, admission{}, logr.Discard()).rate
 	m.clock = m.clock.Add(time.Second)
 }
+
+func (m *boundMu) figure() float64 { return m.last }
 
 // idleVerdict says, cycle by cycle, whether a decode replica holding frac of
 // its cache counts as settled idle room.
