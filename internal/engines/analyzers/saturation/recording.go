@@ -3,6 +3,7 @@ package saturation
 import (
 	"context"
 	"crypto/sha256"
+	"maps"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
@@ -105,10 +106,25 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 
 // SetSwitchesForReplay sets the package's replay switches by name: the test
 // seam a replay drives one named change through (analyzer-learner.md, 2.5).
-// No switch exists yet, so the only set it accepts is the empty one. Never
-// called on a production path; a test holds that.
+// The switches are SwitchK2ReadsSettle and SwitchK2WaitsAfterRestart; a name
+// it does not know is an error, and sets nothing. Never called on a
+// production path; a test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
-	return learnrec.UnknownSwitches("saturation", switches)
+	rest := maps.Clone(switches)
+	fields := map[string]*bool{
+		SwitchK2ReadsSettle:       &a.k2ReadsSettle,
+		SwitchK2WaitsAfterRestart: &a.k2WaitsAfterRestart,
+	}
+	for name := range fields {
+		delete(rest, name)
+	}
+	if err := learnrec.UnknownSwitches("saturation", rest); err != nil {
+		return err
+	}
+	for name, on := range switches {
+		*fields[name] = on
+	}
+	return nil
 }
 
 // Analyze computes capacity signals for a model across all its variants

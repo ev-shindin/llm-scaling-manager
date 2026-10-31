@@ -22,15 +22,22 @@ import (
 // optimize interval. A cycle whose collection failed (settle.KindHold) is in
 // no such recording, so the fallback cannot hold through one.
 //
+// The saturation analyzer's k2 reads the replay's tracker (its joined test),
+// as it read the engine's. A recording is an engine's: one made by driving
+// the analyzer alone gives it a tracker of the caller's, observed as the
+// engine does, or its replay reads otherwise from the first cycle (the
+// analyzer alone takes its first cycle's replicas as already watched,
+// saturation.observeOwnSettle).
+//
 // A known gap: an observation applies only with the next saturation Analyze
 // of its model. A cycle the engine observed and then did not analyze (an
 // error between the observation and the Analyze) leaves its observation
 // pending, and the next one replaces it, so the replay's tracker misses
-// rows the engine's saw. None of the committed recordings has such a cycle;
-// no reader depends on the replay's tracker in this PR.
+// rows the engine's saw, and k2 reads what the replay's holds. None of the
+// committed recordings has such a cycle.
 //
-// No replayed analyzer reads the tracker yet; the replay counts its verdicts
-// per reason (2.5), so a golden set that never reaches one says so.
+// The replay counts the tracker's verdicts per reason (2.5), so a golden set
+// that never reaches one says so.
 
 // settlePathPrefix names the settle tracker's per-path counters: the prefix
 // and the reason.

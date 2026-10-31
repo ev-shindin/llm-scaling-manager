@@ -28,6 +28,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 )
 
 // The coverage test (docs/proposals/analyzer-learner.md, 2.4), part 1: every
@@ -70,8 +71,10 @@ var reviewed = map[reflect.Type]buckets{
 			"ForgetLearnedState", "StableAcceleratorFor"},
 		// PathCounts reads the per-path counters (2.5), which only a replay
 		// reads and nothing restores.
-		readers:  []string{"Name", "Horizons", "BorrowTickGap", "PathCounts"},
-		builders: []string{"WithHorizons", "WithOptimizationInterval", "WithClock", "WithRecorder"},
+		readers: []string{"Name", "Horizons", "BorrowTickGap", "PathCounts"},
+		// WithSettleView hands k2 the engine's settle tracker; the replay hands
+		// it its own, observed from the settle events (settle.go).
+		builders: []string{"WithHorizons", "WithOptimizationInterval", "WithClock", "WithRecorder", "WithSettleView"},
 		seams:    []string{"SetSwitchesForReplay"},
 	},
 	reflect.TypeFor[*slo.Analyzer](): {
@@ -209,6 +212,9 @@ type fixture struct {
 	tp    *throughput.ThroughputAnalyzer
 	clk   *clocktesting.FakePassiveClock
 	rec   *learnrec.Recorder
+	// settle is the engine's settle tracker, observed before each cycle's
+	// Analyze as the engine observes it (fixture.cycle).
+	settle *settle.Tracker
 }
 
 type nilRouter struct{}
@@ -222,19 +228,22 @@ func newFixture(at time.Time) *fixture {
 	rec := learnrec.New(buf, 0)
 	clk := clocktesting.NewFakePassiveClock(at)
 	store := capacity.NewStore().WithRecorder(rec)
+	tracker := settle.NewTracker()
+	tracker.SetInterval(config.DefaultOptimizationInterval)
 	return &fixture{
-		buf:   buf,
-		clk:   clk,
-		rec:   rec,
-		store: store,
-		sat:   saturation.NewSaturationAnalyzer(store).WithClock(clk).WithRecorder(rec),
+		buf:    buf,
+		clk:    clk,
+		rec:    rec,
+		store:  store,
+		settle: tracker,
+		sat:    saturation.NewSaturationAnalyzer(store).WithClock(clk).WithRecorder(rec).WithSettleView(tracker),
 		slo:   slo.New(nilRouter{}, store).WithClock(clk).WithRecorder(rec),
 		tp:    throughput.NewThroughputAnalyzer().WithClock(clk).WithRecorder(rec),
 	}
 }
 
-// The switch hook is a seam: no switch exists yet, so each package takes the
-// empty set and refuses any name.
+// The switch hook is a seam: each package takes the empty set and refuses a
+// name it does not know.
 func TestSwitchHooks_AcceptTheEmptySetAndRefuseUnknownNames(t *testing.T) {
 	f := newFixture(time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC))
 	hooks := map[string]func(map[string]bool) error{

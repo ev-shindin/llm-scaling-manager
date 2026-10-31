@@ -130,6 +130,11 @@ type settleMemo struct {
 	// pastFirstCycle is set once the memo's first cycle has ended
 	// (noteIdleRuns, which runs once at the end of every cycle's pricing).
 	pastFirstCycle bool
+	// firstCycle is the cycle the memo was made on: the analyzer's first
+	// cycle for the model, after a controller restart or once the model was
+	// swept. The joined test on the settle tracker reads it with
+	// SwitchK2WaitsAfterRestart off (k2Joined).
+	firstCycle time.Time
 	// backlogs is the throughput floor's backlog per role on the cycles since
 	// the newest one at least BacklogGrowthLookback ago, oldest first
 	// (noteBacklogGrowth); empty before the first.
@@ -146,11 +151,12 @@ type readySighting struct {
 	restarted bool
 }
 
-// newSettleMemo is an empty memo in its first cycle.
-func newSettleMemo() *settleMemo {
+// newSettleMemo is an empty memo in its first cycle, the one at now.
+func newSettleMemo(now time.Time) *settleMemo {
 	return &settleMemo{
 		pods:       make(map[string][]settleReading),
 		readySince: make(map[string]readySighting),
+		firstCycle: now,
 	}
 }
 
@@ -168,9 +174,12 @@ type k2SettleInput struct {
 	threshold  float64
 	// ready is the row's Pod Ready (domain.ReplicaMetrics.Ready), for the
 	// joined test, and readyAt when its Pod last became Ready, zero when
-	// unknown (replicaReadySince).
+	// unknown (replicaReadySince). bridge is whether a warm-pool Pod lent to
+	// the variant serves it (domain.ReplicaMetrics.FromWarmPool): with
+	// readyAt's row, the settle tracker's key (k2Joined).
 	ready   bool
 	readyAt time.Time
+	bridge  bool
 	// rate is the replica's own service rate this cycle (saturatedCompletionRate)
 	// and rateOK whether it has one; ref is the rate on record for the bucket,
 	// zero when there is none; k2Ref is the mean of the bucket's k2 window,
@@ -194,12 +203,18 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	a.mu.Lock()
 	memo, ok := a.k2Settle[model]
 	if !ok {
-		memo = newSettleMemo()
+		memo = newSettleMemo(now)
 		a.k2Settle[model] = memo
 	}
-	joined, byReadyAt := memo.noteReady(pod, in.ready, in.readyAt, now)
-	if !in.readyAt.IsZero() {
-		a.paths.add(pathReadySince, 1)
+	firstCycle := memo.firstCycle
+	var joined, byReadyAt bool
+	if !a.k2ReadsSettle {
+		// Before the settle tracker (SwitchK2ReadsSettle off): the memo's
+		// own sighting of each Ready time (noteReady).
+		joined, byReadyAt = memo.noteReady(pod, in.ready, in.readyAt, now, a.k2WaitsAfterRestart)
+		if !in.readyAt.IsZero() {
+			a.paths.add(pathReadySince, 1)
+		}
 	}
 	trace := memo.pods[pod]
 	settled := in.tune.settledOverWindow(trace, now, in.tokens, in.threshold)
@@ -221,6 +236,15 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	})
 	a.mu.Unlock()
 
+	if a.k2ReadsSettle {
+		// The settle tracker has its own lock, and is read outside a.mu.
+		var readyKnown bool
+		joined, byReadyAt, readyKnown = a.k2Joined(in, firstCycle, now)
+		if readyKnown {
+			a.paths.add(pathReadySince, 1)
+		}
+	}
+
 	if in.queue < int(in.threshold) || in.tokens <= 0 {
 		return "" // not a saturated reading; nothing to judge
 	}
@@ -228,6 +252,7 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	// says: its one-minute gauges still hold the minute before it was routed
 	// to (throughput_admission.go).
 	if joined {
+		a.paths.add(pathK2UnsettledJoined, 1)
 		if byReadyAt {
 			a.paths.add(pathJoinedReady, 1)
 		}
@@ -252,6 +277,7 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	if settled {
 		return ""
 	}
+	a.paths.add(pathK2UnsettledWindow, 1)
 	return "queue deeper than the replica's whole resident batch, its service rate or its residency short of what is on record, and its resident KV not settled over a window: a load step, not a limit; not recorded"
 }
 

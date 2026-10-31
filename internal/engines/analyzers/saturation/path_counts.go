@@ -52,6 +52,18 @@ const PathRowsReadySince = "rows-ready-since"
 // time: the restart fix (#288) deciding the refusal, not the first sight.
 const PathJoinedRefusedReadySince = "joined-refused-ready-since"
 
+// PathK2UnsettledJoined counts saturated readings k2's settle test refused
+// as a replica that joined under a rate window ago (P1-obs-unsettled), the
+// Ready time or the first sight deciding it: the settle refusals by the
+// tracker's join, restart and rejoin (k2Joined).
+const PathK2UnsettledJoined = "k2-unsettled-joined"
+
+// PathK2UnsettledWindow counts saturated readings k2's settle test refused
+// as a load step, not a limit (P1-obs-unsettled): a queue deeper than the
+// replica's batch, its rate or residency short of what is on record, and its
+// resident KV not settled over a window.
+const PathK2UnsettledWindow = "k2-unsettled-window"
+
 // learnerPath indexes the counters.
 type learnerPath int
 
@@ -66,6 +78,8 @@ const (
 	pathInstantKV
 	pathReadySince
 	pathJoinedReady
+	pathK2UnsettledJoined
+	pathK2UnsettledWindow
 	numPaths
 )
 
@@ -81,10 +95,23 @@ var pathNames = [numPaths]string{
 	pathInstantKV:    PathRowsInstantKV,
 	pathReadySince:   PathRowsReadySince,
 	pathJoinedReady:  PathJoinedRefusedReadySince,
+
+	pathK2UnsettledJoined: PathK2UnsettledJoined,
+	pathK2UnsettledWindow: PathK2UnsettledWindow,
 }
 
 // PathNames is every per-path counter PathCounts reports, in order.
 func PathNames() []string { return append([]string(nil), pathNames[:]...) }
+
+// PathAwaitsRecording reports whether path p is reported and not yet
+// required above zero (2.5): it can run on this base, and no committed
+// recording, nor the in-process runs, reaches it. k2's settle refusal of a
+// load step (PathK2UnsettledWindow) needs the recording the learner
+// proposal names for its PR 2: EPP flow control off, where k2 reads the
+// engine's own queue on every saturated cycle (analyzer-learner.md, 2.8).
+// The unit tests drive it (k2_settle_test.go); it leaves this set in the PR
+// that adds that recording.
+func PathAwaitsRecording(p string) bool { return p == PathK2UnsettledWindow }
 
 // pathCounters is the analyzer's per-path counts. Atomic, so a path counts
 // without taking a.mu.

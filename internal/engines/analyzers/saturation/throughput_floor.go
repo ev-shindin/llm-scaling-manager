@@ -842,7 +842,7 @@ func (a *SaturationAnalyzer) noteBacklogGrowth(namespace, modelID string, backlo
 	}
 	memo, ok := a.k2Settle[model]
 	if !ok {
-		memo = newSettleMemo()
+		memo = newSettleMemo(now)
 		a.k2Settle[model] = memo
 	}
 	// The newest reading at least BacklogGrowthLookback old, else the oldest;

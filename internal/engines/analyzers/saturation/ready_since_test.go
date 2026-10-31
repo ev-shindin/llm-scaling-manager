@@ -9,6 +9,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 )
 
 // The analyzer ages a replica from the Ready time the collector puts on its
@@ -86,31 +87,55 @@ func TestReadySince_ARejoiningPodIsAsFreshAsANewOne(t *testing.T) {
 	assert.Zero(t, backMu, "and its 1.0 req/s (against 6.3 served) became the bucket's mu")
 }
 
-// A Ready time a window old is an established replica when the memo has seen
-// it that long, or when it was already Ready on the memo's first cycle. A
-// Ready time first seen now is held for a window from now, however old it
-// reads: the Ready time is the node's clock, and a node behind the
-// controller's dates a replica that has just joined into the past (review:
-// one 60 s behind skipped the window, and its filling reading became k2).
+// A Ready time a window old is an established replica when the controller
+// has seen it that long. A Ready time first seen now is held for a window
+// from now, however old it reads: the Ready time is the node's clock, and a
+// node behind the controller's dates a replica that has just joined into the
+// past (review: one 60 s behind skipped the window, and its filling reading
+// became k2). On the controller's first cycle the first sight is that cycle,
+// so every replica waits a window once (SwitchK2WaitsAfterRestart); with the
+// switch off, a replica already Ready then is aged from its Ready time
+// alone, as before the settle tracker.
 func TestReadySince_AKnownOldReadyTimeIsEstablished(t *testing.T) {
 	now := time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
 	old := now.Add(-2 * JoinedReplicaWindow)
+	// joined observes rows into a fresh tracker as the engine does, one
+	// cycle per call, and asks k2 whether pod has joined at the last one.
+	type cycle struct {
+		at      time.Time
+		readyAt time.Time
+	}
+	joined := func(waits bool, pod string, cycles ...cycle) bool {
+		t.Helper()
+		tr := settle.NewTracker()
+		a := NewSaturationAnalyzer(capacity.NewStore()).WithSettleView(tr)
+		a.k2WaitsAfterRestart = waits
+		var got bool
+		for _, c := range cycles {
+			tr.Observe(settleModel("ns", "m"), []settle.Row{{Key: settle.Key{Pod: pod, Variant: "v"}, Ready: true, ReadySince: c.readyAt}}, c.at)
+			got, _, _ = a.k2Joined(k2SettleInput{namespace: "ns", modelID: "m", variant: "v", pod: pod, ready: true}, cycles[0].at, c.at)
+		}
+		return got
+	}
+	half, window := now.Add(JoinedReplicaWindow/2), now.Add(JoinedReplicaWindow)
 
-	first := newSettleMemo()
-	assert.False(t, joinedOf(first.noteReady("v/p", true, old, now)), "Ready two windows ago, on the memo's first cycle")
-	assert.True(t, joinedOf(first.noteReady("v/q", true, now.Add(-time.Second), now)), "Ready a second ago, on the memo's first cycle")
-	assert.False(t, joinedOf(first.noteReady("v/u", true, time.Time{}, now)), "unknown on the memo's first cycle: taken as established")
+	// The controller's first cycle, the switch off: as before the tracker.
+	assert.False(t, joined(false, "p", cycle{now, old}), "switch off: Ready two windows ago, on the first cycle")
+	assert.True(t, joined(false, "q", cycle{now, now.Add(-time.Second)}), "switch off: Ready a second ago, on the first cycle")
+	assert.False(t, joined(false, "u", cycle{now, time.Time{}}), "switch off: unknown on the first cycle, taken as established")
+	// The switch on: the first cycle is the controller's first sight.
+	assert.True(t, joined(true, "p", cycle{now, old}), "Ready two windows ago, first seen on the first cycle: waits a window")
+	assert.True(t, joined(true, "u", cycle{now, time.Time{}}), "unknown on the first cycle: waits a window from first sight")
+	assert.False(t, joined(true, "p", cycle{now, old}, cycle{window, old}), "the same Ready time a window after the first cycle")
 
-	m := newSettleMemo()
-	m.pastFirstCycle = true
-	assert.True(t, joinedOf(m.noteReady("v/p", true, old, now)), "a Ready time two windows old, first seen now: a node clock behind")
-	assert.True(t, joinedOf(m.noteReady("v/p", true, old, now.Add(JoinedReplicaWindow/2))), "the same Ready time half a window later")
-	assert.False(t, joinedOf(m.noteReady("v/p", true, old, now.Add(JoinedReplicaWindow))), "the same Ready time a window after it was first seen")
-	assert.True(t, joinedOf(m.noteReady("v/p", true, now.Add(JoinedReplicaWindow), now.Add(JoinedReplicaWindow))), "a new Ready time: back from a restart")
-	assert.True(t, joinedOf(m.noteReady("v/f", true, now.Add(time.Minute), now)), "a Ready time in the future: a node clock ahead")
-	assert.True(t, joinedOf(m.noteReady("v/f", true, now.Add(time.Minute), now.Add(JoinedReplicaWindow))), "held a window from that Ready time, not from first sight")
-	assert.True(t, joinedOf(m.noteReady("v/r", true, time.Time{}, now)), "unknown: first seen now, after the memo's first cycle")
+	// After the first cycle, with either setting.
+	for _, waits := range []bool{false, true} {
+		pre := cycle{now.Add(-time.Hour), old}
+		assert.True(t, joined(waits, "p", cycle{now.Add(-time.Hour), time.Time{}}, cycle{now, old}), "a Ready time two windows old, first seen now: a node clock behind")
+		assert.True(t, joined(waits, "p", pre, cycle{now, old.Add(time.Second)}, cycle{half, old.Add(time.Second)}), "a new Ready time half a window later")
+		assert.False(t, joined(waits, "p", pre, cycle{now, old}, cycle{window, old}), "the same Ready time a window after it was first seen")
+		assert.True(t, joined(waits, "p", pre, cycle{now, old}, cycle{window, window}), "a new Ready time: back from a restart")
+		assert.True(t, joined(waits, "f", pre, cycle{now, now.Add(time.Minute)}), "a Ready time in the future: a node clock ahead")
+		assert.True(t, joined(waits, "f", pre, cycle{now, now.Add(time.Minute)}, cycle{window, now.Add(time.Minute)}), "held a window from that Ready time, not from first sight")
+	}
 }
-
-// joinedOf is noteReady's first result.
-func joinedOf(joined, _ bool) bool { return joined }

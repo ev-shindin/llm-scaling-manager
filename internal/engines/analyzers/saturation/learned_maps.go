@@ -104,6 +104,7 @@ func (a *SaturationAnalyzer) learnedMapsLocked() []learnedMap {
 		registered("hotRankHeld", scopeShared, a.hotRankHeld),
 		registered("k2Settle", scopeShared, a.k2Settle),
 		registered("fleetShape", scopeShared, a.fleetShape),
+		registered("ownSettled", scopeShared, a.ownSettled),
 	}
 }
 

@@ -295,7 +295,9 @@ type Engine struct {
 	observeNow func() time.Time
 	// settle is when each replica last started to settle (settle.go): the
 	// engine writes it at the top of runAnalyzers, and the load-balance
-	// tracker reads it. Built on first use.
+	// tracker and the saturation analyzer's k2 read it. NewEngine builds it
+	// and hands the analyzer its view; an Engine built as a literal builds
+	// it on first use.
 	settle *settle.Tracker
 }
 
@@ -327,7 +329,11 @@ func newEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 
 	capacityStore := capacity.NewStore()
 	cycleClock := cycleclock.New(base)
-	satV2 := saturation.NewSaturationAnalyzer(capacityStore).WithClock(cycleClock)
+	// The settle tracker, written at the top of every cycle (settle.go):
+	// built here so the saturation analyzer reads the engine's, not one of
+	// its own.
+	settleTracker := settle.NewTracker()
+	satV2 := saturation.NewSaturationAnalyzer(capacityStore).WithClock(cycleClock).WithSettleView(settleTracker)
 	// How long the analyzer keeps what it learns. Configured here rather than
 	// read per-cycle: these are process-lifetime horizons, and a sweep whose
 	// horizon moved underneath it would evict on one age and report another.
@@ -416,6 +422,7 @@ func newEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 		sloAnalyzer:             sloAnalyzer,
 		capacityStore:           capacityStore,
 		clock:                   cycleClock,
+		settle:                  settleTracker,
 		lastGoodAnalysis:        make(map[string]map[string]time.Time),
 		lastAnalyzerSeries:      make(map[string]analyzerSeries),
 		lastBlockedModels:       make(map[string]blockedModelRef),

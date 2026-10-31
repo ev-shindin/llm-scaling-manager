@@ -36,6 +36,9 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 	if !ok {
 		return nil, fmt.Errorf("expected *ScalingPolicy, got %T", input.Config)
 	}
+	// Without the engine's settle tracker, the analyzer observes its own,
+	// first, as the engine does before any analyzer runs (settle_view.go).
+	a.observeOwnSettle(input, a.now())
 
 	// Learned state restored after a controller restart waits for this: the
 	// engine has just loaded each variant's configuration from its scale

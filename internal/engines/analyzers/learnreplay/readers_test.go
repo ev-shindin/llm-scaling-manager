@@ -18,6 +18,8 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 )
 
 // The coverage test trusts its buckets: a reader or a builder records
@@ -57,6 +59,10 @@ func (f *fixture) cycle(t *testing.T, n int) {
 	f.slo.EvictStale(at)
 	f.store.EvictStale(at, time.Hour)
 	in := readersInput()
+	// The engine observes the cycle's rows before any analyzer runs; the
+	// recording carries no observation, so the replay observes its own at
+	// each Analyze's clock, at the default interval, and reads alike.
+	f.settle.Observe(utils.GetNamespacedKey(in.Namespace, in.ModelID), settlerow.Of(in.ReplicaMetrics, nil), at)
 	for _, a := range []interface {
 		Analyze(context.Context, domain.AnalyzerInput) (*domain.AnalyzerResult, error)
 	}{f.sat, f.slo, f.tp} {
@@ -75,6 +81,7 @@ func TestReadersAndBuildersChangeNothing(t *testing.T) {
 		"saturation.WithHorizons":             func(f *fixture) { f.sat.WithHorizons(f.sat.Horizons()) },
 		"saturation.WithOptimizationInterval": func(f *fixture) { f.sat.WithOptimizationInterval(0) },
 		"saturation.WithClock":                func(f *fixture) { f.sat.WithClock(f.clk) },
+		"saturation.WithSettleView":           func(f *fixture) { f.sat.WithSettleView(f.settle) },
 		"slo.Name":                            func(f *fixture) { f.slo.Name() },
 		"slo.StateTimeout":                    func(f *fixture) { f.slo.StateTimeout() },
 		"slo.SlopeHoldFor":                    func(f *fixture) { f.slo.SlopeHoldFor() },

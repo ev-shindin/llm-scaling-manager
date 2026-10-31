@@ -675,7 +675,8 @@ type GoldenCheck struct {
 // settle tracker's verdicts the recordings reach (requiredSettlePaths). With
 // the engine's replay registered, its composite paths are required too.
 func requiredPaths() []string {
-	return slices.Concat(saturation.PathNames(), requiredSettlePaths(), enginePathNames())
+	sat := slices.DeleteFunc(saturation.PathNames(), saturation.PathAwaitsRecording)
+	return slices.Concat(sat, requiredSettlePaths(), enginePathNames())
 }
 
 // pathProblems names each required path the fixtures ran on no cycle.

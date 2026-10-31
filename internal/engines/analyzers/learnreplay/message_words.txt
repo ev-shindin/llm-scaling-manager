@@ -1033,6 +1033,10 @@ k2
 k2-compute
 k2-decision
 k2-obs-admitted
+k2-reads-the-settle-tracker
+k2-unsettled-joined
+k2-unsettled-window
+k2-waits-after-controller-restart
 k2Borrows
 k2ComputeBound
 k2History
@@ -1409,6 +1413,7 @@ ownCapacity
 ownPerReplicaCapacity
 ownPriority
 ownReplicas
+ownSettled
 ownerReferences
 p
 page_size

@@ -107,7 +107,7 @@ func (a *SaturationAnalyzer) noteIdleRuns(
 	defer a.mu.Unlock()
 	memo, ok := a.k2Settle[model]
 	if !ok {
-		memo = newSettleMemo()
+		memo = newSettleMemo(now)
 		a.k2Settle[model] = memo
 	}
 	if memo.idle == nil {

@@ -416,7 +416,14 @@ func probeK2Window(r *rand.Rand, n float64) (bool, error) {
 func probeEpisodeGap(r *rand.Rand, h float64) (bool, error) {
 	rig := newPropRig()
 	tok := int64(float64(propKv) * (0.88 + 0.05*r.Float64()))
-	if err := rig.runK2(k2Reading{tok, 10, 6, time.Duration(h * float64(time.Hour))}, k2Reading{tok, 10, 6, propCycle}); err != nil {
+	// Unseen for most of h hours, the replica is a new sighting (the settle
+	// tracker's absence), so its readings wait a window: four refused, and
+	// the fifth, written h hours after the first.
+	readings := []k2Reading{{tok, 10, 6, time.Duration(h*float64(time.Hour)) - JoinedReplicaWindow}}
+	for range 5 {
+		readings = append(readings, k2Reading{tok, 10, 6, propCycle})
+	}
+	if err := rig.runK2(readings...); err != nil {
 		return false, err
 	}
 	rig.a.mu.Lock()

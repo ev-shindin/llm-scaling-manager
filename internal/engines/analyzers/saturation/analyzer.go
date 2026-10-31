@@ -13,6 +13,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 )
 
 // The analyzer itself: its state, its lifecycle, and the lookups that belong
@@ -250,9 +251,22 @@ type SaturationAnalyzer struct {
 	// (WithClock), and tests set it.
 	now func() time.Time
 	// readySince is when a replica's Pod last became Ready, as the
-	// collector reports it, zero when unknown (replicaReadySince); tests
-	// may set it to stand in for the collector.
+	// collector reports it, zero when unknown (replicaReadySince): what the
+	// analyzer's own settle tracker reads. Tests may set it to stand in for
+	// the collector.
 	readySince func(domain.ReplicaMetrics) time.Time
+	// settle is the engine's settle tracker, read-only (WithSettleView);
+	// nil when the engine gave none, and ownSettle, observed by the
+	// analyzer itself, stands in (settle_view.go).
+	settle    settle.View
+	ownSettle *settle.Tracker
+	// ownSettled is the models ownSettle has observed (observeOwnSettle).
+	ownSettled map[string]bool
+	// k2ReadsSettle is SwitchK2ReadsSettle and k2WaitsAfterRestart
+	// SwitchK2WaitsAfterRestart: on from the constructor; a replay turns
+	// them off (SetSwitchesForReplay).
+	k2ReadsSettle       bool
+	k2WaitsAfterRestart bool
 	// horizons is how long each kind of learned state is kept. Defaulted
 	// from capacity.DefaultHorizons and overridable by configuration --
 	// which is the only way any of this is reachable on a cluster, the
@@ -393,6 +407,10 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		variantSeenAt:          make(map[string]time.Time),
 		now:                    clock.RealClock{}.Now,
 		readySince:             replicaReadySince,
+		ownSettle:              newOwnSettle(),
+		ownSettled:             make(map[string]bool),
+		k2ReadsSettle:          true,
+		k2WaitsAfterRestart:    true,
 		horizons:               capacity.DefaultHorizons(),
 	}
 }
