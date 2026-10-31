@@ -70,15 +70,16 @@ func collectOne(t *testing.T, podName string, located map[string]string) []metri
 	}
 	out := make([]metricRow, 0, len(results))
 	for _, r := range results {
-		out = append(out, metricRow{pod: r.PodName, variant: r.VariantName, fromPool: r.FromWarmPool})
+		out = append(out, metricRow{pod: r.PodName, variant: r.VariantName, fromPool: r.FromWarmPool, lentSince: r.LentSince})
 	}
 	return out
 }
 
 type metricRow struct {
-	pod      string
-	variant  string
-	fromPool bool
+	pod       string
+	variant   string
+	fromPool  bool
+	lentSince time.Time
 }
 
 // A LENT pool Pod is attributed to the variant it is serving.
@@ -104,6 +105,24 @@ func TestALentPoolPodIsAttributedToTheVariantItServes(t *testing.T) {
 	}
 	if !rows[0].fromPool {
 		t.Error("FromWarmPool is false: the analyzer needs it to count the demand and NOT the supply")
+	}
+}
+
+// A bridge carries when its current lend began, so the settle tracker tells a
+// Pod lent again from a missed scrape of the old lend: the name, the variant
+// and the Ready time are the same either way.
+func TestABridgeCarriesWhenItsLendBegan(t *testing.T) {
+	t.Cleanup(decision.DefaultBridges.Reset)
+	lent := time.Now().Add(-time.Minute)
+	decision.PublishBridges(bridgeNS, map[string]string{bridgePod: bridgeVariant}, lent)
+	decision.PublishBridges(bridgeNS, map[string]string{bridgePod: bridgeVariant}, lent.Add(5*time.Second))
+
+	rows := collectOne(t, bridgePod, nil)
+	if len(rows) != 1 || !rows[0].lentSince.Equal(lent) {
+		t.Fatalf("rows = %+v, want one bridge lent since %v", rows, lent)
+	}
+	if rows := collectOne(t, "ordinary-replica-0", map[string]string{"ordinary-replica-0": "its-own-scaler"}); len(rows) != 1 || !rows[0].lentSince.IsZero() {
+		t.Errorf("rows = %+v, want an ordinary replica with no lend time", rows)
 	}
 }
 

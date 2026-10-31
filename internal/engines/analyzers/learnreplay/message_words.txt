@@ -1602,6 +1602,7 @@ refusing
 registered
 registering
 registry
+rejoined
 relaxed
 release
 release-taken
@@ -1665,6 +1666,7 @@ resources
 rest
 rest-client-timeout
 restart
+restarted
 restore
 restored
 restoredTransfers
@@ -1695,6 +1697,7 @@ roleRC
 roleSC
 roles
 rolesKnownNow
+rolled-out
 rollout
 room
 rose
@@ -1797,6 +1800,7 @@ servingSet
 set
 sets
 setting
+settle.Observe
 settled
 settling
 sfz_flow_control_queue_size

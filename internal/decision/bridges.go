@@ -41,7 +41,11 @@ type bridgeSnapshot struct {
 	// Deployment beneath the ScaledObject, a different string on any real
 	// deployment, and a lending published under it matches no analyzer row.
 	lentTo map[string]string
-	at     time.Time
+	// since is pod name → when its current lend began: the first pass that
+	// published the Pod lent to that variant, carried across passes that
+	// keep publishing it so.
+	since map[string]time.Time
+	at    time.Time
 }
 
 // NewBridgeStore returns an empty store.
@@ -60,13 +64,26 @@ var DefaultBridges = NewBridgeStore()
 // pool publishes on every pass in which it could observe itself, and publishes
 // nothing on a pass where it could not -- "could not see" must not read as
 // "nothing is lent".
+//
+// A Pod published lent to the same variant as on the namespace's previous
+// pass keeps the time its lend began; any other lent Pod's lend begins at
+// at. So a Pod handed back and lent again reads a new lend time, though its
+// name, its variant and its Ready time are what they were (LendFor).
 func (s *BridgeStore) Publish(namespace string, lentTo map[string]string, at time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.by == nil {
 		s.by = map[string]bridgeSnapshot{}
 	}
-	s.by[namespace] = bridgeSnapshot{lentTo: maps.Clone(lentTo), at: at}
+	prev := s.by[namespace]
+	since := make(map[string]time.Time, len(lentTo))
+	for pod, variant := range lentTo {
+		since[pod] = at
+		if was, ok := prev.since[pod]; ok && prev.lentTo[pod] == variant {
+			since[pod] = was
+		}
+	}
+	s.by[namespace] = bridgeSnapshot{lentTo: maps.Clone(lentTo), since: since, at: at}
 }
 
 // VariantFor returns the variant a Pod is lent to, and whether it is a bridge at
@@ -77,20 +94,27 @@ func (s *BridgeStore) Publish(namespace string, lentTo map[string]string, at tim
 // to a variant on the strength of a lending that may since have ended would add
 // demand for load nobody is carrying.
 func (s *BridgeStore) VariantFor(namespace, pod string, maxAge time.Duration, now time.Time) (string, bool) {
+	variant, _, lent := s.LendFor(namespace, pod, maxAge, now)
+	return variant, lent
+}
+
+// LendFor is VariantFor with the time the Pod's current lend began
+// (Publish).
+func (s *BridgeStore) LendFor(namespace, pod string, maxAge time.Duration, now time.Time) (string, time.Time, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	snapshot, ok := s.by[namespace]
 	if !ok {
-		return "", false
+		return "", time.Time{}, false
 	}
 	if maxAge > 0 && now.Sub(snapshot.at) > maxAge {
-		return "", false
+		return "", time.Time{}, false
 	}
 	variant, lent := snapshot.lentTo[pod]
 	if !lent || variant == "" {
-		return "", false
+		return "", time.Time{}, false
 	}
-	return variant, true
+	return variant, snapshot.since[pod], true
 }
 
 // Reset drops every lending. For tests, and for a controller that has lost its

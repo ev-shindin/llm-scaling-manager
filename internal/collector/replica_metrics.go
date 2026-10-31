@@ -59,13 +59,14 @@ import (
 	"k8s.io/client-go/tools/record"
 )
 
-// BridgeResolver answers which variant a warm-pool Pod is lent to right now.
+// BridgeResolver answers which variant a warm-pool Pod is lent to right now,
+// and since when.
 // The decision store implements it; the collector takes it as an interface so
 // that collecting does not import deciding -- the lending is a decision
 // output that reaches the collector as an input, the way everything else the
 // collector attributes by does.
 type BridgeResolver interface {
-	VariantFor(namespace, pod string, maxAge time.Duration, now time.Time) (string, bool)
+	LendFor(namespace, pod string, maxAge time.Duration, now time.Time) (string, time.Time, bool)
 }
 
 // ReplicaMetricsCollector collects replica-level metrics for both saturation
@@ -137,12 +138,13 @@ func (c *ReplicaMetricsCollector) SetBridgeResolver(r BridgeResolver) {
 // keep adding it for as long as the controller ran.
 const warmPoolLendingMaxAge = 2 * time.Minute
 
-// bridgeFor asks the resolver, if there is one, whether pod is a lent bridge.
-func (c *ReplicaMetricsCollector) bridgeFor(namespace, pod string) (string, bool) {
+// bridgeFor asks the resolver, if there is one, whether pod is a lent bridge,
+// and when its current lend began.
+func (c *ReplicaMetricsCollector) bridgeFor(namespace, pod string) (string, time.Time, bool) {
 	if c.bridges == nil {
-		return "", false
+		return "", time.Time{}, false
 	}
-	return c.bridges.VariantFor(namespace, pod, warmPoolLendingMaxAge, time.Now())
+	return c.bridges.LendFor(namespace, pod, warmPoolLendingMaxAge, time.Now())
 }
 
 // BeginCycle opens an optimize cycle, arming the memo that lets every model in a

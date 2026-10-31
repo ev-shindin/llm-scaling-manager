@@ -27,6 +27,36 @@ func TestALentPodResolvesToTheVariantItServes(t *testing.T) {
 	}
 }
 
+// A lend keeps its start across the passes that go on publishing it, and a
+// Pod handed back and lent again, or lent to another variant, starts a new
+// one: nothing else tells the settle tracker a new lend from the old.
+func TestALendKeepsItsStartUntilThePodIsLentAgain(t *testing.T) {
+	s := NewBridgeStore()
+	t0 := time.Now()
+	since := func(at time.Time) time.Time {
+		t.Helper()
+		_, began, lent := s.LendFor("tenant", "pool-0", time.Minute, at)
+		if !lent {
+			t.Fatalf("pool-0 is not lent at %v", at)
+		}
+		return began
+	}
+	s.Publish("tenant", map[string]string{"pool-0": variantA}, t0)
+	s.Publish("tenant", map[string]string{"pool-0": variantA}, t0.Add(5*time.Second))
+	if got := since(t0.Add(5 * time.Second)); !got.Equal(t0) {
+		t.Errorf("a lend published on two passes began at %v, want the first pass %v", got, t0)
+	}
+	s.Publish("tenant", map[string]string{}, t0.Add(10*time.Second))
+	s.Publish("tenant", map[string]string{"pool-0": variantA}, t0.Add(15*time.Second))
+	if got := since(t0.Add(15 * time.Second)); !got.Equal(t0.Add(15 * time.Second)) {
+		t.Errorf("a Pod handed back and lent again began at %v, want the new lend %v", got, t0.Add(15*time.Second))
+	}
+	s.Publish("tenant", map[string]string{"pool-0": "variant-b"}, t0.Add(20*time.Second))
+	if got := since(t0.Add(20 * time.Second)); !got.Equal(t0.Add(20 * time.Second)) {
+		t.Errorf("a Pod lent to another variant began at %v, want %v", got, t0.Add(20*time.Second))
+	}
+}
+
 // A Pod handed back stops being a bridge.
 //
 // Publishing is wholesale for exactly this: a store that only ever learned of
