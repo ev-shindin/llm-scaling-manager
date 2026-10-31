@@ -271,9 +271,9 @@ var vocabulary = withWords(enginerec.Words(), setOf(
 	"input-invalid",
 	"itl-line", "k2", "mu", "deployment", "live", "store", "unobserved", "whole", "partial", "none",
 	"tpot", "ttft", "mean", "p50", "p90", "p95", "p99",
-	// Freshness, limiter scopes and types, toleration operators and effects.
+	// Freshness, limiter scopes and types, optimizer types, toleration operators and effects.
 	"fresh", "stale-ok", "unavailable", "namespace", "cluster", "quota", "gpu-inventory", "kueue",
-	"utilization-share", "Exists", "Equal", "In", "NotIn", "DoesNotExist", "Gt", "Lt",
+	"utilization-share", "utilizationShare", "Exists", "Equal", "In", "NotIn", "DoesNotExist", "Gt", "Lt",
 	"NoSchedule", "PreferNoSchedule", "NoExecute",
 	// Engines, dtypes, quantization, KV connectors and layouts.
 	"vllm", "sglang", "auto", "half", "float16", "bfloat16", "float", "float32", "fp8", "fp8_e4m3",
