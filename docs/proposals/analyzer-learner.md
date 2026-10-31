@@ -25,8 +25,11 @@
   (`TestABrownoutKeepsTheSettle`). A brownout that drops the rows altogether
   (a failed collection, or one that returns no series) keeps it too: the
   engine holds the model's sightings on such a cycle
-  (`TestSettle_AFailedCollectionKeepsTheSighting`), for up to 5 min without
-  an observation, after which the model is forgotten. The absence tolerance
+  (`TestSettle_AFailedCollectionKeepsTheSighting`,
+  `TestSettle_OptimizeV2HoldsOnEveryPathWithNoRows`), for up to 5 min
+  without an observation (or the tolerance, if longer), after which the
+  model is forgotten. A hold leaves idle runs to the tolerance, as missing
+  rows do (`TestHoldLeavesIdleRunsToTheTolerance`). The absence tolerance
   (4.2) is 1 min or 2.5 optimize intervals, whichever is longer, so a long
   interval does not make every cycle an absence
   (`TestTrackerEndsTheGraceAtLongIntervals`). The re-lend (4.2): the warm pool's lend
@@ -958,7 +961,8 @@ the third passes on the parent and must keep passing.
   brownout longer than 1 min does not restart every replica's settle. A cycle
   that reads no rows of the model at all (its collection failed, or returned
   no series) is not a gap either: the engine holds the model's sightings
-  through it (PR 1), for up to 5 min without an observation. A rule
+  through it (PR 1), for up to 5 min without an observation, or the
+  tolerance if longer. A rule
   compares against the reading one period back, not one cycle back:
   cycle-to-cycle one-minute peaks share 45 s.
 - **The brownout trade.** A run of unknown rows keeps the settle. So a replica
