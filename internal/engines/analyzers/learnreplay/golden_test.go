@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -30,12 +31,24 @@ func TestGoldens_EveryCommittedGoldenReproduces(t *testing.T) {
 	// A check that compared nothing is not a pass.
 	require.NotEmpty(t, m.Goldens, "no fixture")
 	require.Equal(t, len(m.Goldens), c.Fixtures, "fixtures replayed")
+	// Every output of every fixture compares rows, but for an output its
+	// recording allows to be empty, each by a named rule (emptyRules): an
+	// analyzer built and never analyzed, no ITL line published or borrowed,
+	// no learned-state snapshot taken.
 	for _, g := range m.Goldens {
 		for _, o := range g.Outputs {
+			if c.mayBeEmpty[g.Name][path.Base(o)] && c.Rows[o] == 0 {
+				t.Logf("%s is empty, by its rule", o)
+				continue
+			}
 			assert.Positive(t, c.Rows[o], "%s compared no row", o)
 		}
 	}
-	t.Logf("%d fixtures, rows compared per file: %v", c.Fixtures, c.Rows)
+	// The E1 benchmark goldens ran under a policy that lists only
+	// saturation: slo was built and never analyzed in both, and no other
+	// fixture has an analyzer it never analyzed.
+	assert.Equal(t, map[string][]string{"e1": {analyzerSLO}, "e1-tuned": {analyzerSLO}}, c.NotRun)
+	t.Logf("%d fixtures, rows compared per file: %v; built and never analyzed: %v", c.Fixtures, c.Rows, c.NotRun)
 }
 
 // copyGoldens copies the committed goldens to a directory a negative control

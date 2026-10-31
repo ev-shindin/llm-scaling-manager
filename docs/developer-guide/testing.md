@@ -320,12 +320,43 @@ less than one part in 10^9. So two things that vary between replays of the
 same recording do not fail the check: events numbered in another order, and
 a float sum whose last bits differ.
 
-The check also fails on a golden that compares nothing: every analyzer the
-recording's start line says ran must have results, and the slo analyzer, if
-it ran, must have published. `lines.csv` and `learned-state.csv` may be
-empty: lines are published only when the policy turns learned-state reuse
-on, and documents are written only when the learned-state snapshot is on.
-The start line records neither.
+The check also fails on a golden that compares nothing. Every analyzer that
+analyzed must have results, and the slo analyzer, if it analyzed, must have
+published.
+
+- An analyzer analyzed when the recording holds at least one of its
+  `Analyze` events.
+- The start line names the analyzers the controller built. The controller
+  builds the slo analyzer whatever the policy lists, so a run whose models
+  list only saturation has slo built and never analyzed.
+- Such an analyzer is not compared: its rows in `results.csv` and its
+  `slo-published.csv` are empty. The add writes it into the fixture's
+  `notRun` field in `goldens.yaml`, and the check prints it as a note, for
+  example `note: e1: slo: built, never analyzed (0 Analyze events)`. The
+  check fails when a replay disagrees with `notRun`, so a fixture that
+  moves into or out of the set is a diff of `goldens.yaml`. An update
+  writes the set back and prints a `changed:` line for each fixture whose
+  set it changed.
+- An analyzer is listed when a policy entry names it as its effective
+  type: its `type` when set, else its `name`. An entry with
+  `enabled: false` does not list it.
+- An analyzer that a recorded policy lists and that has no `Analyze` event
+  is refused: the controller was asked to run it and never did.
+- An analyzer with even one `Analyze` event analyzed, and a golden that
+  compares nothing of it is refused.
+
+Every other output of a fixture must hold rows, unless its recording
+allows it to be empty by one of these rules; the check fails on an output
+that is empty without one:
+
+- `slo-published.csv`, when the run did not build the slo analyzer, or
+  built it and never analyzed it.
+- `lines.csv`, when the recording holds no ITL line published or borrowed.
+  A variant publishes a line once it fits one of its own, whatever the
+  policy says of reuse; a borrow, the other half, happens only when the
+  policy turns learned-state reuse on.
+- `learned-state.csv`, when the recording holds no learned-state export:
+  the controller took no learned-state snapshot in the run.
 
 The `acceptance` golden is the in-process acceptance run. It covers little
 learning: twelve cycles of fixed synthetic rows. The start-time average, the
@@ -617,8 +648,10 @@ a full one is about twice the limit; at that ratio a head of up to about
 100 MiB fits. Cut it to
 its head with `HEAD_LINES=N`. When a recording is too large, the add says
 which `N` to use: a head that fits, ends on an `Analyze`, and holds an
-`Analyze` of every analyzer the run had. Any head
-replays.
+`Analyze` of every analyzer the whole recording analyzed. Any head
+replays. The add refuses a head that drops every `Analyze` of an analyzer
+the whole recording analyzed: cut there, the analyzer would read as built
+and never analyzed, and no golden would compare it.
 
 To export without adding a golden, for example to share a recording:
 
