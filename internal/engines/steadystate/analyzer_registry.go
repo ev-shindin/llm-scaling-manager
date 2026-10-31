@@ -31,8 +31,9 @@ type analyzerEntry struct {
 // typed capabilities (saturationCapabilities); nothing else asserts on the
 // analyzer's type.
 //
-// A nil registry reads as empty: an Engine a test builds by hand may have
-// none.
+// A nil registry reads as empty and removes nothing: an Engine a test builds
+// by hand may have none. The engine creates one before it registers or
+// starts (Engine.ensureAnalyzers).
 type analyzerRegistry struct {
 	mu sync.RWMutex
 	// builtin is the built-in analyzers in registration order. Appended to
@@ -101,8 +102,12 @@ func (r *analyzerRegistry) upsert(name string, a domain.Analyzer) {
 	r.external[name] = a
 }
 
-// remove retires an external analyzer. Idempotent.
+// remove retires an external analyzer. Idempotent, and a no-op on a nil
+// registry.
 func (r *analyzerRegistry) remove(name string) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.external, name)

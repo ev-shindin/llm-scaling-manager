@@ -497,7 +497,17 @@ func addWarmPoolGPUs(byType map[string]int, byNamespace map[string]map[string]in
 // is already registered — callers must check the error. The analyzer is
 // appended in registration order.
 func (e *Engine) RegisterAnalyzer(name string, a domain.Analyzer) error {
-	return e.analyzers.register(name, a)
+	return e.ensureAnalyzers().register(name, a)
+}
+
+// ensureAnalyzers is the engine's registry, created empty for an Engine a
+// test built by hand with none, so registering and starting work on it as
+// they did before the registry existed.
+func (e *Engine) ensureAnalyzers() *analyzerRegistry {
+	if e.analyzers == nil {
+		e.analyzers = newAnalyzerRegistry()
+	}
+	return e.analyzers
 }
 
 // UpsertExternalAnalyzer registers or replaces a config-driven external analyzer
@@ -507,7 +517,7 @@ func (e *Engine) RegisterAnalyzer(name string, a domain.Analyzer) error {
 // analyzer is still stored but never runs — the built-in wins in
 // analyzerRunEntries.
 func (e *Engine) UpsertExternalAnalyzer(name string, a domain.Analyzer) {
-	e.analyzers.upsert(name, a)
+	e.ensureAnalyzers().upsert(name, a)
 }
 
 // RemoveExternalAnalyzer retires a runtime external analyzer. Idempotent.
@@ -622,7 +632,7 @@ func toExternalDefinition(label string, def config.ExternalAnalyzerDef) (externa
 // go with the catalog. This is the natural place to invoke any future
 // per-analyzer Init(ctx) hook.
 func (e *Engine) StartOptimizeLoop(ctx context.Context) {
-	e.analyzers.start()
+	e.ensureAnalyzers().start()
 	// Before the first cycle, once every analyzer is registered.
 	e.startLearnerRecording()
 	defer e.stopLearnerRecording()
