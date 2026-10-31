@@ -28,6 +28,9 @@ import (
 type SaturationAnalyzer struct {
 	// mu protects computeCapacityHistory from concurrent access.
 	mu sync.Mutex
+	// paths counts how often each learner path ran, for the replay
+	// (PathCounts).
+	paths pathCounters
 	// computeCapacityHistory stores rolling averages of observed k2 values,
 	// keyed by "namespace|variant|modelID|accelerator|gpuCount|role|outputBucket|queueThreshold"
 	// (historyKey): one variant's readings per window, never another's.

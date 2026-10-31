@@ -92,6 +92,9 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// (residentCharge).
 	localQueueDemand := waitingQueueDemand(rm, role)
 	residentDemand := residentCharge(rm, rm.TokensInUse, rm.TotalKvCapacityTokens, routing)
+	if _, ok := instantKv(rm); ok && routing.kvFromInstant && rm.TotalKvCapacityTokens > 0 {
+		a.paths.add(pathInstantKV, 1)
+	}
 	replicaDemand := residentDemand + localQueueDemand
 
 	// k1: memory-bound capacity
@@ -362,6 +365,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		// entirely and only ever reached a log line as a confusing number.
 		throughputSamples = MinDerivedThroughputSamples
 	} else if rate, ok := a.siblingYield(throughputKey, reading, served, tune); ok {
+		a.paths.add(pathYieldSibling, 1)
 		// A measurement under what the variant's Ready, full replicas serve
 		// is one slow replica's, not the variant's (siblingYield).
 		logger.V(logging.DEFAULT).Info("saturated-throughput-yields-to-siblings",
@@ -910,6 +914,7 @@ func (a *SaturationAnalyzer) k2Chain(
 				a.computeCapacityHistory[historyKey] = ra
 			}
 			ra.AddAt(float64(k2Observed), now)
+			a.paths.add(pathK2Obs, 1)
 			if args != "" {
 				a.k2WindowArgs[historyKey] = args
 			}

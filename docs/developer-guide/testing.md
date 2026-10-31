@@ -329,7 +329,46 @@ The start line records neither.
 The `acceptance` golden is the in-process acceptance run. It covers little
 learning: twelve cycles of fixed synthetic rows. The start-time average, the
 borrow tolerance and the measured k2 and mu paths barely move in it, so a
-change to them can leave it as it is. The cluster recordings cover those.
+change to them can leave it as it is.
+
+The `mu-paths` golden is a second in-process run, for those paths. Its
+replicas saturate, so k2 records readings and mu's window takes samples,
+each the mean of the replicas read in its minute. Each of mu's three yields
+runs on a variant of its own (to the derived figure on a served bound, to
+the full siblings, and to the derived figure once stale), and one replica
+restarts under its own name. To write it again as a raw recording:
+
+```bash
+LEARNREC_MUPATHS_OUT=$HOME/mu-paths.jsonl go test ./internal/engines/steadystate/ -run TestLearnerRecording_TheMuPathsRunReachesEveryLearnerPath -v
+```
+
+#### Per-path counters
+
+The saturation analyzer counts how often each learner path runs
+(`PathCounts`, `internal/engines/analyzers/saturation/path_counts.go`), and a
+replay reports the counts (2.5). Each counts where its path does its work,
+not where its input arrives:
+
+- k2 readings recorded in the window (P1-obs);
+- mu samples started in the window (a reading within the minute folds into
+  the sample and is not counted);
+- mu's three yields: to the derived figure on a served bound, to the full
+  siblings, and to the derived figure once stale;
+- ITL lines from a full fit, and from the pinned fit;
+- rows whose instant KV a learner read: a reading the ITL line took, or a
+  replica demand charged at its instant KV;
+- rows whose Pod Ready time k2's joined test read;
+- k2 readings refused as a joiner because of the Ready time: the restart
+  fix (#288), not the first sight, decided the refusal.
+
+The names are one table in `path_counts.go`; `PathCounts` and `PathNames`
+read it.
+
+The committed goldens must run every path at least once between them:
+`make test` and `make learner-goldens-check` fail when one runs on no
+golden. A golden that never reaches a path pins nothing about it. An add or
+an update prints the paths still uncovered and does not fail on them, so a
+first golden can be added to an empty directory.
 
 #### What a golden commits
 
@@ -530,12 +569,19 @@ the cases it ran.
 | `property_itl_test.go`, `property_k2_test.go`, `property_mu_test.go`, `property_floor_test.go`, `property_other_test.go` | the cases, one file per learner |
 | `property_gen_test.go` | the generators, including the time-base family, and the declared estimands |
 | `property_mutants_test.go` | the 2.7 findings, with each one's status, and the mutants |
+| `property_learners_test.go` | the shared and borrowed ITL line, the borrowed k2 lower bound, the fleet shape hold, the decode-saturation memory, and the SLO analyzer's line through `slo.Analyzer` |
+| `property_edges_test.go` | one case per threshold of 2.6's table, held at the threshold and either side of it, and at a non-default value where the threshold is a policy key |
+| `property_more_test.go` | liveness per topology (8-GPU ranks, a prefill role, the ITL line), scale over GPUs per replica and output length, the time-base cases, and the prefill bound through a P/D `Analyze` |
+| `property_policy_test.go` | every policy key a learner reads, each of which some case runs at a non-default value |
 | `property_coverage_test.go` | what each learner's cases cover and do not, and the classes with no time-base case |
 | `testdata/properties/known-failures.yaml` | the known-failures ledger |
 | `testdata/properties/cases.txt` | the registered case ids, pinned |
 
 A new case also goes in `cases.txt` and in the coverage table, or the tests
-fail.
+fail. A case that runs a policy key at a value other than its default names
+the key in its `keys`, and every key in `policyKeys` needs such a case: 2.6
+does not count a key tested at its default alone. A learner that starts
+reading a new key adds it to `policyKeys`.
 
 ### Violations and errors
 
@@ -555,7 +601,7 @@ one is a row in `known-failures.yaml` with these fields:
 | `expect` | the violation kind the case fails with |
 | `finding` | the defect |
 | `measured` | how often it failed, and the first failure, when the row was written |
-| `owner` | the PR that clears it, or `open` |
+| `owner` | what clears it: a PR of the plan (`PR 3`), an issue (`#391`), or `open` |
 
 The test is strict both ways:
 
@@ -577,10 +623,12 @@ owner.
 `findings` in `property_mutants_test.go` lists every row of 2.7. Each row is
 in exactly one of these states:
 
-- **caught**: a mutant puts the defect back, and its class fails;
-- **still escaping**: with the reason;
-- **waits for the replay counters**: the per-path counters of 2.5, which no
-  PR has built yet.
+- **caught**: a mutant puts the defect back, and its class fails; at least
+  one of its mutants is not a toy;
+- **caught (toy)**: every mutant of the row is a toy (`toy-learner` or
+  `toy-output`), which shows the check is sensitive to the defect and not
+  that the production learner would be caught;
+- **still escaping**: with the reason.
 
 `TestPropertyMutants` runs each mutant, and checks two more rules: a mutant
 never runs a ledgered case, and every caught row has a mutant.
@@ -591,6 +639,7 @@ Each mutant states its level:
 | --- | --- | --- |
 | `policy` | a policy key set where the guard stops working | that the production learner is caught |
 | `rows` | rows changed to look the way the defect read them | that the production learner is caught |
+| `stub` | one fix stubbed through a seam the analyzer already has for tests (its `readySince` func) | that the production learner is caught |
 | `toy-learner` | a small learner with the pre-fix estimator | only that the check is sensitive to the defect |
 | `toy-output` | the production output edited the way the defect edited it | only that the check reads that output |
 

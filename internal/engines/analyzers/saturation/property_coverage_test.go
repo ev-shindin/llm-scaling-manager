@@ -18,38 +18,39 @@ type coverage struct {
 }
 
 var propCoverage = []coverage{
-	{learner: "itl", classes: []propClass{classTransient, classFirstSample, classStale, classMissing, classHeterogeneity, classKnownTruth, classEdges},
-		gap: "row 1 and row 13 (the SLO analyzer's line is the same itl.Tracker, so these cases cover its learner, not the SLO analyzer's admission wiring). Not covered: redistribution, N-dependence, scale, liveness, monotonicity; the sequence-cap admission, maxKDrift, carry, the 20/40 rows and 30 min window as edges"},
+	{learner: "itl", classes: []propClass{classTransient, classFirstSample, classStale, classMissing, classHeterogeneity, classKnownTruth, classLiveness, classEdges},
+		gap: "row 1. Not covered: redistribution, N-dependence, scale, monotonicity (the line is a per-key fit, and the cases move no load between keys)"},
+	{learner: "slo-itl", classes: []propClass{classTransient, classFirstSample, classStale, classMissing, classKnownTruth},
+		gap: "row 13, through slo.Analyzer: its admission wiring (the policy's band and steady gate) on the shared tracker. The tracker's own edges are the itl learner's"},
 	{learner: "k2", classes: []propClass{classTransient, classFirstSample, classStale, classMissing, classRedistribution, classKnownTruth, classScale, classLiveness, classEdges},
-		gap: "not covered: N-dependence, monotonicity; scale over GPUs per replica and output length; liveness for 8-GPU DP ranks; edges at the queue threshold, rateFraction, maxRise, the window of 10, the 24 h episode gap and 7 d eviction"},
+		gap: "not covered: N-dependence, monotonicity; the 7 d eviction (EvictStaleHistory, a sweep, not the learner's admission)"},
 	{learner: "demand", classes: []propClass{classRedistribution},
 		gap: "the per-pod KV peak against instant KV only"},
-	{learner: "mu", classes: []propClass{classTransient, classFirstSample, classMissing, classHeterogeneity, classNDependence, classKnownTruth, classLiveness, classEdges},
-		gap: "not covered: stale value (freshFor / lowHoldFor), redistribution, scale, monotonicity; edges at minMeasuredOfDerived, the 2 min confirm, siblingMuTolerance and the full-cache line; mu under flow control"},
-	{learner: "prefill-bound", classes: []propClass{classHeterogeneity, classNDependence},
-		gap: "driven through its write path (recordSaturatedThroughput), not a P/D Analyze with EnablePrefillThroughputBound"},
+	{learner: "mu", classes: []propClass{classTransient, classFirstSample, classMissing, classHeterogeneity, classNDependence, classKnownTruth, classScale, classLiveness, classEdges},
+		gap: "not covered: stale value (freshFor and lowHoldFor are held as edges), redistribution, monotonicity; mu under flow control"},
+	{learner: "prefill-bound", classes: []propClass{classHeterogeneity, classNDependence, classLiveness},
+		gap: "the N-dependence case drives the write path; heterogeneity and liveness also run through a P/D Analyze with enablePrefillThroughputBound"},
 	{learner: "floor", classes: []propClass{classKnownTruth, classMonotonicity, classEdges},
-		gap: "not covered: the trust blend between lagFraction and trustFraction as an edge"},
+		gap: "the standing-queue cap is the monotonicity case's bound, not an edge of its own"},
 	{learner: "idle", classes: []propClass{classEdges},
-		gap: "the 0.30 line only; idleAfterReady is read by the balance tracker, not a learner here"},
+		gap: "edges only; idleAfterReady is read by the balance tracker, not a learner here"},
 	{learner: "start-time", classes: []propClass{classFirstSample, classStale, classEdges},
-		gap: "not covered: the 3-confirmation count and the 0-3600 s range as edges; restart (seen pods are not persisted)"},
+		gap: "not covered: restart (seen pods are not persisted); the 0-3600 s range is the collector's (maxCredibleStartSeconds), and the learner's own bound, a positive sample, is the zero-sample edge"},
+	{learner: "shared-line", classes: []propClass{classStale, classKnownTruth, classLiveness, classEdges},
+		gap: "row 2. A line ages on its last write (the sweep), not covered"},
+	{learner: "borrowed-k2", classes: []propClass{classMissing, classRedistribution, classKnownTruth, classLiveness, classMonotonicity, classEdges},
+		gap: "row 4. Not covered: the bound across a controller restart (the snapshot's tests hold it)"},
+	{learner: "shape-hold", classes: []propClass{classTransient, classFirstSample, classStale, classMissing, classEdges},
+		gap: "row 8. The arriving-prompt axis (the scheduler queue) has no case; the backstop's cooldown is an edge, a ledger row of #391"},
+	{learner: "decode-memory", classes: []propClass{classTransient, classMissing, classRedistribution, classEdges},
+		gap: "row 9"},
 	{learner: "throughput-itl", gap: "row 16 (throughput/analyzer.go resolveITLModel) lives in another package and has none of #273's fixes; its cases come with PR 4b"},
-	{learner: "shared-line", gap: "rows 2 and 4 (the shared and borrowed ITL line, borrowed k2): no case; reuse is off by default"},
-	{learner: "shape-hold", gap: "row 8 (fleet shape and its hold): no case"},
-	{learner: "decode-memory", gap: "row 9 (decode-saturation memory): no case"},
 	{learner: "share", gap: "rows 14 and 15 (the share ledger): out of scope for PR 0"},
 }
 
-// timeBaseExempt is each class with no time-base case, and why.
-var timeBaseExempt = map[propClass]string{
-	classFirstSample:   "one or two readings: there is no one-minute window to pass them through",
-	classMissing:       "a missing row is a cycle-level event; the time base changes no reading in it",
-	classHeterogeneity: "the cases fold per-pod rates; the time base is the N-dependence case's",
-	classScale:         "the cycle interval is one of the scaled quantities",
-	classLiveness:      "not built: liveness on the time base waits for a P/D or flow-control recording",
-	classMonotonicity:  "not built: the floor trajectory runs on direct inputs only",
-}
+// timeBaseExempt is each class with no time-base case, and why. Every class
+// has one now.
+var timeBaseExempt = map[propClass]string{}
 
 func TestPropertyCoverage(t *testing.T) {
 	type key struct {

@@ -184,19 +184,21 @@ func replicaReadySince(rm domain.ReplicaMetrics) time.Time {
 // noteReady records whether pod is Ready this cycle and reports whether it
 // joined the fleet under JoinedReplicaWindow ago, counted from the later of
 // readyAt, when its Pod last became Ready (zero when unknown), and when the
-// analyzer first saw that readyAt on it. A new readyAt is a new sighting: the
-// pod is back from a restart under the same name. Callers hold a.mu.
-func (m *settleMemo) noteReady(pod string, ready bool, readyAt, now time.Time) bool {
+// analyzer first saw that readyAt on it, and whether the Ready time decided
+// a join (byReadyAt): it is the later time, or a new one began the sighting.
+// A new readyAt is a new sighting: the pod is back from a
+// restart under the same name. Callers hold a.mu.
+func (m *settleMemo) noteReady(pod string, ready bool, readyAt, now time.Time) (joined, byReadyAt bool) {
 	if m.readySince == nil {
 		m.readySince = make(map[string]readySighting)
 	}
 	if !ready {
 		delete(m.readySince, pod)
-		return false
+		return false, false
 	}
 	s, seen := m.readySince[pod]
 	if !seen || !s.readyAt.Equal(readyAt) {
-		s = readySighting{readyAt: readyAt, firstSeen: now}
+		s = readySighting{readyAt: readyAt, firstSeen: now, restarted: seen && !readyAt.IsZero()}
 		if !m.pastFirstCycle {
 			s.firstSeen = time.Time{} // already serving when the memo began
 		}
@@ -206,7 +208,10 @@ func (m *settleMemo) noteReady(pod string, ready bool, readyAt, now time.Time) b
 	if readyAt.After(since) {
 		since = readyAt
 	}
-	return !since.IsZero() && now.Sub(since) < JoinedReplicaWindow
+	joined = !since.IsZero() && now.Sub(since) < JoinedReplicaWindow
+	// The Ready time decided the join when it is the later of the two, or
+	// when its change is what started this sighting.
+	return joined, joined && !readyAt.IsZero() && (since.Equal(readyAt) || s.restarted)
 }
 
 // The reasons throughputRefusal gives.
@@ -515,6 +520,7 @@ func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading through
 			a.throughputMuChoice[key] = c
 		}
 		c.yielded = true
+		a.paths.add(pathYieldServed, 1)
 		return true
 	}
 	// The last reading that agreed with the measurement; the newest sample
@@ -547,5 +553,8 @@ func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading through
 		a.throughputMuChoice[key] = c
 	}
 	c.yielded = yielded
+	if yielded {
+		a.paths.add(pathYieldStale, 1)
+	}
 	return yielded
 }

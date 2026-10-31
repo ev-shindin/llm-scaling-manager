@@ -243,8 +243,15 @@ func TestAddGolden(t *testing.T) {
 		require.NoError(t, err)
 		m, err := ReadManifest(dir)
 		require.NoError(t, err)
-		require.Len(t, m.Goldens, 1)
-		assert.Equal(t, "replaced", m.Goldens[0].Source)
+		var listed []ManifestEntry
+		for _, g := range m.Goldens {
+			if g.Name == "acceptance" {
+				listed = append(listed, g)
+			}
+		}
+		require.Len(t, listed, 1)
+		assert.Equal(t, "replaced", listed[0].Source)
+
 		c, err := CheckGoldens(ctx, dir)
 		require.NoError(t, err)
 		assert.Empty(t, c.Problems)

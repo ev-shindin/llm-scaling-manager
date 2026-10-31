@@ -19,3 +19,16 @@ goldens:
     learning: twelve cycles of fixed synthetic rows, so the start-time average, the
     borrow tolerance and the measured k2 and mu paths barely move, and a change to
     them can leave these goldens as they are.'
+- name: mu-paths
+  outputs:
+  - mu-paths/learned-state.csv
+  - mu-paths/lines.csv
+  - mu-paths/results.csv
+  - mu-paths/slo-published.csv
+  - mu-paths/store-records.csv
+  - mu-paths/variant-capacities.csv
+  recording: mu-paths/recording.jsonl.gz
+  source: 'The in-process mu paths run: one decode model of four variants whose replicas
+    saturate, so k2 and mu record readings and each of the three mu yields runs, and
+    one replica restarts under its own name. Twelve minutes of synthetic rows, recorder
+    on, default analyzerTuning.'

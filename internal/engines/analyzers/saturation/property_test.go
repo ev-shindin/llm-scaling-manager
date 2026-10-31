@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"sigs.k8s.io/yaml"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 )
 
 // Property tests for the analyzers' learners (docs/proposals/analyzer-learner.md,
@@ -75,6 +77,9 @@ type propTuning string
 const (
 	tunedDefault    propTuning = "default"
 	tunedNonDefault propTuning = "steadyFor 10m, carry 15m, idleRows 5"
+	// tunedPolicy is a case that runs the policy keys it lists (propCase.keys)
+	// at values other than their defaults.
+	tunedPolicy propTuning = "non-default policy keys"
 )
 
 // Violation kinds. A ledger row names the kind its case is expected to fail
@@ -92,6 +97,7 @@ const (
 	kindFell        = "fell"               // demand fell along a rising trajectory
 	kindUnbounded   = "unbounded"          // demand over what the fleet can drain
 	kindNotDetected = "not-detected"       // a refusal the property needs did not happen
+	kindWrongSide   = "wrong-side"         // a verdict on the wrong side of its threshold
 )
 
 // propViolation is a broken property: the kind, and what was measured.
@@ -122,6 +128,12 @@ type propCase struct {
 	name    string
 	family  propFamily
 	tuning  propTuning
+	// policy is the policy the case runs, set where it sets any key away
+	// from its default, nil otherwise. The check reads the same value, so
+	// the keys it sets (nonDefaultKeys) are the keys the case runs at a
+	// non-default value: 2.6 requires one such case per key a learner reads
+	// (policyKeys).
+	policy *config.ScalingPolicy
 	// seeds is how many seeds the case runs on; zero is defaultSeeds.
 	seeds int
 	check func(seed uint64) error

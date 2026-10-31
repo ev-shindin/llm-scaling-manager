@@ -26,6 +26,7 @@ func TestGoldens_EveryCommittedGoldenReproduces(t *testing.T) {
 	c, err := CheckGoldens(context.Background(), goldenDir)
 	require.NoError(t, err)
 	assert.Empty(t, c.Problems, "run `make learner-goldens` only for a change the PR names (docs/developer-guide/testing.md)")
+	assert.Empty(t, c.Uncovered, "the committed goldens must run every learner path between them")
 	// A check that compared nothing is not a pass.
 	require.NotEmpty(t, m.Goldens, "no fixture")
 	require.Equal(t, len(m.Goldens), c.Fixtures, "fixtures replayed")

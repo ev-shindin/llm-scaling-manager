@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/learnreplay"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 )
 
 // goldens is the committed golden directory, from this package.
@@ -106,4 +107,10 @@ func TestRun_AddCheckUpdate(t *testing.T) {
 	out, err = runOut("update", "-dir", dir)
 	require.NoError(t, err, out)
 	assert.Contains(t, out, "rewrote the goldens")
+
+	// The one golden reproduces again, and reaches none of k2's and mu's
+	// measured paths: an add and an update say so, the check fails on it.
+	assert.Contains(t, out, "no golden runs the learner path "+saturation.PathMuSampleWritten)
+	out, err = runOut("check", "-dir", dir)
+	require.ErrorContains(t, err, "6 learner paths no golden runs", out)
 }

@@ -106,7 +106,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return err
 		}
 		report(out, "added "+*name, rep)
-		return check(ctx, *dir, out)
+		return check(ctx, *dir, out, false)
 	case "update":
 		dir := fs.String("dir", learnreplay.GoldenDir, "the golden directory")
 		if ok, err := parse(); !ok {
@@ -116,13 +116,13 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return err
 		}
 		_, _ = fmt.Fprintln(out, "rewrote the goldens")
-		return check(ctx, *dir, out)
+		return check(ctx, *dir, out, false)
 	case "check":
 		dir := fs.String("dir", learnreplay.GoldenDir, "the golden directory")
 		if ok, err := parse(); !ok {
 			return err
 		}
-		return check(ctx, *dir, out)
+		return check(ctx, *dir, out, true)
 	default:
 		return fmt.Errorf("unknown command %q; %s", args[0], usage)
 	}
@@ -136,7 +136,11 @@ func report(out io.Writer, what string, rep *learnreplay.ExportReport) {
 	_, _ = fmt.Fprintf(out, "kept as they are (read them before committing): %s\n", strings.Join(rep.Kept, ", "))
 }
 
-func check(ctx context.Context, dir string, out io.Writer) error {
+// check runs the golden check on dir and prints what it found. A learner
+// path no golden runs fails it only when covered is set: the committed set
+// must run every path between its goldens, and an add or an update reports
+// the paths still uncovered without failing on them.
+func check(ctx context.Context, dir string, out io.Writer, covered bool) error {
 	c, err := learnreplay.CheckGoldens(ctx, dir)
 	if err != nil {
 		return err
@@ -146,11 +150,18 @@ func check(ctx context.Context, dir string, out io.Writer) error {
 		rows += n
 	}
 	_, _ = fmt.Fprintf(out, "golden check: %d fixtures replayed, %d golden rows compared\n", c.Fixtures, rows)
+	_, _ = fmt.Fprintf(out, "learner paths run, over every fixture: %v\n", c.Paths)
 	for _, p := range c.Problems {
 		_, _ = fmt.Fprintln(out, "  "+p)
 	}
-	if len(c.Problems) > 0 {
-		return fmt.Errorf("%d golden problems", len(c.Problems))
+	for _, p := range c.Uncovered {
+		_, _ = fmt.Fprintln(out, "  "+p)
+	}
+	switch {
+	case len(c.Problems) > 0:
+		return fmt.Errorf("%d golden problems, %d learner paths no golden runs", len(c.Problems), len(c.Uncovered))
+	case covered && len(c.Uncovered) > 0:
+		return fmt.Errorf("%d learner paths no golden runs", len(c.Uncovered))
 	}
 	return nil
 }

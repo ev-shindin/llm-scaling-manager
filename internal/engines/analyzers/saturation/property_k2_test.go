@@ -92,10 +92,23 @@ func checkK2LoadStep(policy func(*config.ScalingPolicy)) func(uint64) error {
 // reads a steady, plausible figure from its first cycle. Nothing is admitted
 // within a minute of its Ready time.
 func checkK2Restart(wrap func(*domain.ReplicaMetrics)) func(uint64) error {
+	return checkK2RestartOn(wrap, nil)
+}
+
+// checkK2RestartOn is checkK2Restart with edit applied to the rig's analyzer
+// first (a mutant), and counts, when it is not nil, the analyzer's path counts
+// at the end of each seed's run.
+func checkK2RestartOn(wrap func(*domain.ReplicaMetrics), edit func(*SaturationAnalyzer), counts ...func(map[string]int64)) func(uint64) error {
 	return func(seed uint64) error {
 		r := propRand(seed)
 		rig := newPropRig()
 		rig.wrap = wrap
+		if edit != nil {
+			edit(rig.a)
+		}
+		for _, c := range counts {
+			defer func() { c(rig.a.PathCounts()) }()
+		}
 		before := int64(200_000 * (1 + 0.05*r.Float64()))
 		ready := propStart.Add(-time.Hour)
 		cycle := func(tokens int64) error {
@@ -132,6 +145,66 @@ func checkK2Restart(wrap func(*domain.ReplicaMetrics)) func(uint64) error {
 // time constant; its KV reaches the analyzer as the max_over_time[1m] peak. No
 // reading under 0.85 of the plateau is admitted.
 func checkK2Fill(policy func(*config.ScalingPolicy)) func(uint64) error {
+	return checkK2FillOn(func() k2FillLearner {
+		rig := newPropRig()
+		rig.policy = policy
+		return rigFill{rig}
+	})
+}
+
+// k2FillLearner is k2 as checkK2FillOn drives it: one replica's reading a
+// cycle, and the figure on record.
+type k2FillLearner interface {
+	reading(tokens int64, queue int) error
+	figure() float64
+}
+
+// rigFill is the production k2, through Analyze.
+type rigFill struct{ rig *propRig }
+
+func (f rigFill) reading(tokens int64, queue int) error {
+	return f.rig.runK2(k2Reading{tokens, queue, 0, propCycle})
+}
+func (f rigFill) figure() float64 { return f.rig.k2("") }
+
+// toyF1Settle is #282 F1's settle: a saturated reading whose queue is deeper
+// than its resident batch (queue x footprint over the tokens held) is a fill
+// suspect, and is refused once; the next is admitted whatever it reads. The
+// figure is the admitted readings' mean.
+type toyF1Settle struct {
+	refused   bool
+	sum       float64
+	n         int
+	threshold int
+}
+
+// toyFootprint is a waiting request's KV at satRow's shape: 1000 in, half of
+// 500 out.
+const toyFootprint = 1250
+
+func (t *toyF1Settle) reading(tokens int64, queue int) error {
+	if queue < t.threshold {
+		return nil
+	}
+	if suspect := float64(queue)*toyFootprint > float64(tokens); suspect && !t.refused {
+		t.refused = true
+		return nil
+	}
+	t.refused = false
+	t.sum += float64(tokens)
+	t.n++
+	return nil
+}
+
+func (t *toyF1Settle) figure() float64 {
+	if t.n == 0 {
+		return 0
+	}
+	return t.sum / float64(t.n)
+}
+
+// checkK2FillOn is checkK2Fill on the learner newL makes.
+func checkK2FillOn(newL func() k2FillLearner) func(uint64) error {
 	return func(seed uint64) error {
 		r := propRand(seed)
 		plateau := 240_000 * (1 + 0.05*r.Float64())
@@ -144,21 +217,20 @@ func checkK2Fill(policy func(*config.ScalingPolicy)) func(uint64) error {
 			}
 		}
 		tb := sampleTimeBase(path)
-		rig := newPropRig()
-		rig.policy = policy
+		l := newL()
 		for i, tok := range tb.peak1m {
 			queue := 0
 			if 60+i*int(propCycle/time.Second) >= idleFor {
 				queue = 200
 			}
-			if err := rig.runK2(k2Reading{int64(tok), queue, 0, propCycle}); err != nil {
+			if err := l.reading(int64(tok), queue); err != nil {
 				return err
 			}
-			if got := rig.k2(""); got > 0 && got < 0.85*plateau {
+			if got := l.figure(); got > 0 && got < 0.85*plateau {
 				return violation(kindTransient, "cycle %d: k2 %.0f admitted while the replica filled toward %.0f (%.0f%%)", i, got, plateau, 100*got/plateau)
 			}
 		}
-		return holds(rig.k2("") > 0, kindNotLearned, "the filled replica was never admitted")
+		return holds(l.figure() > 0, kindNotLearned, "the filled replica was never admitted")
 	}
 }
 

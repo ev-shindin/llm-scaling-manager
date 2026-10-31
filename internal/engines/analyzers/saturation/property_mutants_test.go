@@ -14,14 +14,15 @@ import (
 )
 
 // The 2.7 accounting and its mutants. Every finding 2.7 lists is exactly one
-// of: caught (a mutant puts the defect back and its class fails), still
-// escaping (with the reason), or waiting for the replay's per-path counters
-// (2.5), which #388 did not build.
+// of: caught (a mutant puts the defect back and its class fails), or still
+// escaping (with the reason).
 //
-// A mutant puts its defect back in one of four ways, named by its level:
+// A mutant puts its defect back in one of five ways, named by its level:
 //   - policy: a policy key set where the guard (the fix) stops working, on
 //     the production learner;
 //   - rows: the production learner handed rows the way the defect read them;
+//   - stub: the production learner with one fix stubbed through a seam the
+//     analyzer already has for tests (its readySince func);
 //   - toy-learner: a small learner with the pre-fix estimator, run through the
 //     same check. It proves the check is sensitive to the defect, not that
 //     the production learner would be caught;
@@ -32,9 +33,12 @@ import (
 type findingStatus string
 
 const (
-	statusCaught        findingStatus = "caught"
-	statusEscaping      findingStatus = "still escaping"
-	statusWaitsCounters findingStatus = "waits for the replay counters"
+	statusCaught findingStatus = "caught"
+	// statusCaughtToy is a row whose every mutant is a toy (toy-learner or
+	// toy-output): the check is sensitive to the defect, and no mutant shows
+	// the production learner would be caught.
+	statusCaughtToy findingStatus = "caught (toy)"
+	statusEscaping  findingStatus = "still escaping"
 )
 
 // finding is one row of 2.7, with its status and, unless caught, why.
@@ -53,30 +57,30 @@ var findings = []finding{
 	{row: "Full fit never runs at N >= 2, B stays 6 ms (#273 A3)", status: statusCaught},
 	{row: "k == 0 unsettles (#273 A4)", status: statusEscaping, why: "a k == 0 row restarting a settle is a settle-tracker defect; 2.3 puts its negative control in PR 1, the first PR with a tracker that reads the presence bits"},
 	{row: "router queue without engine metrics", status: statusEscaping, why: "missing-duplicated/k2/unknown-gauges passes on today's code, and no row edit reproduces the pre-fix reading of a router queue as the engine's"},
-	{row: "Instant k against a rate[1m] ITL (#273 A5)", status: statusEscaping, why: "known-truth/itl/line-at-kprice-timebase fails on today's code (a ledger row, open): there is no fixed version to put the defect back into"},
+	{row: "Instant k against a rate[1m] ITL (#273 A5)", status: statusEscaping, why: "known-truth/itl/line-at-kprice-timebase fails on today's code (a ledger row, #393): there is no fixed version to put the defect back into"},
 	{row: "Sum of per-pod one-minute peaks", status: statusCaught},
 	{row: "Settle refuses one cycle of a fill (#282 F1)", status: statusCaught},
-	{row: "k2 key flips on the output-length boundary", status: statusEscaping, why: "edges/k2/key-near-output-boundary fails on today's code (a ledger row, open)"},
+	{row: "k2 key flips on the output-length boundary", status: statusEscaping, why: "edges/k2/key-near-output-boundary fails on today's code (a ledger row, #396)"},
 	{row: "measured/derived flips near 2x", status: statusCaught},
-	{row: "the 0.30 idle line", status: statusEscaping, why: "edges/idle/idle-line-030 fails on today's code (a ledger row, open)"},
+	{row: "the 0.30 idle line", status: statusEscaping, why: "edges/idle/idle-line-030 fails on today's code (a ledger row, #396)"},
 	{row: "backlogGrew", status: statusCaught},
-	{row: "Headroom counted twice (+17.6 %)", status: statusCaught},
-	{row: "idle room counted twice", status: statusCaught},
-	{row: "the rules together always pick the higher mu", status: statusCaught},
+	{row: "Headroom counted twice (+17.6 %)", status: statusCaughtToy},
+	{row: "idle room counted twice", status: statusCaughtToy},
+	{row: "the rules together always pick the higher mu", status: statusCaughtToy},
 	{row: "KV and throughput units mixed", status: statusCaught},
-	{row: "Max across replicas (+13.6 % at 16)", status: statusCaught},
-	{row: "Prefill double scrape", status: statusEscaping, why: "the production prefill bound fails contamination-heterogeneity/prefill-bound/one-pod-doubled (a ledger row, open); mu's mean fold passes it"},
+	{row: "Max across replicas (+13.6 % at 16)", status: statusCaughtToy},
+	{row: "Prefill double scrape", status: statusEscaping, why: "the production prefill bound fails contamination-heterogeneity/prefill-bound/one-pod-doubled (a ledger row, #395); mu's mean fold passes it"},
 	{row: "Demand falls when lambda lags a step", status: statusEscaping, why: "the monotonicity trajectory passes on today's code and no pre-fix floor is reproduced"},
-	{row: "local queue priced as drainable", status: statusCaught},
-	{row: "Weighted median flapping between modes", status: statusCaught},
-	{row: "IQM breaks at 25 % contamination", status: statusCaught},
-	{row: "A genuinely slow replica trimmed away (#273 r3, #282 r3)", status: statusCaught},
-	{row: "No floor under flow control (#144)", status: statusEscaping, why: "liveness/k2/flow-control-on fails on today's code (a ledger row, open); no case drives mu or the floor under flow control"},
-	{row: "prefill never learns (#144)", status: statusEscaping, why: "no liveness case for a prefill role yet"},
+	{row: "local queue priced as drainable", status: statusCaughtToy},
+	{row: "Weighted median flapping between modes", status: statusCaughtToy},
+	{row: "IQM breaks at 25 % contamination", status: statusCaughtToy},
+	{row: "A genuinely slow replica trimmed away (#273 r3, #282 r3)", status: statusCaughtToy},
+	{row: "No floor under flow control (#144)", status: statusEscaping, why: "liveness/k2/flow-control-on fails on today's code (a ledger row, #394); no case drives mu or the floor under flow control"},
+	{row: "prefill never learns (#144)", status: statusCaught},
 	{row: "Imbalance audit (load moved between replicas)", status: statusCaught},
 	{row: "Settle holes: restart", status: statusCaught},
 	{row: "Settle holes: fall, rate escape, idle return, lend", status: statusEscaping, why: "only the restart and joiner events have a case; the others need the settle tracker (PR 1)"},
-	{row: "Restart fix stubbed", status: statusWaitsCounters, why: "the per-path counter \"joined refusals with a known ReadySince\" is the replay's (2.5); #388 brought the goldens and the export, not the per-path counters, so it waits for those. The restart itself is caught as \"Settle holes: restart\""},
+	{row: "Restart fix stubbed", status: statusCaught},
 	{row: "'For good' self-sealing low mu", status: statusEscaping, why: "the closed-loop probe lands in PR 3"},
 }
 
@@ -84,6 +88,7 @@ var findings = []finding{
 const (
 	levelPolicy     = "policy"
 	levelRows       = "rows"
+	levelStub       = "stub"
 	levelToyLearner = "toy-learner"
 	levelToyOutput  = "toy-output"
 )
@@ -140,8 +145,11 @@ func propertyMutants() []propMutant {
 			how:   "rows with KvUsageInstantKnown cleared: demand sums each pod's one-minute peak",
 			check: checkDemandAlternating(func(rm *domain.ReplicaMetrics) { rm.KvUsageInstantKnown = false })},
 		{row: "Settle refuses one cycle of a fill (#282 F1)", caseID: "transient/k2/slow-fill", level: levelPolicy,
-			how:   "k2Settle.rateFraction 1e-9, maxRise 1e9: the rise is not compared a window back. Broader than F1, which refused one cycle and admitted the next",
+			how:   "k2Settle.rateFraction 1e-9, maxRise 1e9: the rise is not compared a window back (broader than F1)",
 			check: checkK2Fill(settleOff)},
+		{row: "Settle refuses one cycle of a fill (#282 F1)", caseID: "transient/k2/slow-fill", level: levelToyLearner,
+			how:   "a settle that refuses exactly one cycle of a fill suspect (queue deeper than its batch) and admits the next",
+			check: checkK2FillOn(func() k2FillLearner { return &toyF1Settle{threshold: 5} })},
 		{row: "measured/derived flips near 2x", caseID: "edges/mu/latch-at-2x", level: levelPolicy,
 			how:   "muChoice.returnRatio = maxRatio = 2: the latch's hysteresis band removed",
 			check: checkMuLatch(tuningWith(func(t *config.AnalyzerTuning) { t.MuChoice.MaxRatio, t.MuChoice.ReturnRatio = 2, 2 }))},
@@ -188,6 +196,81 @@ func propertyMutants() []propMutant {
 		{row: "Settle holes: restart", caseID: "transient/k2/restart-same-name", level: levelRows,
 			how:   "rows with ReadySince cleared: a restart under the same name is not seen",
 			check: checkK2Restart(func(rm *domain.ReplicaMetrics) { rm.ReadySince = time.Time{} })},
+		{row: "prefill never learns (#144)", caseID: "liveness/prefill-bound/behind-full-decode", level: levelPolicy,
+			how:   "enablePrefillThroughputBound off, its default: behind a full decode computeK2 discards every prefill reading, and prefill learns no mu at all",
+			check: checkBoundAnalyzeOn(1, true, &config.ScalingPolicy{})},
+		{row: "Restart fix stubbed", caseID: "transient/k2/restart-same-name", level: levelStub,
+			how:   "the restart fix stubbed: the analyzer's readySince seam reads no Ready time, so the joined test counts from first sight alone",
+			check: checkK2RestartOn(nil, stubRestartFix)},
+	}
+}
+
+// stubRestartFix stubs the restart fix (#288) on a through its readySince
+// seam: no Pod Ready time reaches noteReady, so a restart under the same name
+// reads as the replica it replaced. Nothing is added to production code.
+func stubRestartFix(a *SaturationAnalyzer) {
+	a.readySince = func(domain.ReplicaMetrics) time.Time { return time.Time{} }
+}
+
+// The restart fix's per-path counter (2.5, "joined refusals with a known
+// ReadySince") counts on the restart case, and drops to zero once the fix is
+// stubbed.
+func TestPropertyRestartStubZeroesTheJoinedCounter(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*SaturationAnalyzer)
+		zero bool
+	}{{"the fix", nil, false}, {"the fix stubbed", stubRestartFix, true}} {
+		var joined int64
+		count := func(c map[string]int64) { joined += c[PathJoinedRefusedReadySince] }
+		if _, err := runCase(checkK2RestartOn(nil, tc.edit, count), []uint64{1, 2, 3}); err != nil {
+			t.Fatal(err)
+		}
+		if (joined == 0) != tc.zero {
+			t.Errorf("%s: %d joined refusals decided by a Ready time; want zero: %v", tc.name, joined, tc.zero)
+		}
+		t.Logf("%s: %d joined refusals decided by a Ready time", tc.name, joined)
+	}
+}
+
+// The joined-refusal counter counts a refusal only when the Pod's Ready time
+// decided it. A replica first seen this cycle is refused as a joiner whatever
+// its Ready time says, and is not counted; one whose Ready time changed under
+// its name -- a restart the first sight could not reveal -- is.
+func TestJoinedCounterCountsOnlyARefusalTheReadyTimeDecided(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		restart bool
+		ready   func(now time.Time) time.Time
+		want    int64
+	}{
+		{"no Ready time, first seen now", false, func(time.Time) time.Time { return time.Time{} }, 0},
+		{"Ready 10 s ago, first seen now", false, func(now time.Time) time.Time { return now.Add(-10 * time.Second) }, 0},
+		{"a restart under its name, Ready 10 s ago", true, func(now time.Time) time.Time { return now.Add(-10 * time.Second) }, 1},
+	} {
+		rig := newPropRig()
+		idle := satRow("r1", 100_000, 0, 1)
+		idle.ReadySince = propStart.Add(-time.Hour)
+		rows := []domain.ReplicaMetrics{satRow("r0", 100_000, 0, 1)}
+		if tc.restart {
+			rows = append(rows, idle)
+		}
+		for range 2 {
+			if _, err := rig.analyze(rows, decodeStates(2), 6, propCycle); err != nil {
+				t.Fatal(err)
+			}
+		}
+		rm := satRow("r1", int64(float64(propKv)*0.9), 10, 6)
+		rm.ReadySince = tc.ready(rig.clock)
+		if _, err := rig.analyze([]domain.ReplicaMetrics{satRow("r0", 100_000, 0, 1), rm}, decodeStates(2), 6, propCycle); err != nil {
+			t.Fatal(err)
+		}
+		if got := rig.a.PathCounts()[PathJoinedRefusedReadySince]; got != tc.want {
+			t.Errorf("%s: %d counted, want %d", tc.name, got, tc.want)
+		}
+		if k := rig.k2(""); k > 0 {
+			t.Errorf("%s: the joiner was not refused (k2 %.0f)", tc.name, k)
+		}
 	}
 }
 
@@ -207,7 +290,7 @@ func checkAccounting(fs []finding, muts []propMutant, cases map[string]bool, led
 			errs = append(errs, f.row+": 2.7 row listed twice")
 		}
 		status[f.row] = f
-		if f.status != statusCaught && f.why == "" {
+		if f.status != statusCaught && f.status != statusCaughtToy && f.why == "" {
 			errs = append(errs, f.row+": "+string(f.status)+" needs a reason")
 		}
 		for _, id := range citedCase.FindAllString(f.why, -1) {
@@ -219,14 +302,17 @@ func checkAccounting(fs []finding, muts []propMutant, cases map[string]bool, led
 			}
 		}
 	}
-	mutated := map[string]bool{}
+	mutated, production := map[string]bool{}, map[string]bool{}
 	for _, m := range muts {
 		f, ok := status[m.row]
 		switch {
 		case !ok:
 			errs = append(errs, m.row+": a mutant for a row 2.7 does not list")
-		case f.status != statusCaught:
+		case f.status != statusCaught && f.status != statusCaughtToy:
 			errs = append(errs, m.row+" has a mutant and is "+string(f.status))
+		}
+		if m.level != levelToyLearner && m.level != levelToyOutput {
+			production[m.row] = true
 		}
 		if !cases[m.caseID] {
 			errs = append(errs, m.row+": mutant names no property case "+m.caseID)
@@ -237,8 +323,13 @@ func checkAccounting(fs []finding, muts []propMutant, cases map[string]bool, led
 		mutated[m.row] = true
 	}
 	for _, f := range fs {
-		if f.status == statusCaught && !mutated[f.row] {
+		switch {
+		case (f.status == statusCaught || f.status == statusCaughtToy) && !mutated[f.row]:
 			errs = append(errs, f.row+" is marked caught and has no mutant")
+		case f.status == statusCaught && !production[f.row]:
+			errs = append(errs, f.row+" is marked caught and only a toy catches it: mark it caught (toy)")
+		case f.status == statusCaughtToy && production[f.row]:
+			errs = append(errs, f.row+" is marked caught (toy) and a production-level mutant catches it: mark it caught")
 		}
 	}
 	return errs
@@ -293,6 +384,17 @@ func TestPropertyAccountingNegativeControls(t *testing.T) {
 	}
 	if errs := checkAccounting(fs, nil, cases, nil); !containsPrefix(errs, caught.row+" is marked caught") {
 		t.Errorf("a caught finding with no mutant was not reported: %v", errs)
+	}
+	toy := []propMutant{{row: caught.row, caseID: joiner, level: levelToyLearner}}
+	if errs := checkAccounting(fs, toy, cases, nil); !containsPrefix(errs, caught.row+" is marked caught and only a toy") {
+		t.Errorf("a caught finding only a toy catches was not reported: %v", errs)
+	}
+	toyRow := []finding{{row: caught.row, status: statusCaughtToy}, escaping}
+	if errs := checkAccounting(toyRow, toy, cases, nil); len(errs) != 0 {
+		t.Errorf("a caught (toy) row with a toy mutant is clean: %v", errs)
+	}
+	if errs := checkAccounting(toyRow, good, cases, nil); !containsPrefix(errs, caught.row+" is marked caught (toy) and a production") {
+		t.Errorf("a caught (toy) row with a production mutant was not reported: %v", errs)
 	}
 	for name, m := range map[string]propMutant{
 		"a mutant for an escaping row": {row: escaping.row, caseID: joiner},

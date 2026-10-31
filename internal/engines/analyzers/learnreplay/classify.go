@@ -246,6 +246,8 @@ var vocabulary = setOf(
 	"no-change", "no-data", "no-itl", "no-line", "no-rate", "no-separators", "no-seqs", "no-shape",
 	"slo-model", "slo-own", "slo-pinned", "slo-tpot", "slo-transient", "slo-ttft", "slo-variant",
 	"own", "pinned", "borrowed", "borrowed-line", "derived", "measured", "sibling", "stale", "served",
+	"k1-bound", "pinned-default", "slo-pinned-default", "no-output-length", "declined", "infeasible",
+	"input-invalid",
 	"itl-line", "k2", "mu", "deployment", "live", "store", "unobserved", "whole", "partial", "none",
 	"tpot", "ttft", "mean", "p50", "p90", "p95", "p99",
 	// Freshness, limiter scopes and types, toleration operators and effects.

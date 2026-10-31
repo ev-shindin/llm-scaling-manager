@@ -68,7 +68,9 @@ var reviewed = map[reflect.Type]buckets{
 			"ForgottenToken",
 			"HoldLowerBounds", "ExportLearnedState", "RestoreLearnedState", "TakeRestoreOutcomes",
 			"ForgetLearnedState", "StableAcceleratorFor"},
-		readers:  []string{"Name", "Horizons", "BorrowTickGap"},
+		// PathCounts reads the per-path counters (2.5), which only a replay
+		// reads and nothing restores.
+		readers:  []string{"Name", "Horizons", "BorrowTickGap", "PathCounts"},
 		builders: []string{"WithHorizons", "WithOptimizationInterval", "WithClock", "WithRecorder"},
 		seams:    []string{"SetSwitchesForReplay"},
 	},
