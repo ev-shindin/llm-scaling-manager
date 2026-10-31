@@ -557,6 +557,7 @@ composite-grace
 composite-hold
 composite-pricing
 composite-release-bound
+composite-replica-clamped
 composite-role-capacities
 compute
 computeCapacityHistory

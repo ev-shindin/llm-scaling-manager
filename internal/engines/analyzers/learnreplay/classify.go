@@ -8,6 +8,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
@@ -149,9 +150,8 @@ const (
 	classHoldReason
 )
 
-// holdGracePrefix is steadystate's holdAnalyzerInGrace, which it does not
-// export: a hold reason naming the analyzer inside its grace.
-const holdGracePrefix = "analyzer-in-grace:"
+// holdGracePrefix is the hold reason naming the analyzer inside its grace.
+const holdGracePrefix = enginerec.HoldAnalyzerInGrace
 
 // rule is one table entry: a class, and for a rename its category.
 type rule struct {
@@ -284,8 +284,9 @@ var vocabulary = setOf(
 	"MultiConnector", "P2pNcclConnector", "native", "lmcache", "cpu",
 	// The composite: its name, its decision paths, and why it holds a role
 	// (steadystate's hold reasons; an analyzer's grace names the analyzer).
-	"CompositeSignal", "C0-agree", "C1-single", "C4-no-signal",
-	"no-listed-analyzer-sizes-role", "other-role-cannot-grow", "saturation-holds-role",
+	allocation.CompositeSignalName, string(allocation.DecisionAgree), string(allocation.DecisionSingle),
+	string(allocation.DecisionNoSignal),
+	enginerec.HoldUnsized, enginerec.HoldOtherRoleUnsized, enginerec.HoldSaturationHolds,
 	// The redaction marker.
 	"redacted",
 )

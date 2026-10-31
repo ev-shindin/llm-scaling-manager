@@ -113,6 +113,10 @@ const (
 	// PathCompositeGrace counts composites built with a listed analyzer
 	// inside its staleness grace and no result.
 	PathCompositeGrace = "composite-grace"
+	// PathCompositeReplicaClamped counts composites in which the
+	// capacity-build step clamped an analyzer's replica count of a variant
+	// to the scale target's current replicas (clampReplicaCountToScaleTarget).
+	PathCompositeReplicaClamped = "composite-replica-clamped"
 	// PathWarmPoolSupply counts composites with a variant a bridge serves.
 	PathWarmPoolSupply = "warm-pool-supply"
 	// PathPressureScaleUp counts composites with a variant pushed past its
@@ -124,7 +128,8 @@ const (
 // reports.
 func LearnerReplayPathNames() []string {
 	return []string{PathCompositeBuilt, PathCompositeRoleCapacities, PathCompositeHold, PathCompositeReleaseBound,
-		PathCompositeExternalResult, PathCompositeGrace, PathWarmPoolSupply, PathPressureScaleUp}
+		PathCompositeExternalResult, PathCompositeGrace, PathCompositeReplicaClamped, PathWarmPoolSupply,
+		PathPressureScaleUp}
 }
 
 // LearnerReplay replays the engine events of a learner recording: test
@@ -183,6 +188,7 @@ func (r *LearnerReplay) composite(ctx context.Context, d enginerec.CompositeEven
 	metaByVariant := metadataByVariant(metadata)
 	fromReplay := map[string]bool{}
 	named := make([]allocation.NamedAnalyzerResult, 0, len(d.Entries))
+	clamped := false
 	for _, entry := range d.Entries {
 		res := entry.Result
 		if res == nil {
@@ -198,8 +204,15 @@ func (r *LearnerReplay) composite(ctx context.Context, d enginerec.CompositeEven
 				continue
 			}
 		}
+		before := make([]int, len(res.VariantCapacities))
+		for i, vc := range res.VariantCapacities {
+			before[i] = vc.ReplicaCount
+		}
 		nr := cycleEntry(ctx, entry.Name, res, *policy, metaByVariant)
 		nr.Live = entry.Live
+		for i, vc := range nr.Result.VariantCapacities {
+			clamped = clamped || i < len(before) && vc.ReplicaCount < before[i]
+		}
 		named = append(named, nr)
 	}
 	eligible := append(eligibleEntries(named, *policy), d.Grace...)
@@ -208,6 +221,9 @@ func (r *LearnerReplay) composite(ctx context.Context, d enginerec.CompositeEven
 	in := compositeInputs{namespace: d.Namespace, modelID: d.ModelID, named: named, grace: d.Grace, metadata: metadata}
 	out := compositeEvent(in, composite, reasons, scaleUp, fromReplay)
 	r.count(out)
+	if clamped {
+		r.paths[PathCompositeReplicaClamped]++
+	}
 	rec.Record(enginerec.KindComposite, ev.Now, out)
 	return nil
 }

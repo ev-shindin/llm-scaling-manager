@@ -337,7 +337,7 @@ func (s *recScript) cycle(t *testing.T, e *Engine, n int, at time.Time) []alloca
 			policy = p
 		}
 		if s.engineLayer {
-			req, err := e.collectV2ModelRequest(ctx, m, recNS, rows, policy, states, recMetadata(states, m),
+			req, err := e.collectV2ModelRequest(ctx, m, recNS, rows, policy, states, recMetadata(states, m, n),
 				targets, vas, sq, 1.5+0.1*float64(n%4))
 			require.NoError(t, err, "cycle %d model %s", n, m)
 			out = append(out, req.CompositeSignal)

@@ -12,6 +12,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/enginerec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 )
 
@@ -585,21 +586,12 @@ func redistributeVariantDemand(vcs []domain.VariantCapacity, role string, demand
 
 // Why the composite holds a role, logged as the reason of each
 // "composite holds a role" line. A role can be held for more than one.
+// Defined in enginerec, which a learner recording's export reads them from.
 const (
-	// holdUnsized: saturation is not listed and no listed analyzer sizes
-	// the role, so it neither grows nor shrinks.
-	holdUnsized = "no-listed-analyzer-sizes-role"
-	// holdOtherRoleUnsized: on P/D, another role is held for holdUnsized,
-	// so this one does not grow either.
-	holdOtherRoleUnsized = "other-role-cannot-grow"
-	// holdAnalyzerInGrace is the prefix of the reason a listed analyzer
-	// inside its staleness grace with no reading holds a role against
-	// scale-down; the analyzer's name follows it.
-	holdAnalyzerInGrace = "analyzer-in-grace:"
-	// holdSaturationHolds: saturation holds the role (HeldRoleDemand) and
-	// another analyzer's demand replaced its held figure, so the role does
-	// not shrink.
-	holdSaturationHolds = "saturation-holds-role"
+	holdUnsized          = enginerec.HoldUnsized
+	holdOtherRoleUnsized = enginerec.HoldOtherRoleUnsized
+	holdAnalyzerInGrace  = enginerec.HoldAnalyzerInGrace
+	holdSaturationHolds  = enginerec.HoldSaturationHolds
 )
 
 // roleHoldSet is what the composite forbids each role this cycle, and why.

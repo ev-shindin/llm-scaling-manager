@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"os"
 	"testing"
 	"time"
@@ -87,19 +88,95 @@ func (x *scriptedExternal) Analyze(_ context.Context, in domain.AnalyzerInput) (
 	return res, nil
 }
 
-// recMetadata is the discovery metadata of a model's variants, from their
-// states.
-func recMetadata(states []domain.VariantReplicaState, model string) []domain.VariantMetadata {
+// recScaledDownAt is the cycle from which agg-a's scale target is scaled
+// down by two replicas while its rows still report all ten: the
+// capacity-build step clamps the replica count each analyzer measured to the
+// target's current replicas (clampReplicaCountToScaleTarget). Its Ready
+// replicas stay at ten, so a clamp that read them would not clamp.
+const recScaledDownAt = 6
+
+// recMetadata is the discovery metadata of a model's variants in a cycle,
+// from their states. Every field is set, most to filler values: the
+// recording keeps only the three the capacity-build step reads (enginerec.
+// VariantMeta), so a replay that matches proves it reads no other.
+func recMetadata(states []domain.VariantReplicaState, model string, cycle int) []domain.VariantMetadata {
 	out := make([]domain.VariantMetadata, 0, len(states))
 	for i, vs := range states {
-		out = append(out, domain.VariantMetadata{
-			VariantName: vs.VariantName, ModelID: model, Namespace: recNS, Role: vs.Role,
-			Cost: 10 + float64(i), AcceleratorName: vs.AcceleratorName, Engine: "vllm",
-			GPUsPerReplica: vs.GPUsPerReplica, CurrentReplicas: vs.CurrentReplicas,
-			DesiredReplicas: vs.DesiredReplicas, ReadyReplicas: vs.CurrentReplicas,
-		})
+		var m domain.VariantMetadata
+		fillNonZero(reflect.ValueOf(&m).Elem())
+		m.VariantName, m.ModelID, m.Namespace, m.Role = vs.VariantName, model, recNS, vs.Role
+		m.Cost, m.AcceleratorName, m.Engine, m.GPUsPerReplica = 10+float64(i), vs.AcceleratorName, "vllm", vs.GPUsPerReplica
+		m.CurrentReplicas, m.DesiredReplicas, m.ReadyReplicas = vs.CurrentReplicas, vs.DesiredReplicas, vs.CurrentReplicas
+		if vs.VariantName == "agg-a" && cycle >= recScaledDownAt {
+			m.CurrentReplicas, m.DesiredReplicas = vs.CurrentReplicas-2, vs.CurrentReplicas-2
+		}
+		out = append(out, m)
 	}
 	return out
+}
+
+// fillNonZero sets every settable field under v to a value that is not its
+// zero: a filler, for fields a test must show are not read.
+func fillNonZero(v reflect.Value) {
+	if v.Type() == reflect.TypeFor[time.Time]() {
+		v.Set(reflect.ValueOf(recStart))
+		return
+	}
+	switch v.Kind() {
+	case reflect.String:
+		v.SetString("filler")
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v.SetInt(3)
+	case reflect.Float32, reflect.Float64:
+		v.SetFloat(3)
+	case reflect.Pointer:
+		p := reflect.New(v.Type().Elem())
+		fillNonZero(p.Elem())
+		v.Set(p)
+	case reflect.Slice:
+		s := reflect.MakeSlice(v.Type(), 1, 1)
+		fillNonZero(s.Index(0))
+		v.Set(s)
+	case reflect.Map:
+		m := reflect.MakeMap(v.Type())
+		k := reflect.New(v.Type().Key()).Elem()
+		e := reflect.New(v.Type().Elem()).Elem()
+		fillNonZero(k)
+		fillNonZero(e)
+		m.SetMapIndex(k, e)
+		v.Set(m)
+	case reflect.Struct:
+		for i := range v.NumField() {
+			if v.Type().Field(i).IsExported() {
+				fillNonZero(v.Field(i))
+			}
+		}
+	}
+}
+
+// The capacity-build step reads only the three metadata fields the
+// recording keeps: the script sets every field of the metadata, the replay
+// has only those three, and every composite still matches, the clamped
+// cycles included.
+func TestLearnerRecording_TheCapacityBuildReadsOnlyTheRecordedMetadata(t *testing.T) {
+	states := []domain.VariantReplicaState{{VariantName: "agg-a", Role: domain.RoleBoth, CurrentReplicas: 10, DesiredReplicas: 10,
+		AcceleratorName: "NVIDIA-H100-80GB-HBM3", GPUsPerReplica: 1}}
+	m := recMetadata(states, "acme/agg", recScaledDownAt)[0]
+	mv := reflect.ValueOf(m)
+	for i := range mv.NumField() {
+		assert.False(t, mv.Field(i).IsZero(), "precondition: the script sets %s", mv.Type().Field(i).Name)
+	}
+	assert.Less(t, m.CurrentReplicas, m.ReadyReplicas, "precondition: agg-a is scaled below its Ready replicas")
+
+	recording, _ := recordEngineRun(t, recStart, true)
+	engine := NewLearnerReplay()
+	rep, err := learnreplay.Replay(context.Background(), recording,
+		learnreplay.Options{Mode: learnreplay.Fidelity, Engine: engine})
+	require.NoError(t, err)
+	require.Empty(t, mismatchText(rep.Mismatches))
+	assert.Positive(t, engine.PathCounts()[PathCompositeReplicaClamped], "no composite clamped a replica count")
 }
 
 // recordEngineRun runs the engine script as recordRun runs the acceptance

@@ -402,7 +402,11 @@ discovery metadata, a bridge lent from the warm pool, the P/D model under a
 policy that lists the slo analyzer alone (so the composite holds both its
 roles), and an external analyzer that fails every third call (its results
 are recorded; on the cycles it fails it is inside its grace, and the
-composite holds the roles it covers). To write it again as a raw recording:
+composite holds the roles it covers). From the seventh cycle agg-a's scale
+target is two replicas below what its rows report, so the capacity-build
+step clamps each analyzer's replica count. Every field of its metadata is
+set; the recording keeps three, so a replay that matches shows the
+capacity-build step reads no other. To write it again as a raw recording:
 
 ```bash
 LEARNREC_ENGINE_OUT=$HOME/engine.jsonl go test ./internal/engines/steadystate/ -run TestLearnerRecording_TheEngineLayerReplaysByteForByte -v
@@ -444,9 +448,10 @@ The engine's replay counts its own paths (`LearnerReplay.PathCounts`):
 composites built, composites of a P/D model priced per role, composites that
 hold a role, composites in which another analyzer's frame bounds a release,
 composites built with an external analyzer's recorded result, composites
-with an analyzer inside its grace, and composites with a variant a bridge
-serves or a variant pushed past its scale-up threshold. With the engine's replay registered, they are required
-too.
+with an analyzer inside its grace, composites in which the capacity-build
+step clamped a variant's replica count to its scale target, and composites
+with a variant a bridge serves or a variant pushed past its scale-up
+threshold. With the engine's replay registered, they are required too.
 
 The committed goldens must run every path at least once between them:
 `make test` and `make learner-goldens-check` fail when one runs on no

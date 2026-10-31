@@ -32,6 +32,32 @@ func Kinds() []string { return []string{KindComposite} }
 // Owns reports whether kind is an engine event.
 func Owns(kind string) bool { return strings.HasPrefix(kind, Owner) }
 
+// Why the composite holds a role: the reasons a CompositeEvent's HoldReasons
+// holds, and the "composite holds a role" line logs. The engine defines them
+// here, so the export that must recognise them reads the same words.
+const (
+	// HoldUnsized: saturation is not listed and no listed analyzer sizes the
+	// role, so it neither grows nor shrinks.
+	HoldUnsized = "no-listed-analyzer-sizes-role"
+	// HoldOtherRoleUnsized: on P/D, another role is held for HoldUnsized,
+	// so this one does not grow either.
+	HoldOtherRoleUnsized = "other-role-cannot-grow"
+	// HoldAnalyzerInGrace is the prefix of the reason a listed analyzer
+	// inside its staleness grace with no reading holds a role against
+	// scale-down; the analyzer's name follows it.
+	HoldAnalyzerInGrace = "analyzer-in-grace:"
+	// HoldSaturationHolds: saturation holds the role (HeldRoleDemand) and
+	// another analyzer's demand replaced its held figure, so the role does
+	// not shrink.
+	HoldSaturationHolds = "saturation-holds-role"
+)
+
+// HoldReasons is every hold reason that is a whole word:
+// HoldAnalyzerInGrace is a prefix, and not among them.
+func HoldReasons() []string {
+	return []string{HoldUnsized, HoldOtherRoleUnsized, HoldSaturationHolds}
+}
+
 // Replayed is what a replay has reproduced when it reaches an engine event:
 // each analyzer's last result for a model, and the policy the model's last
 // Analyze received.
