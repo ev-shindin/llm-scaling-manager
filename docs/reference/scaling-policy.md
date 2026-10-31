@@ -1411,6 +1411,9 @@ limits apply:
 - It does not add prefill while decode is still full.
 - It only rises. A lower reading, taken behind a full decode after prefill
   grew, does not lower it.
+- Within a minute it takes the average of the queued prefill replicas, not
+  the fastest. One fast replica, or one replica whose rate was counted twice,
+  does not set it.
 - Prefill's own measurement replaces it.
 
 - It takes effect on the next cycle. The `Effective scaling policy` log line
