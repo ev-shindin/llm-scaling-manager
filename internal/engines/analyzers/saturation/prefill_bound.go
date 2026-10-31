@@ -1,6 +1,7 @@
 package saturation
 
 import (
+	"math"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -136,11 +137,18 @@ func (a *SaturationAnalyzer) notePrefillBound(rm domain.ReplicaMetrics, cfg *con
 	if saturated && adm.serving() && rm.PrefillComputedTokenRate > 0 && ileff > 0 {
 		tokens := rm.PrefillComputedTokenRate
 		a.mu.Lock()
-		var prior float64
+		var prior, last float64
 		if ra, ok := a.saturatedThroughput[key]; ok {
-			prior = ra.Max()
+			prior, last = ra.Max(), ra.Last()
 		}
 		sampledAt, sampled := a.throughputSampledAt[key]
+		// folding: this reading joins the sample already being read.
+		// readsKept: that sample's per-pod readings, and its floor, are on
+		// record; they are not after a restore or a window put aside and
+		// brought back, which carry the sample but not its readings.
+		folding := sampled && a.now().Sub(sampledAt) < ThroughputSampleSpacing
+		kept, readsKept := a.throughputPodReads[key]
+		readsKept = readsKept && kept.at.Equal(sampledAt) && kept.pods != nil
 		a.mu.Unlock()
 		// Under the pod's name, so the readings of one minute fold as mu's
 		// do: a max over one pod's re-reads and the mean across pods
@@ -168,9 +176,21 @@ func (a *SaturationAnalyzer) notePrefillBound(rm domain.ReplicaMetrics, cfg *con
 			// against the max now, which holds the sample itself, it restored
 			// the sample to its first pod's reading and undid the fold.
 			reads := a.throughputPodReads[key]
-			if at, ok := a.throughputSampledAt[key]; ok && reads.at.Equal(at) && (!sampled || !at.Equal(sampledAt)) {
+			at, ok := a.throughputSampledAt[key]
+			switch {
+			case ok && reads.at.Equal(at) && (!sampled || !at.Equal(sampledAt)):
+				// This reading started the sample.
 				reads.floor = prior
 				a.throughputPodReads[key] = reads
+			case folding && !readsKept && ok && at.Equal(sampledAt) && !math.IsInf(tokens, 1):
+				// The fold rebuilt the sample's readings with its value
+				// counted as this pod's. That value is no pod's reading: it
+				// was raised to at least the sample's floor, which is lost
+				// with the readings. It stays the floor, and the mean starts
+				// over from this pod alone.
+				reads = podReads{at: at, pods: map[string]float64{rm.PodName: tokens}, floor: last}
+				a.throughputPodReads[key] = reads
+				ra.SetLastAt(tokens, a.now())
 			}
 			if ra.Last() < reads.floor {
 				ra.RaiseLastAt(reads.floor, a.now())

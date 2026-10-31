@@ -453,10 +453,14 @@ var _ = Describe("notePrefillBound across the pods of one minute", func() {
 	It("prices the mean of four pods when one is genuinely slow, not the fastest", func() {
 		Expect(minute(4000, 4000, 4000, 2000)).To(BeNumerically("~", 3500, 1e-6))
 	})
-	It("still only rises across minutes: a later, lower minute keeps the earlier figure", func() {
+	It("still only rises across minutes, after the higher minute has left the ring", func() {
 		Expect(minute(4000, 4000)).To(BeNumerically("~", 4000, 1e-6))
-		clock = clock.Add(ThroughputSampleSpacing)
-		Expect(minute(3000, 3200)).To(BeNumerically("~", 4000, 1e-6))
+		// More lower minutes than the ring holds: the first minute's sample
+		// is evicted, and only the rise keeps its figure.
+		for range capacity.RollingAverageWindowSize + 1 {
+			clock = clock.Add(ThroughputSampleSpacing)
+			Expect(minute(3000, 3200)).To(BeNumerically("~", 4000, 1e-6))
+		}
 		clock = clock.Add(ThroughputSampleSpacing)
 		Expect(minute(4400, 4800)).To(BeNumerically("~", 4600, 1e-6))
 	})
@@ -464,5 +468,16 @@ var _ = Describe("notePrefillBound across the pods of one minute", func() {
 		Expect(minute(4000, 4000)).To(BeNumerically("~", 4000, 1e-6))
 		clock = clock.Add(capacity.EpisodeGap + time.Minute)
 		Expect(minute(3000, 3200)).To(BeNumerically("~", 4000, 1e-6))
+	})
+	It("keeps the earlier figure when a restart inside the minute lost the sample's readings", func() {
+		Expect(minute(4000, 4000)).To(BeNumerically("~", 4000, 1e-6))
+		clock = clock.Add(capacity.EpisodeGap + time.Minute)
+		Expect(minute(3000)).To(BeNumerically("~", 4000, 1e-6))
+		// What a restored snapshot, or a window put aside and brought back,
+		// leaves: the sample and its time, and not its per-pod readings.
+		analyzer.mu.Lock()
+		delete(analyzer.throughputPodReads, prefillBoundKey(key))
+		analyzer.mu.Unlock()
+		Expect(minute(3200, 3000)).To(BeNumerically("~", 4000, 1e-6))
 	})
 })
