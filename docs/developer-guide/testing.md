@@ -654,9 +654,15 @@ Sorting that loop would change the order models are analysed and reach the
 optimizer, not only the recording. So a recording from a running controller
 keeps the order its cycles ran in, and is never made twice to compare.
 
-The tests of the add (`TestAddGolden` and `TestRun_AddCheckUpdate`) build
-their recording in the test. They do not read a committed one. So a new
-input field does not force the committed recordings to be written again.
+An add replays its recording in Fidelity mode, which fails on a recording
+made before an input field was added. So the two tests that add a recording,
+`TestAddGolden` ("a head cut anywhere is added") and
+`TestRun_AddCheckUpdate`, build it in the test. A new input field then does
+not force the committed recordings to be written again. Other tests still
+read the committed acceptance recording (`rawRecording` in
+`cmd/learnergolden`, `fixtureRecording` in `learnreplay`). They only export
+it or run the golden check on it, and neither compares it byte for byte
+with a replay.
 
 ## Learner Property Tests
 

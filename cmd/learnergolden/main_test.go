@@ -170,15 +170,16 @@ func TestRun_AddCheckUpdate(t *testing.T) {
 	require.NoError(t, err)
 	rep, err := learnreplay.Replay(context.Background(), raw, learnreplay.Options{Mode: learnreplay.Normal})
 	require.NoError(t, err)
-	unrun := 0
+	var unrun []string
 	for _, p := range saturation.PathNames() {
 		if rep.Paths[p] == 0 {
-			unrun++
+			unrun = append(unrun, p)
 		}
 	}
 	// Pinned, so a change in what the replay counts is a reviewed change; the
 	// replay's own count above is only the cross-check.
-	require.Equal(t, 8, unrun, "the saturation paths the head recording leaves unrun")
+	require.Len(t, unrun, 8, "the head recording leaves these saturation paths unrun: %v. "+
+		"A saturation path added or removed moves this count; check the list and update the 8", unrun)
 	out, err = runOut("check", "-dir", dir)
-	require.ErrorContains(t, err, fmt.Sprintf("%d learner paths no golden runs", unrun+len(steadystate.LearnerReplayPathNames())), out)
+	require.ErrorContains(t, err, fmt.Sprintf("%d learner paths no golden runs", len(unrun)+len(steadystate.LearnerReplayPathNames())), out)
 }
