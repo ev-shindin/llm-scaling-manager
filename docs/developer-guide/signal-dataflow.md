@@ -215,17 +215,21 @@ TokenRate              = Sequences / ITL(k)
 | in | unit | from | what it is |
 | --- | --- | --- | --- |
 | `itl` = `AvgITL` | seconds/token | collector, `inter_token_latency_seconds_sum/count` | the gap between two generated tokens |
-| `k` = `KvUsageInstant` | fraction 0-1 | collector, **instantaneous** `gpu_cache_usage_perc` | the occupancy that sample was taken at |
+| `k` = `KvUsageForITL()` | fraction 0-1 | collector, `kv_cache_usage_perc` **averaged over the ITL's minute** (`KvUsageMean`, `avg_over_time[1m]`); the instantaneous `KvUsageInstant` when that was not read | the occupancy over the minute the ITL was measured in |
 | `RunningRequests`, `PreemptionRate` | count, 1/s | collector, `num_requests_running` and `rate(num_preemptions_total[1m])` | whether a reading above `k` 0.80 is a replica at its sequence cap, which the window keeps (issue #287) |
 | `n` | count | the window | how many `(k, itl)` observations the fit is over; at least `DefaultMinSamples` |
 | `C` | tokens | **-> produced above**, [per-replica capacity](#per-replica-capacity--analyzerssaturation) | the replica's KV budget, `TotalKvCapacityTokens` or the override |
 | `KVreq` | tokens/request | **-> produced above**, [the shape](#the-shape--signalsshape) | what one resident request occupies |
 
-`KvUsageInstant` and `KvCacheUsage` are separate fields on purpose:
-`KvCacheUsage` is a **one-minute maximum**, used by the saturation test, where a
-mean would hide a replica that spent part of the minute full. Pairing a
-one-minute max with an instantaneous latency would fit the line against the
-wrong `k`.
+`KvUsageMean`, `KvUsageInstant` and `KvCacheUsage` are separate fields on
+purpose. `KvCacheUsage` is a **one-minute maximum**, used by the saturation
+test, where a mean would hide a replica that spent part of the minute full.
+`KvUsageInstant` is the point the replica is at now, which the idle test and
+the resident charge read. The line pairs each ITL, a `rate[1m]` mean, with the
+mean `k` over the same minute: the instant `k` against it, with the batch
+moving inside the minute, flattened the fitted slope and raised the remembered
+`B` (issue #393), and a one-minute max would fit it against the wrong `k`
+altogether.
 
 A fit is refused unless `A` and `B` are finite, `A > 1e-12` (a flat or falling
 line is not this physics) and `A·0.85 + B > 0`. A full fit needs
@@ -512,7 +516,7 @@ The rules, the same in both:
 | --- | --- |
 | KV capacity (`NumGpuBlocks`, `TotalKvCapacityTokens`) | the sum over the ranks. vLLM's API server already sums its engines' blocks into the `num_gpu_blocks` label of `vllm:cache_config_info`, so that label is read as is and never multiplied |
 | `EngineRanks` | the sum: the merge adds rows, the query counts the `cache_config_info` series (one per rank). `Ranks()` reads an unknown count as 1 |
-| `KvCacheUsage`, `KvUsageInstant` | used tokens over total capacity: the merge weighs by each row's capacity, the query takes the mean over ranks (ranks of a pod are alike), after a max per rank so a second scrape or a per-process copy of a rank's gauge counts once |
+| `KvCacheUsage`, `KvUsageInstant`, `KvUsageMean` | used tokens over total capacity: the merge weighs by each row's capacity, the query takes the mean over ranks (ranks of a pod are alike), after a max per rank so a second scrape or a per-process copy of a rank's gauge counts once |
 | `QueueLength`, `RunningRequests`, `RequestRate`, `GenerationTokenRate`, `PrefillComputedTokenRate`, `PreemptionRate` | the sum, after a max per rank in the query, so a target scraped twice (two PodMonitors on one pod) counts each rank once. Summed straight, a second scrape doubled the three rates: the generation-token rate is the measured mu's numerator and the derived line's check |
 | `PreemptionRateKnown` | set only when every rank reported a preemption rate |
 | `MaxRankQueueLength`, `MaxRankKvCacheUsage` | the max: the busiest rank's queue and use. The merge takes the max over rows, the queries a max over ranks |

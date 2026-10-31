@@ -52,6 +52,7 @@ const (
 var dp8Folded = map[string]float64{
 	registration.QueryKvCacheUsage:   0.203125,
 	registration.QueryKvUsageInstant: 0.203125,
+	registration.QueryKvUsageMean:    0.203125,
 	registration.QueryQueueLength:    8,
 	// The busiest rank, rank 7.
 	registration.QueryMaxRankKvCacheUsage:   0.875,
@@ -128,6 +129,7 @@ func perPortResults() map[string]*source.MetricResult {
 		labels := map[string]string{seriesModelLabel: "glm", "pod": dp8Pod, "instance": inst}
 		addValue(results, registration.QueryKvCacheUsage, labels, r.kv)
 		addValue(results, registration.QueryKvUsageInstant, labels, r.kv)
+		addValue(results, registration.QueryKvUsageMean, labels, r.kv)
 		addValue(results, registration.QueryQueueLength, labels, float64(r.wait))
 		// One rank per instance: its busiest rank is itself.
 		addValue(results, registration.QueryMaxRankKvCacheUsage, labels, r.kv)
@@ -205,6 +207,7 @@ func TestCollectReplicaMetrics_DPLayoutsAgree(t *testing.T) {
 	}{
 		{"KvCacheUsage", func(m domain.ReplicaMetrics) float64 { return m.KvCacheUsage }},
 		{"KvUsageInstant", func(m domain.ReplicaMetrics) float64 { return m.KvUsageInstant }},
+		{"KvUsageMean", func(m domain.ReplicaMetrics) float64 { return m.KvUsageMean }},
 		{"MaxRankKvCacheUsage", func(m domain.ReplicaMetrics) float64 { return m.MaxRankKvCacheUsage }},
 		{"RequestRate", func(m domain.ReplicaMetrics) float64 { return m.RequestRate }},
 		{"GenerationTokenRate", func(m domain.ReplicaMetrics) float64 { return m.GenerationTokenRate }},

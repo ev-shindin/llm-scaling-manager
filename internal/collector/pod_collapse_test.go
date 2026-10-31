@@ -26,7 +26,7 @@ func TestCollapseToPods_MergesDPRanksIntoOneReplica(t *testing.T) {
 		{
 			PodName: "pod-dp", VariantName: "va-1", ModelID: "m", Namespace: "ns",
 			NumGpuBlocks: 1000, BlockSize: 16, TotalKvCapacityTokens: 16000, TokensInUse: 4000,
-			KvCacheUsage: 0.25, KvUsageInstant: 0.25, QueueLength: 2,
+			KvCacheUsage: 0.25, KvUsageInstant: 0.25, KvUsageMean: 0.25, QueueLength: 2,
 			RequestRate: 1, GenerationTokenRate: 100,
 			AvgInputTokens: 100, AvgOutputTokens: 20, AvgITL: 0.02, AvgServiceTime: 10, PrefixCacheHitRate: 0.4,
 			Metadata: &domain.ReplicaMetricsMetadata{CollectedAt: ts, Age: 5 * time.Second, FreshnessStatus: "fresh"},
@@ -34,7 +34,7 @@ func TestCollapseToPods_MergesDPRanksIntoOneReplica(t *testing.T) {
 		{
 			PodName: "pod-dp", VariantName: "va-1", ModelID: "m", Namespace: "ns",
 			NumGpuBlocks: 2000, BlockSize: 16, TotalKvCapacityTokens: 32000, TokensInUse: 32000,
-			KvCacheUsage: 1.0, KvUsageInstant: 1.0, QueueLength: 5,
+			KvCacheUsage: 1.0, KvUsageInstant: 1.0, KvUsageMean: 1.0, QueueLength: 5,
 			RequestRate: 3, GenerationTokenRate: 300,
 			AvgInputTokens: 200, AvgOutputTokens: 40, AvgITL: 0.06, AvgServiceTime: 30, PrefixCacheHitRate: 0.8,
 			Metadata: &domain.ReplicaMetricsMetadata{CollectedAt: ts, Age: 30 * time.Second, FreshnessStatus: "stale"},
@@ -63,6 +63,7 @@ func TestCollapseToPods_MergesDPRanksIntoOneReplica(t *testing.T) {
 	// (which would be 0.625 and would understate a pod that is three quarters full).
 	assert.InDelta(t, 0.75, pod.KvCacheUsage, 1e-9)
 	assert.InDelta(t, 0.75, pod.KvUsageInstant, 1e-9)
+	assert.InDelta(t, 0.75, pod.KvUsageMean, 1e-9)
 
 	// Request shape is weighted by traffic: rank B serves 3 of every 4 requests.
 	assert.InDelta(t, 175.0, pod.AvgInputTokens, 1e-9)
@@ -219,4 +220,22 @@ func TestCollapseToPods_InstantKvKnownOnlyIfEveryRankReportedIt(t *testing.T) {
 	require.Len(t, pods, 2)
 	assert.False(t, pods[0].KvUsageInstantKnown, "pod-a: one rank had no instant series")
 	assert.True(t, pods[1].KvUsageInstantKnown, "pod-b: both ranks reported one")
+}
+
+func TestCollapseToPods_MeanKvKnownOnlyIfEveryRankReportedIt(t *testing.T) {
+	// The same for the k an ITL(k) reading is fitted from: a rank with no
+	// series would be averaged in as an empty cache.
+	instances := []domain.ReplicaMetrics{
+		{PodName: "pod-a", TotalKvCapacityTokens: 100, KvUsageMean: 0.8, KvUsageMeanKnown: true},
+		{PodName: "pod-a", TotalKvCapacityTokens: 100},
+		{PodName: "pod-b", TotalKvCapacityTokens: 100, KvUsageMean: 0.2, KvUsageMeanKnown: true},
+		{PodName: "pod-b", TotalKvCapacityTokens: 100, KvUsageMean: 0.4, KvUsageMeanKnown: true},
+	}
+
+	pods := collapseToPods(instances)
+
+	require.Len(t, pods, 2)
+	assert.False(t, pods[0].KvUsageMeanKnown, "pod-a: one rank had no mean series")
+	assert.True(t, pods[1].KvUsageMeanKnown, "pod-b: both ranks reported one")
+	assert.InDelta(t, 0.3, pods[1].KvUsageMean, 1e-9)
 }

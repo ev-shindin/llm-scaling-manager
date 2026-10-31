@@ -32,8 +32,8 @@ func itlCases() []propCase {
 			policy: tuningPolicy(tuningNonDefault), check: checkITLMissedRow(non)},
 		{class: classHeterogeneity, learner: "itl", name: "slow-replica-fit", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkITLSlowReplica(itl.FitPinnedB)},
 		{class: classHeterogeneity, learner: "itl", name: "flagged-contamination-to-50pct", family: familyDirect, tuning: tunedDefault, check: checkITLFlagged(def)},
-		{class: classKnownTruth, learner: "itl", name: "line-at-kprice", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkITLKnownTruth(def, false)},
-		{class: classKnownTruth, learner: "itl", name: "line-at-kprice-timebase", family: familyTimeBase, tuning: tunedDefault, seeds: cheapSeeds, check: checkITLKnownTruth(def, true)},
+		{class: classKnownTruth, learner: "itl", name: "line-at-kprice", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkITLKnownTruth(def)},
+		{class: classKnownTruth, learner: "itl", name: "line-at-kprice-timebase", family: familyTimeBase, tuning: tunedDefault, seeds: cheapSeeds, check: checkITLKnownTruthTimeBase(def, nil)},
 		{class: classEdges, learner: "itl", name: "bimodal-fit", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkITLBimodal(itl.FitPinnedB)},
 	}
 }
@@ -269,38 +269,10 @@ func checkITLFlagged(newL func() itlLearner) func(uint64) error {
 
 // checkITLKnownTruth: from a fleet at distinct steady levels, the line priced
 // at kPrice is no lower than the true ITL there by more than propTruthTol
-// (too low is the side that over-prices derived mu). On the time base k is
-// the instant reading and ITL a rate[1m] (#273 A5), with a batch that swings
-// by a quarter inside the minute.
-func checkITLKnownTruth(newL func() itlLearner, timeBased bool) func(uint64) error {
+// (too low is the side that over-prices derived mu).
+func checkITLKnownTruth(newL func() itlLearner) func(uint64) error {
 	return func(seed uint64) error {
-		r := propRand(seed)
-		l := newL()
-		var readings []itl.Reading
-		if !timeBased {
-			readings = itlRun(l, 60, steadyFleet(r, 3, 60))
-		} else {
-			const n, secs = 3, 15 * 60
-			lv := baseLevels(n)
-			k := make([]timeBase, n)
-			lat := make([]timeBase, n)
-			for p := range n {
-				ks := make([]float64, secs)
-				ls := make([]float64, secs)
-				for s := range ks {
-					ks[s] = math.Max(0.01, lv[p]*(1+0.25*r.NormFloat64()))
-					ls[s] = propITL(ks[s])
-				}
-				k[p], lat[p] = sampleTimeBase(ks), sampleTimeBase(ls)
-			}
-			readings = itlRun(l, len(k[0].instant), func(i int) []domain.ReplicaMetrics {
-				rows := make([]domain.ReplicaMetrics, n)
-				for p := range n {
-					rows[p] = itlRow(fmt.Sprintf("r%d", p), k[p].instant[i], lat[p].rate1m[i])
-				}
-				return rows
-			})
-		}
+		readings := itlRun(newL(), 60, steadyFleet(propRand(seed), 3, 60))
 		last := readings[len(readings)-1]
 		got, want := itlAt(last), propITL(propKPrice)
 		if math.IsNaN(got) {
@@ -309,6 +281,70 @@ func checkITLKnownTruth(newL func() itlLearner, timeBased bool) func(uint64) err
 		return holds(got >= want*(1-propTruthTol), kindBiased, "ITL(%.2f) priced %.5f s against a true %.5f s (%s tier, A %.4f B %.4f): %.1f%% low",
 			propKPrice, got, want, last.Tier, last.Model.A, last.Model.B, 100*(1-got/want))
 	}
+}
+
+// The time-base known-truth fleet's batch: each replica's KV fill moves by
+// tbKSigma of its level, as an AR(1) process whose correlation time is
+// tbKTau -- a batch's sequences come and go over a request's lifetime, so the
+// fill does not jump independently every second.
+const (
+	tbKSigma = 0.15
+	tbKTau   = 30 * time.Second
+)
+
+// checkITLKnownTruthTimeBase: three replicas at distinct levels, their KV
+// fill moving inside the minute, ITL a rate[1m] of the per-second path and k
+// as the collector reads it: the instant fill and the scraped minute's mean
+// (avg_over_time[1m], KvUsageMean). Within 15 minutes the key learns its own
+// B, and the line priced at kPrice is within propTruthTol of the true ITL
+// there, on either side (#273 A5, #393). edit, when not nil, changes each row
+// before the learner sees it.
+func checkITLKnownTruthTimeBase(newL func() itlLearner, edit func(*domain.ReplicaMetrics)) func(uint64) error {
+	return func(seed uint64) error {
+		return knownTruthTimeBase(seed, newL, tbKSigma, tbKTau, edit)
+	}
+}
+
+func knownTruthTimeBase(seed uint64, newL func() itlLearner, sigma float64, tau time.Duration, edit func(*domain.ReplicaMetrics)) error {
+	r := propRand(seed)
+	const n, secs = 3, 15 * 60
+	lv := baseLevels(n)
+	rho := math.Exp(-1 / tau.Seconds())
+	k := make([]timeBase, n)
+	lat := make([]timeBase, n)
+	for p := range n {
+		ks := make([]float64, secs)
+		ls := make([]float64, secs)
+		noise := arNoise(r, secs, sigma, rho)
+		for s := range ks {
+			ks[s] = math.Max(0.01, lv[p]*(1+noise[s]))
+			ls[s] = propITL(ks[s])
+		}
+		k[p], lat[p] = sampleTimeBase(ks), sampleTimeBase(ls)
+	}
+	l := newL()
+	readings := itlRun(l, len(k[0].instant), func(i int) []domain.ReplicaMetrics {
+		rows := make([]domain.ReplicaMetrics, n)
+		for p := range n {
+			rows[p] = itlRow(fmt.Sprintf("r%d", p), k[p].instant[i], lat[p].rate1m[i])
+			rows[p].KvUsageMean, rows[p].KvUsageMeanKnown = k[p].avg1m[i], true
+			if edit != nil {
+				edit(&rows[p])
+			}
+		}
+		return rows
+	})
+	last := readings[len(readings)-1]
+	got, want := itlAt(last), propITL(propKPrice)
+	if math.IsNaN(got) {
+		return violation(kindNotLearned, "no line")
+	}
+	if !last.BaselineLearned {
+		return violation(kindNotLearned, "B never learned: the line pins the %.4f s default (ITL(%.2f) %.5f s against a true %.5f s)",
+			itl.DefaultBaselineSec, propKPrice, got, want)
+	}
+	return holds(relErr(got, want) <= propTruthTol, kindBiased, "ITL(%.2f) priced %.5f s against a true %.5f s (%s tier, A %.4f B %.4f): %+.1f%%",
+		propKPrice, got, want, last.Tier, last.Model.A, last.Model.B, 100*(got/want-1))
 }
 
 // checkITLBimodal: two groups of replicas on slopes 0.06 and 0.10; the second

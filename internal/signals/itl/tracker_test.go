@@ -74,6 +74,33 @@ var _ = Describe("Tracker", func() {
 		Expect(b).To(BeNumerically("~", 0.01, 1e-9))
 	})
 
+	It("pairs each ITL with the minute-mean k when the collector read one, the instant k only otherwise", func() {
+		// The instant k is the line's k mirrored about 0.45: a batch that
+		// swung inside the minute. A fit through it would fall with k.
+		rows := onLine(10, 0.2, 0.7)
+		for i := range rows {
+			rows[i].KvUsageMean, rows[i].KvUsageMeanKnown = rows[i].KvUsageInstant, true
+			rows[i].KvUsageInstant = 0.9 - rows[i].KvUsageInstant
+		}
+		rows = append(rows, domain.ReplicaMetrics{PodName: "spike", VariantName: "v", Ready: true,
+			KvUsageInstant: 0.95, KvUsageMean: 0.45, KvUsageMeanKnown: true, AvgITL: 0.02*0.45 + 0.01})
+		r := t.Observe("key", "v", rows, Admission{}, now)
+		Expect(r.AboveBand).To(BeZero(), "the band judges the minute's k: an instant spike above it is still a reading")
+		Expect(r.Offered).To(Equal(11))
+		Expect(r.Tier).To(Equal(TierOLS))
+		Expect(r.Model.A).To(BeNumerically("~", 0.02, 1e-9))
+		Expect(r.Model.B).To(BeNumerically("~", 0.01, 1e-9))
+
+		// Not read: the instant k, as before the minute's mean was collected.
+		fallback := NewTracker()
+		rows = onLine(10, 0.2, 0.7)
+		rows[0].KvUsageMean = 0.6 // a value with no series behind it is not read
+		r = fallback.Observe("key", "v", rows, Admission{}, now)
+		Expect(r.Tier).To(Equal(TierOLS))
+		Expect(r.Model.A).To(BeNumerically("~", 0.02, 1e-9))
+		Expect(r.Model.B).To(BeNumerically("~", 0.01, 1e-9))
+	})
+
 	It("does not remember a B that is not a physical floor", func() {
 		rows := make([]domain.ReplicaMetrics, 10)
 		for i := range rows {

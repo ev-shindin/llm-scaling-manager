@@ -55,6 +55,7 @@ var _ = Describe("the queries the demand floor and the throughput analyzer share
 				QueryModelArrivalRate,
 				QueryGenerationTokenRate,
 				QueryKvUsageInstant,
+				QueryKvUsageMean,
 			}
 			for _, name := range expectedQueries {
 				q := queryList.Get(name)
@@ -121,6 +122,18 @@ var _ = Describe("the queries the demand floor and the throughput analyzer share
 			Expect(rendered).To(ContainSubstring(`avg by (model_name,`),
 				"the mean over a pod's engine ranks, not the busiest rank (issue #150)")
 			Expect(rendered).NotTo(ContainSubstring(`model_name="`), "the model is partitioned in the collector, not matched in PromQL")
+		})
+
+		It("builds QueryKvUsageMean over the ITL window, so k and ITL cover the same minute", func() {
+			rendered, err := queryList.Build(QueryKvUsageMean, map[string]string{
+				source.ParamNamespace: "test-ns",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rendered).To(ContainSubstring(`avg_over_time(vllm:kv_cache_usage_perc{namespace="test-ns"}[`+ITLWindow+`])`),
+				"the minute AvgITL's rate covers (issue #393)")
+			Expect(rendered).NotTo(ContainSubstring(`max_over_time`))
+			Expect(rendered).To(ContainSubstring(`avg by (model_name,`),
+				"the mean over a pod's engine ranks, as QueryKvUsageInstant (issue #150)")
 		})
 
 		It("should build QueryRequestRate with 1m window over token count, once registered", func() {

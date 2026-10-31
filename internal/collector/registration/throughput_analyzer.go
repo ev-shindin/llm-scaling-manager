@@ -69,6 +69,16 @@ const (
 	// Source: vllm:kv_cache_usage_perc (gauge)
 	QueryKvUsageInstant = "kv_usage_instant"
 
+	// QueryKvUsageMean is the query name for the per-pod KV cache utilization
+	// fraction (0.0–1.0) averaged over ITLWindow: avg_over_time of the gauge
+	// QueryKvUsageInstant reads, folded over the ranks the same way. It is the
+	// k of an ITL(k) reading (itl.Tracker), so the reading pairs the minute's
+	// k with the minute's ITL rate (QueryAvgITL); the instant k against it
+	// flattened the fitted slope whenever the batch moved inside the minute
+	// (issue #393).
+	// Source: vllm:kv_cache_usage_perc (gauge)
+	QueryKvUsageMean = "kv_usage_mean"
+
 	// QueryRequestRate is the query name for the engine-side request completion
 	// rate per pod (req/s), derived from the generation tokens histogram count.
 	// It is engine-agnostic: the vLLM variant reads
@@ -313,6 +323,15 @@ func RegisterAlwaysOnQueries(sourceRegistry *source.SourceRegistry) {
 		Params:      []string{source.ParamNamespace},
 		Description: "Instantaneous KV cache utilization per pod (0.0–1.0), used as k* in the ITL model",
 	})
+	// The same mean over the ranks, averaged over the window the ITL rate is
+	// taken over: the k each ITL(k) reading is fitted from (issue #393).
+	registry.MustRegister(source.QueryTemplate{
+		Name:        QueryKvUsageMean,
+		Type:        source.QueryTypePromQL,
+		Template:    `avg by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (avg_over_time(vllm:kv_cache_usage_perc{namespace="{{.namespace}}"}[` + ITLWindow + `])))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "KV cache utilization per pod (0.0–1.0) averaged over the ITL window, the k of the ITL(k) fit",
+	})
 	registerSGLangThroughputAnalyzerQueries(registry)
 	registerSequenceCapQueries(registry)
 }
@@ -371,6 +390,13 @@ func registerSGLangThroughputAnalyzerQueries(registry *source.QueryList) {
 		Template:    `max by (model_name, instance, pod) (sglang:token_usage{namespace="{{.namespace}}"})`,
 		Params:      []string{source.ParamNamespace},
 		Description: "Instantaneous KV cache utilization per pod (0.0-1.0), used as k* in the ITL model (SGLang)",
+	})
+	registerForEngine(registry, inferenceengine.EngineSGLang, source.QueryTemplate{
+		Name:        QueryKvUsageMean,
+		Type:        source.QueryTypePromQL,
+		Template:    `max by (model_name, instance, pod) (avg_over_time(sglang:token_usage{namespace="{{.namespace}}"}[` + ITLWindow + `]))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "KV cache utilization per pod (0.0-1.0) averaged over the ITL window, the k of the ITL(k) fit (SGLang)",
 	})
 
 	// The SGLang completion rate moved to registerSGLangArrivalRateQueries, which

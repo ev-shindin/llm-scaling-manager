@@ -8,11 +8,11 @@ import (
 // DefaultSteadyFor is how long a replica's k must have held still before its
 // (k, ITL) pair may teach the full fit.
 //
-// The two halves of a pair are not read over the same interval. k is the
-// instantaneous KV fill; ITL is a histogram mean over rate[1m]
-// (collector/registration/queueing_model.go), scraped some seconds later. On a
-// replica whose load just changed, the pair is this moment's k against the
-// last minute's latency, and a line through such pairs is not ITL(k) at all.
+// The two halves of a pair are not taken at the same moment. ITL is a
+// histogram mean over rate[1m] (collector/registration/queueing_model.go); k
+// is the KV fill averaged over the same minute (issue #393), or the instant
+// fill where that was not read. On a replica whose load just changed, the
+// minute holds both levels, and a line through such pairs is not ITL(k) at all.
 // Two minutes covers the rate window and a couple of scrapes after it.
 // It is the default of the policy key analyzerTuning.steadyGate.steadyFor
 // (Steadiness.For).
@@ -227,7 +227,7 @@ func (w *Window) dropBefore(cutoff time.Time) {
 // traceable is whether a row's k says anything about the replica's load: a
 // finite k above zero.
 //
-// Zero is what the collector leaves in KvUsageInstant when it read no k for
+// Zero is what the collector leaves in the row's k when it read none for
 // the replica, and Observe already counts it as NoK. Traced as a reading, one
 // missed scrape put a k of 0 into the trace and held the replica out of the
 // steady readings for DefaultSteadyFor against it. A row without a k neither
