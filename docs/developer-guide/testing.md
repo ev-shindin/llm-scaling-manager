@@ -485,10 +485,14 @@ not where its input arrives:
   charged at its instant KV;
 - rows whose Pod Ready time k2's joined test read;
 - k2 readings refused as a joiner because of the Ready time: the restart
-  fix (#288), not the first sight, decided the refusal.
+  fix (#288), not the first sight, decided the refusal;
+- k2's settle refusals by reason: as a joiner (`k2-unsettled-joined`), and
+  as a load step (`k2-unsettled-window`).
 
 The names are one table in `path_counts.go`; `PathCounts` and `PathNames`
-read it.
+read it. A counter no committed recording reaches yet is reported and not
+required (`PathAwaitsRecording`): `k2-unsettled-window` needs the
+flow-control-off recording, and leaves that set in the PR that adds it.
 
 The replay also runs the settle tracker (`internal/signals/settle`) and
 counts its verdicts per reason: `settle-joined`, `settle-rejoined` (back
@@ -499,6 +503,11 @@ replay applies it with the rows of the model's next saturation `Analyze`. A
 recording made before the engine recorded them is observed at each
 saturation `Analyze`'s own clock, at the default optimize interval. A cycle
 whose collection failed is recorded as `settle.Hold` and replayed as one.
+k2's joined test reads the replay's tracker, as it read the engine's, so a
+recording made by driving the analyzer alone must observe a tracker the way
+the engine does (`readers_test.go`, `cmd/learnergolden`); an analyzer given
+none takes its first cycle's replicas as already watched, and its replay
+would read otherwise.
 Only `settle-joined` and `settle-lent` are required. The committed goldens
 reach `settle-restarted` and `settle-rejoined` too, but only through their
 synthetic generators (rows whose Ready time moves every cycle, clocks that

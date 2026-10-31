@@ -38,6 +38,29 @@
   Checked in the code, not on a run: a lend does not touch the Pod's
   readiness, so ReadySince does not change on a re-lend, and a re-lend to
   the same variant keeps the key.
+- **PR 2's decisions.** Where an LWS group's Ready time comes from (4.3):
+  the collector builds one row per group, the leader's; a worker's instance
+  is dropped before its row is built (`isLWSWorker`), and the row carries
+  the leader Pod's own Ready condition (`podReadySince`). So the group's
+  Ready time is its leader's, whatever its workers' are
+  (`TestLWSGroupReadyTimeIsTheLeaders`). Under LWS's default
+  `restartPolicy`, `RecreateGroupOnPodRestart`, any worker's restart
+  deletes the leader, so the recreated leader has a new Ready time and the
+  group waits again; under `restartPolicy: None` a worker-only restart
+  leaves the leader Ready and is not seen. Checked in the code (the
+  collector and lws v0.8.0's pod controller), not on a run. k2's joined
+  test reads the tracker, keeping #288's rule, behind two replay switches:
+  `k2-reads-the-settle-tracker` (a replica unseen past the tracker's
+  absence tolerance waits again; the memo held it 2 min; no committed
+  golden moves with it alone) and `k2-waits-after-controller-restart`
+  (every replica waits once after a restart; moves mu-paths only). An
+  analyzer given no view, as unit tests build one, observes a tracker of
+  its own and takes its first cycle's replicas as already watched; a
+  controller restart is the engine's tracker's first cycle. `learn` holds
+  `Report`, `Forgotten` and the list `Learners` (`k2`); k2's
+  `learner-write` band is 2 % of the last logged value, not measured on a
+  run. The counter `k2-unsettled-window` is reported and not required
+  until the flow-control-off recording lands (`PathAwaitsRecording`).
 - **Problem:** the analyzers learn about fifteen quantities. Each one accepts
   readings, fits, forgets and logs in its own way. The same defects were fixed
   in one learner after another, because no learner could reuse another's fix.

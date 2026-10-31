@@ -141,7 +141,8 @@ suspect when the busiest rank's queue, at the request's footprint, is larger
 than everything the rank holds:
 
 ```
-joined   = Pod Ready (else first seen Ready) under JoinedReplicaWindow (1m) ago
+joined   = later of Pod Ready and its first sight (else first sight) under
+           JoinedReplicaWindow (1m) ago, read from the settle tracker
 suspect  = queue x (I [+ O unless prefill]) > tokens / ranks
 admitted = !joined && (!suspect
         || (rate >= K2SettleRateFraction x rateOnRecord             // 0.7
@@ -152,6 +153,26 @@ admitted = !joined && (!suspect
              (1 - K2SettleMaxRise) x tokens then
                  <= tokens <= (1 + K2SettleMaxRise) x tokens then)   // 0.25
 ```
+
+The joined test reads the engine's settle tracker (`internal/signals/settle`,
+`k2Joined` in `settle_view.go`): the analyzer takes a read-only view at
+construction (`WithSettleView`) and never writes it. A replica waits from the
+later of its Pod's Ready time and the controller's first sight of that Ready
+time, so a restart under the same name (an engine or LWS group restart: the
+row is the group leader's, with the leader Pod's Ready time) waits again, a
+node clock behind the controller's does not shorten the wait, and after a
+controller restart every replica waits once. A replica unseen for longer than
+the tracker's absence tolerance (1 min, or 2.5 optimize intervals) is a new
+sighting. An analyzer given no view, as a unit test builds one, observes a
+tracker of its own and takes its first cycle's replicas as already watched.
+The two changes from the analyzer's own memo of Ready times are replay
+switches (`SwitchK2ReadsSettle`, `SwitchK2WaitsAfterRestart`).
+
+Each cycle k2 also fills a `learn.Report` per variant (`k2_learner.go`;
+`LearnerReports`), and logs `learner-write` at `--v=3` for a key whose figure
+was set for the first time, moved more than `K2WriteBand` (2 %) from the value
+last logged, or has not logged for `LearnerHeartbeat` (10 min). The
+forget-learned-state annotation reaches k2 through `learn.Learners`.
 
 A replica that joined the fleet under a rate window ago is filling, whatever
 its queue: its one-minute gauges still hold the minute before it was routed

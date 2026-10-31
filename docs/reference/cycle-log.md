@@ -196,6 +196,33 @@ and recovers reports the pod's age as its start time, which is the usual cause.
 After three rejections in a row the next sample is accepted, so a variant that
 really got slower moves its estimate.
 
+### `learner-start`
+
+One line per model, on the first cycle after the controller starts (and on a
+model's first cycle after that). It says what the learners begin with:
+`restoredKeys` (learned keys restored from the snapshot, per learner),
+`coldVariants` (variants with none), `oldestAdmittedAgeSeconds` (the oldest
+restored key's last admitted reading, `-1` when none) and `settleUntil`: when
+the wait every replica starts after a controller restart ends. Until then a
+saturated replica's reading is `P1-obs-unsettled`, and with the snapshot off a
+variant with no k2 is priced at k1.
+
+```text
+2026-11-01T09:00:00.020Z  INFO  learner-start  {"modelID": "my-model",
+  "namespace": "default", "restoredKeys": {"k2": 0}, "coldVariants": {"k2": 1},
+  "oldestAdmittedAgeSeconds": -1, "settleUntil": "2026-11-01T09:01:00Z"}
+```
+
+### `learner-write` (`--v=3`)
+
+At most one line per learned key per cycle, when its figure is set for the
+first time, moves more than its band from the value last logged (k2: 2 %), or
+has not logged for 10 minutes: `learner` (`k2`), `variant`, `role`, `key`,
+`value`, `previousValue`, `firstWrite`, `source`, `samples`, and `pods`: the
+pods whose readings were admitted this cycle, lowest reading first, at most 16,
+each with its `reading`, `timeBase`, `passedBy` (the admission test it passed)
+and `settledForSeconds`; `podsOmitted` counts the rest.
+
 ### `replica-capacity-summary`
 
 One line per variant per cycle: which replicas the saturation analyzer priced,
