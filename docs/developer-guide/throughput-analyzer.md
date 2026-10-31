@@ -137,7 +137,10 @@ max by (model_name, instance, pod) (vllm:kv_cache_usage_perc{namespace="..."})
 
 **What it measures:** Instantaneous KV cache utilization fraction per pod (0.0–1.0).
 
-**TA notation:** k* — the current operating point in the ITL model `ITL(k) = A·k + B`.
+**TA notation:** k* — the replica's current operating point. Local demand, the sanity check
+and the GPS check read it. The observation window, its band check and both fits read
+`k = KvUsageForITL()` instead: the minute's mean (`QueryKvUsageMean`) when the collector read
+it, else k* (issue #403).
 
 **ReplicaMetrics field:** `KvUsageInstant`
 
@@ -179,9 +182,13 @@ the window the ITL rate is taken over (`ITLWindow`).
 
 **ReplicaMetrics field:** `KvUsageMean` (`KvUsageMeanKnown`), read through `KvUsageForITL()`.
 
-**Used by:** `itl.Tracker`, the ITL line the saturation and SLO analyzers fit. Each `(k, ITL)`
-reading pairs the minute's mean `k` with the minute's ITL (issue #393). This analyzer's own
-window still reads `KvUsageInstant`.
+**Used by:** `itl.Tracker`, the ITL line the saturation and SLO analyzers fit, and this
+analyzer's own observation window, its band check and its tier-2 fit. Each `(k, ITL)` reading
+pairs the minute's mean `k` with the minute's ITL (issues #393, #403). Without the mean, `k` is
+`KvUsageInstant`. Local demand and the sanity check read `KvUsageInstant` because they want the
+fill now. The GPS check also still reads `KvUsageInstant`, although it compares it with 1-minute
+rates (`GenerationTokenRate`, and `AvgITL` near saturation): the same mismatch, left to the
+plan's PR 4b. The mean-`k` line lowers its error, so window clears get rarer, not more frequent.
 
 ---
 
@@ -253,6 +260,7 @@ reported but does not gate a scaling decision.
 |---|---|---|---|---|
 | `QueryGenerationTokenRate` | vLLM | `sum by (model_name, instance, pod)` | 1m rate | μ_dec^obs per pod (observability) |
 | `QueryKvUsageInstant` | vLLM | `max by (model_name, instance, pod)` | instant | k* (no max_over_time) |
+| `QueryKvUsageMean` | vLLM | `avg by (model_name, instance, pod)` | 1m avg_over_time | k of each `(k, ITL_obs)` reading, via `KvUsageForITL()` |
 | `QueryRequestRate` | vLLM | `sum by (model_name, instance, pod)` | 1m rate | Fallback λ_req; histogram weight |
 | `TotalKvCapacityTokens` | `registration.QueryCacheConfigInfo` labels | derived | static | KV_max = blocks × block_size |
 | `AvgITL` | `QueryAvgITL` | `max by (model_name, instance, pod)` | 1m rate | ITL_obs for OLS calibration |
@@ -315,8 +323,10 @@ Maintains the current workload shape bucket `(IL, OL, IL_eff, KVreq)`. Detects s
 - `KVreq = IL_eff + OL/2` — time-averaged KV footprint per decode request
 
 **ObservationWindow (`signals/itl/window.go`)**  
-Rolling window of `(k*, ITL_obs)` pairs collected per replica per cycle. Filters observations
-to `k ∈ [0.15, 0.85]` (reliable linear-model range). Reports `Ready()` when ≥ 10 samples with
+Rolling window of `(k, ITL_obs)` pairs collected per replica per cycle, with
+`k = KvUsageForITL()`: the minute's mean fill when the collector read it, else k*. Keeps only
+observations with `k` inside the policy band, `[0.15, 0.80]` by default (reliable linear-model
+range), set by [`analyzerTuning.itlBand`](../reference/scaling-policy.md#analyzertuningitlband-the-kv-band-the-itl-line-is-fitted-over). Reports `Ready()` when ≥ 10 samples with
 ≥ 0.30 k-spread are accumulated within the 30-minute default window.
 
 **ITLModel (`signals/itl/model.go`)**  
@@ -330,14 +340,14 @@ The engine's universal threshold post-step writes `RequiredCapacity` and `SpareC
 
 ### State and High Availability
 
-`ThroughputAnalyzer` is stateful across reconcile cycles: it accumulates `(k*, ITL)` observations until the window is ready to fit the ITL model. The state is **in-memory only** — a `map[string]*variantState` held inside the analyzer instance, with no persistence to etcd or Kubernetes.
+`ThroughputAnalyzer` is stateful across reconcile cycles: it accumulates `(k, ITL)` observations, with `k = KvUsageForITL()`, until the window is ready to fit the ITL model. The state is **in-memory only** — a `map[string]*variantState` held inside the analyzer instance, with no persistence to etcd or Kubernetes.
 
 Per-variant state is minimal:
 
 | Field | What it holds |
 |---|---|
 | `ShapeTracker` | Current workload shape snapshot (IL, OL, hit rate); overwritten each cycle |
-| `ObservationWindow` | Rolling slice of ≤ 20 `(k*, ITL_obs)` pairs + timestamps |
+| `ObservationWindow` | Rolling slice of ≤ 20 `(k, ITL_obs)` pairs + timestamps, `k = KvUsageForITL()` |
 | `lastSanityReport` | Most recent sanity check result |
 | `lastObservedAt` | Timestamp of last observation |
 
@@ -360,7 +370,7 @@ On leader failover the incoming leader starts with an empty analyzer. During war
   │        │                                         KVreq, IL_eff                │
   │        │                                         shape change──► Window.Clear │
   │        │                                                                      │
-  │        ├─(k*, ITL_obs per replica)──────────────► ObservationWindow           │
+  │        ├─(KvUsageForITL, ITL_obs)───────────────► ObservationWindow           │
   │        │                                               │                      │
   │        │                                        Ready? yes──► OLS fit         │
   │        │                                               │    no──► constrained │
@@ -402,6 +412,7 @@ On leader failover the incoming leader starts with an empty analyzer. During war
 └──────┬─────┘
        │ vllm:request_generation_tokens_sum      (QueryGenerationTokenRate   → GenerationTokenRate)
        │ vllm:kv_cache_usage_perc                (QueryKvUsageInstant          → KvUsageInstant)
+       │ vllm:kv_cache_usage_perc [1m avg]       (QueryKvUsageMean             → KvUsageMean)
        │ vllm:request_generation_tokens_count    (QueryRequestRate           → RequestRate)
        │ vllm:cache_config_info                  (QueryCacheConfigInfo       → TotalKvCapacityTokens)
        │ vllm:inter_token_latency_seconds_*      (QueryAvgITL               → AvgITL)
@@ -422,7 +433,7 @@ On leader failover the incoming leader starts with an empty analyzer. During war
 │                                                          │
 │  per variant:                                            │
 │    ShapeTracker → KVreq                                  │
-│    ObservationWindow → (k*, ITL) pairs                   │
+│    ObservationWindow → (k, ITL) pairs                    │
 │    ITLModel (tier-1 OLS or tier-2 constrained)           │
 │    supply: μ_dec_sat = k_sat×KV_max / KVreq / ITL(k_sat) │
 │    demand: EPP primary → engine fallback → k*-local      │
@@ -455,6 +466,11 @@ On leader failover the incoming leader starts with an empty analyzer. During war
 The ITL model `ITL(k) = A·k + B` captures how inter-token latency grows with KV cache
 utilization k. It is calibrated independently per variant (different hardware → different A, B).
 
+`AvgITL` is a `rate[1m]` mean, so the `k` paired with it is `ReplicaMetrics.KvUsageForITL()`:
+the KV fill averaged over the same minute (`KvUsageMean`) when the collector read it, otherwise
+the instant fill. The band check, the window and the tier-2 fit below all use that one `k`
+(issue #403).
+
 ### Tier 1 — OLS Fit
 
 When `ObservationWindow.Ready()` is true (≥ 10 samples spanning ≥ 30% of the k range),
@@ -472,8 +488,9 @@ When the window is not ready, A is estimated with B pinned and only A fitted:
 A = Σ((ITL_i − B) · k_i) / Σ(k_i²)
 ```
 
-This is least-squares with B fixed, applied to all replicas with k* > 0. For a single replica
-it reduces to the single-point formula `A = (ITL − B) / k*`. For multiple replicas it is
+This is least-squares with B fixed, applied to all replicas with k > 0, where
+`k = KvUsageForITL()` as in the window. For a single replica it reduces to the single-point
+formula `A = (ITL − B) / k`. For multiple replicas it is
 strictly better — same OLS criterion as tier-1 but with one fewer degree of freedom. The
 resulting `(A, B)` is accepted through the same `itl.ValidModel` predicate as Tier 1, so Tier 2
 cannot accept a model Tier 1 would reject.
@@ -728,12 +745,12 @@ shape tracker's in `internal/signals/shape`; the analyzer's own in
 | `itl.DefaultKSat` | 0.85 | KV utilization at which μ_dec_sat is evaluated |
 | `DefaultBaselineITLSec` | 0.006 | B in tier-2 ITL model (H100 near-zero-load baseline) |
 | `DefaultQueueDrainFactor` | 2.0 | Bounds queueing time to ≤ factor × ITL(k_sat) × OL |
-| `itl.DefaultWindowMaxSize` | 20 | Max (k*, ITL) pairs in the observation window |
+| `itl.DefaultWindowMaxSize` | 20 | Max (k, ITL) pairs in the observation window, `k = KvUsageForITL()` |
 | `itl.DefaultObservationMaxAge` | 30m | Observations older than this are pruned (by the analyzer's `Prune` call) |
 | `itl.DefaultMinSamples` | 10 | Minimum samples for OLS Ready flag |
 | `itl.DefaultMinKSpread` | 0.30 | Minimum k-spread for OLS Ready flag |
-| `itl.DefaultMinObservableK` | 0.15 | Lower k* filter for the observation window |
-| `itl.DefaultMaxObservableK` | 0.85 | Upper k* filter for the observation window (equals `DefaultKSat`) |
+| `itl.DefaultMinObservableK` | 0.15 | Default lower edge of the band on `KvUsageForITL()` for the observation window; policy key [`analyzerTuning.itlBand.minObservableK`](../reference/scaling-policy.md#analyzertuningitlband-the-kv-band-the-itl-line-is-fitted-over) |
+| `itl.DefaultMaxObservableK` | 0.80 | Default upper edge of the band on `KvUsageForITL()` for the observation window, below `DefaultKSat` (0.85); policy key [`analyzerTuning.itlBand.maxObservableK`](../reference/scaling-policy.md#analyzertuningitlband-the-kv-band-the-itl-line-is-fitted-over) |
 | `shape.DefaultChangeTolerance` | 0.20 | IL or OL shift that triggers window reset |
 | `DefaultGPSMismatchThresholdPct` | 15.0 | GPS error % above which SpareCapacity is suppressed |
 | `DefaultGPSMinKForVerification` | 0.30 | Minimum k* for GPS check to apply |
