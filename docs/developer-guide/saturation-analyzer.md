@@ -225,8 +225,10 @@ the observable range it rises linearly:
 ITL(k) = A x k + B
 ```
 
-where `k` is instantaneous KV usage (`rm.KvUsageInstant`, 0–1). Fitted by
-ordinary least squares over a rolling window of `(k, ITL)` observations:
+where `k` is KV usage (0–1) averaged over the same minute as the ITL rate
+(`rm.KvUsageForITL()`: `KvUsageMean`, from `avg_over_time[1m]`, or
+`KvUsageInstant` when that was not read; issue #393). Fitted by ordinary least
+squares over a rolling window of `(k, ITL)` observations:
 
 ```
 A = (n x SUM(k x itl) - SUM(k) x SUM(itl)) / (n x SUM(k^2) - SUM(k)^2)

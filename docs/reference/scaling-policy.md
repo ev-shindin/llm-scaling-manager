@@ -1492,8 +1492,8 @@ long-context:
 
 | Key | Default | Range | What it does |
 |-----|---------|-------|--------------|
-| `minObservableK` | `0.15` | (0, 1), below `maxObservableK` | Lowest KV fill at which a replica's inter-token latency teaches its ITL line. Below it the engine barely batches and the latency is noise. |
-| `maxObservableK` | `0.80` | (0, 1) | Highest KV fill at which the latency teaches the line. Above it an engine short of memory preempts and its latency leaves the line. If the merged policy leaves it at or below `minObservableK`, both edges go back to their defaults, and the controller logs a `WARNING: tuning figure not used` line when it reads the ConfigMap. |
+| `minObservableK` | `0.15` | (0, 1), below `maxObservableK` | Lowest KV fill at which a replica's inter-token latency teaches its ITL line. Below it the engine barely batches and the latency is noise. It judges the fill averaged over the latency's minute when the collector has it, else the instant fill. |
+| `maxObservableK` | `0.80` | (0, 1) | Highest KV fill at which the latency teaches the line. Above it an engine short of memory preempts and its latency leaves the line. It judges the fill averaged over the latency's minute when the collector has it, else the instant fill, so a replica that bursts above it for part of a minute can still teach the line. If the merged policy leaves it at or below `minObservableK`, both edges go back to their defaults, and the controller logs a `WARNING: tuning figure not used` line when it reads the ConfigMap. |
 | `capMaxPreemptionRate` | `0` | >= 0 | A replica above `maxObservableK` still teaches the line when it is at its sequence cap: its running batch is exactly `--max-num-seqs` (set on the engine, not defaulted) times its ranks, and requests are waiting. With `--max-num-active-seqs` set (vLLM v0.31+), the cap is the lower of the two. This is the most preemptions per second it may show over the ITL window. An explicit `0` overrides a tier that raised it. vLLM only: SGLang publishes no preemption counter. |
 
 These three were top-level keys (`itlMinObservableK`, `itlMaxObservableK`,
@@ -1505,7 +1505,7 @@ spelling is reported as an unknown key and ignored.
 | Key | Default | Range | What it does |
 |-----|---------|-------|--------------|
 | `steadyFor` | `2m` | 1m to 24h | How long a replica's KV fill must hold still before its latency reading may teach the ITL line. The latency is a one-minute average, so a shorter wait pairs this moment's fill with last minute's latency. |
-| `maxKDrift` | `0.10` | (0, 1) | How far the KV fill may move within `steadyFor` and still count as steady. |
+| `maxKDrift` | `0.10` | (0, 1) | How far the KV fill may move within `steadyFor` and still count as steady. The fill is the one averaged over the latency's minute when the collector has it, else the instant fill; the average is smoother, so the same value admits more readings than it did against the instant fill. |
 | `carry` | `5m` | `steadyFor` to 24h | How long a steady reading is kept past the newest window, so a load step's old level is still there when the new one settles. If the merged policy has `carry` under `steadyFor`, both go back to `2m` and `5m`, and the controller logs a `WARNING: tuning figure not used` line when it reads the ConfigMap. |
 | `idleRows` | `2` | 1 to 1000 | How many cycles in a row with no latency and no KV fill make a replica idle rather than one missed scrape. An idle replica waits out `steadyFor` again when load returns. |
 | `minSettledSamples` | `3` | 1 to 1000 | The fewest readings from settled replicas the line is refitted from. Below it the last slope holds. |

@@ -377,6 +377,16 @@ type ReplicaMetrics struct {
 	// ranks did not all report one is not known.
 	KvUsageInstantKnown bool
 
+	// KvUsageMean is the KV cache utilization fraction on this replica
+	// (0.0–1.0) averaged over the minute AvgITL's rate is taken over
+	// (avg_over_time over the ITL window), so an ITL(k) reading pairs a
+	// minute's k with the same minute's ITL (issue #393). Read it through
+	// KvUsageForITL. Zero when the metric is unavailable.
+	KvUsageMean float64
+	// KvUsageMeanKnown is set when KvUsageMean was read from a series. A pod
+	// whose ranks did not all report one is not known.
+	KvUsageMeanKnown bool
+
 	// RunningRequests is how many sequences the replica's engines hold in
 	// their running batch now, summed over its ranks. Derived from
 	// vllm:num_requests_running (sglang:num_running_reqs), instantaneous like
@@ -518,6 +528,18 @@ func (m ReplicaMetrics) BusiestRankKvUsage() float64 {
 		return m.KvCacheUsage
 	}
 	return m.MaxRankKvCacheUsage
+}
+
+// KvUsageForITL is the k an ITL(k) reading pairs with AvgITL: KvUsageMean,
+// taken over the same minute as the ITL's rate, when it was read, and
+// otherwise KvUsageInstant (issue #393). The instant k against a minute's
+// ITL is the mismatch #273 A5 names: with the batch moving inside the minute
+// it flattens the fitted slope and moves the intercept.
+func (m ReplicaMetrics) KvUsageForITL() float64 {
+	if m.KvUsageMeanKnown {
+		return m.KvUsageMean
+	}
+	return m.KvUsageInstant
 }
 
 // BusiestRankTokens is the tokens the record would hold were every one of

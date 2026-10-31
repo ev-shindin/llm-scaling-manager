@@ -122,6 +122,13 @@ func (r Reading) SlopeAge(now time.Time) time.Duration {
 // Observe offers one cycle's replica rows of a variant to the key's window and
 // fits ITL(k) = A*k + B over it.
 //
+// A row's k is domain.ReplicaMetrics.KvUsageForITL: the KV fill averaged over
+// the minute its ITL rate covers when the collector read that, the instant
+// fill otherwise. Every use of k below -- the band, the steady gate, the
+// reading -- is that one figure. An instant k against a minute's ITL, with
+// the batch moving inside the minute, flattened the fitted slope and raised
+// the remembered B (issue #393).
+//
 // A row is a reading when it is the variant's, Ready and not lent by the warm
 // pool, with a finite positive ITL and a k inside adm's band (by default
 // [DefaultMinObservableK, DefaultMaxObservableK]). A k above the band is a
@@ -194,6 +201,9 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 			continue
 		}
 		r.Considered++
+		// The k paired with the row's ITL: over the same minute as its rate
+		// when the collector read that (issue #393).
+		k := rm.KvUsageForITL()
 		// Judged before the switch and noted after it, so a row that is no
 		// reading -- k below the band, no ITL yet -- still says where the
 		// replica's load is.
@@ -206,10 +216,10 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 				trace = &replicaTrace{since: now, joined: now.After(traces.since)}
 				traces.replicas[rm.PodName] = trace
 			}
-			trace.serving(rm.AvgITL > 0 && !math.IsInf(rm.AvgITL, 1), traceable(rm.KvUsageInstant), now, s)
+			trace.serving(rm.AvgITL > 0 && !math.IsInf(rm.AvgITL, 1), traceable(k), now, s)
 			settling = trace.settling(now, s)
-			if traceable(rm.KvUsageInstant) {
-				steady = trace.steady(rm.KvUsageInstant, now, s)
+			if traceable(k) {
+				steady = trace.steady(k, now, s)
 			} else {
 				// Present, so its trace is kept; no k, so nothing is noted.
 				trace = nil
@@ -221,26 +231,26 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 		case !(rm.AvgITL > 0) || math.IsInf(rm.AvgITL, 1):
 			// +Inf passes "> 0": a rate over a window with no tokens in it.
 			r.NoITL++
-		case !(rm.KvUsageInstant > 0):
+		case !(k > 0):
 			r.NoK++
-		case rm.KvUsageInstant < lo:
+		case k < lo:
 			r.BelowBand++
-		case rm.KvUsageInstant > hi && !adm.atSequenceCap(rm):
+		case k > hi && !adm.atSequenceCap(rm):
 			r.AboveBand++
 		default:
 			// Add drops nothing the cases above let through but a k above a
 			// full cache, which the collector never reports; counted as
 			// above the band all the same.
-			if w.add(Observation{K: rm.KvUsageInstant, ITLSec: rm.AvgITL, Timestamp: now, settling: settling}) {
+			if w.add(Observation{K: k, ITLSec: rm.AvgITL, Timestamp: now, settling: settling}) {
 				r.AboveBand++
 			} else {
 				r.Offered++
-				if rm.KvUsageInstant > hi {
+				if k > hi {
 					r.Capped++
 				}
 				switch {
 				case steady:
-					sw.Add(rm.KvUsageInstant, rm.AvgITL, now)
+					sw.Add(k, rm.AvgITL, now)
 				case settling:
 					r.Unsteady++
 					r.Settling++
@@ -250,7 +260,7 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, adm
 			}
 		}
 		if trace != nil {
-			trace.note(rm.KvUsageInstant, now, s)
+			trace.note(k, now, s)
 		}
 	}
 	// A replica missing from this cycle starts over when it returns: what it

@@ -61,13 +61,6 @@
   finding: "The start-time estimator's first measurement replaces the 70 s default (DefaultReplicaStartSeconds). PR 5's acceptance: with no seed, the estimate sits strictly between the sample and 70 s."
   measured: "100/100 seeds; seed 1: a first sample of 487 s set the estimate to 487.2 s"
   owner: "PR 5"
-- id: known-truth/itl/line-at-kprice-timebase
-  class: known-truth
-  learner: itl
-  expect: biased
-  finding: "#273 A5: k is the instant reading and ITL a rate[1m]. With the batch swinging inside the minute, the pinned fit on the pairs prices ITL at kPrice low, the side that over-prices derived mu."
-  measured: "3/100 seeds; seed 38: ITL(0.85) 0.04295 s against a true 0.05250 s, 18.2 % low"
-  owner: "#393"
 - id: liveness/k2/flow-control-on
   class: liveness
   learner: k2

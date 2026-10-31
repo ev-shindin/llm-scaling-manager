@@ -45,9 +45,15 @@ func arNoise(r *rand.Rand, n int, sigma, rho float64) []float64 {
 type timeBase struct {
 	// instant is the path at the cycle's instant; rate1m its mean over the
 	// minute before (rate[1m]); peak1m its max over that minute
-	// (max_over_time[1m]). Consecutive cycles' minutes share 45 s.
-	instant, rate1m, peak1m []float64
+	// (max_over_time[1m]); avg1m the mean of the samples Prometheus scraped
+	// of it in that minute, one every propScrape (avg_over_time[1m] of a
+	// gauge). Consecutive cycles' minutes share 45 s.
+	instant, rate1m, peak1m, avg1m []float64
 }
+
+// propScrape is Prometheus's scrape interval: a gauge's avg_over_time[1m]
+// averages the four samples it took in the minute, not every second of it.
+const propScrape = 15 * time.Second
 
 // sampleTimeBase samples path, one value per second over seconds, at every
 // propCycle from the first full minute.
@@ -60,9 +66,15 @@ func sampleTimeBase(path []float64) timeBase {
 			sum += path[s]
 			peak = math.Max(peak, path[s])
 		}
+		scraped, n := 0.0, 0
+		for s := t; s > t-60; s -= int(propScrape / time.Second) {
+			scraped += path[s]
+			n++
+		}
 		tb.instant = append(tb.instant, path[t])
 		tb.rate1m = append(tb.rate1m, sum/60)
 		tb.peak1m = append(tb.peak1m, peak)
+		tb.avg1m = append(tb.avg1m, scraped/float64(n))
 	}
 	return tb
 }

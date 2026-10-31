@@ -589,7 +589,7 @@ class below runs on it as well as on direct inputs.
 | Edges by enumeration | the operating point is put on **each** threshold below, with noise of the gauges' real autocorrelation. Between declared latched switches the output is Lipschitz in the input, and it reverses at most once per excursion, an excursion being one crossing of the threshold by the **noise-free** generator path |
 
 **Known-failures ledger.** Several classes fail on today's code by design: known
-truth on the time-base family (A5, an open defect), first sample on k2 and
+truth on the time-base family (A5, until #393 cleared it), first sample on k2 and
 start time, N-dependence on the prefill bound's max, and edges on the k2 key
 boundary. 0b commits a ledger of (class, learner, finding,
 measured result, the PR that clears it or "open"). A listed case runs and must
@@ -627,7 +627,7 @@ not cover a key.
 | GPS ratio first raw; pinned B from unsteady readings; k2 at 8 % behind a step | first sample, transient |
 | Full fit never runs at N ≥ 2, B stays 6 ms (#273 A3) | stale value at N ≥ 2 |
 | k == 0 unsettles; router queue without engine metrics | missing values |
-| Instant k against a rate[1m] ITL (#273 A5, in the ledger: open) | known truth, on the time-base family |
+| Instant k against a rate[1m] ITL (#273 A5, caught since #393) | known truth, on the time-base family |
 | Sum of per-pod one-minute peaks | redistribution invariance, on the time-base family |
 | Settle refuses one cycle of a fill (#282 F1) | transient, on the time-base family |
 | k2 key flips on the output-length boundary; measured/derived flips near 2x; the 0.30 idle line; `backlogGrew` | edges by enumeration (the operating point on the boundary, or the ratio built at 2) |
@@ -649,16 +649,19 @@ not cover a key.
 `D/property_mutants_test.go`, and a test holds it to the mutants. Each
 finding above is in exactly one state:
 
-- **Caught:** 22 findings. For each, a mutant puts the defect back, and its
-  class fails on that mutant. For 14 a mutant runs the production learner
-  (a policy key, rows, or a stub); 8 are caught only by a toy, and the code
+- **Caught:** 25 findings. For each, a mutant puts the defect back, and its
+  class fails on that mutant. For 16 a mutant runs the production learner
+  (a policy key, rows, or a stub); 9 are caught only by a toy, and the code
   table marks them "caught (toy)". "Restart fix stubbed" is caught: its
   mutant stubs the Ready time through the analyzer's `readySince` seam, the
   restart case fails on it, and the per-path counter "joined refusals with a
   known ReadySince" drops to zero. "Prefill never learns (#144)" is caught
   too: behind a full decode the prefill bound learns a mu within 3 min, and
   with `enablePrefillThroughputBound` off, its default, prefill learns
-  none. The replay counts that counter and the others of 2.5, and the golden
+  none. "Instant k against a rate[1m] ITL (#273 A5)" is caught since #393:
+  the ITL line pairs each rate[1m] ITL with the KV fill averaged over the
+  same minute, and a rows mutant that withholds that average fails known
+  truth on the time base on 15 of 100 seeds. The replay counts that counter and the others of 2.5, and the golden
   check fails when a counter is zero over every committed golden.
 - **Still escaping:** the rest, listed below. A row is escaping either because
   no mutant reproduces it, or because today's code already fails its class,
@@ -671,7 +674,6 @@ finding above is in exactly one state:
 | --- | --- |
 | k == 0 unsettles (#273 A4) | a settle-tracker defect; its negative control is PR 1's (2.3) |
 | Router queue without engine metrics | the missing-values case passes, and no row edit reproduces the pre-fix reading |
-| Instant k against a rate[1m] ITL (#273 A5) | a ledger row: known truth on the time base fails on 3 of 100 seeds |
 | k2 key flips on the output-length boundary | a ledger row: the selected key flips on about a third of seeds |
 | The 0.30 idle line | a ledger row: the idle-room verdict flips on the line |
 | Demand falls when λ lags a step | the trajectory passes; no pre-fix floor is reproduced |

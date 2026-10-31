@@ -157,6 +157,8 @@ var presenceBits = []struct {
 		func(m domain.ReplicaMetrics) bool { return m.KvCacheUsageKnown }},
 	{"KvUsageInstantKnown", registration.QueryKvUsageInstant, 0.4, true, false,
 		func(m domain.ReplicaMetrics) bool { return m.KvUsageInstantKnown }},
+	{"KvUsageMeanKnown", registration.QueryKvUsageMean, 0.4, true, false,
+		func(m domain.ReplicaMetrics) bool { return m.KvUsageMeanKnown }},
 	{"CapacityQueueKnown", registration.QueryCapacityQueueLength, 2, true, true,
 		func(m domain.ReplicaMetrics) bool { return m.CapacityQueueKnown }},
 	{"PreemptionRateKnown", registration.QueryPreemptionRate, 0.1, true, true,
@@ -270,7 +272,7 @@ func TestNonFiniteValuesUnchanged(t *testing.T) {
 		return m
 	}
 	clearBits := func(m domain.ReplicaMetrics) domain.ReplicaMetrics {
-		m.KvCacheUsageKnown, m.KvUsageInstantKnown, m.CapacityQueueKnown, m.PreemptionRateKnown = false, false, false, false
+		m.KvCacheUsageKnown, m.KvUsageInstantKnown, m.KvUsageMeanKnown, m.CapacityQueueKnown, m.PreemptionRateKnown = false, false, false, false, false
 		m.PrefillComputedTokenRateKnown, m.GenerationTokenRateKnown, m.RequestRateKnown, m.RunningRequestsKnown = false, false, false, false
 		m.AvgITLKnown, m.AvgITLEmpty = false, false
 		m.Metadata = nil
@@ -354,6 +356,8 @@ func TestMergePodInstances_PresenceBitsIndependent(t *testing.T) {
 			func(m domain.ReplicaMetrics) bool { return m.KvCacheUsageKnown }},
 		{"KvUsageInstantKnown", func(m *domain.ReplicaMetrics) { m.KvUsageInstantKnown = false },
 			func(m domain.ReplicaMetrics) bool { return m.KvUsageInstantKnown }},
+		{"KvUsageMeanKnown", func(m *domain.ReplicaMetrics) { m.KvUsageMeanKnown = false },
+			func(m domain.ReplicaMetrics) bool { return m.KvUsageMeanKnown }},
 		{"CapacityQueueKnown", func(m *domain.ReplicaMetrics) { m.CapacityQueueKnown = false },
 			func(m domain.ReplicaMetrics) bool { return m.CapacityQueueKnown }},
 		{"PreemptionRateKnown", func(m *domain.ReplicaMetrics) { m.PreemptionRateKnown = false },
@@ -371,7 +375,7 @@ func TestMergePodInstances_PresenceBitsIndependent(t *testing.T) {
 	}
 	full := func() domain.ReplicaMetrics {
 		return domain.ReplicaMetrics{PodName: "p", ModelID: "m",
-			KvCacheUsageKnown: true, KvUsageInstantKnown: true, CapacityQueueKnown: true,
+			KvCacheUsageKnown: true, KvUsageInstantKnown: true, KvUsageMeanKnown: true, CapacityQueueKnown: true,
 			PreemptionRateKnown: true, PrefillComputedTokenRateKnown: true,
 			GenerationTokenRateKnown: true, RequestRateKnown: true, RunningRequestsKnown: true,
 			AvgITLKnown: true}

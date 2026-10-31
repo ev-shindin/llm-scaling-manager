@@ -39,8 +39,9 @@ const PathITLOLS = "itl-ols"
 const PathITLPinned = "itl-pinned"
 
 // PathRowsInstantKV counts rows whose instant KV a learner read: a reading
-// the ITL line took at its instant k, or a replica demand charged at its
-// instant KV rather than its one-minute peak.
+// the ITL line took (at its k over the ITL's minute, KvUsageMean, where the
+// collector read one: issue #393), or a replica demand charged at its instant
+// KV rather than its one-minute peak.
 const PathRowsInstantKV = "rows-instant-kv"
 
 // PathRowsReadySince counts rows whose Pod Ready time k2's joined test read.

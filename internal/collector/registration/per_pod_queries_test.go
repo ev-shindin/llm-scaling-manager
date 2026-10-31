@@ -28,6 +28,7 @@ const perPodQueryFixture = "testdata/per-pod-queries.test.yaml"
 var perPodVLLMQueries = []string{
 	QueryKvCacheUsage,
 	QueryKvUsageInstant,
+	QueryKvUsageMean,
 	QueryQueueLength,
 	QueryMaxRankKvCacheUsage,
 	QueryMaxRankQueueLength,
@@ -134,6 +135,7 @@ func TestPerPodQueriesFoldDataParallelRanks(t *testing.T) {
 	want := map[string]string{
 		QueryKvCacheUsage:             "avg " + perPod + perRank,
 		QueryKvUsageInstant:           "avg " + perPod + perRank,
+		QueryKvUsageMean:              "avg " + perPod + perRank + "avg_over_time(",
 		QueryQueueLength:              "sum " + perPod + perRank,
 		QueryRequestRate:              "sum " + perPod + perRank + "rate(",
 		QueryGenerationTokenRate:      "sum " + perPod + perRank + "rate(",

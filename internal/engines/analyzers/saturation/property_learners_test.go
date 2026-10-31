@@ -85,7 +85,7 @@ func learnerCases() []propCase {
 		{class: classMissing, learner: "slo-itl", name: "missed-row", family: familyDirect, tuning: tunedDefault,
 			check: checkITLMissedRow(sloDef)},
 		{class: classKnownTruth, learner: "slo-itl", name: "line-at-kprice", family: familyDirect, tuning: tunedDefault,
-			check: checkITLKnownTruth(sloDef, false)},
+			check: checkITLKnownTruth(sloDef)},
 	}
 }
 
