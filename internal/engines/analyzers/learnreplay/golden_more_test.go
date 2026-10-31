@@ -284,6 +284,8 @@ func TestAddGolden(t *testing.T) {
 		full := cycledRecording(t, 12)
 		n := bytes.Count(full, []byte("\n")) / 3
 		require.Positive(t, bytes.Count(headLines(full, n), []byte(`.Analyze"`)), "precondition: the head holds an Analyze")
+		// Not "head": the add refuses a fixture name that holds a recorded
+		// name, and the recording's pods are named a to d.
 		_, err := AddGolden(ctx, t.TempDir(), "x", full, AddOptions{Source: "s", HeadLines: n})
 		require.NoError(t, err)
 	})

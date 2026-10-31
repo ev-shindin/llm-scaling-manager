@@ -176,8 +176,9 @@ func TestRun_AddCheckUpdate(t *testing.T) {
 			unrun++
 		}
 	}
-	require.Positive(t, unrun, "precondition: the recording leaves a saturation path unrun")
-	require.Less(t, unrun, len(saturation.PathNames()), "precondition: the recording runs a saturation path")
+	// Pinned, so a change in what the replay counts is a reviewed change; the
+	// replay's own count above is only the cross-check.
+	require.Equal(t, 8, unrun, "the saturation paths the head recording leaves unrun")
 	out, err = runOut("check", "-dir", dir)
 	require.ErrorContains(t, err, fmt.Sprintf("%d learner paths no golden runs", unrun+len(steadystate.LearnerReplayPathNames())), out)
 }

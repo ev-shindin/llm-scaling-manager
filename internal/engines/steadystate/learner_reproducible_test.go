@@ -10,11 +10,13 @@ import (
 
 // Each recording generator, run again at one commit, writes the same bytes
 // (docs/proposals/analyzer-learner.md, 2.4: a recording is a reproducible
-// fixture). Events that share a timestamp -- the per-model
-// NoteVariantsPresent, the per-variant StableAcceleratorFor and
-// FileScaleTarget -- come out sorted by model and then variant, not in map
-// order. So two recordings made at one commit have no diff, and a diff
-// between two means an input changed (#400).
+// fixture). Events that share a timestamp come out in a fixed order, not in
+// map order: the NoteVariantsPresent events by model (namespace/model key),
+// each naming its variants sorted, and each model's StableAcceleratorFor
+// and FileScaleTarget events by variant (namespace/variant key). The
+// generators analyse models in sorted order themselves. So two recordings
+// made at one commit have no diff, and a diff between two means an input
+// changed (#400).
 func TestLearnerRecording_EachGeneratorIsReproducible(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -29,10 +31,7 @@ func TestLearnerRecording_EachGeneratorIsReproducible(t *testing.T) {
 			require.NotEmpty(t, first, "precondition: the run recorded")
 			// Several runs, not two: two map orders can agree by chance.
 			for i := range 4 {
-				again := tc.run(t)
-				if !bytes.Equal(first, again) {
-					require.Equal(t, firstDiff(first, again), "", "run %d recorded other bytes", i+2)
-				}
+				require.Empty(t, firstDiff(first, tc.run(t)), "run %d recorded other bytes", i+2)
 			}
 		})
 	}

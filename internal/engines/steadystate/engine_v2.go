@@ -500,6 +500,10 @@ func (e *Engine) notePresentVariants(
 			for i := range modelVAs {
 				names = append(names, modelVAs[i].Name)
 			}
+			// Sorted too: modelVAs comes from a map, and every noter stamps each
+			// name on the one clock reading, so their order matters to the
+			// recording alone.
+			slices.Sort(names)
 			for _, noter := range noters {
 				noter.NoteVariantsPresent(modelVAs[0].Namespace, modelVAs[0].Spec.ModelID, names)
 			}

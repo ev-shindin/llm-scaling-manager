@@ -642,10 +642,17 @@ LEARNREC_ACCEPTANCE_OUT=$HOME/acceptance.jsonl go test ./internal/engines/steady
 ```
 
 The acceptance, mu-paths and engine runs each write the same bytes every
-time at one commit.
-Events with the same timestamp come out sorted by model, then variant, not
-in map order. `TestLearnerRecording_EachGeneratorIsReproducible` holds each
-run to it.
+time at one commit. Events with the same timestamp come out in a fixed
+order, not in map order. `NoteVariantsPresent` comes out in model order,
+with its variants sorted. Each model's `StableAcceleratorFor` and
+`FileScaleTarget` come out in variant order. The runs analyse models in
+sorted order themselves. `TestLearnerRecording_EachGeneratorIsReproducible`
+holds each run to it.
+
+A running controller still analyses models in map order (`optimizeV2`).
+Sorting that loop would change the order models are analysed and reach the
+optimizer, not only the recording. So a recording from a running controller
+keeps the order its cycles ran in, and is never made twice to compare.
 
 The tests of the add (`TestAddGolden` and `TestRun_AddCheckUpdate`) build
 their recording in the test. They do not read a committed one. So a new
