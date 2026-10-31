@@ -104,6 +104,10 @@ func TestInputBuilder_TheEngineRunRecordsTheSameEventsInTheSamePhases(t *testing
 	sort.Strings(lines)
 	got := strings.Join(lines, "\n") + "\n"
 	if os.Getenv("ENGINE_RUN_EVENT_COUNTS_WRITE") != "" {
+		if os.Getenv("CI") != "" {
+			t.Fatal("ENGINE_RUN_EVENT_COUNTS_WRITE is refused under CI: the counts are a golden, " +
+				"rewritten locally and committed with the change named in the PR's goldens: section")
+		}
 		require.NoError(t, os.WriteFile(engineRunEventCounts, []byte(got), 0o644))
 		t.Logf("wrote %s (%d rows)", engineRunEventCounts, len(lines))
 	}
