@@ -18,6 +18,15 @@
   (`saturationCapabilities`), not by assertion at each call; a wrapper around
   the analyzer would still hide them (2.4). `runV2AnalysisOnly` is now
   `buildAnalyzerInput` followed by `runSaturation`.
+- **PR 1's decisions.** The brownout trade (4.3): a run of unknown rows keeps
+  the settle, and the PR does not end it after 2 min; an idle run that a
+  brownout interrupts for more than a minute is no return of load
+  (`TestABrownoutKeepsTheSettle`). The re-lend (4.2): the warm pool's lend
+  time rides on each bridge row (`ReplicaMetrics.LentSince`), and a new one
+  under the same key is a lend event (`TestTrackerRestartsTheGraceOfAPodLentAgain`).
+  Checked in the code, not on a run: a lend does not touch the Pod's
+  readiness, so ReadySince does not change on a re-lend, and a re-lend to
+  the same variant keeps the key.
 - **Problem:** the analyzers learn about fifteen quantities. Each one accepts
   readings, fits, forgets and logs in its own way. The same defects were fixed
   in one learner after another, because no learner could reuse another's fix.
