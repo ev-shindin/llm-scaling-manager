@@ -75,6 +75,7 @@ Check
 Closing
 ClusterQueue
 Collected
+Composite
 CompositeSignal
 ConfigMap
 Configuration
@@ -548,8 +549,12 @@ completely
 completes
 completions
 composite
+composite-built
 composite-contributors
+composite-hold
 composite-pricing
+composite-release-bound
+composite-role-capacities
 compute
 computeCapacityHistory
 computed
@@ -1043,6 +1048,7 @@ keeping
 keeps
 kept
 key
+know
 known
 kueue
 kueue-gate
@@ -1493,6 +1499,7 @@ prefix-cache-scorer
 prefix_caching_disabled
 preparation
 present
+pressure-needs-scale-up
 previous
 previous-desired
 price
@@ -2120,6 +2127,7 @@ waking
 want
 warm-pool
 warm-pool-bridge-supply
+warm-pool-supply
 was
 watch
 watch-namespace

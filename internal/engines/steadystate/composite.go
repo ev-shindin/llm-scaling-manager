@@ -68,13 +68,30 @@ func buildComposite(
 	namedResults, eligibleAnalyzers []allocation.NamedAnalyzerResult,
 	scaleUp, scaleDown float64,
 ) allocation.NamedAnalyzerResult {
+	composite, _ := composeSignal(ctx, namedResults, eligibleAnalyzers, scaleUp, scaleDown)
+	return composite
+}
+
+// composeSignal is buildComposite, and, for each role the composite holds,
+// the reasons it holds it, in the order they were found (nil when nothing is
+// held): what the "composite holds a role" line logs, and what a learner
+// recording keeps beside the composite.
+//
+// It reads nothing but its arguments: a learner recording keeps exactly
+// these, and a replay rebuilds the composite from them
+// (engine_recording.go).
+func composeSignal(
+	ctx context.Context,
+	namedResults, eligibleAnalyzers []allocation.NamedAnalyzerResult,
+	scaleUp, scaleDown float64,
+) (allocation.NamedAnalyzerResult, map[string][]string) {
 	logger := ctrl.LoggerFrom(ctx)
 	sat := findSaturation(namedResults)
 	// No saturation entry: nothing to express demand in. Unreachable in
 	// production, where runAnalyzers fails before building any entry
 	// without one; every test builds its own slice.
 	if sat == nil || sat.Result == nil {
-		return emptyComposite()
+		return emptyComposite(), nil
 	}
 
 	warnModelLevelOnly(ctx, *sat, eligibleAnalyzers)
@@ -167,7 +184,10 @@ func buildComposite(
 	}
 	composite.Remaining = composite.RequiredCapacity
 	composite.Spare = composite.SpareCapacity
-	return composite
+	if len(composite.Holds) == 0 {
+		return composite, nil
+	}
+	return composite, holds.reasons
 }
 
 // warnModelLevelOnly logs each listed analyzer that cannot size a P/D model:

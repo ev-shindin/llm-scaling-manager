@@ -23,6 +23,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/enginerec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
@@ -1410,9 +1411,15 @@ func (e *Engine) collectV2ModelRequest(
 	if !config.SaturationListed() {
 		eligibleAnalyzers = excludeByName(eligibleAnalyzers, domain.SaturationAnalyzerName)
 	}
-	eligibleAnalyzers = append(eligibleAnalyzers, e.listedInGrace(namespace, modelID, config, namedResults)...)
+	grace := e.listedInGrace(namespace, modelID, config, namedResults)
+	eligibleAnalyzers = append(eligibleAnalyzers, grace...)
 	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
-	composite := buildComposite(ctx, namedResults, eligibleAnalyzers, satUp, satDown)
+	composite, holdReasons := composeSignal(ctx, namedResults, eligibleAnalyzers, satUp, satDown)
+	if e.learnRec.Active() {
+		e.recordComposite(compositeInputs{namespace: namespace, modelID: modelID, named: namedResults,
+			eligible: eligibleAnalyzers, grace: grace, metadata: variantMetadata, scaleUp: satUp, scaleDown: satDown},
+			composite, holdReasons)
+	}
 	// How hard each variant is being pushed, for the retained pool's switching
 	// decision. Published from the composite, the result the optimizer acts on,
 	// with saturation's scale-up threshold, so the pool never switches for a
@@ -1476,10 +1483,23 @@ func buildNamedResult(
 	metaByVariant map[string]domain.VariantMetadata,
 	scaleUp, scaleDown float64,
 ) allocation.NamedAnalyzerResult {
+	return namedResultScored(ctx, name, result, config.AnalyzerScore(name), metaByVariant, scaleUp, scaleDown)
+}
+
+// namedResultScored is buildNamedResult with the analyzer's score given: what
+// a learner replay calls, from the score the recording kept.
+func namedResultScored(
+	ctx context.Context,
+	name string,
+	result *domain.AnalyzerResult,
+	score float64,
+	metaByVariant map[string]domain.VariantMetadata,
+	scaleUp, scaleDown float64,
+) allocation.NamedAnalyzerResult {
 	nr := allocation.NamedAnalyzerResult{
 		Name:              name,
 		Result:            result,
-		Score:             config.AnalyzerScore(name),
+		Score:             score,
 		ScaleUpThreshold:  scaleUp,
 		ScaleDownBoundary: scaleDown,
 	}
@@ -1989,17 +2009,28 @@ func (e *Engine) publishHeadroomForIdleFleet(ctx context.Context) {
 // composite is built without it), and saturation's entry, where supply was
 // published before, did not exist on that cycle either.
 func publishWarmPoolSupply(namespace string, nr allocation.NamedAnalyzerResult) {
-	if nr.Result == nil {
-		return
-	}
 	now := time.Now()
+	for _, s := range warmPoolSupply(nr) {
+		decision.PublishWarmPoolSupply(namespace, s.Variant, s.Replicas, s.Capacity, now)
+	}
+}
+
+// warmPoolSupply is what publishWarmPoolSupply publishes for each variant of
+// nr, in nr's variant order: nothing without a result, and nothing for a
+// variant with no name.
+func warmPoolSupply(nr allocation.NamedAnalyzerResult) []enginerec.WarmPoolSupply {
+	if nr.Result == nil {
+		return nil
+	}
+	var out []enginerec.WarmPoolSupply
 	for _, vc := range nr.Result.VariantCapacities {
 		if vc.VariantName == "" {
 			continue
 		}
-		decision.PublishWarmPoolSupply(namespace, vc.VariantName,
-			vc.WarmPoolReplicas, vc.WarmPoolCapacity, now)
+		out = append(out, enginerec.WarmPoolSupply{Variant: vc.VariantName, Replicas: vc.WarmPoolReplicas,
+			Capacity: vc.WarmPoolCapacity})
 	}
+	return out
 }
 
 // publishVariantPressure records how close each variant is to needing capacity.
@@ -2010,10 +2041,23 @@ func publishWarmPoolSupply(namespace string, nr allocation.NamedAnalyzerResult) 
 // unknown and idle are opposite answers to the question a retained pool asks,
 // and the safer of the two is to say nothing.
 func publishVariantPressure(namespace string, nr allocation.NamedAnalyzerResult, scaleUp float64) {
-	if nr.Result == nil {
-		return
-	}
 	now := time.Now()
+	for _, p := range variantPressure(nr, scaleUp) {
+		decision.PublishPressure(namespace, p.Variant, decision.Pressure{
+			SpareFraction: p.SpareFraction,
+			NeedsScaleUp:  p.NeedsScaleUp,
+			At:            now,
+		})
+	}
+}
+
+// variantPressure is what publishVariantPressure publishes for each variant
+// of nr, in nr's variant order.
+func variantPressure(nr allocation.NamedAnalyzerResult, scaleUp float64) []enginerec.VariantPressure {
+	if nr.Result == nil {
+		return nil
+	}
+	var out []enginerec.VariantPressure
 	for _, vc := range nr.Result.VariantCapacities {
 		if vc.VariantName == "" {
 			continue
@@ -2028,10 +2072,11 @@ func publishVariantPressure(namespace string, nr allocation.NamedAnalyzerResult,
 		// serving this model instead of another.
 		// A role the composite holds against growth is not being grown, however
 		// hard it is pushed.
-		decision.PublishPressure(namespace, vc.VariantName, decision.Pressure{
+		out = append(out, enginerec.VariantPressure{
+			Variant:       vc.VariantName,
 			SpareFraction: 1 - vc.Utilization,
 			NeedsScaleUp:  vc.Utilization > scaleUp && !nr.Holds[domain.RoleOfVC(vc)].NoScaleUp,
-			At:            now,
 		})
 	}
+	return out
 }

@@ -61,7 +61,8 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 			return err
 		}
 		r.rep.Analyzes[ev.Kind]++
-		_, _ = r.sat.Analyze(ctx, input)
+		res, err := r.sat.Analyze(ctx, input)
+		r.noteResult(domain.SaturationAnalyzerName, input.Namespace, input.ModelID, res, err)
 	case saturation.KindNoteVariantsPresent:
 		var d saturation.PresentEvent
 		if err := ev.DecodeData(&d); err != nil {
@@ -133,7 +134,8 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 			r.router.latency, r.router.called = d.RouterLatency, false
 		}
 		r.rep.Analyzes[ev.Kind]++
-		_, _ = r.slo.Analyze(ctx, input)
+		res, err := r.slo.Analyze(ctx, input)
+		r.noteResult(domain.SLOAnalyzerName, input.Namespace, input.ModelID, res, err)
 		if r.router != nil && r.router.called != d.RouterCalled {
 			r.mismatch(ev, "router", fmt.Sprintf("the replay asked the router: %v, the run: %v", r.router.called, d.RouterCalled))
 		}
@@ -174,7 +176,8 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 			return err
 		}
 		r.rep.Analyzes[ev.Kind]++
-		_, _ = r.tp.Analyze(ctx, input)
+		res, err := r.tp.Analyze(ctx, input)
+		r.noteResult(throughput.AnalyzerName, input.Namespace, input.ModelID, res, err)
 	case throughput.KindObserve:
 		if r.tp == nil {
 			return errNoThroughput
@@ -190,7 +193,11 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 		r.tp.Observe(ctx, d.Now, d.ModelID, d.Namespace, rows)
 
 	default:
-		return errors.New("an event the replay does not know")
+		if r.engine == nil || !r.engine.Owns(ev.Kind) {
+			return errors.New("an event the replay does not know")
+		}
+		r.rep.Analyzes[ev.Kind]++
+		return r.engine.Apply(ctx, ev, r.result, r.rec)
 	}
 	return nil
 }

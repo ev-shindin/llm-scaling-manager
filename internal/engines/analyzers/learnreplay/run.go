@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 
 	clocktesting "k8s.io/utils/clock/testing"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
@@ -90,14 +92,20 @@ type replayer struct {
 	router *recordedRouter
 	tp     *throughput.ThroughputAnalyzer
 	rep    *Report
+	// engine replays the engine events, nil when the replay has none; and
+	// results is each analyzer's last replayed result per model, for it.
+	engine  EngineReplayer
+	results map[string]*domain.AnalyzerResult
+	// rec is the replay's own recorder.
+	rec *learnrec.Recorder
 }
 
 // owners is the kinds' owners a replay drives, by the prefix of their kind.
 var owners = []string{"saturation.", "slo.", "throughput.", "store."}
 
 // driven reports whether a replay applies, or checks, events of kind.
-func driven(kind string) bool {
-	if kind == learnrec.KindStart {
+func (r *replayer) driven(kind string) bool {
+	if kind == learnrec.KindStart || r.engine != nil && r.engine.Owns(kind) {
 		return true
 	}
 	for _, o := range owners {
@@ -138,7 +146,7 @@ func Replay(ctx context.Context, recording []byte, opts Options) (*Report, error
 
 	var kept []learnrec.RawEvent
 	for _, ev := range events {
-		if !driven(ev.Kind) {
+		if !r.driven(ev.Kind) {
 			r.rep.Ignored[ev.Kind]++
 			continue
 		}
@@ -164,6 +172,9 @@ func Replay(ctx context.Context, recording []byte, opts Options) (*Report, error
 	}
 	r.rep.Recording = buf.Bytes()
 	r.rep.Paths = r.sat.PathCounts()
+	if r.engine != nil {
+		maps.Copy(r.rep.Paths, r.engine.PathCounts())
+	}
 	if opts.Mode == Fidelity {
 		r.rep.Mismatches = append(r.rep.Mismatches, compareEvents(kept, r.rep.Recording)...)
 	}

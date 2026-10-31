@@ -11,6 +11,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/enginerec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
@@ -53,6 +54,8 @@ var recordedTypes = []reflect.Type{
 
 	reflect.TypeFor[domain.AnalyzerResult](),
 	reflect.TypeFor[domain.AnalyzerInput](),
+
+	reflect.TypeFor[enginerec.CompositeEvent](),
 }
 
 // fieldNames is every Go field name of recordedTypes: an object whose keys
@@ -173,6 +176,9 @@ var valueRules = map[string]rule{
 	"FreshnessStatus": {class: classVocab}, "Quantity": {class: classVocab}, "Engine": {class: classVocab},
 	"Scope": {class: classVocab}, "Type": {class: classVocab}, "AnalyzerName": {class: classVocab},
 	"Analyzers.Name": {class: classVocab}, "DefaultPolicy": {class: classVocab}, "Operator": {class: classVocab},
+	// The engine's composite events: analyzer names, and why a role is held.
+	"Entries.Name": {class: classVocab}, "Grace.Name": {class: classVocab}, "Composite.Name": {class: classVocab},
+	"Eligible": {class: classVocab}, "HoldReasons": {class: classVocab},
 	"Effect": {class: classVocab}, "KvCacheDtype": {class: classVocab}, "WeightDtype": {class: classVocab},
 	"Quantization": {class: classVocab}, "KVConnector": {class: classVocab},
 	"KVOffloadingBackend": {class: classVocab}, "MemoryLayout": {class: classVocab},
@@ -227,7 +233,11 @@ var keyRules = map[string]rule{
 	"HeldRoleDemand": {class: classVocab}, "HotRankDemand": {class: classVocab},
 	"RoleDemand": {class: classVocab}, "RoleStartSeconds": {class: classVocab},
 	"AnalyzerDefinitions": {class: classVocab}, "Engines": {class: classVocab},
-	"Parameters":                       {class: classVocab},
+	"Parameters": {class: classVocab},
+	// The composite's per-role maps, keyed by role.
+	"Holds": {class: classVocab}, "HoldReasons": {class: classVocab}, "ReleaseBound": {class: classVocab},
+	"OtherFrames": {class: classVocab}, "RoleCapacities": {class: classVocab}, "RoleSpare": {class: classVocab},
+	"RoleReleasable":                   {class: classVocab},
 	saturation.KindTakeRestoreOutcomes: {class: classVocab},
 }
 
@@ -259,6 +269,11 @@ var vocabulary = setOf(
 	"fp8_e5m2", "int8", "awq", "gptq", "marlin", "awq_marlin", "gptq_marlin", "compressed-tensors",
 	"modelopt", "bitsandbytes", "NixlConnector", "LMCacheConnectorV1", "OffloadingConnector",
 	"MultiConnector", "P2pNcclConnector", "native", "lmcache", "cpu",
+	// The composite: its name, its decision paths, and why it holds a role
+	// (steadystate's hold reasons; an analyzer's grace names the analyzer).
+	"CompositeSignal", "C0-agree", "C1-single", "C4-no-signal",
+	"no-listed-analyzer-sizes-role", "other-role-cannot-grow", "saturation-holds-role",
+	"analyzer-in-grace:throughput",
 	// The redaction marker.
 	"redacted",
 )

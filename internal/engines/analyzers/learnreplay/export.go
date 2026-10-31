@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/enginerec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
@@ -175,14 +176,26 @@ func Export(recording []byte, opts ExportOptions) ([]byte, *ExportReport, error)
 	return out.Bytes(), rep, nil
 }
 
-// lastAnalyze is the index of the last Analyze event, -1 when there is none.
+// lastAnalyze is the index of the last Analyze event, or of an engine
+// composite after it (a recorded result too, built from the Analyzes before
+// it); -1 when there is no Analyze.
 func lastAnalyze(events []learnrec.RawEvent) int {
+	last := -1
 	for i := len(events) - 1; i >= 0; i-- {
 		if strings.HasSuffix(events[i].Kind, ".Analyze") {
+			last = i
+			break
+		}
+	}
+	if last < 0 {
+		return -1
+	}
+	for i := len(events) - 1; i > last; i-- {
+		if events[i].Kind == enginerec.KindComposite {
 			return i
 		}
 	}
-	return -1
+	return last
 }
 
 // ExportOptions configure Export.

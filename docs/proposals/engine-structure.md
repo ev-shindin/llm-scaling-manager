@@ -32,7 +32,9 @@ Two outcomes differ from what the text below expects:
   source, and is now also its unit: every analyzer's need is converted into
   saturation's units. Retiring it now waits on stage 3 and on the replay
   harness from #341; it is tracked as
-  [#345](https://github.com/ev-shindin/llm-scaling-manager/issues/345).
+  [#345](https://github.com/ev-shindin/llm-scaling-manager/issues/345). Its
+  step 0, the engine-level golden, records and replays the composite and the
+  warm pool's figures; the optimizer's decisions are not recorded yet.
 - **The composite took a different shape** from the branch reviewed below:
   no saturation fallback (saturation contributes only when listed), roles
   priced in one analyzer's frame, and holds and a grace veto. See

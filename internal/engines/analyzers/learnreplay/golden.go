@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"math"
 	"os"
 	"path"
@@ -24,6 +25,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/enginerec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
 
@@ -89,10 +91,56 @@ const (
 	OutputLearnedState = "learned-state.csv"
 )
 
-// OutputNames is every output, in the order the manifest lists them.
+// The engine's outputs (issue #345, step 0), from each composite the engine
+// events record: written for a fixture whose recording carries the engine
+// layer, and for no other.
+const (
+	// OutputCompositeResults is each composite at model scope: its supply,
+	// required and spare capacity, score and liveness, and its result
+	// without the per-variant and per-role parts the files below hold.
+	OutputCompositeResults = "composite-results.csv"
+	// OutputCompositeVariants is each composite's variant capacities, one
+	// row per variant, with the decision path that sized it.
+	OutputCompositeVariants = "composite-variants.csv"
+	// OutputCompositeRoles is each composite's role capacities, one row per
+	// role of a P/D model.
+	OutputCompositeRoles = "composite-roles.csv"
+	// OutputCompositeHolds is each role a composite holds, with the reasons.
+	OutputCompositeHolds = "composite-holds.csv"
+	// OutputCompositeRelease is, per role another analyzer's frame sizes, the
+	// most it may release (ReleaseBound) and what the other frames read of
+	// it (OtherFrames).
+	OutputCompositeRelease = "composite-release.csv"
+	// OutputWarmPoolSupply is what each variant gets from the warm pool's
+	// bridges, as the engine publishes it for the pool.
+	OutputWarmPoolSupply = "warm-pool-supply.csv"
+	// OutputWarmPoolPressure is how hard each variant is pushed, as the
+	// engine publishes it for the pool.
+	OutputWarmPoolPressure = "warm-pool-pressure.csv"
+)
+
+// OutputNames is every analyzer output, in the order the manifest lists
+// them. Every fixture has each.
 func OutputNames() []string {
 	return []string{OutputLearnedState, OutputLines, OutputResults, OutputSLOPublished,
 		OutputStoreRecords, OutputVariantCapacities}
+}
+
+// EngineOutputNames is every engine output, in the order the manifest lists
+// them. A fixture whose recording carries engine events has each.
+func EngineOutputNames() []string {
+	return []string{OutputCompositeHolds, OutputCompositeRelease, OutputCompositeResults, OutputCompositeRoles,
+		OutputCompositeVariants, OutputWarmPoolPressure, OutputWarmPoolSupply}
+}
+
+// producedNames is the outputs a replay produced, in manifest order: the
+// analyzer outputs, then the engine outputs when it produced them.
+func producedNames(outputs map[string][]byte) []string {
+	out := OutputNames()
+	if _, ok := outputs[OutputCompositeResults]; ok {
+		out = append(out, EngineOutputNames()...)
+	}
+	return out
 }
 
 // storeOutputFields are the capacity record's fields an analyzer writes: the
@@ -118,7 +166,11 @@ func Outputs(recording []byte) (map[string][]byte, error) {
 		return nil, err
 	}
 	out := make(map[string][]byte)
-	for _, name := range OutputNames() {
+	names := OutputNames()
+	if _, ok := rows[OutputCompositeResults]; ok {
+		names = append(names, EngineOutputNames()...)
+	}
+	for _, name := range names {
 		b, err := writeRows(rows[name])
 		if err != nil {
 			return nil, err
@@ -134,6 +186,7 @@ func outputRows(recording []byte) (map[string][]row, error) {
 		return nil, err
 	}
 	rows := map[string][]row{}
+	engine := false
 	for _, ev := range read.Events {
 		data, err := parseNode(ev.Data)
 		if err != nil {
@@ -173,6 +226,9 @@ func outputRows(recording []byte) (map[string][]row, error) {
 			if pub := data.get("Published"); pub != nil && pub.kind != nodeNull {
 				rows[OutputSLOPublished] = append(rows[OutputSLOPublished], row{ev.Kind, now, group, "", string(pub.bytes())})
 			}
+		case enginerec.KindComposite:
+			engine = true
+			compositeRows(rows, ev.Kind, now, data)
 		case saturation.KindPublishLine, saturation.KindBorrowLine:
 			rows[OutputLines] = append(rows[OutputLines],
 				row{ev.Kind, now, data.get("PhysicsKey").str(), data.get("Variant").str(), string(data.bytes())})
@@ -194,7 +250,84 @@ func outputRows(recording []byte) (map[string][]row, error) {
 			}
 		}
 	}
+	if engine {
+		for _, name := range EngineOutputNames() {
+			if rows[name] == nil {
+				rows[name] = []row{}
+			}
+		}
+	}
 	return rows, nil
+}
+
+// compositeRows adds one composite event's rows to the engine outputs.
+func compositeRows(rows map[string][]row, kind, now string, data *node) {
+	group := data.get("Namespace").str() + "/" + data.get("ModelID").str()
+	add := func(output, item string, n *node) {
+		if n == nil {
+			n = &node{kind: nodeNull}
+		}
+		rows[output] = append(rows[output], row{kind, now, group, item, string(n.bytes())})
+	}
+	comp := data.get("Composite")
+	if comp == nil || comp.kind != nodeObject {
+		return
+	}
+	summary := comp.without("RoleCapacities", "Holds", "ReleaseBound", "OtherFrames")
+	if res := comp.get("Result"); res != nil && res.kind == nodeObject {
+		for i, k := range summary.keys {
+			if k == "Result" {
+				summary.vals[i] = res.without("VariantCapacities")
+			}
+		}
+		for _, vc := range res.get("VariantCapacities").items() {
+			add(OutputCompositeVariants, vc.get("VariantName").str(), vc)
+		}
+	}
+	add(OutputCompositeResults, "", summary)
+	if rc := comp.get("RoleCapacities"); rc != nil && rc.kind == nodeObject {
+		for i, role := range rc.keys {
+			add(OutputCompositeRoles, role, rc.vals[i])
+		}
+	}
+	byRole := func(fields map[string]*node) []string {
+		seen := map[string]bool{}
+		for _, n := range fields {
+			if n != nil && n.kind == nodeObject {
+				for _, k := range n.keys {
+					seen[k] = true
+				}
+			}
+		}
+		return slices.Sorted(maps.Keys(seen))
+	}
+	pair := func(a string, an *node, b string, bn *node, role string) *node {
+		return &node{kind: nodeObject, keys: []string{a, b}, vals: []*node{an.get(role), bn.get(role)}}
+	}
+	holds, reasons := comp.get("Holds"), data.get("HoldReasons")
+	for _, role := range byRole(map[string]*node{"h": holds, "r": reasons}) {
+		add(OutputCompositeHolds, role, nullFill(pair("Hold", holds, "Reasons", reasons, role)))
+	}
+	bound, frames := comp.get("ReleaseBound"), comp.get("OtherFrames")
+	for _, role := range byRole(map[string]*node{"b": bound, "f": frames}) {
+		add(OutputCompositeRelease, role, nullFill(pair("ReleaseBound", bound, "OtherFrames", frames, role)))
+	}
+	for _, s := range data.get("Supply").items() {
+		add(OutputWarmPoolSupply, s.get("Variant").str(), s)
+	}
+	for _, p := range data.get("Pressure").items() {
+		add(OutputWarmPoolPressure, p.get("Variant").str(), p)
+	}
+}
+
+// nullFill writes a missing member of n as null.
+func nullFill(n *node) *node {
+	for i, v := range n.vals {
+		if v == nil {
+			n.vals[i] = &node{kind: nodeNull}
+		}
+	}
+	return n
 }
 
 // str is a string node's text, "" for anything else.
@@ -522,8 +655,9 @@ type GoldenCheck struct {
 // requiredPaths is every learner path the goldens must run at least once
 // between them: a golden set that never reaches a path pins nothing about
 // it (analyzer-learner.md, 2.5). Each can run on this base; the settle
-// tracker's verdicts join from the PR that adds the tracker.
-func requiredPaths() []string { return saturation.PathNames() }
+// tracker's verdicts join from the PR that adds the tracker. With the
+// engine's replay registered, its composite paths are required too.
+func requiredPaths() []string { return append(saturation.PathNames(), enginePathNames()...) }
 
 // pathProblems names each required path the fixtures ran on no cycle.
 func pathProblems(paths map[string]int64) []string {
@@ -621,7 +755,7 @@ func CheckGoldens(ctx context.Context, dir string) (*GoldenCheck, error) {
 				problem("%s: golden no longer reproduces: %s", g.Name, d)
 			}
 		}
-		for _, name := range OutputNames() {
+		for _, name := range producedNames(got) {
 			if !want[name] {
 				problem("%s: the output %s has no golden file in %s", g.Name, name, ManifestName)
 			}
@@ -667,6 +801,11 @@ func goldenReplay(ctx context.Context, recording []byte, mode Mode) (map[string]
 	rep, err := Replay(ctx, recording, Options{Mode: mode})
 	if err != nil {
 		return nil, nil, err
+	}
+	for kind := range rep.Ignored {
+		if enginerec.Owns(kind) {
+			return nil, nil, fmt.Errorf("the recording carries engine events (%s) and no engine replay is registered (learnreplay.RegisterEngine)", kind)
+		}
 	}
 	if failed := rep.Failed(); len(failed) > 0 {
 		return nil, nil, fmt.Errorf("the replay failed: %s (%d in all)", failed[0], len(failed))
@@ -732,6 +871,11 @@ func comparedNothing(start learnrec.Start, outputs map[string][]byte) []string {
 	}
 	if start.Throughput {
 		need(count(OutputResults, throughput.KindAnalyze) > 0, "throughput results")
+	}
+	if _, ok := outputs[OutputCompositeResults]; ok {
+		need(count(OutputCompositeResults, "") > 0, "composites")
+		need(count(OutputCompositeVariants, "") > 0, "composite variants")
+		need(count(OutputWarmPoolPressure, "") > 0, "warm-pool pressure")
 	}
 	return missing
 }
@@ -847,7 +991,7 @@ func AddGolden(ctx context.Context, dir, name string, raw []byte, opts AddOption
 	if err != nil {
 		return nil, fmt.Errorf("learnreplay: the export of %s, Normal: %w", name, err)
 	}
-	for _, o := range OutputNames() {
+	for _, o := range producedNames(outputs) {
 		if !bytes.Equal(outputs[o], normal[o]) {
 			return nil, fmt.Errorf("learnreplay: the export of %s: %s differs between a Fidelity and a Normal replay", name, o)
 		}
@@ -865,7 +1009,7 @@ func AddGolden(ctx context.Context, dir, name string, raw []byte, opts AddOption
 		return nil, err
 	}
 	entry := ManifestEntry{Name: name, Source: opts.Source, Recording: path.Join(name, RecordingName)}
-	for _, o := range OutputNames() {
+	for _, o := range producedNames(outputs) {
 		if err := os.WriteFile(filepath.Join(tmp, o), outputs[o], 0o644); err != nil {
 			return nil, err
 		}
@@ -928,7 +1072,7 @@ func UpdateGoldens(ctx context.Context, dir string) error {
 			}
 		}
 		m.Goldens[i].Outputs = nil
-		for _, o := range OutputNames() {
+		for _, o := range producedNames(outputs) {
 			if err := os.WriteFile(filepath.Join(dir, g.Name, o), outputs[o], 0o644); err != nil {
 				return err
 			}

@@ -26,8 +26,15 @@ import (
 	"syscall"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/learnreplay"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/steadystate"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
+
+// The engine replays its own events (the composite); register it so every
+// replay this command runs drives them.
+func init() {
+	learnreplay.RegisterEngine(func() learnreplay.EngineReplayer { return steadystate.NewLearnerReplay() })
+}
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

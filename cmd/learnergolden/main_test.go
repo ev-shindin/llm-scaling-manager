@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/learnreplay"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/steadystate"
 )
 
 // goldens is the committed golden directory, from this package.
@@ -112,5 +114,7 @@ func TestRun_AddCheckUpdate(t *testing.T) {
 	// measured paths: an add and an update say so, the check fails on it.
 	assert.Contains(t, out, "no golden runs the learner path "+saturation.PathMuSampleWritten)
 	out, err = runOut("check", "-dir", dir)
-	require.ErrorContains(t, err, "6 learner paths no golden runs", out)
+	// Six of saturation's paths, and every engine path: the acceptance
+	// recording carries no engine events.
+	require.ErrorContains(t, err, fmt.Sprintf("%d learner paths no golden runs", 6+len(steadystate.LearnerReplayPathNames())), out)
 }

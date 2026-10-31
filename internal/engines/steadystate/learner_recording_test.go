@@ -76,6 +76,12 @@ type recScript struct {
 	// forgetAt is the cycle the forget annotation appears on agg-a, and
 	// goneAfter the last cycle the "gone" model is present.
 	forgetAt, goneAfter int
+	// engineLayer runs each model through collectV2ModelRequest, the
+	// analyzers and then the composite, with discovery metadata, instead
+	// of the analyzers alone: the engine-level recording (#345 step 0).
+	engineLayer bool
+	// policies is a model's own policy, where it is not policy.
+	policies map[string]config.ScalingPolicy
 }
 
 // scriptedRouter answers with a latency that moves with the cycle.
@@ -320,7 +326,18 @@ func (s *recScript) cycle(t *testing.T, e *Engine, n int, at time.Time) []alloca
 		if m == "acme/agg" {
 			sq = &domain.SchedulerQueueMetrics{QueueSize: int64(n % 3)}
 		}
-		results, err := e.runAnalyzers(ctx, m, recNS, rows, s.policy, states, nil, targets, vas, sq, 1.5+0.1*float64(n%4))
+		policy := s.policy
+		if p, ok := s.policies[m]; ok {
+			policy = p
+		}
+		if s.engineLayer {
+			req, err := e.collectV2ModelRequest(ctx, m, recNS, rows, policy, states, recMetadata(states, m),
+				targets, vas, sq, 1.5+0.1*float64(n%4))
+			require.NoError(t, err, "cycle %d model %s", n, m)
+			out = append(out, req.CompositeSignal)
+			continue
+		}
+		results, err := e.runAnalyzers(ctx, m, recNS, rows, policy, states, nil, targets, vas, sq, 1.5+0.1*float64(n%4))
 		require.NoError(t, err, "cycle %d model %s", n, m)
 		out = append(out, results...)
 	}
