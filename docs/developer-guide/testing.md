@@ -355,8 +355,10 @@ not where its input arrives:
 - mu's three yields: to the derived figure on a served bound, to the full
   siblings, and to the derived figure once stale;
 - ITL lines from a full fit, and from the pinned fit;
-- rows whose instant KV a learner read: a reading the ITL line took, or a
-  replica demand charged at its instant KV;
+- rows whose KV a learner read: a reading the ITL line took (at the KV fill
+  averaged over the ITL minute when the collector read it, else the instant
+  fill; the counter does not tell the two apart), or a replica demand
+  charged at its instant KV;
 - rows whose Pod Ready time k2's joined test read;
 - k2 readings refused as a joiner because of the Ready time: the restart
   fix (#288), not the first sight, decided the refusal.
