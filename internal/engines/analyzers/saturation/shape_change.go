@@ -417,9 +417,10 @@ func (a *SaturationAnalyzer) noteFleetShape(namespace, modelID string, in, out f
 		// the hold exists to guard against, because those at least let it
 		// scale. A hold given up on is evidence the fleet will not measure
 		// itself under this shape any time soon; re-raising it on the next
-		// crossing repeats a wait already known not to finish. settleFleetShape
-		// clears this, so a fleet that DOES measure itself is free to hold
-		// again immediately for a genuinely new transition.
+		// crossing repeats a wait already known not to finish. So after a
+		// give-up the next hold waits out the whole cooldown: nothing is
+		// outstanding inside it, so settleFleetShape never runs there and a
+		// fleet that measures itself does not cut it short.
 		// Recorded on EVERY declared change and before the hold's own
 		// conditions, so it survives a hold of zero. This is the clock the mu
 		// divisor reads; changedAt below is the hold's.
@@ -432,14 +433,24 @@ func (a *SaturationAnalyzer) noteFleetShape(namespace, modelID string, in, out f
 	if !changed {
 		return stableOut, stableIn, !memo.changedAt.IsZero()
 	}
+	// The hold's own state, as on the no-change path above, not "changed": a
+	// change declared with the hold disabled, or inside a given-up hold's
+	// cooldown, raised no hold, and reporting it outstanding here held the
+	// fleet anyway for the one cycle that declared it.
+	held := !memo.changedAt.IsZero()
+	reason := "the shape the capacity figures were learned under is no longer the one arriving; the fleet is not released until the new shape has a reading of its own"
+	if !held {
+		reason = "the shape the capacity figures were learned under is no longer the one arriving; no hold is raised (the hold is disabled, or a hold was given up on within its cooldown), so the fleet is released as usual"
+	}
 	logger.Info("fleet-shape-change",
 		"modelID", modelID, "namespace", namespace,
 		"inputTokensWas", was.AvgInputTokens, "inputTokensNow", next.AvgInputTokens,
 		"outputTokensWas", was.AvgOutputTokens, "outputTokensNow", next.AvgOutputTokens,
 		"arrivingPromptTokens", arriving, "arrivingRead", arrivingOK,
 		"hadShape", hadShape, "tolerance", shape.DefaultChangeTolerance,
-		"reason", "the shape the capacity figures were learned under is no longer the one arriving; the fleet is not released until the new shape has a reading of its own")
-	return stableOut, stableIn, true
+		"held", held,
+		"reason", reason)
+	return stableOut, stableIn, held
 }
 
 // fleetHasMeasuredItself reports whether every variant with a replica has a
@@ -519,9 +530,10 @@ func (a *SaturationAnalyzer) settleFleetShape(namespace, modelID string, ownRead
 	defer a.mu.Unlock()
 	if memo, ok := a.fleetShape[namespace+"|"+modelID]; ok {
 		memo.changedAt = time.Time{}
-		// The fleet has measured itself, so the reason a previous hold was
-		// given up on no longer applies and the next transition need not wait
-		// out its cooldown.
+		// Defensive. This runs only while a hold is outstanding, and a hold is
+		// raised only once any earlier give-up's cooldown has passed, so the
+		// cooldown never shortens here; clearing it just leaves no stale
+		// give-up behind the hold this settles.
 		memo.gaveUpAt = time.Time{}
 	}
 }

@@ -649,8 +649,8 @@ not cover a key.
 `D/property_mutants_test.go`, and a test holds it to the mutants. Each
 finding above is in exactly one state:
 
-- **Caught:** 24 findings. For each, a mutant puts the defect back, and its
-  class fails on that mutant. For 15 a mutant runs the production learner
+- **Caught:** 25 findings. For each, a mutant puts the defect back, and its
+  class fails on that mutant. For 16 a mutant runs the production learner
   (a policy key, rows, or a stub); 9 are caught only by a toy, and the code
   table marks them "caught (toy)". "Restart fix stubbed" is caught: its
   mutant stubs the Ready time through the analyzer's `readySince` seam, the
@@ -676,7 +676,6 @@ finding above is in exactly one state:
 | Router queue without engine metrics | the missing-values case passes, and no row edit reproduces the pre-fix reading |
 | k2 key flips on the output-length boundary | a ledger row: the selected key flips on about a third of seeds |
 | The 0.30 idle line | a ledger row: the idle-room verdict flips on the line |
-| Prefill double scrape | a ledger row: the prefill bound's max takes a pod read at 2x |
 | Demand falls when λ lags a step | the trajectory passes; no pre-fix floor is reproduced |
 | No floor under flow control (#144) | a ledger row for k2; no case drives mu or the floor under flow control |
 | Settle holes: fall, rate escape, idle return, lend | need the settle tracker (PR 1) |
