@@ -177,12 +177,34 @@ type.
 
 ## Components
 
-- **Registration** — `internal/engines/steadystate/engine.go`:
-  `RegisterAnalyzer(name, analyzer) error`. `cmd/main.go` registers external
-  analyzers (e.g., throughput) before `StartOptimizeLoop`. The saturation analyzer is
-  pre-registered at slot 0, and the slo analyzer after it; an external analyzer
-  named `slo` is not run. The registry is snapshotted at `StartOptimizeLoop`;
-  late registration returns an error.
+- **Registration** — one registry, `analyzerRegistry` in
+  `internal/engines/steadystate/analyzer_registry.go`, the engine's
+  `analyzers` field. `RegisterAnalyzer(name, analyzer) error` adds a
+  built-in; `cmd/main.go` registers the throughput analyzer this way before
+  `StartOptimizeLoop`. The saturation analyzer is pre-registered at slot 0,
+  and the slo analyzer after it. `StartOptimizeLoop` freezes the built-ins:
+  a later registration returns an error. The config-driven analyzers from
+  `analyzerDefinitions` live in the same registry
+  (`UpsertExternalAnalyzer`/`RemoveExternalAnalyzer`, reconciled every
+  cycle); one named like a built-in (`slo`, say) is stored but not run.
+  Every read takes the registry's read lock.
+- **Saturation's capabilities** — what the engine reaches of the saturation
+  analyzer beyond `Analyze` is resolved once, when it is registered, into
+  `saturationCapabilities`: the accelerator stabiliser, the history evictor,
+  the forgetter, the presence noter, the learned-state store and the learner
+  recording's hook. Each is a typed interface pinned at compile time on
+  `*saturation.SaturationAnalyzer`; a nil field is a capability the
+  registered analyzer lacks (a test double), and each caller skips it.
+- **Input builder** — `buildAnalyzerInput` in `engine_v2.go`, called by
+  `runAnalyzers` before any analyzer runs. Per variant it forgets on request
+  (`forgetOnRequest`), files the scale target's engine parameters in the
+  capacity store (`LoadFromScaleTarget`) and publishes `wva_engine_config`
+  (`publishEngineConfig`), in that order. It returns the one
+  `domain.AnalyzerInput` every analyzer of the model receives: rows,
+  variant states, discovery's `VariantMetadata`, the merged policy, the
+  scheduler queue and the arrival rate. No analyzer reads `VariantMetadata`
+  yet; the role join and the clamp to the scale target still run after
+  `Analyze`, in `buildCapacities`. `AnalyzerInput` has no capacity view yet.
 - **Engine post-step** — `internal/engines/steadystate/engine_v2.go`:
   `applyUniversalThreshold(*allocation.NamedAnalyzerResult, scaleUp, scaleDown)`,
   called from `buildCapacities`, applies the formula
@@ -320,17 +342,17 @@ analyzer's; an analyzer normally has no reason to call them.
 
 ## Pipeline flow
 
-1. `cmd/main.go` calls `engine.RegisterAnalyzer(name, a)` for each external
-   analyzer before `StartOptimizeLoop`. The saturation analyzer is pre-registered at
-   slot 0.
-2. `StartOptimizeLoop` snapshots the registry into `analyzersSnapshot`
-   (frozen, race-safe). The snapshot is the ordered set of analyzers that
-   every optimize cycle iterates.
+1. `cmd/main.go` calls `engine.RegisterAnalyzer(name, a)` for each built-in
+   analyzer it adds before `StartOptimizeLoop`. The saturation analyzer is
+   pre-registered at slot 0.
+2. `StartOptimizeLoop` freezes the registry's built-ins.
 3. Each cycle, `reconcileExternalAnalyzers` rebuilds the external analyzers
-   from `analyzerDefinitions`.
-4. Per cycle, for each model: `runAnalyzers` runs the saturation analyzer
+   from `analyzerDefinitions`, in the same registry.
+4. Per cycle, for each model: `runAnalyzers` builds the model's
+   `AnalyzerInput` (`buildAnalyzerInput`), runs the saturation analyzer on it
    unconditionally, then every other analyzer (`analyzerRunEntries`: the
-   snapshot, then the external ones by name) that the policy enables.
+   built-ins in registration order, then the external ones by name) that the
+   policy enables, each on the same input.
 5. For each analyzer that runs, `buildNamedResult` builds its capacities and
    applies `applyUniversalThreshold` at its own resolved band (per-analyzer
    override beats global). This shapes that analyzer's own result and its

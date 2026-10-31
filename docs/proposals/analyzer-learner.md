@@ -8,6 +8,15 @@
   describes main as it is now. Line numbers are main's at that commit.
   [Shipped behaviour each PR must keep](#shipped-behaviour-each-pr-must-keep)
   lists what those PRs fixed that a later step could undo.
+- **Since revision 7:** #345 step 1 landed: one analyzer registry, and one
+  `AnalyzerInput` per model built before any `Analyze` (`buildAnalyzerInput`).
+  It runs after `observeLoadBalance`, as the scale-target load did. PR 1's
+  settle tracker must observe before the balance tracker reads (4.2), so it
+  goes at the top of `runAnalyzers`, ahead of both. The engine now reaches
+  saturation's capabilities through typed fields resolved at registration
+  (`saturationCapabilities`), not by assertion at each call; a wrapper around
+  the analyzer would still hide them (2.4). `runV2AnalysisOnly` is now
+  `buildAnalyzerInput` followed by `runSaturation`.
 - **Problem:** the analyzers learn about fifteen quantities. Each one accepts
   readings, fits, forgets and logs in its own way. The same defects were fixed
   in one learner after another, because no learner could reuse another's fix.

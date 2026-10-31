@@ -1,7 +1,8 @@
 # Engine structure: scope, layering, and what to do before the next feature
 
-**Status:** partly built: stages 1, 2 and 5 done, stage 3 partial, stage 4
-merged in another place and shape (see [Status by stage](#status-by-stage)).
+**Status:** partly built: stages 1, 2 and 5 done, stage 3 partial (one
+registry and the input builder landed with #345 step 1), stage 4 merged in
+another place and shape (see [Status by stage](#status-by-stage)).
 Proposed 2026-09-21, revised after review. Decisions in this
 document are the repository owner's; each one is marked **Decision** where
 the text asks for it. A prerequisite for the shape-shift proposal
@@ -21,10 +22,25 @@ proposal as written; this table is what happened to each stage.
 |---|---|---|
 | 1 — `signals` | done (#89, #91) | `internal/signals/{balance,capacity,fleet,floor,itl,shape}`. `engines/aggregation` has not moved under `signals` yet. |
 | 2 — import direction | done (#88) | `hack/check-import-direction.sh`, run by `make test`. |
-| 3 — split the engine, one registry, input builder first | partial | `internal/scalingpolicy` holds sticky scale-down, the inventory gate, blocked reasons and the policy report. Not done: `engine.go` (2,657 lines) and `engine_v2.go` (2,030) are still two files; there are still two registries (`analyzersSnapshot` and `externalAnalyzers`); `buildCapacities` still runs after `Analyze`; `AnalyzerInput` has no `Capacity`. |
+| 3 — split the engine, one registry, input builder first | partial | `internal/scalingpolicy` holds sticky scale-down, the inventory gate, blocked reasons and the policy report. #345 step 1: one registry (`steadystate/analyzer_registry.go`), with saturation's capabilities as typed interfaces resolved at registration; one `AnalyzerInput` per model, built before any `Analyze` (`buildAnalyzerInput`), which carries `VariantMetadata` and does the forget, `LoadFromScaleTarget` and `publishEngineConfig`; zero golden change. Not done: `engine.go` and `engine_v2.go` are still two files; the overlay (the role join and the clamp to the scale target) still runs after `Analyze`, in `buildCapacities`, and moves in a later step that is allowed to change the goldens, since saturation's recorded result carries the unclamped replica count; `AnalyzerInput` has no `Capacity` (below). |
 | 4 — merge the composite, move it to `analyze/combine` | merged, not moved | The composite landed as #167 and #197 in `steadystate/composite.go` and `allocation/composite_*.go`, not `analyze/combine`. `plan/optimize` and `plan/limit` were not split out of `allocation`. |
 | 5 — collector by concern | done | `query.go`, `extract.go`, `attribute.go`, `freshness.go`. |
 | 6 — comment policy | not tracked | `docs/developer-guide/analyzer-evidence.md` exists; no file-by-file record. |
+
+`AnalyzerInput.Capacity` lands with its first reader, in its own PR. The SLO
+analyzer reads engine parameters from the store today, so it is the natural
+one. That PR moves the record into `domain` (the first option of the note
+under stage 1 below) if `capacity.EngineParams` and its fingerprint methods
+can move without an upward import. Otherwise it adds a read-only interface in
+`domain` that returns a domain projection of the record. Checked at #345
+step 1: `EngineParams`, every method on it (`deployment_parser.go`,
+`fingerprint.go`) and the helpers those methods call import only the standard
+library, `internal/constants` and `internal/inferenceengine`. The latter
+imports `internal/utils/scaletarget`, which imports `internal/constants`,
+`internal/logging` and `internal/resources`. All of these are infrastructure
+leaves the import-direction check does not rank, none imports `domain`, and
+`domain` already imports one such leaf (`internal/variant`). So the move adds
+no upward edge and no cycle. Nothing was moved.
 
 Two outcomes differ from what the text below expects:
 
