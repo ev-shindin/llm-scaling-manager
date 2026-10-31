@@ -61,6 +61,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/cycleclock"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
@@ -288,9 +289,14 @@ type Engine struct {
 	// one replica saturated beside an idle one (observeLoadBalance). Built on
 	// first use.
 	loadBalance *balance.Tracker
-	// loadBalanceNow is the clock observeLoadBalance reads; nil is time.Now.
-	// A test sets it to step cycles without waiting for them.
-	loadBalanceNow func() time.Time
+	// observeNow is the clock the settle observation and
+	// observeLoadBalance read, once per model per cycle; nil is the cycle
+	// clock. A test sets it to step cycles without waiting for them.
+	observeNow func() time.Time
+	// settle is when each replica last started to settle (settle.go): the
+	// engine writes it at the top of runAnalyzers, and the load-balance
+	// tracker reads it. Built on first use.
+	settle *settle.Tracker
 }
 
 // NewEngine creates a new instance of the saturation engine.
@@ -1503,6 +1509,10 @@ func (e *Engine) optimizeV2(
 		if len(saturationConfigMap) == 0 {
 			logger.Info("Saturation scaling config not loaded yet for namespace, skipping model",
 				"namespace", namespace, "modelID", modelID)
+			// No rows read this cycle: the settle tracker holds its
+			// sightings, so a policy missing for a while does not settle
+			// every replica again when it returns (holdSettle).
+			e.holdSettle(namespace, modelID, e.observeClock())
 			continue
 		}
 
@@ -1511,10 +1521,11 @@ func (e *Engine) optimizeV2(
 		if err != nil {
 			msg := "Model data preparation failed"
 			logger.Error(err, msg, "modelID", modelID)
-			// Nothing measured the load this cycle: the series go once
-			// collection has failed for balance.StaleAfter, not on one
-			// failed cycle (loadBalanceCollectionFailed).
-			e.loadBalanceCollectionFailed(namespace, modelID)
+			// Nothing measured the load this cycle: the settle tracker
+			// holds its sightings, and the series go once collection has
+			// failed for balance.StaleAfter, not on one failed cycle
+			// (modelCollectionFailed).
+			e.modelCollectionFailed(namespace, modelID)
 			e.recordOptimizationFailedEvent(modelVAs, msg)
 			e.emitSafetyNetMetrics(ctx, modelVAs, currentAllocations, nil)
 			reportSignalReason(namespace, modelID, nil)

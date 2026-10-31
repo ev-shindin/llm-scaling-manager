@@ -70,6 +70,16 @@ type ReplicaMetrics struct {
 	// disambiguate). With several pools declared, a variant naming none is
 	// Unassignable: it gets no warm copy at all, and is reported.
 	FromWarmPool bool
+	// LentSince is when the warm pool lent this Pod to this variant: the
+	// first pass of the pool that published the current lend
+	// (decision.BridgeStore). Zero when the record is not a bridge, or the
+	// lend time is unknown.
+	//
+	// A Pod handed back and lent again to the same variant keeps its name,
+	// its variant and the Ready time it had in the pool, so nothing else
+	// tells the new lend from a missed scrape of the old one; the settle
+	// tracker (internal/signals/settle) reads a new LentSince as a new lend.
+	LentSince time.Time
 
 	// Ready is the Pod's own readiness condition, read from the Pod and not
 	// inferred from the fact that it answered a scrape.

@@ -101,10 +101,12 @@ type replayer struct {
 	policies map[string]*config.ScalingPolicy
 	// rec is the replay's own recorder.
 	rec *learnrec.Recorder
+	// settle is the replay's settle tracker (settle.go).
+	settle *settleReplay
 }
 
 // owners is the kinds' owners a replay drives, by the prefix of their kind.
-var owners = []string{"saturation.", "slo.", "throughput.", "store."}
+var owners = []string{"saturation.", "slo.", "throughput.", "store.", "settle."}
 
 // driven reports whether a replay applies, or checks, events of kind.
 func (r *replayer) driven(kind string) bool {
@@ -175,6 +177,7 @@ func Replay(ctx context.Context, recording []byte, opts Options) (*Report, error
 	}
 	r.rep.Recording = buf.Bytes()
 	r.rep.Paths = r.sat.PathCounts()
+	maps.Copy(r.rep.Paths, r.settle.pathCounts())
 	if r.engine != nil {
 		maps.Copy(r.rep.Paths, r.engine.PathCounts())
 	}

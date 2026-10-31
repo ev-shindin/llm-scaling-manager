@@ -180,6 +180,17 @@ func TestRun_AddCheckUpdate(t *testing.T) {
 	// replay's own count above is only the cross-check.
 	require.Len(t, unrun, 8, "the head recording leaves these saturation paths unrun: %v. "+
 		"A saturation path added or removed moves this count; check the list and update the 8", unrun)
+	// The settle verdicts the goldens must reach (learnreplay's
+	// requiredSettlePaths) that the recording's own replay never reached.
+	var unrunSettle []string
+	for _, p := range []string{"settle-joined", "settle-lent"} {
+		if rep.Paths[p] == 0 {
+			unrunSettle = append(unrunSettle, p)
+		}
+	}
+	require.Len(t, unrunSettle, 1, "the head recording leaves these required settle paths unrun: %v. "+
+		"It lends no bridge, so settle-lent; check the list and update the 1", unrunSettle)
 	out, err = runOut("check", "-dir", dir)
-	require.ErrorContains(t, err, fmt.Sprintf("%d learner paths no golden runs", len(unrun)+len(steadystate.LearnerReplayPathNames())), out)
+	require.ErrorContains(t, err, fmt.Sprintf("%d learner paths no golden runs",
+		len(unrun)+len(unrunSettle)+len(steadystate.LearnerReplayPathNames())), out)
 }

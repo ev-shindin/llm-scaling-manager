@@ -37,13 +37,13 @@ func TestThresholdsTuneTheIdleTest(t *testing.T) {
 func TestTrackerTakesItsTimingsFromMeasure(t *testing.T) {
 	th := policy
 	th.SustainFor, th.ClearAfter = 4*time.Minute, 3*time.Minute
-	measured := func() *Tracker {
-		tr := NewTracker()
+	measured := func() testTracker {
+		tr := newTestTracker()
 		tr.Measure("ns/m", nil, pd, th, t0)
 		return tr
 	}
 	// sustainedAfter counts the cycles until the role is reported.
-	sustainedAfter := func(tr *Tracker) int {
+	sustainedAfter := func(tr testTracker) int {
 		c := &clock{now: t0}
 		for i := 1; i <= 100; i++ {
 			if only(t, tr.Observe("ns/m", imbalanced(), c.tick())).Sustained {
@@ -52,7 +52,7 @@ func TestTrackerTakesItsTimingsFromMeasure(t *testing.T) {
 		}
 		return -1
 	}
-	if def, tuned := sustainedAfter(NewTracker()), sustainedAfter(measured()); def != sustainCycles || tuned != int(4*time.Minute/cycle)+1 {
+	if def, tuned := sustainedAfter(newTestTracker()), sustainedAfter(measured()); def != sustainCycles || tuned != int(4*time.Minute/cycle)+1 {
 		t.Errorf("reported after %d cycles by default and %d at sustainFor 4m; want %d and %d",
 			def, tuned, sustainCycles, int(4*time.Minute/cycle)+1)
 	}
@@ -81,7 +81,7 @@ func TestTrackerTakesItsTimingsFromMeasure(t *testing.T) {
 	if !stale.Failed("ns/m", t0.Add(4*time.Minute)) {
 		t.Error("not stale at sustainFor (4m)")
 	}
-	if def := NewTracker(); def.Failed("ns/m", t0) || !def.Failed("ns/m", t0.Add(StaleAfter)) {
+	if def := newTestTracker(); def.Failed("ns/m", t0) || !def.Failed("ns/m", t0.Add(StaleAfter)) {
 		t.Error("the default tracker is not stale at StaleAfter")
 	}
 }

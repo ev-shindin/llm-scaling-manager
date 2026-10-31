@@ -36,6 +36,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
@@ -85,6 +86,11 @@ type recScript struct {
 	// external is an external analyzer each controller registers, nil for
 	// none.
 	external domain.Analyzer
+	// failModel's collection fails on cycle failAt: the engine holds its
+	// settle sightings (modelCollectionFailed) and nothing analyzes it. ""
+	// for none.
+	failModel string
+	failAt    int
 }
 
 // scriptedRouter answers with a latency that moves with the cycle.
@@ -305,6 +311,10 @@ func (s *recScript) cycle(t *testing.T, e *Engine, n int, at time.Time) []alloca
 
 	out := make([]allocation.NamedAnalyzerResult, 0, 3*len(models))
 	for _, m := range models {
+		if m == s.failModel && n == s.failAt {
+			e.modelCollectionFailed(recNS, m)
+			continue
+		}
 		rows := make([]domain.ReplicaMetrics, 0, 16)
 		states := make([]domain.VariantReplicaState, 0, len(byModel[m]))
 		targets := map[string]scaletarget.ScaleTargetAccessor{}
@@ -371,6 +381,13 @@ func recSchedule(start time.Time) []time.Time {
 // result the restarted controller's analyzers returned.
 func recordRun(t *testing.T, start time.Time, record bool) ([]byte, [][]allocation.NamedAnalyzerResult) {
 	t.Helper()
+	recording, results, _ := recordRunEngine(t, start, record)
+	return recording, results
+}
+
+// recordRunEngine is recordRun, with the engine that recorded.
+func recordRunEngine(t *testing.T, start time.Time, record bool) ([]byte, [][]allocation.NamedAnalyzerResult, *Engine) {
+	t.Helper()
 	s := newRecScript(start)
 	first := s.engine(t)
 	// Long enough apart for each snapshot write to land.
@@ -388,10 +405,69 @@ func recordRun(t *testing.T, start time.Time, record bool) ([]byte, [][]allocati
 		results = append(results, s.cycle(t, second, i, at))
 	}
 	if !record {
-		return nil, results
+		return nil, results, second
 	}
 	require.NoError(t, second.learnRec.Err())
-	return buf.Bytes(), results
+	return buf.Bytes(), results, second
+}
+
+// Review r2 (S2): a cycle whose collection fails records a settle.Hold, and
+// a replay at the same commit applies it and records it again byte for
+// byte, its settle verdicts the engine's. A short run of its own: the
+// scripted run's pinned counts stay as they are. A recording made before the
+// settle events has no hold to apply; its fallback cannot hold through such
+// a cycle, which is a stated limit (learnreplay/settle.go).
+func TestLearnerRecording_AFailedCollectionIsRecordedAsAHold(t *testing.T) {
+	s := newRecScript(recStart)
+	s.failModel, s.failAt = s.variants[0].model, 2 // acme/agg
+	e := s.engine(t)
+	var buf bytes.Buffer
+	e.recordLearners(learnrec.New(&buf, 0))
+	for i, at := range recSchedule(recStart)[:5] {
+		s.cycle(t, e, i, at)
+	}
+	require.NoError(t, e.learnRec.Err())
+	recording := buf.Bytes()
+	require.Equal(t, 1, kindCounts(t, recording)[settle.KindHold], "the failed cycle records one hold")
+
+	rep, err := learnreplay.Replay(context.Background(), recording, learnreplay.Options{Mode: learnreplay.Fidelity})
+	require.NoError(t, err)
+	require.Empty(t, mismatchText(rep.Mismatches), "the replay diverged from the recording")
+	require.Equal(t, string(recording), string(rep.Recording), "the replay's recording")
+	assertSettleVerdicts(t, "a recording with a hold", e.settleTracker().Verdicts(), rep.Paths)
+}
+
+// assertSettleVerdicts holds a replay's settle counters to the engine's
+// verdicts, reason by reason.
+func assertSettleVerdicts(t *testing.T, what string, want map[settle.Reason]int64, paths map[string]int64) {
+	t.Helper()
+	total := int64(0)
+	for r, n := range want {
+		total += n
+		assert.Equal(t, n, paths["settle-"+string(r)], "%s: settle verdict %s", what, r)
+	}
+	assert.Positive(t, total, "%s: the engine reached no settle verdict", what)
+}
+
+// withoutKind is recording with every event of kind left out, and the rest
+// numbered again from 1, as a recording that never had them is.
+func withoutKind(t *testing.T, recording []byte, kind string) []byte {
+	t.Helper()
+	const prefix = `{"Seq":`
+	var out []byte
+	seq := 0
+	for _, line := range bytes.SplitAfter(recording, []byte("\n")) {
+		if len(line) == 0 || bytes.Contains(line, []byte(`"Kind":"`+kind+`"`)) {
+			continue
+		}
+		require.True(t, bytes.HasPrefix(line, []byte(prefix)), "a line that does not start with its sequence number")
+		end := bytes.IndexByte(line, ',')
+		require.Positive(t, end)
+		seq++
+		out = append(out, fmt.Sprintf("%s%d", prefix, seq)...)
+		out = append(out, line[end:]...)
+	}
+	return out
 }
 
 // kindCounts counts a recording's events by kind.
@@ -409,13 +485,15 @@ func kindCounts(t *testing.T, recording []byte) map[string]int {
 var recStart = time.Date(2026, 3, 2, 9, 0, 0, 0, time.UTC)
 
 func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing.T) {
-	recording, _ := recordRun(t, recStart, true)
+	recording, _, recorder := recordRunEngine(t, recStart, true)
 
 	// The run covered what the acceptance names; a recording that missed one
 	// would pass a replay without testing it.
 	// Pinned, so a change in what the run records is a reviewed change: 12
 	// cycles over 3 models (the departed one for the first 4), 28 Analyzes
 	// per analyzer, 5 variants filed every cycle and the departed one for 4.
+	// The engine observes the settle tracker once per model per cycle, before
+	// its analyzers: 28 observations.
 	kinds := kindCounts(t, recording)
 	require.Equal(t, map[string]int{
 		learnrec.KindStart:                  1,
@@ -438,6 +516,7 @@ func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing
 		slo.KindBeginCycle:                  12,
 		slo.KindEvictStale:                  12,
 		slo.KindNoteVariantsPresent:         28,
+		settle.KindObserve:                  28,
 	}, kinds, "the events the scripted run records")
 	t.Logf("recorded %d bytes: %v", len(recording), kinds)
 	assertResultsPriced(t, recording)
@@ -463,6 +542,20 @@ func TestLearnerRecording_AReplayAtTheSameCommitReproducesEveryResult(t *testing
 	rep, err := learnreplay.Replay(context.Background(), recording, learnreplay.Options{Mode: learnreplay.Normal})
 	require.NoError(t, err)
 	require.Empty(t, mismatchText(rep.Failed()), "a Normal replay at the same commit failed")
+
+	// Review r1 (S4): the replay's settle tracker reaches the engine's
+	// verdicts, from the recorded observations, and, with them stripped as a
+	// recording made before they existed would be, from the fallback that
+	// observes at each saturation Analyze's clock: over three models and
+	// many replicas, not one.
+	engineVerdicts := recorder.settleTracker().Verdicts()
+	assertSettleVerdicts(t, "recorded observations", engineVerdicts, rep.Paths)
+	stripped := withoutKind(t, recording, settle.KindObserve)
+	require.Less(t, len(stripped), len(recording), "precondition: the recording has settle observations")
+	old, err := learnreplay.Replay(context.Background(), stripped, learnreplay.Options{Mode: learnreplay.Normal})
+	require.NoError(t, err)
+	require.Empty(t, mismatchText(old.Failed()), "a replay with the observations stripped failed")
+	assertSettleVerdicts(t, "observations stripped", engineVerdicts, old.Paths)
 	assert.Equal(t, 128, rep.StoreChecks, "store checks, Normal")
 	assert.Equal(t, kinds[saturation.KindAnalyze], rep.Analyzes[saturation.KindAnalyze])
 
@@ -514,6 +607,8 @@ func TestLearnerRecording_EveryEventRoundTripsByteForByte(t *testing.T) {
 		throughput.KindAnalyze:              func() any { return &throughput.AnalyzeEvent{} },
 		capacity.KindFileScaleTarget:        func() any { return &capacity.FileScaleTargetEvent{} },
 		capacity.KindEvictStale:             func() any { return &capacity.EvictStaleEvent{} },
+		settle.KindObserve:                  func() any { return &settle.ObserveEvent{} },
+		settle.KindHold:                     func() any { return &settle.ObserveEvent{} },
 	}
 	checked := map[string]int{}
 	for _, ev := range events {
@@ -611,7 +706,8 @@ func TestLearnerRecording_StartStopStart(t *testing.T) {
 	assert.Equal(t, string(before), string(files[0].data), "something wrote to the closed recording")
 	events, err := readEvents(before)
 	require.NoError(t, err)
-	assert.Len(t, events, 36, "events of the one recorded cycle")
+	// 36, and the settle observation of each of the cycle's 3 models.
+	assert.Len(t, events, 39, "events of the one recorded cycle")
 }
 
 // The same run thirty days later records the same results: nothing an

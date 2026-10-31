@@ -490,6 +490,22 @@ not where its input arrives:
 The names are one table in `path_counts.go`; `PathCounts` and `PathNames`
 read it.
 
+The replay also runs the settle tracker (`internal/signals/settle`) and
+counts its verdicts per reason: `settle-joined`, `settle-rejoined` (back
+after more than its absence tolerance), `settle-restarted` (a new Ready time under
+the same name), `settle-lent` and `settle-rolled-out`. The engine records
+each observation (`settle.Observe`: the model and the instant), and the
+replay applies it with the rows of the model's next saturation `Analyze`. A
+recording made before the engine recorded them is observed at each
+saturation `Analyze`'s own clock, at the default optimize interval. A cycle
+whose collection failed is recorded as `settle.Hold` and replayed as one.
+Only `settle-joined` and `settle-lent` are required. The committed goldens
+reach `settle-restarted` and `settle-rejoined` too, but only through their
+synthetic generators (rows whose Ready time moves every cycle, clocks that
+jump), so requiring them would pin the generators, not the tracker; no
+recording has a rollout under a Pod's own name. The settle suite covers the
+three until a cluster recording reaches them.
+
 The engine's replay counts its own paths (`LearnerReplay.PathCounts`):
 composites built, composites of a P/D model priced per role, composites that
 hold a role, composites in which another analyzer's frame bounds a release,

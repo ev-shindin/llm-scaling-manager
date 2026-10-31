@@ -211,14 +211,15 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 	// lent Pod is not reported as a mapping miss, and before the FMA hop
 	// because the two cannot both apply.
 	fromWarmPool := false
-	if bridgeFor, lent := c.bridgeFor(namespace, podName); lent {
+	var lentSince time.Time
+	if bridgeFor, since, lent := c.bridgeFor(namespace, podName); lent {
 		if vaName != "" && vaName != bridgeFor {
 			logger.V(logging.DEBUG).Info(
 				"a warm pool Pod resolved to a scale target of its own; attributing it to the variant it is lent to",
 				"pod", podName, "resolved", vaName, "lentTo", bridgeFor, "namespace", namespace)
 		}
 		vaName = bridgeFor
-		fromWarmPool = true
+		fromWarmPool, lentSince = true, since
 	}
 
 	if vaName == "" {
@@ -414,6 +415,7 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		Namespace:                namespace,
 		VariantName:              vaName,
 		FromWarmPool:             fromWarmPool,
+		LentSince:                lentSince,
 		Ready:                    ready,
 		Revision:                 c.podRevision(ctx, namespace, podName),
 		StartSeconds:             c.podStartSeconds(ctx, namespace, podName),

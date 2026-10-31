@@ -23,7 +23,7 @@ const loadCycle = 15 * time.Second
 // loadCycle per read, from start.
 func steppedLoadClock(e *Engine, start time.Time) {
 	now := start
-	e.loadBalanceNow = func() time.Time {
+	e.observeNow = func() time.Time {
 		now = now.Add(loadCycle)
 		return now
 	}
@@ -234,7 +234,7 @@ func TestOneFailedCollectionDoesNotRestartTheLoadSeries(t *testing.T) {
 		t.Fatalf("wva_load_imbalanced = %v after the imbalance held, want 1", v)
 	}
 
-	e.loadBalanceCollectionFailed("ns", "m")
+	e.modelCollectionFailed("ns", "m")
 	if v, present, _ := loadSeries(t, reg); !present || v != 1 {
 		t.Errorf("one failed collection left wva_load_imbalanced = %v (present %v), want 1", v, present)
 	}
@@ -244,7 +244,7 @@ func TestOneFailedCollectionDoesNotRestartTheLoadSeries(t *testing.T) {
 	}
 
 	for range int(balance.StaleAfter/loadCycle) + 1 {
-		e.loadBalanceCollectionFailed("ns", "m")
+		e.modelCollectionFailed("ns", "m")
 	}
 	if _, _, total := loadSeries(t, reg); total != 0 {
 		t.Errorf("collection failing for StaleAfter kept %d load series", total)

@@ -15,6 +15,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 )
 
 // recordedTypes is every type a recorded event can reach. What a Raw or an
@@ -55,6 +56,8 @@ var recordedTypes = []reflect.Type{
 	reflect.TypeFor[domain.AnalyzerResult](),
 
 	reflect.TypeFor[enginerec.CompositeEvent](),
+
+	reflect.TypeFor[settle.ObserveEvent](),
 }
 
 // fieldNames is every Go field name of recordedTypes: an object whose keys

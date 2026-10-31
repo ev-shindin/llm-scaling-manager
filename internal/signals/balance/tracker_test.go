@@ -45,7 +45,7 @@ var (
 // once; it clears once it has read balanced on every cycle for ClearAfter,
 // once.
 func TestTrackerWarnsOncePerChangeAfterSustainFor(t *testing.T) {
-	tr, c := NewTracker(), &clock{now: t0}
+	tr, c := newTestTracker(), &clock{now: t0}
 	sustainAt := sustainCycles
 	for i := 1; i <= sustainAt+2; i++ {
 		r := only(t, tr.Observe("ns/m", imbalanced(), c.tick()))
@@ -70,7 +70,7 @@ func TestTrackerTwoCyclesAreNotSustained(t *testing.T) {
 	if SustainFor <= time.Minute {
 		t.Fatalf("SustainFor %v does not exceed the one-minute window the figures are peaks over", SustainFor)
 	}
-	tr, c := NewTracker(), &clock{now: t0}
+	tr, c := newTestTracker(), &clock{now: t0}
 	for i := 1; i < sustainCycles; i++ {
 		if r := only(t, tr.Observe("ns/m", imbalanced(), c.tick())); r.Sustained {
 			t.Fatalf("reported imbalanced after %d cycles (%v), under SustainFor", i, time.Duration(i-1)*cycle)
@@ -80,7 +80,7 @@ func TestTrackerTwoCyclesAreNotSustained(t *testing.T) {
 
 // Before it is reported, one balanced cycle restarts the streak.
 func TestTrackerResetsAnUnreportedStreakOnABalancedCycle(t *testing.T) {
-	tr, c := NewTracker(), &clock{now: t0}
+	tr, c := newTestTracker(), &clock{now: t0}
 	half := sustainCycles - 2
 	for round := 0; round < 3; round++ {
 		for i := 0; i < half; i++ {
@@ -97,7 +97,7 @@ func TestTrackerResetsAnUnreportedStreakOnABalancedCycle(t *testing.T) {
 // alert's 10-minute timer: a persistent imbalance paged, resolved and paged
 // again, or never paged. A dip shorter than ClearAfter keeps it reported.
 func TestTrackerKeepsAReportedImbalanceThroughAShortDip(t *testing.T) {
-	tr, c := NewTracker(), &clock{now: t0}
+	tr, c := newTestTracker(), &clock{now: t0}
 	for i := 0; i < sustainCycles; i++ {
 		tr.Observe("ns/m", imbalanced(), c.tick())
 	}
@@ -117,12 +117,12 @@ func TestTrackerKeepsAReportedImbalanceThroughAShortDip(t *testing.T) {
 // A role that parks and returns starts from zero, and so does a forgotten
 // model; models are tracked apart.
 func TestTrackerForgetsAbsentRolesAndModels(t *testing.T) {
-	sustain := func(tr *Tracker, c *clock, key string) {
+	sustain := func(tr testTracker, c *clock, key string) {
 		for i := 0; i < sustainCycles; i++ {
 			tr.Observe(key, imbalanced(), c.tick())
 		}
 	}
-	tr, c := NewTracker(), &clock{now: t0}
+	tr, c := newTestTracker(), &clock{now: t0}
 	sustain(tr, c, "ns/m")
 	if rs := tr.Observe("ns/m", nil, c.tick()); len(rs) != 0 {
 		t.Fatalf("readings for a model with no ready replica: %v", rs)
@@ -149,7 +149,7 @@ func TestTrackerForgetsAbsentRolesAndModels(t *testing.T) {
 // cycle empty first read idle, and how long until the role was reported; -1
 // for never within 20 minutes.
 func replicaGraceCycles(empty domain.ReplicaMetrics, start time.Time) (idleAfter, reportedAfter time.Duration) {
-	tr, c := NewTracker(), &clock{now: start}
+	tr, c := newTestTracker(), &clock{now: start}
 	first := time.Time{}
 	idleAfter, reportedAfter = -1, -1
 	for range int(20 * time.Minute / cycle) {
@@ -193,7 +193,7 @@ func TestTrackerGivesALentBridgeTheGraceFromTheLend(t *testing.T) {
 // the other way round, is a new replica each time; one it has known for long
 // enough is idle at once.
 func TestTrackerRestartsTheGraceWhenAPodChangesHands(t *testing.T) {
-	tr := NewTracker()
+	tr := newTestTracker()
 	pod := row("p-0", "dec", 0, 0)
 	pod.FromWarmPool = true
 	now := t0
@@ -235,13 +235,13 @@ func TestTrackerDoesNotLetASlowNodeClockSkipTheGrace(t *testing.T) {
 // being forgotten) reported at once. A streak is of readings at most one
 // interval apart, with half an interval of slack.
 func TestTrackerSustainNeedsConsecutiveReadings(t *testing.T) {
-	tr := NewTracker()
+	tr := newTestTracker()
 	tr.Observe("ns/m", imbalanced(), t0)
 	if r := only(t, tr.Observe("ns/m", imbalanced(), t0.Add(3*time.Minute))); r.Sustained {
 		t.Error("two imbalanced readings 3m apart, nothing between, were reported")
 	}
 	for _, interval := range []time.Duration{15 * time.Second, 30 * time.Second, time.Minute} {
-		tr := NewTracker()
+		tr := newTestTracker()
 		tr.SetInterval(interval)
 		now, reportedAt := t0, -1
 		for i := 1; i <= 20 && reportedAt < 0; i++ {
@@ -256,7 +256,7 @@ func TestTrackerSustainNeedsConsecutiveReadings(t *testing.T) {
 	}
 	// Once reported, a gap restarts the clear: one balanced reading after it
 	// does not clear what the readings before it reported.
-	tr = NewTracker()
+	tr = newTestTracker()
 	c := &clock{now: t0}
 	for range sustainCycles {
 		tr.Observe("ns/m", imbalanced(), c.tick())
@@ -271,7 +271,7 @@ func TestTrackerSustainNeedsConsecutiveReadings(t *testing.T) {
 // for SustainFor and the alert's for: restarted. Failed keeps the tracker as it
 // stands until collection has failed for StaleAfter.
 func TestTrackerKeepsItsStateThroughAShortCollectionFailure(t *testing.T) {
-	tr, c := NewTracker(), &clock{now: t0}
+	tr, c := newTestTracker(), &clock{now: t0}
 	for range sustainCycles {
 		tr.Observe("ns/m", imbalanced(), c.tick())
 	}

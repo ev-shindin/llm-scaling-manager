@@ -57,13 +57,12 @@ func loadBalanceThresholds(p config.ScalingPolicy) balance.Thresholds {
 // replica and demand per fleet, and a role whose router piles load on one
 // replica is fixed in the router's scorer configuration, not by a replica
 // count.
+//
+// Each replica's idle grace is read from the settle tracker, which the caller
+// has observed the same rows into at the same now (observeSettle).
 func (e *Engine) observeLoadBalance(logger logr.Logger, namespace, modelID string,
-	rows []domain.ReplicaMetrics, states []domain.VariantReplicaState, th balance.Thresholds) {
-	tracker, now := e.loadBalanceTracker(), e.loadBalanceClock()
-	roles := make(map[string]string, len(states))
-	for _, vs := range states {
-		roles[vs.VariantName] = vs.Role
-	}
+	rows []domain.ReplicaMetrics, states []domain.VariantReplicaState, th balance.Thresholds, now time.Time) {
+	tracker, roles := e.loadBalanceTracker(), variantRoles(states)
 	key := utils.GetNamespacedKey(namespace, modelID)
 	readings := tracker.Observe(key, tracker.Measure(key, rows, roles, th, now), now)
 	metrics.PublishLoadBalance(namespace, modelID, readings)
@@ -86,23 +85,26 @@ func (e *Engine) observeLoadBalance(logger logr.Logger, namespace, modelID strin
 }
 
 // loadBalanceTracker is the engine's load-balance tracker, set to the
-// configured optimize interval.
+// configured optimize interval. It reads replicas through the settle
+// tracker's view.
 func (e *Engine) loadBalanceTracker() *balance.Tracker {
 	// Lazily, as the other per-model maps here: optimize cycles run one at a
 	// time, and an Engine built as a literal in a test has none.
 	if e.loadBalance == nil {
-		e.loadBalance = balance.NewTracker()
+		e.loadBalance = balance.NewTracker(e.settleTracker())
 	}
 	e.loadBalance.SetInterval(e.sloMissedAfter())
 	return e.loadBalance
 }
 
-// loadBalanceClock is the instant the load-balance tracker reads.
-func (e *Engine) loadBalanceClock() time.Time {
-	if e.loadBalanceNow != nil {
-		return e.loadBalanceNow()
+// observeClock is the instant the settle tracker and the load-balance
+// tracker read: the cycle clock, the one instant every analyzer of the cycle
+// reads too.
+func (e *Engine) observeClock() time.Time {
+	if e.observeNow != nil {
+		return e.observeNow()
 	}
-	return time.Now()
+	return e.clock.Now()
 }
 
 // loadBalanceCollectionFailed is what a cycle that could not collect the
@@ -113,8 +115,8 @@ func (e *Engine) loadBalanceClock() time.Time {
 // minutes kept it from ever paging. Once collection has failed on every cycle
 // for balance.StaleAfter the series are deleted, so a page does not stand on
 // figures nothing measures any more.
-func (e *Engine) loadBalanceCollectionFailed(namespace, modelID string) {
-	if e.loadBalanceTracker().Failed(utils.GetNamespacedKey(namespace, modelID), e.loadBalanceClock()) {
+func (e *Engine) loadBalanceCollectionFailed(namespace, modelID string, now time.Time) {
+	if e.loadBalanceTracker().Failed(utils.GetNamespacedKey(namespace, modelID), now) {
 		e.forgetLoadBalance(namespace, modelID)
 	}
 }

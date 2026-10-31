@@ -671,10 +671,12 @@ type GoldenCheck struct {
 
 // requiredPaths is every learner path the goldens must run at least once
 // between them: a golden set that never reaches a path pins nothing about
-// it (analyzer-learner.md, 2.5). Each can run on this base; the settle
-// tracker's verdicts join from the PR that adds the tracker. With the
-// engine's replay registered, its composite paths are required too.
-func requiredPaths() []string { return append(saturation.PathNames(), enginePathNames()...) }
+// it (analyzer-learner.md, 2.5). Each can run on this base, and so can the
+// settle tracker's verdicts the recordings reach (requiredSettlePaths). With
+// the engine's replay registered, its composite paths are required too.
+func requiredPaths() []string {
+	return slices.Concat(saturation.PathNames(), requiredSettlePaths(), enginePathNames())
+}
 
 // pathProblems names each required path the fixtures ran on no cycle.
 func pathProblems(paths map[string]int64) []string {

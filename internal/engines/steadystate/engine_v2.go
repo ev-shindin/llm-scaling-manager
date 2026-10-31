@@ -180,12 +180,18 @@ func (e *Engine) runAnalyzers(
 	// e.g. unit tests, in which case the build step is a no-op join).
 	metaByVariant := metadataByVariant(variantMetadata)
 
+	// The settle tracker first (settle.go), ahead of everything that reads
+	// the cycle's rows: the load-balance diagnostic reads each replica's
+	// grace from it (#345 step 1 left this slot for it).
+	now := e.observeClock()
+	e.observeSettle(namespace, modelID, replicaMetrics, variantStates, now)
+
 	// Observe only: how evenly the router loads each role (load_balance.go).
 	// Before the analyzers, so a failing analyzer does not leave the series at
 	// a value from a cycle that no longer stands: the rows are this cycle's
 	// whatever the analysis makes of them.
 	e.observeLoadBalance(logger, namespace, modelID, replicaMetrics, variantStates,
-		loadBalanceThresholds(config))
+		loadBalanceThresholds(config), now)
 
 	// One input, complete before any analyzer runs, shared by all of them.
 	// Each reports demand and capacity only: the engine applies the
@@ -626,6 +632,9 @@ func (e *Engine) onNothingObserved(namespace, modelID string) {
 	// No ready replica, so no distribution: a parked role must not keep
 	// reporting the imbalance it had.
 	e.forgetLoadBalance(namespace, modelID)
+	// No rows either: the settle tracker holds what it saw last, so an
+	// outage that drops every series is not an absence (holdSettle).
+	e.holdSettle(namespace, modelID, e.observeClock())
 }
 
 // zeroObservedReplicas sets wva_analyzer_observed_replicas to 0 for every
@@ -752,6 +761,7 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 	// Published before the model reached recordAnalyzerMetrics, so tracked
 	// apart from lastAnalyzerSeries.
 	e.retainLoadBalance(activeKeys)
+	e.retainSettle(activeKeys)
 }
 
 // evictAllAnalyzerSeries removes every analyzer series the engine has published,
@@ -774,6 +784,7 @@ func (e *Engine) evictAllAnalyzerSeries() {
 		delete(e.lastAnalyzerSeries, modelKey)
 	}
 	e.retainLoadBalance(nil)
+	e.retainSettle(nil)
 }
 
 // livenessThreshold is how long an analyzer stays live after its last

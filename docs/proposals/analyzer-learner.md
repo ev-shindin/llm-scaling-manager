@@ -2,7 +2,8 @@
 
 - **Review:** Revision 6 was reviewed in five rounds by four reviewers; all
   four: good enough (round 5). Revision 7 is under review.
-- **Status:** proposed, revision 7. No code changed. Revision 6 merged as
+- **Status:** revision 7. PR 1 (the settle tracker) is implemented on
+  `feat/learner-settle-tracker`; the later PRs are proposed. Revision 6 merged as
   #286. Revision 7 re-checks it against main 3515c6ccd, after #282, #283,
   #288, #293, #294, #298, #302, #303, #306, #329, #331 and #361 merged, and
   describes main as it is now. Line numbers are main's at that commit.
@@ -18,6 +19,25 @@
   (`saturationCapabilities`), not by assertion at each call; a wrapper around
   the analyzer would still hide them (2.4). `runV2AnalysisOnly` is now
   `buildAnalyzerInput` followed by `runSaturation`.
+- **PR 1's decisions.** The brownout trade (4.3): a run of unknown rows keeps
+  the settle, and the PR does not end it after 2 min; an idle run that a
+  brownout interrupts for more than the tolerance is no return of load
+  (`TestABrownoutKeepsTheSettle`). A brownout that drops the rows altogether
+  (a failed collection, or one that returns no series) keeps it too: the
+  engine holds the model's sightings on such a cycle
+  (`TestSettle_AFailedCollectionKeepsTheSighting`,
+  `TestSettle_OptimizeV2HoldsOnEveryPathWithNoRows`), for up to 5 min
+  without an observation (or the tolerance, if longer), after which the
+  model is forgotten. A hold leaves idle runs to the tolerance, as missing
+  rows do (`TestHoldLeavesIdleRunsToTheTolerance`). The absence tolerance
+  (4.2) is 1 min or 2.5 optimize intervals, whichever is longer, so a long
+  interval does not make every cycle an absence
+  (`TestTrackerEndsTheGraceAtLongIntervals`). The re-lend (4.2): the warm pool's lend
+  time rides on each bridge row (`ReplicaMetrics.LentSince`), and a new one
+  under the same key is a lend event (`TestTrackerRestartsTheGraceOfAPodLentAgain`).
+  Checked in the code, not on a run: a lend does not touch the Pod's
+  readiness, so ReadySince does not change on a re-lend, and a re-lend to
+  the same variant keeps the key.
 - **Problem:** the analyzers learn about fifteen quantities. Each one accepts
   readings, fits, forgets and logs in its own way. The same defects were fixed
   in one learner after another, because no learner could reuse another's fix.
@@ -863,7 +883,10 @@ One tracker in `internal/signals/settle` replaces them.
 sightings from this cycle's rows, so one missing row forgets a replica
 (`tracker.go:117-141`). That forget is load-bearing: its comment says a
 warm-pool Pod lent again "starts its grace again". The shared tracker keeps a
-sighting across an absence up to one rule period (1 min): a single missing row
+sighting across an absence up to one rule period (1 min; at an optimize
+interval over 24 s, one missed cycle and half a cycle of slack, 2.5
+intervals, so a long interval does not make every cycle an absence, PR 1): a
+single missing row
 is a missed scrape, and restarting a busy replica's settle for k2, mu and ITL
 would re-open #273's A4. Under that rule a Pod lent again to the **same**
 variant inside a minute keeps its key, (pod, variant, bridge = true), and so
@@ -935,7 +958,11 @@ the third passes on the parent and must keep passing.
 - **Gaps and lookback.** A gap longer than the rule's period restarts the
   judgement. A gap is **missing rows**, not unknown gauges: a row is a
   sighting whenever the pod is listed, whatever its bits, so a Prometheus
-  brownout longer than 1 min does not restart every replica's settle. A rule
+  brownout longer than 1 min does not restart every replica's settle. A cycle
+  that reads no rows of the model at all (its collection failed, or returned
+  no series) is not a gap either: the engine holds the model's sightings
+  through it (PR 1), for up to 5 min without an observation, or the
+  tolerance if longer. A rule
   compares against the reading one period back, not one cycle back:
   cycle-to-cycle one-minute peaks share 45 s.
 - **The brownout trade.** A run of unknown rows keeps the settle. So a replica
@@ -943,10 +970,11 @@ the third passes on the parent and must keep passing.
   state, and its first known rows, a fill transient, are admitted. That errs
   on the cost side: a fill reading has a standing queue and low residency, so
   it lowers k2 and over-orders, and k2's own transient checks (0.7 of mu, 0.7
-  of k2) catch most such readings. PR 1 may instead end the settled state
-  after more than 2 min of unknown rows, at the price of 2 min of refused
-  admissions per replica. The brownout case in [section 8](#8-risks-and-limits)
-  pins whichever PR 1 picks.
+  of k2) catch most such readings. PR 1 could instead have ended the settled
+  state after more than 2 min of unknown rows, at the price of 2 min of
+  refused admissions per replica; it keeps the settle, and holds it through
+  cycles with no rows at all as well. The brownout case in
+  [section 8](#8-risks-and-limits) pins it.
 
 Each learner keeps its own predicate and thresholds over the trace the tracker
 returns. k2's rule needs a second gauge, a precondition and a cross-learner
@@ -1184,7 +1212,8 @@ that fails it. The owning PR adds the test, or keeps it green if it exists.
   its request rate is above 0), a Prometheus brownout longer than 1 min with
   every pod still listed (including an idle-and-return inside it, with the
   expected behaviour being the trade PR 1 picks in
-  [4.3](#43-what-the-tracker-owns)), a restart under the same name, an LWS group with mixed Ready times,
+  [4.3](#43-what-the-tracker-owns)), the same brownout with no rows at all (a
+  failed collection: held), an optimize interval over a minute, a restart under the same name, an LWS group with mixed Ready times,
   a missed cycle, a slow fill, a just-Ready pod, a bridge lend, clock skew.
 - **A shared write path already changed a learner silently.** #282 turned #5's
   in-spacing fold from a max into a lower median, and then into the mean. #7 kept its max only through
