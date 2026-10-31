@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -30,12 +31,21 @@ func TestGoldens_EveryCommittedGoldenReproduces(t *testing.T) {
 	// A check that compared nothing is not a pass.
 	require.NotEmpty(t, m.Goldens, "no fixture")
 	require.Equal(t, len(m.Goldens), c.Fixtures, "fixtures replayed")
+	// Every output compares rows on some fixture. One fixture's file may be
+	// empty: lines.csv and learned-state.csv follow the run's configuration,
+	// and slo-published.csv is empty where the slo analyzer was built and
+	// never ran (c.NotRun). What each fixture must compare, the check
+	// itself holds it to (comparedNothing).
+	perOutput := map[string]int{}
 	for _, g := range m.Goldens {
 		for _, o := range g.Outputs {
-			assert.Positive(t, c.Rows[o], "%s compared no row", o)
+			perOutput[path.Base(o)] += c.Rows[o]
 		}
 	}
-	t.Logf("%d fixtures, rows compared per file: %v", c.Fixtures, c.Rows)
+	for o, n := range perOutput {
+		assert.Positive(t, n, "no fixture compares a row of %s", o)
+	}
+	t.Logf("%d fixtures, rows compared per file: %v; not run: %v", c.Fixtures, c.Rows, c.NotRun)
 }
 
 // copyGoldens copies the committed goldens to a directory a negative control

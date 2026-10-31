@@ -5,12 +5,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
 
@@ -163,19 +165,65 @@ func TestCheckGoldens_ProblemPaths(t *testing.T) {
 }
 
 // A golden that would compare nothing is refused, by the check and by the
-// add alike: an analyzer the start says ran must have results.
+// add alike: an analyzer that ran must have results. The slo analyzer here
+// ran: it has Analyze events, and its results are taken away.
 func TestComparedNothing(t *testing.T) {
 	rec := probeRecording(t, "ns", "mdl", []string{"v"}, nil, nil)
 	out, err := goldenOutputs(context.Background(), rec, Fidelity)
 	require.NoError(t, err, "a saturation-only run compares what it ran")
 	require.NotEmpty(t, out)
 
-	withSLO := bytes.Replace(rec, []byte(`"SLO":null`), []byte(`"SLO":{"StateTimeout":3600000000000,"SlopeHoldFor":3600000000000,"Judging":false}`), 1)
-	_, err = goldenOutputs(context.Background(), withSLO, Normal)
-	require.ErrorContains(t, err, "the goldens would compare nothing for slo results, slo published")
+	acc := fixtureRecording(t)
+	read, err := learnrec.Read(acc)
+	require.NoError(t, err)
+	var start learnrec.Start
+	require.NoError(t, read.Events[0].DecodeData(&start))
+	require.NotNil(t, start.SLO, "precondition: the acceptance run built the slo analyzer")
+	require.Empty(t, builtNotRun(start, read.Events), "precondition: and ran it")
+	outputs, err := goldenOutputs(context.Background(), acc, Normal)
+	require.NoError(t, err)
+	require.Empty(t, comparedNothing(start, outputs, builtNotRun(start, read.Events)))
 
-	_, err = AddGolden(context.Background(), t.TempDir(), "x", withSLO, AddOptions{Source: "s"})
-	require.ErrorContains(t, err, "would compare nothing")
+	empty, err := writeRows(nil)
+	require.NoError(t, err)
+	outputs[OutputSLOPublished] = empty
+	rows, err := readRows(outputs[OutputResults])
+	require.NoError(t, err)
+	rows = slices.DeleteFunc(rows, func(r row) bool { return r.kind == slo.KindAnalyze })
+	outputs[OutputResults], err = writeRows(rows)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"slo results", "slo published"}, comparedNothing(start, outputs, builtNotRun(start, read.Events)),
+		"an analyzer with Analyze events whose results compare nothing is refused")
+}
+
+// An analyzer the start built and that ran no Analyze is not run: the
+// controller builds the slo analyzer whatever the policy lists, so a run
+// whose models list only saturation has no slo results to compare. The add
+// and the check accept it and say so; no golden compares it. On the parent
+// commit, which asked results of every analyzer the start built, the add
+// refused this recording ("would compare nothing for slo results, slo
+// published"), as it refused the E1 benchmark recordings.
+func TestComparedNothing_ABuiltAnalyzerThatNeverRanIsNotRun(t *testing.T) {
+	ctx := context.Background()
+	rec := probeRecording(t, "ns", "mdl", []string{"v"}, nil, nil)
+	withSLO := bytes.Replace(rec, []byte(`"SLO":null`), []byte(`"SLO":{"StateTimeout":3600000000000,"SlopeHoldFor":3600000000000,"Judging":false}`), 1)
+	require.NotEqual(t, rec, withSLO, "precondition: the start now builds the slo analyzer")
+	require.NotContains(t, string(withSLO), slo.KindAnalyze, "precondition: and it never ran")
+
+	out, _, notes, err := goldenReplay(ctx, withSLO, Fidelity)
+	require.NoError(t, err)
+	require.NotEmpty(t, out)
+	assert.Equal(t, []string{"slo: built, not run (0 Analyze events)"}, notes)
+
+	dir := t.TempDir()
+	_, err = AddGolden(ctx, dir, "x", withSLO, AddOptions{Source: "s"})
+	require.NoError(t, err)
+	c, err := CheckGoldens(ctx, dir)
+	require.NoError(t, err)
+	assert.Empty(t, c.Problems)
+	assert.Equal(t, 1, c.Fixtures)
+	assert.Equal(t, []string{"x: slo: built, not run (0 Analyze events)"}, c.NotRun)
+	assert.Positive(t, c.Rows["x/"+OutputResults], "the saturation results are still compared")
 }
 
 // listDir is every file under dir with its bytes.

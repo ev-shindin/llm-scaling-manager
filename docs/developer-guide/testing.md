@@ -320,9 +320,17 @@ less than one part in 10^9. So two things that vary between replays of the
 same recording do not fail the check: events numbered in another order, and
 a float sum whose last bits differ.
 
-The check also fails on a golden that compares nothing: every analyzer the
-recording's start line says ran must have results, and the slo analyzer, if
-it ran, must have published. `lines.csv` and `learned-state.csv` may be
+The check also fails on a golden that compares nothing: every analyzer
+that ran must have results, and the slo analyzer, if it ran, must have
+published. An analyzer ran when the recording holds at least one of its
+`Analyze` events. The start line names the analyzers the controller
+built, and the controller builds the slo analyzer whatever the policy
+lists, so a run whose models list only saturation has slo built and never
+run. The add and the check print that, for example
+`e1: slo: built, not run (0 Analyze events)`, and no golden compares it:
+its rows in `results.csv` and its `slo-published.csv` are empty. An
+analyzer with even one `Analyze` event ran, and a golden that compares
+nothing of it is refused. `lines.csv` and `learned-state.csv` may be
 empty: lines are published only when the policy turns learned-state reuse
 on, and documents are written only when the learned-state snapshot is on.
 The start line records neither.
@@ -617,7 +625,7 @@ a full one is about twice the limit; at that ratio a head of up to about
 100 MiB fits. Cut it to
 its head with `HEAD_LINES=N`. When a recording is too large, the add says
 which `N` to use: a head that fits, ends on an `Analyze`, and holds an
-`Analyze` of every analyzer the run had. Any head
+`Analyze` of every analyzer the run ran. Any head
 replays.
 
 To export without adding a golden, for example to share a recording:

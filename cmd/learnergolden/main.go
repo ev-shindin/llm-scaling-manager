@@ -158,6 +158,9 @@ func check(ctx context.Context, dir string, out io.Writer, covered bool) error {
 	}
 	_, _ = fmt.Fprintf(out, "golden check: %d fixtures replayed, %d golden rows compared\n", c.Fixtures, rows)
 	_, _ = fmt.Fprintf(out, "learner paths run, over every fixture: %v\n", c.Paths)
+	for _, n := range c.NotRun {
+		_, _ = fmt.Fprintln(out, "  "+n)
+	}
 	for _, p := range c.Problems {
 		_, _ = fmt.Fprintln(out, "  "+p)
 	}
