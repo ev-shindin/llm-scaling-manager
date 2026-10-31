@@ -100,7 +100,7 @@ reading the analyzer's three log lines and then the optimizer's, in that order.
 | `signals/capacity` | parsing the engine's launch flags; persisting k2 history | the k2 *decision* |
 | `signals/fleet` | one weighted mean, with zero/range handled per caller | which field to average |
 | `signals/floor` | the throughput floor and the landing projection | whether the floor is allowed to order |
-| `signals/settle` | when each replica last started to settle (joined, back after more than a minute away, restarted, lent, rolled out), its Ready time as first seen, its idle runs and returns of load, and a trace of its rows. The engine writes it once per model per cycle, at the top of `runAnalyzers`; readers take `settle.View` (the load-balance tracker today) | how long any reader waits: each applies its own policy window |
+| `signals/settle` | when each replica last started to settle (joined, back after more than its absence tolerance, restarted, lent, rolled out), its Ready time as first seen, its idle runs and returns of load, and a trace of its rows. The engine writes it once per model per cycle, at the top of `runAnalyzers`; readers take `settle.View` (the load-balance tracker today) | how long any reader waits: each applies its own policy window |
 | `analyzers/saturation` | demand `D`, per-replica capacity `P`, role attribution, and the holds | supply, `RC`, `SC`, targets |
 | `engines/aggregation` | supply and anticipated supply | thresholds |
 | `engines/steadystate` | `RC` / `SC` from one formula at every scope | per-role threshold overrides (there are none) |

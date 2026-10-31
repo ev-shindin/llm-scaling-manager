@@ -466,9 +466,14 @@ the same name), `settle-lent` and `settle-rolled-out`. The engine records
 each observation (`settle.Observe`: the model and the instant), and the
 replay applies it with the rows of the model's next saturation `Analyze`. A
 recording made before the engine recorded them is observed at each
-saturation `Analyze`'s own clock. Every verdict but `settle-rolled-out` is
-required: no recording has a rollout under a Pod's own name yet, and the
-settle suite covers it until one does.
+saturation `Analyze`'s own clock, at the default optimize interval. A cycle
+whose collection failed is recorded as `settle.Hold` and replayed as one.
+Only `settle-joined` and `settle-lent` are required. The committed goldens
+reach `settle-restarted` and `settle-rejoined` too, but only through their
+synthetic generators (rows whose Ready time moves every cycle, clocks that
+jump), so requiring them would pin the generators, not the tracker; no
+recording has a rollout under a Pod's own name. The settle suite covers the
+three until a cluster recording reaches them.
 
 The engine's replay counts its own paths (`LearnerReplay.PathCounts`):
 composites built, composites of a P/D model priced per role, composites that
