@@ -67,7 +67,12 @@ func (e *Engine) buildAnalyzerInput(
 	logger := ctrl.LoggerFrom(ctx)
 	sat := e.analyzers.saturationCaps()
 
-	for _, va := range variantAutoscalings {
+	// In key order, not map order: a learner recording writes the forget,
+	// accelerator and scale-target events below in the order they run, and a
+	// recording made again must have the same bytes. No step below reads what
+	// another variant's step writes, so the order changes no result.
+	for _, vaKey := range slices.Sorted(maps.Keys(variantAutoscalings)) {
+		va := variantAutoscalings[vaKey]
 		key := utils.GetNamespacedKey(va.Namespace, va.GetScaleTargetName())
 		scaleTarget := scaleTargets[key]
 		if scaleTarget == nil {
@@ -482,8 +487,12 @@ func (e *Engine) notePresentVariants(
 	if len(noters) == 0 {
 		return
 	}
+	// Models in key order, not map order, so a learner recording made again
+	// writes their NoteVariantsPresent events in the same order. Each stamps
+	// only its own model's variants.
 	note := func(groups map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling) {
-		for _, modelVAs := range groups {
+		for _, groupKey := range slices.Sorted(maps.Keys(groups)) {
+			modelVAs := groups[groupKey]
 			if len(modelVAs) == 0 {
 				continue
 			}
@@ -491,6 +500,10 @@ func (e *Engine) notePresentVariants(
 			for i := range modelVAs {
 				names = append(names, modelVAs[i].Name)
 			}
+			// Sorted too: modelVAs comes from a map, and every noter stamps each
+			// name on the one clock reading, so their order matters to the
+			// recording alone.
+			slices.Sort(names)
 			for _, noter := range noters {
 				noter.NoteVariantsPresent(modelVAs[0].Namespace, modelVAs[0].Spec.ModelID, names)
 			}
