@@ -79,10 +79,7 @@ type ReplicaMetrics struct {
 	// its variant and the Ready time it had in the pool, so nothing else
 	// tells the new lend from a missed scrape of the old one; the settle
 	// tracker (internal/signals/settle) reads a new LentSince as a new lend.
-	//
-	// Left out of a learner recording when zero, so a recording made before
-	// the field existed replays byte for byte.
-	LentSince time.Time `json:",omitzero"`
+	LentSince time.Time
 
 	// Ready is the Pod's own readiness condition, read from the Pod and not
 	// inferred from the fact that it answered a scrape.
