@@ -986,6 +986,8 @@ itl-gps-mismatch
 itl-line
 itl-line-borrowed
 itl-line-none
+itl-ols
+itl-pinned
 itl-window
 itlA
 itlArgs
@@ -1009,6 +1011,7 @@ itl|
 its
 itself
 joined
+joined-refused-ready-since
 joint
 judged
 k
@@ -1020,6 +1023,7 @@ k1MemoryBound
 k2
 k2-compute
 k2-decision
+k2-obs-admitted
 k2Borrows
 k2ComputeBound
 k2History
@@ -1235,6 +1239,10 @@ most
 mount
 move
 mu
+mu-sample-written
+mu-yield-served
+mu-yield-sibling
+mu-yield-stale
 muChoice.freshFor
 muChoice.freshFor/lowHoldFor
 muChoice.lowHoldFor
@@ -1683,6 +1691,8 @@ round
 routed
 router
 row
+rows-instant-kv
+rows-ready-since
 run
 running
 runs

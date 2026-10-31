@@ -354,6 +354,14 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	// samples, far enough apart in k), and the two tiers below are the
 	// tracker's: the slo analyzer fits with the same rules.
 	r := a.itlTracker.Observe(key, variantName, replicas, adm, now)
+	switch r.Tier {
+	case itl.TierOLS:
+		a.paths.add(pathITLOLS, 1)
+	case itl.TierPinnedB:
+		a.paths.add(pathITLPinned, 1)
+	}
+	// Every reading the window took was read at its instant k.
+	a.paths.add(pathInstantKV, int64(r.Offered))
 
 	// Logged at DEFAULT, not DEBUG: the deployment passes no -v, so DEBUG (4)
 	// never prints and a diagnostic nobody can read is the problem it was

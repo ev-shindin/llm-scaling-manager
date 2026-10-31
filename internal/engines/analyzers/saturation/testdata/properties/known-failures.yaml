@@ -10,7 +10,8 @@
 #
 # id is class/learner/case, as the test names it; rows are sorted by id.
 # measured is the fail rate over the case's seeds and the first failure, when
-# the row was written. owner is the PR of #341 that clears the row, or "open".
+# the row was written. owner is what clears the row: a PR of #341's plan
+# ("PR 3"), an issue ("#391"), or "open".
 - id: contamination-heterogeneity/mu/half-served-max-slow-pod
   class: contamination-heterogeneity
   learner: mu
@@ -31,35 +32,63 @@
   expect: biased
   finding: "The prefill bound keeps the max of every prefill pod's reading within a minute (it writes through mu's fold under one empty pod name), so one pod read at 2x -- the prefill double scrape -- sets the bound."
   measured: "100/100 seeds; seed 1: 1.548 against the mean 0.968"
-  owner: "open"
+  owner: "#395"
+- id: contamination-heterogeneity/prefill-bound/one-pod-doubled-analyze
+  class: contamination-heterogeneity
+  learner: prefill-bound
+  expect: biased
+  finding: "Through a P/D Analyze with enablePrefillThroughputBound: the prefill bound keeps the max across the prefill replicas, so one replica read at 2x (a series doubled inside PromQL) sets it. The same defect as one-pod-doubled on the write path."
+  measured: "20/20 seeds; seed 1: four replicas, one at 2x: bound 6548 tokens/s against the mean 4093"
+  owner: "#395"
 - id: contamination-heterogeneity/prefill-bound/one-slow-pod-n4
   class: contamination-heterogeneity
   learner: prefill-bound
   expect: biased
   finding: "The prefill bound's max ignores a genuinely slow pod: the bound is the fastest pod's rate, not the mean."
   measured: "100/100 seeds; seed 1: 0.774 against the mean 0.677"
-  owner: "open"
+  owner: "#395"
 - id: edges/idle/idle-line-030
   class: edges
   learner: idle
   expect: flipped
   finding: "Idle room has a 2 min dwell and no hysteresis band on the 0.30 idle line (loadImbalance.idleKvUsage): a peak KV sitting on the line with 30 s-correlated noise settles idle and clears again."
   measured: "98/100 seeds; seed 1: 6 reversals in 116 cycles"
-  owner: "open"
+  owner: "#396"
 - id: edges/k2/key-near-output-boundary
   class: edges
   learner: k2
   expect: flipped
   finding: "The k2 key's output-length bucket has no hysteresis of its own: with the noise-free output length 6 % above the 500-token medium/long boundary, autocorrelated noise moves the key the analyzer selects, and back."
   measured: "17/50 seeds; seed 2: the selected key changed 2 times in 112 cycles"
-  owner: "open"
+  owner: "#396"
+- id: edges/shape-hold/backstop-cooldown
+  class: edges
+  learner: shape-hold
+  expect: wrong-side
+  finding: "Inside the backstop's cooldown (holdFor after it gave up on a hold, gaveUpAt) a new shape change raises no hold, and noteFleetShape still reports the change outstanding on the cycle it is declared, so applyFloorAndHolds floors the demand that cycle. The same return as hold-disabled."
+  measured: "5/5 seeds; seed 1: a change 285 s after the give-up reported outstanding, where no hold is raised"
+  owner: "#391"
+- id: edges/shape-hold/hold-disabled
+  class: edges
+  learner: shape-hold
+  expect: moved
+  finding: "With disableShapeChangeHold (a hold of zero) noteFleetShape still reports the change outstanding on the cycle it is declared, so applyFloorAndHolds floors every role's demand at the no-release band that cycle unless the fleet has measured itself. The code's own comment says a hold of zero leaves nothing outstanding. The same return reports a change outstanding inside the backstop's cooldown (gaveUpAt), where no hold is raised either: the fix is to return whether a hold is outstanding (#391)."
+  measured: "100/100 seeds; seed 1: held true on the change cycle, key 1774 (the key follows the change, as it should)"
+  owner: "#391"
 - id: first-sample/k2/second-reading
   class: first-sample
   learner: k2
   expect: adopted-raw
   finding: "k2 prices its first admitted reading at once; the window mean then moves by half the second reading's difference."
   measured: "20/20 seeds; seed 1: 296 552 from the first reading, 264 778 after a second, 11 %"
-  owner: "open"
+  owner: "#392"
+- id: first-sample/mu/joiner-rate-timebase
+  class: first-sample
+  learner: mu
+  expect: adopted-raw
+  finding: "On the time base, a replica's first saturated rate[1m] covers only the part of the minute it served. Served for half the minute or more, the reading is at least half the derived mu and passes minMeasuredOfDerived, so a second reading moves the figure by up to half. The joined test refuses this for a replica Ready under a minute, not for one routed to late. Measured on throughputRefusal alone, so an upper bound: the analyzer's full path also applies tokensOutrunCompletions and the served bound, which may refuse some of these readings."
+  measured: "51/100 seeds; seed 3: served 30 s of its first minute, rate[1m] 0.1095 against a derived 0.2118, admitted"
+  owner: "#392"
 - id: first-sample/start-time/between-sample-and-default
   class: first-sample
   learner: start-time
@@ -73,18 +102,18 @@
   expect: biased
   finding: "#273 A5: k is the instant reading and ITL a rate[1m]. With the batch swinging inside the minute, the pinned fit on the pairs prices ITL at kPrice low, the side that over-prices derived mu."
   measured: "3/100 seeds; seed 38: ITL(0.85) 0.04295 s against a true 0.05250 s, 18.2 % low"
-  owner: "open"
+  owner: "#393"
 - id: liveness/k2/flow-control-on
   class: liveness
   learner: k2
   expect: not-learned
-  finding: "k2 is learned only from an engine queue at or over the threshold. Under flow control the queue stands at the scheduler and the engines' own queues read empty, so P1-obs never fires and the variant prices from k1."
+  finding: "k2 is learned only from an engine queue at or over the threshold. Under flow control the queue stands at the scheduler and the engines' own queues read empty, so P1-obs never fires and the variant prices from k1. Here the true capacity is above k1, so a learned k2 could not move capacity: what the row measures is the mu written beside a P1-obs reading, which flow control leaves unwritten. The under-provisioning when a fleet is sequence-bound is #399."
   measured: "20/20 seeds; two decode replicas full for 3 min with 40 requests at the scheduler: no k2"
-  owner: "open"
+  owner: "#394"
 - id: n-dependence/prefill-bound/iid-max
   class: n-dependence
   learner: prefill-bound
   expect: n-dependent
-  finding: "The prefill bound's max across pods grows with N under iid noise."
+  finding: "The prefill bound's max across pods grows with N under iid noise. The bound is a running max over time by design (#397). This case drives boundMu, the write path; re-measured through the production notePrefillBound the bias is about +16 % already at N=1. A later PR moves the case onto the production path."
   measured: "10/10 seeds; seed 1: E at N=2 is 1.031 against a true 1, +3.1 %"
-  owner: "open"
+  owner: "#397"

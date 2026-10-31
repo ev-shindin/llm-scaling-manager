@@ -64,6 +64,9 @@ type Report struct {
 	Recording []byte
 	// Mismatches is every divergence found, in sequence order.
 	Mismatches []Mismatch
+	// Paths is how often each learner path ran in the replay, by
+	// saturation.PathNames (analyzer-learner.md, 2.5).
+	Paths map[string]int64
 }
 
 // Failed is the mismatches that fail the replay in its mode.
@@ -160,6 +163,7 @@ func Replay(ctx context.Context, recording []byte, opts Options) (*Report, error
 		return nil, fmt.Errorf("learnreplay: the replay's own recording failed: %w", err)
 	}
 	r.rep.Recording = buf.Bytes()
+	r.rep.Paths = r.sat.PathCounts()
 	if opts.Mode == Fidelity {
 		r.rep.Mismatches = append(r.rep.Mismatches, compareEvents(kept, r.rep.Recording)...)
 	}
