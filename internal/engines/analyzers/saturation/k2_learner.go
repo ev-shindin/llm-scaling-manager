@@ -266,8 +266,7 @@ func (a *SaturationAnalyzer) LearnerReports() map[string][]learn.Report {
 // learners named in learn.Learners are forgotten by name, here, not through
 // a registry. Callers hold a.mu.
 func (a *SaturationAnalyzer) forgetLearnerLocked(name, namespace, modelID, variant string, by learn.By) (int, bool) {
-	switch name {
-	case learn.K2:
+	if name == learn.K2 {
 		return a.forgetK2Locked(namespace, modelID, variant, by), true
 	}
 	return 0, false

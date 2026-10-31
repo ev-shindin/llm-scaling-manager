@@ -25,6 +25,9 @@ type restartRig struct {
 	now time.Time
 }
 
+// p1Obs is the k2 source of a saturated reading k2 recorded.
+const p1Obs = "P1-obs"
+
 // restartCycle is the interval the rig's cycles are apart.
 const restartCycle = 15 * time.Second
 
@@ -49,7 +52,7 @@ func (r *restartRig) cycle(rows []domain.ReplicaMetrics, states []domain.Variant
 	r.cycleCtx(ctx, rows, states)
 	var out []string
 	for _, e := range logs.FilterMessage("k2-decision").All() {
-		if p := stringField(r.t, e.ContextMap(), "priority"); strings.HasPrefix(p, "P1-obs") {
+		if p := stringField(r.t, e.ContextMap(), "priority"); strings.HasPrefix(p, p1Obs) {
 			out = append(out, p)
 		}
 	}

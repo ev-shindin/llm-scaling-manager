@@ -239,8 +239,8 @@ func newFixture(at time.Time) *fixture {
 		store:  store,
 		settle: tracker,
 		sat:    saturation.NewSaturationAnalyzer(store).WithClock(clk).WithRecorder(rec).WithSettleView(tracker),
-		slo:   slo.New(nilRouter{}, store).WithClock(clk).WithRecorder(rec),
-		tp:    throughput.NewThroughputAnalyzer().WithClock(clk).WithRecorder(rec),
+		slo:    slo.New(nilRouter{}, store).WithClock(clk).WithRecorder(rec),
+		tp:     throughput.NewThroughputAnalyzer().WithClock(clk).WithRecorder(rec),
 	}
 }
 

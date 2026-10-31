@@ -51,7 +51,7 @@ var waitWindow = int(JoinedReplicaWindow / restartCycle)
 func TestRestartSuite_AControllerRestartWaitsAWindowOnce(t *testing.T) {
 	r := newRestartRig(t, restartT0)
 	row := fullRow("p0", "v", restartT0.Add(-time.Hour))
-	var got []string
+	got := make([]string, 0, waitWindow+2)
 	for range waitWindow + 2 {
 		got = append(got, r.cycle([]domain.ReplicaMetrics{row}, decodeVariants("v"))...)
 	}
@@ -59,7 +59,7 @@ func TestRestartSuite_AControllerRestartWaitsAWindowOnce(t *testing.T) {
 	for range waitWindow {
 		want = append(want, k2ReasonObsUnsettled)
 	}
-	want = append(want, "P1-obs", "P1-obs")
+	want = append(want, p1Obs, p1Obs)
 	assert.Equal(t, want, got, "a replica Ready an hour waits a window from the controller's first sight of it")
 }
 
@@ -114,7 +114,7 @@ func TestRestartSuite_AnLWSGroupRestartWithMixedReadyTimes(t *testing.T) {
 	r.cycle(leaders(time.Time{}, old, time.Time{}, false, false), states)
 	seen := r.now
 	g0, g2 := seen.Add(-20*time.Second), seen.Add(30*time.Second)
-	var got [][]string
+	got := make([][]string, 0, waitWindow+3)
 	for range waitWindow + 3 {
 		got = append(got, r.cycle(leaders(g0, old, g2, true, true), states))
 	}
@@ -122,7 +122,7 @@ func TestRestartSuite_AnLWSGroupRestartWithMixedReadyTimes(t *testing.T) {
 		at := time.Duration(i) * restartCycle
 		require.Len(t, d, 3, "one decision per leader at +%v", at)
 		assert.Equal(t, verdictAt(seen.Add(at), seen), d[0], "group 0, Ready 20 s before first seen, at +%v: waits from its first sight", at)
-		assert.Equal(t, "P1-obs", d[1], "group 1, its Ready time unchanged, at +%v: no wait", at)
+		assert.Equal(t, p1Obs, d[1], "group 1, its Ready time unchanged, at +%v: no wait", at)
 		assert.Equal(t, verdictAt(seen.Add(at), g2), d[2], "group 2, Ready 30 s after first seen, at +%v: waits from its Ready time", at)
 	}
 }
@@ -143,7 +143,7 @@ func TestRestartSuite_ABridgeLendWritesNothing(t *testing.T) {
 		lent.LentSince = restartT0
 		d := r.cycle([]domain.ReplicaMetrics{own(), lent}, states)
 		require.Len(t, d, 2)
-		assert.Equal(t, "P1-obs", d[0], "the variant's own replica, cycle %d of the lend", i)
+		assert.Equal(t, p1Obs, d[0], "the variant's own replica, cycle %d of the lend", i)
 		assert.Equal(t, k2ReasonObsUnadmitted, d[1], "the bridge, cycle %d of the lend", i)
 	}
 }
@@ -161,7 +161,7 @@ func TestRestartSuite_ANodeClockBehindStillWaitsAWindow(t *testing.T) {
 	for i := range waitWindow + 1 {
 		d := r.cycle([]domain.ReplicaMetrics{fullRow("p0", "v", old), fullRow("p1", "v", joined)}, states)
 		require.Len(t, d, 2)
-		assert.Equal(t, "P1-obs", d[0], "the settled replica, cycle %d", i)
+		assert.Equal(t, p1Obs, d[0], "the settled replica, cycle %d", i)
 		assert.Equal(t, waitThenAdmit()[i], d[1], "the new replica, its Ready time 90 s old by a clock behind, cycle %d", i)
 	}
 }
@@ -175,7 +175,7 @@ func settled(t *testing.T, r *restartRig, rows func() []domain.ReplicaMetrics, s
 		last = r.cycle(rows(), states)
 	}
 	for _, p := range last {
-		require.Equal(t, "P1-obs", p, "premise: settled after a window of cycles")
+		require.Equal(t, p1Obs, p, "premise: settled after a window of cycles")
 	}
 }
 
@@ -196,7 +196,7 @@ func waitThenAdmit() []string {
 	for range waitWindow {
 		out = append(out, k2ReasonObsUnsettled)
 	}
-	return append(out, "P1-obs")
+	return append(out, p1Obs)
 }
 
 // verdictAt is what k2 decides at now for a replica that started to wait at
@@ -205,5 +205,5 @@ func verdictAt(now, since time.Time) string {
 	if now.Sub(since) < JoinedReplicaWindow {
 		return k2ReasonObsUnsettled
 	}
-	return "P1-obs"
+	return p1Obs
 }

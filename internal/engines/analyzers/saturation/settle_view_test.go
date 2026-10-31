@@ -21,7 +21,7 @@ func TestSettleView_TheRestartSwitchOffTakesTheFirstCycleAsEstablished(t *testin
 		ready time.Duration
 		want  string
 	}{
-		{"Ready an hour", time.Hour, "P1-obs"},
+		{"Ready an hour", time.Hour, p1Obs},
 		{"Ready 10 s", 10 * time.Second, k2ReasonObsUnsettled},
 	} {
 		r := newRestartRig(t, restartT0)
@@ -45,7 +45,7 @@ func TestSettleView_TheTrackerSwitchMovesOnlyTheAbsenceRule(t *testing.T) {
 		return r.cycle([]domain.ReplicaMetrics{row}, decodeVariants("v"))
 	}
 	assert.Equal(t, []string{k2ReasonObsUnsettled}, run(true), "on the tracker: unseen 90 s is a new sighting")
-	assert.Equal(t, []string{"P1-obs"}, run(false), "on the memo: unseen 90 s, under K2SettleMaxGap, is the same one")
+	assert.Equal(t, []string{p1Obs}, run(false), "on the memo: unseen 90 s, under K2SettleMaxGap, is the same one")
 }
 
 // Given the engine's tracker, the analyzer reads it and observes nothing of

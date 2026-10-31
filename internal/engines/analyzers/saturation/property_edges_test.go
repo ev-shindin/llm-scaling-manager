@@ -419,7 +419,8 @@ func probeEpisodeGap(r *rand.Rand, h float64) (bool, error) {
 	// Unseen for most of h hours, the replica is a new sighting (the settle
 	// tracker's absence), so its readings wait a window: four refused, and
 	// the fifth, written h hours after the first.
-	readings := []k2Reading{{tok, 10, 6, time.Duration(h*float64(time.Hour)) - JoinedReplicaWindow}}
+	readings := make([]k2Reading, 0, 6)
+	readings = append(readings, k2Reading{tok, 10, 6, time.Duration(h*float64(time.Hour)) - JoinedReplicaWindow})
 	for range 5 {
 		readings = append(readings, k2Reading{tok, 10, 6, propCycle})
 	}

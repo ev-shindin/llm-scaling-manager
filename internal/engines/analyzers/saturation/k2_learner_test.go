@@ -35,8 +35,9 @@ func TestK2Learner_WritesOnFirstSetOnAMoveOverTheBandAndOnTheHeartbeat(t *testin
 		row.KvCacheUsage = float64(tokens) / float64(row.TotalKvCapacityTokens)
 		ctx, logs := observedCtx(t)
 		r.cycleCtx(ctx, []domain.ReplicaMetrics{row}, decodeVariants("v"))
-		var out []map[string]any
-		for _, e := range logs.FilterMessage("learner-write").All() {
+		entries := logs.FilterMessage("learner-write").All()
+		out := make([]map[string]any, 0, len(entries))
+		for _, e := range entries {
 			out = append(out, e.ContextMap())
 		}
 		return out
@@ -51,7 +52,7 @@ func TestK2Learner_WritesOnFirstSetOnAMoveOverTheBandAndOnTheHeartbeat(t *testin
 	assert.Equal(t, true, first[0]["firstWrite"])
 	assert.Equal(t, int64(260_000), first[0]["value"])
 	assert.Equal(t, learn.K2, first[0]["learner"])
-	assert.Equal(t, "P1-obs", first[0]["source"])
+	assert.Equal(t, p1Obs, first[0]["source"])
 
 	assert.Empty(t, writes(261_000), "a move under the band does not log")
 	moved := writes(330_000)
@@ -104,7 +105,7 @@ func TestK2Learner_AWriteLineListsSixteenPodsLowestFirst(t *testing.T) {
 	listed, ok := f["pods"].([]map[string]any)
 	require.True(t, ok, "pods is a list, got %T", f["pods"])
 	require.Len(t, listed, LearnerWriteMaxPods)
-	var readings []int64
+	readings := make([]int64, 0, len(listed))
 	for _, m := range listed {
 		readings = append(readings, m["reading"].(int64))
 		assert.Equal(t, k2TimeBase, m["timeBase"])
@@ -125,7 +126,7 @@ func TestK2Learner_AWriteLineListsSixteenPodsLowestFirst(t *testing.T) {
 // after it while the controller-restart wait is on.
 func TestK2Learner_LearnerStartIsOneLinePerModelAtTheDefaultLevel(t *testing.T) {
 	r := newRestartRig(t, restartT0)
-	var starts []map[string]any
+	starts := make([]map[string]any, 0, 1)
 	for range 3 {
 		core, logs := observer.New(zapcore.Level(-logging.DEFAULT))
 		ctx := logr.NewContext(context.Background(), zapr.NewLogger(zap.New(core)))
@@ -187,7 +188,9 @@ func TestK2Learner_ForgetReachesEveryLearnerOnTheList(t *testing.T) {
 	assert.False(t, reached, "negative control: a name the analyzer does not know is not reached")
 
 	r := newRestartRig(t, restartT0)
-	row := func() []domain.ReplicaMetrics { return []domain.ReplicaMetrics{fullRow("p0", "v", restartT0.Add(-time.Hour))} }
+	row := func() []domain.ReplicaMetrics {
+		return []domain.ReplicaMetrics{fullRow("p0", "v", restartT0.Add(-time.Hour))}
+	}
 	settled(t, r, row, decodeVariants("v"))
 	key := firstKey(r.a)
 	require.NotEmpty(t, key, "premise: k2 holds a window")
@@ -230,10 +233,10 @@ func TestK2Learner_TheReportCountsTheCycle(t *testing.T) {
 	}, decodeVariants("v"))
 	rep = r.a.LearnerReports()["test-ns|test-model"]
 	require.Len(t, rep, 1)
-	assert.Equal(t, map[learn.Reason]int64{"P1-obs": 1}, rep[0].Counts)
+	assert.Equal(t, map[learn.Reason]int64{p1Obs: 1}, rep[0].Counts)
 	assert.Equal(t, int64(1), rep[0].Writes)
 	assert.Equal(t, firstKey(r.a), rep[0].PricingKey)
-	assert.Equal(t, learn.Source("P1-obs"), rep[0].Source)
+	assert.Equal(t, learn.Source(p1Obs), rep[0].Source)
 	assert.Equal(t, r.now.Add(-restartCycle), rep[0].LastAdmitted)
 	assert.Positive(t, rep[0].Samples)
 }
