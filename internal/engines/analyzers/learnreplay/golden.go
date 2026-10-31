@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,7 @@ import (
 
 	"sigs.k8s.io/yaml"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
@@ -598,6 +600,11 @@ type ManifestEntry struct {
 	// each relative to the golden directory.
 	Recording string   `json:"recording"`
 	Outputs   []string `json:"outputs"`
+	// NotRun names each analyzer the run built and never analyzed
+	// (neverAnalyzed): no golden compares it. The add writes it and the
+	// check holds the replay to it, so a fixture that moves into or out of
+	// the set is a diff of this file.
+	NotRun []string `json:"notRun,omitempty"`
 }
 
 const manifestHeader = `# The learner goldens: each fixture is an exported recording and the output
@@ -650,6 +657,16 @@ type GoldenCheck struct {
 	// golden, as an add writes it, need not.
 	Paths     map[string]int64
 	Uncovered []string
+	// NotRun is, per fixture, each analyzer its run built and never
+	// analyzed (neverAnalyzed): no golden compares it there. The manifest
+	// pins the set (ManifestEntry.NotRun); a replay that disagrees is a
+	// problem.
+	NotRun map[string][]string
+	// mayBeEmpty is, per fixture, each output of emptyRuled its recording
+	// allows to hold no row (emptyRules); any other that holds none is a
+	// problem. Kept for the tests, which hold every output to rows but
+	// these.
+	mayBeEmpty map[string]map[string]bool
 }
 
 // requiredPaths is every learner path the goldens must run at least once
@@ -679,7 +696,8 @@ func CheckGoldens(ctx context.Context, dir string) (*GoldenCheck, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &GoldenCheck{Rows: map[string]int{}, Paths: map[string]int64{}}
+	c := &GoldenCheck{Rows: map[string]int{}, Paths: map[string]int64{},
+		NotRun: map[string][]string{}, mayBeEmpty: map[string]map[string]bool{}}
 	problem := func(format string, args ...any) { c.Problems = append(c.Problems, fmt.Sprintf(format, args...)) }
 	if len(m.Goldens) == 0 {
 		problem("%s lists no fixture", ManifestName)
@@ -721,13 +739,21 @@ func CheckGoldens(ctx context.Context, dir string) (*GoldenCheck, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		got, paths, err := replayFixture(ctx, dir, g)
+		r, err := replayFixture(ctx, dir, g)
 		if err != nil {
 			problem("%s: %v", g.Name, err)
 			continue
 		}
+		got, facts := r.outputs, r.facts
+		if len(facts.notRun) > 0 {
+			c.NotRun[g.Name] = facts.notRun
+		}
+		if !slices.Equal(facts.notRun, g.NotRun) {
+			problem("%s: the analyzers built and never analyzed are %v, and %s says %v", g.Name, facts.notRun, ManifestName, g.NotRun)
+		}
+		c.mayBeEmpty[g.Name] = facts.mayBeEmpty
 		c.Fixtures++
-		for p, n := range paths {
+		for p, n := range r.paths {
 			c.Paths[p] += n
 		}
 		want := map[string]bool{}
@@ -748,6 +774,9 @@ func CheckGoldens(ctx context.Context, dir string) (*GoldenCheck, error) {
 				continue
 			}
 			c.Rows[f] = len(rows)
+			if len(rows) == 0 && slices.Contains(emptyRuled, path.Base(f)) && !facts.mayBeEmpty[path.Base(f)] {
+				problem("%s: %s holds no row, and nothing in the recording allows it to be empty", g.Name, f)
+			}
 			d, err := compareOutput(f, b, out)
 			if err != nil {
 				problem("%s: %v", g.Name, err)
@@ -769,82 +798,257 @@ func CheckGoldens(ctx context.Context, dir string) (*GoldenCheck, error) {
 	return c, nil
 }
 
-// replayFixture replays one fixture as every later commit does (Normal) and
-// returns its outputs, and how often each learner path ran.
-func replayFixture(ctx context.Context, dir string, g ManifestEntry) (map[string][]byte, map[string]int64, error) {
+// replayFixture replays one fixture as every later commit does (Normal).
+func replayFixture(ctx context.Context, dir string, g ManifestEntry) (replayResult, error) {
 	gz, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(g.Recording)))
 	if err != nil {
-		return nil, nil, err
+		return replayResult{}, err
 	}
 	if len(gz) > MaxFixtureBytes {
-		return nil, nil, fmt.Errorf("%s is %d bytes, over the %d-byte fixture limit", g.Recording, len(gz), MaxFixtureBytes)
+		return replayResult{}, fmt.Errorf("%s is %d bytes, over the %d-byte fixture limit", g.Recording, len(gz), MaxFixtureBytes)
 	}
 	recording, err := gunzip(gz)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%s: %w", g.Recording, err)
+		return replayResult{}, fmt.Errorf("%s: %w", g.Recording, err)
 	}
 	return goldenReplay(ctx, recording, Normal)
 }
 
-// goldenOutputs is goldenReplay without the path counts, for the callers that
+// goldenOutputs is goldenReplay's outputs alone, for the callers that
 // compare outputs and not coverage: an add, which checks a Fidelity and a
 // Normal replay produce the same files, and the tests. The coverage of the
 // committed set is CheckGoldens' business, over every fixture together.
 func goldenOutputs(ctx context.Context, recording []byte, mode Mode) (map[string][]byte, error) {
-	out, _, err := goldenReplay(ctx, recording, mode)
-	return out, err
+	r, err := goldenReplay(ctx, recording, mode)
+	return r.outputs, err
 }
 
-// goldenReplay replays recording in mode and returns its outputs and how
-// often each learner path ran. It is an error when the replay fails in its
-// mode, and when the goldens would compare nothing (comparedNothing): the
-// same rule for the check make test runs and for an add.
-func goldenReplay(ctx context.Context, recording []byte, mode Mode) (map[string][]byte, map[string]int64, error) {
+// replayResult is what a golden replay gives: the outputs, how often each
+// learner path ran, and what the recording says of the outputs.
+type replayResult struct {
+	outputs map[string][]byte
+	paths   map[string]int64
+	facts   fixtureFacts
+}
+
+// fixtureFacts is what a fixture's recording says about its outputs. Both
+// are read from the recording the fixture commits, never from a replay, so
+// the code under test cannot move them: the recording is the witness, and
+// the replay is what is held to it.
+type fixtureFacts struct {
+	// notRun names each analyzer the run built and never analyzed
+	// (neverAnalyzed), in a fixed order: no golden compares it.
+	notRun []string
+	// mayBeEmpty is each output of emptyRuled the recording allows to hold
+	// no row (emptyRules).
+	mayBeEmpty map[string]bool
+}
+
+// goldenReplay replays recording in mode. It is an error when the replay
+// fails in its mode, when an analyzer the policy lists never analyzed, and
+// when the goldens would compare nothing (comparedNothing): the same rule
+// for the check make test runs and for an add.
+func goldenReplay(ctx context.Context, recording []byte, mode Mode) (replayResult, error) {
 	rep, err := Replay(ctx, recording, Options{Mode: mode})
 	if err != nil {
-		return nil, nil, err
+		return replayResult{}, err
 	}
 	for kind := range rep.Ignored {
 		if enginerec.Owns(kind) {
-			return nil, nil, fmt.Errorf("the recording carries engine events (%s) and no engine replay is registered (learnreplay.RegisterEngine)", kind)
+			return replayResult{}, fmt.Errorf("the recording carries engine events (%s) and no engine replay is registered (learnreplay.RegisterEngine)", kind)
 		}
 	}
 	if failed := rep.Failed(); len(failed) > 0 {
-		return nil, nil, fmt.Errorf("the replay failed: %s (%d in all)", failed[0], len(failed))
+		return replayResult{}, fmt.Errorf("the replay failed: %s (%d in all)", failed[0], len(failed))
 	}
 	if mode == Fidelity && !bytes.Equal(rep.Recording, recording) {
-		return nil, nil, fmt.Errorf("the replay did not reproduce the recording byte for byte: %s", firstDifferentLine(recording, rep.Recording))
+		return replayResult{}, fmt.Errorf("the replay did not reproduce the recording byte for byte: %s", firstDifferentLine(recording, rep.Recording))
 	}
 	outputs, err := Outputs(rep.Recording)
 	if err != nil {
-		return nil, nil, err
+		return replayResult{}, err
 	}
-	var start learnrec.Start
+	use, err := readAnalyzerUse(recording, 0)
+	if err != nil {
+		return replayResult{}, err
+	}
+	for _, a := range use.optional {
+		if a.built && a.listed && a.analyzed == 0 {
+			return replayResult{}, fmt.Errorf("the goldens would compare nothing for %s: the policy lists it and it has 0 Analyze events", a.name)
+		}
+	}
+	notRun := use.neverAnalyzed()
+	if missing := comparedNothing(use.start, outputs, notRun); len(missing) > 0 {
+		return replayResult{}, fmt.Errorf("the goldens would compare nothing for %s", strings.Join(missing, ", "))
+	}
+	return replayResult{outputs: outputs, paths: rep.Paths, facts: fixtureFacts{notRun: notRun, mayBeEmpty: use.emptyRules()}}, nil
+}
+
+// The analyzers a run may leave out, by the name or type a policy lists
+// them under (config.AnalyzerScoreConfig.EffectiveType).
+const (
+	analyzerSLO        = "slo"
+	analyzerThroughput = "throughput"
+)
+
+// analyzerUse is how a recording used its analyzers. It holds the start
+// line, and for each analyzer a run may leave out whether the start built
+// it, whether a policy recorded in a saturation Analyze lists it, and how
+// many Analyze events it has. It also counts the events that fill the two
+// outputs that follow the run rather than an analyzer: ITL lines published
+// or borrowed, and learned-state exports.
+type analyzerUse struct {
+	start    learnrec.Start
+	optional []optionalAnalyzer
+	lines    int
+	exports  int
+}
+
+// optionalAnalyzer is one analyzer a run may leave out.
+type optionalAnalyzer struct {
+	// name is what a policy lists it under; kind is its Analyze event.
+	name, kind    string
+	built, listed bool
+	// analyzed is how many Analyze events it has, and analyzedInHead how
+	// many of them fall in the head readAnalyzerUse was given.
+	analyzed, analyzedInHead int
+}
+
+// readAnalyzerUse reads analyzerUse from a recording, in one pass over its
+// events. With head positive it also counts each analyzer's Analyze events
+// among the first head lines (analyzedInHead), as headLines would cut them:
+// a recording holds one event per line, which Read holds it to.
+func readAnalyzerUse(recording []byte, head int) (analyzerUse, error) {
 	read, err := learnrec.Read(recording)
 	if err != nil {
-		return nil, nil, err
+		return analyzerUse{}, err
 	}
-	if err := read.Events[0].DecodeData(&start); err != nil {
-		return nil, nil, err
+	if len(read.Events) == 0 || read.Events[0].Kind != learnrec.KindStart {
+		return analyzerUse{}, errors.New("the recording does not open with a start line")
 	}
-	if missing := comparedNothing(start, outputs); len(missing) > 0 {
-		return nil, nil, fmt.Errorf("the goldens would compare nothing for %s", strings.Join(missing, ", "))
+	var u analyzerUse
+	if err := read.Events[0].DecodeData(&u.start); err != nil {
+		return analyzerUse{}, err
 	}
-	return outputs, rep.Paths, nil
+	u.optional = []optionalAnalyzer{
+		{name: analyzerSLO, kind: slo.KindAnalyze, built: u.start.SLO != nil},
+		{name: analyzerThroughput, kind: throughput.KindAnalyze, built: u.start.Throughput},
+	}
+	for i, e := range read.Events {
+		switch e.Kind {
+		case saturation.KindPublishLine, saturation.KindBorrowLine:
+			u.lines++
+		case saturation.KindExportLearnedState:
+			u.exports++
+		case saturation.KindAnalyze:
+			// Only the policy's analyzer list; every other field is the
+			// replay's business.
+			var in struct {
+				Input struct {
+					Config *struct{ Analyzers []config.AnalyzerScoreConfig }
+				}
+			}
+			if err := json.Unmarshal(e.Data, &in); err != nil {
+				return analyzerUse{}, fmt.Errorf("seq %d (%s): %w", e.Seq, e.Kind, err)
+			}
+			if cfg := in.Input.Config; cfg != nil {
+				u.markListed(cfg.Analyzers)
+			}
+		}
+		for j := range u.optional {
+			if e.Kind == u.optional[j].kind {
+				u.optional[j].analyzed++
+				if i < head {
+					u.optional[j].analyzedInHead++
+				}
+			}
+		}
+	}
+	return u, nil
+}
+
+// markListed marks each optional analyzer the policy's list names, by its
+// effective type. An entry with enabled: false does not list it; an unset
+// enabled is true, as in the policy.
+func (u *analyzerUse) markListed(list []config.AnalyzerScoreConfig) {
+	for _, a := range list {
+		if a.Enabled != nil && !*a.Enabled {
+			continue
+		}
+		for j := range u.optional {
+			if a.EffectiveType() == u.optional[j].name {
+				u.optional[j].listed = true
+			}
+		}
+	}
+}
+
+// neverAnalyzed names each analyzer the start built that no recorded policy
+// lists and that has no Analyze event. The controller builds the slo
+// analyzer whatever the policy lists, so a run whose models list only
+// saturation records an slo start and never an slo Analyze: it has no slo
+// results to compare, and comparedNothing asks for none. An analyzer the
+// policy lists and that never analyzed is no such case: goldenReplay refuses
+// it. An analyzer with even one Analyze analyzed, and comparedNothing holds
+// it to its results. Saturation is never among them: its results are what
+// every golden compares.
+func (u analyzerUse) neverAnalyzed() []string {
+	var out []string
+	for _, a := range u.optional {
+		if a.built && !a.listed && a.analyzed == 0 {
+			out = append(out, a.name)
+		}
+	}
+	return out
+}
+
+// analyzeCount is how many Analyze events the analyzer name has.
+func (u analyzerUse) analyzeCount(name string) int {
+	for _, a := range u.optional {
+		if a.name == name {
+			return a.analyzed
+		}
+	}
+	return 0
+}
+
+// emptyRuled is every output a rule may allow to be empty (emptyRules).
+// The others never may: comparedNothing refuses a replay that leaves one
+// empty.
+var emptyRuled = []string{OutputLearnedState, OutputLines, OutputSLOPublished}
+
+// emptyRules is each output of emptyRuled this recording allows to hold no
+// row. The check reports any other output of emptyRuled that holds none.
+//
+//   - slo-published.csv, when the start did not build the slo analyzer, or
+//     built it and it never analyzed (neverAnalyzed).
+//   - lines.csv, when the recording holds no ITL line published or
+//     borrowed. A variant publishes a line once it fits one of its own,
+//     whatever the policy says of reuse; a borrow, the other half, happens
+//     only when the policy turns learned-state reuse on.
+//   - learned-state.csv, when the recording holds no learned-state export:
+//     the controller took no learned-state snapshot in the run.
+func (u analyzerUse) emptyRules() map[string]bool {
+	return map[string]bool{
+		OutputSLOPublished: u.start.SLO == nil || slices.Contains(u.neverAnalyzed(), analyzerSLO),
+		OutputLines:        u.lines == 0,
+		OutputLearnedState: u.exports == 0,
+	}
 }
 
 // comparedNothing names what a fixture's goldens would not compare: a golden
-// that compares nothing passes whatever changes. Every analyzer the start
-// says ran must have results, and the results must price variants and read
-// the store; the slo analyzer, when it ran, must have published.
+// that compares nothing passes whatever changes. Every analyzer that
+// analyzed must have results, and the results must price variants and read
+// the store; the slo analyzer, when it analyzed, must have published. An
+// analyzer in notRun was built and never analyzed (neverAnalyzed): nothing
+// is asked of it.
 //
-// Two outputs may be empty whatever ran, and the start cannot say when:
-// lines.csv holds ITL lines published and borrowed, which happen only when
-// the policy turns reuse on (EnableLearnedStateReuse) and a variant fits a
-// line; learned-state.csv holds the snapshot documents, written only when
-// the controller's learned-state snapshot is on. Both are the run's
-// configuration, not an analyzer's, and the start line records neither.
-func comparedNothing(start learnrec.Start, outputs map[string][]byte) []string {
+// lines.csv and learned-state.csv follow the run, not an analyzer, and may
+// be empty (emptyRules): lines.csv when no variant fitted an ITL line of its
+// own and none was borrowed (a borrow happens only when the policy turns
+// learned-state reuse on); learned-state.csv when the controller took no
+// learned-state snapshot.
+func comparedNothing(start learnrec.Start, outputs map[string][]byte, notRun []string) []string {
 	count := func(name string, kind string) int {
 		rows, err := readRows(outputs[name])
 		if err != nil {
@@ -867,11 +1071,11 @@ func comparedNothing(start learnrec.Start, outputs map[string][]byte) []string {
 	need(count(OutputResults, saturation.KindAnalyze) > 0, "saturation results")
 	need(count(OutputVariantCapacities, "") > 0, "variant capacities")
 	need(count(OutputStoreRecords, "") > 0, "store records")
-	if start.SLO != nil {
+	if start.SLO != nil && !slices.Contains(notRun, analyzerSLO) {
 		need(count(OutputResults, slo.KindAnalyze) > 0, "slo results")
 		need(count(OutputSLOPublished, "") > 0, "slo published")
 	}
-	if start.Throughput {
+	if start.Throughput && !slices.Contains(notRun, analyzerThroughput) {
 		need(count(OutputResults, throughput.KindAnalyze) > 0, "throughput results")
 	}
 	if _, ok := outputs[OutputCompositeResults]; ok {
@@ -966,6 +1170,9 @@ func AddGolden(ctx context.Context, dir, name string, raw []byte, opts AddOption
 		return nil, err
 	}
 	if opts.HeadLines > 0 {
+		if err := headKeepsAnalyzers(raw, opts.HeadLines); err != nil {
+			return nil, fmt.Errorf("learnreplay: %s: %w", name, err)
+		}
 		raw = headLines(raw, opts.HeadLines)
 	}
 	exported, rep, err := Export(raw, ExportOptions{Source: opts.Source, Text: []string{name}})
@@ -979,14 +1186,15 @@ func AddGolden(ctx context.Context, dir, name string, raw []byte, opts AddOption
 	if len(gz) > MaxFixtureBytes {
 		head := suggestHead(exported, len(gz), MaxFixtureBytes)
 		if head == 0 {
-			return nil, fmt.Errorf("learnreplay: the export of %s is %d bytes compressed, over the %d-byte fixture limit, and no head that fits holds an Analyze of every analyzer the run had", name, len(gz), MaxFixtureBytes)
+			return nil, fmt.Errorf("learnreplay: the export of %s is %d bytes compressed, over the %d-byte fixture limit, and no head that fits holds an Analyze of every analyzer the export ran", name, len(gz), MaxFixtureBytes)
 		}
 		return nil, fmt.Errorf("learnreplay: the export of %s is %d bytes compressed, over the %d-byte fixture limit; cut it to its head, for example HEAD_LINES=%d", name, len(gz), MaxFixtureBytes, head)
 	}
-	outputs, err := goldenOutputs(ctx, exported, Fidelity)
+	fidelity, err := goldenReplay(ctx, exported, Fidelity)
 	if err != nil {
 		return nil, fmt.Errorf("learnreplay: the export of %s: %w", name, err)
 	}
+	outputs := fidelity.outputs
 	// The goldens are what every later commit compares with: a Normal
 	// replay's, which at this commit must equal the Fidelity one.
 	normal, err := goldenOutputs(ctx, exported, Normal)
@@ -1010,7 +1218,7 @@ func AddGolden(ctx context.Context, dir, name string, raw []byte, opts AddOption
 	if err := os.WriteFile(filepath.Join(tmp, RecordingName), gz, 0o644); err != nil {
 		return nil, err
 	}
-	entry := ManifestEntry{Name: name, Source: opts.Source, Recording: path.Join(name, RecordingName)}
+	entry := ManifestEntry{Name: name, Source: opts.Source, Recording: path.Join(name, RecordingName), NotRun: fidelity.facts.notRun}
 	for _, o := range producedNames(outputs) {
 		if err := os.WriteFile(filepath.Join(tmp, o), outputs[o], 0o644); err != nil {
 			return nil, err
@@ -1054,34 +1262,49 @@ func restore(err error, old, fixture string) error {
 	return err
 }
 
-// UpdateGoldens rewrites every fixture's golden files from a Normal replay at
-// this commit: what a PR that names a golden change runs. It repairs what
-// the check reports: a moved output, a missing file, an output the manifest
-// leaves out. A fixture whose replay fails leaves its files as they were.
+// UpdateGoldens is RewriteGoldens without its report.
 func UpdateGoldens(ctx context.Context, dir string) error {
+	_, err := RewriteGoldens(ctx, dir)
+	return err
+}
+
+// RewriteGoldens rewrites every fixture's golden files from a Normal replay
+// at this commit: what a PR that names a golden change runs. It repairs what
+// the check reports: a moved output, a missing file, an output the manifest
+// leaves out, a never-analyzed set the replay disagrees with. A fixture
+// whose replay fails leaves its files as they were. It returns one line per
+// fixture whose never-analyzed set it changed, so an update cannot move a
+// fixture into or out of the set unseen.
+func RewriteGoldens(ctx context.Context, dir string) ([]string, error) {
 	m, err := ReadManifest(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var moved []string
 	for i, g := range m.Goldens {
-		outputs, _, err := replayFixture(ctx, dir, g)
+		r, err := replayFixture(ctx, dir, g)
 		if err != nil {
-			return fmt.Errorf("learnreplay: %s: %w", g.Name, err)
+			return nil, fmt.Errorf("learnreplay: %s: %w", g.Name, err)
 		}
+		if !slices.Equal(r.facts.notRun, g.NotRun) {
+			moved = append(moved, fmt.Sprintf("%s: built and never analyzed was %v, now %v", g.Name, g.NotRun, r.facts.notRun))
+		}
+		m.Goldens[i].NotRun = r.facts.notRun
+		outputs := r.outputs
 		for _, o := range g.Outputs {
 			if err := os.Remove(filepath.Join(dir, filepath.FromSlash(o))); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return err
+				return nil, err
 			}
 		}
 		m.Goldens[i].Outputs = nil
 		for _, o := range producedNames(outputs) {
 			if err := os.WriteFile(filepath.Join(dir, g.Name, o), outputs[o], 0o644); err != nil {
-				return err
+				return nil, err
 			}
 			m.Goldens[i].Outputs = append(m.Goldens[i].Outputs, path.Join(g.Name, o))
 		}
 	}
-	return writeManifest(dir, m)
+	return moved, writeManifest(dir, m)
 }
 
 // headLines is b's first n lines.
@@ -1125,24 +1348,34 @@ func gunzip(b []byte) ([]byte, error) {
 
 // suggestHead is a HEAD_LINES that fits limit, from how well this export
 // compressed, snapped back to the last line of an Analyze after which
-// every analyzer the start says ran has analyzed: a head whose goldens
+// every analyzer the export ran has analyzed: a head whose goldens
 // would compare nothing (comparedNothing) is no suggestion. Zero when no
 // head fits that holds them all.
+//
+// It counts the export's lines, and HEAD_LINES cuts the raw recording's,
+// before the export: the two number the same. A recording holds one event
+// per line, numbered from 1 with no gap (learnrec.Read), and the export
+// writes the same events in the same order, one per line, cutting only
+// after the last Analyze and a torn last line. So line N of the export is
+// line N of the raw recording for every N the export keeps.
 func suggestHead(exported []byte, compressed, limit int) int {
 	budget := int(float64(len(exported)) * 0.9 * float64(limit) / float64(compressed))
 	read, err := learnrec.Read(exported)
 	if err != nil || len(read.Events) == 0 {
 		return 0
 	}
-	var start learnrec.Start
-	if err := read.Events[0].DecodeData(&start); err != nil {
+	// An analyzer the whole export built and never analyzed (neverAnalyzed)
+	// has no Analyze for a head to hold.
+	use, err := readAnalyzerUse(exported, 0)
+	if err != nil {
 		return 0
 	}
+	notRun := use.neverAnalyzed()
 	need := map[string]bool{saturation.KindAnalyze: true}
-	if start.SLO != nil {
+	if use.start.SLO != nil && !slices.Contains(notRun, analyzerSLO) {
 		need[slo.KindAnalyze] = true
 	}
-	if start.Throughput {
+	if use.start.Throughput && !slices.Contains(notRun, analyzerThroughput) {
 		need[throughput.KindAnalyze] = true
 	}
 	best, size := 0, 0
@@ -1157,6 +1390,24 @@ func suggestHead(exported []byte, compressed, limit int) int {
 		}
 	}
 	return best
+}
+
+// headKeepsAnalyzers refuses a head of n lines that drops every Analyze of an
+// analyzer the whole recording analyzed. Cut there, the analyzer would read
+// as built and never analyzed (neverAnalyzed), and no golden would compare
+// it. suggestHead never suggests such a head; this holds a head someone
+// chose to the same rule.
+func headKeepsAnalyzers(raw []byte, n int) error {
+	use, err := readAnalyzerUse(raw, n)
+	if err != nil {
+		return err
+	}
+	for _, a := range use.optional {
+		if a.analyzed > 0 && a.analyzedInHead == 0 {
+			return fmt.Errorf("the head of %d lines drops every %s Analyze; the full recording has %d", n, a.name, a.analyzed)
+		}
+	}
+	return nil
 }
 
 // recordedCommit is the commit a raw recording's start line names, "" when

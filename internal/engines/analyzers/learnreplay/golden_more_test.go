@@ -5,12 +5,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
 
@@ -185,19 +187,34 @@ func TestCheckGoldens_ProblemPaths(t *testing.T) {
 }
 
 // A golden that would compare nothing is refused, by the check and by the
-// add alike: an analyzer the start says ran must have results.
+// add alike: an analyzer that analyzed must have results. The slo analyzer
+// here analyzed: it has Analyze events, and its results are taken away.
 func TestComparedNothing(t *testing.T) {
 	rec := probeRecording(t, "ns", "mdl", []string{"v"}, nil, nil)
 	out, err := goldenOutputs(context.Background(), rec, Fidelity)
 	require.NoError(t, err, "a saturation-only run compares what it ran")
 	require.NotEmpty(t, out)
 
-	withSLO := bytes.Replace(rec, []byte(`"SLO":null`), []byte(`"SLO":{"StateTimeout":3600000000000,"SlopeHoldFor":3600000000000,"Judging":false}`), 1)
-	_, err = goldenOutputs(context.Background(), withSLO, Normal)
-	require.ErrorContains(t, err, "the goldens would compare nothing for slo results, slo published")
+	acc := fixtureRecording(t)
+	use, err := readAnalyzerUse(acc, 0)
+	require.NoError(t, err)
+	require.NotNil(t, use.start.SLO, "precondition: the acceptance run built the slo analyzer")
+	require.Positive(t, use.analyzeCount(analyzerSLO), "precondition: and it analyzed")
+	require.Empty(t, use.neverAnalyzed())
+	outputs, err := goldenOutputs(context.Background(), acc, Normal)
+	require.NoError(t, err)
+	require.Empty(t, comparedNothing(use.start, outputs, use.neverAnalyzed()))
 
-	_, err = AddGolden(context.Background(), t.TempDir(), "x", withSLO, AddOptions{Source: "s"})
-	require.ErrorContains(t, err, "would compare nothing")
+	empty, err := writeRows(nil)
+	require.NoError(t, err)
+	outputs[OutputSLOPublished] = empty
+	rows, err := readRows(outputs[OutputResults])
+	require.NoError(t, err)
+	rows = slices.DeleteFunc(rows, func(r row) bool { return r.kind == slo.KindAnalyze })
+	outputs[OutputResults], err = writeRows(rows)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"slo results", "slo published"}, comparedNothing(use.start, outputs, use.neverAnalyzed()),
+		"an analyzer with Analyze events whose results compare nothing is refused")
 }
 
 // listDir is every file under dir with its bytes.
