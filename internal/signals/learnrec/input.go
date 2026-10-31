@@ -14,7 +14,9 @@ import (
 // merged policy, analyzerTuning and loadImbalance included, every cycle; the
 // scheduler queue and the arrival rate.
 //
-// It mirrors domain.AnalyzerInput field for field. Config is written as its
+// It mirrors domain.AnalyzerInput field for field, less VariantMetadata,
+// which no analyzer reads: the engine's composite event records the part of
+// it the capacity-build step reads (enginerec). Config is written as its
 // dynamic value, and ConfigType names that value's type, so a replay knows
 // what to read it back into: the engine passes a *config.ScalingPolicy. This
 // package does not import config, whose tests import the analyzers that

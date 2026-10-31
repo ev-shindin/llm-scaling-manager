@@ -152,7 +152,7 @@ func recordMuRun(t *testing.T, start time.Time) ([]byte, map[string]int64) {
 		s.cycle(t, e, i, start.Add(time.Duration(i)*15*time.Second))
 	}
 	require.NoError(t, e.learnRec.Err())
-	return buf.Bytes(), e.saturationV2Analyzer.(*saturation.SaturationAnalyzer).PathCounts()
+	return buf.Bytes(), e.saturationAnalyzer().(*saturation.SaturationAnalyzer).PathCounts()
 }
 
 // The mu-paths run reaches every learner path the acceptance run does not,

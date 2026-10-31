@@ -120,8 +120,8 @@ type learnedStateStoreState struct {
 	lastWriteErr string
 }
 
-// learnedStater is the part of the saturation analyzer the store needs,
-// reached through an assertion for the same reason as staleHistoryEvictor.
+// learnedStater is the part of the saturation analyzer the store needs, one
+// of its capabilities in the registry (saturationCapabilities).
 type learnedStater interface {
 	ExportLearnedState() saturation.LearnedState
 	RestoreLearnedState(saturation.LearnedState) saturation.RestoreReport
@@ -129,9 +129,6 @@ type learnedStater interface {
 	TakeRestoreOutcomes() map[string]int
 	HoldLowerBounds(held bool)
 }
-
-// Pinned at compile time: the assertion below fails silently at run time.
-var _ learnedStater = (*saturation.SaturationAnalyzer)(nil)
 
 func (e *Engine) learnedStateReader() client.Reader {
 	if e.apiReader != nil {
@@ -208,8 +205,8 @@ func (e *Engine) restoreLearnedState(ctx context.Context, now time.Time) {
 	if st.restored {
 		return
 	}
-	analyzer, ok := e.saturationV2Analyzer.(learnedStater)
-	if !ok {
+	analyzer := e.analyzers.saturationCaps().learned
+	if analyzer == nil {
 		return
 	}
 	if st.firstTry.IsZero() {
@@ -283,14 +280,14 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 	st := &e.learnedState
 	// Every cycle, not every interval: the restores the analyzer decided this
 	// cycle are counted in this cycle's scrape.
-	if a, ok := e.saturationV2Analyzer.(learnedStater); ok {
+	if a := e.analyzers.saturationCaps().learned; a != nil {
 		e.metricsEmitter.AddLearnedStateRestores(a.TakeRestoreOutcomes())
 	}
 	if !st.restored || (!st.lastWrite.IsZero() && now.Sub(st.lastWrite) < learnedStateInterval) {
 		return
 	}
-	analyzer, ok := e.saturationV2Analyzer.(learnedStater)
-	if !ok {
+	analyzer := e.analyzers.saturationCaps().learned
+	if analyzer == nil {
 		return
 	}
 	logger := ctrl.LoggerFrom(ctx).WithName("learned-state")

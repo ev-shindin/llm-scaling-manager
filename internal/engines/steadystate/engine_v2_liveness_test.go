@@ -18,11 +18,7 @@ var _ = Describe("analyzer liveness gate (engine level)", func() {
 	// left nil so the liveness threshold falls back to the 30s default
 	// (analyzerLivenessStaleCycles=3 → 90s window).
 	liveEngine := func(sat domain.Analyzer) *Engine {
-		return &Engine{
-			saturationV2Analyzer: sat,
-			analyzersSnapshot:    []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: sat}},
-			started:              true,
-		}
+		return &Engine{analyzers: testAnalyzers(sat)}
 	}
 
 	cfg := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70}
@@ -48,8 +44,7 @@ var _ = Describe("analyzer liveness gate (engine level)", func() {
 				VariantCapacities: []domain.VariantCapacity{{VariantName: "v", Reason: "P1-obs"}},
 			},
 		}
-		e.saturationV2Analyzer = informative
-		e.analyzersSnapshot = []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: informative}}
+		e.setSaturation(informative)
 
 		results, err = e.runAnalyzersAndScore(context.Background(), "m", cfg)
 		Expect(err).NotTo(HaveOccurred())
@@ -112,15 +107,13 @@ var _ = Describe("analyzer liveness gate (engine level)", func() {
 				VariantCapacities: []domain.VariantCapacity{{VariantName: "v", Reason: "P1-obs"}},
 			},
 		}
-		e.saturationV2Analyzer = fresh
-		e.analyzersSnapshot = []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: fresh}}
+		e.setSaturation(fresh)
 		_, err := e.runAnalyzersAndScore(context.Background(), "model-b", cfg)
 		Expect(err).NotTo(HaveOccurred())
 
 		// model-a's never-analyzed, non-informative result must still be non-live — not
 		// contaminated by model-b's freshness.
-		e.saturationV2Analyzer = neverAnalyzed
-		e.analyzersSnapshot = []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: neverAnalyzed}}
+		e.setSaturation(neverAnalyzed)
 		results, err := e.runAnalyzersAndScore(context.Background(), "model-a", cfg)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(namedByName(results)[domain.SaturationAnalyzerName].Live).To(BeFalse())

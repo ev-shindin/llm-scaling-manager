@@ -48,13 +48,22 @@ type AnalyzerConfig interface {
 	GetAnalyzerName() string
 }
 
-// AnalyzerInput is the common input provided to all analyzers.
+// AnalyzerInput is the common input provided to all analyzers. The engine
+// builds one per model per cycle, complete before any analyzer runs, and
+// every analyzer of the model receives the same one.
 type AnalyzerInput struct {
 	ModelID        string
 	Namespace      string
 	ReplicaMetrics []ReplicaMetrics
 	VariantStates  []VariantReplicaState
-	Config         AnalyzerConfig
+	// VariantMetadata is discovery's identity and fleet state for each
+	// variant of the model this cycle: role, accelerator, cost, GPUs per
+	// replica, and the scale target's replica counts. Nil on paths that run
+	// no discovery. No analyzer reads it yet: the engine joins the role and
+	// clamps the replica count onto each result after Analyze
+	// (steadystate.buildCapacities).
+	VariantMetadata []VariantMetadata
+	Config          AnalyzerConfig
 
 	// SchedulerQueue holds model-level queue metrics from the llm-d inference
 	// scheduler flow control layer. These represent requests queued upstream

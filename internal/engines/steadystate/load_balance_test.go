@@ -81,8 +81,7 @@ func TestRunAnalyzersReportsLoadImbalanceOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{}}
-	e := &Engine{saturationV2Analyzer: sat, started: true,
-		analyzersSnapshot: []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: sat}}}
+	e := &Engine{analyzers: testAnalyzers(sat)}
 	start := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
 	steppedLoadClock(e, start)
 	states := []domain.VariantReplicaState{
@@ -164,8 +163,7 @@ func TestFailingAnalysisDoesNotFreezeTheLoadSeries(t *testing.T) {
 		t.Fatal(err)
 	}
 	sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{}}
-	e := &Engine{saturationV2Analyzer: sat, started: true,
-		analyzersSnapshot: []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: sat}}}
+	e := &Engine{analyzers: testAnalyzers(sat)}
 	start := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
 	steppedLoadClock(e, start)
 	since := start.Add(-time.Hour)
@@ -189,8 +187,7 @@ func TestFailingAnalysisDoesNotFreezeTheLoadSeries(t *testing.T) {
 		t.Fatalf("wva_load_imbalanced = %v after the imbalance held, want 1", v)
 	}
 
-	e.saturationV2Analyzer = failingSaturation{}
-	e.analyzersSnapshot = []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: failingSaturation{}}}
+	e.setSaturation(failingSaturation{})
 	for range int(balance.ClearAfter/loadCycle) + 1 {
 		if _, err := e.runAnalyzers(ctx, "m", "ns", even, policy, states, nil, nil, nil, nil, 0); err == nil {
 			t.Fatal("the failing analyzer did not fail")
@@ -213,8 +210,7 @@ func TestOneFailedCollectionDoesNotRestartTheLoadSeries(t *testing.T) {
 		t.Fatal(err)
 	}
 	sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{}}
-	e := &Engine{saturationV2Analyzer: sat, started: true,
-		analyzersSnapshot: []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: sat}}}
+	e := &Engine{analyzers: testAnalyzers(sat)}
 	start := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
 	steppedLoadClock(e, start)
 	since := start.Add(-time.Hour)
@@ -266,8 +262,7 @@ func TestLoadImbalanceReadsThePolicysKvThreshold(t *testing.T) {
 		t.Fatal(err)
 	}
 	sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{}}
-	e := &Engine{saturationV2Analyzer: sat, started: true,
-		analyzersSnapshot: []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: sat}}}
+	e := &Engine{analyzers: testAnalyzers(sat)}
 	start := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
 	steppedLoadClock(e, start)
 	since := start.Add(-time.Hour)

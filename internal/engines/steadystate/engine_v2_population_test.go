@@ -113,17 +113,9 @@ var _ = Describe("Engine config-population helpers", func() {
 	Describe("runAnalyzersAndScore config-bridge", func() {
 
 		// minEngine builds a minimal Engine suitable for calling runAnalyzersAndScore.
-		// satFake is used as saturationV2Analyzer; spies is the additional snapshot.
+		// satFake is the saturation analyzer; spies are the analyzers after it.
 		minEngine := func(satFake domain.Analyzer, spies ...analyzerEntry) *Engine {
-			snapshot := append(
-				[]analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: satFake}},
-				spies...,
-			)
-			return &Engine{
-				saturationV2Analyzer: satFake,
-				analyzersSnapshot:    snapshot,
-				started:              true,
-			}
+			return &Engine{analyzers: testAnalyzers(satFake, spies...)}
 		}
 
 		zeroSat := &fakeAnalyzerWithResult{

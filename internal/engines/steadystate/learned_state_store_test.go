@@ -65,7 +65,7 @@ func snapshotEngine(t *testing.T, c client.Client, spy *stateSpy) *Engine {
 	t.Helper()
 	cfg := config.NewTestConfig()
 	config.SetLearnedStateSnapshotForTest(cfg, true)
-	return &Engine{Config: cfg, client: c, saturationV2Analyzer: spy}
+	return &Engine{Config: cfg, client: c, analyzers: testAnalyzers(spy)}
 }
 
 func storedDoc(t *testing.T, c client.Client) (learnedStateDoc, *corev1.ConfigMap) {
@@ -80,7 +80,7 @@ func storedDoc(t *testing.T, c client.Client) (learnedStateDoc, *corev1.ConfigMa
 
 func TestLearnedStateSnapshotIsOffByDefault(t *testing.T) {
 	c := fake.NewClientBuilder().Build()
-	e := &Engine{Config: config.NewTestConfig(), client: c, saturationV2Analyzer: &stateSpy{state: sampleState(4000)}}
+	e := &Engine{Config: config.NewTestConfig(), client: c, analyzers: testAnalyzers(&stateSpy{state: sampleState(4000)})}
 	now := time.Now()
 	e.restoreLearnedState(context.Background(), now)
 	e.writeLearnedState(context.Background(), now)

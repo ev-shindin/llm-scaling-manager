@@ -46,12 +46,10 @@ func TestWarmPoolSupplyIsInThePressuresFrame(t *testing.T) {
 		},
 	}
 	e := &Engine{
-		saturationV2Analyzer: fakeSat,
-		analyzersSnapshot: []analyzerEntry{
-			{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
-			{name: "spy", analyzer: spy},
-		},
-		started: true,
+		analyzers: testAnalyzers(fakeSat,
+			analyzerEntry{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
+			analyzerEntry{name: "spy", analyzer: spy},
+		),
 	}
 	cfg := config.ScalingPolicy{
 		ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70,
@@ -88,12 +86,10 @@ func TestWarmPoolSupplyIsPublishedWhenAnotherAnalyzerFails(t *testing.T) {
 	}
 	failing := &fakeAnalyzerWithResult{analyzerName: "spy"} // no result: the run failed
 	e := &Engine{
-		saturationV2Analyzer: fakeSat,
-		analyzersSnapshot: []analyzerEntry{
-			{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
-			{name: "spy", analyzer: failing},
-		},
-		started: true,
+		analyzers: testAnalyzers(fakeSat,
+			analyzerEntry{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
+			analyzerEntry{name: "spy", analyzer: failing},
+		),
 	}
 	cfg := config.ScalingPolicy{
 		ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70,

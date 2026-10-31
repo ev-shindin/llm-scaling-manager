@@ -47,7 +47,7 @@ func sloWiringEngine(t *testing.T) *Engine {
 // with nothing failing.
 func TestNewEngineGivesTheSLOAnalyzerARouterSource(t *testing.T) {
 	e := sloWiringEngine(t)
-	for _, entry := range e.analyzers {
+	for _, entry := range e.analyzers.builtins() {
 		if entry.name != domain.SLOAnalyzerName {
 			continue
 		}
@@ -158,7 +158,7 @@ func (s *sloKeeperSpy) EvictStale(time.Time) slo.Evicted {
 // unswept.
 func TestNewEngineHoldsTheSLOAnalyzerItRegisters(t *testing.T) {
 	e := sloWiringEngine(t)
-	for _, entry := range e.analyzers {
+	for _, entry := range e.analyzers.builtins() {
 		if entry.name == domain.SLOAnalyzerName {
 			if entry.analyzer != e.sloAnalyzer.(domain.Analyzer) {
 				t.Fatal("the engine sweeps a different slo analyzer than the one it registered")
@@ -174,7 +174,7 @@ func TestNewEngineHoldsTheSLOAnalyzerItRegisters(t *testing.T) {
 // Analyze, which never runs again once the last model stops listing it.
 func TestEvictStaleLearnedStateSweepsTheSLOAnalyzer(t *testing.T) {
 	spy := &sloKeeperSpy{}
-	e := &Engine{saturationV2Analyzer: plainAnalyzer{}, sloAnalyzer: spy}
+	e := &Engine{analyzers: testAnalyzers(plainAnalyzer{}), sloAnalyzer: spy}
 	e.evictStaleLearnedState(context.Background())
 	if spy.evictions != 1 {
 		t.Fatalf("a sweep reached the slo analyzer %d times, want 1", spy.evictions)
@@ -357,8 +357,8 @@ func TestListingSLOLeavesTheDecisionUnchanged(t *testing.T) {
 					TotalDemand: leg.demand, RoleDemand: leg.roleDem,
 					VariantCapacities: []domain.VariantCapacity{{VariantName: "v", Role: leg.states[0].Role, ReplicaCount: 2,
 						PerReplicaCapacity: leg.capacity, ObservedReplicas: 2}}}}
-				return &Engine{saturationV2Analyzer: sat, started: true, analyzersSnapshot: []analyzerEntry{
-					{name: domain.SaturationAnalyzerName, analyzer: sat}, {name: domain.SLOAnalyzerName, analyzer: a}}}
+				return &Engine{analyzers: testAnalyzers(sat,
+					analyzerEntry{name: domain.SLOAnalyzerName, analyzer: a})}
 			}
 			rec := &recordingAnalyzer{Analyzer: slo.New(router, nil)}
 			without, with := newEngine(slo.New(router, nil)), newEngine(rec)
@@ -442,8 +442,8 @@ func TestTheSLOAnalyzerCostsNothingWhereNoPolicyListsIt(t *testing.T) {
 	}
 	router := &countingRouter{}
 	sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{}}
-	e := &Engine{saturationV2Analyzer: sat, started: true, analyzersSnapshot: []analyzerEntry{
-		{name: domain.SaturationAnalyzerName, analyzer: sat}, {name: domain.SLOAnalyzerName, analyzer: slo.New(router, nil)}}}
+	e := &Engine{analyzers: testAnalyzers(sat,
+		analyzerEntry{name: domain.SLOAnalyzerName, analyzer: slo.New(router, nil)})}
 	run := func(namespace string, policy config.ScalingPolicy, states []domain.VariantReplicaState) {
 		t.Helper()
 		results, err := e.runAnalyzers(context.Background(), "m", namespace, nil, policy, states, nil, nil, nil, nil, 0)

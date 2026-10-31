@@ -53,10 +53,10 @@ func (plainAnalyzer) Analyze(context.Context, domain.AnalyzerInput) (*domain.Ana
 func TestEvictStaleLearnedStateIsWiredIntoTheCycle(t *testing.T) {
 	spy := &evictSpy{}
 	e := &Engine{
-		Config:               config.NewTestConfig(),
-		optimizer:            allocation.NewCostAwareOptimizer(),
-		saturationV2Analyzer: spy,
-		capacityStore:        capacity.NewStore(),
+		Config:        config.NewTestConfig(),
+		optimizer:     allocation.NewCostAwareOptimizer(),
+		analyzers:     testAnalyzers(spy),
+		capacityStore: capacity.NewStore(),
 	}
 
 	// One cycle over one model. It collects nothing, which is the cheapest
@@ -88,10 +88,10 @@ func TestEvictStaleLearnedStateIsWiredIntoTheCycle(t *testing.T) {
 func TestEvictStaleLearnedStateSweepsTheCapacityStore(t *testing.T) {
 	store := capacity.NewStore()
 	e := &Engine{
-		Config:               config.NewTestConfig(),
-		optimizer:            allocation.NewCostAwareOptimizer(),
-		saturationV2Analyzer: &evictSpy{},
-		capacityStore:        store,
+		Config:        config.NewTestConfig(),
+		optimizer:     allocation.NewCostAwareOptimizer(),
+		analyzers:     testAnalyzers(&evictSpy{}),
+		capacityStore: store,
 	}
 
 	store.Update("ns", "m", "v1", capacity.Record{
@@ -118,13 +118,13 @@ func TestEvictStaleLearnedStateSweepsTheCapacityStore(t *testing.T) {
 }
 
 // TestEvictStaleLearnedStateSurvivesAnAnalyzerThatCannotEvict pins the failure
-// mode of reaching eviction through a type assertion: saturationV2Analyzer is
-// typed domain.Analyzer so tests can inject one, and neither an injected
-// analyzer without the method nor an unset field may panic the cycle.
+// mode of a capability resolved at registration: a saturation analyzer
+// registered without the method leaves it nil, and neither that nor an engine
+// with no registry may panic the cycle.
 func TestEvictStaleLearnedStateSurvivesAnAnalyzerThatCannotEvict(t *testing.T) {
-	withPlain := &Engine{saturationV2Analyzer: plainAnalyzer{}, capacityStore: capacity.NewStore()}
+	withPlain := &Engine{analyzers: testAnalyzers(plainAnalyzer{}), capacityStore: capacity.NewStore()}
 	require.NotPanics(t, func() { withPlain.evictStaleLearnedState(context.Background()) })
 
-	bare := &Engine{} // no analyzer and no store
+	bare := &Engine{} // no registry and no store
 	require.NotPanics(t, func() { bare.evictStaleLearnedState(context.Background()) })
 }

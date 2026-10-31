@@ -19,11 +19,9 @@ func satOnlyEngine(satResult *domain.AnalyzerResult) *Engine {
 		result:       satResult,
 	}
 	return &Engine{
-		saturationV2Analyzer: fakeSat,
-		analyzersSnapshot: []analyzerEntry{
-			{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
-		},
-		started: true,
+		analyzers: testAnalyzers(fakeSat,
+			analyzerEntry{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
+		),
 	}
 }
 
@@ -278,12 +276,10 @@ var _ = Describe("buildComposite — Score has no effect", func() {
 				},
 			}
 			return &Engine{
-				saturationV2Analyzer: fakeSat,
-				analyzersSnapshot: []analyzerEntry{
-					{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
-					{name: "spy", analyzer: spy},
-				},
-				started: true,
+				analyzers: testAnalyzers(fakeSat,
+					analyzerEntry{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
+					analyzerEntry{name: "spy", analyzer: spy},
+				),
 			}
 		}
 
@@ -343,12 +339,10 @@ var _ = Describe("buildComposite — end-to-end with a higher-demand contributor
 			},
 		}
 		e := &Engine{
-			saturationV2Analyzer: fakeSat,
-			analyzersSnapshot: []analyzerEntry{
-				{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
-				{name: "spy", analyzer: spy},
-			},
-			started: true,
+			analyzers: testAnalyzers(fakeSat,
+				analyzerEntry{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
+				analyzerEntry{name: "spy", analyzer: spy},
+			),
 		}
 		cfg := config.ScalingPolicy{
 			ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70,

@@ -34,9 +34,7 @@ func TestCompositeObservability_MetricsIncludeTheComposite(t *testing.T) {
 			VariantCapacities: []domain.VariantCapacity{{VariantName: "v1", ReplicaCount: 1, PerReplicaCapacity: 200, Reason: "P1-obs"}},
 		},
 	}
-	e.saturationV2Analyzer = fakeSat
-	e.analyzersSnapshot = []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: fakeSat}}
-	e.started = true
+	e.analyzers = testAnalyzers(fakeSat)
 
 	req, err := e.collectV2ModelRequest(context.Background(), "m", "ns", nil, scaleCfg,
 		nil, nil, nil, nil, nil, 0)
@@ -85,12 +83,7 @@ func TestCompositeObservability_CompositeIsAdditiveNotReplacing(t *testing.T) {
 			VariantCapacities: []domain.VariantCapacity{{VariantName: "v1", ReplicaCount: 1, PerReplicaCapacity: 200, Reason: "measured"}},
 		},
 	}
-	e.saturationV2Analyzer = fakeSat
-	e.analyzersSnapshot = []analyzerEntry{
-		{name: domain.SaturationAnalyzerName, analyzer: fakeSat},
-		{name: "spy", analyzer: spy},
-	}
-	e.started = true
+	e.analyzers = testAnalyzers(fakeSat, analyzerEntry{name: "spy", analyzer: spy})
 	cfg := config.ScalingPolicy{
 		ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70,
 		Analyzers: []config.AnalyzerScoreConfig{{Name: "spy"}},

@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 )
 
@@ -64,38 +65,41 @@ var _ = Describe("Engine analyzer registry", func() {
 			testConfig := config.NewTestConfig()
 			engine := NewEngine(k8sClient, k8sClient, k8sClient.Scheme(), nil, sourceRegistry, testConfig, allocation.NewNoOpLimiter("test"))
 
-			Expect(engine.analyzers).To(HaveLen(2))
-			Expect(engine.analyzers[0].name).To(Equal(domain.SaturationAnalyzerName))
-			Expect(engine.analyzers[0].analyzer).To(BeIdenticalTo(engine.saturationV2Analyzer))
+			builtins := engine.analyzers.builtins()
+			Expect(builtins).To(HaveLen(2))
+			Expect(builtins[0].name).To(Equal(domain.SaturationAnalyzerName))
+			Expect(builtins[0].analyzer).To(BeIdenticalTo(engine.saturationAnalyzer()))
+			Expect(builtins[0].analyzer).To(BeAssignableToTypeOf(&saturation.SaturationAnalyzer{}))
 			// Built in and always registered; it runs only where a policy lists it.
-			Expect(engine.analyzers[1].name).To(Equal(domain.SLOAnalyzerName))
-			Expect(engine.analyzers[1].analyzer).To(BeAssignableToTypeOf(&slo.Analyzer{}))
+			Expect(builtins[1].name).To(Equal(domain.SLOAnalyzerName))
+			Expect(builtins[1].analyzer).To(BeAssignableToTypeOf(&slo.Analyzer{}))
 		})
 	})
 
 	Describe("RegisterAnalyzer", func() {
 		It("appends new analyzers in registration order", func() {
 			e := &Engine{
-				analyzers: []analyzerEntry{
-					{name: domain.SaturationAnalyzerName, analyzer: &spyAnalyzer{name: domain.SaturationAnalyzerName}},
-				},
+				analyzers: newAnalyzerRegistry(
+					analyzerEntry{name: domain.SaturationAnalyzerName, analyzer: &spyAnalyzer{name: domain.SaturationAnalyzerName}},
+				),
 			}
 
 			Expect(e.RegisterAnalyzer("throughput", &spyAnalyzer{name: "throughput"})).To(Succeed())
 			Expect(e.RegisterAnalyzer("slo", &spyAnalyzer{name: "slo"})).To(Succeed())
 
-			Expect(e.analyzers).To(HaveLen(3))
-			Expect(e.analyzers[0].name).To(Equal(domain.SaturationAnalyzerName))
-			Expect(e.analyzers[1].name).To(Equal("throughput"))
-			Expect(e.analyzers[2].name).To(Equal("slo"))
+			builtins := e.analyzers.builtins()
+			Expect(builtins).To(HaveLen(3))
+			Expect(builtins[0].name).To(Equal(domain.SaturationAnalyzerName))
+			Expect(builtins[1].name).To(Equal("throughput"))
+			Expect(builtins[2].name).To(Equal("slo"))
 		})
 
 		It("returns an error when re-registering an existing name", func() {
 			e := &Engine{
-				analyzers: []analyzerEntry{
-					{name: domain.SaturationAnalyzerName, analyzer: &spyAnalyzer{name: domain.SaturationAnalyzerName}},
-					{name: "throughput", analyzer: &spyAnalyzer{name: "throughput"}},
-				},
+				analyzers: newAnalyzerRegistry(
+					analyzerEntry{name: domain.SaturationAnalyzerName, analyzer: &spyAnalyzer{name: domain.SaturationAnalyzerName}},
+					analyzerEntry{name: "throughput", analyzer: &spyAnalyzer{name: "throughput"}},
+				),
 			}
 
 			Expect(e.RegisterAnalyzer("throughput", &spyAnalyzer{name: "throughput"})).
@@ -107,10 +111,7 @@ var _ = Describe("Engine analyzer registry", func() {
 
 		It("returns an error when called after StartOptimizeLoop has frozen the registry", func() {
 			e := &Engine{
-				analyzers: []analyzerEntry{
-					{name: domain.SaturationAnalyzerName, analyzer: &spyAnalyzer{name: domain.SaturationAnalyzerName}},
-				},
-				started: true,
+				analyzers: testAnalyzers(&spyAnalyzer{name: domain.SaturationAnalyzerName}),
 			}
 
 			Expect(e.RegisterAnalyzer("throughput", &spyAnalyzer{name: "throughput"})).
@@ -119,7 +120,7 @@ var _ = Describe("Engine analyzer registry", func() {
 	})
 
 	Describe("StartOptimizeLoop", func() {
-		It("snapshots the analyzer registry and flips started before launching the executor", func() {
+		It("freezes the built-in analyzers before launching the executor", func() {
 			sourceRegistry := source.NewSourceRegistry()
 			Expect(sourceRegistry.Register("prometheus", source.NewNoOpSource())).To(Succeed())
 			testConfig := config.NewTestConfig()
@@ -133,18 +134,19 @@ var _ = Describe("Engine analyzer registry", func() {
 			cancelStart()
 			engine.StartOptimizeLoop(startCtx)
 
-			Expect(engine.started).To(BeTrue())
-			Expect(engine.analyzersSnapshot).To(HaveLen(len(engine.analyzers)))
-			for i := range engine.analyzers {
-				Expect(engine.analyzersSnapshot[i].name).To(Equal(engine.analyzers[i].name))
-				Expect(engine.analyzersSnapshot[i].analyzer).To(BeIdenticalTo(engine.analyzers[i].analyzer))
+			Expect(engine.RegisterAnalyzer("late", &spyAnalyzer{name: "late"})).
+				To(MatchError(ContainSubstring("called after StartOptimizeLoop")))
+			names := []string{}
+			for _, entry := range engine.analyzerRunEntries() {
+				names = append(names, entry.name)
 			}
+			Expect(names).To(Equal([]string{domain.SaturationAnalyzerName, domain.SLOAnalyzerName, "throughput", "spy"}))
 		})
 
-		It("snapshot reader does not race with a post-Start RegisterAnalyzer attempt", func() {
+		It("a run-entries reader does not race with a post-Start RegisterAnalyzer attempt", func() {
 			// Verifies the race-safety contract under -race: the optimize
-			// goroutine reads analyzersSnapshot (immutable after Start) while
-			// any post-Start RegisterAnalyzer returns an error before mutating anything.
+			// goroutine reads the registry under its read lock while any
+			// post-Start RegisterAnalyzer returns an error before mutating anything.
 			sourceRegistry := source.NewSourceRegistry()
 			Expect(sourceRegistry.Register("prometheus", source.NewNoOpSource())).To(Succeed())
 			testConfig := config.NewTestConfig()
@@ -163,7 +165,7 @@ var _ = Describe("Engine analyzer registry", func() {
 			go func() {
 				defer wg.Done()
 				for i := 0; i < iterations; i++ {
-					for _, entry := range engine.analyzersSnapshot {
+					for _, entry := range engine.analyzerRunEntries() {
 						_ = entry.name
 					}
 				}
