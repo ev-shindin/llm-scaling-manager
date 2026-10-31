@@ -36,10 +36,10 @@ goldens:
   - engine/warm-pool-supply.csv
   recording: engine/recording.jsonl.gz
   source: 'The in-process engine run: the acceptance scenario with each composite
-    recorded, discovery metadata, a bridge lent from the warm pool, and the P/D model
-    under a policy that lists slo alone, so the composite holds both its roles. Twelve
-    cycles of synthetic rows. It covers the composite and the warm pool figures, not
-    the optimizer.'
+    recorded, discovery metadata, a bridge lent from the warm pool, an external analyzer
+    that fails every third call, and the P/D model under a policy that lists slo alone,
+    so the composite holds both its roles. Twelve cycles of synthetic rows. It covers
+    the composite and the warm pool figures, not the optimizer.'
 - name: mu-paths
   outputs:
   - mu-paths/learned-state.csv

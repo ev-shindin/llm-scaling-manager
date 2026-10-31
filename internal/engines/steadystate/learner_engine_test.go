@@ -3,6 +3,7 @@ package steadystate
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -30,7 +31,12 @@ import (
 //     supply is not zero;
 //   - acme/pd under a policy that lists the slo analyzer alone, which sizes
 //     nothing: the composite holds both its roles (no listed analyzer sizes
-//     them) and prices them per role.
+//     them) and prices them per role;
+//   - an external analyzer, listed for the other two models, that fails
+//     every third call of a model: its results are recorded, since the
+//     replay cannot run it, and on the cycles it fails it is inside its
+//     staleness grace, so the composite holds the roles it covers against
+//     scale-down.
 //
 // With LEARNREC_ENGINE_OUT set, the raw recording is also written there: the
 // input `make learner-golden-add` takes to commit it as the engine golden.
@@ -42,6 +48,8 @@ func newEngineScript(start time.Time) *recScript {
 	sloOnly := s.policy
 	sloOnly.Analyzers = []config.AnalyzerScoreConfig{{Name: "slo"}}
 	s.policies = map[string]config.ScalingPolicy{"acme/pd": sloOnly}
+	s.policy.Analyzers = append(s.policy.Analyzers, config.AnalyzerScoreConfig{Name: "ext"})
+	s.external = &scriptedExternal{calls: map[string]int{}}
 	for i := range s.variants {
 		if s.variants[i].name != "agg-a" {
 			continue
@@ -55,6 +63,28 @@ func newEngineScript(start time.Time) *recScript {
 		}
 	}
 	return s
+}
+
+// scriptedExternal is an external analyzer the replay cannot run: it sizes
+// every variant at 10 a replica with 9 a replica of demand, and fails every
+// third call for a model.
+type scriptedExternal struct{ calls map[string]int }
+
+func (x *scriptedExternal) Name() string { return "ext" }
+
+func (x *scriptedExternal) Analyze(_ context.Context, in domain.AnalyzerInput) (*domain.AnalyzerResult, error) {
+	x.calls[in.ModelID]++
+	if x.calls[in.ModelID]%3 == 0 {
+		return nil, errors.New("the scripted external analyzer fails this cycle")
+	}
+	res := &domain.AnalyzerResult{AnalyzerName: x.Name(), ModelID: in.ModelID, Namespace: in.Namespace}
+	for _, vs := range in.VariantStates {
+		demand := 9 * float64(vs.CurrentReplicas)
+		res.VariantCapacities = append(res.VariantCapacities, domain.VariantCapacity{VariantName: vs.VariantName,
+			Role: vs.Role, ReplicaCount: vs.CurrentReplicas, PerReplicaCapacity: 10, TotalDemand: demand})
+		res.TotalDemand += demand
+	}
+	return res, nil
 }
 
 // recMetadata is the discovery metadata of a model's variants, from their
@@ -152,6 +182,17 @@ func TestLearnerRecording_TheEngineExportReplaysAndNamesNothing(t *testing.T) {
 	for _, name := range scriptNames() {
 		require.True(t, bytes.Contains(recording, []byte(name)), "precondition: the recording names %q", name)
 		assert.False(t, bytes.Contains(exported, []byte(name)), "%q survives the export", name)
+	}
+	// The external analyzer's name is renamed wherever it stands: an entry,
+	// a result, the policy, a grace entry and a hold reason. The built-in
+	// analyzers keep theirs.
+	assert.Equal(t, 1, rep.Names["analyzer"], "analyzer names renamed")
+	for _, site := range []string{`"Name":"ext"`, `"AnalyzerName":"ext"`, `analyzer-in-grace:ext`} {
+		require.True(t, bytes.Contains(recording, []byte(site)), "precondition: the recording holds %s", site)
+		assert.False(t, bytes.Contains(exported, []byte(site)), "%s survives the export", site)
+	}
+	for _, site := range []string{`"Name":"analyzer-01"`, `analyzer-in-grace:analyzer-01`, `"Name":"throughput"`} {
+		assert.True(t, bytes.Contains(exported, []byte(site)), "the export holds no %s", site)
 	}
 }
 

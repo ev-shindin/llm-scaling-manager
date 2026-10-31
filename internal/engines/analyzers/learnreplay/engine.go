@@ -6,7 +6,9 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/enginerec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
 
@@ -24,10 +26,8 @@ type EngineReplayer interface {
 	// Owns reports whether the replayer applies events of kind.
 	Owns(kind string) bool
 	// Apply replays one event at its clock and records what it built with
-	// rec. results is the replay's own result of an analyzer's last Analyze
-	// of a model, false when that Analyze failed or never ran.
-	Apply(ctx context.Context, ev learnrec.RawEvent,
-		results func(analyzer, namespace, modelID string) (*domain.AnalyzerResult, bool), rec *learnrec.Recorder) error
+	// rec. replayed is what the replay has reproduced before the event.
+	Apply(ctx context.Context, ev learnrec.RawEvent, replayed enginerec.Replayed, rec *learnrec.Recorder) error
 	// PathCounts is how often each engine path ran in this replay.
 	PathCounts() map[string]int64
 }
@@ -73,6 +73,24 @@ func resultKey(analyzer, namespace, modelID string) string {
 	return analyzer + "\x00" + namespace + "\x00" + modelID
 }
 
+// notePolicy keeps the policy an Analyze received, for the engine's events
+// after it: the replay derives from it what the engine derives from the
+// cycle's policy.
+func (r *replayer) notePolicy(in domain.AnalyzerInput) {
+	if r.policies == nil {
+		r.policies = map[string]*config.ScalingPolicy{}
+	}
+	p, _ := in.Config.(*config.ScalingPolicy)
+	r.policies[resultKey("", in.Namespace, in.ModelID)] = p
+}
+
+// Policy implements enginerec.Replayed: the policy the model's last
+// saturation Analyze received.
+func (r *replayer) Policy(namespace, modelID string) (*config.ScalingPolicy, bool) {
+	p := r.policies[resultKey("", namespace, modelID)]
+	return p, p != nil
+}
+
 // noteResult keeps an Analyze's result for the engine's events after it; a
 // failed Analyze leaves none.
 func (r *replayer) noteResult(analyzer, namespace, modelID string, res *domain.AnalyzerResult, err error) {
@@ -85,8 +103,9 @@ func (r *replayer) noteResult(analyzer, namespace, modelID string, res *domain.A
 	r.results[resultKey(analyzer, namespace, modelID)] = res
 }
 
-// result is the replay's last result of an analyzer for a model.
-func (r *replayer) result(analyzer, namespace, modelID string) (*domain.AnalyzerResult, bool) {
+// Result implements enginerec.Replayed: the replay's last result of an
+// analyzer for a model.
+func (r *replayer) Result(analyzer, namespace, modelID string) (*domain.AnalyzerResult, bool) {
 	res := r.results[resultKey(analyzer, namespace, modelID)]
 	return res, res != nil
 }

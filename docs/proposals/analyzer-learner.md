@@ -488,7 +488,7 @@ own recorder events (composite, optimizer and warm-pool inputs) to 0b's sink
 and builds its goldens on them. Status: the composite and the warm pool's
 figures are recorded and replayed (`engine.Composite`, the `engine` golden;
 [testing](../developer-guide/testing.md#the-engine-layer)); the optimizer's
-decisions are not yet.
+decisions get their own PR, before #345 step 3.
 
 **The rule.**
 

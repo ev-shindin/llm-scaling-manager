@@ -452,6 +452,14 @@ func (x *exporter) harvest(at site, s string, composites *[]string) {
 		if !knownLabels[s] {
 			x.add(r.category, s)
 		}
+	case classAnalyzer:
+		if !vocabulary[s] {
+			x.add("analyzer", s)
+		}
+	case classHoldReason:
+		if name, ok := strings.CutPrefix(s, holdGracePrefix); ok && !vocabulary[name] {
+			x.add("analyzer", name)
+		}
 	}
 }
 
@@ -567,7 +575,7 @@ func (x *exporter) harvestComposites(composites []string) {
 
 // categoryOrder settles a name found under two categories: the first wins.
 var categoryOrder = []string{"ns", "model", "variant", "pod", "image", "revision", "token", "arg", "label",
-	"labelkey", "resource", "accelerator", "priority", "weightclass", "limiter", "name"}
+	"labelkey", "resource", "accelerator", "priority", "weightclass", "limiter", "analyzer", "name"}
 
 // assign gives every name its pseudonym.
 func (x *exporter) assign() error {
@@ -631,9 +639,15 @@ func (x *exporter) rename(at site, s string) string {
 		return s
 	}
 	switch r.class {
-	case classRename, classLabelKey, classResource, classAccelerator:
+	case classRename, classLabelKey, classResource, classAccelerator, classAnalyzer:
 		if p, ok := x.names[s]; ok {
 			return p
+		}
+	case classHoldReason:
+		if name, ok := strings.CutPrefix(s, holdGracePrefix); ok {
+			if p, ok := x.names[name]; ok {
+				return holdGracePrefix + p
+			}
 		}
 	case classComposite:
 		return x.renameComposite(s)
@@ -969,6 +983,14 @@ func (x *exporter) allowed(r rule, v string) bool {
 			r.category == "label" && keep(knownAccelerators[v])
 	case classVocab:
 		return keep(vocabulary[v])
+	case classAnalyzer:
+		return keep(vocabulary[v]) || x.pseudonyms[v]
+	case classHoldReason:
+		if vocabulary[v] {
+			return keep(true)
+		}
+		name, ok := strings.CutPrefix(v, holdGracePrefix)
+		return ok && (keep(vocabulary[name]) || x.pseudonyms[name])
 	case classAccelerator:
 		return x.pseudonyms[v] || keep(knownAccelerators[v])
 	case classDuration:

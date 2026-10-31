@@ -82,6 +82,9 @@ type recScript struct {
 	engineLayer bool
 	// policies is a model's own policy, where it is not policy.
 	policies map[string]config.ScalingPolicy
+	// external is an external analyzer each controller registers, nil for
+	// none.
+	external domain.Analyzer
 }
 
 // scriptedRouter answers with a latency that moves with the cycle.
@@ -267,6 +270,9 @@ func (s *recScript) engine(t *testing.T) *Engine {
 	}
 	require.NoError(t, e.RegisterAnalyzer(throughput.AnalyzerName, throughput.NewThroughputAnalyzer().WithClock(e.Clock())))
 	e.analyzersSnapshot = slices.Clone(e.analyzers)
+	if s.external != nil {
+		e.UpsertExternalAnalyzer(s.external.Name(), s.external)
+	}
 	return e
 }
 

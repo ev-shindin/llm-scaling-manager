@@ -10,6 +10,7 @@ import (
 
 	clocktesting "k8s.io/utils/clock/testing"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
@@ -96,6 +97,8 @@ type replayer struct {
 	// results is each analyzer's last replayed result per model, for it.
 	engine  EngineReplayer
 	results map[string]*domain.AnalyzerResult
+	// policies is each model's last saturation Analyze's policy, for it.
+	policies map[string]*config.ScalingPolicy
 	// rec is the replay's own recorder.
 	rec *learnrec.Recorder
 }

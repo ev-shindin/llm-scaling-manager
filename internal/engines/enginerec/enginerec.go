@@ -1,7 +1,8 @@
 // Package enginerec holds the engine-level events of a learner recording
-// (internal/signals/learnrec): what the engine hands the composite, and what
-// the composite and the warm pool's figures came out as. Issue #345 step 0
-// adds them beside the analyzer events of docs/proposals/analyzer-learner.md,
+// (internal/signals/learnrec): what the engine hands the composite that it
+// did not compute from the cycle's policy and results, and what the
+// composite and the warm pool's figures came out as. Issue #345 step 0 adds
+// them beside the analyzer events of docs/proposals/analyzer-learner.md,
 // 2.4, so a replay can hold the composite to a golden as it holds the
 // analyzers.
 //
@@ -13,6 +14,7 @@ package enginerec
 import (
 	"strings"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 )
@@ -20,8 +22,8 @@ import (
 // Owner is the prefix of every engine event's kind.
 const Owner = "engine."
 
-// KindComposite is one model's composite in one cycle: its inputs, as the
-// engine handed them to it, and what it built.
+// KindComposite is one model's composite in one cycle: the inputs only the
+// engine's history can supply, and what it built.
 const KindComposite = Owner + "Composite"
 
 // Kinds is every engine event kind, sorted.
@@ -30,32 +32,41 @@ func Kinds() []string { return []string{KindComposite} }
 // Owns reports whether kind is an engine event.
 func Owns(kind string) bool { return strings.HasPrefix(kind, Owner) }
 
+// Replayed is what a replay has reproduced when it reaches an engine event:
+// each analyzer's last result for a model, and the policy the model's last
+// Analyze received.
+type Replayed interface {
+	// Result is the replay's own result of an analyzer's last Analyze of a
+	// model, false when that Analyze failed or never ran.
+	Result(analyzer, namespace, modelID string) (*domain.AnalyzerResult, bool)
+	// Policy is the policy the model's last saturation Analyze received,
+	// false when none has run.
+	Policy(namespace, modelID string) (*config.ScalingPolicy, bool)
+}
+
 // CompositeEvent is one model's composite in one cycle.
 //
 // The inputs are recorded at the composite's boundary, as the analyzer
-// events record theirs (analyzer-learner.md, 2.4): what the engine supplied,
-// never what a recorded analyzer returned. A replay takes an analyzer's
-// result from its own replayed Analyze, and builds each analyzer's entry the
-// way the engine does (the capacity-build step), so a change to an analyzer
-// reaches the composite in the replay as it would in the controller.
+// events record theirs (analyzer-learner.md, 2.4), and only those the replay
+// cannot rebuild. Everything the engine derives from the cycle's policy (the
+// eligible entries, each analyzer's score and thresholds, saturation's
+// thresholds) the replay derives again, with the engine's own functions,
+// from the policy the Analyze events recorded; each analyzer's result it
+// takes from its own replayed Analyze. A change to any of them reaches the
+// composite in the replay as it would in the controller.
 type CompositeEvent struct {
 	Namespace, ModelID string
 	// Entries is every analyzer entry the cycle built, in the engine's order:
 	// saturation first, then each other analyzer that returned a result.
 	Entries []CompositeEntry
-	// Eligible names the entries the composite may size from, in order:
-	// every entry less the slo analyzer, and less saturation when the policy
-	// does not list it.
-	Eligible []string
 	// Grace is the entry, with no result, of each listed analyzer that
-	// returned nothing this cycle and is still inside its staleness grace.
+	// returned nothing this cycle and is still inside its staleness grace:
+	// read from the engine's history of the analyzer.
 	Grace []allocation.NamedAnalyzerResult
-	// Metadata is the discovery metadata the capacity-build step joins onto
-	// each analyzer's variant capacities; nil when the cycle had none.
-	Metadata []domain.VariantMetadata
-	// ScaleUp and ScaleDown are saturation's thresholds, an override
-	// included: the composite's, and the warm pool's pressure's.
-	ScaleUp, ScaleDown float64
+	// Metadata is what the capacity-build step reads of the discovery
+	// metadata it joins onto each analyzer's variant capacities; nil when
+	// the cycle had none.
+	Metadata []VariantMeta
 
 	// Composite is what the composite built, its result without AnalyzedAt.
 	Composite allocation.NamedAnalyzerResult
@@ -69,12 +80,10 @@ type CompositeEvent struct {
 	Pressure []VariantPressure
 }
 
-// CompositeEntry is one analyzer entry as the engine supplied it to the
-// capacity-build step and the composite.
+// CompositeEntry is one analyzer entry: what the engine knew of it that the
+// cycle's policy and results do not say.
 type CompositeEntry struct {
 	Name string
-	// Score and the thresholds are the policy's for this analyzer.
-	Score, ScaleUp, ScaleDown float64
 	// Live is the engine's liveness verdict for the entry this cycle. It
 	// reads the analyzer's history in the engine, so it is recorded, not
 	// recomputed.
@@ -83,6 +92,38 @@ type CompositeEntry struct {
 	// replay does not run (an external one); nil for saturation, slo and
 	// throughput, whose own Analyze event the replay reproduces it from.
 	Result *domain.AnalyzerResult
+}
+
+// VariantMeta is the part of a variant's discovery metadata the
+// capacity-build step reads: its name, its role, and its current replicas.
+type VariantMeta struct {
+	VariantName, Role string
+	CurrentReplicas   int
+}
+
+// MetaOf is what a recording keeps of metadata.
+func MetaOf(metadata []domain.VariantMetadata) []VariantMeta {
+	if metadata == nil {
+		return nil
+	}
+	out := make([]VariantMeta, 0, len(metadata))
+	for _, m := range metadata {
+		out = append(out, VariantMeta{VariantName: m.VariantName, Role: m.Role, CurrentReplicas: m.CurrentReplicas})
+	}
+	return out
+}
+
+// Metadata is the discovery metadata a recording's VariantMeta stands for,
+// with every field the recording does not keep at its zero value.
+func Metadata(meta []VariantMeta) []domain.VariantMetadata {
+	if meta == nil {
+		return nil
+	}
+	out := make([]domain.VariantMetadata, 0, len(meta))
+	for _, m := range meta {
+		out = append(out, domain.VariantMetadata{VariantName: m.VariantName, Role: m.Role, CurrentReplicas: m.CurrentReplicas})
+	}
+	return out
 }
 
 // WarmPoolSupply is what one variant gets from the warm pool's bridges.

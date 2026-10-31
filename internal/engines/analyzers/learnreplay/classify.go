@@ -139,7 +139,19 @@ const (
 	// classRedact: configuration text no analyzer reads; a non-empty value
 	// is replaced by "redacted".
 	classRedact
+	// classAnalyzer: an analyzer's name; kept when it is the code's own (a
+	// built-in analyzer, the composite), renamed to an "analyzer" pseudonym
+	// otherwise (an external analyzer someone named).
+	classAnalyzer
+	// classHoldReason: why the composite holds a role: the code's own word,
+	// or holdGracePrefix and an analyzer's name, held as classAnalyzer holds
+	// one.
+	classHoldReason
 )
+
+// holdGracePrefix is steadystate's holdAnalyzerInGrace, which it does not
+// export: a hold reason naming the analyzer inside its grace.
+const holdGracePrefix = "analyzer-in-grace:"
 
 // rule is one table entry: a class, and for a rename its category.
 type rule struct {
@@ -174,11 +186,12 @@ var valueRules = map[string]rule{
 	"RateSource": {class: classVocab}, "Source": {class: classVocab}, "Excluded": {class: classVocab},
 	"Objective": {class: classVocab}, "Statistic": {class: classVocab}, "LearnedFrom": {class: classVocab},
 	"FreshnessStatus": {class: classVocab}, "Quantity": {class: classVocab}, "Engine": {class: classVocab},
-	"Scope": {class: classVocab}, "Type": {class: classVocab}, "AnalyzerName": {class: classVocab},
-	"Analyzers.Name": {class: classVocab}, "DefaultPolicy": {class: classVocab}, "Operator": {class: classVocab},
+	"Scope": {class: classVocab}, "Type": {class: classVocab}, "AnalyzerName": {class: classAnalyzer},
+	"Analyzers.Name": {class: classAnalyzer}, "Analyzers.Type": {class: classAnalyzer},
+	"DefaultPolicy": {class: classVocab}, "Operator": {class: classVocab},
 	// The engine's composite events: analyzer names, and why a role is held.
-	"Entries.Name": {class: classVocab}, "Grace.Name": {class: classVocab}, "Composite.Name": {class: classVocab},
-	"Eligible": {class: classVocab}, "HoldReasons": {class: classVocab},
+	"Entries.Name": {class: classAnalyzer}, "Grace.Name": {class: classAnalyzer}, "Composite.Name": {class: classVocab},
+	"HoldReasons": {class: classHoldReason},
 	"Effect": {class: classVocab}, "KvCacheDtype": {class: classVocab}, "WeightDtype": {class: classVocab},
 	"Quantization": {class: classVocab}, "KVConnector": {class: classVocab},
 	"KVOffloadingBackend": {class: classVocab}, "MemoryLayout": {class: classVocab},
@@ -273,7 +286,6 @@ var vocabulary = setOf(
 	// (steadystate's hold reasons; an analyzer's grace names the analyzer).
 	"CompositeSignal", "C0-agree", "C1-single", "C4-no-signal",
 	"no-listed-analyzer-sizes-role", "other-role-cannot-grow", "saturation-holds-role",
-	"analyzer-in-grace:throughput",
 	// The redaction marker.
 	"redacted",
 )

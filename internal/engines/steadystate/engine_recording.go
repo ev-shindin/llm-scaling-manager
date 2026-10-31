@@ -2,6 +2,7 @@ package steadystate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -20,22 +21,32 @@ import (
 // (docs/proposals/analyzer-learner.md, 2.4) stop at each Analyze; this layer
 // carries the recording on to the composite. Off unless a learner recording
 // is open (learner_recording.go); with it off nothing here runs.
+//
+// It records only what the replay cannot rebuild: the liveness verdicts and
+// the grace entries, which read the engine's history of each analyzer; an
+// external analyzer's result; and what the capacity-build step reads of the
+// discovery metadata. What the engine derives from the cycle's policy -- the
+// eligible entries, each analyzer's score and thresholds, saturation's
+// thresholds -- the replay derives again with the same functions
+// (cycleEntry, eligibleEntries, compositeThresholds), from the policy the
+// Analyze events recorded.
 
-// compositeInputs is what collectV2ModelRequest hands the composite.
+// compositeInputs is what collectV2ModelRequest hands the composite that
+// the recording keeps.
 type compositeInputs struct {
 	namespace, modelID string
-	// named is every entry runAnalyzers built; eligible the entries the
-	// composite may size from, grace last; grace the entries of the listed
-	// analyzers inside their staleness grace with no result.
-	named, eligible, grace []allocation.NamedAnalyzerResult
-	metadata               []domain.VariantMetadata
-	scaleUp, scaleDown     float64
+	// named is every entry runAnalyzers built; grace the entries of the
+	// listed analyzers inside their staleness grace with no result.
+	named, grace []allocation.NamedAnalyzerResult
+	metadata     []domain.VariantMetadata
 }
 
 // recordComposite records one composite: its inputs and what it built.
-func (e *Engine) recordComposite(in compositeInputs, composite allocation.NamedAnalyzerResult, holdReasons map[string][]string) {
+// scaleUp is the threshold the warm pool's pressure was read at.
+func (e *Engine) recordComposite(in compositeInputs, composite allocation.NamedAnalyzerResult,
+	holdReasons map[string][]string, scaleUp float64) {
 	e.learnRec.Record(enginerec.KindComposite, e.clock.Now(),
-		compositeEvent(in, composite, holdReasons, e.replayedAnalyzers()))
+		compositeEvent(in, composite, holdReasons, scaleUp, e.replayedAnalyzers()))
 }
 
 // replayedAnalyzers is the names of the analyzers whose Analyze the learner
@@ -60,28 +71,22 @@ func (e *Engine) replayedAnalyzers() map[string]bool {
 // The production path and the replay build the event here, so the two
 // cannot drift.
 func compositeEvent(in compositeInputs, composite allocation.NamedAnalyzerResult, holdReasons map[string][]string,
-	replayed map[string]bool) enginerec.CompositeEvent {
+	scaleUp float64, replayed map[string]bool) enginerec.CompositeEvent {
 	ev := enginerec.CompositeEvent{
 		Namespace:   in.namespace,
 		ModelID:     in.modelID,
 		Grace:       in.grace,
-		Metadata:    in.metadata,
-		ScaleUp:     in.scaleUp,
-		ScaleDown:   in.scaleDown,
+		Metadata:    enginerec.MetaOf(in.metadata),
 		HoldReasons: holdReasons,
 		Supply:      warmPoolSupply(composite),
-		Pressure:    variantPressure(composite, in.scaleUp),
+		Pressure:    variantPressure(composite, scaleUp),
 	}
 	for _, nr := range in.named {
-		entry := enginerec.CompositeEntry{Name: nr.Name, Score: nr.Score, ScaleUp: nr.ScaleUpThreshold,
-			ScaleDown: nr.ScaleDownBoundary, Live: nr.Live}
+		entry := enginerec.CompositeEntry{Name: nr.Name, Live: nr.Live}
 		if !replayed[nr.Name] {
 			entry.Result = learnrec.ResultOf(nr.Result)
 		}
 		ev.Entries = append(ev.Entries, entry)
-	}
-	for _, nr := range in.eligible[:len(in.eligible)-len(in.grace)] {
-		ev.Eligible = append(ev.Eligible, nr.Name)
 	}
 	ev.Composite = composite
 	ev.Composite.Result = learnrec.ResultOf(composite.Result)
@@ -102,6 +107,12 @@ const (
 	// PathCompositeReleaseBound counts composites in which another
 	// analyzer's frame bounds a role's release.
 	PathCompositeReleaseBound = "composite-release-bound"
+	// PathCompositeExternalResult counts composites built with an external
+	// analyzer's result, read from the recording.
+	PathCompositeExternalResult = "composite-external-result"
+	// PathCompositeGrace counts composites built with a listed analyzer
+	// inside its staleness grace and no result.
+	PathCompositeGrace = "composite-grace"
 	// PathWarmPoolSupply counts composites with a variant a bridge serves.
 	PathWarmPoolSupply = "warm-pool-supply"
 	// PathPressureScaleUp counts composites with a variant pushed past its
@@ -113,7 +124,7 @@ const (
 // reports.
 func LearnerReplayPathNames() []string {
 	return []string{PathCompositeBuilt, PathCompositeRoleCapacities, PathCompositeHold, PathCompositeReleaseBound,
-		PathWarmPoolSupply, PathPressureScaleUp}
+		PathCompositeExternalResult, PathCompositeGrace, PathWarmPoolSupply, PathPressureScaleUp}
 }
 
 // LearnerReplay replays the engine events of a learner recording: test
@@ -121,9 +132,10 @@ func LearnerReplayPathNames() []string {
 // cannot import this package. cmd/learnergolden and the replay's tests use
 // it; nothing in the controller does.
 //
-// It rebuilds each composite from the inputs the engine supplied and the
-// analyzers' results the replay reproduced, with the engine's own functions,
-// and records it with the replay's recorder.
+// It rebuilds each composite from the analyzers' replayed results, the
+// policy their Analyze events recorded, and what the event recorded of the
+// engine's history, with the engine's own functions, and records it with the
+// replay's recorder.
 type LearnerReplay struct {
 	paths map[string]int64
 }
@@ -148,32 +160,35 @@ func (r *LearnerReplay) PathCounts() map[string]int64 {
 }
 
 // Apply replays one engine event, at its clock, and records what it built
-// with rec. results is the replay's own result of an analyzer's last Analyze
-// of a model, false when that Analyze failed or never ran.
-func (r *LearnerReplay) Apply(ctx context.Context, ev learnrec.RawEvent,
-	results func(analyzer, namespace, modelID string) (*domain.AnalyzerResult, bool), rec *learnrec.Recorder) error {
+// with rec. replayed is what the replay has reproduced before it.
+func (r *LearnerReplay) Apply(ctx context.Context, ev learnrec.RawEvent, replayed enginerec.Replayed,
+	rec *learnrec.Recorder) error {
 	if ev.Kind == enginerec.KindComposite {
 		var d enginerec.CompositeEvent
 		if err := ev.DecodeData(&d); err != nil {
 			return err
 		}
-		return r.composite(ctx, d, results, rec, ev)
+		return r.composite(ctx, d, replayed, rec, ev)
 	}
 	return fmt.Errorf("an engine event the replay does not know: %s", ev.Kind)
 }
 
-func (r *LearnerReplay) composite(ctx context.Context, d enginerec.CompositeEvent,
-	results func(analyzer, namespace, modelID string) (*domain.AnalyzerResult, bool), rec *learnrec.Recorder,
-	ev learnrec.RawEvent) error {
-	metaByVariant := metadataByVariant(d.Metadata)
-	replayed := map[string]bool{}
+func (r *LearnerReplay) composite(ctx context.Context, d enginerec.CompositeEvent, replayed enginerec.Replayed,
+	rec *learnrec.Recorder, ev learnrec.RawEvent) error {
+	policy, ok := replayed.Policy(d.Namespace, d.ModelID)
+	if !ok || policy == nil {
+		return errors.New("a composite with no Analyze of its model before it to read the policy from")
+	}
+	metadata := enginerec.Metadata(d.Metadata)
+	metaByVariant := metadataByVariant(metadata)
+	fromReplay := map[string]bool{}
 	named := make([]allocation.NamedAnalyzerResult, 0, len(d.Entries))
 	for _, entry := range d.Entries {
 		res := entry.Result
 		if res == nil {
-			replayed[entry.Name] = true
+			fromReplay[entry.Name] = true
 			var ok bool
-			if res, ok = results(entry.Name, d.Namespace, d.ModelID); !ok {
+			if res, ok = replayed.Result(entry.Name, d.Namespace, d.ModelID); !ok {
 				if entry.Name == domain.SaturationAnalyzerName {
 					// The model fails the cycle before any composite
 					// (runAnalyzers): there is none to record.
@@ -183,21 +198,15 @@ func (r *LearnerReplay) composite(ctx context.Context, d enginerec.CompositeEven
 				continue
 			}
 		}
-		nr := namedResultScored(ctx, entry.Name, res, entry.Score, metaByVariant, entry.ScaleUp, entry.ScaleDown)
+		nr := cycleEntry(ctx, entry.Name, res, *policy, metaByVariant)
 		nr.Live = entry.Live
 		named = append(named, nr)
 	}
-	eligible := make([]allocation.NamedAnalyzerResult, 0, len(d.Eligible)+len(d.Grace))
-	for _, name := range d.Eligible {
-		if i := slices.IndexFunc(named, func(nr allocation.NamedAnalyzerResult) bool { return nr.Name == name }); i >= 0 {
-			eligible = append(eligible, named[i])
-		}
-	}
-	eligible = append(eligible, d.Grace...)
-	in := compositeInputs{namespace: d.Namespace, modelID: d.ModelID, named: named, eligible: eligible,
-		grace: d.Grace, metadata: d.Metadata, scaleUp: d.ScaleUp, scaleDown: d.ScaleDown}
-	composite, reasons := composeSignal(ctx, named, eligible, d.ScaleUp, d.ScaleDown)
-	out := compositeEvent(in, composite, reasons, replayed)
+	eligible := append(eligibleEntries(named, *policy), d.Grace...)
+	scaleUp, scaleDown := compositeThresholds(*policy)
+	composite, reasons := composeSignal(ctx, named, eligible, scaleUp, scaleDown)
+	in := compositeInputs{namespace: d.Namespace, modelID: d.ModelID, named: named, grace: d.Grace, metadata: metadata}
+	out := compositeEvent(in, composite, reasons, scaleUp, fromReplay)
 	r.count(out)
 	rec.Record(enginerec.KindComposite, ev.Now, out)
 	return nil
@@ -214,6 +223,12 @@ func (r *LearnerReplay) count(ev enginerec.CompositeEvent) {
 	}
 	if len(ev.Composite.ReleaseBound) > 0 {
 		r.paths[PathCompositeReleaseBound]++
+	}
+	if slices.ContainsFunc(ev.Entries, func(e enginerec.CompositeEntry) bool { return e.Result != nil }) {
+		r.paths[PathCompositeExternalResult]++
+	}
+	if len(ev.Grace) > 0 {
+		r.paths[PathCompositeGrace]++
 	}
 	if slices.ContainsFunc(ev.Supply, func(s enginerec.WarmPoolSupply) bool { return s.Replicas > 0 }) {
 		r.paths[PathWarmPoolSupply]++

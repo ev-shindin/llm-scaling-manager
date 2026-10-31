@@ -63,6 +63,7 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 		r.rep.Analyzes[ev.Kind]++
 		res, err := r.sat.Analyze(ctx, input)
 		r.noteResult(domain.SaturationAnalyzerName, input.Namespace, input.ModelID, res, err)
+		r.notePolicy(input)
 	case saturation.KindNoteVariantsPresent:
 		var d saturation.PresentEvent
 		if err := ev.DecodeData(&d); err != nil {
@@ -197,7 +198,7 @@ func (r *replayer) apply(ctx context.Context, ev learnrec.RawEvent) error {
 			return errors.New("an event the replay does not know")
 		}
 		r.rep.Analyzes[ev.Kind]++
-		return r.engine.Apply(ctx, ev, r.result, r.rec)
+		return r.engine.Apply(ctx, ev, r, r.rec)
 	}
 	return nil
 }
