@@ -127,8 +127,10 @@ func TestTrackerEndsTheGraceAtLongIntervals(t *testing.T) {
 	empty.ReadySince = t0
 	for _, interval := range []time.Duration{45 * time.Second, 60 * time.Second, 61 * time.Second} {
 		// The first cycle at least IdleAfterReady after the first.
-		n := (IdleAfterReady + interval - 1) / interval
-		want := n * interval
+		want := interval
+		for want < IdleAfterReady {
+			want += interval
+		}
 		if got := firstIdleEvery(interval, empty, nil, 0, nil); got != want {
 			t.Errorf("interval %v: idle %v after the first cycle, want %v", interval, got, want)
 		}
