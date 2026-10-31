@@ -223,6 +223,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		logger,
 	)
 	k2, k2Priority, k2Recordable, k2Borrowed := d.k2, d.src, d.recordable, d.borrowed
+	a.noteK2(namespace, modelID, rm.VariantName, role, historyKey, rm.PodName, d, rm.BusiestRankTokens())
 	k2Age, k2AgeKnown := a.k2WriteAge(historyKey, k2Priority, k2Borrowed)
 	// The same saturated moment that yields a k2 observation yields the
 	// replica's saturated THROUGHPUT: with the queue over the threshold the

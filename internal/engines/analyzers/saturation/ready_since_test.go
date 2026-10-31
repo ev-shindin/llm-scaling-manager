@@ -113,7 +113,7 @@ func TestReadySince_AKnownOldReadyTimeIsEstablished(t *testing.T) {
 		var got bool
 		for _, c := range cycles {
 			tr.Observe(settleModel("ns", "m"), []settle.Row{{Key: settle.Key{Pod: pod, Variant: "v"}, Ready: true, ReadySince: c.readyAt}}, c.at)
-			got, _, _ = a.k2Joined(k2SettleInput{namespace: "ns", modelID: "m", variant: "v", pod: pod, ready: true}, cycles[0].at, c.at)
+			got, _, _, _ = a.k2Joined(k2SettleInput{namespace: "ns", modelID: "m", variant: "v", pod: pod, ready: true}, cycles[0].at, c.at)
 		}
 		return got
 	}

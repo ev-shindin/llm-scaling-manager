@@ -1,6 +1,7 @@
 package saturation
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -44,20 +45,26 @@ func newRestartRig(t *testing.T, start time.Time) *restartRig {
 // a refused reading then falls through to.
 func (r *restartRig) cycle(rows []domain.ReplicaMetrics, states []domain.VariantReplicaState) []string {
 	r.t.Helper()
-	roles := make(map[string]string, len(states))
-	for _, vs := range states {
-		roles[vs.VariantName] = vs.Role
-	}
-	r.tr.Observe(settleModel("test-ns", "test-model"), settlerow.Of(rows, roles), r.now)
 	ctx, logs := observedCtx(r.t)
-	_, err := r.a.Analyze(ctx, makeAnalyzerInput(rows, states))
-	require.NoError(r.t, err)
+	r.cycleCtx(ctx, rows, states)
 	var out []string
 	for _, e := range logs.FilterMessage("k2-decision").All() {
 		if p := stringField(r.t, e.ContextMap(), "priority"); strings.HasPrefix(p, "P1-obs") {
 			out = append(out, p)
 		}
 	}
-	r.now = r.now.Add(restartCycle)
 	return out
+}
+
+// cycleCtx is one cycle as cycle runs it, logging to ctx's logger.
+func (r *restartRig) cycleCtx(ctx context.Context, rows []domain.ReplicaMetrics, states []domain.VariantReplicaState) {
+	r.t.Helper()
+	roles := make(map[string]string, len(states))
+	for _, vs := range states {
+		roles[vs.VariantName] = vs.Role
+	}
+	r.tr.Observe(settleModel("test-ns", "test-model"), settlerow.Of(rows, roles), r.now)
+	_, err := r.a.Analyze(ctx, makeAnalyzerInput(rows, states))
+	require.NoError(r.t, err)
+	r.now = r.now.Add(restartCycle)
 }

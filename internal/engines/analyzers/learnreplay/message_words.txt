@@ -39,6 +39,7 @@
 16
 168h
 1h
+1m
 20060102T150405.000000000Z
 24
 24h
@@ -474,6 +475,7 @@ build
 built
 built-in
 busiest
+busiest-rank-max_over_time
 busiestPod
 busiestRankKvUsage
 busiestRankQueue
@@ -536,6 +538,7 @@ cluster-wide
 cohort
 cohorts
 cold
+coldVariants
 collect
 collecting
 combined
@@ -807,6 +810,7 @@ finding
 finite
 first
 firstDroppedSeq
+firstWrite
 fit
 fitted
 fitting
@@ -1039,7 +1043,10 @@ k2-unsettled-window
 k2-waits-after-controller-restart
 k2Borrows
 k2ComputeBound
+k2Cycles
+k2Forgotten
 k2History
+k2Logged
 k2Observed
 k2Priors
 k2Settle
@@ -1106,6 +1113,10 @@ leader-election-retry-period
 learned
 learned-state
 learner
+learner-start
+learner-write
+learnerReports
+learnerStarted
 learnrec
 learnrec-
 least
@@ -1372,6 +1383,7 @@ old
 oldEntries
 older
 oldest
+oldestAdmittedAgeSeconds
 ols
 omittedNamespaces
 on
@@ -1383,6 +1395,7 @@ only
 onto
 open
 operation
+operator
 optimization
 optimizer
 optimizer.type
@@ -1429,6 +1442,7 @@ part
 partner
 parts
 pass
+passedBy
 passes
 past
 path
@@ -1478,6 +1492,7 @@ pod
 pod/
 podGPUs
 pods
+podsOmitted
 pointer
 policies
 policy
@@ -1511,6 +1526,7 @@ present
 pressure-needs-scale-up
 previous
 previous-desired
+previousValue
 price
 priced
 prior
@@ -1544,6 +1560,7 @@ queueLength
 queueLengthThreshold
 queueMax
 queueMean
+queueOverThreshold
 queueThreshold
 queued
 queuedRequests
@@ -1674,6 +1691,7 @@ restart
 restarted
 restore
 restored
+restoredKeys
 restoredTransfers
 restoring
 result
@@ -1805,9 +1823,12 @@ servingSet
 set
 sets
 setting
+settle
 settle.Hold
 settle.Observe
+settleUntil
 settled
+settledForSeconds
 settling
 sfz_flow_control_queue_size
 sglang
@@ -1830,6 +1851,7 @@ sibling
 siblingRate
 siblingRateNow
 side
+sight
 signal
 since
 single
@@ -1991,6 +2013,7 @@ tier-1
 tier-2
 tiers
 time
+timeBase
 timeout
 timeouts
 times

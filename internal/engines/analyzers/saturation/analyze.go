@@ -90,6 +90,14 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 			"boundPriors", r.BoundPriors)
 	}
 
+	// One learner-start line per model, at its first cycle (k2_learner.go).
+	variantNames := make([]string, 0, len(input.VariantStates))
+	for _, vs := range input.VariantStates {
+		variantNames = append(variantNames, vs.VariantName)
+	}
+	a.logLearnerStart(ctx, input.Namespace, input.ModelID, variantNames)
+	a.beginK2Cycle(input.Namespace, input.ModelID)
+
 	c := a.newCycle(ctx, input, satConfig)
 	c.observeFleetShape()
 	c.resolvePricing()
@@ -99,6 +107,8 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 	if err != nil {
 		return nil, err
 	}
+	// After the last replica is priced: k2's reports and learner-write lines.
+	a.closeK2Cycle(ctx, input.Namespace, input.ModelID)
 	c.settleShape(caps)
 
 	d := c.priceDemand(caps)

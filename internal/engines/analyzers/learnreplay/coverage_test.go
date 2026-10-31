@@ -71,7 +71,9 @@ var reviewed = map[reflect.Type]buckets{
 			"ForgetLearnedState", "StableAcceleratorFor"},
 		// PathCounts reads the per-path counters (2.5), which only a replay
 		// reads and nothing restores.
-		readers: []string{"Name", "Horizons", "BorrowTickGap", "PathCounts"},
+		// LearnerReports copies each model's last cycle of learner reports,
+		// which the analyzer overwrites every cycle and nothing restores.
+		readers: []string{"Name", "Horizons", "BorrowTickGap", "PathCounts", "LearnerReports"},
 		// WithSettleView hands k2 the engine's settle tracker; the replay hands
 		// it its own, observed from the settle events (settle.go).
 		builders: []string{"WithHorizons", "WithOptimizationInterval", "WithClock", "WithRecorder", "WithSettleView"},

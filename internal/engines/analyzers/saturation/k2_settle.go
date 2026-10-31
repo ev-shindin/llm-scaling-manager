@@ -236,13 +236,23 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	})
 	a.mu.Unlock()
 
+	var since time.Time
 	if a.k2ReadsSettle {
 		// The settle tracker has its own lock, and is read outside a.mu.
 		var readyKnown bool
-		joined, byReadyAt, readyKnown = a.k2Joined(in, firstCycle, now)
+		joined, byReadyAt, readyKnown, since = a.k2Joined(in, firstCycle, now)
 		if readyKnown {
 			a.paths.add(pathReadySince, 1)
 		}
+	}
+	// admit records how the reading passed, for learner-write's margins.
+	admit := func(by string) string {
+		m := k2Margin{passedBy: by, queueOverThreshold: float64(in.queue) / max(in.threshold, 1)}
+		if !since.IsZero() {
+			m.settledFor = now.Sub(since)
+		}
+		a.noteK2Margin(model, in.variant+"/"+in.pod, m)
+		return ""
 	}
 
 	if in.queue < int(in.threshold) || in.tokens <= 0 {
@@ -260,11 +270,11 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	}
 	perRank := float64(in.tokens) / float64(max(in.ranks, 1))
 	if !(float64(in.queue)*in.perRequest > perRank) {
-		return "" // the queue is the overflow of a batch at least as large
+		return admit("batch") // the queue is the overflow of a batch at least as large
 	}
 	if in.ref > 0 && in.rateOK && in.rate >= in.tune.K2Settle.RateFraction*in.ref &&
 		in.k2Ref > 0 && float64(in.tokens) >= in.tune.K2Settle.RateFraction*in.k2Ref {
-		return ""
+		return admit("rate")
 	}
 	// Settled is FLAT over a window: within K2SettleMaxRise of the reading a
 	// window back, either way. A fall is not settling. A replica that was
@@ -275,7 +285,7 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	// admitted on the rise test alone, took the variant's window 270 539 ->
 	// 222 774 and re-priced every replica there.
 	if settled {
-		return ""
+		return admit("settled")
 	}
 	a.paths.add(pathK2UnsettledWindow, 1)
 	return "queue deeper than the replica's whole resident batch, its service rate or its residency short of what is on record, and its resident KV not settled over a window: a load step, not a limit; not recorded"

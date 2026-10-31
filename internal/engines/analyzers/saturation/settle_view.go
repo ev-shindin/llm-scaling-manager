@@ -141,8 +141,9 @@ func settleModel(namespace, modelID string) string {
 // and the admission refuses it on its own (P1-obs-unadmitted).
 //
 // readyKnown reports whether this cycle's row carried a Ready time, for the
-// per-path counter (PathRowsReadySince).
-func (a *SaturationAnalyzer) k2Joined(in k2SettleInput, firstCycle, now time.Time) (joined, byReadyAt, readyKnown bool) {
+// per-path counter (PathRowsReadySince), and since is when the replica's
+// wait began, zero when it has none to wait.
+func (a *SaturationAnalyzer) k2Joined(in k2SettleInput, firstCycle, now time.Time) (joined, byReadyAt, readyKnown bool, since time.Time) {
 	view := a.settleView()
 	model := settleModel(in.namespace, in.modelID)
 	key := settle.Key{Pod: in.pod, Variant: in.variant, Bridge: in.bridge}
@@ -151,7 +152,7 @@ func (a *SaturationAnalyzer) k2Joined(in k2SettleInput, firstCycle, now time.Tim
 		readyKnown = !trace[n-1].Row.ReadySince.IsZero()
 	}
 	if !in.ready {
-		return false, false, readyKnown
+		return false, false, readyKnown, time.Time{}
 	}
 	r, ok := view.Replica(model, key)
 	if !ok {
@@ -176,7 +177,7 @@ func (a *SaturationAnalyzer) k2Joined(in k2SettleInput, firstCycle, now time.Tim
 	if !a.k2WaitsAfterRestart && !first.After(firstCycle) {
 		first = time.Time{}
 	}
-	since := first
+	since = first
 	if readyAt.After(since) {
 		since = readyAt
 	}
@@ -184,7 +185,7 @@ func (a *SaturationAnalyzer) k2Joined(in k2SettleInput, firstCycle, now time.Tim
 	// The Ready time decided the join when it is the later of the two, or
 	// when a new one under a name already seen is what began the sighting.
 	restarted := !readyAt.IsZero() && r.ReadySeen.After(r.FirstSeen)
-	return joined, joined && !readyAt.IsZero() && (since.Equal(readyAt) || restarted), readyKnown
+	return joined, joined && !readyAt.IsZero() && (since.Equal(readyAt) || restarted), readyKnown, since
 }
 
 // readyAgain is the first Ready row after the last row of trace that was not

@@ -12,6 +12,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 )
@@ -262,6 +263,16 @@ type SaturationAnalyzer struct {
 	ownSettle *settle.Tracker
 	// ownSettled is the models ownSettle has observed (observeOwnSettle).
 	ownSettled map[string]bool
+	// k2 as a learner (k2_learner.go): the cycle in progress per
+	// namespace|model, the value learner-write last logged per k2 key, the
+	// keys forgotten per namespace|model and variant since its last report,
+	// each model's reports of its last cycle, and the models whose
+	// learner-start line is logged.
+	k2Cycles       map[string]*k2Cycle
+	k2Logged       map[string]k2Logged
+	k2Forgotten    map[string]map[string][]learn.Forgotten
+	learnerReports map[string][]learn.Report
+	learnerStarted map[string]bool
 	// k2ReadsSettle is SwitchK2ReadsSettle and k2WaitsAfterRestart
 	// SwitchK2WaitsAfterRestart: on from the constructor; a replay turns
 	// them off (SetSwitchesForReplay).
@@ -409,6 +420,11 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		readySince:             replicaReadySince,
 		ownSettle:              newOwnSettle(),
 		ownSettled:             make(map[string]bool),
+		k2Cycles:               make(map[string]*k2Cycle),
+		k2Logged:               make(map[string]k2Logged),
+		k2Forgotten:            make(map[string]map[string][]learn.Forgotten),
+		learnerReports:         make(map[string][]learn.Report),
+		learnerStarted:         make(map[string]bool),
 		k2ReadsSettle:          true,
 		k2WaitsAfterRestart:    true,
 		horizons:               capacity.DefaultHorizons(),
@@ -610,6 +626,11 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 		if ra.StaleAt(now, bucketRetention) {
 			delete(a.computeCapacityHistory, key)
 			evicted.K2History++
+			// k2 forgets the key itself, unused past its horizon: its
+			// variant's next report says so.
+			if f := strings.Split(key, "|"); len(f) >= 3 {
+				a.noteForgottenLocked(f[0], f[2], f[1], []string{key}, learn.ByEvicted)
+			}
 		}
 	}
 	// A window's arguments go with the window.

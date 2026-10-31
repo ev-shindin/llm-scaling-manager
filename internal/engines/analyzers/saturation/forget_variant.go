@@ -3,6 +3,8 @@ package saturation
 import (
 	"strings"
 	"time"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 )
 
 // Forgetting one variant's learned state, on an operator's request.
@@ -59,8 +61,18 @@ func (a *SaturationAnalyzer) forgetVariant(namespace, modelID, variant, token st
 	name := namespace + "/" + variant
 
 	a.mu.Lock()
-	n := a.dropVariantLocked(namespace, modelID, variant)
-	// The maps with their own rule (scopeOwnRule).
+	// The learners on the shared rules, by name (learn.Learners): each
+	// forgets its own keys and reports them forgotten. A learner not on the
+	// list yet is forgotten below, with the rest of the variant's state.
+	n := 0
+	for _, name := range learn.Learners() {
+		dropped, _ := a.forgetLearnerLocked(name, namespace, modelID, variant, learn.ByOperator)
+		n += dropped
+	}
+	n += a.dropVariantLocked(namespace, modelID, variant)
+	// The maps with their own rule (scopeOwnRule). k2's lower bounds were
+	// ended by its forget (forgetK2Locked); this ends any a key outside its
+	// windows still holds.
 	a.spendLowerBoundsLocked(k2Prefix, a.now())
 	for key, line := range a.itlLines {
 		if strings.HasPrefix(line.fromVariant, itlPrefix) {
