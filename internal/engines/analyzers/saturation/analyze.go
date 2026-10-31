@@ -134,7 +134,8 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 //
 // Every field here is written by exactly ONE stage and read only by later
 // ones -- except shapeChanged, which is deliberately two-phase: raised by
-// observeFleetShape when the tracker declares a change, and cleared by
+// observeFleetShape when the tracker declares a change that raises a hold
+// (or one raised earlier is still outstanding), and cleared by
 // settleShape once the fleet has measured itself under the new shape. That
 // one exception is the reason the holds in applyFloorAndHolds can ask "is a
 // change still outstanding" rather than "did one happen this cycle".

@@ -607,6 +607,91 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		Expect(bare.RoleDemand[domain.RoleDecode] / 0.85).To(BeNumerically("<", decodeP))
 	})
 
+	// A shape change declared by the arriving prompt alone: the replicas'
+	// shape, and so the throughput key, stays where the window was learned,
+	// so the floor has an own window to order on. promptTokens is the queue's
+	// prompt length; disable turns the shape-change hold off.
+	declaring := func(promptTokens int64, disable bool) domain.AnalyzerInput {
+		in := makeAnalyzerInput(
+			[]domain.ReplicaMetrics{decode("decode-0", 200_000, 0, runLambda), prefill("prefill-0", 0)},
+			states(1, 1))
+		in.ArrivalRate = runLambda
+		in.SchedulerQueue = &domain.SchedulerQueueMetrics{QueueSize: 2, QueueBytes: 2 * promptTokens * BytesPerToken}
+		policy, ok := in.Config.(*config.ScalingPolicy)
+		Expect(ok).To(BeTrue(), "fixture Config must be a *config.ScalingPolicy, got %T", in.Config)
+		policy.DisableShapeChangeHold = disable
+		return in
+	}
+	// expectOrdered is the floor ordering decode from lambda / mu: RC through
+	// the engine's headroom, D / scaleUp - supply, is positive on a fleet of
+	// one. On its stale-shape path the floor may only hold, at scaleUp x
+	// supply, so RC is zero.
+	decodePOf := func(r *domain.AnalyzerResult) float64 {
+		var decodeP float64
+		for _, vc := range r.VariantCapacities {
+			if vc.VariantName == decodeVariant {
+				decodeP = vc.PerReplicaCapacity
+			}
+		}
+		return decodeP
+	}
+	expectOrdered := func(r *domain.AnalyzerResult, why string) {
+		GinkgoHelper()
+		decodeP := decodePOf(r)
+		Expect(decodeP).To(BeNumerically(">", 0))
+		Expect(r.RoleDemand[domain.RoleDecode]/0.85).To(BeNumerically(">", decodeP), why)
+		Expect(r.HeldRoleDemand).NotTo(HaveKey(domain.RoleDecode), why)
+	}
+
+	It("orders on mu on the cycle a change is declared with the hold disabled", func() {
+		saturate()
+		before, err := analyzer.Analyze(ctx, declaring(6000, true))
+		Expect(err).NotTo(HaveOccurred())
+		expectOrdered(before, "the floor orders before the change, or this proves nothing")
+		clock = clock.Add(15 * time.Second)
+
+		// The queue's prompts double: a declared change, and no hold.
+		declared, err := analyzer.Analyze(ctx, declaring(12_000, true))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(analyzer.shapeChangedWithin("test-ns", "test-model", time.Second, clock)).To(BeTrue(),
+			"the cycle has to declare a change or this proves nothing")
+		expectOrdered(declared,
+			"a disabled hold leaves the floor free to order on the cycle that declares the change")
+	})
+
+	It("orders on mu on the cycle the backstop gives up on a hold and a change is declared", func() {
+		saturate()
+		_, err := analyzer.Analyze(ctx, declaring(6000, false))
+		Expect(err).NotTo(HaveOccurred())
+		clock = clock.Add(15 * time.Second)
+
+		// A change raises a hold. Prefill has no window of its own, so the
+		// fleet has not measured itself and the hold stands.
+		held, err := analyzer.Analyze(ctx, declaring(12_000, false))
+		Expect(err).NotTo(HaveOccurred())
+		_, _, outstanding := analyzer.fleetShapeState("test-ns", "test-model")
+		Expect(outstanding).To(BeTrue(), "the first change has to raise a hold or this proves nothing")
+		Expect(held.RoleDemand[domain.RoleDecode]).To(BeNumerically("<=", 0.85*decodePOf(held)+1),
+			"while it stands the floor only holds, or this proves nothing")
+
+		// Past the backstop, and a change on the same cycle: the hold is given
+		// up on, the cooldown starts, and this change raises nothing.
+		clock = clock.Add(ShapeChangeHoldMax + time.Second)
+		gaveUp, err := analyzer.Analyze(ctx, declaring(24_000, false))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(analyzer.shapeChangedWithin("test-ns", "test-model", time.Second, clock)).To(BeTrue(),
+			"the cycle has to declare a change or this proves nothing")
+		expectOrdered(gaveUp, "the given-up hold does not come back for the cycle that declares")
+
+		// And a further change inside the cooldown.
+		clock = clock.Add(90 * time.Second)
+		inCooldown, err := analyzer.Analyze(ctx, declaring(48_000, false))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(analyzer.shapeChangedWithin("test-ns", "test-model", time.Second, clock)).To(BeTrue(),
+			"the cycle has to declare a change or this proves nothing")
+		expectOrdered(inCooldown, "a change inside the cooldown raises no hold, so it holds nothing")
+	})
+
 	It("prices a queue as a backlog to drain, not as KV that must be resident at once", func() {
 		saturate()
 		// The first ramp of the run: one decode replica full, 180 requests

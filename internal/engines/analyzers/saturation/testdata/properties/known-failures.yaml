@@ -61,20 +61,6 @@
   finding: "The k2 key's output-length bucket has no hysteresis of its own: with the noise-free output length 6 % above the 500-token medium/long boundary, autocorrelated noise moves the key the analyzer selects, and back."
   measured: "17/50 seeds; seed 2: the selected key changed 2 times in 112 cycles"
   owner: "#396"
-- id: edges/shape-hold/backstop-cooldown
-  class: edges
-  learner: shape-hold
-  expect: wrong-side
-  finding: "Inside the backstop's cooldown (holdFor after it gave up on a hold, gaveUpAt) a new shape change raises no hold, and noteFleetShape still reports the change outstanding on the cycle it is declared, so applyFloorAndHolds floors the demand that cycle. The same return as hold-disabled."
-  measured: "5/5 seeds; seed 1: a change 285 s after the give-up reported outstanding, where no hold is raised"
-  owner: "#391"
-- id: edges/shape-hold/hold-disabled
-  class: edges
-  learner: shape-hold
-  expect: moved
-  finding: "With disableShapeChangeHold (a hold of zero) noteFleetShape still reports the change outstanding on the cycle it is declared, so applyFloorAndHolds floors every role's demand at the no-release band that cycle unless the fleet has measured itself. The code's own comment says a hold of zero leaves nothing outstanding. The same return reports a change outstanding inside the backstop's cooldown (gaveUpAt), where no hold is raised either: the fix is to return whether a hold is outstanding (#391)."
-  measured: "100/100 seeds; seed 1: held true on the change cycle, key 1774 (the key follows the change, as it should)"
-  owner: "#391"
 - id: first-sample/k2/second-reading
   class: first-sample
   learner: k2
