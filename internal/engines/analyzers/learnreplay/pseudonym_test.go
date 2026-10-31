@@ -131,8 +131,8 @@ func TestExport_EveryRecordedStringIsClassified(t *testing.T) {
 	assert.Empty(t, stale, "table entries no recorded field matches")
 	// Pinned, so a new field is a reviewed change.
 	t.Logf("%d string value sites, %d string-keyed maps", len(values), len(keys))
-	assert.Len(t, values, 123, "string value sites")
-	assert.Len(t, keys, 38, "string-keyed maps")
+	assert.Len(t, values, 132, "string value sites")
+	assert.Len(t, keys, 45, "string-keyed maps")
 }
 
 // canaryRecording is a small recording with one more event, of an owner the

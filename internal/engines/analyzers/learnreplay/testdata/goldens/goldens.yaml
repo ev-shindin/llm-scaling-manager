@@ -19,6 +19,28 @@ goldens:
     learning: twelve cycles of fixed synthetic rows, so the start-time average, the
     borrow tolerance and the measured k2 and mu paths barely move, and a change to
     them can leave these goldens as they are.'
+- name: engine
+  outputs:
+  - engine/learned-state.csv
+  - engine/lines.csv
+  - engine/results.csv
+  - engine/slo-published.csv
+  - engine/store-records.csv
+  - engine/variant-capacities.csv
+  - engine/composite-holds.csv
+  - engine/composite-release.csv
+  - engine/composite-results.csv
+  - engine/composite-roles.csv
+  - engine/composite-variants.csv
+  - engine/warm-pool-pressure.csv
+  - engine/warm-pool-supply.csv
+  recording: engine/recording.jsonl.gz
+  source: 'The in-process engine run: the acceptance scenario with each composite
+    recorded, discovery metadata, a bridge lent from the warm pool, an external analyzer
+    that fails every third call, a scale target two replicas below its rows, and the
+    P/D model under a policy that lists slo alone, so the composite holds both its
+    roles. Twelve cycles of synthetic rows. It covers the composite and the warm pool
+    figures, not the optimizer.'
 - name: mu-paths
   outputs:
   - mu-paths/learned-state.csv

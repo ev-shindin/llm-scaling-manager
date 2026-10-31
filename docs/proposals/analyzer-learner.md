@@ -485,7 +485,10 @@ engine-level golden layer (the composite, its holds and their reasons,
 `ReleaseBound`/`OtherFrames`, the warm-pool supply and pressure, the
 optimizer's decisions) is #345's and outside this plan: #345 step 0 adds its
 own recorder events (composite, optimizer and warm-pool inputs) to 0b's sink
-and builds its goldens on them.
+and builds its goldens on them. Status: the composite and the warm pool's
+figures are recorded and replayed (`engine.Composite`, the `engine` golden;
+[testing](../developer-guide/testing.md#the-engine-layer)); the optimizer's
+decisions get their own PR, before #345 step 3.
 
 **The rule.**
 

@@ -11,6 +11,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/enginerec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
@@ -53,6 +54,8 @@ var recordedTypes = []reflect.Type{
 
 	reflect.TypeFor[domain.AnalyzerResult](),
 	reflect.TypeFor[domain.AnalyzerInput](),
+
+	reflect.TypeFor[enginerec.CompositeEvent](),
 }
 
 // fieldNames is every Go field name of recordedTypes: an object whose keys
@@ -136,7 +139,18 @@ const (
 	// classRedact: configuration text no analyzer reads; a non-empty value
 	// is replaced by "redacted".
 	classRedact
+	// classAnalyzer: an analyzer's name; kept when it is the code's own (a
+	// built-in analyzer, the composite), renamed to an "analyzer" pseudonym
+	// otherwise (an external analyzer someone named).
+	classAnalyzer
+	// classHoldReason: why the composite holds a role: the code's own word,
+	// or holdGracePrefix and an analyzer's name, held as classAnalyzer holds
+	// one.
+	classHoldReason
 )
+
+// holdGracePrefix is the hold reason naming the analyzer inside its grace.
+const holdGracePrefix = enginerec.HoldAnalyzerInGrace
 
 // rule is one table entry: a class, and for a rename its category.
 type rule struct {
@@ -171,9 +185,13 @@ var valueRules = map[string]rule{
 	"RateSource": {class: classVocab}, "Source": {class: classVocab}, "Excluded": {class: classVocab},
 	"Objective": {class: classVocab}, "Statistic": {class: classVocab}, "LearnedFrom": {class: classVocab},
 	"FreshnessStatus": {class: classVocab}, "Quantity": {class: classVocab}, "Engine": {class: classVocab},
-	"Scope": {class: classVocab}, "Type": {class: classVocab}, "AnalyzerName": {class: classVocab},
-	"Analyzers.Name": {class: classVocab}, "DefaultPolicy": {class: classVocab}, "Operator": {class: classVocab},
-	"Effect": {class: classVocab}, "KvCacheDtype": {class: classVocab}, "WeightDtype": {class: classVocab},
+	"Scope": {class: classVocab}, "Type": {class: classVocab}, "AnalyzerName": {class: classAnalyzer},
+	"Analyzers.Name": {class: classAnalyzer}, "Analyzers.Type": {class: classAnalyzer},
+	"DefaultPolicy": {class: classVocab}, "Operator": {class: classVocab},
+	// The engine's composite events: analyzer names, and why a role is held.
+	"Entries.Name": {class: classAnalyzer}, "Grace.Name": {class: classAnalyzer}, "Composite.Name": {class: classVocab},
+	"HoldReasons": {class: classHoldReason},
+	"Effect":      {class: classVocab}, "KvCacheDtype": {class: classVocab}, "WeightDtype": {class: classVocab},
 	"Quantization": {class: classVocab}, "KVConnector": {class: classVocab},
 	"KVOffloadingBackend": {class: classVocab}, "MemoryLayout": {class: classVocab},
 
@@ -227,7 +245,11 @@ var keyRules = map[string]rule{
 	"HeldRoleDemand": {class: classVocab}, "HotRankDemand": {class: classVocab},
 	"RoleDemand": {class: classVocab}, "RoleStartSeconds": {class: classVocab},
 	"AnalyzerDefinitions": {class: classVocab}, "Engines": {class: classVocab},
-	"Parameters":                       {class: classVocab},
+	"Parameters": {class: classVocab},
+	// The composite's per-role maps, keyed by role.
+	"Holds": {class: classVocab}, "HoldReasons": {class: classVocab}, "ReleaseBound": {class: classVocab},
+	"OtherFrames": {class: classVocab}, "RoleCapacities": {class: classVocab}, "RoleSpare": {class: classVocab},
+	"RoleReleasable":                   {class: classVocab},
 	saturation.KindTakeRestoreOutcomes: {class: classVocab},
 }
 
@@ -235,7 +257,7 @@ var keyRules = map[string]rule{
 // may hold. A value not here stops the export, naming the field: add the
 // word here when it is the code's own, or classify the field as a rename
 // when it is a name someone chose.
-var vocabulary = setOf(
+var vocabulary = withWords(enginerec.Words(), setOf(
 	// Roles and analyzers.
 	"both", "decode", "prefill", "saturation", "slo", "throughput", "saturation-token-based",
 	"queueing-model", "default",
@@ -261,7 +283,16 @@ var vocabulary = setOf(
 	"MultiConnector", "P2pNcclConnector", "native", "lmcache", "cpu",
 	// The redaction marker.
 	"redacted",
-)
+))
+
+// withWords adds words to a set and returns it: the composite's own words
+// (enginerec.Words), read from the code that writes them.
+func withWords(words []string, set map[string]bool) map[string]bool {
+	for _, w := range words {
+		set[w] = true
+	}
+	return set
+}
 
 func setOf(names ...string) map[string]bool {
 	out := make(map[string]bool, len(names))

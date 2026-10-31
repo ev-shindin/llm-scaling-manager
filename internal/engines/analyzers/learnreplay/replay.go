@@ -62,6 +62,10 @@ type Options struct {
 	// (SetSwitchesForReplay). Nil leaves every switch at its constructor
 	// default.
 	Switches map[string]map[string]bool
+	// Engine replays the recording's engine events; nil takes the one
+	// RegisterEngine set, and with none the engine events are skipped
+	// (Report.Ignored).
+	Engine EngineReplayer
 }
 
 // build makes the analyzers and the store a recording's start describes.
@@ -74,6 +78,10 @@ func build(start learnrec.Start, now time.Time, opts Options, rec *learnrec.Reco
 		clock: clocktesting.NewFakePassiveClock(now),
 		store: capacity.NewStore().WithRecorder(rec),
 		rep:   &Report{Analyzes: map[string]int{}, Ignored: map[string]int{}},
+		rec:   rec,
+	}
+	if r.engine = opts.Engine; r.engine == nil {
+		r.engine = registeredEngine()
 	}
 	h := capacity.Horizons{EpisodeGap: start.Saturation.EpisodeGap, VariantTimeout: start.Saturation.VariantTimeout,
 		BucketRetention: start.Saturation.BucketRetention}
