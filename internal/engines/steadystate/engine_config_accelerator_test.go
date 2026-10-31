@@ -67,7 +67,7 @@ func unresolvedVariant() (*llmdVariantAutoscalingV1alpha1.VariantAutoscaling, sc
 func runWithAnalyzer(t *testing.T, e *Engine, va *llmdVariantAutoscalingV1alpha1.VariantAutoscaling, st scaletarget.ScaleTargetAccessor) {
 	t.Helper()
 	_, err := e.buildInputAndRunSaturation(
-		context.Background(), "m", "ns", nil,
+		context.Background(),
 		config.ScalingPolicy{
 			KvCacheThreshold:     0.8,
 			QueueLengthThreshold: 5,
@@ -75,10 +75,8 @@ func runWithAnalyzer(t *testing.T, e *Engine, va *llmdVariantAutoscalingV1alpha1
 			ScaleUpThreshold:     0.85,
 			ScaleDownBoundary:    0.70,
 		},
-		nil,
 		map[string]scaletarget.ScaleTargetAccessor{utils.GetNamespacedKey("ns", "d"): st},
 		map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling{"ns/v1": va},
-		nil, 0,
 	)
 	require.NoError(t, err)
 }

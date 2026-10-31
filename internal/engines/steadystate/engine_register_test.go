@@ -136,8 +136,9 @@ var _ = Describe("Engine analyzer registry", func() {
 
 			Expect(engine.RegisterAnalyzer("late", &spyAnalyzer{name: "late"})).
 				To(MatchError(ContainSubstring("called after StartOptimizeLoop")))
-			names := []string{}
-			for _, entry := range engine.analyzerRunEntries() {
+			entries := engine.analyzerRunEntries()
+			names := make([]string, 0, len(entries))
+			for _, entry := range entries {
 				names = append(names, entry.name)
 			}
 			Expect(names).To(Equal([]string{domain.SaturationAnalyzerName, domain.SLOAnalyzerName, "throughput", "spy"}))

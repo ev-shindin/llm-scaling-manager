@@ -40,15 +40,13 @@ func TestBuildAnalyzerInput_ForgetsOneVariantOnRequest(t *testing.T) {
 			deploy.Annotations = map[string]string{annotations.ForgetLearnedState: token}
 		}
 		_, err := e.buildInputAndRunSaturation(
-			context.Background(), "m", "ns", nil,
+			context.Background(),
 			config.ScalingPolicy{KvCacheThreshold: 0.8, QueueLengthThreshold: 5, AnalyzerName: "saturation",
 				ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70},
-			nil,
 			map[string]scaletarget.ScaleTargetAccessor{
 				utils.GetNamespacedKey("ns", "d"): scaletarget.NewDeploymentAccessor(deploy),
 			},
 			map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling{"ns/v1": va},
-			nil, 0,
 		)
 		require.NoError(t, err)
 	}

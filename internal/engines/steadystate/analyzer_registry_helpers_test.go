@@ -68,20 +68,15 @@ func (e *Engine) saturationAnalyzer() domain.Analyzer {
 }
 
 // buildInputAndRunSaturation is what runAnalyzers does before the other
-// analyzers: the input builder, with no discovery metadata, then the
-// saturation analyzer on the input it built.
+// analyzers, for model "m" in namespace "ns" with no rows, states, metadata,
+// scheduler queue or arrival rate: the input builder, then the saturation
+// analyzer on the input it built.
 func (e *Engine) buildInputAndRunSaturation(
 	ctx context.Context,
-	modelID, namespace string,
-	replicaMetrics []domain.ReplicaMetrics,
 	policy config.ScalingPolicy,
-	variantStates []domain.VariantReplicaState,
 	scaleTargets map[string]scaletarget.ScaleTargetAccessor,
 	variantAutoscalings map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
-	schedulerQueue *domain.SchedulerQueueMetrics,
-	arrivalRate float64,
 ) (*domain.AnalyzerResult, error) {
-	input := e.buildAnalyzerInput(ctx, modelID, namespace, replicaMetrics, policy, variantStates, nil,
-		scaleTargets, variantAutoscalings, schedulerQueue, arrivalRate)
+	input := e.buildAnalyzerInput(ctx, "m", "ns", nil, policy, nil, nil, scaleTargets, variantAutoscalings, nil, 0)
 	return e.runSaturation(ctx, input)
 }

@@ -158,7 +158,7 @@ func sharedTargetCycle(t *testing.T, e *Engine, vaNames []string, results []allo
 		}
 	}
 	_, err := e.buildInputAndRunSaturation(
-		context.Background(), "m", "ns", nil,
+		context.Background(),
 		config.ScalingPolicy{
 			KvCacheThreshold:     0.8,
 			QueueLengthThreshold: 5,
@@ -166,9 +166,8 @@ func sharedTargetCycle(t *testing.T, e *Engine, vaNames []string, results []allo
 			ScaleUpThreshold:     0.85,
 			ScaleDownBoundary:    0.70,
 		},
-		nil,
 		map[string]scaletarget.ScaleTargetAccessor{utils.GetNamespacedKey("ns", "d"): st},
-		vas, nil, 0,
+		vas,
 	)
 	require.NoError(t, err)
 	e.recordAnalyzerMetrics("ns", "m", results)
@@ -310,8 +309,7 @@ func TestBuildAnalyzerInput_PublishesEachVariantsConfig(t *testing.T) {
 		"--max-num-seqs=128", "--dtype=bfloat16"))
 
 	_, err := e.buildInputAndRunSaturation(
-		context.Background(), "m", "ns",
-		nil, // no replica metrics: the publication happens before any analysis
+		context.Background(), // no replica metrics: the publication happens before any analysis
 		config.ScalingPolicy{
 			KvCacheThreshold:     0.8,
 			QueueLengthThreshold: 5,
@@ -319,12 +317,10 @@ func TestBuildAnalyzerInput_PublishesEachVariantsConfig(t *testing.T) {
 			ScaleUpThreshold:     0.85,
 			ScaleDownBoundary:    0.70,
 		},
-		nil,
 		map[string]scaletarget.ScaleTargetAccessor{
 			utils.GetNamespacedKey("ns", "d"): st,
 		},
 		map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling{"ns/v1": va},
-		nil, 0,
 	)
 	require.NoError(t, err)
 
@@ -416,7 +412,7 @@ func TestBuildAnalyzerInput_PublishesNothingForAVariantWithNoScaleTarget(t *test
 	}
 
 	_, err := e.buildInputAndRunSaturation(
-		context.Background(), "m", "ns", nil,
+		context.Background(),
 		config.ScalingPolicy{
 			KvCacheThreshold:     0.8,
 			QueueLengthThreshold: 5,
@@ -424,10 +420,8 @@ func TestBuildAnalyzerInput_PublishesNothingForAVariantWithNoScaleTarget(t *test
 			ScaleUpThreshold:     0.85,
 			ScaleDownBoundary:    0.70,
 		},
-		nil,
 		map[string]scaletarget.ScaleTargetAccessor{}, // none resolvable
 		map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling{"ns/v1": va},
-		nil, 0,
 	)
 	require.NoError(t, err)
 
