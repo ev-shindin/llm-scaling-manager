@@ -165,8 +165,8 @@ func TestCheckGoldens_ProblemPaths(t *testing.T) {
 }
 
 // A golden that would compare nothing is refused, by the check and by the
-// add alike: an analyzer that ran must have results. The slo analyzer here
-// ran: it has Analyze events, and its results are taken away.
+// add alike: an analyzer that analyzed must have results. The slo analyzer
+// here analyzed: it has Analyze events, and its results are taken away.
 func TestComparedNothing(t *testing.T) {
 	rec := probeRecording(t, "ns", "mdl", []string{"v"}, nil, nil)
 	out, err := goldenOutputs(context.Background(), rec, Fidelity)
@@ -174,15 +174,14 @@ func TestComparedNothing(t *testing.T) {
 	require.NotEmpty(t, out)
 
 	acc := fixtureRecording(t)
-	read, err := learnrec.Read(acc)
+	use, err := readAnalyzerUse(acc)
 	require.NoError(t, err)
-	var start learnrec.Start
-	require.NoError(t, read.Events[0].DecodeData(&start))
-	require.NotNil(t, start.SLO, "precondition: the acceptance run built the slo analyzer")
-	require.Empty(t, builtNotRun(start, read.Events), "precondition: and ran it")
+	require.NotNil(t, use.start.SLO, "precondition: the acceptance run built the slo analyzer")
+	require.Positive(t, use.analyzed("slo"), "precondition: and it analyzed")
+	require.Empty(t, use.neverAnalyzed())
 	outputs, err := goldenOutputs(context.Background(), acc, Normal)
 	require.NoError(t, err)
-	require.Empty(t, comparedNothing(start, outputs, builtNotRun(start, read.Events)))
+	require.Empty(t, comparedNothing(use.start, outputs, use.neverAnalyzed()))
 
 	empty, err := writeRows(nil)
 	require.NoError(t, err)
@@ -192,38 +191,8 @@ func TestComparedNothing(t *testing.T) {
 	rows = slices.DeleteFunc(rows, func(r row) bool { return r.kind == slo.KindAnalyze })
 	outputs[OutputResults], err = writeRows(rows)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"slo results", "slo published"}, comparedNothing(start, outputs, builtNotRun(start, read.Events)),
+	assert.Equal(t, []string{"slo results", "slo published"}, comparedNothing(use.start, outputs, use.neverAnalyzed()),
 		"an analyzer with Analyze events whose results compare nothing is refused")
-}
-
-// An analyzer the start built and that ran no Analyze is not run: the
-// controller builds the slo analyzer whatever the policy lists, so a run
-// whose models list only saturation has no slo results to compare. The add
-// and the check accept it and say so; no golden compares it. On the parent
-// commit, which asked results of every analyzer the start built, the add
-// refused this recording ("would compare nothing for slo results, slo
-// published"), as it refused the E1 benchmark recordings.
-func TestComparedNothing_ABuiltAnalyzerThatNeverRanIsNotRun(t *testing.T) {
-	ctx := context.Background()
-	rec := probeRecording(t, "ns", "mdl", []string{"v"}, nil, nil)
-	withSLO := bytes.Replace(rec, []byte(`"SLO":null`), []byte(`"SLO":{"StateTimeout":3600000000000,"SlopeHoldFor":3600000000000,"Judging":false}`), 1)
-	require.NotEqual(t, rec, withSLO, "precondition: the start now builds the slo analyzer")
-	require.NotContains(t, string(withSLO), slo.KindAnalyze, "precondition: and it never ran")
-
-	out, _, notes, err := goldenReplay(ctx, withSLO, Fidelity)
-	require.NoError(t, err)
-	require.NotEmpty(t, out)
-	assert.Equal(t, []string{"slo: built, not run (0 Analyze events)"}, notes)
-
-	dir := t.TempDir()
-	_, err = AddGolden(ctx, dir, "x", withSLO, AddOptions{Source: "s"})
-	require.NoError(t, err)
-	c, err := CheckGoldens(ctx, dir)
-	require.NoError(t, err)
-	assert.Empty(t, c.Problems)
-	assert.Equal(t, 1, c.Fixtures)
-	assert.Equal(t, []string{"x: slo: built, not run (0 Analyze events)"}, c.NotRun)
-	assert.Positive(t, c.Rows["x/"+OutputResults], "the saturation results are still compared")
 }
 
 // listDir is every file under dir with its bytes.

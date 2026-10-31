@@ -20,6 +20,8 @@ goldens:
     borrow tolerance and the measured k2 and mu paths barely move, and a change to
     them can leave these goldens as they are.'
 - name: e1
+  notRun:
+  - slo
   outputs:
   - e1/learned-state.csv
   - e1/lines.csv
@@ -30,6 +32,8 @@ goldens:
   recording: e1/recording.jsonl.gz
   source: E1 benchmark scenario, recorder on, default analyzerTuning
 - name: e1-tuned
+  notRun:
+  - slo
   outputs:
   - e1-tuned/learned-state.csv
   - e1-tuned/lines.csv
