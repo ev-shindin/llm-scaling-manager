@@ -38,7 +38,7 @@ import (
 //   - Capacities, queue depth, rates and engine ranks are extensive — summed. A
 //     pod's KV capacity is the sum of its instances' capacities, and a request
 //     served by any instance is a request served by the pod.
-//   - Utilization fractions (KvCacheUsage, KvUsageInstant) are recomputed as
+//   - Utilization fractions (KvCacheUsage, KvUsageInstant, KvUsageMean) are recomputed as
 //     Σtokens/Σcapacity rather than averaged, so an instance with a larger cache
 //     weighs proportionally more. Without capacity to weigh by they fall back to
 //     the plain mean.
@@ -134,10 +134,11 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	pod.RunningRequests = 0
 	pod.PreemptionRate = 0
 
-	var weightedKvUsage, weightedKvInstant float64
+	var weightedKvUsage, weightedKvInstant, weightedKvMean float64
 	// Known only if every rank reported it: a rank with no series would
 	// otherwise be averaged in as an empty cache.
 	pod.KvUsageInstantKnown = true
+	pod.KvUsageMeanKnown = true
 	// The same for the capacity part of the queue: a rank without it would
 	// count none of its queue as waiting for capacity.
 	pod.CapacityQueueKnown = true
@@ -162,6 +163,7 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	itlAnyKnown, itlAllEmpty, itlNoneAbsent, itlEmptyGenerated := false, true, true, false
 	for _, m := range group {
 		pod.KvUsageInstantKnown = pod.KvUsageInstantKnown && m.KvUsageInstantKnown
+		pod.KvUsageMeanKnown = pod.KvUsageMeanKnown && m.KvUsageMeanKnown
 		pod.PreemptionRateKnown = pod.PreemptionRateKnown && m.PreemptionRateKnown
 		pod.CapacityQueueKnown = pod.CapacityQueueKnown && m.CapacityQueueKnown
 		pod.KvCacheUsageKnown = pod.KvCacheUsageKnown && m.KvCacheUsageKnown
@@ -196,6 +198,7 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 
 		weightedKvUsage += m.KvCacheUsage * float64(m.TotalKvCapacityTokens)
 		weightedKvInstant += m.KvUsageInstant * float64(m.TotalKvCapacityTokens)
+		weightedKvMean += m.KvUsageMean * float64(m.TotalKvCapacityTokens)
 	}
 
 	if !pod.CapacityQueueKnown {
@@ -210,9 +213,11 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	if capacity > 0 {
 		pod.KvCacheUsage = weightedKvUsage / capacity
 		pod.KvUsageInstant = weightedKvInstant / capacity
+		pod.KvUsageMean = weightedKvMean / capacity
 	} else {
 		pod.KvCacheUsage = mean(group, func(m domain.ReplicaMetrics) float64 { return m.KvCacheUsage })
 		pod.KvUsageInstant = mean(group, func(m domain.ReplicaMetrics) float64 { return m.KvUsageInstant })
+		pod.KvUsageMean = mean(group, func(m domain.ReplicaMetrics) float64 { return m.KvUsageMean })
 	}
 
 	pod.AvgInputTokens = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.AvgInputTokens })

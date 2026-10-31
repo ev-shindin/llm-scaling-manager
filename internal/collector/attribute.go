@@ -439,6 +439,8 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		GenerationTokenRate:      data.generationTokenRate,
 		KvUsageInstant:           data.kvUsageInstant,
 		KvUsageInstantKnown:      data.kvUsageInstantOK,
+		KvUsageMean:              data.kvUsageMean,
+		KvUsageMeanKnown:         data.kvUsageMeanOK,
 		RunningRequests:          data.runningRequests,
 		PreemptionRate:           data.preemptionRate,
 		PreemptionRateKnown:      data.preemptionRateOK,

@@ -116,9 +116,9 @@ func capacityTokensFor(params *capacity.EngineParams, ranks int, liveTokens int6
 // role rejected at once. The fleet still reached 9 so the run stands, but its
 // phase-1 TTFT p95 was 64 s against main's 42 s.
 //
-// The cause is not a threshold that needs tuning. The signals are not
-// collected over the same window -- KvUsageInstant has none, while
-// GenerationTokenRate and AvgITL are both rate[1m] -- so on a ramp k reaches
+// The cause is not a threshold that needs tuning. The signals this check
+// reads are not collected over the same window -- KvUsageInstant has none,
+// while GenerationTokenRate and AvgITL are both rate[1m] -- so on a ramp k reaches
 // its new level in seconds while the 1m rate still reports a fraction of the
 // steady state. The disagreement is therefore largest exactly when a scale-up
 // is needed, and it moves every replica together, so neither N-consecutive
@@ -126,8 +126,10 @@ func capacityTokensFor(params *capacity.EngineParams, ranks int, liveTokens int6
 //
 // What it is still worth: it is the line that let run T be diagnosed, and a
 // persistent mismatch away from a ramp is real evidence that the shape, and so
-// KVreq, does not describe the fleet. When the collector grows a k averaged
-// over the same window as the rate, this can become a gate again.
+// KVreq, does not describe the fleet. The collector now has a k averaged over
+// the same window as the rate (KvUsageMean, which the ITL line is fitted
+// from: issue #393), so this can become a gate again. Until it does, the check
+// still pairs the instant k with the rate[1m] figures, and only logs.
 //
 // Warm-pool replicas and non-decode roles are skipped rather than logged: a
 // bridge runs on the pool's own engine settings (noteITL excludes it from the

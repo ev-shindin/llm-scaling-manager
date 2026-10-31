@@ -66,6 +66,8 @@ type podMetricData struct {
 	generationTokenRate float64
 	kvUsageInstant      float64
 	kvUsageInstantOK    bool
+	kvUsageMean         float64
+	kvUsageMeanOK       bool
 	requestRate         float64
 	// Sequence-cap fields (sequence_cap.go)
 	runningRequests  int
@@ -604,6 +606,26 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 					// The source turns a NaN into 0, which passes the range
 					// test above; only a finite sample is a reading.
 					podData[instanceKey].kvUsageInstantOK = value.Finite()
+				}
+			}
+		}
+	}
+
+	// Process KV usage averaged over the ITL window (0.0–1.0) — the k of an
+	// ITL(k) reading, over the same minute as the ITL rate (issue #393)
+	if result := results[registration.QueryKvUsageMean]; result != nil {
+		if !result.HasError() {
+			for _, value := range result.Values {
+				instanceKey, _, _ := c.buildInstanceKey(ctx, namespace, value.Labels)
+				if instanceKey == "" {
+					continue
+				}
+				if podData[instanceKey] == nil {
+					continue // skip pods the KV/queue queries didn't see (scrape skew)
+				}
+				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value >= 0 && value.Value <= 1 {
+					podData[instanceKey].kvUsageMean = value.Value
+					podData[instanceKey].kvUsageMeanOK = value.Finite()
 				}
 			}
 		}

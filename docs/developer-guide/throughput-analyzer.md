@@ -168,6 +168,21 @@ the managed HPA/ScaledObject — a cached Kubernetes lookup per instance. That r
 for every layout, shadow pods included, so stamping the label buys nothing. Pods the
 locator cannot resolve are counted by `wva_pod_mapping_miss_total`.
 
+#### QueryKvUsageMean (`kv_usage_mean`)
+
+```promql
+avg by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (avg_over_time(vllm:kv_cache_usage_perc{namespace="..."}[1m])))
+```
+
+**What it measures:** KV cache utilization fraction per pod (0.0–1.0), averaged over
+the window the ITL rate is taken over (`ITLWindow`).
+
+**ReplicaMetrics field:** `KvUsageMean` (`KvUsageMeanKnown`), read through `KvUsageForITL()`.
+
+**Used by:** `itl.Tracker`, the ITL line the saturation and SLO analyzers fit. Each `(k, ITL)`
+reading pairs the minute's mean `k` with the minute's ITL (issue #393). This analyzer's own
+window still reads `KvUsageInstant`.
+
 ---
 
 #### QueryRequestRate (`request_rate`)

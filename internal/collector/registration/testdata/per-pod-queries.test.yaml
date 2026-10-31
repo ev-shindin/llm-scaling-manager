@@ -432,6 +432,18 @@ tests:
             value: 0.75
           - labels: '{model_name="glm",instance="10.0.0.2:8000",pod="dup-2"}'
             value: 0.5
+      # kv_usage_mean: the same mean, each rank averaged over the ITL window (the gauges are flat, so it equals the instant)
+      - expr: 'avg by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (avg_over_time(vllm:kv_cache_usage_perc{namespace="llm"}[1m])))'
+        eval_time: 10m
+        exp_samples:
+          - labels: '{model_name="glm",instance="10.0.0.8:8000",pod="dp8-0"}'
+            value: 0.203125
+          - labels: '{model_name="glm",instance="10.0.1.1:8000",pod="solo-0"}'
+            value: 0.5
+          - labels: '{model_name="glm",instance="10.0.0.6:8000",pod="pid-0"}'
+            value: 0.75
+          - labels: '{model_name="glm",instance="10.0.0.2:8000",pod="dup-2"}'
+            value: 0.5
       # queue_length: summed over the ranks; a second scrape (solo-0, dup-2) or a pid copy (pid-0) is not counted twice
       - expr: 'sum by (model_name, instance, pod) (max by (model_name, instance, pod, engine) (max_over_time(vllm:num_requests_waiting{namespace="llm"}[1m])))'
         eval_time: 10m
