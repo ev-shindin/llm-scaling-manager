@@ -72,7 +72,8 @@ const (
 	// QueryKvUsageMean is the query name for the per-pod KV cache utilization
 	// fraction (0.0–1.0) averaged over ITLWindow: avg_over_time of the gauge
 	// QueryKvUsageInstant reads, folded over the ranks the same way. It is the
-	// k of an ITL(k) reading (itl.Tracker), so the reading pairs the minute's
+	// k of an ITL(k) reading (itl.Tracker, and the throughput analyzer's window
+	// and tier-2 fit, issue #403), so the reading pairs the minute's
 	// k with the minute's ITL rate (QueryAvgITL); the instant k against it
 	// flattened the fitted slope whenever the batch moved inside the minute
 	// (issue #393).

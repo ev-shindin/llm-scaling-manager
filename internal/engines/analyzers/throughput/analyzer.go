@@ -178,12 +178,17 @@ func (a *ThroughputAnalyzer) observe(
 		// Collect one (k*, ITL) observation per healthy replica. Per-replica variation
 		// in k* provides the k-spread needed for a reliable OLS fit.
 		for _, m := range healthyMetrics {
+			// The k paired with the replica's ITL: the KV fill averaged over
+			// the minute its rate covers when the collector read that, the
+			// instant fill otherwise (issue #403, as #393 for itl.Tracker).
+			// The band and the reading judge that one figure.
+			k := m.KvUsageForITL()
 			// The window spans the whole cache; the band is applied here.
-			inBand := m.KvUsageInstant >= lo && m.KvUsageInstant <= hi
-			if dropped := !inBand || state.observationWindow.Add(m.KvUsageInstant, m.AvgITL, now); dropped {
+			inBand := k >= lo && k <= hi
+			if dropped := !inBand || state.observationWindow.Add(k, m.AvgITL, now); dropped {
 				ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("throughput analyzer: observation dropped (k out of range or ITL invalid)",
 					"namespace", namespace, "modelID", modelID, "variant", variantName,
-					"k", m.KvUsageInstant, "itl", m.AvgITL)
+					"k", k, "itl", m.AvgITL)
 			}
 		}
 		state.observationWindow.Prune(now)
@@ -619,12 +624,14 @@ func (a *ThroughputAnalyzer) resolveITLModel(ctx context.Context, state *variant
 		baselineB = state.lastFittedB
 		tier2Label = itlReasonT2Pinned
 	}
+	// Each replica's k is the one paired with its ITL in the window: the
+	// minute's mean fill when the collector read it, else the instant fill.
 	var numerator, sumK2 float64
 	var n float64
 	for _, m := range metrics {
-		if m.KvUsageInstant > 0 && m.AvgITL > 0 {
-			numerator += (m.AvgITL - baselineB) * m.KvUsageInstant
-			sumK2 += m.KvUsageInstant * m.KvUsageInstant
+		if k := m.KvUsageForITL(); k > 0 && m.AvgITL > 0 {
+			numerator += (m.AvgITL - baselineB) * k
+			sumK2 += k * k
 			n++
 		}
 	}
