@@ -23,6 +23,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/enginerec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
@@ -163,7 +164,6 @@ func (e *Engine) runAnalyzers(
 	if err != nil {
 		return nil, err
 	}
-	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
 
 	// Build AnalyzerInput once; shared by all non-saturation analyzers. Each
 	// reports demand and capacity only: the engine applies the thresholds
@@ -182,7 +182,7 @@ func (e *Engine) runAnalyzers(
 	// first and always runs; each non-saturation analyzer is run only if
 	// registered and enabled.
 	namedResults := []allocation.NamedAnalyzerResult{
-		buildNamedResult(ctx, domain.SaturationAnalyzerName, baseResult, config, metaByVariant, satUp, satDown),
+		cycleEntry(ctx, domain.SaturationAnalyzerName, baseResult, config, metaByVariant),
 	}
 	for _, entry := range e.analyzerRunEntries() {
 		if entry.name == domain.SaturationAnalyzerName {
@@ -195,8 +195,7 @@ func (e *Engine) runAnalyzers(
 		if result == nil {
 			continue
 		}
-		up, down := config.AnalyzerThresholds(entry.name)
-		namedResults = append(namedResults, buildNamedResult(ctx, entry.name, result, config, metaByVariant, up, down))
+		namedResults = append(namedResults, cycleEntry(ctx, entry.name, result, config, metaByVariant))
 	}
 
 	e.updateLivenessAndSetLive(ctx, namespace, modelID, namedResults)
@@ -1406,13 +1405,14 @@ func (e *Engine) collectV2ModelRequest(
 	// result sizes nothing. The thresholds are saturation's own, a
 	// per-analyzer override included: the composite's demand is saturation's,
 	// and the warm pool's pressure reads the same pair.
-	eligibleAnalyzers := excludeByName(namedResults, domain.SLOAnalyzerName)
-	if !config.SaturationListed() {
-		eligibleAnalyzers = excludeByName(eligibleAnalyzers, domain.SaturationAnalyzerName)
+	grace := e.listedInGrace(namespace, modelID, config, namedResults)
+	eligibleAnalyzers := append(eligibleEntries(namedResults, config), grace...)
+	satUp, satDown := compositeThresholds(config)
+	composite, holdReasons := composeSignal(ctx, namedResults, eligibleAnalyzers, satUp, satDown)
+	if e.learnRec.Active() {
+		e.recordComposite(compositeInputs{namespace: namespace, modelID: modelID, named: namedResults,
+			grace: grace, metadata: variantMetadata}, composite, holdReasons, satUp)
 	}
-	eligibleAnalyzers = append(eligibleAnalyzers, e.listedInGrace(namespace, modelID, config, namedResults)...)
-	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
-	composite := buildComposite(ctx, namedResults, eligibleAnalyzers, satUp, satDown)
 	// How hard each variant is being pushed, for the retained pool's switching
 	// decision. Published from the composite, the result the optimizer acts on,
 	// with saturation's scale-up threshold, so the pool never switches for a
@@ -1445,6 +1445,25 @@ func (e *Engine) collectV2ModelRequest(
 	}, nil
 }
 
+// eligibleEntries is the entries of namedResults the composite may size
+// from: every one less the slo analyzer, which only observes, and less
+// saturation when the policy does not list it. The grace entries are the
+// caller's to add.
+func eligibleEntries(namedResults []allocation.NamedAnalyzerResult, config config.ScalingPolicy) []allocation.NamedAnalyzerResult {
+	eligible := excludeByName(namedResults, domain.SLOAnalyzerName)
+	if !config.SaturationListed() {
+		eligible = excludeByName(eligible, domain.SaturationAnalyzerName)
+	}
+	return eligible
+}
+
+// compositeThresholds is the scale-up threshold and scale-down boundary the
+// composite is judged at, and the warm pool's pressure read with:
+// saturation's, a per-analyzer override included.
+func compositeThresholds(config config.ScalingPolicy) (scaleUp, scaleDown float64) {
+	return config.AnalyzerThresholds(domain.SaturationAnalyzerName)
+}
+
 // excludeByName returns a copy of results without the entries named name.
 func excludeByName(results []allocation.NamedAnalyzerResult, name string) []allocation.NamedAnalyzerResult {
 	return slices.DeleteFunc(slices.Clone(results), func(nr allocation.NamedAnalyzerResult) bool {
@@ -1460,6 +1479,21 @@ func metadataByVariant(variantMetadata []domain.VariantMetadata) map[string]doma
 		byName[m.VariantName] = m
 	}
 	return byName
+}
+
+// cycleEntry is one analyzer's entry for the cycle: its result built at
+// the policy's thresholds for it (buildNamedResult). runAnalyzers builds every
+// entry here, and a learner replay rebuilds each one here, from the policy
+// the recording kept.
+func cycleEntry(
+	ctx context.Context,
+	name string,
+	result *domain.AnalyzerResult,
+	config config.ScalingPolicy,
+	metaByVariant map[string]domain.VariantMetadata,
+) allocation.NamedAnalyzerResult {
+	up, down := config.AnalyzerThresholds(name)
+	return buildNamedResult(ctx, name, result, config, metaByVariant, up, down)
 }
 
 // buildNamedResult wraps one analyzer's raw (D, P) result in the optimizer-facing
@@ -1993,13 +2027,27 @@ func publishWarmPoolSupply(namespace string, nr allocation.NamedAnalyzerResult) 
 		return
 	}
 	now := time.Now()
+	for _, s := range warmPoolSupply(nr) {
+		decision.PublishWarmPoolSupply(namespace, s.Variant, s.Replicas, s.Capacity, now)
+	}
+}
+
+// warmPoolSupply is what publishWarmPoolSupply publishes for each variant of
+// nr, in nr's variant order: nothing without a result, and nothing for a
+// variant with no name.
+func warmPoolSupply(nr allocation.NamedAnalyzerResult) []enginerec.WarmPoolSupply {
+	if nr.Result == nil {
+		return nil
+	}
+	var out []enginerec.WarmPoolSupply
 	for _, vc := range nr.Result.VariantCapacities {
 		if vc.VariantName == "" {
 			continue
 		}
-		decision.PublishWarmPoolSupply(namespace, vc.VariantName,
-			vc.WarmPoolReplicas, vc.WarmPoolCapacity, now)
+		out = append(out, enginerec.WarmPoolSupply{Variant: vc.VariantName, Replicas: vc.WarmPoolReplicas,
+			Capacity: vc.WarmPoolCapacity})
 	}
+	return out
 }
 
 // publishVariantPressure records how close each variant is to needing capacity.
@@ -2014,6 +2062,22 @@ func publishVariantPressure(namespace string, nr allocation.NamedAnalyzerResult,
 		return
 	}
 	now := time.Now()
+	for _, p := range variantPressure(nr, scaleUp) {
+		decision.PublishPressure(namespace, p.Variant, decision.Pressure{
+			SpareFraction: p.SpareFraction,
+			NeedsScaleUp:  p.NeedsScaleUp,
+			At:            now,
+		})
+	}
+}
+
+// variantPressure is what publishVariantPressure publishes for each variant
+// of nr, in nr's variant order.
+func variantPressure(nr allocation.NamedAnalyzerResult, scaleUp float64) []enginerec.VariantPressure {
+	if nr.Result == nil {
+		return nil
+	}
+	var out []enginerec.VariantPressure
 	for _, vc := range nr.Result.VariantCapacities {
 		if vc.VariantName == "" {
 			continue
@@ -2028,10 +2092,11 @@ func publishVariantPressure(namespace string, nr allocation.NamedAnalyzerResult,
 		// serving this model instead of another.
 		// A role the composite holds against growth is not being grown, however
 		// hard it is pushed.
-		decision.PublishPressure(namespace, vc.VariantName, decision.Pressure{
+		out = append(out, enginerec.VariantPressure{
+			Variant:       vc.VariantName,
 			SpareFraction: 1 - vc.Utilization,
 			NeedsScaleUp:  vc.Utilization > scaleUp && !nr.Holds[domain.RoleOfVC(vc)].NoScaleUp,
-			At:            now,
 		})
 	}
+	return out
 }

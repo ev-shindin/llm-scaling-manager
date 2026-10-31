@@ -3,7 +3,9 @@ analyzertuning
 average
 barely
 benchmark
+call
 exercises
+fails
 fixed
 forget
 four
@@ -12,7 +14,9 @@ in-process
 judging
 learning
 leave
+lists
 little
+metadata
 paths
 recorder
 restarts
@@ -23,7 +27,9 @@ scenario
 start-time
 sweeps
 synthetic
+third
 three
 tuned
 twelve
+warm
 yields

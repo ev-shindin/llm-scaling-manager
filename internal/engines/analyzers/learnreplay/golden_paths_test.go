@@ -21,7 +21,7 @@ func TestGoldens_EveryLearnerPathRuns(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, c.Problems)
 	require.Empty(t, c.Uncovered)
-	for _, p := range saturation.PathNames() {
+	for _, p := range requiredPaths() {
 		assert.Positive(t, c.Paths[p], "no golden runs %s", p)
 	}
 	t.Logf("learner paths over %d fixtures: %v", c.Fixtures, c.Paths)
@@ -63,9 +63,9 @@ func TestGoldens_APathNoGoldenRunsIsAProblem(t *testing.T) {
 // Each counter's zero-check: with every path counted but one, the check
 // names exactly that one.
 func TestGoldens_EachPathAtZeroIsNamedAlone(t *testing.T) {
-	for _, zero := range saturation.PathNames() {
+	for _, zero := range requiredPaths() {
 		paths := map[string]int64{}
-		for _, p := range saturation.PathNames() {
+		for _, p := range requiredPaths() {
 			paths[p] = 1
 		}
 		paths[zero] = 0
@@ -74,5 +74,5 @@ func TestGoldens_EachPathAtZeroIsNamedAlone(t *testing.T) {
 			assert.Contains(t, got[0], "learner path "+zero+":", "%s at zero", zero)
 		}
 	}
-	assert.Len(t, pathProblems(map[string]int64{}), len(saturation.PathNames()))
+	assert.Len(t, pathProblems(map[string]int64{}), len(requiredPaths()))
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/enginerec"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 )
 
@@ -68,13 +69,30 @@ func buildComposite(
 	namedResults, eligibleAnalyzers []allocation.NamedAnalyzerResult,
 	scaleUp, scaleDown float64,
 ) allocation.NamedAnalyzerResult {
+	composite, _ := composeSignal(ctx, namedResults, eligibleAnalyzers, scaleUp, scaleDown)
+	return composite
+}
+
+// composeSignal is buildComposite, and, for each role the composite holds,
+// the reasons it holds it, in the order they were found (nil when nothing is
+// held): what the "composite holds a role" line logs, and what a learner
+// recording keeps beside the composite.
+//
+// It reads nothing but its arguments: a learner recording keeps exactly
+// these, and a replay rebuilds the composite from them
+// (engine_recording.go).
+func composeSignal(
+	ctx context.Context,
+	namedResults, eligibleAnalyzers []allocation.NamedAnalyzerResult,
+	scaleUp, scaleDown float64,
+) (allocation.NamedAnalyzerResult, map[string][]string) {
 	logger := ctrl.LoggerFrom(ctx)
 	sat := findSaturation(namedResults)
 	// No saturation entry: nothing to express demand in. Unreachable in
 	// production, where runAnalyzers fails before building any entry
 	// without one; every test builds its own slice.
 	if sat == nil || sat.Result == nil {
-		return emptyComposite()
+		return emptyComposite(), nil
 	}
 
 	warnModelLevelOnly(ctx, *sat, eligibleAnalyzers)
@@ -167,7 +185,10 @@ func buildComposite(
 	}
 	composite.Remaining = composite.RequiredCapacity
 	composite.Spare = composite.SpareCapacity
-	return composite
+	if len(composite.Holds) == 0 {
+		return composite, nil
+	}
+	return composite, holds.reasons
 }
 
 // warnModelLevelOnly logs each listed analyzer that cannot size a P/D model:
@@ -565,21 +586,12 @@ func redistributeVariantDemand(vcs []domain.VariantCapacity, role string, demand
 
 // Why the composite holds a role, logged as the reason of each
 // "composite holds a role" line. A role can be held for more than one.
+// Defined in enginerec, which a learner recording's export reads them from.
 const (
-	// holdUnsized: saturation is not listed and no listed analyzer sizes
-	// the role, so it neither grows nor shrinks.
-	holdUnsized = "no-listed-analyzer-sizes-role"
-	// holdOtherRoleUnsized: on P/D, another role is held for holdUnsized,
-	// so this one does not grow either.
-	holdOtherRoleUnsized = "other-role-cannot-grow"
-	// holdAnalyzerInGrace is the prefix of the reason a listed analyzer
-	// inside its staleness grace with no reading holds a role against
-	// scale-down; the analyzer's name follows it.
-	holdAnalyzerInGrace = "analyzer-in-grace:"
-	// holdSaturationHolds: saturation holds the role (HeldRoleDemand) and
-	// another analyzer's demand replaced its held figure, so the role does
-	// not shrink.
-	holdSaturationHolds = "saturation-holds-role"
+	holdUnsized          = enginerec.HoldUnsized
+	holdOtherRoleUnsized = enginerec.HoldOtherRoleUnsized
+	holdAnalyzerInGrace  = enginerec.HoldAnalyzerInGrace
+	holdSaturationHolds  = enginerec.HoldSaturationHolds
 )
 
 // roleHoldSet is what the composite forbids each role this cycle, and why.

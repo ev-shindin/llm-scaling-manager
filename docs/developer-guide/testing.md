@@ -181,7 +181,8 @@ The learner recorder writes every input the analyzers read, and every result
 they return, to a file of JSON lines, so a run can be replayed through the
 analyzers later (`internal/engines/analyzers/learnreplay`). The design is in
 [the learner proposal](../proposals/analyzer-learner.md), sections 2.4 and 2.5.
-It is a test aid, off by default.
+It also records each model's composite, with the inputs the engine handed it
+([the engine layer](#the-engine-layer)). It is a test aid, off by default.
 
 Before you start:
 
@@ -342,6 +343,85 @@ restarts under its own name. To write it again as a raw recording:
 LEARNREC_MUPATHS_OUT=$HOME/mu-paths.jsonl go test ./internal/engines/steadystate/ -run TestLearnerRecording_TheMuPathsRunReachesEveryLearnerPath -v
 ```
 
+#### The engine layer
+
+The analyzer events stop at each `Analyze`. The engine layer (issue #345,
+step 0) carries a recording on to the composite, so a replay holds the
+composite to a golden as it holds the analyzers. The optimizer's decisions
+get a layer of their own, in a later pull request (before #345 step 3).
+
+With a recording open, `collectV2ModelRequest` writes one `engine.Composite`
+event per model per cycle, after the model's analyzers
+(`internal/engines/steadystate/engine_recording.go`; the event types are in
+`internal/engines/enginerec`). It records only what a replay cannot rebuild,
+and what the composite built:
+
+- each analyzer entry, by name, with its liveness verdict, which reads the
+  engine's history of the analyzer. The result of an analyzer the recording
+  replays (saturation, slo, throughput) is not recorded again; an external
+  analyzer's is;
+- the entries of the listed analyzers inside their staleness grace, also
+  read from that history;
+- what the capacity-build step reads of the discovery metadata: each
+  variant's name, role and current replicas;
+- the composite, the reasons it holds each role, and the warm pool's figures
+  published from it: each variant's bridge supply and its pressure.
+
+A replay rebuilds each composite with the engine's own functions. It takes
+each analyzer's result from its own replayed `Analyze`. From the policy
+that `Analyze` received, it derives what the engine derives from the
+cycle's policy: each entry's score and thresholds (`cycleEntry`, which runs
+the capacity-build step), the entries the composite may size from
+(`eligibleEntries`), and saturation's thresholds (`compositeThresholds`).
+A change to an analyzer, or to how the engine assembles the composite's
+inputs, therefore reaches the composite goldens.
+
+A test holds the composite to these inputs
+(`TestEngineRecording_TheCompositeReadsOnlyItsArguments`). It walks, with
+type information, every function of the engine, allocation, aggregation,
+domain, config, enginerec and learnrec packages the replay's functions
+reach. It fails on a method of the engine, a read of any package's
+package-level variable (the logger aside), a call to the time package's
+clock, and a call into another package of this module the walk does not
+follow. The engine replays its own events
+(`steadystate.LearnerReplay`); `learnreplay` cannot import the engine, whose
+tests import it, so `cmd/learnergolden` and the replay's tests register it
+(`learnreplay.RegisterEngine`). A recording that carries engine events is
+not a golden without it: the check says so.
+
+A golden whose recording carries engine events has seven more output files:
+`composite-results.csv` (each composite at model scope),
+`composite-variants.csv`, `composite-roles.csv` (role capacities of a P/D
+model), `composite-holds.csv` (each held role with its reasons),
+`composite-release.csv` (`ReleaseBound` and `OtherFrames` per role),
+`warm-pool-supply.csv` and `warm-pool-pressure.csv`. A golden without engine
+events has none of them.
+
+The `engine` golden is the acceptance run with the engine layer on. It adds
+discovery metadata, a bridge lent from the warm pool, the P/D model under a
+policy that lists the slo analyzer alone (so the composite holds both its
+roles), and an external analyzer that fails every third call (its results
+are recorded; on the cycles it fails it is inside its grace, and the
+composite holds the roles it covers). From the seventh cycle agg-a's scale
+target is two replicas below what its rows report, so the capacity-build
+step clamps each analyzer's replica count. Every field of its metadata is
+set; the recording keeps three, so a replay that matches shows the
+capacity-build step reads no other. To write it again as a raw recording:
+
+```bash
+LEARNREC_ENGINE_OUT=$HOME/engine.jsonl go test ./internal/engines/steadystate/ -run TestLearnerRecording_TheEngineLayerReplaysByteForByte -v
+```
+
+An external analyzer's name is a name someone chose, so the export renames
+it to an `analyzer` pseudonym (`analyzer-01`) wherever it stands: the policy,
+an entry, a result, a grace entry, and a hold reason
+(`analyzer-in-grace:analyzer-01`). The built-in analyzers keep their names.
+A pseudonym keeps the order of the external names among themselves, not
+against the built-in names, and the composite reads other analyzers' frames
+in name order. So an external name that sorts after a built-in one (after
+`saturation`, say) can come out of the export in another order, and the
+add's byte-for-byte replay then refuses the export. Nothing is committed.
+
 #### Per-path counters
 
 The saturation analyzer counts how often each learner path runs
@@ -365,6 +445,15 @@ not where its input arrives:
 
 The names are one table in `path_counts.go`; `PathCounts` and `PathNames`
 read it.
+
+The engine's replay counts its own paths (`LearnerReplay.PathCounts`):
+composites built, composites of a P/D model priced per role, composites that
+hold a role, composites in which another analyzer's frame bounds a release,
+composites built with an external analyzer's recorded result, composites
+with an analyzer inside its grace, composites in which the capacity-build
+step clamped a variant's replica count to its scale target, and composites
+with a variant a bridge serves or a variant pushed past its scale-up
+threshold. With the engine's replay registered, they are required too.
 
 The committed goldens must run every path at least once between them:
 `make test` and `make learner-goldens-check` fail when one runs on no
