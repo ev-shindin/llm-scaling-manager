@@ -331,10 +331,15 @@ published.
   list only saturation has slo built and never analyzed.
 - Such an analyzer is not compared: its rows in `results.csv` and its
   `slo-published.csv` are empty. The add writes it into the fixture's
-  `notRun` field in `goldens.yaml`, and the check prints it, for example
-  `e1: slo: built, never analyzed (0 Analyze events)`. The check fails
-  when a replay disagrees with `notRun`, so a fixture that moves into or
-  out of the set is a diff of `goldens.yaml`.
+  `notRun` field in `goldens.yaml`, and the check prints it as a note, for
+  example `note: e1: slo: built, never analyzed (0 Analyze events)`. The
+  check fails when a replay disagrees with `notRun`, so a fixture that
+  moves into or out of the set is a diff of `goldens.yaml`. An update
+  writes the set back and prints a `changed:` line for each fixture whose
+  set it changed.
+- An analyzer is listed when a policy entry names it as its effective
+  type: its `type` when set, else its `name`. An entry with
+  `enabled: false` does not list it.
 - An analyzer that a recorded policy lists and that has no `Analyze` event
   is refused: the controller was asked to run it and never did.
 - An analyzer with even one `Analyze` event analyzed, and a golden that

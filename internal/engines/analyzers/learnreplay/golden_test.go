@@ -37,13 +37,17 @@ func TestGoldens_EveryCommittedGoldenReproduces(t *testing.T) {
 	// no learned-state snapshot taken.
 	for _, g := range m.Goldens {
 		for _, o := range g.Outputs {
-			if why := c.MayBeEmpty[g.Name][path.Base(o)]; why != "" && c.Rows[o] == 0 {
-				t.Logf("%s is empty: %s", o, why)
+			if c.mayBeEmpty[g.Name][path.Base(o)] && c.Rows[o] == 0 {
+				t.Logf("%s is empty, by its rule", o)
 				continue
 			}
 			assert.Positive(t, c.Rows[o], "%s compared no row", o)
 		}
 	}
+	// The E1 benchmark goldens ran under a policy that lists only
+	// saturation: slo was built and never analyzed in both, and no other
+	// fixture has an analyzer it never analyzed.
+	assert.Equal(t, map[string][]string{"e1": {analyzerSLO}, "e1-tuned": {analyzerSLO}}, c.NotRun)
 	t.Logf("%d fixtures, rows compared per file: %v; built and never analyzed: %v", c.Fixtures, c.Rows, c.NotRun)
 }
 

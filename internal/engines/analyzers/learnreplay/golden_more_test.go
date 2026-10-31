@@ -174,10 +174,10 @@ func TestComparedNothing(t *testing.T) {
 	require.NotEmpty(t, out)
 
 	acc := fixtureRecording(t)
-	use, err := readAnalyzerUse(acc)
+	use, err := readAnalyzerUse(acc, 0)
 	require.NoError(t, err)
 	require.NotNil(t, use.start.SLO, "precondition: the acceptance run built the slo analyzer")
-	require.Positive(t, use.analyzed("slo"), "precondition: and it analyzed")
+	require.Positive(t, use.analyzeCount(analyzerSLO), "precondition: and it analyzed")
 	require.Empty(t, use.neverAnalyzed())
 	outputs, err := goldenOutputs(context.Background(), acc, Normal)
 	require.NoError(t, err)

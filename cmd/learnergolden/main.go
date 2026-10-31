@@ -121,10 +121,14 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if ok, err := parse(); !ok {
 			return err
 		}
-		if err := learnreplay.UpdateGoldens(ctx, *dir); err != nil {
+		moved, err := learnreplay.RewriteGoldens(ctx, *dir)
+		if err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintln(out, "rewrote the goldens")
+		for _, m := range moved {
+			_, _ = fmt.Fprintln(out, "changed: "+m)
+		}
 		return check(ctx, *dir, out, false)
 	case "check":
 		dir := fs.String("dir", learnreplay.GoldenDir, "the golden directory")
@@ -162,7 +166,7 @@ func check(ctx context.Context, dir string, out io.Writer, covered bool) error {
 	_, _ = fmt.Fprintf(out, "learner paths run, over every fixture: %v\n", c.Paths)
 	for _, name := range slices.Sorted(maps.Keys(c.NotRun)) {
 		for _, a := range c.NotRun[name] {
-			_, _ = fmt.Fprintf(out, "  %s: %s: built, never analyzed (0 Analyze events)\n", name, a)
+			_, _ = fmt.Fprintf(out, "note: %s: %s: built, never analyzed (0 Analyze events)\n", name, a)
 		}
 	}
 	for _, p := range c.Problems {
