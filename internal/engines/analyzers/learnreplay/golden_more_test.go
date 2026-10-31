@@ -81,6 +81,28 @@ func fixtureRecording(t *testing.T) []byte {
 	return b
 }
 
+// cycledRecording is a recording made at this commit: a start and the given
+// number of cycles of every recorded call. A test that adds a recording as
+// a golden uses it rather than the committed one, whose Fidelity replay at a
+// later commit writes the input fields added since and so no longer matches
+// it byte for byte (#400).
+func cycledRecording(t *testing.T, cycles int) []byte {
+	t.Helper()
+	f := newFixture(readersAt)
+	f.buf.Reset()
+	rec := learnrec.New(f.buf, 0)
+	f.attach(rec)
+	start := defaultStart()
+	start.SLO = &learnrec.SLOStart{StateTimeout: f.slo.StateTimeout(), SlopeHoldFor: f.slo.SlopeHoldFor(), Judging: f.slo.Judging()}
+	start.Throughput = true
+	rec.Record(learnrec.KindStart, readersAt, start)
+	for n := range cycles {
+		f.cycle(t, n)
+	}
+	require.NoError(t, rec.Err())
+	return bytes.Clone(f.buf.Bytes())
+}
+
 // writeFixtureRecording replaces the copy's acceptance recording.
 func writeFixtureRecording(t *testing.T, dir string, b []byte) {
 	t.Helper()
@@ -276,9 +298,15 @@ func TestAddGolden(t *testing.T) {
 		assert.True(t, os.IsNotExist(err), "the old fixture was left inside the new one")
 	})
 	t.Run("a head cut anywhere is added", func(t *testing.T) {
-		full := fixtureRecording(t)
+		full := cycledRecording(t, 12)
 		n := bytes.Count(full, []byte("\n")) / 3
-		_, err := AddGolden(ctx, t.TempDir(), "head", full, AddOptions{Source: "s", HeadLines: n})
+		require.Positive(t, bytes.Count(headLines(full, n), []byte(`.Analyze"`)), "precondition: the head holds an Analyze")
+		// Not "head": the add refuses a fixture name that holds a recorded
+		// name, and the recording's pods are named a to d (its namespace,
+		// model and variant ns, m and v). Each part of the name must also be
+		// a number, a scenario name such as e1 or a word in source_words.txt,
+		// and no listed word that says "head" is free of those letters.
+		_, err := AddGolden(ctx, t.TempDir(), "x", full, AddOptions{Source: "s", HeadLines: n})
 		require.NoError(t, err)
 	})
 }

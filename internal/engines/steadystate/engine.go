@@ -1484,6 +1484,11 @@ func (e *Engine) optimizeV2(
 	// stage 3, for the same reason: scale-to-zero is resolved from them there.
 	modelTiers := make(map[string][]string)
 
+	// Map order, deliberately (#400): sorting this loop would also change the
+	// order models are analysed and their requests reach the optimizer, not
+	// only how a learner recording is ordered. So a recording from a running
+	// controller interleaves models in map order; the in-process generators
+	// sort models themselves.
 	for groupKey, modelVAs := range modelGroups {
 		modelID := modelVAs[0].Spec.ModelID
 		namespace := modelVAs[0].Namespace

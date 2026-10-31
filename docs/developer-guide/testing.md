@@ -674,6 +674,29 @@ To write the acceptance run as a raw recording:
 LEARNREC_ACCEPTANCE_OUT=$HOME/acceptance.jsonl go test ./internal/engines/steadystate/ -run TestLearnerRecording_AnExportReplaysAndNamesNothing -v
 ```
 
+The acceptance, mu-paths and engine runs each write the same bytes every
+time at one commit. Events with the same timestamp come out in a fixed
+order, not in map order. `NoteVariantsPresent` comes out in model order,
+with its variants sorted. Each model's `StableAcceleratorFor` and
+`FileScaleTarget` come out in variant order. The runs analyse models in
+sorted order themselves. `TestLearnerRecording_EachGeneratorIsReproducible`
+holds each run to it.
+
+A running controller still analyses models in map order (`optimizeV2`).
+Sorting that loop would change the order models are analysed and reach the
+optimizer, not only the recording. So a recording from a running controller
+keeps the order its cycles ran in, and is never made twice to compare.
+
+An add replays its recording in Fidelity mode, which fails on a recording
+made before an input field was added. So the two tests that add a recording,
+`TestAddGolden` ("a head cut anywhere is added") and
+`TestRun_AddCheckUpdate`, build it in the test. A new input field then does
+not force the committed recordings to be written again. Other tests still
+read the committed acceptance recording (`rawRecording` in
+`cmd/learnergolden`, `fixtureRecording` in `learnreplay`). They only export
+it or run the golden check on it, and neither compares it byte for byte
+with a replay.
+
 ## Learner Property Tests
 
 The [learner goldens](#learner-goldens) pin what the analyzers output on a
