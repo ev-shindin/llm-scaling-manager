@@ -641,6 +641,16 @@ To write the acceptance run as a raw recording:
 LEARNREC_ACCEPTANCE_OUT=$HOME/acceptance.jsonl go test ./internal/engines/steadystate/ -run TestLearnerRecording_AnExportReplaysAndNamesNothing -v
 ```
 
+The acceptance, mu-paths and engine runs each write the same bytes every
+time at one commit.
+Events with the same timestamp come out sorted by model, then variant, not
+in map order. `TestLearnerRecording_EachGeneratorIsReproducible` holds each
+run to it.
+
+The tests of the add (`TestAddGolden` and `TestRun_AddCheckUpdate`) build
+their recording in the test. They do not read a committed one. So a new
+input field does not force the committed recordings to be written again.
+
 ## Learner Property Tests
 
 The [learner goldens](#learner-goldens) pin what the analyzers output on a
