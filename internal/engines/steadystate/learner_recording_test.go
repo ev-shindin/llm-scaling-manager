@@ -419,7 +419,7 @@ func recordRunEngine(t *testing.T, start time.Time, record bool) ([]byte, [][]al
 // a cycle, which is a stated limit (learnreplay/settle.go).
 func TestLearnerRecording_AFailedCollectionIsRecordedAsAHold(t *testing.T) {
 	s := newRecScript(recStart)
-	s.failModel, s.failAt = "acme/agg", 2
+	s.failModel, s.failAt = s.variants[0].model, 2 // acme/agg
 	e := s.engine(t)
 	var buf bytes.Buffer
 	e.recordLearners(learnrec.New(&buf, 0))
