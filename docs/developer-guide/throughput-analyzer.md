@@ -324,8 +324,9 @@ Maintains the current workload shape bucket `(IL, OL, IL_eff, KVreq)`. Detects s
 
 **ObservationWindow (`signals/itl/window.go`)**  
 Rolling window of `(k, ITL_obs)` pairs collected per replica per cycle, with
-`k = KvUsageForITL()`: the minute's mean fill when the collector read it, else k*. Filters observations
-to `k ∈ [0.15, 0.85]` (reliable linear-model range). Reports `Ready()` when ≥ 10 samples with
+`k = KvUsageForITL()`: the minute's mean fill when the collector read it, else k*. Keeps only
+observations with `k` inside the policy band, `[0.15, 0.80]` by default (reliable linear-model
+range), set by [`analyzerTuning.itlBand`](../reference/scaling-policy.md#analyzertuningitlband-the-kv-band-the-itl-line-is-fitted-over). Reports `Ready()` when ≥ 10 samples with
 ≥ 0.30 k-spread are accumulated within the 30-minute default window.
 
 **ITLModel (`signals/itl/model.go`)**  
@@ -339,14 +340,14 @@ The engine's universal threshold post-step writes `RequiredCapacity` and `SpareC
 
 ### State and High Availability
 
-`ThroughputAnalyzer` is stateful across reconcile cycles: it accumulates `(k*, ITL)` observations until the window is ready to fit the ITL model. The state is **in-memory only** — a `map[string]*variantState` held inside the analyzer instance, with no persistence to etcd or Kubernetes.
+`ThroughputAnalyzer` is stateful across reconcile cycles: it accumulates `(k, ITL)` observations, with `k = KvUsageForITL()`, until the window is ready to fit the ITL model. The state is **in-memory only** — a `map[string]*variantState` held inside the analyzer instance, with no persistence to etcd or Kubernetes.
 
 Per-variant state is minimal:
 
 | Field | What it holds |
 |---|---|
 | `ShapeTracker` | Current workload shape snapshot (IL, OL, hit rate); overwritten each cycle |
-| `ObservationWindow` | Rolling slice of ≤ 20 `(k*, ITL_obs)` pairs + timestamps |
+| `ObservationWindow` | Rolling slice of ≤ 20 `(k, ITL_obs)` pairs + timestamps, `k = KvUsageForITL()` |
 | `lastSanityReport` | Most recent sanity check result |
 | `lastObservedAt` | Timestamp of last observation |
 
@@ -432,7 +433,7 @@ On leader failover the incoming leader starts with an empty analyzer. During war
 │                                                          │
 │  per variant:                                            │
 │    ShapeTracker → KVreq                                  │
-│    ObservationWindow → (k*, ITL) pairs                   │
+│    ObservationWindow → (k, ITL) pairs                    │
 │    ITLModel (tier-1 OLS or tier-2 constrained)           │
 │    supply: μ_dec_sat = k_sat×KV_max / KVreq / ITL(k_sat) │
 │    demand: EPP primary → engine fallback → k*-local      │
@@ -744,12 +745,12 @@ shape tracker's in `internal/signals/shape`; the analyzer's own in
 | `itl.DefaultKSat` | 0.85 | KV utilization at which μ_dec_sat is evaluated |
 | `DefaultBaselineITLSec` | 0.006 | B in tier-2 ITL model (H100 near-zero-load baseline) |
 | `DefaultQueueDrainFactor` | 2.0 | Bounds queueing time to ≤ factor × ITL(k_sat) × OL |
-| `itl.DefaultWindowMaxSize` | 20 | Max (k*, ITL) pairs in the observation window |
+| `itl.DefaultWindowMaxSize` | 20 | Max (k, ITL) pairs in the observation window, `k = KvUsageForITL()` |
 | `itl.DefaultObservationMaxAge` | 30m | Observations older than this are pruned (by the analyzer's `Prune` call) |
 | `itl.DefaultMinSamples` | 10 | Minimum samples for OLS Ready flag |
 | `itl.DefaultMinKSpread` | 0.30 | Minimum k-spread for OLS Ready flag |
-| `itl.DefaultMinObservableK` | 0.15 | Lower k* filter for the observation window |
-| `itl.DefaultMaxObservableK` | 0.85 | Upper k* filter for the observation window (equals `DefaultKSat`) |
+| `itl.DefaultMinObservableK` | 0.15 | Default lower edge of the band on `KvUsageForITL()` for the observation window; policy key [`analyzerTuning.itlBand.minObservableK`](../reference/scaling-policy.md#analyzertuningitlband-the-kv-band-the-itl-line-is-fitted-over) |
+| `itl.DefaultMaxObservableK` | 0.80 | Default upper edge of the band on `KvUsageForITL()` for the observation window, below `DefaultKSat` (0.85); policy key [`analyzerTuning.itlBand.maxObservableK`](../reference/scaling-policy.md#analyzertuningitlband-the-kv-band-the-itl-line-is-fitted-over) |
 | `shape.DefaultChangeTolerance` | 0.20 | IL or OL shift that triggers window reset |
 | `DefaultGPSMismatchThresholdPct` | 15.0 | GPS error % above which SpareCapacity is suppressed |
 | `DefaultGPSMinKForVerification` | 0.30 | Minimum k* for GPS check to apply |
