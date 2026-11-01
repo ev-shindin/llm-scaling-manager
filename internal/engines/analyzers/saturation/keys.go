@@ -120,9 +120,8 @@ func (a *SaturationAnalyzer) historyKey(
 
 // k2KeyOutput is the output length a replica's k2 history is keyed by: the
 // fleet's length (keyOutput), its bucket held across a boundary
-// (k2KeyLength), and not the replica's own average. It is not the length the
-// throughput key reads (the tracked one), so the two keys can sit in
-// different buckets for minutes after the length crosses a boundary.
+// (keyLengths), and not the replica's own average. The throughput key reads
+// the same band (SwitchMuKeyBucketHeld), so the two keys sit in one bucket.
 //
 // The replica's own average has no hysteresis, and a workload that sits on a
 // bucket boundary crosses it every few cycles. Measured on a two-namespace

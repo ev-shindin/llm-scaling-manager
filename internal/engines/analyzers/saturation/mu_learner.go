@@ -57,6 +57,9 @@ const (
 	muReasonYieldServed         learn.Reason = "yield-served"
 	muReasonYieldStale          learn.Reason = "yield-stale"
 	muReasonYieldSiblings       learn.Reason = "yield-siblings"
+	// muReasonSwapPending is a reading not written because a swap is
+	// pending on the key's band (muSwapFrozen).
+	muReasonSwapPending learn.Reason = "swap-pending"
 )
 
 // muRefusalReason is the Report's reason for a refusal throughputRefusal

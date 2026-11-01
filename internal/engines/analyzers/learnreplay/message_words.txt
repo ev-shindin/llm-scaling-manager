@@ -1282,8 +1282,10 @@ move
 moved
 mu
 mu-exact-repeat-is-use
+mu-key-bucket-held
 mu-latch-restores-safe-side
 mu-sample-written
+mu-swap-freeze
 mu-unknown-age-resolves-safe
 mu-yield-served
 mu-yield-sibling
@@ -1300,6 +1302,7 @@ muDecModel
 muDivisor
 muInputTokens
 muKey
+muKeyMoved
 muLogged
 muShortWindow
 muSource
@@ -1990,6 +1993,7 @@ supply
 supported
 sustainFor
 swap
+swap-pending
 sweep
 swing
 swingReversals

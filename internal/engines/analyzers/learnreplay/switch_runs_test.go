@@ -35,13 +35,14 @@ import (
 // replaySwitches is each saturation replay switch, and the golden outputs
 // (fixture/file) it is named to move.
 //
-// #396's bands: the idle band and the k2 key's bucket band. Learner PR 2's
-// and PR 3's switches are not here: "all off" is this PR's switches, and an
-// earlier PR's stay at their constructor default, on, as the base goldens
-// were written (analyzer-learner.md, 2.5).
+// #415's band on the throughput (mu) key, and its window's freeze while a
+// swap is pending. Learner PR 2's and PR 3's
+// switches, and #396's bands, are not here: "all off" is this PR's switches,
+// and an earlier PR's stay at their constructor default, on, as the base
+// goldens were written (analyzer-learner.md, 2.5).
 var replaySwitches = map[string][]string{
-	saturation.SwitchIdleBand:        nil,
-	saturation.SwitchK2KeyBucketHeld: nil,
+	saturation.SwitchMuKeyBucketHeld: nil,
+	saturation.SwitchMuSwapFreeze:    nil,
 }
 
 // earlierSeams is each switch an earlier learner PR added whose seam the
@@ -57,6 +58,8 @@ var earlierSeams = map[string][]string{
 	saturation.SwitchMuRepeatIsUse:       nil,
 	saturation.SwitchMuUnknownAgeSafe:    nil,
 	saturation.SwitchMuLatchRestoresSafe: nil,
+	saturation.SwitchIdleBand:            nil,
+	saturation.SwitchK2KeyBucketHeld:     nil,
 }
 
 // heldBy is, for a switch that names no output, the unit tests that hold it:
@@ -75,6 +78,14 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestK2KeyBucket_APendingSwapHoldsTheBucket"},
 		{"../saturation", "TestK2KeyBucket_AMovedKeyIsPricedFromTheBucketItLeft"},
 		{"../saturation", "TestK2KeyBucket_TheSwitchPicksTheLength"},
+	},
+	saturation.SwitchMuKeyBucketHeld: {
+		{"../saturation", "TestMuKeyBucket_TheSwitchPicksTheLength"},
+		{"../saturation", "TestMuKeyBucket_TheKeysShareABucket"},
+		{"../saturation", "TestMuKeyBucket_AMovedKeyIsCarriedLowerOnly"},
+	},
+	saturation.SwitchMuSwapFreeze: {
+		{"../saturation", "TestMuKeyBucket_APendingSwapFreezesTheWindow"},
 	},
 	saturation.SwitchK2ReadsSettle: {
 		{"../saturation", "TestSettleView_TheTrackerSwitchMovesTheAbsenceRule"},

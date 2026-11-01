@@ -228,14 +228,135 @@ func TestK2KeyBucket_TheSwitchPicksTheLength(t *testing.T) {
 	a.now = func() time.Time { return propStart }
 	a.fleetShape["ns|m"] = &shapeMemo{}
 	length := func(model string, fleet float64) float64 {
-		l, _ := a.k2KeyLength("ns", model, fleet, 530)
-		return l
+		return a.keyLengths("ns", model, fleet, 530).k2
 	}
 	assert.Equal(t, 480.0, length("m", 480), "on: the fleet's length")
 	assert.Equal(t, 480.0, length("m", 0), "on, no length this cycle: the held one")
 	assert.Equal(t, 530.0, length("other", 480), "no shape memo yet: the tracked length")
 	require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchK2KeyBucketHeld: false}))
 	assert.Equal(t, 530.0, length("m", 480), "off: the tracked length")
+}
+
+// The throughput key's switch (#415), the same way: on, the band's length,
+// the one the k2 key reads; off, the tracked length, and no move or carry.
+// Each key reads the band by its own switch, and the band runs while either
+// is on.
+func TestMuKeyBucket_TheSwitchPicksTheLength(t *testing.T) {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	a.now = func() time.Time { return propStart }
+	a.fleetShape["ns|m"] = &shapeMemo{}
+	got := a.keyLengths("ns", "m", 480, 530)
+	assert.Equal(t, 480.0, got.mu, "on: the fleet's length")
+	assert.Equal(t, got.k2, got.mu, "on: the length the k2 key reads")
+	assert.Equal(t, 480.0, a.keyLengths("ns", "m", 0, 530).mu, "on, no length this cycle: the held one")
+	require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchMuKeyBucketHeld: false}))
+	got = a.keyLengths("ns", "m", 480, 530)
+	assert.Equal(t, 530.0, got.mu, "off: the tracked length")
+	assert.Equal(t, 480.0, got.k2, "off: the k2 key still reads the band")
+	assert.Zero(t, got.muLeft, "off: nothing to carry from")
+	require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchMuKeyBucketHeld: true, SwitchK2KeyBucketHeld: false}))
+	got = a.keyLengths("ns", "m", 480, 530)
+	assert.Equal(t, 480.0, got.mu, "the k2 switch off: the throughput key still reads the band")
+	assert.Equal(t, 530.0, got.k2, "the k2 switch off: the tracked length")
+}
+
+// The two keys sit in one bucket on every cycle (#415): k2's settle test
+// (k2Unsettled) compares a throughput reference with a k2 reference, read
+// under the two keys, and from different buckets they are figures of
+// different shapes. On the property case's fleet, its output length 6 %
+// above the 500-token boundary with noise, the buckets agree on every
+// cycle; with SwitchMuKeyBucketHeld off they do not, on some seed.
+func TestMuKeyBucket_TheKeysShareABucket(t *testing.T) {
+	split := func(edit func(*SaturationAnalyzer)) (int, int) {
+		t.Helper()
+		splits, seeds := 0, 0
+		for seed := uint64(1); seed <= 50; seed++ {
+			noise := arNoise(propRand(seed), 120, 0.06, 0.9)
+			lengths := make([]float64, len(noise))
+			for i, e := range noise {
+				lengths[i] = 530 * (1 + e)
+			}
+			k2, mu, err := selectedKeys(lengths, nil, edit)
+			require.NoError(t, err)
+			n := 0
+			for i := range k2 {
+				require.NotEmpty(t, k2[i], "seed %d cycle %d: no k2 key", seed, i)
+				require.NotEmpty(t, mu[i], "seed %d cycle %d: no mu key", seed, i)
+				if bucketOf(k2[i]) != bucketOf(mu[i]) {
+					n++
+				}
+			}
+			splits += n
+			if n > 0 {
+				seeds++
+			}
+		}
+		return splits, seeds
+	}
+	splits, seeds := split(nil)
+	assert.Zero(t, splits, "on: the k2 and mu keys sat in different buckets on %d cycles of %d seeds", splits, seeds)
+	splits, seeds = split(func(a *SaturationAnalyzer) { a.muKeyBucketHeld = false })
+	assert.Positive(t, splits, "off: the keys never split, so this test cannot see the switch")
+	t.Logf("off: the keys sat in different buckets on %d cycles of %d of 50 seeds", splits, seeds)
+}
+
+// A throughput key the band moved to a bucket with no window is priced from
+// the bucket it left where that is lower than the nearest neighbour
+// (carriedThroughput), and the neighbour where it is not. The variant
+// measured "short" at 4 and "long" at 1; the band moves the key from "long"
+// to "medium". The nearest neighbour, the shorter on a tie, is "short": 4,
+// over what the "long" figure of 1 says. Carried, 1; with
+// SwitchMuKeyBucketHeld off, nothing is carried and the key is still "long".
+func TestMuKeyBucket_AMovedKeyIsCarriedLowerOnly(t *testing.T) {
+	const prefix = "ns|v|m|H200|1|decode|ilong|"
+	short, medium, long := prefix+"short|q5", prefix+"medium|q5", prefix+"long|q5"
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	a.now = func() time.Time { return propStart }
+	a.recordSaturatedThroughputFrom(short, "p", 4)
+	a.recordSaturatedThroughputFrom(long, "p", 1)
+
+	none := a.saturatedThroughputReadingUnder(medium, "", true)
+	require.Equal(t, 4.0, none.rate, "precondition: the nearest neighbour is short's")
+	got := a.carriedThroughput(medium, long, "", none)
+	assert.Equal(t, 1.0, got.rate, "carried from the bucket left, the lower")
+	assert.Equal(t, "long", got.bucket)
+	assert.True(t, got.borrowed, "a carried figure is borrowed")
+
+	// Lower only: a key that left "short" for "medium" keeps the nearest.
+	a2 := NewSaturationAnalyzer(capacity.NewStore())
+	a2.now = a.now
+	a2.recordSaturatedThroughputFrom(short, "p", 4)
+	a2.recordSaturatedThroughputFrom(long, "p", 1)
+	near := a2.saturatedThroughputReadingUnder(medium, "", true)
+	assert.Equal(t, near, a2.carriedThroughput(medium, short, "", near), "the bucket left is higher: the neighbour stands")
+
+	// A window of its own is never carried over.
+	a.recordSaturatedThroughputFrom(medium, "p", 2)
+	own := a.saturatedThroughputReadingUnder(medium, "", true)
+	assert.Equal(t, own, a.carriedThroughput(medium, long, "", own), "own window: as read")
+
+	// Through the analyzer: the band moves the key, and muLeft names the
+	// bucket left; off, the throughput key reads the tracked length and
+	// carries nothing.
+	b := NewSaturationAnalyzer(capacity.NewStore())
+	clock := propStart
+	b.now = func() time.Time { return clock }
+	b.fleetShape["ns|m"] = &shapeMemo{}
+	var keys outputKeys
+	for range 10 {
+		keys = b.keyLengths("ns", "m", 530, 530)
+		clock = clock.Add(propCycle)
+	}
+	for range int(K2KeyBucketDwell/propCycle) + 2 {
+		keys = b.keyLengths("ns", "m", 380, 530)
+		clock = clock.Add(propCycle)
+	}
+	require.Equal(t, "medium", classifyOutputLength(keys.mu), "precondition: a swap moved the band to medium")
+	assert.Equal(t, "long", classifyOutputLength(keys.muLeft), "the bucket left")
+	require.NoError(t, b.SetSwitchesForReplay(map[string]bool{SwitchMuKeyBucketHeld: false}))
+	keys = b.keyLengths("ns", "m", 380, 530)
+	assert.Equal(t, 530.0, keys.mu, "off: the tracked length")
+	assert.Zero(t, keys.muLeft, "off: nothing carried")
 }
 
 // A key that moves to a bucket with no window of its own is priced from the
@@ -277,4 +398,101 @@ func TestK2KeyBucket_AMovedKeyIsPricedFromTheBucketItLeft(t *testing.T) {
 	}
 	require.GreaterOrEqual(t, moved, 0, "the key never moved to medium: the test did not reach the move")
 	t.Logf("the key moved to medium on cycle %d at 440; learned k2 %v, k1 %v", moved, learned, k1)
+}
+
+// swapRun is one variant measured saturated at 530 output tokens ("long")
+// at 3 req/s, then saturated at 5500 tokens at 0.5 req/s: a swap to longer
+// outputs. It returns, for each cycle after the swap, whether a swap was
+// pending on the band, the "long" window's readings after the cycle, and the
+// variant's service-rate source.
+type swapCycle struct {
+	pending bool
+	long    []float64
+	source  string
+}
+
+func runSwap(t *testing.T, freeze bool) (before []float64, cycles []swapCycle) {
+	t.Helper()
+	store := capacity.NewStore()
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(256, "vllm:v1")}, propStart)
+	a := NewSaturationAnalyzer(store)
+	require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchMuSwapFreeze: freeze}))
+	clock := propStart
+	a.now = func() time.Time { return clock }
+	longKey := ""
+	readings := func() []float64 {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if longKey == "" {
+			for k := range a.saturatedThroughput {
+				if bucketOf(k) == "long" {
+					longKey = k
+				}
+			}
+		}
+		ra, ok := a.saturatedThroughput[longKey]
+		if !ok {
+			return nil
+		}
+		return ra.Snapshot().Values
+	}
+	run := func(out, rate float64) string {
+		t.Helper()
+		rm := makeReplicaMetrics("pod-a", "variant-a", 12000, 16000, 6, 100, out)
+		rm.RequestRate, rm.GenerationTokenRate, rm.Ready = rate, rate*out, true
+		res, err := a.Analyze(context.Background(), makeAnalyzerInput([]domain.ReplicaMetrics{rm}, mtOneVariant))
+		require.NoError(t, err)
+		require.Len(t, res.VariantCapacities, 1)
+		clock = clock.Add(propCycle)
+		if sr := res.VariantCapacities[0].ServiceRate; sr != nil {
+			return sr.RateSource
+		}
+		return ""
+	}
+	src := ""
+	for range 12 {
+		src = run(530, 3)
+	}
+	before = readings()
+	require.NotEmpty(t, before, "precondition: the variant measured mu in long")
+	require.Equal(t, domain.ServiceRateSourceMeasured, src, "precondition: priced from its own measurement in long")
+	for range int(K2KeyBucketDwell/propCycle) + 4 {
+		src := run(5500, 0.5)
+		a.mu.Lock()
+		pending := !a.fleetShape["test-ns|test-model"].k2Key.swapSince.IsZero()
+		a.mu.Unlock()
+		cycles = append(cycles, swapCycle{pending: pending, long: readings(), source: src})
+	}
+	return before, cycles
+}
+
+// While a swap is pending the throughput window is frozen (muSwapFrozen):
+// the arriving shape's readings are not written into the bucket the key is
+// leaving, and that bucket's measured mu -- 3 req/s at 530 tokens, six times
+// the 0.5 of the shape arriving -- never prices at full authority. With
+// SwitchMuSwapFreeze off, the mutant: the old bucket's window takes the new
+// shape's readings and prices as measured.
+func TestMuKeyBucket_APendingSwapFreezesTheWindow(t *testing.T) {
+	before, cycles := runSwap(t, true)
+	pending := 0
+	for i, c := range cycles {
+		if !c.pending {
+			continue
+		}
+		pending++
+		assert.Equal(t, before, c.long, "cycle %d, swap pending: the long window was written", i)
+		assert.NotEqual(t, domain.ServiceRateSourceMeasured, c.source, "cycle %d, swap pending: the old bucket's mu priced at full authority", i)
+	}
+	require.Positive(t, pending, "no cycle had a swap pending: the test did not reach the freeze")
+	assert.False(t, cycles[len(cycles)-1].pending, "the swap never landed")
+
+	before, cycles = runSwap(t, false)
+	wrote, measured := false, false
+	for _, c := range cycles {
+		if c.pending {
+			wrote = wrote || !assert.ObjectsAreEqual(before, c.long)
+			measured = measured || c.source == domain.ServiceRateSourceMeasured
+		}
+	}
+	assert.True(t, wrote && measured, "freeze off: the pending swap should write the long window (%v) and price it as measured (%v); the test cannot see the switch", wrote, measured)
 }

@@ -51,6 +51,17 @@ import (
 // used only where it is below the variant's own capacity without it, held
 // 30 min, relaxed over 6 h, and set aside by the new bucket's first
 // measurement.
+//
+// The throughput (mu) key reads the same band (#415). It read the tracked
+// length, which moved on one reading 20 % off its anchor, so on the same
+// property case (edges/mu/key-near-output-boundary) it left "long" for
+// "medium" on 13 of 50 seeds: measured mu was read from, and written to,
+// another bucket's window at constant load, and k2's settle test
+// (k2Unsettled) compared a throughput reference from one bucket with a k2
+// reference from another. One band puts both keys in one bucket on every
+// cycle. When the band moves the throughput key to a bucket with no window,
+// it borrows a neighbour's as it always has (nearestSaturatedThroughput),
+// and the bucket it left where that is lower (carriedThroughput).
 
 // K2KeyBucketSmoothing is the time constant of the smoothed output length
 // the k2 key is judged on. Until that long after the first reading the
@@ -85,14 +96,27 @@ const K2KeyBucketDwell = 2 * ThroughputSampleSpacing
 
 // SwitchK2KeyBucketHeld is the replay switch for the k2 key's bucket band
 // (#396, analyzer-learner.md 2.5). On, the key's output bucket is held as
-// k2KeyLength says. Off, as before, the key reads the tracked length.
+// keyLengths says. Off, as before, the key reads the tracked length.
 const SwitchK2KeyBucketHeld = "k2-key-bucket-held"
 
-// k2KeyMemo is one model's k2 key length and the smoothed length it follows.
+// SwitchMuKeyBucketHeld is the replay switch for the throughput (mu) key's
+// output bucket (#415, analyzer-learner.md 2.5). On, the key reads the k2
+// key's band (keyLengths), so the two keys sit in one bucket, and a key
+// that moves to a bucket with no window is priced from the bucket it left
+// where that is lower (carriedThroughput). Off, as before, the key reads the
+// tracked length.
+const SwitchMuKeyBucketHeld = "mu-key-bucket-held"
+
+// k2KeyMemo is one model's output-key band: the length the keys are built
+// from and the smoothed length it follows. The k2 key reads it, and the
+// throughput key too (SwitchMuKeyBucketHeld).
 type k2KeyMemo struct {
 	// length is the output length the k2 keys were last built from, 0
 	// before the first: its bucket is the key's.
 	length float64
+	// left is the length the keys were built from before the bucket last
+	// moved, 0 before the first move: its bucket is the one the keys left.
+	left float64
 	// smoothed is the output length smoothed over K2KeyBucketSmoothing, as
 	// of at; n counts the readings in it.
 	smoothed float64
@@ -154,7 +178,7 @@ func (m *k2KeyMemo) note(now float64, t time.Time) (float64, k2KeyMove) {
 	case m.swapSince.IsZero():
 		m.swapSince = t
 	case t.Sub(m.swapSince) >= K2KeyBucketDwell:
-		*m = k2KeyMemo{length: now, smoothed: now, at: t, n: 1}
+		*m = k2KeyMemo{length: now, left: was, smoothed: now, at: t, n: 1}
 		return m.length, k2KeyMove{from: was, swap: true}
 	}
 	// The mean of every reading until K2KeyBucketSmoothing has passed, an
@@ -171,32 +195,101 @@ func (m *k2KeyMemo) note(now float64, t time.Time) (float64, k2KeyMove) {
 		m.length = m.smoothed
 	}
 	if classifyOutputLength(m.length) != classifyOutputLength(was) {
+		m.left = was
 		return m.length, k2KeyMove{from: was}
 	}
 	return m.length, k2KeyMove{}
 }
 
-// k2KeyLength is the output length the model's k2 keys are built from this
-// cycle, and the move of its bucket if there was one. With
-// SwitchK2KeyBucketHeld on, the fleet's output length now (fleetOut), its
-// bucket held (k2KeyMemo.note); a cycle with no length carries the held one,
-// and the tracked length (stableOut) stands in until there is one. Off, the
-// tracked length, as before, and never a move. The memo is not persisted: a
+// outputKeys is the output length a model's keys are built from on one
+// cycle (keyLengths).
+type outputKeys struct {
+	// k2 is the length the k2 keys are built from, and mu the length the
+	// throughput keys are.
+	k2, mu float64
+	// k2Move is the move of the k2 key's bucket this cycle, if one happened
+	// (seedMovedK2Key), and muMove the throughput key's: the band's one move,
+	// for each key that reads the band.
+	k2Move, muMove k2KeyMove
+	// muLeft is the length the throughput keys were built from before the
+	// band last moved, 0 when they do not read the band or it has not moved:
+	// the bucket a key with no window of its own is carried from
+	// (carriedThroughput).
+	muLeft float64
+	// muSwapPending is a swap pending on the band (k2KeyMemo.swapSince) when
+	// the throughput keys read it: the length is past K2KeyBucketSwap of the
+	// key's bucket, and the key has not moved yet. The key's window is then
+	// frozen (muSwapFrozen).
+	muSwapPending bool
+}
+
+// keyLengths is the output length the model's k2 and throughput keys are
+// built from this cycle. The band is one for both keys: the fleet's output
+// length now (fleetOut), its bucket held (k2KeyMemo.note); a cycle with no
+// length carries the held one, and the tracked length (stableOut) stands in
+// until there is one. A key reads the band with its switch on
+// (SwitchK2KeyBucketHeld, SwitchMuKeyBucketHeld), and the tracked length,
+// as before, with it off, and never a move. The memo is not persisted: a
 // controller restart chooses the bucket again from its first readings.
-func (a *SaturationAnalyzer) k2KeyLength(namespace, modelID string, fleetOut, stableOut float64) (float64, k2KeyMove) {
+func (a *SaturationAnalyzer) keyLengths(namespace, modelID string, fleetOut, stableOut float64) outputKeys {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	out := outputKeys{k2: stableOut, mu: stableOut}
 	memo, ok := a.fleetShape[namespace+"|"+modelID]
-	if !a.k2KeyBucketHeld || !ok {
-		return stableOut, k2KeyMove{}
+	if !ok || (!a.k2KeyBucketHeld && !a.muKeyBucketHeld) {
+		return out
 	}
-	if !(fleetOut > 0) {
-		if memo.k2Key.length > 0 {
-			return memo.k2Key.length, k2KeyMove{}
-		}
-		return stableOut, k2KeyMove{}
+	var held float64
+	var move k2KeyMove
+	switch {
+	case fleetOut > 0:
+		held, move = memo.k2Key.note(fleetOut, a.now())
+	case memo.k2Key.length > 0:
+		held = memo.k2Key.length
+	default:
+		return out
 	}
-	return memo.k2Key.note(fleetOut, a.now())
+	if a.k2KeyBucketHeld {
+		out.k2, out.k2Move = held, move
+	}
+	if a.muKeyBucketHeld {
+		out.mu, out.muMove, out.muLeft = held, move, memo.k2Key.left
+		out.muSwapPending = a.muSwapFreeze && !memo.k2Key.swapSince.IsZero()
+	}
+	return out
+}
+
+// SwitchMuSwapFreeze is the replay switch for the throughput window's freeze
+// while a swap is pending (#415). On, as muSwapFrozen says. Off, the key's
+// window takes writes and prices at full authority through the swap dwell.
+const SwitchMuSwapFreeze = "mu-swap-freeze"
+
+// muSwapFrozen is the throughput reading for a key whose band has a swap
+// pending (outputKeys.muSwapPending), and the key's window takes no write
+// while it is (computeReplicaCapacity).
+//
+// The band holds the key in its bucket through K2KeyBucketDwell of a swap, so
+// that one reading does not move it. For the throughput window that hold is
+// not neutral. A swap to longer outputs keeps the key in the shorter bucket,
+// whose measured mu is the higher: on the 1000 -> 5500-token shape-swap spec
+// (throughput_floor_test.go) the first swapped cycle priced the fleet at the
+// old bucket's 3.08 against the new shape's 1.40, at full authority, and the
+// new shape's readings went into the old bucket's window (median 1.64 of
+// both shapes) -- mu's too-high side, which breaks the SLO
+// (analyzer-learner.md 3.4). The tracker-keyed throughput key moved at once
+// and did neither.
+//
+// So while a swap is pending the window is frozen: its readings are not
+// written, and the figure it holds counts as borrowed. The derived mu prices
+// instead where there is one (useDerived), and the floor may hold the fleet
+// on the window but not grow it. The keys keep one bucket. The cost: up to
+// K2KeyBucketDwell on the derived figure at a real swap, and a cycle of no
+// write when noise alone reaches the swap line.
+func muSwapFrozen(r throughputReading, pending bool) throughputReading {
+	if pending && r.rate > 0 {
+		r.borrowed = true
+	}
+	return r
 }
 
 // seedMovedK2Key prices a k2 key the bucket moved to (to) from the one it left
@@ -218,4 +311,39 @@ func (a *SaturationAnalyzer) seedMovedK2Key(from, to string) {
 		return
 	}
 	a.notePreviousFigureLocked(to, ra)
+}
+
+// carriedThroughput is the throughput reading for key, whose band left the
+// bucket of left (outputKeys.muLeft): r, the reading key has
+// (saturatedThroughputReadingUnder), unless key has no window of its own and
+// left's window, usable under args, is lower than what r borrows -- then
+// left's, borrowed. Lower only, as the k2 key's carry (seedMovedK2Key) is:
+// mu is the learner whose too-high side breaks the SLO (analyzer-learner.md
+// 3.4), and r's neighbour is the nearest bucket, the shorter on a tie, whose
+// mu is the higher. So a key that moved from "long" to "medium", with
+// "short" measured too, is priced from "long", not "short". A key that
+// moved to a longer bucket is carried no lower than its neighbour: that is
+// the bucket it left, whose mu over-states the new one, as a neighbour's
+// always did (nearestSaturatedThroughput). Either is a borrowed figure: the
+// derived mu, where there is one, prices instead (useDerived), and the floor
+// may hold the fleet on it but not grow it.
+func (a *SaturationAnalyzer) carriedThroughput(key, left, args string, r throughputReading) throughputReading {
+	// r's bucket is key's own when key has a window, or one put aside under
+	// other arguments (saturatedThroughputReadingUnder): not carried over.
+	if left == "" || left == key || r.bucket == bucketOf(key) {
+		return r
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ra, ok := a.saturatedThroughput[left]
+	if !ok || ra.Len() == 0 || !a.throughputWindowUsable(left, args) {
+		return r
+	}
+	// r found the nearest window of all, so with left's usable it has a rate.
+	rate := ra.Median()
+	if !(rate > 0) || !(rate < r.rate) {
+		return r
+	}
+	ra.TouchAt(a.now())
+	return throughputReading{rate: rate, bucket: bucketOf(left), samples: ra.Len(), borrowed: true}
 }

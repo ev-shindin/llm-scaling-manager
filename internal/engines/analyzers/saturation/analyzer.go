@@ -302,10 +302,13 @@ type SaturationAnalyzer struct {
 	// recorded, so an unchanged one is not recorded again.
 	lastExport [32]byte
 	// idleBand is SwitchIdleBand and k2KeyBucketHeld SwitchK2KeyBucketHeld
-	// (#396): on from the constructor; a replay turns them off
-	// (SetSwitchesForReplay).
+	// (#396), muKeyBucketHeld SwitchMuKeyBucketHeld and muSwapFreeze
+	// SwitchMuSwapFreeze (#415): on from the constructor; a replay turns them
+	// off (SetSwitchesForReplay).
 	idleBand        bool
 	k2KeyBucketHeld bool
+	muKeyBucketHeld bool
+	muSwapFreeze    bool
 }
 
 // Evicted is what one sweep of the analyzer's learned state removed, counted
@@ -452,6 +455,8 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		horizons:               capacity.DefaultHorizons(),
 		idleBand:               true,
 		k2KeyBucketHeld:        true,
+		muKeyBucketHeld:        true,
+		muSwapFreeze:           true,
 	}
 }
 

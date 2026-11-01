@@ -897,7 +897,7 @@ tracked length, which the shape tracker moves on one reading 20 % off its
 anchor; with the length 6 % above 500 and 6 % noise it moved either side of
 500, so the key went to `medium` and back (#396; property case
 `edges/k2/key-near-output-boundary`, 13 of 50 seeds). The key now holds its
-bucket by a band of its own (`k2KeyLength`, `k2_key_bucket.go`):
+bucket by a band of its own (`keyLengths`, `k2_key_bucket.go`):
 
 - It is judged on the fleet's length smoothed over `K2KeyBucketSmoothing`
   (10 min; the mean of every reading until then, so one early reading does not
@@ -916,8 +916,7 @@ priced from its observation (`P1-obs`), whatever the key, and refills the
 window it writes within a few cycles. One that keeps up is priced from the old
 bucket's window (`P2-hist`) until the key moves: 2 minutes for a swap of 20 %
 or more past the boundary, about 7 minutes for 530 -> 440 tokens, about 14 for
-530 -> 470. The throughput key still reads the tracked length, so the two keys
-can sit in different buckets for that long.
+530 -> 470.
 
 When the key moves, the bucket it lands in usually has no window, and k2 would
 fall to k1 (`P4-k1`): about 60 % more capacity per replica on the test rig,
@@ -935,6 +934,36 @@ The memo is not persisted: after a controller restart the key chooses its
 bucket again from its first readings, as the shape tracker does. The band is
 the replay switch `SwitchK2KeyBucketHeld`; off, the k2 key reads the tracked
 length as before.
+
+The throughput (mu) key reads the same band (#415). It used to read the tracked
+length, and on the same boundary case (`edges/mu/key-near-output-boundary`)
+it left `long` for `medium` on 13 of 50 seeds: measured mu was read from,
+and written to, another bucket's window at constant load, and k2's settle test
+(`k2Unsettled`) compared a throughput reference from one bucket with a k2
+reference from another. With one band the two keys sit in one bucket on every
+cycle (`TestMuKeyBucket_TheKeysShareABucket`). The switch is
+`SwitchMuKeyBucketHeld`; off, the throughput key reads the tracked length.
+
+- **A pending swap freezes the throughput window** (`muSwapFrozen`). While a
+  swap is pending the key still names the bucket it is leaving, and for a swap
+  to longer outputs that bucket's measured mu is the higher one: on the
+  1000 -> 5500-token shape-swap spec the first swapped cycle priced the old
+  bucket's 3.08 against the new shape's 1.40, at full authority, and wrote the
+  new shape's readings into the old window. So while a swap is pending the
+  window takes no writes (counted as `swap-pending` in the mu learner's
+  report) and its figure counts as borrowed: the derived mu prices where there
+  is one, and the floor may hold the fleet on the window but not grow it
+  (`TestMuKeyBucket_APendingSwapFreezesTheWindow`). The cost is up to
+  `K2KeyBucketDwell` (2 minutes) on the derived figure at a real swap, and a
+  cycle with no write when noise alone reaches the swap line. The shape-change
+  hold settles two spaced samples after the swap lands, so it lasts the dwell
+  longer than it did. The switch is `SwitchMuSwapFreeze`.
+- **A moved key is carried lower only** (`carriedThroughput`). When the band
+  moves the throughput key to a bucket with no window, it borrows the nearest
+  neighbour as before (`nearestSaturatedThroughput`, the shorter bucket on a
+  tie), or the bucket it left where that is lower. A key that moves to a longer
+  bucket with no derived mu is still priced from the shorter bucket's higher
+  mu, as a borrow: that is the neighbour borrow's behaviour, not changed here.
 
 ## Constants
 
