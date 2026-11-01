@@ -36,7 +36,7 @@ import (
 // (fixture/file) it is named to move.
 //
 // #392's first sample for k2: its first reading waits for a second. Earlier
-// PRs' switches (learner PRs 2 and 3, #396's bands, #399's batch cap) are
+// PRs' switches (learner PRs 2 and 3, #396's bands, #399's batch cap, #415's mu key) are
 // not here: "all off" is this PR's switches, and an earlier PR's stay at
 // their constructor default, on, as the base goldens were written
 // (analyzer-learner.md, 2.5).
@@ -58,6 +58,9 @@ var earlierSeams = map[string][]string{
 	saturation.SwitchBatchCapDeclared: nil,
 	saturation.SwitchBatchCapLearned:  nil,
 	saturation.SwitchK2ReadsSettle:    nil,
+	saturation.SwitchMuKeyBucketHeld:  nil,
+	saturation.SwitchMuMarginClamp:    nil,
+	saturation.SwitchMuSwapFreeze:     nil,
 	saturation.SwitchK2WaitsAfterRestart: {
 		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
 	},
@@ -66,6 +69,8 @@ var earlierSeams = map[string][]string{
 	saturation.SwitchMuLatchRestoresSafe: nil,
 	saturation.SwitchIdleBand:            nil,
 	saturation.SwitchK2KeyBucketHeld:     nil,
+	saturation.SwitchBatchCapDeclared:    nil,
+	saturation.SwitchBatchCapLearned:     nil,
 }
 
 // heldBy is, for a switch that names no output, the unit tests that hold it:
@@ -84,6 +89,20 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestK2KeyBucket_APendingSwapHoldsTheBucket"},
 		{"../saturation", "TestK2KeyBucket_AMovedKeyIsPricedFromTheBucketItLeft"},
 		{"../saturation", "TestK2KeyBucket_TheSwitchPicksTheLength"},
+	},
+	saturation.SwitchMuKeyBucketHeld: {
+		{"../saturation", "TestMuKeyBucket_TheSwitchPicksTheLength"},
+		{"../saturation", "TestMuKeyBucket_TheKeysShareABucket"},
+		{"../saturation", "TestMuKeyBucket_AMovedKeyIsCarriedLowerOnly"},
+		{"../saturation", "TestMuKeyBucket_TheCarryPricesThroughAnalyze"},
+	},
+	saturation.SwitchMuSwapFreeze: {
+		{"../saturation", "TestMuKeyBucket_APendingSwapFreezesTheWindow"},
+		{"../saturation", "TestMuKeyBucket_APendingSwapLeavesPrefillWriting"},
+	},
+	saturation.SwitchMuMarginClamp: {
+		{"../saturation", "TestMuKeyBucket_AMarginMoveNeverRaisesTheWindow"},
+		{"../saturation", "TestMuKeyBucket_TheClampWritesNothingToAnEmptyWindow"},
 	},
 	saturation.SwitchK2ReadsSettle: {
 		{"../saturation", "TestSettleView_TheTrackerSwitchMovesTheAbsenceRule"},

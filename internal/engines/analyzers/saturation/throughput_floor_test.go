@@ -371,8 +371,16 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 			clock = clock.Add(ThroughputSampleSpacing + time.Second)
 		}
 		// phase 2: `xxlong` learns 1.40 over two spaced samples, with three
-		// fresh replicas beside the saturated pair
-		for _, rate := range []float64{1.39, 1.40} {
+		// fresh replicas beside the saturated pair. The throughput key reads
+		// the k2 key's band (#415), which waits out K2KeyBucketDwell of a swap
+		// before it moves, and the window is frozen while it waits
+		// (muSwapFrozen): the first two cycles, a rate window apart, write
+		// nothing, and the swap lands on the third. So phase 2 runs four
+		// cycles, where it ran two when the key moved on the tracker's first
+		// reading. The premise is unchanged: the floor still prices the
+		// drained fleet from the arriving shape's own window, two minutes
+		// later than the tracker-keyed key would have opened it.
+		for _, rate := range []float64{1.39, 1.39, 1.39, 1.40} {
 			cycle([]domain.ReplicaMetrics{
 				xxlong("d0", 1_158_912, 10, rate), xxlong("d1", 1_158_912, 10, rate),
 				long("d2", 30_000, 0, 0.2), long("d3", 30_000, 0, 0.2), long("d4", 30_000, 0, 0.2),

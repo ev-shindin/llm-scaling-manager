@@ -191,3 +191,65 @@ func TestK2Hold_TheSwitchOffWritesTheFirstReadingAtOnce(t *testing.T) {
 		assert.Equal(t, want, k2Windows(a), "switch on=%v: windows written by the first saturated cycle", on)
 	}
 }
+
+// A k2 reading held as its window's first (k2_confirm.go) while a mu key swap
+// is pending is frozen like a P1-obs one (#415's muSwapFrozen): its mu is not
+// written under the bucket the key is leaving, and the refusal is counted.
+func TestK2Hold_AHeldReadingDuringAPendingSwapLeavesTheMuWindowFrozen(t *testing.T) {
+	store := capacity.NewStore()
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(256, "vllm:v1")}, propStart)
+	a := NewSaturationAnalyzer(store)
+	clock := propStart
+	a.now = func() time.Time { return clock }
+	run := func(out, rate float64) {
+		t.Helper()
+		rm := makeReplicaMetrics("pod-a", "variant-a", 12000, 16000, 6, 100, out)
+		rm.RequestRate, rm.GenerationTokenRate, rm.Ready = rate, rate*out, true
+		_, err := a.Analyze(context.Background(), makeAnalyzerInput([]domain.ReplicaMetrics{rm}, mtOneVariant))
+		require.NoError(t, err)
+		clock = clock.Add(propCycle)
+	}
+	long := func() []float64 {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		for k, ra := range a.saturatedThroughput {
+			if bucketOf(k) == longBucket {
+				return ra.Snapshot().Values
+			}
+		}
+		return nil
+	}
+	for range 12 {
+		run(530, 3)
+	}
+	before := long()
+	require.NotEmpty(t, before, "precondition: mu measured in long")
+	// The shape moves, and the swap is pending from its first cycle. Every
+	// k2 window is gone, so that cycle's saturated reading is held.
+	a.mu.Lock()
+	clear(a.computeCapacityHistory)
+	a.mu.Unlock()
+	run(5500, 0.5)
+	a.mu.Lock()
+	pending := !a.fleetShape["test-ns|test-model"].k2Key.swapSince.IsZero()
+	_, held := a.k2Pending[firstPendingKey(a)]
+	a.mu.Unlock()
+	require.True(t, pending, "premise: the swap is pending")
+	require.True(t, held, "premise: the reading is held")
+	assert.Equal(t, before, long(), "the held reading's mu was written under the bucket being left")
+	var counted int64
+	for _, r := range a.LearnerReports()["test-ns|test-model"] {
+		if r.Learner == learn.Mu {
+			counted += r.Counts[muReasonSwapPending]
+		}
+	}
+	assert.Equal(t, int64(1), counted, "the frozen write is counted")
+}
+
+// firstPendingKey is a key with readings held, "" when none. Callers hold a.mu.
+func firstPendingKey(a *SaturationAnalyzer) string {
+	for k := range a.k2Pending {
+		return k
+	}
+	return ""
+}

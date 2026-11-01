@@ -38,6 +38,7 @@ func k2Cases() []propCase {
 		{class: classLiveness, learner: "k2", name: "flow-control-on", family: familyDirect, tuning: tunedDefault, check: checkK2Liveness("flow-control")},
 		{class: classEdges, learner: "k2", name: "key-near-output-boundary", family: familyDirect, tuning: tunedDefault, seeds: 50, check: checkK2KeyEdgeOn(nil, nil)},
 		{class: classEdges, learner: "k2", name: "key-follows-output-length", family: familyDirect, tuning: tunedDefault, check: checkK2KeyFollows(nil)},
+		{class: classEdges, learner: "mu", name: "key-near-output-boundary", family: familyDirect, tuning: tunedDefault, seeds: 50, check: checkMuKeyEdgeOn(nil)},
 	}
 }
 
@@ -537,6 +538,14 @@ func checkK2Liveness(topology string) func(uint64) error {
 // its k2-decision line names it (historyKey, in logContract). wrap edits each
 // row, and edit the analyzer before the first cycle (mutants).
 func selectedK2Keys(lengths []float64, wrap func(*domain.ReplicaMetrics), edit func(*SaturationAnalyzer)) ([]string, error) {
+	k2, _, err := selectedKeys(lengths, wrap, edit)
+	return k2, err
+}
+
+// selectedKeys is selectedK2Keys with the throughput (mu) key each cycle
+// beside the k2 key: the key mu was read and written under (noteMuKey), the
+// variant's one key, as the cycle's mu record holds it.
+func selectedKeys(lengths []float64, wrap func(*domain.ReplicaMetrics), edit func(*SaturationAnalyzer)) (k2Keys, muKeys []string, err error) {
 	rig := newPropRig()
 	rig.wrap = wrap
 	if edit != nil {
@@ -544,7 +553,8 @@ func selectedK2Keys(lengths []float64, wrap func(*domain.ReplicaMetrics), edit f
 	}
 	core, logs := observer.New(zapcore.Level(-perReplicaLogLevel))
 	rig.ctx = logr.NewContext(context.Background(), zapr.NewLogger(zap.New(core)))
-	keys := make([]string, 0, len(lengths))
+	k2Keys = make([]string, 0, len(lengths))
+	muKeys = make([]string, 0, len(lengths))
 	for _, l := range lengths {
 		rows := make([]domain.ReplicaMetrics, 2)
 		for p := range rows {
@@ -552,7 +562,7 @@ func selectedK2Keys(lengths []float64, wrap func(*domain.ReplicaMetrics), edit f
 			rows[p].AvgOutputTokens = l
 		}
 		if _, err := rig.analyze(rows, decodeStates(2), 12, propCycle); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		key := ""
 		for _, entry := range logs.TakeAll() {
@@ -562,9 +572,55 @@ func selectedK2Keys(lengths []float64, wrap func(*domain.ReplicaMetrics), edit f
 				}
 			}
 		}
-		keys = append(keys, key)
+		k2Keys = append(k2Keys, key)
+		muKeys = append(muKeys, rig.muKey())
 	}
-	return keys, nil
+	return k2Keys, muKeys, nil
+}
+
+// muKey is the throughput key the rig's one variant was priced under on the
+// last cycle, "" when none.
+func (r *propRig) muKey() string {
+	r.a.mu.Lock()
+	defer r.a.mu.Unlock()
+	for _, c := range r.a.muCycles {
+		for _, v := range c.variants {
+			return v.key
+		}
+	}
+	return ""
+}
+
+// checkMuKeyEdgeOn is checkK2KeyEdgeOn for the throughput (mu) key (#415):
+// the same fleet, its output length 6 % above the 500-token boundary with 6 %
+// autocorrelated noise, and the same verdict on the key mu is read and
+// written under. A key that moves to "medium" and back reads, and writes,
+// another bucket's window at constant load. edit edits the analyzer before
+// the first cycle (mutants).
+func checkMuKeyEdgeOn(edit func(*SaturationAnalyzer)) func(uint64) error {
+	return func(seed uint64) error {
+		noise := arNoise(propRand(seed), 120, 0.06, 0.9)
+		lengths := make([]float64, len(noise))
+		for i, e := range noise {
+			lengths[i] = 530 * (1 + e)
+		}
+		_, keys, err := selectedKeys(lengths, nil, edit)
+		if err != nil {
+			return err
+		}
+		changes, err := keyChanges(keys)
+		if err != nil {
+			return err
+		}
+		left := 0
+		for i := keySettle + 1; i < len(keys); i++ {
+			if strings.Contains(keys[i-1], "|long|") && keys[i] != keys[i-1] {
+				left++
+			}
+		}
+		last := keys[len(keys)-1]
+		return holds(changes <= 1 && left == 0 && strings.Contains(last, "|long|"), kindFlipped, "output length 6 %% above the 500-token boundary: the selected mu key changed %d times in %d cycles, %d of them out of \"long\", and ended on %s", changes, len(keys)-keySettle, left, last)
+	}
 }
 
 // keySettle is two minutes of cycles: the fleet's tracked length exists by

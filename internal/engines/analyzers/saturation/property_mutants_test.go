@@ -62,6 +62,7 @@ var findings = []finding{
 	{row: "Sum of per-pod one-minute peaks", status: statusCaught},
 	{row: "Settle refuses one cycle of a fill (#282 F1)", status: statusCaught},
 	{row: "k2 key flips on the output-length boundary", status: statusCaught},
+	{row: "mu key flips on the output-length boundary", status: statusCaught},
 	{row: "measured/derived flips near 2x", status: statusCaught},
 	{row: "the 0.30 idle line", status: statusCaught},
 	{row: "backlogGrew", status: statusCaught},
@@ -211,6 +212,9 @@ func propertyMutants() []propMutant {
 		{row: "k2 key flips on the output-length boundary", caseID: "edges/k2/key-near-output-boundary", level: levelStub,
 			how:   "SwitchK2KeyBucketHeld off: the key reads the tracked length, with no band or dwell of its own (#396)",
 			check: checkK2KeyEdgeOn(nil, func(a *SaturationAnalyzer) { a.k2KeyBucketHeld = false })},
+		{row: "mu key flips on the output-length boundary", caseID: "edges/mu/key-near-output-boundary", level: levelStub,
+			how:   "SwitchMuKeyBucketHeld off: the throughput key reads the tracked length, not the k2 key's band (#415)",
+			check: checkMuKeyEdgeOn(func(a *SaturationAnalyzer) { a.muKeyBucketHeld = false })},
 		{row: "the 0.30 idle line", caseID: "edges/idle/idle-line-030", level: levelStub,
 			how: "SwitchIdleBand off: a replica in an idle run is held to the line it entered under (#396)",
 			check: checkIdleEdge(func(a *SaturationAnalyzer, frac float64, now time.Time) bool {

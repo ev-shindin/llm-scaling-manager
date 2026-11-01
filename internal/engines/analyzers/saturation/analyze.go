@@ -189,11 +189,10 @@ type cycle struct {
 	stableInput  float64
 	stableOutput float64
 	shapeChanged bool
-	// k2KeyLen is the output length the k2 keys are built from: the
-	// fleet's, its bucket held across a boundary (k2KeyLength). k2KeyMove is
-	// the move of its bucket this cycle, if one happened.
-	k2KeyLen  float64
-	k2KeyMove k2KeyMove
+	// keys is the output length the k2 and throughput keys are built from:
+	// the fleet's, its bucket held across a boundary (keyLengths), and the
+	// move of its bucket this cycle, if one happened.
+	keys outputKeys
 
 	// resolvePricing: the shape mu is priced at, which is not always the one
 	// above.
@@ -329,12 +328,13 @@ func (c *cycle) observeFleetShape() {
 	c.stableOutput, c.stableInput, c.shapeChanged = c.a.noteFleetShape(
 		c.input.Namespace, c.input.ModelID,
 		c.fleetInput, c.fleetOutput, arriving, arrivingOK, holdFor, c.logger)
-	c.k2KeyLen, c.k2KeyMove = c.a.k2KeyLength(c.input.Namespace, c.input.ModelID, c.fleetOutput, c.stableOutput)
-	if c.k2KeyMove.from > 0 {
+	c.keys = c.a.keyLengths(c.input.Namespace, c.input.ModelID, c.fleetOutput, c.stableOutput)
+	if c.keys.k2Move.from > 0 {
 		c.logger.V(logging.VERBOSE).Info("k2-key-bucket-moved",
 			"modelID", c.input.ModelID, "namespace", c.input.Namespace,
-			"fromBucket", classifyOutputLength(c.k2KeyMove.from), "toBucket", classifyOutputLength(c.k2KeyLen),
-			"keyOutputTokens", c.k2KeyLen, "outputTokensNow", c.fleetOutput, "swap", c.k2KeyMove.swap,
+			"fromBucket", classifyOutputLength(c.keys.k2Move.from), "toBucket", classifyOutputLength(c.keys.k2),
+			"keyOutputTokens", c.keys.k2, "outputTokensNow", c.fleetOutput, "swap", c.keys.k2Move.swap,
+			"muKeyMoved", c.keys.muMove.from > 0,
 			"reason", "the k2 key's output bucket moved: the smoothed length crossed the margin, or a swap held for the dwell; a bucket with no window of its own is priced from the one left, lower only (P2-prior)")
 	}
 }
@@ -594,12 +594,12 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		gpuCount := c.gpusByVariant[rm.VariantName]
 		role := c.rolesByVariant[rm.VariantName]
 		downstreamSaturated := c.decodeSaturated && domain.CanonicalRole(role) == domain.RolePrefill
-		if c.k2KeyMove.from > 0 {
+		if c.keys.k2Move.from > 0 {
 			c.a.seedMovedK2Key(
 				c.a.historyKey(c.input.ModelID, c.input.Namespace, rm.VariantName, c.accelByVariant[rm.VariantName], gpuCount, role,
-					k2KeyOutput(role, c.k2KeyMove.from, rm.AvgOutputTokens), c.cfg.QueueLengthThreshold),
+					k2KeyOutput(role, c.keys.k2Move.from, rm.AvgOutputTokens), c.cfg.QueueLengthThreshold),
 				c.a.historyKey(c.input.ModelID, c.input.Namespace, rm.VariantName, c.accelByVariant[rm.VariantName], gpuCount, role,
-					k2KeyOutput(role, c.k2KeyLen, rm.AvgOutputTokens), c.cfg.QueueLengthThreshold))
+					k2KeyOutput(role, c.keys.k2, rm.AvgOutputTokens), c.cfg.QueueLengthThreshold))
 		}
 		// Priced, then reported on. noteLineMismatch says when the observed
 		// generation-token rate disagrees with the line, and does not act on
@@ -678,7 +678,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		c.a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq,
 			c.itlBorrowedFrom[rm.VariantName], c.logger)
 		rc := c.a.computeReplicaCapacity(rm, c.cfg, c.tune, c.input.ModelID, c.input.Namespace, gpuCount,
-			role, c.accelByVariant[rm.VariantName], c.stableOutput, c.k2KeyLen, c.fleetOutput, c.stableInput,
+			role, c.accelByVariant[rm.VariantName], c.keys, c.fleetOutput, c.stableInput,
 			c.fleetHitRate, derived, served[rm.VariantName], downstreamSaturated, mixed[rm.VariantName],
 			replicaRouting{
 				kvFromInstant: c.tune.kvFromInstant(raw, c.busyNowRoles[domain.CanonicalRole(role)]),

@@ -255,8 +255,10 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		clock = clock.Add(15 * time.Second)
 		Expect(outstanding()).To(BeTrue())
 
-		// Two saturated cycles a window apart under the new shape.
-		for _, rate := range []float64{5.3, 5.4} {
+		// Two saturated cycles a window apart under the new shape, after the
+		// two the throughput key's band waits out before it moves: while the
+		// swap is pending its window takes no writes (muSwapFrozen, #415).
+		for _, rate := range []float64{5.3, 5.3, 5.3, 5.4} {
 			rms := makeReplicaMetrics("d0", decodeV, 1_100_000, kvCap, 10, 8000, 1000)
 			rms.RequestRate = rate
 			rms.GenerationTokenRate = rms.RequestRate * rms.AvgOutputTokens
@@ -694,8 +696,25 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		in.ArrivalRate = 5.68
 		_, err := analyzer.Analyze(ctx, in)
 		Expect(err).NotTo(HaveOccurred())
+		// Trivially held now: the swap is pending, so this cycle writes no
+		// sample at all (muSwapFrozen). The guard this spec is for -- one
+		// sample does not settle -- is asserted on the landing cycle below.
 		Expect(outstanding()).To(BeTrue(),
-			"one sample is the drain, not a measurement of the new shape")
+			"the declaring cycle does not settle the hold")
+
+		// The throughput key's band waits out K2KeyBucketDwell of the swap
+		// before it moves, and writes nothing while it waits (muSwapFrozen,
+		// #415): the cycle a window on is still pending, and the one after
+		// it lands the swap and writes the new bucket's first sample. Neither
+		// settles the hold.
+		for range 2 {
+			clock = clock.Add(ThroughputSampleSpacing + time.Second)
+			pending := makeAnalyzerInput([]domain.ReplicaMetrics{saturated}, states(4))
+			pending.ArrivalRate = 5.68
+			_, err = analyzer.Analyze(ctx, pending)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(outstanding()).To(BeTrue(), "the swap's dwell, and the first sample after it, do not settle the hold")
+		}
 
 		// A second reading a window later is: it cannot have come from the
 		// same drain as the first.
