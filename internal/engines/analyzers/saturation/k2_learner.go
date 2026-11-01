@@ -297,16 +297,19 @@ func (a *SaturationAnalyzer) LearnerReports() map[string][]learn.Report {
 }
 
 // forgetLearnerLocked forgets one learner's state for a variant, on an
-// operator's request, and returns how many entries it dropped: the learners
-// named in learn.Learners are forgotten by name, here, not through a
-// registry. A name it does not know is a learner put on the list without
-// the code that forgets it, and panics; a test walks the list. Callers hold
-// a.mu.
-func (a *SaturationAnalyzer) forgetLearnerLocked(name, namespace, modelID, variant string, by learn.By) int {
+// operator's request, and returns how many entries it dropped and whether
+// it has code for the learner: the learners named in learn.Learners are
+// forgotten by name, here, not through a registry. A name it does not know
+// is a learner put on the list without the code that forgets it: logged as
+// an error, and nothing is forgotten. A test walks the list and holds every
+// name to handled. Callers hold a.mu.
+func (a *SaturationAnalyzer) forgetLearnerLocked(name, namespace, modelID, variant string, by learn.By) (dropped int, handled bool) {
 	if name == learn.K2 {
-		return a.forgetK2Locked(namespace, modelID, variant, by)
+		return a.forgetK2Locked(namespace, modelID, variant, by), true
 	}
-	panic("saturation: no forget for the learner " + name + " on learn.Learners")
+	ctrl.Log.WithName("saturation").Error(nil, "learner on learn.Learners has no forget code; nothing forgotten",
+		"learner", name, "namespace", namespace, "modelID", modelID, "variant", variant)
+	return 0, false
 }
 
 // forgetK2Locked forgets k2's state for one variant: its windows under every

@@ -536,6 +536,7 @@ cluster-autoscaler
 cluster-gpu-inventory
 cluster-scoped
 cluster-wide
+code
 cohort
 cohorts
 cold

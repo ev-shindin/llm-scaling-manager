@@ -180,12 +180,13 @@ func TestK2Learner_ForgetReachesEveryLearnerOnTheList(t *testing.T) {
 	a := NewSaturationAnalyzer(capacity.NewStore())
 	a.mu.Lock()
 	for _, name := range learn.Learners() {
-		assert.NotPanics(t, func() { a.forgetLearnerLocked(name, "ns", "m", "v", learn.ByOperator) },
-			"the learner %q is on learn's list and the analyzer does not forget it", name)
+		_, handled := a.forgetLearnerLocked(name, "ns", "m", "v", learn.ByOperator)
+		assert.True(t, handled, "the learner %q is on learn's list and the analyzer has no code to forget it", name)
 	}
-	assert.Panics(t, func() { a.forgetLearnerLocked("no-such-learner", "ns", "m", "v", learn.ByOperator) },
-		"negative control: a name the analyzer does not know is not reached")
+	dropped, handled := a.forgetLearnerLocked("no-such-learner", "ns", "m", "v", learn.ByOperator)
 	a.mu.Unlock()
+	assert.False(t, handled, "negative control: a name the analyzer does not know is not handled")
+	assert.Zero(t, dropped, "and nothing is forgotten")
 
 	r := newRestartRig(t, restartT0)
 	row := func() []domain.ReplicaMetrics {
