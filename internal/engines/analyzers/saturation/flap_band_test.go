@@ -402,6 +402,9 @@ func TestK2KeyBucket_AMovedKeyIsPricedFromTheBucketItLeft(t *testing.T) {
 	t.Logf("the key moved to medium on cycle %d at 440; learned k2 %v, k1 %v", moved, learned, k1)
 }
 
+// longBucket is the "long" output-length bucket (classifyOutputLength).
+const longBucket = "long"
+
 // swapRun is one variant measured saturated at 530 output tokens ("long")
 // at 3 req/s, then saturated at 5500 tokens at 0.5 req/s: a swap to longer
 // outputs. It returns, for each cycle after the swap, whether a swap was
@@ -429,7 +432,7 @@ func runSwap(t *testing.T, freeze bool) (before []float64, cycles []swapCycle) {
 		defer a.mu.Unlock()
 		if longKey == "" {
 			for k := range a.saturatedThroughput {
-				if bucketOf(k) == "long" {
+				if bucketOf(k) == longBucket {
 					longKey = k
 				}
 			}
@@ -600,7 +603,7 @@ func TestMuKeyBucket_TheCarryPricesThroughAnalyze(t *testing.T) {
 	a.mu.Lock()
 	long := ""
 	for k := range a.saturatedThroughput {
-		if bucketOf(k) == "long" {
+		if bucketOf(k) == longBucket {
 			long = k
 		}
 	}
