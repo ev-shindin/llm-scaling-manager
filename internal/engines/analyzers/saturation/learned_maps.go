@@ -89,6 +89,8 @@ func (a *SaturationAnalyzer) learnedMapsLocked() []learnedMap {
 		registered("k2Stash", scopeK2Key, a.k2Stash),
 		registered("throughputStash", scopeK2Key, a.throughputStash),
 		registered("throughputHeld", scopeK2Key, a.throughputHeld),
+		registered("batchCaps", scopeK2Key, a.batchCaps),
+		registered("batchCapPlateaus", scopeK2Key, a.batchCapPlateaus).working(),
 		registered("lowerBounds", scopeOwnRule, a.lowerBounds),
 		registered("itlArgs", scopeITLKey, a.itlArgs),
 		registered("itlBaselineStash", scopeITLKey, a.itlBaselineStash),

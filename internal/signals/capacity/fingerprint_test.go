@@ -74,6 +74,10 @@ var fingerprintExcluded = []string{
 	// published engine-config metric, which moves every stored digest. Read
 	// for the batch cap (ExplicitMaxNumSeqs) and compared for capacity.
 	"MaxNumActiveSeqs",
+	// Not hashed: an operator's statement about the engine (the
+	// llm-d.ai/max-num-seqs annotation), not a setting of it. Read only for
+	// the derived k2 where the flags state no cap, and compared for capacity.
+	"DeclaredBatchCap",
 }
 
 func TestFingerprintCoversEveryEngineParamsField(t *testing.T) {
@@ -214,6 +218,8 @@ func TestFingerprintIgnoresTheResolvedInputs(t *testing.T) {
 			p.MaxNumSeqsSet = !p.MaxNumSeqsSet
 		case "MaxNumActiveSeqs":
 			p.MaxNumActiveSeqs = 64
+		case "DeclaredBatchCap":
+			p.DeclaredBatchCap = 128
 		default:
 			t.Fatalf("no case for excluded field %s", name)
 		}

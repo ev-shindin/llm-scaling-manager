@@ -290,6 +290,22 @@ type SaturationAnalyzer struct {
 	muRepeatIsUse       bool
 	muUnknownAgeSafe    bool
 	muLatchRestoresSafe bool
+	// batchCapDeclared and batchCapLearned are the batch cap's replay
+	// switches (batch_cap.go): SwitchBatchCapDeclared and
+	// SwitchBatchCapLearned. On from the constructor; a replay turns them
+	// off (SetSwitchesForReplay).
+	batchCapDeclared bool
+	batchCapLearned  bool
+	// batchCaps is each variant's learned batch cap, and batchCapPlateaus
+	// each pod's run of cycles at one running count (batch_cap.go). Keyed
+	// namespace|variant|model|, and the pod after it.
+	batchCaps        map[string]*learnedBatchCap
+	batchCapPlateaus map[string]*batchCapPlateau
+	// batchCapAdmission and batchCapPlateauCycles are the learned cap's
+	// admission rules and plateau length: batchCapRules and
+	// BatchCapPlateauCycles, held here so a mutant can drop one.
+	batchCapAdmission     []batchCapRule
+	batchCapPlateauCycles int
 	// horizons is how long each kind of learned state is kept. Defaulted
 	// from capacity.DefaultHorizons and overridable by configuration --
 	// which is the only way any of this is reachable on a cluster, the
@@ -444,6 +460,12 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		muRepeatIsUse:          true,
 		muUnknownAgeSafe:       true,
 		muLatchRestoresSafe:    true,
+		batchCapDeclared:       true,
+		batchCapLearned:        true,
+		batchCaps:              make(map[string]*learnedBatchCap),
+		batchCapPlateaus:       make(map[string]*batchCapPlateau),
+		batchCapAdmission:      batchCapRules(),
+		batchCapPlateauCycles:  BatchCapPlateauCycles,
 		horizons:               capacity.DefaultHorizons(),
 	}
 }
@@ -652,6 +674,7 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 			}
 		}
 	}
+	a.sweepBatchCapsLocked(now, bucketRetention)
 	// A window's arguments go with the window.
 	maps.DeleteFunc(a.k2WindowArgs, func(key, _ string) bool {
 		_, ok := a.computeCapacityHistory[key]

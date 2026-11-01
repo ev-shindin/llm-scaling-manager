@@ -122,6 +122,35 @@ and `O` decode steps, so the fraction of a request's life that is decode is
 own `--max-num-seqs`. Multiplying by `(I + O/2)` converts a count of requests
 into the tokens they occupy, the same per-request footprint as `KVreq`.
 
+`S` is the batch cap `pricingBatchCap` (`batch_cap.go`) hands `computeK2`,
+and the `k2-decision` line names its source (`batchCapSource`):
+
+| source | `S` | when |
+|---|---|---|
+| `flags` | `EngineParams.ExplicitMaxNumSeqs()` | the flags state a cap |
+| `declared` | `EngineParams.DeclaredBatchCap`, the scale target's `llm-d.ai/max-num-seqs` annotation | the flags state none (`SwitchBatchCapDeclared`) |
+| `learned` | `batchCaps[namespace\|variant\|model\|].perRank` | the flags state none, none is declared, the policy sets `enableBatchCapLearning`, and it is lower than the default (`SwitchBatchCapLearned`) |
+| `default` | `EngineParams.MaxNumSeqs`, the parser's 256 | otherwise |
+
+With no `EngineParams` at all (the scale target was never read), a learned cap
+still prices P3, with `B` taken as not binding (`estimateCapacityAtCap`);
+`min(k1, k2)` keeps that at or under the k1 it replaces.
+
+The learned cap (`observeBatchCap`, issue #399) is the max, per engine rank,
+of the running counts a pod held for `BatchCapPlateauCycles` (3) cycles in a
+row, every cycle passing `batchCapRules`: serving (`admission.serving`), not
+joined under `JoinedReplicaWindow`, a queue on the busiest rank of at least 1,
+a decode row's queue reason known (`CapacityQueueKnown`), a running count
+known, `BusiestRankTokens` under k1, preemption known and zero. A running
+count can never exceed the cap, so every sample is at or below it and the max
+only rises toward it; each rule guards against a sample below it. A refused
+cycle ends the pod's plateau. The cap is reset when the variant's `windowArgs`
+change, swept after `BucketRetention` unconfirmed, and not in the learned-state
+snapshot. A flow-controlled fleet whose engine queues read 0 gives no sample:
+the router judges the pool, not the pod, so its queue is not evidence that any
+one pod is full. The property cases are `*/batch-cap/*`, and
+`TestBatchCapMutants` drops each rule in turn.
+
 `B` and `S` bound one engine. A replica running several data-parallel ranks
 runs that many engines, so `computeK2` multiplies the derived k2 by the ranks
 the row reports (`ReplicaMetrics.Ranks`), and `deriveMu` caps the sequences at

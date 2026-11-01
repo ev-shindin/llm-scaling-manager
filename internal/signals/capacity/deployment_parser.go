@@ -9,6 +9,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/annotations"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
@@ -25,7 +26,23 @@ func ParseEngineArgs(engine inferenceengine.Engine, scaleTarget scaletarget.Scal
 		params = ParseVLLMArgs(scaleTarget)
 	}
 	params.Image = engineImage(engine, scaleTarget)
+	params.DeclaredBatchCap = declaredBatchCap(scaletarget.Annotations(scaleTarget))
 	return params
+}
+
+// declaredBatchCap is the batch cap the llm-d.ai/max-num-seqs annotation
+// states (EngineParams.DeclaredBatchCap): a positive integer, and 0 for an
+// absent annotation or any other value.
+func declaredBatchCap(annots map[string]string) int64 {
+	v, ok := annots[annotations.MaxNumSeqs]
+	if !ok {
+		return 0
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	if err != nil || n < 1 {
+		return 0
+	}
+	return n
 }
 
 // engineImage is the image of the engine's own container(s), chosen by the
@@ -110,6 +127,24 @@ type EngineParams struct {
 	// max_num_seqs, still a true upper bound. A later unreadable occurrence
 	// clears an earlier readable one, since the engine takes the last.
 	MaxNumActiveSeqs int64
+
+	// DeclaredBatchCap is the batch cap an operator states on the scale
+	// target with the llm-d.ai/max-num-seqs annotation (annotations.MaxNumSeqs):
+	// one engine rank's max_num_seqs, or SGLang's max_running_requests. 0 is
+	// unset, or a value that is not a positive integer.
+	//
+	// It exists for an engine whose flags this parser cannot read -- a
+	// launcher script, or the cap passed as a variable nothing resolves --
+	// where MaxNumSeqs is the default of 256 standing in for something
+	// unknown. Only the derived k2 (P3) reads it, and only where the flags
+	// state no cap (ExplicitMaxNumSeqs is 0): what the flags state is what
+	// the engine runs. ExplicitMaxNumSeqs and BatchCap do not read it.
+	//
+	// Compared for capacity (IsCapacityCompatible), so two variants that
+	// declare different caps never price each other. Not hashed into the
+	// fingerprint: the annotation is a statement about the engine, not a
+	// setting of it, and hashing it would move every stored digest.
+	DeclaredBatchCap int64
 
 	// TotalKvTokensOverride is the explicit total KV-cache token capacity, when the
 	// engine exposes it as a deployment flag (SGLang --max-total-tokens). 0 = unset.
@@ -1362,6 +1397,7 @@ func (p *EngineParams) IsCapacityCompatible(other *EngineParams) bool {
 		p.EffectiveMaxBatchedTokens == other.EffectiveMaxBatchedTokens &&
 		p.MaxNumSeqs == other.MaxNumSeqs &&
 		p.MaxNumActiveSeqs == other.MaxNumActiveSeqs &&
+		p.DeclaredBatchCap == other.DeclaredBatchCap &&
 		p.MaxModelLen == other.MaxModelLen &&
 		p.WeightDtype == other.WeightDtype &&
 		p.Quantization == other.Quantization &&

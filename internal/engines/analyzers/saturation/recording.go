@@ -108,7 +108,8 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // SetSwitchesForReplay sets the package's replay switches by name: the test
 // seam a replay drives one named change through (analyzer-learner.md, 2.5).
 // The switches are SwitchK2ReadsSettle, SwitchK2WaitsAfterRestart,
-// SwitchMuRepeatIsUse, SwitchMuUnknownAgeSafe and SwitchMuLatchRestoresSafe; a name
+// SwitchMuRepeatIsUse, SwitchMuUnknownAgeSafe, SwitchMuLatchRestoresSafe,
+// SwitchBatchCapDeclared and SwitchBatchCapLearned; a name
 // it does not know is an error, and sets nothing. Never called on a
 // production path; a test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
@@ -134,6 +135,8 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		SwitchMuRepeatIsUse:       &a.muRepeatIsUse,
 		SwitchMuUnknownAgeSafe:    &a.muUnknownAgeSafe,
 		SwitchMuLatchRestoresSafe: &a.muLatchRestoresSafe,
+		SwitchBatchCapDeclared:    &a.batchCapDeclared,
+		SwitchBatchCapLearned:     &a.batchCapLearned,
 	}
 }
 
