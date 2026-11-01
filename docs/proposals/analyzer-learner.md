@@ -782,7 +782,7 @@ finding above is in exactly one state:
   truth on the time base on 15 of 100 seeds. "k2 key flips on the
   output-length boundary" and "The 0.30 idle line" are caught since #396:
   a stub mutant turns each band's replay switch off, and its edge case
-  fails (12 of 50 seeds, and 98 of 100). The replay counts that counter and the others of 2.5, and the golden
+  fails (13 of 50 seeds, and 98 of 100). The replay counts that counter and the others of 2.5, and the golden
   check fails when a counter is zero over every committed golden.
 - **Still escaping:** the rest, listed below. A row is escaping either because
   no mutant reproduces it, or because today's code already fails its class,

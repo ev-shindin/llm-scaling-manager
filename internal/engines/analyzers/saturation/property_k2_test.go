@@ -579,7 +579,11 @@ func keyChanges(keys []string) (int, error) {
 // counted once it has selected one for two minutes -- ends in "long", never
 // leaves it, and changes at most once (into it). A key that moves to
 // "medium" and back is the flap (#396); one that stays in "medium" has taken
-// its bucket from noise. wrap edits each row and edit the analyzer before the
+// its bucket from noise. The case is close to its noise: run over 300 seeds
+// the key fails 3 (116, 251, 282, each into "medium" and back), none of them
+// in the 50 it runs, so a change to arNoise or propRand's draw order can turn
+// it red with no defect (restate the rate, testing.md). wrap edits each row
+// and edit the analyzer before the
 // first cycle (mutants).
 func checkK2KeyEdgeOn(wrap func(*domain.ReplicaMetrics), edit func(*SaturationAnalyzer)) func(uint64) error {
 	return func(seed uint64) error {
@@ -634,11 +638,6 @@ func checkK2KeyFollows(wrap func(*domain.ReplicaMetrics)) func(uint64) error {
 	}
 }
 
-// The k2-key edge case's positive control. edges/k2/key-near-output-boundary
-// passes when the selected key never changes, which an analyzer whose key
-// ignores the output length would do too. Such an analyzer -- here, rows whose
-// output length the key reads held at 530 -- fails the non-ledgered
-// edges/k2/key-follows-output-length.
 // The k2-key edge case is not met by a key that takes its bucket from the
 // first reading and keeps it: rows whose output length the key reads is held
 // at the first cycle's, with the band off, fail on the seeds whose first
@@ -669,6 +668,11 @@ func TestPropertyK2KeyEdgeRejectsAFrozenFirstBucket(t *testing.T) {
 	t.Logf("a key frozen at its first reading's bucket fails %d/%d seeds", failed, len(seeds))
 }
 
+// The k2-key edge case's positive control. edges/k2/key-near-output-boundary
+// passes when the selected key never changes, which an analyzer whose key
+// ignores the output length would do too. Such an analyzer -- here, rows whose
+// output length the key reads held at 530 -- fails the non-ledgered
+// edges/k2/key-follows-output-length.
 func TestPropertyK2KeyPositiveControl(t *testing.T) {
 	ignores := func(rm *domain.ReplicaMetrics) { rm.AvgOutputTokens = 530 }
 	run, err := runCase(checkK2KeyFollows(ignores), []uint64{1, 2, 3})

@@ -1,6 +1,7 @@
 package saturation
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -95,7 +96,8 @@ type keyRig struct {
 
 func (r *keyRig) step(l float64) string {
 	r.at = r.at.Add(propCycle)
-	return classifyOutputLength(r.m.note(l, r.at))
+	got, _ := r.m.note(l, r.at)
+	return classifyOutputLength(got)
 }
 
 // steps notes l for n cycles and returns the last bucket.
@@ -173,6 +175,40 @@ func TestK2KeyBucket_ASwapMovesItTheSameWayBothWays(t *testing.T) {
 	assert.Equal(t, "short", settledKey(1000).steps(50, dwellCycles+1), "and down")
 }
 
+// While a swap is pending the key holds its bucket, even when the smoothed
+// length passes the margin of the bucket next door: a swap lands in the
+// length's own bucket, and does not stop in the ones between. A fresh memo
+// (one reading at 1000) smooths fast, so 3500 takes its mean past 1545 on the
+// first cycle, inside the swap's dwell.
+func TestK2KeyBucket_APendingSwapHoldsTheBucket(t *testing.T) {
+	r := &keyRig{at: propStart}
+	r.step(1000)
+	for i := range dwellCycles {
+		assert.Equal(t, "long", r.step(3500), "cycle %d of a pending swap: held in long, not xlong", i)
+	}
+	assert.Equal(t, "xxlong", r.step(3500), "the swap lands in the length's own bucket")
+}
+
+// note reports a move of the bucket, from the length it left, and whether a
+// swap made it.
+func TestK2KeyBucket_NoteReportsTheMove(t *testing.T) {
+	r := settledKey(530)
+	at := r.at
+	for range dwellCycles {
+		at = at.Add(propCycle)
+		_, mv := r.m.note(380, at)
+		require.Zero(t, mv.from, "no move inside the dwell")
+	}
+	at = at.Add(propCycle)
+	got, mv := r.m.note(380, at)
+	assert.Equal(t, 380.0, got)
+	assert.Equal(t, "long", classifyOutputLength(mv.from), "the move is from long")
+	assert.True(t, mv.swap, "a swap made it")
+	at = at.Add(propCycle)
+	_, mv = r.m.note(380, at)
+	assert.Zero(t, mv.from, "one move, reported once")
+}
+
 // The margins are judged at the boundary of the bucket the key leaves.
 func TestK2KeyBucket_TheMarginIsAtTheBoundaryLeft(t *testing.T) {
 	assert.True(t, pastBucketMargin(530, 4000, K2KeyBucketMargin))
@@ -191,9 +227,54 @@ func TestK2KeyBucket_TheSwitchPicksTheLength(t *testing.T) {
 	a := NewSaturationAnalyzer(capacity.NewStore())
 	a.now = func() time.Time { return propStart }
 	a.fleetShape["ns|m"] = &shapeMemo{}
-	assert.Equal(t, 480.0, a.k2KeyLength("ns", "m", 480, 530), "on: the fleet's length")
-	assert.Equal(t, 480.0, a.k2KeyLength("ns", "m", 0, 530), "on, no length this cycle: the held one")
-	assert.Equal(t, 530.0, a.k2KeyLength("ns", "other", 480, 530), "no shape memo yet: the tracked length")
+	length := func(model string, fleet float64) float64 {
+		l, _ := a.k2KeyLength("ns", model, fleet, 530)
+		return l
+	}
+	assert.Equal(t, 480.0, length("m", 480), "on: the fleet's length")
+	assert.Equal(t, 480.0, length("m", 0), "on, no length this cycle: the held one")
+	assert.Equal(t, 530.0, length("other", 480), "no shape memo yet: the tracked length")
 	require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchK2KeyBucketHeld: false}))
-	assert.Equal(t, 530.0, a.k2KeyLength("ns", "m", 480, 530), "off: the tracked length")
+	assert.Equal(t, 530.0, length("m", 480), "off: the tracked length")
+}
+
+// A key that moves to a bucket with no window of its own is priced from the
+// bucket it left, lower only (seedMovedK2Key, P2-prior), not at k1. The fleet
+// learns k2 saturated at 530 output tokens ("long"), then keeps up, unsaturated,
+// at 440: the key moves to "medium" within minutes, and for the 20 minutes the
+// test runs no cycle prices the replica above what it learned.
+func TestK2KeyBucket_AMovedKeyIsPricedFromTheBucketItLeft(t *testing.T) {
+	store := capacity.NewStore()
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(256, "vllm:v1")}, propStart)
+	a := NewSaturationAnalyzer(store)
+	clock := propStart
+	a.now = func() time.Time { return clock }
+	run := func(tokens int64, queue int, out float64) domain.VariantCapacity {
+		t.Helper()
+		in := makeAnalyzerInput([]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", tokens, 16000, queue, 100, out)}, mtOneVariant)
+		res, err := a.Analyze(context.Background(), in)
+		require.NoError(t, err)
+		require.Len(t, res.VariantCapacities, 1)
+		clock = clock.Add(propCycle)
+		return res.VariantCapacities[0]
+	}
+	for range 10 {
+		run(8000, 6, 530)
+	}
+	learned := run(1000, 0, 530).PerReplicaCapacity
+	k1 := 16000 * 0.8
+	require.True(t, learned > 0 && learned < k1, "precondition: a k2 under k1 learned in long, got %v", learned)
+	moved := -1
+	for i := range 80 {
+		vc := run(1000, 0, 440)
+		a.mu.Lock()
+		bucket := classifyOutputLength(a.fleetShape["test-ns|test-model"].k2Key.length)
+		a.mu.Unlock()
+		if bucket == "medium" && moved < 0 {
+			moved = i
+		}
+		assert.LessOrEqual(t, vc.PerReplicaCapacity, learned, "cycle %d at 440 (key in %s): priced above the k2 learned in long", i, bucket)
+	}
+	require.GreaterOrEqual(t, moved, 0, "the key never moved to medium: the test did not reach the move")
+	t.Logf("the key moved to medium on cycle %d at 440; learned k2 %v, k1 %v", moved, learned, k1)
 }

@@ -896,7 +896,7 @@ The fleet's length is not enough on its own either. The key used to read the
 tracked length, which the shape tracker moves on one reading 20 % off its
 anchor; with the length 6 % above 500 and 6 % noise it moved either side of
 500, so the key went to `medium` and back (#396; property case
-`edges/k2/key-near-output-boundary`, 17 of 50 seeds). The key now holds its
+`edges/k2/key-near-output-boundary`, 13 of 50 seeds). The key now holds its
 bucket by a band of its own (`k2KeyLength`, `k2_key_bucket.go`):
 
 - It is judged on the fleet's length smoothed over `K2KeyBucketSmoothing`
@@ -911,13 +911,30 @@ bucket by a band of its own (`k2KeyLength`, `k2_key_bucket.go`):
 - Both rules are the same in both directions, no single reading moves the key,
   and a cycle with no length keeps the bucket.
 
-The cost is staleness: after a real move, k2 is priced from the old bucket's
-window, and saturated readings of the new shape are written into it, until the
-key moves -- 2 minutes for a swap of 20 % or more past the boundary, about 7
-minutes for 530 -> 440 tokens, about 14 for 530 -> 470. The throughput key
-still reads the tracked length, so the two keys can sit in different buckets
-for that long. The band is the replay switch `SwitchK2KeyBucketHeld`; off, the
-k2 key reads the tracked length as before.
+The cost is staleness, for a fleet that is not saturated. A saturated fleet is
+priced from its observation (`P1-obs`), whatever the key, and refills the
+window it writes within a few cycles. One that keeps up is priced from the old
+bucket's window (`P2-hist`) until the key moves: 2 minutes for a swap of 20 %
+or more past the boundary, about 7 minutes for 530 -> 440 tokens, about 14 for
+530 -> 470. The throughput key still reads the tracked length, so the two keys
+can sit in different buckets for that long.
+
+When the key moves, the bucket it lands in usually has no window, and k2 would
+fall to k1 (`P4-k1`): about 60 % more capacity per replica on the test rig,
+which a fleet that keeps up never corrects, as it never saturates there. The
+old key made that move only on a tracker change of 20 %; this one also makes
+it on the 10-20 % shifts the old key ignored. So a move seeds the new bucket's
+lower bound with the variant's window from the bucket it left
+(`seedMovedK2Key`), as the variant's own previous figure: `P2-prior`, lower
+only, held 30 minutes, then relaxed to the variant's own capacity over 6
+hours, and out of use once the new bucket has a window of its own
+(`TestK2KeyBucket_AMovedKeyIsPricedFromTheBucketItLeft`: 8 000, not 12 800).
+A move is logged at `--v=3` as `k2-key-bucket-moved`.
+
+The memo is not persisted: after a controller restart the key chooses its
+bucket again from its first readings, as the shape tracker does. The band is
+the replay switch `SwitchK2KeyBucketHeld`; off, the k2 key reads the tracked
+length as before.
 
 ## Constants
 

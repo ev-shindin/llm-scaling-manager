@@ -14,9 +14,9 @@ import (
 // into the next bucket for as long as the tracker stayed there. On the
 // property case edges/k2/key-near-output-boundary (output length 6 % above
 // the 500-token boundary, with 6 % noise correlated over ten cycles) the
-// selected key moved between "long" and "medium", and back, on 17 of 50
-// seeds: k2 was read from another window for minutes at a time at constant
-// load.
+// selected key left "long" for "medium" on 13 of 50 seeds (seed 2: twice,
+// once out of "long"): k2 was read from another window for minutes at a time
+// at constant load.
 //
 // Judging the bucket on one cycle's length, however wide the band, does not
 // fix it: the noise's excursions last as long as a dwell, and one reading
@@ -33,10 +33,24 @@ import (
 // rules apply the same way in both directions, and neither moves the key on
 // one reading.
 //
-// The cost: a real move of the length prices k2 from the old bucket's window
-// until the smoothed length crosses -- about 7 min for 530 -> 440 tokens and
-// 14 min for 530 -> 470 -- or for K2KeyBucketDwell when it moves by more than
-// K2KeyBucketSwap (530 -> 380 or less).
+// The cost: after a real move of the length, a fleet that is not saturated is
+// priced from the old bucket's window until the key moves -- about 7 min for
+// 530 -> 440 tokens and 14 min for 530 -> 470 -- or for K2KeyBucketDwell when
+// it moves by more than K2KeyBucketSwap (530 -> 380 or less). A saturated
+// fleet is priced from its observation (P1-obs), which also refills the window
+// it writes within a few cycles.
+//
+// When the key does move, the bucket it lands in usually has no window of
+// its own, and k2 would fall to k1 (P4-k1): about 60 % more capacity per
+// replica on the property rig, until the fleet saturates in the new bucket --
+// which a fleet that keeps up never does. The old key did that too, but only
+// on a tracker change of 20 %; this one moves on 10-20 % shifts the old key
+// ignored. So a move seeds the new bucket's lower bound with the variant's
+// figure from the bucket it left (seedMovedK2Key), as the variant's own
+// previous figure, which P2-prior already prices an argument change from:
+// used only where it is below the variant's own capacity without it, held
+// 30 min, relaxed over 6 h, and set aside by the new bucket's first
+// measurement.
 
 // K2KeyBucketSmoothing is the time constant of the smoothed output length
 // the k2 key is judged on. Until that long after the first reading the
@@ -89,12 +103,15 @@ type k2KeyMemo struct {
 	swapSince time.Time
 }
 
+// outputBucketUppers is the upper bound of every output-length bucket but the
+// last, in order (classifyOutputLength).
+var outputBucketUppers = [...]float64{ShortOutputThreshold, MediumOutputThreshold, LongOutputThreshold,
+	ExtraLongOutputThreshold, VeryLongOutputThreshold}
+
 // outputBucketBounds is the bounds of the output-length bucket l is in
 // (classifyOutputLength). hi is 0 for the last bucket, which has none.
 func outputBucketBounds(l float64) (lo, hi float64) {
-	bounds := []float64{ShortOutputThreshold, MediumOutputThreshold, LongOutputThreshold,
-		ExtraLongOutputThreshold, VeryLongOutputThreshold}
-	for _, b := range bounds {
+	for _, b := range outputBucketUppers {
 		if l < b {
 			return lo, b
 		}
@@ -111,16 +128,26 @@ func pastBucketMargin(held, now, margin float64) bool {
 	return (hi > 0 && now >= hi*(1+margin)) || now < lo*(1-margin)
 }
 
+// k2KeyMove is a move of the k2 key's output bucket: from is the length the
+// key was built from before it, 0 when the bucket did not move, and swap says
+// the swap rule moved it.
+type k2KeyMove struct {
+	from float64
+	swap bool
+}
+
 // note is this cycle's output length, now, read at t; it returns the length
-// the k2 keys are built from. A swap (now past K2KeyBucketSwap for
-// K2KeyBucketDwell) moves it to now and restarts the smoothing there.
-// Otherwise it is the smoothed length when that is in the held bucket, or
-// past its margin with no swap pending, and the held length when not.
-func (m *k2KeyMemo) note(now float64, t time.Time) float64 {
+// the k2 keys are built from, and the move of its bucket if there was one. A
+// swap (now past K2KeyBucketSwap for K2KeyBucketDwell) moves it to now and
+// restarts the smoothing there. Otherwise it is the smoothed length when that
+// is in the held bucket, or past its margin with no swap pending, and the
+// held length when not.
+func (m *k2KeyMemo) note(now float64, t time.Time) (float64, k2KeyMove) {
 	if !(m.length > 0) {
 		*m = k2KeyMemo{length: now, smoothed: now, at: t, n: 1}
-		return m.length
+		return m.length, k2KeyMove{}
 	}
+	was := m.length
 	switch {
 	case !pastBucketMargin(m.length, now, K2KeyBucketSwap):
 		m.swapSince = time.Time{}
@@ -128,7 +155,7 @@ func (m *k2KeyMemo) note(now float64, t time.Time) float64 {
 		m.swapSince = t
 	case t.Sub(m.swapSince) >= K2KeyBucketDwell:
 		*m = k2KeyMemo{length: now, smoothed: now, at: t, n: 1}
-		return m.length
+		return m.length, k2KeyMove{from: was, swap: true}
 	}
 	// The mean of every reading until K2KeyBucketSmoothing has passed, an
 	// exponential average over it after.
@@ -143,26 +170,52 @@ func (m *k2KeyMemo) note(now float64, t time.Time) float64 {
 		(m.swapSince.IsZero() && pastBucketMargin(m.length, m.smoothed, K2KeyBucketMargin)) {
 		m.length = m.smoothed
 	}
-	return m.length
+	if classifyOutputLength(m.length) != classifyOutputLength(was) {
+		return m.length, k2KeyMove{from: was}
+	}
+	return m.length, k2KeyMove{}
 }
 
 // k2KeyLength is the output length the model's k2 keys are built from this
-// cycle. With SwitchK2KeyBucketHeld on, the fleet's output length now
-// (fleetOut), its bucket held (k2KeyMemo.note); a cycle with no length
-// carries the held one, and the tracked length (stableOut) stands in until
-// there is one. Off, the tracked length, as before.
-func (a *SaturationAnalyzer) k2KeyLength(namespace, modelID string, fleetOut, stableOut float64) float64 {
+// cycle, and the move of its bucket if there was one. With
+// SwitchK2KeyBucketHeld on, the fleet's output length now (fleetOut), its
+// bucket held (k2KeyMemo.note); a cycle with no length carries the held one,
+// and the tracked length (stableOut) stands in until there is one. Off, the
+// tracked length, as before, and never a move. The memo is not persisted: a
+// controller restart chooses the bucket again from its first readings.
+func (a *SaturationAnalyzer) k2KeyLength(namespace, modelID string, fleetOut, stableOut float64) (float64, k2KeyMove) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	memo, ok := a.fleetShape[namespace+"|"+modelID]
 	if !a.k2KeyBucketHeld || !ok {
-		return stableOut
+		return stableOut, k2KeyMove{}
 	}
 	if !(fleetOut > 0) {
 		if memo.k2Key.length > 0 {
-			return memo.k2Key.length
+			return memo.k2Key.length, k2KeyMove{}
 		}
-		return stableOut
+		return stableOut, k2KeyMove{}
 	}
 	return memo.k2Key.note(fleetOut, a.now())
+}
+
+// seedMovedK2Key prices a k2 key the bucket moved to (to) from the one it left
+// (from) until it has a window of its own: the window of from becomes the
+// previous figure of to (notePreviousFigureLocked), which P2-prior prices
+// lower only, holds and relaxes. Nothing is seeded when to already has a
+// window, or from has none.
+func (a *SaturationAnalyzer) seedMovedK2Key(from, to string) {
+	if from == to {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if ra, ok := a.computeCapacityHistory[to]; ok && ra.Len() > 0 {
+		return
+	}
+	ra, ok := a.computeCapacityHistory[from]
+	if !ok || ra.Len() == 0 {
+		return
+	}
+	a.notePreviousFigureLocked(to, ra)
 }
