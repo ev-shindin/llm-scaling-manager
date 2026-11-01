@@ -31,11 +31,14 @@ import (
 
 // replaySwitches is each saturation replay switch, and the golden outputs
 // (fixture/file) it is named to move.
+//
+// Learner PR 3's switches (mu). PR 2's k2 switches are not here: "all off"
+// is this PR's switches, and an earlier PR's stay at their constructor
+// default, on, as the base goldens were written (analyzer-learner.md, 2.5).
 var replaySwitches = map[string][]string{
-	saturation.SwitchK2ReadsSettle: nil,
-	saturation.SwitchK2WaitsAfterRestart: {
-		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
-	},
+	saturation.SwitchMuRepeatIsUse:       nil,
+	saturation.SwitchMuUnknownAgeSafe:    nil,
+	saturation.SwitchMuLatchRestoresSafe: nil,
 }
 
 // heldBy is, for a switch that names no output, the unit tests that hold it:
@@ -43,9 +46,18 @@ var replaySwitches = map[string][]string{
 // and a switch whose off path were dead would pass them. Each test named
 // must exist (by its func declaration, in the package directory given).
 var heldBy = map[string][]heldTest{
-	saturation.SwitchK2ReadsSettle: {
-		{"../saturation", "TestSettleView_TheTrackerSwitchMovesTheAbsenceRule"},
-		{"../saturation", "TestSettleView_TheTrackerSwitchKeepsTheSettleThroughAZeroReadyTime"},
+	saturation.SwitchMuRepeatIsUse: {
+		{"../saturation", "TestMuRepeat_IsUseNotAWrite"},
+		{"../saturation", "TestMuRepeat_AFrozenSeriesLetsTheEpisodeEnd"},
+		{"../saturation", "TestMuRepeat_DoesNotKeepTheMeasurementFresh"},
+	},
+	saturation.SwitchMuUnknownAgeSafe: {
+		{"../saturation", "TestMuUnknownAge_UnderDerivedKeepsTheLowHold"},
+		{"../saturation", "TestMuUnknownAge_NoTimeAtAllIsHeld"},
+	},
+	saturation.SwitchMuLatchRestoresSafe: {
+		{"../saturation", "TestMuLatch_ARestoredMeasurementOverDerivedComesBackLatched"},
+		{"../saturation", "TestMuLatch_TheRestoredLatchIsKnownAfterItsFirstChoice"},
 	},
 }
 
@@ -79,12 +91,8 @@ func TestGoldens_ASwitchNoGoldenMovesIsHeldByItsTests(t *testing.T) {
 }
 
 // switchBase is the sha256 of each output a switch names, as the base
-// commit's goldens hold it (25617e954, learner PR 1).
-var switchBase = map[string]string{
-	"mu-paths/learned-state.csv":      "04745ee34d9d20cdbbc46956144b6fdec7bd53cb0a0b3d557e88af30fd90161e",
-	"mu-paths/store-records.csv":      "9db7ac4cb7887fbeade8ef0ab5d1a04762fea4b8b6bce127c6494fb82a83e8a3",
-	"mu-paths/variant-capacities.csv": "b763381d5eb0ee0a59e3ac9006365e0acb2f873c8a2014c0dde3666b25af5850",
-}
+// commit's goldens hold it (e3ecadd63, learner PR 2).
+var switchBase = map[string]string{}
 
 func TestGoldens_TheSwitchRuns(t *testing.T) {
 	m, err := ReadManifest(goldenDir)
@@ -124,13 +132,16 @@ func TestGoldens_TheSwitchRuns(t *testing.T) {
 		}
 		return sw
 	}
-	moved := func(from, to map[string][]byte) []string {
+	// moved is the outputs that differ between two runs, sorted, each
+	// logged with the replay's one-line summary of how.
+	moved := func(name string, from, to map[string][]byte) []string {
 		var out []string
 		for f, b := range to {
 			d, err := compareOutput(f, from[f], b)
 			require.NoError(t, err)
 			if d != nil {
 				out = append(out, f)
+				t.Logf("%s: %s", name, d)
 			}
 		}
 		slices.Sort(out)
@@ -152,7 +163,7 @@ func TestGoldens_TheSwitchRuns(t *testing.T) {
 		require.Nil(t, d, "all off: %s moved, and no switch names it", f)
 	}
 	for _, name := range slices.Sorted(maps.Keys(replaySwitches)) {
-		got := moved(off, run(set(name)))
+		got := moved(name, off, run(set(name)))
 		for _, f := range got {
 			require.Contains(t, replaySwitches[name], f, "%s alone moved %s, which it does not name", name, f)
 		}
