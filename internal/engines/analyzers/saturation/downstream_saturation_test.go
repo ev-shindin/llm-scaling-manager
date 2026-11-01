@@ -121,7 +121,7 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 			prefill(),
 		}, states)
 		in.ArrivalRate = runLambda
-		result, err := analyzer.Analyze(ctx, in)
+		result, err := analyzeConfirmed(ctx, analyzer, in)
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(prefillP(result)).To(Equal(357_800.0))
@@ -144,7 +144,7 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		// than the 80 000 the replica holds, which is what a load step looks
 		// like, so only a queue that has stood for K2SettleLookback with the
 		// residency flat is recorded (k2_settle.go).
-		for range 5 {
+		for range 6 { // the fifth admits, and is held for the sixth (k2_confirm.go)
 			_, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{
 				decode("decode-0", 300_000, 0), decode("decode-1", 280_000, 0), seedP}, states))
 			Expect(err).NotTo(HaveOccurred())
@@ -259,7 +259,7 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 
 		By("and letting the same row record once the window has passed")
 		forget()
-		_, err = analyzer.Analyze(ctx, makeAnalyzerInput(drained, states))
+		_, err = analyzeConfirmed(ctx, analyzer, makeAnalyzerInput(drained, states))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(analyzer.computeCapacityHistory).To(HaveKey(prefillKey))
 	})
@@ -277,7 +277,7 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		Expect(analyzer.computeCapacityHistory).NotTo(HaveKey(prefillKey), "inside the window, still decode's")
 
 		clock = last.Add(DecodeSaturationMemory)
-		_, err = analyzer.Analyze(ctx, makeAnalyzerInput(drained, states))
+		_, err = analyzeConfirmed(ctx, analyzer, makeAnalyzerInput(drained, states))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(analyzer.computeCapacityHistory).To(HaveKey(prefillKey), "a full window later, prefill's own")
 	})
@@ -292,7 +292,7 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		other := makeAnalyzerInput([]domain.ReplicaMetrics{
 			decode("decode-0", 300_000, 0), decode("decode-1", 280_000, 0), prefill()}, states)
 		other.ModelID, other.Namespace = "other-model", "other-ns"
-		result, err := analyzer.Analyze(ctx, other)
+		result, err := analyzeConfirmed(ctx, analyzer, other)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(analyzer.computeCapacityHistory).To(HaveKey("other-ns|" + prefillVariant + "|other-model|H200|1|prefill|short|q5"))
 		Expect(analyzer.computeCapacityHistory).NotTo(HaveKey(prefillKey), "the first model is still gated")
@@ -325,7 +325,7 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		// reading is its own then -- and, with the hold on its demand,
 		// prefill could otherwise never be ordered on such a fleet.
 		inFlight := []domain.ReplicaMetrics{decode("decode-0", 300_000, 8), decode("decode-1", 280_000, 6), prefill()}
-		result, err := analyzer.Analyze(ctx, makeAnalyzerInput(inFlight, states))
+		result, err := analyzeConfirmed(ctx, analyzer, makeAnalyzerInput(inFlight, states))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(analyzer.computeCapacityHistory).To(HaveKey(prefillKey))
 		Expect(analyzer.saturatedThroughput).To(HaveKey(tkey(analyzer, prefillMuKey)))
@@ -374,7 +374,7 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 			decode("decode-1", 280_000, 0),
 			prefill(),
 		}, states)
-		_, err := analyzer.Analyze(ctx, seed)
+		_, err := analyzeConfirmed(ctx, analyzer, seed)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(analyzer.computeCapacityHistory).To(HaveKey(prefillKey))
 
@@ -386,7 +386,7 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		result, err := analyzer.Analyze(ctx, gated)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(prefillP(result)).To(Equal(357_800.0), "the seeded history, at P2-hist")
-		Expect(analyzer.computeCapacityHistory[prefillKey].Len()).To(Equal(1), "the gated reading was not added to it")
+		Expect(analyzer.computeCapacityHistory[prefillKey].Len()).To(Equal(2), "the gated reading was not added to it (the seed, twice)")
 		Expect(analyzer.saturatedThroughput[tkey(analyzer, prefillMuKey)].Len()).To(Equal(1), "nor to the throughput window")
 	})
 
@@ -396,7 +396,7 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 			decode("decode-0", 970_475, 36),
 			prefill(),
 		}, states)
-		_, err := analyzer.Analyze(ctx, in)
+		_, err := analyzeConfirmed(ctx, analyzer, in)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(analyzer.computeCapacityHistory).To(HaveKey(decodeKey))
 		Expect(analyzer.computeCapacityHistory).NotTo(HaveKey(prefillKey))
@@ -405,7 +405,7 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		both := NewSaturationAnalyzer(capacity.NewStore())
 		rm := makeReplicaMetrics("both-0", "both-v", 900_000, runKvCapacity, 40, 6000, 1000)
 		rm.Ready = true
-		_, err = both.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{rm},
+		_, err = analyzeConfirmed(ctx, both, makeAnalyzerInput([]domain.ReplicaMetrics{rm},
 			[]domain.VariantReplicaState{{VariantName: "both-v", AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1}}))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(both.computeCapacityHistory).To(HaveKey("test-ns|both-v|test-model|H200|1|both|long|q5"))
@@ -516,7 +516,7 @@ func TestLogContract_PrefillSaturationUnderDecodeIsLabelled(t *testing.T) {
 	prefill := makeReplicaMetrics("pod-p", "variant-p", 357_800, 1_149_312, 30, 6000, 1)
 	decode := makeReplicaMetrics("pod-d", "variant-d", 1_039_474, 1_162_240, 81, 6000, 1000)
 	prefill.Ready, decode.Ready = true, true
-	_, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{prefill, decode},
+	_, err := analyzeAfterHold(ctx, analyzer, makeAnalyzerInput([]domain.ReplicaMetrics{prefill, decode},
 		[]domain.VariantReplicaState{
 			{VariantName: "variant-p", AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1, Role: domain.RolePrefill},
 			{VariantName: "variant-d", AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1, Role: domain.RoleDecode},

@@ -79,7 +79,8 @@ func TestOneClock_K2SettleLookbackIsJudgedOnThePinnedInstant(t *testing.T) {
 		pin  bool
 		want []string
 	}{
-		{pin: true, want: []string{"P1-obs-unsettled", "P1-obs"}},
+		// Admitted, and held as the window's first reading (k2_confirm.go).
+		{pin: true, want: []string{"P1-obs-unsettled", k2ReasonObsUnconfirmed}},
 		{pin: false, want: []string{"P1-obs-unsettled", "P1-obs-unsettled"}},
 	} {
 		base := clocktesting.NewFakePassiveClock(oneClockT0)

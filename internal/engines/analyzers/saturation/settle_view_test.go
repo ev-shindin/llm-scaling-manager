@@ -21,7 +21,8 @@ func TestSettleView_TheRestartSwitchOffTakesTheFirstCycleAsEstablished(t *testin
 		ready time.Duration
 		want  string
 	}{
-		{"Ready an hour", time.Hour, p1Obs},
+		// Admitted: held as its window's first reading (k2_confirm.go).
+		{"Ready an hour", time.Hour, k2ReasonObsUnconfirmed},
 		{"Ready 10 s", 10 * time.Second, k2ReasonObsUnsettled},
 	} {
 		r := newRestartRig(t, restartT0)

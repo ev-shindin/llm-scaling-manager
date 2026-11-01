@@ -232,10 +232,15 @@ func TestE1Replay_AJoiningReplicaIsNotAThroughputSample(t *testing.T) {
 // The same joiners' k2. rx62w at 174 359 and 288 492 under 218 waiting, and
 // kjxzs at 174 327 under 84, were filling: the run's window settled at 264 265
 // while every replica then held 331-351k with no queue. Neither has served a
-// window when it reads them; kjxzs a minute in, at 343 807, has.
+// window when it reads them; kjxzs a minute in, at 343 807, has. The run's
+// trace holds that one admitted reading, and a window's first waits for a
+// second (k2_confirm.go): kjxzs reads it again at 14:35:17, as a replica
+// still queued there would.
 func TestE1Replay_AJoiningReplicaIsNotAK2Sample(t *testing.T) {
 	a := newE1Analyzer(t, true)
-	decisions, _ := replayE1(t, a, append(append([]e1Cycle{}, e1Sg2...), steadyE1("14:35:32", 4, "5scc7", "rx62w", "kjxzs")...))
+	confirm := e1Cycle{"14:35:17", []e1Row{{"5scc7", 0, 331_182, 6.72, 3360}, {"rx62w", 0, 345_151, 6.64, 3043.08}, {"kjxzs", 84, 343_807, 4.45, 2647.91}}}
+	cycles := append(append([]e1Cycle{}, e1Sg2...), confirm)
+	decisions, _ := replayE1(t, a, append(cycles, steadyE1("14:35:32", 4, "5scc7", "rx62w", "kjxzs")...))
 	last := decisions[len(decisions)-1]
 	require.Equal(t, "P2-hist", last.k2Src, "premise: the fleet is priced from its k2 window")
 	assert.GreaterOrEqual(t, last.k2, int64(330_000), "the window holds what a full replica holds, not a fill")

@@ -230,6 +230,20 @@ k2 window nor the throughput window. Each replica's readings over
 beside `hotRankHeld`. A refusal can only keep k2 where it was; nothing here
 raises a recorded k2.
 
+A reading that passes would be the first in an empty window is held, not
+written (`k2_confirm.go`, #392): it logs `P1-obs-unconfirmed`, waits in
+`k2Pending` under its key, and is written with the next cycle's admitted
+reading (a later `Analyze`, counted by `analyzeSeq`; a sibling in the same
+cycle does not confirm it). Held readings past `EpisodeGap` are swept. The mu
+written beside a `P1-obs` reading is judged on the held cycle too. The replay
+switch `SwitchK2FirstReadingWaits` turns the hold off.
+
+Mu has a wait of its own (`mu_return.go`): a reading from a replica whose load
+returned after an idle run (`settle.Replica.ReturnedAfter`, read from the settle
+tracker) under `JoinedReplicaWindow` ago is refused (`refused-returned` in the
+learner report): its `rate[1m]` still covers part of the idle minute. The
+replay switch is `SwitchMuReturnWaits`.
+
 ### Which bound applies
 
 ```

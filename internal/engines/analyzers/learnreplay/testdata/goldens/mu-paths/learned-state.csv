@@ -42,10 +42,6 @@ saturation.ExportLearnedState,2026-03-02T09:01:00Z,ITLSlopes,ns-01|model-01|vari
 saturation.ExportLearnedState,2026-03-02T09:01:00Z,ITLSlopes,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999955,""FittedAt"":""2026-03-02T09:01:00Z"",""Args"":""e220d772947df48f""}"
 saturation.ExportLearnedState,2026-03-02T09:01:00Z,ITLSlopes,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.019999999999999955,""FittedAt"":""2026-03-02T09:01:00Z"",""Args"":""e220d772947df48f""}"
 saturation.ExportLearnedState,2026-03-02T09:01:00Z,ITLSlopes,ns-01|model-01|variant-04|NVIDIA-H100-80GB-HBM3|1,"{""A"":0.020000000000000004,""FittedAt"":""2026-03-02T09:01:00Z"",""Args"":""e220d772947df48f""}"
-saturation.ExportLearnedState,2026-03-02T09:01:00Z,K2,ns-01|variant-01|model-01|NVIDIA-H100-80GB-HBM3|1|decode|medium|q5,"{""Values"":[92000,92000],""LastUsed"":""2026-03-02T09:01:00Z"",""LastWritten"":""2026-03-02T09:01:00Z""}"
-saturation.ExportLearnedState,2026-03-02T09:01:00Z,K2,ns-01|variant-02|model-01|NVIDIA-H100-80GB-HBM3|1|decode|medium|q5,"{""Values"":[92000],""LastUsed"":""2026-03-02T09:01:00Z"",""LastWritten"":""2026-03-02T09:01:00Z""}"
-saturation.ExportLearnedState,2026-03-02T09:01:00Z,K2,ns-01|variant-03|model-01|NVIDIA-H100-80GB-HBM3|1|decode|medium|q5,"{""Values"":[92000],""LastUsed"":""2026-03-02T09:01:00Z"",""LastWritten"":""2026-03-02T09:01:00Z""}"
-saturation.ExportLearnedState,2026-03-02T09:01:00Z,K2,ns-01|variant-04|model-01|NVIDIA-H100-80GB-HBM3|1|decode|medium|q5,"{""Values"":[92000],""LastUsed"":""2026-03-02T09:01:00Z"",""LastWritten"":""2026-03-02T09:01:00Z""}"
 saturation.ExportLearnedState,2026-03-02T09:01:00Z,StartSeconds,ns-01|model-01|variant-01|NVIDIA-H100-80GB-HBM3|1,75
 saturation.ExportLearnedState,2026-03-02T09:01:00Z,StartSeconds,ns-01|model-01|variant-02|NVIDIA-H100-80GB-HBM3|1,75
 saturation.ExportLearnedState,2026-03-02T09:01:00Z,StartSeconds,ns-01|model-01|variant-03|NVIDIA-H100-80GB-HBM3|1,75

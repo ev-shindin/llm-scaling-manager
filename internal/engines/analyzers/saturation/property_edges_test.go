@@ -342,7 +342,7 @@ func probeK2Queue(threshold float64) probe {
 			rig.policy = func(p *config.ScalingPolicy) { p.QueueLengthThreshold = threshold }
 		}
 		err := rig.runK2(k2Reading{int64(float64(propKv) * (0.88 + 0.05*r.Float64())), int(q), 6, propCycle})
-		return rig.k2("") > 0, err
+		return rig.k2Admitted(), err
 	}
 }
 
@@ -354,7 +354,7 @@ func probeJoined(r *rand.Rand, s float64) (bool, error) {
 	rm := satRow("r0", int64(float64(propKv)*(0.88+0.05*r.Float64())), 10, 6)
 	rm.ReadySince = rig.clock.Add(-time.Duration(s) * time.Second)
 	_, err := rig.analyze([]domain.ReplicaMetrics{rm}, decodeStates(1), 6, propCycle)
-	return rig.k2("") > 0, err
+	return rig.k2Admitted(), err
 }
 
 // settleIn is a saturated reading whose queue overflows its batch, so the
@@ -411,17 +411,22 @@ func probeK2Window(r *rand.Rand, n float64) (bool, error) {
 	return false, errors.New("no k2 window")
 }
 
-// probeEpisodeGap: one reading, a write gap of h hours, another: the window
-// continues within the 24 h episode gap and starts over past it.
+// probeEpisodeGap: a window of two readings, a write gap of h hours, two
+// more: the window continues within the 24 h episode gap and starts over
+// past it.
 func probeEpisodeGap(r *rand.Rand, h float64) (bool, error) {
 	rig := newPropRig()
 	tok := int64(float64(propKv) * (0.88 + 0.05*r.Float64()))
-	// Unseen for most of h hours, the replica is a new sighting (the settle
-	// tracker's absence), so its readings wait a window: four refused, and
-	// the fifth, written h hours after the first.
-	readings := make([]k2Reading, 0, 6)
-	readings = append(readings, k2Reading{tok, 10, 6, time.Duration(h*float64(time.Hour)) - JoinedReplicaWindow})
-	for range 5 {
+	// Two readings start the window: the first is held for the second
+	// (k2_confirm.go), which writes both. Unseen for most of h hours, the
+	// replica is then a new sighting (the settle tracker's absence), so its
+	// readings wait a window: four refused, and the fifth read h hours after
+	// the window's last write. Past the gap that fifth is a new window's
+	// first, held for the sixth.
+	readings := make([]k2Reading, 0, 8)
+	readings = append(readings, k2Reading{tok, 10, 6, propCycle},
+		k2Reading{tok, 10, 6, time.Duration(h*float64(time.Hour)) - JoinedReplicaWindow})
+	for range 6 {
 		readings = append(readings, k2Reading{tok, 10, 6, propCycle})
 	}
 	if err := rig.runK2(readings...); err != nil {
@@ -430,7 +435,7 @@ func probeEpisodeGap(r *rand.Rand, h float64) (bool, error) {
 	rig.a.mu.Lock()
 	defer rig.a.mu.Unlock()
 	for _, ra := range rig.a.computeCapacityHistory {
-		return ra.Len() == 2, nil
+		return ra.Len() == 4, nil
 	}
 	return false, errors.New("no k2 window")
 }

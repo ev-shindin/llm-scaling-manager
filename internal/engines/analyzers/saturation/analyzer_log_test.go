@@ -465,7 +465,7 @@ func TestLogContract_SaturatedQueueReportsObservedTier(t *testing.T) {
 		},
 	)
 
-	_, err := analyzer.Analyze(ctx, input)
+	_, err := analyzeAfterHold(ctx, analyzer, input)
 	require.NoError(t, err)
 
 	assert.Equal(t, "P1-obs", requireLogged(t, logs, "k2-decision")["priority"])

@@ -183,6 +183,7 @@ P1-obs-downstream
 P1-obs-invalid
 P1-obs-rollout
 P1-obs-unadmitted
+P1-obs-unconfirmed
 P1-obs-unsettled
 P2-borrow
 P2-hist
@@ -579,6 +580,7 @@ configuration
 configured
 confirmCycles
 confirmedFor
+confirms
 consecutiveFailures
 considered
 constrained
@@ -1045,6 +1047,7 @@ k1MemoryBound
 k2
 k2-compute
 k2-decision
+k2-first-reading-waits-for-a-second
 k2-key-bucket-held
 k2-key-bucket-moved
 k2-obs-admitted
@@ -1059,6 +1062,7 @@ k2Forgotten
 k2History
 k2Logged
 k2Observed
+k2Pending
 k2Priors
 k2Settle
 k2Settle.maxRise
@@ -1181,6 +1185,7 @@ longer
 loop
 lose
 lost
+low
 low-confirmed
 lowHoldFor
 lower
@@ -1285,6 +1290,7 @@ mu-exact-repeat-is-use
 mu-latch-restores-safe-side
 mu-sample-written
 mu-unknown-age-resolves-safe
+mu-waits-a-window-after-load-returns
 mu-yield-served
 mu-yield-sibling
 mu-yield-stale
@@ -1647,6 +1653,7 @@ refresh
 refreshInterval
 refused-filling
 refused-no-completion
+refused-returned
 refused-under-derived
 refused-under-served
 refusing

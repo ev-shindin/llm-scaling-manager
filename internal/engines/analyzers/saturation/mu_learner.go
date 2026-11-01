@@ -54,6 +54,7 @@ const (
 	muReasonRefusedFilling      learn.Reason = "refused-filling"
 	muReasonRefusedUnderServed  learn.Reason = "refused-under-served"
 	muReasonRefusedUnderDerived learn.Reason = "refused-under-derived"
+	muReasonRefusedReturned     learn.Reason = "refused-returned"
 	muReasonYieldServed         learn.Reason = "yield-served"
 	muReasonYieldStale          learn.Reason = "yield-stale"
 	muReasonYieldSiblings       learn.Reason = "yield-siblings"
@@ -69,6 +70,8 @@ func muRefusalReason(why string) learn.Reason {
 		return muReasonRefusedFilling
 	case refusedUnderServed:
 		return muReasonRefusedUnderServed
+	case refusedReturned:
+		return muReasonRefusedReturned
 	default:
 		return muReasonRefusedUnderDerived
 	}

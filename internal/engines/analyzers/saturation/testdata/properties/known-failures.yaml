@@ -26,20 +26,6 @@
   finding: "The sibling yield prices the full siblings' lower median when the reading on record is a genuinely slow pod's: over the fleet's mean, the SLO side. Declared: it starts to over-price once the slow pod reads under siblingMuTolerance (0.8) of its siblings."
   measured: "100/100 seeds; seed 1: fleet {1, 1, 1, 0.569}, mean 0.892, priced 1.000, 12 % over"
   owner: "PR 3"
-- id: first-sample/k2/second-reading
-  class: first-sample
-  learner: k2
-  expect: adopted-raw
-  finding: "k2 prices its first admitted reading at once; the window mean then moves by half the second reading's difference."
-  measured: "20/20 seeds; seed 1: 296 552 from the first reading, 264 778 after a second, 11 %"
-  owner: "#392"
-- id: first-sample/mu/joiner-rate-timebase
-  class: first-sample
-  learner: mu
-  expect: adopted-raw
-  finding: "On the time base, a replica's first saturated rate[1m] covers only the part of the minute it served. Served for half the minute or more, the reading is at least half the derived mu and passes minMeasuredOfDerived, so a second reading moves the figure by up to half. The joined test refuses this for a replica Ready under a minute, not for one routed to late. Measured on throughputRefusal alone, so an upper bound: the analyzer's full path also applies tokensOutrunCompletions and the served bound, which may refuse some of these readings."
-  measured: "51/100 seeds; seed 3: served 30 s of its first minute, rate[1m] 0.1095 against a derived 0.2118, admitted"
-  owner: "#392"
 - id: first-sample/start-time/between-sample-and-default
   class: first-sample
   learner: start-time

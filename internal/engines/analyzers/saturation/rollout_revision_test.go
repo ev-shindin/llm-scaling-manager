@@ -38,7 +38,7 @@ func TestReplicasOfTwoRevisionsHoldTheVariantsReadings(t *testing.T) {
 		ra.Revision = revA
 		rb := makeReplicaMetrics("pod-b", "variant-a", 4000, 16000, 6, 100, 50)
 		rb.Revision, rb.FromWarmPool = revB, bridgeB
-		if _, err := a.Analyze(context.Background(), makeAnalyzerInput([]domain.ReplicaMetrics{ra, rb}, states)); err != nil {
+		if _, err := analyzeConfirmed(context.Background(), a, makeAnalyzerInput([]domain.ReplicaMetrics{ra, rb}, states)); err != nil {
 			t.Fatal(err)
 		}
 		return r4Windows(a)

@@ -33,7 +33,7 @@ func mtAnalyze(t *testing.T, a *SaturationAnalyzer, tokens int64, queue int, mut
 	if mutate != nil {
 		mutate(in.Config.(*config.ScalingPolicy))
 	}
-	result, err := a.Analyze(context.Background(), in)
+	result, err := analyzeConfirmed(context.Background(), a, in)
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestAnImageOnlyBumpLeavesASpentBorrowSpent(t *testing.T) {
 		{VariantName: "variant-a", AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},
 		{VariantName: "variant-b", AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},
 	}
-	if _, err := a.Analyze(context.Background(), makeAnalyzerInput([]domain.ReplicaMetrics{
+	if _, err := analyzeConfirmed(context.Background(), a, makeAnalyzerInput([]domain.ReplicaMetrics{
 		makeReplicaMetrics("pod-a", "variant-a", 4000, 16000, 6, 100, 50),
 		makeReplicaMetrics("pod-b", "variant-b", 1000, 16000, 0, 100, 50),
 	}, states)); err != nil {

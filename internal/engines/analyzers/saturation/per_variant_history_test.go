@@ -42,14 +42,14 @@ var _ = Describe("k2 and throughput windows are per variant", func() {
 		// k1 = 0.8 x 16000 = 12800 for both, so neither reading is clamped
 		// and the k2 each one reads back is what decides its capacity.
 		By("variant-b saturating at 4000 tokens: its own window")
-		_, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{
+		_, err := analyzeConfirmed(ctx, analyzer, makeAnalyzerInput([]domain.ReplicaMetrics{
 			makeReplicaMetrics("pod-a", "variant-a", 1000, 16000, 0, 100, 50),
 			makeReplicaMetrics("pod-b", "variant-b", 4000, 16000, 6, 100, 50),
 		}, states))
 		Expect(err).NotTo(HaveOccurred())
 
 		By("variant-a saturating at 12000 tokens: a larger batch on the same model and card")
-		_, err = analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{
+		_, err = analyzeConfirmed(ctx, analyzer, makeAnalyzerInput([]domain.ReplicaMetrics{
 			makeReplicaMetrics("pod-a", "variant-a", 12000, 16000, 6, 100, 50),
 			makeReplicaMetrics("pod-b", "variant-b", 1000, 16000, 0, 100, 50),
 		}, states))
@@ -75,13 +75,13 @@ var _ = Describe("k2 and throughput windows are per variant", func() {
 		// P1-obs returns the window's average after folding the reading in,
 		// so a shared window made even a variant's OWN saturated cycle report
 		// a figure partly measured on another variant.
-		_, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{
+		_, err := analyzeConfirmed(ctx, analyzer, makeAnalyzerInput([]domain.ReplicaMetrics{
 			makeReplicaMetrics("pod-a", "variant-a", 12000, 16000, 6, 100, 50),
 			makeReplicaMetrics("pod-b", "variant-b", 1000, 16000, 0, 100, 50),
 		}, states))
 		Expect(err).NotTo(HaveOccurred())
 
-		result, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{
+		result, err := analyzeConfirmed(ctx, analyzer, makeAnalyzerInput([]domain.ReplicaMetrics{
 			makeReplicaMetrics("pod-a", "variant-a", 1000, 16000, 0, 100, 50),
 			makeReplicaMetrics("pod-b", "variant-b", 4000, 16000, 6, 100, 50),
 		}, states))

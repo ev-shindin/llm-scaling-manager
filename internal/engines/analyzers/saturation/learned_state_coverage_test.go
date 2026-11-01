@@ -301,7 +301,7 @@ func TestAThroughputWindowIsTaggedWithItsArgumentsWhenWritten(t *testing.T) {
 	rm := makeReplicaMetrics("pod-a", "variant-a", 4000, 16000, 6, 100, 50)
 	rm.RequestRate = 2
 	rm.GenerationTokenRate = 100
-	if _, err := a.Analyze(context.Background(), makeAnalyzerInput([]domain.ReplicaMetrics{rm}, mtOneVariant)); err != nil {
+	if _, err := analyzeConfirmed(context.Background(), a, makeAnalyzerInput([]domain.ReplicaMetrics{rm}, mtOneVariant)); err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
 

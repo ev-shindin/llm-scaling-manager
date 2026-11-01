@@ -278,7 +278,11 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// key alone, as the shape-shift proposal scopes it. (throughputKey and
 	// keyInput are built above, before computeK2, whose settle test reads the
 	// rate on record under the key.)
-	if k2Priority == capacity.K2SrcObserved && adm.admitted() {
+	//
+	// A first k2 reading held for a later cycle's (k2_confirm.go) passed
+	// every admission test P1-obs does, and its mu is judged here as one
+	// written beside it: the hold is k2's, not mu's.
+	if (k2Priority == capacity.K2SrcObserved || d.refused == k2ReasonObsUnconfirmed) && adm.admitted() {
 		// keyInput is the effective prompt length this key was built with, so
 		// the token rate is converted to requests/s at the same figure the
 		// window is keyed by -- a rate divided by one shape and stored under
@@ -293,6 +297,12 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 			// what one replica sustains.
 			why := tune.throughputRefusal(rm.RequestRate, mu, derived, served.max,
 				tune.tokensOutrunCompletions(rm, role, fleetOutput))
+			// Nor, for a rate window, is one whose load has just returned
+			// after an idle run (mu_return.go): its window holds part of the
+			// idle minute. Ahead of the low run, which it would only start.
+			if (why == "" || why == refusedUnderDerived) && a.muReturnedUnderWindow(namespace, modelID, rm, a.now()) {
+				why = refusedReturned
+			}
 			// A low reading that repeats on every saturated cycle for
 			// MeasuredLowConfirmFor is a real low rate, not a fill -- unless
 			// a sibling's served rate contradicts it (refusedUnderServed),
@@ -936,9 +946,27 @@ func (a *SaturationAnalyzer) k2Chain(
 			// a bucket the fleet is still serving -- two episodes weeks
 			// apart would blend, and a stale high reading would hold
 			// capacity up against today's lower, truer one.
-			if !ok || ra.WriteGapExceedsAt(now, a.horizons.EpisodeGap) {
+			fresh := !ok || ra.WriteGapExceedsAt(now, a.horizons.EpisodeGap)
+			// The first reading of a window waits for a later cycle's
+			// (k2_confirm.go).
+			held, confirmed := a.k2HoldFirstLocked(historyKey, k2Observed, fresh, now)
+			if held {
+				a.mu.Unlock()
+				*refused = k2ReasonObsUnconfirmed
+				logger.V(perReplicaLogLevel).Info("k2-decision",
+					"modelID", modelID, "namespace", namespace, "variant", variantName,
+					"priority", k2ReasonObsUnconfirmed, "historyKey", historyKey,
+					"queueLength", queueLen, "queueThreshold", queueThreshold,
+					"reason", "the first saturated reading of a window with nothing on record: held until a later cycle's reading confirms it; not recorded",
+					"tokensInUse", tokensInUse, "k1", k1)
+				break
+			}
+			if fresh {
 				ra = capacity.NewRollingAverage(capacity.RollingAverageWindowSize, now)
 				a.computeCapacityHistory[historyKey] = ra
+			}
+			for _, r := range confirmed {
+				ra.AddAt(float64(r), now)
 			}
 			ra.AddAt(float64(k2Observed), now)
 			a.paths.add(pathK2Obs, 1)

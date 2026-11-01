@@ -90,11 +90,13 @@ type k2Logged struct {
 }
 
 // beginK2Cycle starts k2's cycle for a model, at the top of Analyze: what
-// an Analyze that failed part way left is dropped.
+// an Analyze that failed part way left is dropped, and the call is numbered
+// (analyzeSeq).
 func (a *SaturationAnalyzer) beginK2Cycle(namespace, modelID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.k2Cycles, namespace+"|"+modelID)
+	a.analyzeSeq++
 }
 
 // k2CycleLocked is model's k2 cycle in progress. Callers hold a.mu.
@@ -378,6 +380,13 @@ func (a *SaturationAnalyzer) forgetK2Locked(namespace, modelID, variant string, 
 	for key := range a.k2Logged {
 		if strings.HasPrefix(key, prefix) {
 			delete(a.k2Logged, key)
+		}
+	}
+	// Readings held for a window (k2_confirm.go) are not counted: no
+	// window holds them yet.
+	for key := range a.k2Pending {
+		if strings.HasPrefix(key, prefix) {
+			delete(a.k2Pending, key)
 		}
 	}
 	a.spendLowerBoundsLocked(prefix, a.now())

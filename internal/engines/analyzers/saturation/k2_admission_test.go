@@ -31,7 +31,7 @@ func k2AdmissionAnalyze(t *testing.T, analyzer *SaturationAnalyzer, totalKv int6
 	ctx, logs := observedCtx(t)
 	rm := makeReplicaMetrics("pod-d", admissionVariant, 600_000, totalKv, 30, 1000, 1000)
 	mutate(&rm)
-	result, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{rm},
+	result, err := analyzeAfterHold(ctx, analyzer, makeAnalyzerInput([]domain.ReplicaMetrics{rm},
 		[]domain.VariantReplicaState{
 			{VariantName: admissionVariant, AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1, Role: domain.RoleDecode},
 		}))
@@ -106,7 +106,7 @@ func TestK2Admission_UnadmittedRowReadsTheWindow(t *testing.T) {
 	analyzer.mu.Lock()
 	defer analyzer.mu.Unlock()
 	for _, ra := range analyzer.computeCapacityHistory {
-		assert.Equal(t, 1, ra.Len(), "the declined reading was not folded in")
+		assert.Equal(t, 2, ra.Len(), "the declined reading was not folded in: the window holds the first cycle's two (k2_confirm.go)")
 		assert.InDelta(t, 600_000, ra.Average(), 0.5)
 	}
 }

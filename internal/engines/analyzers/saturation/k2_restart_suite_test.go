@@ -59,7 +59,9 @@ func TestRestartSuite_AControllerRestartWaitsAWindowOnce(t *testing.T) {
 	for range waitWindow {
 		want = append(want, k2ReasonObsUnsettled)
 	}
-	want = append(want, p1Obs, p1Obs)
+	// Admitted a window on: the bucket's first reading is held for the next
+	// (k2_confirm.go), which writes both.
+	want = append(want, k2ReasonObsUnconfirmed, p1Obs)
 	assert.Equal(t, want, got, "a replica Ready an hour waits a window from the controller's first sight of it")
 }
 
@@ -183,7 +185,9 @@ func TestRestartSuite_ANodeClockBehindStillWaitsAWindow(t *testing.T) {
 func settled(t *testing.T, r *restartRig, rows func() []domain.ReplicaMetrics, states []domain.VariantReplicaState) {
 	t.Helper()
 	var last []string
-	for range waitWindow + 1 {
+	// A window of refusals, the first admission held (k2_confirm.go), and
+	// the one that writes it.
+	for range waitWindow + 2 {
 		last = r.cycle(rows(), states)
 	}
 	for _, p := range last {

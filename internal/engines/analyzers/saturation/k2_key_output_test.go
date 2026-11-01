@@ -29,7 +29,9 @@ func k2KeysOverCycles(t *testing.T, role string, tokens []int64, queues []int, o
 			}))
 		require.NoError(t, err)
 		decisions := logs.FilterMessage("k2-decision").All()
-		require.Len(t, decisions, 1, "cycle %d: one k2 decision per replica", i)
+		// One per replica, or two where the window's first reading is held
+		// (k2_confirm.go): the hold, then what priced the cycle. One key.
+		require.NotEmpty(t, decisions, "cycle %d: a k2 decision per replica", i)
 		keys = append(keys, stringField(t, decisions[0].ContextMap(), "historyKey"))
 		require.Len(t, result.VariantCapacities, 1)
 		prices = append(prices, result.VariantCapacities[0].PerReplicaCapacity)

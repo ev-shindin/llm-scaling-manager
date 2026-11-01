@@ -46,9 +46,13 @@ var _ = Describe("learned state across a restart", func() {
 	// process that remembers it prices the replica at 4000 and one that does
 	// not prices it at k1.
 	learn := func(a *SaturationAnalyzer) LearnedState {
-		_, err := a.Analyze(context.Background(), makeAnalyzerInput(
-			[]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 4000, 16000, 6, 100, 50)}, states))
-		Expect(err).NotTo(HaveOccurred())
+		// Twice: a window's first reading waits for a later cycle's
+		// (k2_confirm.go).
+		for range 2 {
+			_, err := a.Analyze(context.Background(), makeAnalyzerInput(
+				[]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 4000, 16000, 6, 100, 50)}, states))
+			Expect(err).NotTo(HaveOccurred())
+		}
 		Expect(capacityOf(a)).To(Equal(float64(4000)), "precondition: the first process learned k2")
 		return a.ExportLearnedState()
 	}
@@ -164,7 +168,7 @@ var _ = Describe("learned state across a restart", func() {
 		saved := carry(learn(first))
 
 		second := newProcess(params(256))
-		_, err := second.Analyze(context.Background(), makeAnalyzerInput(
+		_, err := analyzeConfirmed(context.Background(), second, makeAnalyzerInput(
 			[]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 9000, 16000, 6, 100, 50)}, states))
 		Expect(err).NotTo(HaveOccurred())
 		second.RestoreLearnedState(saved)

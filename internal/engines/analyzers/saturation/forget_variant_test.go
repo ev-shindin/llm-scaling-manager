@@ -38,7 +38,7 @@ var _ = Describe("forgetting one variant", func() {
 			r.Ready = true
 			rows = append(rows, r)
 		}
-		_, err := a.Analyze(context.Background(), makeAnalyzerInput(rows, states))
+		_, err := analyzeConfirmed(context.Background(), a, makeAnalyzerInput(rows, states))
 		Expect(err).NotTo(HaveOccurred())
 		for _, v := range variants {
 			a.itlLines["line-of-"+v] = learnedLine{
