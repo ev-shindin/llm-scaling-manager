@@ -109,3 +109,22 @@ func TestMergeCarriesEnablePrefillThroughputBound(t *testing.T) {
 		}
 	})
 }
+
+// TestMergeCarriesEnableBatchCapLearning: batch-cap learning is off by
+// default, and either a `default:` entry or a model's own entry turns it on.
+func TestMergeCarriesEnableBatchCapLearning(t *testing.T) {
+	var p ScalingPolicy
+	if p.EnableBatchCapLearning {
+		t.Error("batch-cap learning is opt-in")
+	}
+	base := ScalingPolicy{}
+	base.Merge(ScalingPolicy{EnableBatchCapLearning: true})
+	if !base.EnableBatchCapLearning {
+		t.Error("an override that enables batch-cap learning must survive Merge")
+	}
+	base = ScalingPolicy{EnableBatchCapLearning: true}
+	base.Merge(ScalingPolicy{ScaleUpThreshold: 0.9})
+	if !base.EnableBatchCapLearning {
+		t.Error("an override silent on batch-cap learning must not turn it off")
+	}
+}

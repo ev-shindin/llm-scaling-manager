@@ -109,10 +109,10 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // seam a replay drives one named change through (analyzer-learner.md, 2.5).
 // The switches are SwitchK2ReadsSettle, SwitchK2WaitsAfterRestart,
 // SwitchMuRepeatIsUse, SwitchMuUnknownAgeSafe, SwitchMuLatchRestoresSafe,
-// SwitchIdleBand, SwitchK2KeyBucketHeld and SwitchK2FirstReadingWaits; a
-// name it does not know is an
-// error, and sets nothing. Never called on a production path; a test holds
-// that.
+// SwitchIdleBand, SwitchK2KeyBucketHeld, SwitchBatchCapDeclared,
+// SwitchBatchCapLearned and SwitchK2FirstReadingWaits; a name it does not
+// know is an error, and sets nothing. Never called on a production path; a
+// test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
 	fields := a.switchFields()
@@ -138,6 +138,8 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		SwitchMuLatchRestoresSafe: &a.muLatchRestoresSafe,
 		SwitchIdleBand:            &a.idleBand,
 		SwitchK2KeyBucketHeld:     &a.k2KeyBucketHeld,
+		SwitchBatchCapDeclared:    &a.batchCapDeclared,
+		SwitchBatchCapLearned:     &a.batchCapLearned,
 		SwitchK2FirstReadingWaits: &a.k2FirstReadingWaits,
 	}
 }

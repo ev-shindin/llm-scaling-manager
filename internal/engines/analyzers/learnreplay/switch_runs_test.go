@@ -36,7 +36,7 @@ import (
 // (fixture/file) it is named to move.
 //
 // #392's first sample for k2: its first reading waits for a second. Earlier
-// PRs' switches are
+// PRs' switches (learner PRs 2 and 3, #396's bands, #399's batch cap) are
 // not here: "all off" is this PR's switches, and an earlier PR's stay at
 // their constructor default, on, as the base goldens were written
 // (analyzer-learner.md, 2.5).
@@ -55,15 +55,17 @@ var replaySwitches = map[string][]string{
 // all on, it may move only what it named. A seam's row goes with the seam,
 // in the PR, or cleanup PR, that deletes it with zero golden diff.
 var earlierSeams = map[string][]string{
-	saturation.SwitchIdleBand:        nil,
-	saturation.SwitchK2KeyBucketHeld: nil,
-	saturation.SwitchK2ReadsSettle:   nil,
+	saturation.SwitchBatchCapDeclared: nil,
+	saturation.SwitchBatchCapLearned:  nil,
+	saturation.SwitchK2ReadsSettle:    nil,
 	saturation.SwitchK2WaitsAfterRestart: {
 		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
 	},
 	saturation.SwitchMuRepeatIsUse:       nil,
 	saturation.SwitchMuUnknownAgeSafe:    nil,
 	saturation.SwitchMuLatchRestoresSafe: nil,
+	saturation.SwitchIdleBand:            nil,
+	saturation.SwitchK2KeyBucketHeld:     nil,
 }
 
 // heldBy is, for a switch that names no output, the unit tests that hold it:
@@ -95,6 +97,13 @@ var heldBy = map[string][]heldTest{
 	saturation.SwitchMuUnknownAgeSafe: {
 		{"../saturation", "TestMuUnknownAge_UnderDerivedKeepsTheLowHold"},
 		{"../saturation", "TestMuUnknownAge_NoTimeAtAllIsHeld"},
+	},
+	saturation.SwitchBatchCapDeclared: {
+		{"../saturation", "TestBatchCapSwitch_DeclaredOffPricesTheDefault"},
+	},
+	saturation.SwitchBatchCapLearned: {
+		{"../saturation", "TestBatchCapSwitch_LearnedOffLearnsNothing"},
+		{"../saturation", "TestBatchCap_SwitchesOffReproduceTheIssue"},
 	},
 	saturation.SwitchMuLatchRestoresSafe: {
 		{"../saturation", "TestMuLatch_ARestoredMeasurementOverDerivedComesBackLatched"},
@@ -156,7 +165,7 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch names, as the base
-// commit's goldens hold it (0d9ec6599, main after #424).
+// commit's goldens hold it (584bb9649, main after #422).
 var switchBase = map[string]string{
 	"e1/variant-capacities.csv":         "acb5d20d1f2e7570fe079e31001bc1e3f9213d939fb4e5844c33f1c0a6caf69c",
 	"e1-tuned/store-records.csv":        "2c7766fdd7c8c057c9ed08c47ae0245ee3e00840458b968f60c3cb2db8e4379a",

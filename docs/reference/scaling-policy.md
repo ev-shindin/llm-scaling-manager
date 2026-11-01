@@ -1431,6 +1431,83 @@ limits apply:
   [`throughput-demand-floor`](cycle-log.md#throughput-demand-floor) line, or
   `wva_service_rate_per_replica{source="lower-bound"}`.
 
+### The batch cap: `llm-d.ai/max-num-seqs` and `enableBatchCapLearning`
+
+Until a replica has been seen full, its capacity is **derived** from the engine's
+flags (`P3-k2`): how many sequences one engine runs at once (`--max-num-seqs`,
+SGLang `--max-running-requests`) times the tokens each holds. The scaling
+manager reads that cap from the flags. When it cannot read them (a launcher
+script, or `--max-num-seqs $VAR` with the value from an `envFrom`), it assumes
+vLLM's 256. An engine whose real cap is lower is then priced as if it held
+more than it can.
+
+This matters under **flow control**. The router holds the queue, the engine's
+own queue stays under `queueLengthThreshold`, and the replica is never seen
+full. A sequence-bound replica is then priced at its KV cache. Measured at a
+true capacity of 0.42 of the cache, that is 1.9 times the truth: about half
+the replicas the load needs.
+
+**Declare the cap on the scale target** (the Deployment or LeaderWorkerSet
+itself, not its pod template, so nothing rolls). The value is one engine
+rank's cap:
+
+```bash
+kubectl annotate deployment <name> -n <namespace> --overwrite llm-d.ai/max-num-seqs=128
+```
+
+- It is used only where the flags state no cap. A cap in the flags wins.
+- It takes effect on the next cycle and keeps everything the variant has
+  learned.
+- A value that is not a positive whole number is ignored.
+- Two variants that declare different caps never price each other.
+- **On a P/D decode, declare the cap.** Learning does not see it there (below).
+
+**Or let the scaling manager learn it.** **`enableBatchCapLearning` is off by
+default.** On, a variant whose flags state no cap and which declares none
+learns it from its pods. A pod's running count is a sample of the cap when
+all of these hold for three cycles in a row, at the same count:
+
+- the pod is Ready, the variant's own (not a warm-pool bridge), not mid-rollout,
+  and Ready for over a minute;
+- requests wait on the pod itself;
+- on a data-parallel pod, every rank holds about the same KV (the busiest
+  within 10% of the mean), because the running count is read summed over
+  ranks;
+- its KV is under `kvCacheThreshold`;
+- it is not preempting (SGLang publishes no preemption count, so an SGLang
+  fleet does not learn).
+
+The cap is the highest such count, per engine rank. It is used only where it
+is lower than the 256 it replaces.
+
+```yaml
+default:
+  enableBatchCapLearning: true
+```
+
+**The risk goes one way: it can add replicas, never remove them.** A running
+count is never above the true cap. A cap learned too low (a fleet that waits on
+its batch-token budget rather than its batch, or never fills its batch) orders
+more replicas than needed until a higher count is seen. These limits apply:
+
+- **A pod with nothing waiting on it teaches nothing.** With the router holding
+  every request and the engines' own queues at 0, nothing is learned. Declare
+  the cap instead.
+- **A P/D decode does not learn.** At its cap vLLM reports the requests waiting
+  on a decode as deferred, not waiting for capacity, so the decode reads no
+  queue of its own. Learning covers aggregated and data-parallel pods; on a
+  P/D decode, declare the cap.
+- **Uneven data-parallel ranks do not teach.** One full rank beside idle ones
+  says nothing about the others.
+- The learned cap is not kept across a controller restart. It is dropped when
+  the variant's engine arguments change, or after a week in which it neither
+  priced a replica nor was seen again.
+- One direction only, like `enableLearnedStateReuse`.
+
+To see which cap priced a replica, read `batchCapSource` (`flags`, `declared`,
+`learned` or `default`) and `batchCap` on the `k2-decision` line for
+[`P3-k2`](cycle-log.md#reason-values-reason-field).
+
 ### Advanced tuning: `analyzerTuning` and `loadImbalance`
 
 **Leave these alone unless a measurement tells you otherwise.** The defaults are

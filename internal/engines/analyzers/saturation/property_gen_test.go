@@ -341,7 +341,7 @@ const (
 func propertyCases() []propCase {
 	out := make([]propCase, 0, 192)
 	for _, part := range [][]propCase{itlCases(), k2Cases(), muCases(), floorCases(), otherCases(),
-		learnerCases(), edgeCases(), moreCases(), reviewEdgeCases()} {
+		learnerCases(), edgeCases(), moreCases(), reviewEdgeCases(), batchCapCases()} {
 		out = append(out, part...)
 	}
 	return out

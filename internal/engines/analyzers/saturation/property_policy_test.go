@@ -33,7 +33,7 @@ var policyKeys = []string{
 	// The scaling policy's own keys a learner reads. scaleUpThreshold sets the
 	// k derived mu is priced at, with kvCacheThreshold (pricingK).
 	"kvCacheThreshold", "queueLengthThreshold", "scaleUpThreshold", keyShapeHoldSeconds, keyDisableShapeHold,
-	keyReuse, keyDisableK2Borrow, keyPrefillBound,
+	keyReuse, keyDisableK2Borrow, keyPrefillBound, keyBatchCapLearning,
 }
 
 // notLearnerKeys are the scaling policy's keys no learner here reads, and

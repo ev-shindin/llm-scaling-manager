@@ -196,12 +196,13 @@ var _ = Describe("learned-state horizons", func() {
 		// A saturated queue, so Priority 1 fires and takes the reset branch.
 		saturated := func() k2Decision {
 			return a.computeK2(historyKey, "m", "ns", "decode-v",
-				20,      // queueLen, above the threshold below
-				900000,  // tokensInUse: this episode's reading
-				600,     // avgOutput
-				1000,    // avgInput
-				10,      // queueThreshold
-				nil,     // engineParams
+				20,     // queueLen, above the threshold below
+				900000, // tokensInUse: this episode's reading
+				600,    // avgOutput
+				1000,   // avgInput
+				10,     // queueThreshold
+				nil,    // engineParams
+				pricedBatchCap{},
 				1,       // ranks
 				2000000, // k1
 				2000000, // kvCeiling, at or above tokensInUse or the read is refused
