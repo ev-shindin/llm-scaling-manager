@@ -188,8 +188,8 @@ func TestRun_AddCheckUpdate(t *testing.T) {
 	}
 	// Pinned, so a change in what the replay counts is a reviewed change; the
 	// replay's own count above is only the cross-check.
-	require.Len(t, unrun, 8, "the head recording leaves these saturation paths unrun: %v. "+
-		"A saturation path added or removed moves this count; check the list and update the 8", unrun)
+	require.Len(t, unrun, 9, "the head recording leaves these saturation paths unrun: %v. "+
+		"A saturation path added or removed moves this count; check the list and update the 9", unrun)
 	// The settle verdicts the goldens must reach (learnreplay's
 	// requiredSettlePaths) that the recording's own replay never reached.
 	var unrunSettle []string

@@ -27,32 +27,36 @@ func TestGoldens_EveryLearnerPathRuns(t *testing.T) {
 	t.Logf("learner paths over %d fixtures: %v", c.Fixtures, c.Paths)
 }
 
-// Negative control: without the mu-paths golden, the acceptance golden alone
-// reaches none of k2's and mu's measured paths, and the check names each.
+// Negative control: without the mu-paths golden, the others leave some of
+// k2's and mu's measured paths unrun, and the check names each.
 func TestGoldens_APathNoGoldenRunsIsAProblem(t *testing.T) {
 	dir := copyGoldens(t)
 	require.NoError(t, os.RemoveAll(filepath.Join(dir, "mu-paths")))
-	p := filepath.Join(dir, ManifestName)
-	b, err := os.ReadFile(p)
+	m, err := ReadManifest(dir)
 	require.NoError(t, err)
-	manifest := string(b)
-	i := strings.Index(manifest, "- name: mu-paths")
-	require.Positive(t, i, "precondition: the manifest lists mu-paths")
-	require.NoError(t, os.WriteFile(p, []byte(manifest[:i]), 0o644))
+	kept := m.Goldens[:0]
+	for _, g := range m.Goldens {
+		if g.Name != "mu-paths" {
+			kept = append(kept, g)
+		}
+	}
+	require.Len(t, kept, len(m.Goldens)-1, "precondition: the manifest lists mu-paths")
+	m.Goldens = kept
+	require.NoError(t, writeManifest(dir, m))
 
 	c, err := CheckGoldens(context.Background(), dir)
 	require.NoError(t, err)
-	require.Empty(t, c.Problems, "the acceptance golden alone still reproduces")
+	require.Empty(t, c.Problems, "the other goldens still reproduce")
 	got := strings.Join(c.Uncovered, "\n")
-	// The paths named are exactly those the acceptance golden ran on no
-	// cycle, by its own counts.
+	// The paths named are exactly those the other goldens ran on no cycle,
+	// by their own counts.
 	var zero []string
 	for _, p := range saturation.PathNames() {
 		if c.Paths[p] == 0 {
 			zero = append(zero, p)
 		}
 	}
-	require.NotEmpty(t, zero, "precondition: the acceptance golden alone leaves a path uncovered")
+	require.NotEmpty(t, zero, "precondition: the other goldens leave a path uncovered")
 	require.Len(t, c.Uncovered, len(zero), got)
 	for _, p := range zero {
 		assert.Contains(t, got, "no golden runs the learner path "+p)
