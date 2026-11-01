@@ -8,8 +8,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 )
 
@@ -72,20 +74,7 @@ func TestTheOptimizerViewHoldsEachHoleOnItsNode(t *testing.T) {
 func TestUtilizationSharePublishesPromisedHoleNodes(t *testing.T) {
 	f := newShareFleet()
 	clock := time.Unix(0, 0)
-	c := sharePods(t, f)
-	var pods corev1.PodList
-	if err := c.List(context.Background(), &pods); err != nil {
-		t.Fatal(err)
-	}
-	for i := range pods.Items {
-		p := &pods.Items[i]
-		p.Spec.Containers = []corev1.Container{{Name: "vllm", Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}}}
-		if err := c.Update(context.Background(), p); err != nil {
-			t.Fatal(err)
-		}
-	}
-	e := &Engine{Config: shadowConfig(t, activeShare), client: c}
+	e := &Engine{Config: shadowConfig(t, activeShare), client: gpuSharePods(t, f)}
 	e.utilizationShare.now = func() time.Time { return clock }
 	t.Cleanup(func() { decision.PublishSharePromised(nil, time.Time{}) })
 	ctx, _ := observe(t)
@@ -112,6 +101,75 @@ func TestUtilizationSharePublishesPromisedHoleNodes(t *testing.T) {
 	}
 	if got := decision.LatestSharePromised(clock)[""]["A100"]; got != started {
 		t.Fatalf("published count %d, want %d", got, started)
+	}
+}
+
+// gpuSharePods is sharePods with one GPU requested by each pod, so the holes
+// marking a donor opens are on its node (n1).
+func gpuSharePods(t *testing.T, f *shareFleet) client.Client {
+	t.Helper()
+	c := sharePods(t, f)
+	var pods corev1.PodList
+	if err := c.List(context.Background(), &pods); err != nil {
+		t.Fatal(err)
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		p.Spec.Containers = []corev1.Container{{Name: "vllm", Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}}}
+		if err := c.Update(context.Background(), p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return c
+}
+
+// The warm pool's headroom, republished by decideV2 after the share promised a
+// hole in the cycle, holds the hole on its node (n1, where the donor pod was):
+// n2 stays wholly free. Read as a count, the GPU came off n2, the freest.
+func TestDecideV2RepublishesTheNewHoleOnItsNode(t *testing.T) {
+	f := newShareFleet()
+	clock := time.Unix(0, 0)
+	e := &Engine{Config: shadowConfig(t, activeShare), client: gpuSharePods(t, f)}
+	e.utilizationShare.now = func() time.Time { return clock }
+	t.Cleanup(func() { decision.PublishSharePromised(nil, time.Time{}) })
+	t.Cleanup(decision.DefaultHeadroom.Reset)
+	ctx, _ := observe(t)
+	cycle := func() []domain.VariantDecision {
+		clock = clock.Add(30 * time.Second)
+		held := f.current["A"] + f.current["B"] + f.current["C"]
+		o := allocation.NewGreedyByScoreOptimizer()
+		o.Nodes = allocation.NewNodeView(map[string]decision.NodeGPU{
+			"n1": {Accelerator: "A100", Capacity: 16, Used: held},
+			"n2": {Accelerator: "A100", Capacity: 8},
+		})
+		return e.decideV2(ctx, o, f.requests(), fullQuota(), f.scaleTargets())
+	}
+	started := 0
+	for range 20 {
+		for _, d := range cycle() {
+			if d.VariantName == "A-v" && d.TargetReplicas < 9 {
+				started = 9 - d.TargetReplicas
+			}
+		}
+		if started > 0 {
+			break
+		}
+	}
+	if started == 0 {
+		t.Fatal("setup: no transfer started in 20 cycles")
+	}
+	f.current["A"] -= started
+	cycle()
+	if h := decision.LatestSharePromisedHoles(clock)[""]["A100"]; h.Nodes["n1"] != started {
+		t.Fatalf("setup: published %+v, want %d on n1", h, started)
+	}
+	hr, ok := decision.DefaultHeadroom.Get()
+	if !ok || hr.Nodes == nil {
+		t.Fatal("setup: no headroom with node holes published")
+	}
+	if got := hr.Nodes["A100"].Free; len(got) != 1 || got[0] != 8 {
+		t.Fatalf("warm-pool node holes %v, want [8]: the new hole held on n1, n2 whole", got)
 	}
 }
 

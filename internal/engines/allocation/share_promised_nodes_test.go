@@ -68,11 +68,13 @@ func TestReservePromisedKeepsAPartialHoleClosed(t *testing.T) {
 // change.
 func TestReservePromisedFallsBackToTheFreestNodes(t *testing.T) {
 	nodes := h100Nodes(2, 8, 8, 8)
-	nodes["other"] = decision.NodeGPU{Accelerator: "MI300X", Capacity: 8}
+	// The MI300X node sorts first and ties the freest HBM3 nodes, so the
+	// fallback would take it first if it did not filter by accelerator.
+	nodes["a-other"] = decision.NodeGPU{Accelerator: "MI300X", Capacity: 8}
 	v := NewNodeView(nodes)
 	// n00: 2 of its 4 held there, 2 off the freest; gone: 8 off the freest;
-	// other: 8 off the freest (not an HBM3 node); unplaced: 2.
-	ReservePromised(v, promiseOn(2, map[string]int{"n00": 4, "gone": 8, "other": 8}))
+	// a-other: 8 off the freest (not an HBM3 node); unplaced: 2.
+	ReservePromised(v, promiseOn(2, map[string]int{"n00": 4, "gone": 8, "a-other": 8}))
 	got := v.DebitsExcept(nil)
 	total := 0
 	for _, g := range got {
@@ -81,7 +83,7 @@ func TestReservePromisedFallsBackToTheFreestNodes(t *testing.T) {
 	if total != 22 {
 		t.Fatalf("held %d GPUs (%v), want 22: every promised GPU", total, got)
 	}
-	if got["n00"] != 2 || got["other"] != 0 {
+	if got["n00"] != 2 || got["a-other"] != 0 {
 		t.Fatalf("held %v: want n00=2 (all it has free) and nothing on the MI300X node", got)
 	}
 	// 20 off the freest, each in one piece: n01 and n02 whole, 4 off n03.
