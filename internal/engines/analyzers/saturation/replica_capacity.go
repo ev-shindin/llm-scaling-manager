@@ -297,12 +297,6 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 			// what one replica sustains.
 			why := tune.throughputRefusal(rm.RequestRate, mu, derived, served.max,
 				tune.tokensOutrunCompletions(rm, role, fleetOutput))
-			// Nor, for a rate window, is one whose load has just returned
-			// after an idle run (mu_return.go): its window holds part of the
-			// idle minute. Ahead of the low run, which it would only start.
-			if (why == "" || why == refusedUnderDerived) && a.muReturnedUnderWindow(namespace, modelID, rm, a.now()) {
-				why = refusedReturned
-			}
 			// A low reading that repeats on every saturated cycle for
 			// MeasuredLowConfirmFor is a real low rate, not a fill -- unless
 			// a sibling's served rate contradicts it (refusedUnderServed),

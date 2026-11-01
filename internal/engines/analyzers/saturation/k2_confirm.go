@@ -29,7 +29,7 @@ import (
 //
 // Nothing else waits. The held reading passed every admission test a P1-obs
 // one does, so the mu beside it is judged as on any P1-obs cycle: the hold is
-// k2's, and mu's own first-sample rules are its own (mu_return.go). A window
+// k2's. A window
 // already holding readings, or restored from the learned-state snapshot,
 // takes each reading at once, as before.
 //

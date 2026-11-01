@@ -35,8 +35,8 @@ import (
 // replaySwitches is each saturation replay switch, and the golden outputs
 // (fixture/file) it is named to move.
 //
-// #392's first samples: k2's first reading waits for a second, and mu waits
-// a rate window after a replica's load returns. Earlier PRs' switches are
+// #392's first sample for k2: its first reading waits for a second. Earlier
+// PRs' switches are
 // not here: "all off" is this PR's switches, and an earlier PR's stay at
 // their constructor default, on, as the base goldens were written
 // (analyzer-learner.md, 2.5).
@@ -46,11 +46,6 @@ var replaySwitches = map[string][]string{
 		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
 		"pd-restart/composite-results.csv", "pd-restart/composite-roles.csv", "pd-restart/composite-variants.csv",
 		"pd-restart/store-records.csv", "pd-restart/variant-capacities.csv", "pd-restart/warm-pool-pressure.csv",
-	},
-	saturation.SwitchMuReturnWaits: {
-		"pd-restart/composite-results.csv", "pd-restart/composite-roles.csv", "pd-restart/composite-variants.csv",
-		"pd-restart/results.csv", "pd-restart/store-records.csv", "pd-restart/variant-capacities.csv",
-		"pd-restart/warm-pool-pressure.csv",
 	},
 }
 
@@ -172,7 +167,6 @@ var switchBase = map[string]string{
 	"pd-restart/composite-results.csv":  "151cd978b60095ab2e2393e6974b625cc9f20acea2a8651c3c68919891547bd0",
 	"pd-restart/composite-roles.csv":    "dbd55459a148a9c0088eb6caa32fae8ad78cf6cba89b7c21eae820ba80a7cdcc",
 	"pd-restart/composite-variants.csv": "7ae147ff16b8cd0376718750ccca9ff0b50300b626e6357dc0b38cc981ff5dd3",
-	"pd-restart/results.csv":            "1f7f9e64e4fa1cb7aa467e70358fd74778c45045f7f5460791bd5861e9234637",
 	"pd-restart/store-records.csv":      "c456d2cb6d1b80af61701f99d23c2fa1b3f6597790cfcc88d8b0d532d1ae3703",
 	"pd-restart/variant-capacities.csv": "87a4c908f9e355e5733766f792fda7b0fca39465b9969cbd684c918d9886d2ae",
 	"pd-restart/warm-pool-pressure.csv": "4b50856d8c040df8d5c4ee495f14316d2d6217fe227dfb29be981e3e29ad3628",

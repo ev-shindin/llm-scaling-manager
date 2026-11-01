@@ -83,7 +83,6 @@ var findings = []finding{
 	{row: "Settle holes: fall, rate escape, idle return, lend", status: statusEscaping, why: "only the restart and joiner events have a case; the others need the settle tracker (PR 1)"},
 	{row: "Restart fix stubbed", status: statusCaught},
 	{row: "k2 adopts its first reading (#392)", status: statusCaught},
-	{row: "a partial rate[1m] after an idle run as mu (#392)", status: statusCaught},
 	{row: "'For good' self-sealing low mu", status: statusEscaping, why: "the closed-loop probe lands in PR 3"},
 }
 
@@ -224,9 +223,6 @@ func propertyMutants() []propMutant {
 		{row: "k2 adopts its first reading (#392)", caseID: "first-sample/k2/second-reading", level: levelStub,
 			how:   "SwitchK2FirstReadingWaits off: a window's first reading is written, and prices, at once",
 			check: checkK2FirstSampleOn(func(a *SaturationAnalyzer) { a.k2FirstReadingWaits = false })},
-		{row: "a partial rate[1m] after an idle run as mu (#392)", caseID: "first-sample/mu/joiner-rate-timebase", level: levelStub,
-			how:   "SwitchMuReturnWaits off: a replica whose load has just returned is admitted on the joined test alone",
-			check: checkMuFirstSampleTimeBaseOn(func(a *SaturationAnalyzer) { a.muReturnWaits = false })},
 	}
 }
 

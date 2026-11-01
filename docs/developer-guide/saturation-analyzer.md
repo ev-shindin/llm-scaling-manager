@@ -238,12 +238,6 @@ cycle does not confirm it). Held readings past `EpisodeGap` are swept. The mu
 written beside a `P1-obs` reading is judged on the held cycle too. The replay
 switch `SwitchK2FirstReadingWaits` turns the hold off.
 
-Mu has a wait of its own (`mu_return.go`): a reading from a replica whose load
-returned after an idle run (`settle.Replica.ReturnedAfter`, read from the settle
-tracker) under `JoinedReplicaWindow` ago is refused (`refused-returned` in the
-learner report): its `rate[1m]` still covers part of the idle minute. The
-replay switch is `SwitchMuReturnWaits`.
-
 ### Which bound applies
 
 ```
