@@ -175,15 +175,14 @@ func TestRun_AddCheckUpdate(t *testing.T) {
 	// paths: an add and an update say so, the check fails on it.
 	assert.Contains(t, out, "no golden runs the learner path "+saturation.PathMuSampleWritten)
 	// Each of saturation's required paths the recording's own replay never
-	// ran (a path that awaits a recording is reported, not required), and
-	// every engine path: the recording carries no engine events.
+	// ran, and every engine path: the recording carries no engine events.
 	raw, err := os.ReadFile(in)
 	require.NoError(t, err)
 	rep, err := learnreplay.Replay(context.Background(), raw, learnreplay.Options{Mode: learnreplay.Normal})
 	require.NoError(t, err)
 	var unrun []string
 	for _, p := range saturation.PathNames() {
-		if rep.Paths[p] == 0 && !saturation.PathAwaitsRecording(p) {
+		if rep.Paths[p] == 0 {
 			unrun = append(unrun, p)
 		}
 	}

@@ -374,6 +374,17 @@ restarts under its own name. To write it again as a raw recording:
 LEARNREC_MUPATHS_OUT=$HOME/mu-paths.jsonl go test ./internal/engines/steadystate/ -run TestLearnerRecording_TheMuPathsRunReachesEveryLearnerPath -v
 ```
 
+The `pd-restart` golden is a cluster recording of a P/D model, made with
+EPP flow control off, so k2 reads each engine's own queue. The model is the
+P/D benchmark scenario: Qwen3-0.6B, one prefill and one decode pod to start.
+The load is open loop, 1000 tokens in and 1000 out, in steps of 4, 14, 40
+and 4 requests a second. At 40 the decode fleet is at its ceiling of four
+replicas, with hundreds of requests queued on each. Mid-run, one decode
+pod's engine is killed and its container restarts under the same pod name.
+It is the golden that reaches `k2-unsettled-window` (a load step k2 refuses
+to learn from), and the only one in which `settle-restarted` comes from a
+real restart rather than a generator.
+
 #### The engine layer
 
 The analyzer events stop at each `Analyze`. The engine layer (issue #345,
@@ -490,9 +501,9 @@ not where its input arrives:
   as a load step (`k2-unsettled-window`).
 
 The names are one table in `path_counts.go`; `PathCounts` and `PathNames`
-read it. A counter no committed recording reaches yet is reported and not
-required (`PathAwaitsRecording`): `k2-unsettled-window` needs the
-flow-control-off recording, and leaves that set in the PR that adds it.
+read it. Every counter is required. `k2-unsettled-window` runs only with
+EPP flow control off, so the `pd-restart` golden is the one that reaches
+it.
 
 The replay also runs the settle tracker (`internal/signals/settle`) and
 counts its verdicts per reason: `settle-joined`, `settle-rejoined` (back

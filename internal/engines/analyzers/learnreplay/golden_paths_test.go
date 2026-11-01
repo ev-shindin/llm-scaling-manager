@@ -48,7 +48,7 @@ func TestGoldens_APathNoGoldenRunsIsAProblem(t *testing.T) {
 	// cycle, by its own counts.
 	var zero []string
 	for _, p := range saturation.PathNames() {
-		if c.Paths[p] == 0 && !saturation.PathAwaitsRecording(p) {
+		if c.Paths[p] == 0 {
 			zero = append(zero, p)
 		}
 	}

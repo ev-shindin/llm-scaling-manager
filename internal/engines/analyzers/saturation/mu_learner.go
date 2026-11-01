@@ -36,7 +36,7 @@ const (
 	// length that, at a hard edge, flipped the choice 11 times in 20 cycles
 	// (analyzer-learner.md, 6.1): a derived figure carries that noise every
 	// cycle. A source flip logs whatever the value. Not measured on a
-	// cluster run: the flow-control-off recording PR 3 needs is not taken.
+	// cluster run.
 	MuWriteBand = 0.05
 	// muTimeBase is the time base of a mu reading: the completion rate over
 	// the collector's rate window, at the fleet's shape
