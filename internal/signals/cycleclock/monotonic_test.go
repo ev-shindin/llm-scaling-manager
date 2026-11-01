@@ -14,8 +14,9 @@ func hasMonotonic(t time.Time) bool {
 
 // A recording keeps wall times only, so a replay subtracts wall times. A
 // reading that kept the monotonic clock was subtracted by it live, and an age
-// taken live then differed from the replayed one by the nanoseconds the wall
-// clock had been slewed -- the K2Age a replay could not match. Every reading
+// taken live then differed from the replayed one by the nanoseconds between
+// time.Now's separate wall and monotonic readings, or by a wall-clock step --
+// the K2Age a replay could not match. Every reading
 // this clock hands out must be wall-only, from the real clock as from any
 // other.
 func TestReadingsCarryNoMonotonicClock(t *testing.T) {

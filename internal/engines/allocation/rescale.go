@@ -159,8 +159,10 @@ func roundExtras(in []rescaleInput, extra map[string]float64, targets map[string
 	remainder := make(map[string]float64, len(extra))
 	totalFrac := 0.0
 	sumWhole := 0
-	// In key order: totalFrac is a float sum, whose last bit depends on the
-	// order it is taken in, and it is rounded below.
+	// In key order: totalFrac is a float sum, whose last bits depend on the
+	// order it is taken in. roundToNano below absorbs those bits before the
+	// total is rounded to GPUs; the sort is belt-and-braces, so the sum is
+	// also the same from one cycle to the next.
 	for _, id := range slices.Sorted(maps.Keys(extra)) {
 		e := extra[id]
 		whole := int(math.Floor(e))

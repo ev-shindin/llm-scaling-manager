@@ -101,13 +101,14 @@ func (c *Clock) Now() time.Time {
 // longer than a timeout evicts or expires what it guards. A backward step
 // gives a negative age, which holds until the wall clock catches up: a
 // timeout is extended, and a wait for an age to pass (sample spacing,
-// settling) waits longer. NTP slewing moves both clocks alike; only a step
-// does this.
+// settling) waits longer. Only a step does this, not a gradual NTP
+// adjustment.
 func wall(t time.Time) time.Time {
 	return t.Round(0)
 }
 
-// Since returns how long before Now t was.
+// Since returns how long before Now t was. It is negative when t is after
+// Now, as after a backward wall-clock step (see wall).
 func (c *Clock) Since(t time.Time) time.Duration {
 	return c.Now().Sub(t)
 }
