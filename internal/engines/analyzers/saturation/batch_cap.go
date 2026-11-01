@@ -84,7 +84,7 @@ type pricedBatchCap struct {
 // learnedBatchCap is a variant's learned batch cap: the most sequences per
 // engine rank one of its pods was seen holding at its cap, under the engine
 // arguments it was learned under (args), raised from pod, last confirmed by a
-// plateau at at and last used to price a replica at usedAt.
+// plateau when at says and last used to price a replica when usedAt says.
 type learnedBatchCap struct {
 	perRank int64
 	args    string
@@ -270,8 +270,7 @@ func (a *SaturationAnalyzer) pricingBatchCap(namespace, modelID, variant string,
 		}
 		a.mu.Unlock()
 	}
-	switch {
-	case def > 0:
+	if def > 0 {
 		return pricedBatchCap{perRank: def, source: batchCapDefault}
 	}
 	return pricedBatchCap{}
