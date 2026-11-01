@@ -381,21 +381,66 @@ func (v *NodeView) without(exclude func(owner string) bool) *NodeView {
 // receiver are charged to (ReservePromised).
 const PromisedOwner = "promised"
 
-// ReservePromised holds promised GPUs (scope -> accelerator -> GPUs, as
-// decision.LatestSharePromised returns them) on the view's nodes, charged to
-// PromisedOwner: a node freed and held for a receiver whose pod is still
+// ReservePromised holds promised GPUs (scope -> accelerator -> holes, as
+// decision.LatestSharePromisedHoles returns them) on the view's nodes, charged
+// to PromisedOwner: a node freed and held for a receiver whose pod is still
 // Pending looks free in the snapshot, and neither the optimizer nor a wake
-// nor the warm pool may place into it. Which node is not known; Reserve takes
-// the freest.
-func ReservePromised(v *NodeView, promised map[string]map[string]int) {
+// nor the warm pool may place into it. A hole whose node is known is held on
+// that node: the receiver's pod waits for it there. Held on the freest node
+// instead, a 1-GPU hole on a nearly full node made a wholly free node look
+// short of one, and left the hole itself open to another pod. What a hole's
+// node no longer shows free, or a node the view does not count for the
+// accelerator, joins the holes of no known node, and those are taken from the
+// freest nodes (Reserve), after every known hole of every scope is placed.
+// Mirrors the share planner's own node picture (shareFreeNodesAfter).
+func ReservePromised(v *NodeView, promised map[string]map[string]decision.PromisedHoles) {
 	if v == nil {
 		return
 	}
+	type rest struct {
+		acc  string
+		gpus int
+	}
+	var unplaced []rest
 	for _, scope := range slices.Sorted(maps.Keys(promised)) {
 		for _, acc := range slices.Sorted(maps.Keys(promised[scope])) {
-			v.Reserve(PromisedOwner, acc, promised[scope][acc])
+			h := promised[scope][acc]
+			unplaced = append(unplaced, rest{acc, h.Unplaced + v.reserveOn(PromisedOwner, acc, h.Nodes)})
 		}
 	}
+	for _, r := range unplaced {
+		v.Reserve(PromisedOwner, r.acc, r.gpus)
+	}
+}
+
+// reserveOn debits, charged to owner, up to perNode[name] GPUs of accelerator
+// acc from each named node the view counts for acc, as far as it has them
+// free, and returns what it could not debit.
+func (v *NodeView) reserveOn(owner, acc string, perNode map[string]int) int {
+	if v == nil || len(perNode) == 0 {
+		return 0
+	}
+	prev := v.setOwner(owner)
+	defer v.setOwner(prev)
+	eligible := v.eligible(acc, nil, true)
+	left := 0
+	for _, name := range slices.Sorted(maps.Keys(perNode)) {
+		g := perNode[name]
+		if g <= 0 {
+			continue
+		}
+		i, ok := slices.BinarySearchFunc(v.slots, name, func(s nodeSlot, n string) int { return strings.Compare(s.name, n) })
+		if !ok || !slices.Contains(eligible, i) {
+			left += g
+			continue
+		}
+		take := min(v.free(i), g)
+		if take > 0 {
+			v.charge(i, take)
+		}
+		left += g - take
+	}
+	return left
 }
 
 // Reserve debits gpus GPUs of accelerator acc, charged to owner, from the

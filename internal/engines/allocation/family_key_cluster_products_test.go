@@ -217,7 +217,7 @@ func TestNamespaceFamilyHeadroomReadsEachProduct(t *testing.T) {
 	if got := read(); got[famHBM3] != 8 || got[famPCIe] != 8 || got[famSXM5] != 0 {
 		t.Errorf("team-a after a pass: headroom = %v, want HBM3 8, PCIe 8, SXM5 0", got)
 	}
-	o.RepublishHeadroom(nil, promise, time.Now())
+	o.RepublishHeadroom(nil, map[string]map[string]decision.PromisedHoles{"team-b": {famHBM3: {Unplaced: 8}}}, time.Now())
 	if got := read(); got[famHBM3] != 0 || got[famPCIe] != 8 {
 		t.Errorf("team-a after a pass and team-b's HBM3 promise: headroom = %v, want HBM3 0, PCIe 8", got)
 	}

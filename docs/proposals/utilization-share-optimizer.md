@@ -2760,10 +2760,13 @@ optimizer every cycle (§6.6).
      - a donor lowered on a restart only if its marked pod was not yet
        terminating, and raised back on cancel or abort only if it was lowered.
      - promised GPUs withheld from the other two consumers of "what is
-       free": the steady-state engine publishes them each pass
-       (`decision.PublishSharePromised`), and both the warm pool's headroom
-       and the scale-from-zero budget check count them as used
-       (`allocation.WithholdPromised`);
+       free": the steady-state engine publishes them each pass, each with
+       the nodes its holes are on (`decision.PublishSharePromised`), and both
+       the warm pool's headroom and the scale-from-zero budget check count
+       them as used (`allocation.WithholdPromised`); the node views of
+       today's optimizer, a wake and the warm pool hold each on its own node,
+       and only what has no known node off the freest
+       (`allocation.ReservePromised`);
      - re-anchoring: a variant held off its target by something outside the
        optimizer (a ResourceQuota denial, a ScaledObject ceiling, scale to
        zero), with no transfer in flight, returns to its running count after
