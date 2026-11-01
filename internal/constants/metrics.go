@@ -1313,6 +1313,8 @@ var EngineConfigFlagLabels = []string{
 	"total_kv_tokens_override",
 	"effective_max_batched_tokens",
 	"max_num_seqs",
+	// vLLM's --max-num-active-seqs; 0 when unset or unreadable.
+	"max_num_active_seqs",
 	"max_model_len",
 	"enforce_eager",
 	// Which of the labels above are the engine's real settings and which
