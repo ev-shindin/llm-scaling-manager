@@ -692,7 +692,11 @@ commit's goldens (an output a switch names, by the base file's digest),
 each switch alone moves only the outputs it names, and all on is the
 committed goldens. "All off" is the PR's own switches: replace the table
 with yours, and leave an earlier PR's switches at their constructor default,
-on, as the base goldens were written. A switch that moves no committed
+on, as the base goldens were written. An earlier PR's switch whose seam is
+still in the code moves to `earlierSeams`, with the outputs its PR named; it
+is replayed off alone from all on, and may move only those. Every name
+`SetSwitchesForReplay` accepts must have a row in one of the two
+(`TestGoldens_EverySwitchHasARow`); a row goes with its seam. A switch that moves no committed
 golden is invisible to the runs, so it names the unit tests that hold it
 (`heldBy`, checked to exist): mu's three switches are held by
 `mu_repeat_test.go`, `mu_unknown_age_test.go` and `mu_latch_restore_test.go`,
@@ -854,7 +858,11 @@ Ready replicas, each serves up to its true mu and queues the rest, the
 analyzer's order becomes replicas after a 90 s start time, and a release
 waits out a 5-minute stabilization. The verdict compares the fleet the loop
 settles at with need, the fleet a truthful analyzer orders once every
-replica serves the fleet's mean mu, within 15 % plus one replica.
+replica serves the fleet's mean mu, within 15 % plus one replica. It also
+fails a fleet that sits below need at the arrival rate of the moment for
+more than 5 minutes in one run, an under-order mid-run. Each passing case
+asserts its premise from mu's reports: the load step measured mu and priced
+it `measured`, and the slow replica's rate was counted `refused-under-served`.
 
 `TestClosedLoopProbe_KnownFailing_*` is a case today's code fails: one slow
 replica at 0.55 of its siblings' rate passes the served bound, becomes mu,

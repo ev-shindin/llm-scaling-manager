@@ -78,11 +78,17 @@
   The fold across pods stays the mean. Three named changes, each behind a
   replay switch, none of which moves a committed golden, so each names the
   unit tests that hold it (`heldBy`). `mu-exact-repeat-is-use`: a repeat
-  past the spacing touches the use clock only, so it keeps neither the
-  episode (write clock) nor the measurement's freshness (agreement clock),
-  and is judged before the episode, so a frozen series past `EpisodeGap`
-  starts no new window with its frozen value; the prefill bound (row 7)
-  keeps the old rule, a write. `mu-unknown-age-resolves-safe`: over the
+  past the spacing touches the use clock only, so it does not keep the
+  episode (write clock) alive, and is judged before the episode, so a frozen
+  series past `EpisodeGap` starts no new window with its frozen value. Its
+  effect on freshness (agreement clock) is by side: over the derived figure
+  it does not refresh it, so the measurement yields to the lower figure;
+  under it, or with no derived figure, it still counts as agreement, since a
+  real low rate that repeats would otherwise give way to the higher derived
+  figure after the 30 min hold. The prefill bound (row 7) keeps the old
+  rule, a write. A window installed by a restore, or brought back from the
+  stash, marks any choice memo made before it unknown, so the latch rule
+  below sees it. `mu-unknown-age-resolves-safe`: over the
   derived figure an unknown age is still stale; under it the low hold counts
   from the window's own last write, never earlier than its newest sample, so
   it holds at least as long as a known sample time would, and with no write
@@ -883,7 +889,7 @@ restores, exact repeats and unknown ages. Two rules apply to all:
 | --- | --- | --- |
 | k2 | too high | none. The window mean rises on admitted readings only. A too-low k2 is **permanent** on a serving variant: touched on every read, never evicted, and its episode resets only on a write, which needs the saturation a low k2 prevents. The only exit is `llm-d.ai/forget-learned-state`; the runbook says so |
 | borrowed k2 | too high | the upward relaxation over 6 h of serving time |
-| measured mu | too high | the stale yield to a higher derived figure after 30 min (5 min toward a lower one). The restart that drops the latch (see [the mu choice](#the-mu-choice)). An unknown age (above). Backed by new evidence, so allowed: the **immediate** yield when a Ready replica serves more than 2x it, and the sibling yield |
+| measured mu | too high | the stale yield to a higher derived figure after 30 min (5 min toward a lower one). The restart that drops the latch (see [the mu choice](#the-mu-choice); restored to the safe side since PR 3). An unknown age (above; safe side since PR 3). An exact repeat: since PR 3 it refreshes freshness only under the derived figure, where losing it would let a repeating low rate yield to the higher figure, and not over it, where staleness yields to the lower one. Backed by new evidence, so allowed: the **immediate** yield when a Ready replica serves more than 2x it, and the sibling yield |
 | ITL line and derived mu | ITL(kPrice) too low, that is, derived mu too high (with B pinned low, A comes out too high and the prediction is still low) | the 6 ms default B or a stashed B. With B pinned below the true intercept, the pinned A absorbs the error and the prediction at kPrice is low by (B_true − B_pin)(1 − kPrice / k̄): **risky whenever the fleet runs above its pricing point**, the under-provisioned fleet that most needs a correct line |
 | prefill bound | too high | its window max only rises, survives the episode reset through `RaiseLast`, and never ages while read. Because `RaiseLast` carries the max past every reset, it is a running max over the bound's life: about 1.5σ above the mean after 10 readings, about 3.2σ after a day at one a minute. Unreviewed |
 | start time | **both** | too low under-orders a fleet that is behind (λ > mu · ready). Too high, in `internal/signals/floor/floor.go`: `DrainHorizon` under-prices the backlog whenever S exceeds 60 s, `startingCredit` credits a stuck pod for up to 2S, and a fleet with spare projects more drain and orders less. Share pacing errs the other way: too low moves GPUs for bursts that end first. PR 5 bounds both sides |
@@ -915,7 +921,7 @@ The clock fix itself is [2.2](#22-one-clock). The clocks in use:
 | **write** | ITL line age, the shared line |
 | **use** | k2 and mu eviction, 7 d after the last read; the prefill bound's `Touch` |
 | **write gap** | k2's and mu's new episode after 24 h without a write, on the same window as the use clock. The prefill bound defeats it (`RaiseLast`) |
-| **agreement** | mu freshness: the last saturated reading within 2x. Refused readings set it too |
+| **agreement** | mu freshness: the last saturated reading within 2x. Refused readings set it too. An exact repeat sets it only while the measurement is under the derived figure (PR 3) |
 | **serving** | the borrowed k2 relaxation, and the hold clocks that only a serving row advances |
 | **existence** | `VariantTimeout` (last reported or found to exist), the ITL sweep at 24 h unseen, `evictStartSeenPods` |
 | **since event** | the settle tracker: time since join, idle return, restart or lend |
@@ -1141,7 +1147,7 @@ E1's 0.0995 req/s was **admitted**; this is the line that would have shown it.
 
 **Decision lines name their learner key and source.**
 `throughput-demand-floor` gains `muKey`, `muSource`, `startEstimateSeconds` and
-`startSource` (measured or seed).
+`startSource` (measured, or none until PR 5 wires a seed).
 
 **Sources stay per learner,** in the vocabularies already shipped. k2 keeps
 `P1-obs`, `P2-hist`, `P2-prior`, `P2-borrow`, `P3-k2`, `P4-k1`: the

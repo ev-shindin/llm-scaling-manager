@@ -493,10 +493,13 @@ replay switch (`mu_switches.go`):
 
 - **An exact repeat is use** (`SwitchMuRepeatIsUse`). A rate read past the
   sample spacing at exactly the value last read is the same scrape pair, or
-  a frozen series. It touches the window's use clock only: it keeps neither
-  the window's episode (its write clock, which `EpisodeGap` ages) nor the
-  measurement's freshness (`TestMuRepeat_*`). The prefill bound writes
-  through the same fold and keeps taking a repeat as a write.
+  a frozen series. It touches the window's use clock only, and does not keep
+  the window's episode (its write clock, which `EpisodeGap` ages) alive. Over
+  the derived figure it does not keep the measurement fresh either; under
+  it, or with no derived figure, it still counts as agreement, so a real low
+  rate that repeats is not handed to the higher derived figure after the
+  30-minute hold (`TestMuRepeat_*`). The prefill bound writes through the
+  same fold and keeps taking a repeat as a write.
 - **An unknown age resolves to the safe side** (`SwitchMuUnknownAgeSafe`). A
   window with no sample time and no agreeing reading on record is stale over
   the derived figure, and under it holds for `MeasuredLowHoldFor` from its
@@ -505,7 +508,9 @@ replay switch (`mu_switches.go`):
   latch is not persisted. A window restored, or brought back, with no choice
   on record comes back latched over the derived figure and unlatched under
   it; its first choice is evidence, and the hysteresis runs as it does live
-  from then on (`muChoice.latchKnown`, `TestMuLatch_*`).
+  from then on (`muChoice.latchKnown`, `TestMuLatch_*`). A restore that
+  installs a window, and a bring-back from the stash, mark a memo made
+  before them unknown (`unknownLatchLocked`).
 
 Mu has no joined test of its own: a sample is written only beside a k2
 `P1-obs` write, so it waits out k2's settle, the wait after a controller
