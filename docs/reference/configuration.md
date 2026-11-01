@@ -949,8 +949,8 @@ What is restored, and what is not:
   variant's measured capacity only as that lower-only figure
   (`restores_total{outcome="differs"}` from a release that did not record
   the arguments, `"prior"` from one with another `fingerprint_version`, and
-  `P2-prior` in the cycle log). With `differs`, its saturated throughput, start time and
-  latency baseline are not restored; with `prior`, as for any change of
+  `P2-prior` in the cycle log). With `differs`, its saturated throughput,
+  start time and latency baseline are not restored; with `prior`, as for any change of
   arguments, the old saturated throughput holds the floor hold-only (above);
 - **`fingerprint_version` 4** adds `--max-num-active-seqs` to the engine
   arguments, so a rollout that changes only the active cap is a change of
@@ -962,10 +962,7 @@ What is restored, and what is not:
   `restores_total{outcome="prior"}`; one whose flags were only partly read
   (`unresolved` not empty) counts as `"incomplete"` and logs `learned state
   restored under the unread configuration`, with the same lower-only effect.
-  Each variant then measures its own again under load. A
-  `--max-num-active-seqs` whose value cannot be read (an unexpanded
-  `$VARIABLE`) is now listed in `unresolved`, so such a variant reads as
-  partly read from this release on;
+  Each variant then measures its own again under load;
 - **rolling the controller back** to a release that records engine
   arguments under the same `fingerprint_version` restores each variant whose
   configuration it can read whole, as an ordinary restart does. It does not
@@ -992,6 +989,16 @@ What is restored, and what is not:
   the configuration check;
 - a variant forgotten on request (the `llm-d.ai/forget-learned-state`
   annotation) stays forgotten, and the annotation is not acted on again.
+
+An active cap the controller cannot read -- `--max-num-active-seqs` given as
+an unexpanded `$VARIABLE`, or a value it cannot parse -- is listed in
+`wva_engine_config`'s `unresolved` label, as any other unread flag is (v0.10.2
+and earlier left it out). For as long as the cap is written that way, the
+variant's configuration is only partly read: it gets its own figures back
+after a restart only under the same unread configuration, does not share a
+latency line with another variant, and does not take a sibling's measured
+capacity. Its batch cap falls back to `--max-num-seqs`. Writing the cap as a
+literal value lifts all three.
 
 The log line `Learned state: snapshot restored` says how many variants are
 pending their first cycle; a `learned state restored` line (or, with nothing

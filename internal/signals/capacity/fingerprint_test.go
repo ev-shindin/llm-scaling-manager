@@ -240,6 +240,22 @@ func TestFingerprintVersionParticipates(t *testing.T) {
 	}
 }
 
+// The version this release hashes under, pinned on its own: the goldens hold
+// digests too, but a regeneration would record a reverted constant away. A
+// version left at 3 with the field list of 4 would also let a k2 lower bound
+// stored by v0.10.2 compare its arguments as if hashed alike (k2_borrow.go).
+// The digest below is what v0.10.2 (version 3) wrote for this configuration,
+// computed at 354cbb69b.
+func TestFingerprintVersionIsFour(t *testing.T) {
+	if FingerprintVersion != 4 {
+		t.Fatalf("FingerprintVersion is %d, want 4: version 4 adds max_num_active_seqs (#334)", FingerprintVersion)
+	}
+	p := &EngineParams{Engine: "vllm", MaxNumSeqs: 256, Image: "vllm:v1"}
+	if got := p.Fingerprint(); got == "685b446b731842fd" {
+		t.Fatalf("the digest is version 3's (%s)", got)
+	}
+}
+
 func TestFingerprintOfNilIsEmpty(t *testing.T) {
 	var p *EngineParams
 	if got := p.Fingerprint(); got != "" {

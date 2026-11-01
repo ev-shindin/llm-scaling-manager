@@ -73,21 +73,19 @@ const fingerprintLength = 16
 // be done in one place; a fingerprint on its own identifies a configuration,
 // never a thing being served.
 //
-// Relative to IsCapacityCompatible this adds one field, EnforceEager, and the
-// asymmetry is deliberate. It also hashes MaxNumActiveSeqs, which that
-// predicate compares: the active cap bounds how far along the ITL line a
-// replica runs rather than the line, but it moves the saturated k2 and
-// throughput, and the arguments half of this digest (ArgsFingerprint) is
-// what decides whether a rollout keeps them. The cost on the latency side is
-// the safe one: two engines differing only in the cap each learn their own
-// line. An unreadable cap is left at 0 and listed in Unresolved (see the
-// field).
-// The EnforceEager half: No CUDA graphs does not change how much KV
+// Relative to IsCapacityCompatible this adds one field, EnforceEager, and
+// the asymmetry is deliberate: no CUDA graphs does not change how much KV
 // fits or how many sequences run, so a capacity record survives it -- but it
 // does change the inter-token latency, and this digest also keys a latency
 // model. Including it costs only that two engines differing in --enforce-eager
 // each learn their own ITL line; excluding it would pool them onto one line
 // that describes neither. The safe direction needs no measurement.
+//
+// MaxNumActiveSeqs is hashed, as IsCapacityCompatible compares it: the active
+// cap moves the saturated k2 and throughput, and ArgsFingerprint decides
+// whether a rollout keeps them. It bounds how far along the ITL line a
+// replica runs rather than the line, so hashing it costs only that two
+// engines differing in the cap each learn their own line.
 //
 // Three EngineParams fields are excluded on one rule: MaxNumBatchedTokens,
 // IsV1Engine and ChunkedPrefillEnabled exist only to resolve

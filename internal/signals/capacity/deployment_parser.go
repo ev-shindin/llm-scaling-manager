@@ -101,20 +101,12 @@ type EngineParams struct {
 	// 0 is unset, in which case MaxNumSeqs alone caps the batch. See
 	// ExplicitMaxNumSeqs, which folds it into the cap.
 	//
-	// A value that cannot be read (an unresolved reference, not a number,
-	// below 1) also leaves it 0, so the cap falls back to max_num_seqs, still
-	// a true upper bound, and it is recorded in Unresolved like any other
-	// hashed flag that could not be read. A later unreadable occurrence
+	// It is hashed into the fingerprint, so a rollout that changes only the
+	// active cap is a change of arguments. A value that cannot be read (an
+	// unresolved reference, not a number, below 1) leaves it 0, so the cap
+	// falls back to max_num_seqs, still a true upper bound, and is recorded
+	// in Unresolved like any other hashed flag. A later unreadable occurrence
 	// clears an earlier readable one, since the engine takes the last.
-	//
-	// It is hashed into the fingerprint (FingerprintVersion 4), so a rollout
-	// that changes only the active cap is a change of arguments. Until then
-	// (the 0.10 patch line) it was neither hashed nor recorded when unread:
-	// recording it would have marked reads incomplete within a fingerprint
-	// version. Hashing it moves every digest once anyway, and with it an
-	// unread cap is a gap the read must own: hashed as unset and not
-	// recorded, a cap set through an env var could change with no change to
-	// the digest or to anything published.
 	MaxNumActiveSeqs int64
 
 	// TotalKvTokensOverride is the explicit total KV-cache token capacity, when the
