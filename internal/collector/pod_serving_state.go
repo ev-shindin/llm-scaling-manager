@@ -154,11 +154,14 @@ func lwsGroupKey(p *corev1.Pod) string {
 // restartPolicy None, which leaves the leader Ready -- is when the group last
 // came back, and its row must carry that time for k2's settle to wait on it.
 //
-// Only live, Ready Pods count. A worker that is missing or not Ready yet adds
-// nothing, so the group keeps the latest time it has: it never reads as zero
-// (unknown) or older because of a worker in flight, and the worker's own Ready
-// time moves the group later once it arrives. A Pod being deleted is leaving
-// the group, and its Ready time is not the group's.
+// Only live, Ready Pods count. A worker that is missing or not Ready adds
+// nothing, so a worker in flight never makes the group's time zero (unknown),
+// and its own Ready time moves the group later once it arrives. It is not
+// monotonic: a worker that drops while it holds the latest time moves the
+// group back to the next latest Pod's, which the settle tracker reads as a
+// restart too, so the group waits from the drop and again from the worker's
+// return. Cautious, and the group is impaired while the worker is down. A Pod
+// being deleted is leaving the group, and its Ready time is not the group's.
 func groupReadyTimes(pods []corev1.Pod) map[string]time.Time {
 	out := map[string]time.Time{}
 	for i := range pods {

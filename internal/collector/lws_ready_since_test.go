@@ -32,9 +32,11 @@ import (
 // any worker's restart deletes the leader (lws pod_controller.go,
 // handleRestartPolicy), and the recreated leader has a new Ready time too.
 //
-// A worker missing or not Ready yet adds nothing: the group keeps the
-// latest Ready time it has, never zero (unknown) and never older, and the
-// worker's own Ready time moves it once the worker is Ready.
+// A worker missing or not Ready adds nothing: it never makes the group's
+// time zero (unknown), and the worker's own Ready time moves it once the
+// worker is Ready. A worker that drops while it holds the latest time moves
+// the group back to the next latest Pod's, which the settle tracker also
+// reads as a restart: the group waits from the drop and again on return.
 func TestLWSGroupReadyTimeIsTheLatestOfItsPods(t *testing.T) {
 	ctx := context.Background()
 	t0 := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
@@ -48,13 +50,14 @@ func TestLWSGroupReadyTimeIsTheLatestOfItsPods(t *testing.T) {
 			lwsv1.WorkerIndexLabelKey: "1"},
 	}
 	// pod is the named Pod Ready at readyAt, or Running and not Ready when
-	// readyAt is zero.
+	// readyAt is zero. A not-Ready Pod's condition changed after every Ready
+	// time here (a probe failing now), so counting it would show.
 	pod := func(name string, readyAt time.Time) *corev1.Pod {
 		cond := corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionTrue,
 			LastTransitionTime: metav1.NewTime(readyAt)}
 		if readyAt.IsZero() {
 			cond = corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionFalse,
-				LastTransitionTime: metav1.NewTime(t0.Add(-time.Hour))}
+				LastTransitionTime: metav1.NewTime(t0.Add(3 * time.Hour))}
 		}
 		return &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: labels[name]},
@@ -118,8 +121,8 @@ func TestLWSGroupReadyTimeIsTheLatestOfItsPods(t *testing.T) {
 		t.Errorf("a worker-only restart left the group's Ready time at %v; want the worker's %v", got, restarted)
 	}
 
-	// The recreated worker not Ready yet, or not created yet: the group keeps
-	// the latest Ready time it has, not zero and not older.
+	// The recreated worker not Ready yet, or not created yet: the group reads
+	// the latest Ready time among the rest, not zero.
 	notReady := rows(pod("lws-0", t0), pod("lws-0-1", time.Time{}), pod("lws-0-2", t0.Add(time.Minute)))
 	if got, want := notReady["lws-0"], t0.Add(time.Minute); !got.Equal(want) {
 		t.Errorf("with a worker not Ready the group's Ready time is %v, want %v", got, want)
@@ -127,6 +130,14 @@ func TestLWSGroupReadyTimeIsTheLatestOfItsPods(t *testing.T) {
 	missing := rows(pod("lws-0", t0), pod("lws-0-2", t0.Add(time.Minute)))
 	if got, want := missing["lws-0"], t0.Add(time.Minute); !got.Equal(want) {
 		t.Errorf("with a worker missing the group's Ready time is %v, want %v", got, want)
+	}
+
+	// The worker holding the latest time drops (a probe fails): the group
+	// moves back to the next latest Pod's, 10 s after the leader.
+	dropped := rows(pod("lws-0", restarted), pod("lws-0-1", restarted.Add(10*time.Second)),
+		pod("lws-0-2", time.Time{}))
+	if got, want := dropped["lws-0"], restarted.Add(10*time.Second); !got.Equal(want) {
+		t.Errorf("with its latest worker dropped the group's Ready time is %v, want the next latest %v", got, want)
 	}
 
 	// A leader not Ready is a group not Ready: zero, whatever its workers say.
