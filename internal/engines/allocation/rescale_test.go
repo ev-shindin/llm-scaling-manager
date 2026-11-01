@@ -88,8 +88,9 @@ var _ = Describe("roundExtras", func() {
 	// 0.1 + 0.35 + 0.05 sums to 0.5 in some orders and to 0.49999999999999994
 	// in others, and the sum is rounded to the leftover: taken in a map's
 	// random order, the same extras handed out one GPU on some runs and none
-	// on others.
-	It("hands out the same leftover however the extras map was built", func() {
+	// on others. The total is a half, so every run hands out one GPU, to the
+	// largest remainder.
+	It("hands out the half GPU however the extras map was built", func() {
 		in := []rescaleInput{{ID: "A", CapGPUs: 9}, {ID: "B", CapGPUs: 9}, {ID: "C", CapGPUs: 9}}
 		ids := []string{"A", "B", "C"}
 		figures := map[string]float64{"A": 0.1, "B": 0.35, "C": 0.05}
@@ -103,7 +104,7 @@ var _ = Describe("roundExtras", func() {
 			roundExtras(in, extra, targets)
 			return targets
 		}
-		want := run(0)
+		want := map[string]int{"A": 0, "B": 1, "C": 0}
 		for i := range 1000 {
 			Expect(run(i)).To(Equal(want), "run %d: the leftover moved with the map's order", i)
 		}

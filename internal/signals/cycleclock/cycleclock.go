@@ -89,11 +89,20 @@ func (c *Clock) Now() time.Time {
 //
 // A recording keeps only wall times, so a replay subtracts wall times. A live
 // time.Now also carries a monotonic reading, and Sub between two that both do
-// uses the monotonic one -- which drifts from the wall clock by nanoseconds as
-// the wall clock is slewed. An age taken live then differed from the same age
-// replayed by those nanoseconds, and the replay of a cycle could not match the
-// recording of it. Every stamp and age read from this clock is wall-only, live
-// and replayed alike.
+// uses the monotonic one. time.Now takes the wall and the monotonic readings
+// separately, so the gap between them varies by nanoseconds from one call to
+// the next, and a wall-clock step moves one and not the other. An age taken
+// live then differed from the same age replayed, and the replay of a cycle
+// could not match the recording of it. Every stamp and age read from this
+// clock is wall-only, live and replayed alike.
+//
+// The cost: ages now follow wall-clock steps, as learned state restored after
+// a restart already did. A forward step ages everything at once, and a step
+// longer than a timeout evicts or expires what it guards. A backward step
+// gives a negative age, which holds until the wall clock catches up: a
+// timeout is extended, and a wait for an age to pass (sample spacing,
+// settling) waits longer. NTP slewing moves both clocks alike; only a step
+// does this.
 func wall(t time.Time) time.Time {
 	return t.Round(0)
 }

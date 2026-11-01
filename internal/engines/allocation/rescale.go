@@ -170,8 +170,17 @@ func roundExtras(in []rescaleInput, extra map[string]float64, targets map[string
 		remainder[id] = e - float64(whole)
 	}
 	// leftover = round(total above-floor allocation) - the whole GPUs already applied.
-	leftover := int(math.Round(totalFrac)) - sumWhole
+	leftover := int(math.Round(roundToNano(totalFrac))) - sumWhole
 	apportionLeftover(targets, remainder, leftover, capOf)
+}
+
+// roundToNano rounds x to nine decimal places, the precision a GPU total is
+// meant at. A float sum carries error in its last bits: 0.1 + 0.35 + 0.05
+// sums to 0.49999999999999994, and rounding that to whole GPUs gave 0 where
+// the total is a half and rounds to 1. Exact to 1e-9 for any total below
+// about 4.5e6 GPUs.
+func roundToNano(x float64) float64 {
+	return math.Round(x*1e9) / 1e9
 }
 
 // apportionLeftover hands out `leftover` whole units one at a time to the keys with
