@@ -41,14 +41,18 @@
 - **PR 2's decisions.** Where an LWS group's Ready time comes from (4.3):
   the collector builds one row per group, the leader's; a worker's instance
   is dropped before its row is built (`isLWSWorker`), and the row carries
-  the leader Pod's own Ready condition (`podReadySince`). So the group's
-  Ready time is its leader's, whatever its workers' are
-  (`TestLWSGroupReadyTimeIsTheLeaders`). Under LWS's default
-  `restartPolicy`, `RecreateGroupOnPodRestart`, any worker's restart
-  deletes the leader, so the recreated leader has a new Ready time and the
-  group waits again; under `restartPolicy: None` a worker-only restart
-  leaves the leader Ready and is not seen. Checked in the code (the
-  collector and lws v0.8.0's pod controller), not on a run. k2's joined
+  the latest Ready time over the leader and its live, Ready workers,
+  matched by the LWS set-name and group-index labels (`groupReadyTimes`,
+  `replicaReadySince`; `TestLWSGroupReadyTimeIsTheLatestOfItsPods`). Under
+  LWS's default `restartPolicy`, `RecreateGroupOnPodRestart`, any worker's
+  restart deletes the leader, so the recreated leader has a new Ready time
+  and the group waits again. Under `restartPolicy: None` a worker-only
+  restart leaves the leader Ready, and the restarted worker's Ready time
+  makes the group wait. A worker missing or not Ready yet adds nothing: the
+  group keeps the latest Ready time it has, never zero or older, and waits
+  from the worker's own once it is Ready. A not-Ready leader still makes
+  the group's Ready time zero. Checked in the code (the collector and lws
+  v0.8.0's pod controller), not on a run. k2's joined
   test reads the tracker, keeping #288's rule, behind two replay switches:
   `k2-reads-the-settle-tracker` (a replica unseen past the tracker's
   absence tolerance waits again, where the memo held it 2 min; and a Ready
@@ -1229,7 +1233,7 @@ that fails it. The owning PR adds the test, or keeps it green if it exists.
 | Mu folds across pods by the mean, and yields to its full siblings (#282) | the base recordings; one slow pod | the goldens hold; one slow pod moves mu by its weight only | a fold by max or min fails the one-slow-pod case | 0b, 3 |
 | The default verbosity does not grow per replica; no line passes the CRI limit (#303) | one cycle at 8 and at 64 replicas, the `learner-write` burst included | the same line count at the default verbosity for both, and every line under the CRI limit | a per-replica line at the default fails it | every PR that adds `learner-write` (2, 3, 4a, 4b, 5). Today the test lives only in the saturation package (`saturation/replica_log_test.go`: `TestCycleLogAtTheShippedVerbosityDoesNotGrowPerReplica` at 1 and 8 replicas, `TestSummaryStaysWithinTheCRILineLimit`); each other package that adds `learner-write` adds the same test (throughput in 4b) |
 | A warm-pool Pod lent, and lent again, starts its grace again (#283) | balance-tracker rows: one Pod missing one cycle under the same lend; one Pod lent again to a variant within 1 min | the missing row keeps the grace; the re-lend restarts it. The tracker keys by {pod, variant, bridge} plus a changed ReadySince (`balance/tracker.go:117-141`), and a re-lend to the same variant keeps that key, so the discriminator is a lend event PR 1 adds (`ReplicaMetrics` carries only `FromWarmPool` today) | the parent restarts on both, so the first case fails there | 1 |
-| A pod back from an engine or LWS group restart waits again, from the later of its Ready time and first sight (#288; #361 issues LWS group restarts) | PR 2's first task: a fixture from #361's workload-patch group restart, leader and workers recreated, pod names kept, Ready times differ. It establishes where a group's Ready time comes from, which is not verified: the collector gives a per-pod Ready time only (`attribute.go:410`) | each pod waits from the later of its own Ready time and first sight | on the parent, a pod whose Ready time the group restart does not change shows no wait | 2 |
+| A pod back from an engine or LWS group restart waits again, from the later of its Ready time and first sight (#288; #361 issues LWS group restarts) | PR 2's first task: a fixture from #361's workload-patch group restart, leader and workers recreated, pod names kept, Ready times differ. It establishes where a group's Ready time comes from. Done: the group's row is its leader's, with the latest Ready time over the leader and its Ready workers, so a worker restarted alone under `restartPolicy: None` makes the group wait (`TestLWSGroupReadyTimeIsTheLatestOfItsPods`) | each pod waits from the later of its own Ready time and first sight | on the parent, a pod whose Ready time the group restart does not change shows no wait | 2 |
 
 ## 8. Risks and limits
 

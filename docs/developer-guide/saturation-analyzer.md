@@ -159,7 +159,9 @@ The joined test reads the engine's settle tracker (`internal/signals/settle`,
 construction (`WithSettleView`) and never writes it. A replica waits from the
 later of its Pod's Ready time and the controller's first sight of that Ready
 time, so a restart under the same name (an engine or LWS group restart: the
-row is the group leader's, with the leader Pod's Ready time) waits again, a
+row is the group leader's, with the latest Ready time over the leader and its
+Ready workers, so a worker restarted alone under `restartPolicy: None` counts
+too) waits again, a
 node clock behind the controller's does not shorten the wait, and after a
 controller restart every replica waits once. A replica unseen for longer than
 the tracker's absence tolerance (1 min, or 2.5 optimize intervals) is a new

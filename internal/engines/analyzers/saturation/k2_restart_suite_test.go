@@ -85,9 +85,9 @@ func TestRestartSuite_ARestartUnderTheSameNameWaitsAgain(t *testing.T) {
 
 // An LWS group restart (#361: the workload patch recreates the leader and its
 // workers, names kept). The collector reports one row per group, the
-// leader's, with the leader Pod's own Ready time (attribute.go drops a
-// worker's row; TestLWSGroupReadyTimeIsTheLeaders pins it), so the workers'
-// Ready times, here earlier and later than the leader's, never reach k2. The
+// leader's, with the latest Ready time over the leader and its Ready workers
+// (attribute.go drops a worker's row; TestLWSGroupReadyTimeIsTheLatestOfItsPods
+// pins it), so k2 sees one Ready time per group, here the row's own. The
 // restarted group's leader waits a window from the later of its own Ready
 // time and the first sight of it; a node clock ahead holds it from its Ready
 // time. The group the patch has not reached yet keeps its Ready time and

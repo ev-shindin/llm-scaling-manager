@@ -8,6 +8,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
@@ -47,6 +48,10 @@ type podServingState struct {
 	// readySince is when the Pod last became Ready: the Ready condition's
 	// LastTransitionTime. Zero when it is not Ready or the time is unset.
 	readySince time.Time
+	// groupReadySince is the replica's Ready time: readySince for a Pod
+	// outside a LeaderWorkerSet, and for an LWS Pod the latest readySince over
+	// its group (groupReadyTimes). Zero when this Pod itself is not Ready.
+	groupReadySince time.Time
 	// revision is the pod template revision the Pod was created from
 	// (podRevision), "" when it carries none.
 	revision string
@@ -114,7 +119,59 @@ func podStates(ctx context.Context, reader client.Reader, namespace string) name
 		state.revision = podRevision(p)
 		out[p.Name] = state
 	}
+	groups := groupReadyTimes(pods.Items)
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		state := out[p.Name]
+		state.groupReadySince = state.readySince
+		if g := lwsGroupKey(p); g != "" && !state.readySince.IsZero() {
+			if latest := groups[g]; latest.After(state.readySince) {
+				state.groupReadySince = latest
+			}
+		}
+		out[p.Name] = state
+	}
 	return namespacePods{byName: out, listed: true}
+}
+
+// lwsGroupKey names the LeaderWorkerSet group a Pod belongs to, from the
+// set-name and group-index labels the LWS controller stamps on the leader and
+// every worker; "" for a Pod outside any LWS.
+func lwsGroupKey(p *corev1.Pod) string {
+	set, idx := p.Labels[lwsv1.SetNameLabelKey], p.Labels[lwsv1.GroupIndexLabelKey]
+	if set == "" || idx == "" {
+		return ""
+	}
+	return set + "/" + idx
+}
+
+// groupReadyTimes is, per LWS group, the latest Ready time over its leader and
+// workers.
+//
+// The collector reports one row per group, the leader's (isLWSWorker drops a
+// worker's instance), and the group serves only while all its Pods do. So a
+// worker that became Ready after the leader -- a worker alone recreated under
+// restartPolicy None, which leaves the leader Ready -- is when the group last
+// came back, and its row must carry that time for k2's settle to wait on it.
+//
+// Only live, Ready Pods count. A worker that is missing or not Ready yet adds
+// nothing, so the group keeps the latest time it has: it never reads as zero
+// (unknown) or older because of a worker in flight, and the worker's own Ready
+// time moves the group later once it arrives. A Pod being deleted is leaving
+// the group, and its Ready time is not the group's.
+func groupReadyTimes(pods []corev1.Pod) map[string]time.Time {
+	out := map[string]time.Time{}
+	for i := range pods {
+		p := &pods[i]
+		g := lwsGroupKey(p)
+		if g == "" || p.DeletionTimestamp != nil {
+			continue
+		}
+		if t := podReadySince(p); t.After(out[g]) {
+			out[g] = t
+		}
+	}
+	return out
 }
 
 // podRevisionLabels are the labels a workload controller stamps a Pod's
@@ -336,17 +393,19 @@ func (c *ReplicaMetricsCollector) podStartSeconds(
 	return state.startSeconds
 }
 
-// podReadySince reports when this Pod last became Ready, and zero when that
-// cannot be established: the listing could not be read, does not contain the
-// Pod, or the Pod is not Ready. Zero is "unknown", not "long ago".
-func (c *ReplicaMetricsCollector) podReadySince(
+// replicaReadySince reports when the replica this Pod reports for last became
+// Ready, and zero when that cannot be established: the listing could not be
+// read, does not contain the Pod, or the Pod is not Ready. Zero is "unknown",
+// not "long ago". For an LWS leader it is the latest Ready time over its
+// group (groupReadyTimes), so a worker's restart moves it.
+func (c *ReplicaMetricsCollector) replicaReadySince(
 	ctx context.Context, namespace, podName string,
 ) time.Time {
 	state, found, listed := c.servingState(ctx, namespace, podName)
 	if !listed || !found {
 		return time.Time{}
 	}
-	return state.readySince
+	return state.groupReadySince
 }
 
 // seriesPodName pulls the Pod identity out of a series' labels.
