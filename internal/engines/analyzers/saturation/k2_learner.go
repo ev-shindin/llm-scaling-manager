@@ -277,13 +277,31 @@ func (a *SaturationAnalyzer) sweepLearnerMapsLocked() {
 		_, ok := a.computeCapacityHistory[key]
 		return !ok
 	})
-	// Mu's, the same way: its cycle with its model, what learner-write last
-	// logged of a key with the key's window.
-	maps.DeleteFunc(a.muCycles, func(m string, _ *muCycle) bool { return gone(m) })
+	// Mu's: its cycle with its model, and what learner-write last logged of
+	// a key with the key's model, or once the key has no window and its
+	// model's last cycle did not price it. Not with the window alone: a key
+	// priced from the derived figure, a neighbour or a lower bound has no
+	// window of its own, and dropped each cycle it logged a first write on
+	// every one.
 	maps.DeleteFunc(a.muLogged, func(key string, _ muLogged) bool {
-		_, ok := a.saturatedThroughput[key]
-		return !ok
+		name, model, ok := variantOfKey(key)
+		ns, _, _ := strings.Cut(name, "/")
+		if !ok || gone(ns+"|"+model) {
+			return true
+		}
+		if _, ok := a.saturatedThroughput[key]; ok {
+			return false
+		}
+		if c := a.muCycles[ns+"|"+model]; c != nil {
+			for _, p := range c.priced {
+				if p.key == key {
+					return false
+				}
+			}
+		}
+		return true
 	})
+	maps.DeleteFunc(a.muCycles, func(m string, _ *muCycle) bool { return gone(m) })
 }
 
 // LearnerReports is each learner's report of each variant the model priced

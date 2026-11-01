@@ -88,12 +88,15 @@ func (a *SaturationAnalyzer) measuredSamples() int {
 // learner-write for mu logs the priced figure of a key at most once a
 // cycle: when it is set for the first time, moves MuWriteBand from what was
 // last logged, flips source -- measured, derived, served-siblings -- or has
-// not logged for LearnerHeartbeat.
+// not logged for LearnerHeartbeat. The sweep runs between cycles, as the
+// engine runs it every cycle, and the key -- priced with no window of its
+// own -- keeps what it last logged.
 func TestMuLearner_LogsAChoiceFlipAMoveOverTheBandAndTheHeartbeat(t *testing.T) {
 	a := NewSaturationAnalyzer(capacity.NewStore())
 	now := restartT0
 	a.now = func() time.Time { return now }
 	const key = "ns|v|m|H200|1|decode|imedium|medium|q5"
+	a.k2Settle["ns|m"] = newSettleMemo(now)
 	step := func(rate float64, derived, siblings bool) []map[string]any {
 		t.Helper()
 		a.beginMuCycle("ns", "m")
@@ -105,6 +108,10 @@ func TestMuLearner_LogsAChoiceFlipAMoveOverTheBandAndTheHeartbeat(t *testing.T) 
 			SaturatedThroughputDerived: derived}}
 		ctx, logs := observedCtx(t)
 		a.closeMuCycle(ctx, "ns", "m", caps)
+		a.mu.Lock()
+		a.k2Settle["ns|m"].seen = now // the model is served
+		a.mu.Unlock()
+		a.EvictStaleHistory()
 		now = now.Add(restartCycle)
 		entries := learnerWrites(logs, learn.Mu)
 		out := make([]map[string]any, 0, len(entries))
@@ -113,14 +120,22 @@ func TestMuLearner_LogsAChoiceFlipAMoveOverTheBandAndTheHeartbeat(t *testing.T) 
 		}
 		return out
 	}
-	first := step(3.0, false, false)
+	first := step(3.0, true, false)
 	require.Len(t, first, 1)
+	assert.Equal(t, domain.ServiceRateSourceDerived, first[0]["source"])
 	assert.Equal(t, true, first[0]["firstWrite"])
+	for range 4 {
+		assert.Empty(t, step(3.0, true, false), "priced with no window, the key keeps what it last logged through the sweep")
+	}
+	first = step(3.0, false, false)
+	require.Len(t, first, 1)
+	assert.Equal(t, false, first[0]["firstWrite"])
 	assert.Equal(t, domain.ServiceRateSourceMeasured, first[0]["source"])
 	assert.Equal(t, key, first[0]["key"])
 
 	flip := step(3.0, true, false)
 	require.Len(t, flip, 1, "a source flip logs, whatever the value")
+	assert.Equal(t, false, flip[0]["firstWrite"])
 	assert.Equal(t, domain.ServiceRateSourceDerived, flip[0]["source"])
 	assert.Equal(t, domain.ServiceRateSourceMeasured, flip[0]["previousSource"])
 
@@ -140,6 +155,15 @@ func TestMuLearner_LogsAChoiceFlipAMoveOverTheBandAndTheHeartbeat(t *testing.T) 
 	}
 	now = now.Add(LearnerHeartbeat)
 	assert.Len(t, step(3.4, false, false), 1, "a key that has not logged for the heartbeat logs once")
+
+	// A key its model's last cycle did not price, with no window, goes.
+	a.beginMuCycle("ns", "m")
+	a.closeMuCycle(context.Background(), "ns", "m", nil)
+	a.EvictStaleHistory()
+	a.mu.Lock()
+	_, kept := a.muLogged[key]
+	a.mu.Unlock()
+	assert.False(t, kept)
 }
 
 // throughput-demand-floor names the learned figures its term priced from:
