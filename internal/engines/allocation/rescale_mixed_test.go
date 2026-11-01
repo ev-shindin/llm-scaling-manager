@@ -234,6 +234,81 @@ func TestRescaleMixedPodsGrid(t *testing.T) {
 	assert.Greater(t, frees, 20000)
 }
 
+// TestRescaleMixedHoldsAModelAtItsTarget: a model at its target keeps its
+// pods. Prefill on two 8-GPU pods and decode on four 4-GPU pods, demand for
+// 30 and 18 GPUs, hold 32 and are given 32: split 20 and 12, prefill cannot
+// place its +4 as a pod, and decode was cut by 4. Rounded without netting,
+// decode shed a pod, 32 went to 28, and the next cycle took it back.
+func TestRescaleMixedHoldsAModelAtItsTarget(t *testing.T) {
+	for _, decode := range [][]podVariant{
+		{{name: "d4", role: domain.RoleDecode, gpus: 4, cur: 4, cost: 4, perGPU: 100}},
+		{{name: "d4", role: domain.RoleDecode, gpus: 4, cur: 2, cost: 4, perGPU: 100},
+			{name: "d8", role: domain.RoleDecode, gpus: 8, cur: 1, cost: 8.5, perGPU: 100}},
+	} {
+		req := podRequest(map[string]float64{domain.RolePrefill: 3000, domain.RoleDecode: 1800},
+			append([]podVariant{{name: "p8", role: domain.RolePrefill, gpus: 8, cur: 2, cost: 8, perGPU: 100}}, decode...))
+		require.Equal(t, 32, podCurrentGPUs(req))
+		assert.Equal(t, 32, podGPUs(req, 32), "at its target the model keeps its pods: %s", describePodModel(req, 32))
+		assert.Zero(t, podFreedGPUs(req, 32), "no pod is shed")
+	}
+}
+
+// podApplied is req after a cycle at targetGPUs: each variant at the
+// replicas that cycle set.
+func podApplied(req ModelScalingRequest, targetGPUs int) ModelScalingRequest {
+	got := rescaleTargets(req, targetGPUs, 1<<20)
+	next := req
+	next.VariantStates = slices.Clone(req.VariantStates)
+	for i, st := range next.VariantStates {
+		if n, ok := got[st.VariantName]; ok {
+			next.VariantStates[i].CurrentReplicas = n
+		}
+	}
+	res := *req.CompositeSignal.Result
+	res.VariantCapacities = slices.Clone(res.VariantCapacities)
+	for i, vc := range res.VariantCapacities {
+		if n, ok := got[vc.VariantName]; ok {
+			res.VariantCapacities[i].ReplicaCount = n
+		}
+	}
+	next.CompositeSignal.Result = &res
+	return next
+}
+
+// TestRescaleMixedRerunIsStable: run a cycle, take its result as what the
+// model holds, and run the same target again, over targets within 16 GPUs
+// of what the model holds. A model at its target does not move again, and no
+// model goes back to where it started: that is a pod deleted and created
+// again every cycle. Rounded alone, 31 models at their target moved again
+// and 86 went back; the greedy rounding before #219 moved 2 and sent 13 back.
+func TestRescaleMixedRerunIsStable(t *testing.T) {
+	r := rand.New(rand.NewPCG(219, 3))
+	points, moved, flapped, atTarget := 0, 0, 0, 0
+	for range 1000 {
+		req := randomPodModel(r, true, false)
+		cur := podCurrentGPUs(req)
+		for target := max(cur-16, 0); target <= cur+16; target++ {
+			next := podApplied(req, target)
+			first := podCurrentGPUs(next)
+			second := podGPUs(next, target)
+			points++
+			if second != first {
+				moved++
+				if second == cur && first != cur {
+					flapped++
+				}
+				if target == cur {
+					atTarget++
+				}
+			}
+		}
+	}
+	t.Logf("%d points: %d move again, %d go back to where they started, %d at their target", points, moved, flapped, atTarget)
+	assert.Greater(t, points, 30000)
+	assert.Zero(t, atTarget, "a model at its target moves again")
+	assert.Zero(t, flapped, "a model goes back to where it started")
+}
+
 // describePodModel prints a model's variants and demand, and what each of
 // targets splits to per role and ends at, for a readable failure.
 func describePodModel(req ModelScalingRequest, targets ...int) string {
@@ -256,7 +331,8 @@ func describePodModel(req ModelScalingRequest, targets ...int) string {
 }
 
 // TestRescaleWholeNodeMixedStress: whole-node 8-GPU pods beside 4- and
-// 16-GPU ones, at tens of pods and targets in the hundreds of GPUs.
+// 16-GPU ones, at tens of pods and targets in the hundreds of GPUs. A
+// regression guard: the rounding before #219 passes it too.
 func TestRescaleWholeNodeMixedStress(t *testing.T) {
 	req := podRequest(map[string]float64{domain.RolePrefill: 30000, domain.RoleDecode: 50000}, []podVariant{
 		{name: "p8", role: domain.RolePrefill, gpus: 8, cur: 12, cost: 8, perGPU: 100},

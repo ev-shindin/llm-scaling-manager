@@ -584,20 +584,34 @@ the second pass never takes a role with demand to zero. Cut 4 GPUs from
 each of two roles on 8-GPU pods, each role alone shed nothing.
 
 Both roundings, fill and reclaim, are greedy, which is exact while the
-model has one replica size. A model with more than one size, in one role or across roles, is
-rounded by an exact pod search instead (`rescale_pods.go`): a bounded
-knapsack, on bitsets, over each role's variants. Fills (`roundFillsExact`)
-take the most GPUs within the summed growth of the roles not cut, each role
-bounded as the greedy pass bounds it; reclaims (`reclaimExact`) shed the
-most GPUs within the summed cut, each role no further than its cut rounded
-up to its smallest removable pod, keeping `minReplicas`, scale-down holds,
-a role's last replica while it has a share, and the cheapest-at-one rule. A
-larger target only adds choices to a fill and removes them from a reclaim,
-so it never leaves fewer GPUs: greedy, prefill on an empty 8-GPU variant
-and decode on 2- and 4-GPU pods placed 10 GPUs at a target of 10 and 8 at
-11. Each bound is clamped to `podSearchMaxUnits` (4096 units of the pods'
-greatest common divisor), so a search costs at most about 0.27M word
-operations per role, and a model grows or sheds no more than that a cycle.
+model has one replica size. A model with more than one size, in one role or
+across roles, is rounded by an exact pod search instead (`roundExact` in
+`rescale_pods.go`): a bounded knapsack, on bitsets, over each role's
+variants. It weighs two plans and takes the one that leaves the model more
+GPUs, rounding each side alone on a tie:
+
+- **Round each side alone.** Fill the most GPUs within the summed growth of
+  the roles not cut, each role bounded as the greedy pass bounds it. Shed the
+  most GPUs within the summed cut, each role no further than its cut rounded
+  up to its smallest removable pod, keeping `minReplicas`, scale-down holds,
+  a role's last replica while it has a share, and the cheapest-at-one rule.
+- **Shed nothing.** Fill the most GPUs within what the shares add above what
+  the model holds; open only when they add zero or more.
+
+Each plan's GPUs are nondecreasing in the target, so the larger is too: a
+larger target never leaves fewer GPUs. Greedy, prefill on an empty 8-GPU
+variant and decode on 2- and 4-GPU pods placed 10 GPUs at a target of 10 and
+8 at 11. A target a pod or more below what the model holds closes the second
+plan, so the first sheds a pod. The second plan is what keeps a model at its
+target still: rounded alone, a growing role short of a pod made a cut role
+shed one, and the next cycle took it back.
+
+The search takes the most GPUs first and cost order only among equal sums, a
+change from the greedy pass: on a cheap 6-GPU variant and a dearer 4-GPU
+one, +8 is two 4s. Each bound is clamped to `podSearchMaxUnits` (4096 units
+of the pods' greatest common divisor), so a model grows or sheds no more
+than that a cycle; one joint search over two roles at the bound takes
+0.35-0.47 ms (`BenchmarkPodSearchAtTheBound`).
 The real fill of a mixed role (`fillRoleExact`) uses the same search.
 
 ---

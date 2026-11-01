@@ -16,8 +16,10 @@ import (
 // Worst case per model and cycle: every set is at most podSearchMaxUnits+1
 // bits (65 words). Each variant's reachable set is built by binary-split
 // shifts, at most 13 per variant; composing a role's pods keeps one suffix set
-// per variant; and the joint search over roles shifts one set per reachable
-// value of each role, at most 4097 x 65 word operations, about 0.27M, per role.
+// per variant; and the joint search over roles, run once for the fill and
+// once for the shed, shifts one set per reachable value of each role, at most
+// 4097 x 65 word operations per role. BenchmarkPodSearchAtTheBound measures
+// one joint search over two roles at the bound at 0.35-0.47 ms.
 const podSearchMaxUnits = 4096
 
 // podBits is a set of small non-negative integers: GPU sums, in units.
@@ -126,11 +128,16 @@ func composePods(items []podItem, amount int) []int {
 }
 
 // jointPods picks one member of each sets[i], at most caps[i], whose sum is
-// the largest at most bound, and returns the picks. Among the picks that
-// reach that sum, each role, from the last, takes the member nearest its
-// ideal, the smaller on a tie. A larger bound or cap only adds choices, so the
-// sum never falls as either rises.
+// the largest at most bound, and returns the picks (jointSplit). A larger
+// bound or cap only adds choices, so the sum never falls as either rises.
 func jointPods(sets []podBits, caps []int, bound int, ideal []int) []int {
+	layers := jointLayers(sets, caps, bound)
+	return jointSplit(layers, sets, caps, layers[len(sets)].maxAtMost(bound), ideal)
+}
+
+// jointLayers returns, for each i, the sums at most bound that one member of
+// each of sets[:i], at most caps, can make.
+func jointLayers(sets []podBits, caps []int, bound int) []podBits {
 	layers := make([]podBits, len(sets)+1)
 	layers[0] = zeroPodBits(bound)
 	for i, s := range sets {
@@ -139,8 +146,14 @@ func jointPods(sets []podBits, caps []int, bound int, ideal []int) []int {
 			layers[i+1].orShifted(layers[i], a)
 		}
 	}
+	return layers
+}
+
+// jointSplit splits sum, a member of the last of layers, into one member of
+// each sets[i]: each role, from the last, takes the member nearest its ideal
+// that the roles before it can complete, the smaller on a tie.
+func jointSplit(layers, sets []podBits, caps []int, sum int, ideal []int) []int {
 	out := make([]int, len(sets))
-	sum := layers[len(sets)].maxAtMost(bound)
 	for i := len(sets) - 1; i >= 0 && sum > 0; i-- {
 		pick, best := 0, -1
 		for a := sets[i].maxAtMost(min(caps[i], sum)); a >= 0; a = sets[i].maxAtMost(a - 1) {
@@ -240,56 +253,57 @@ func fillRoleExact(variants []variantRecord, role string, stateMap map[string]do
 	return spent
 }
 
-// roundFillsExact is roundFillsToReplicas for a model with more than one
-// replica size. The roles not cut (tgt at or above cur) share the model's
-// growth, the sum of their shares above cur, as whole pods by an exact
-// search: the most GPUs within the growth, each role taking no more than its
-// demand dem still asks for or its own share rounded up to one replica, the
-// same bound the greedy pass applies. With more growth or a larger share a
-// role only gains choices, so a larger target never places fewer GPUs; the
-// greedy pass placed 10 GPUs at a target of 10 and 8 at 11.
-func roundFillsExact(records []variantRecord, stateMap map[string]domain.VariantReplicaState,
-	roles []string, tgt, cur, dem, targets map[string]int) {
-	unit := podUnit(records, stateMap)
-	var growing []string
+// podPlan is one side of a model's change, its fill or its shed, for the
+// exact search: per role, the sums of pods it can make (sets), at most caps
+// each, the share it was asked for (ideal), and, for a shed, the pods
+// themselves (items); bound caps the side's sum. All in units.
+type podPlan struct {
+	roles []string
+	sets  []podBits
+	caps  []int
+	ideal []int
+	items [][]podItem
+	bound int
+}
+
+// fillPlan is the fill side: the roles not cut (tgt at or above cur), each
+// taking no more than its demand dem still asks for or its own share rounded
+// up to one replica, the bound the greedy pass applies, and all of them no
+// more than their summed growth.
+func fillPlan(records []variantRecord, stateMap map[string]domain.VariantReplicaState,
+	roles []string, tgt, cur, dem, targets map[string]int, unit int) podPlan {
+	var p podPlan
 	growth := 0
 	for _, role := range roles {
 		if tgt[role] >= cur[role] {
-			growing = append(growing, role)
 			growth += tgt[role] - cur[role]
 		}
 	}
-	bound := toUnits(growth, unit)
-	sets := make([]podBits, len(growing))
-	caps := make([]int, len(growing))
-	ideal := make([]int, len(growing))
-	for i, role := range growing {
+	p.bound = toUnits(growth, unit)
+	for _, role := range roles {
+		if tgt[role] < cur[role] {
+			continue
+		}
 		want := tgt[role] - cur[role]
 		limit := max(dem[role]-cur[role], ceilToReplica(want, roleReplicaStepGPUs(records, role, stateMap)))
-		caps[i] = min(toUnits(limit, unit), bound)
-		ideal[i] = toUnits(want, unit)
-		sets[i] = podSums(fillItems(records, role, stateMap, targets, unit, caps[i]), caps[i])
+		c := min(toUnits(limit, unit), p.bound)
+		p.roles = append(p.roles, role)
+		p.caps = append(p.caps, c)
+		p.ideal = append(p.ideal, toUnits(want, unit))
+		p.sets = append(p.sets, podSums(fillItems(records, role, stateMap, targets, unit, c), c))
 	}
-	for i, a := range jointPods(sets, caps, bound, ideal) {
-		tgt[growing[i]] = cur[growing[i]] + a*unit
-	}
+	return p
 }
 
-// reclaimExact is reclaimWholeReplicas for a model with more than one
-// replica size. The cut roles' cuts are summed, each counted no further than
-// what the role can give, and shed by an exact search: the most GPUs within
-// the sum, each role no further than its cut rounded up to its smallest
-// removable pod, and each role's pods taken most expensive first. A smaller
-// target only adds choices, so a larger one never sheds more, and a summed cut
-// of at least one pod sheds one. Each variant keeps its minReplicas, a role
-// under a scale-down hold is not cut, and a role keeps its last replica when
-// it has a share or the cheapest-at-one rule protects it.
-func reclaimExact(e NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState,
-	roles []string, tgt, cur, targets map[string]int) {
-	unit := podUnit(records, stateMap)
-	var sets []podBits
-	var items [][]podItem
-	var caps, ideal []int
+// shedPlan is the shed side: the roles cut (tgt below cur) and not under a
+// scale-down hold, each no further than its cut rounded up to its smallest
+// removable pod, its pods most expensive first, and all of them no more than
+// the summed cut, each role counted no further than it can give. Each
+// variant keeps its minReplicas, and a role keeps its last replica when it
+// has a share or the cheapest-at-one rule protects it.
+func shedPlan(e NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState,
+	roles []string, tgt, cur, targets map[string]int, unit int) podPlan {
+	var p podPlan
 	total := 0
 	for _, role := range roles {
 		if tgt[role] >= cur[role] || e.Holds[role].NoScaleDown {
@@ -331,19 +345,62 @@ func reclaimExact(e NamedAnalyzerResult, records []variantRecord, stateMap map[s
 		if can <= 0 {
 			continue
 		}
-		sets = append(sets, set)
-		items = append(items, its)
-		caps = append(caps, toUnits(ceilToReplica(cut, step), unit))
-		ideal = append(ideal, toUnits(cut, unit))
+		p.roles = append(p.roles, role)
+		p.sets = append(p.sets, set)
+		p.items = append(p.items, its)
+		p.caps = append(p.caps, toUnits(ceilToReplica(cut, step), unit))
+		p.ideal = append(p.ideal, toUnits(cut, unit))
 		// Summed in GPUs: two cuts each short of a unit still make one.
 		total += min(cut, can*unit)
 	}
-	if toUnits(total, unit) == 0 {
-		return
+	p.bound = toUnits(total, unit)
+	return p
+}
+
+// roundExact rounds the role shares tgt of a model with more than one replica
+// size to whole pods, in place of roundFillsToReplicas and
+// reclaimWholeReplicas: it sets each growing role's tgt to what its fill will
+// place and sheds the cut roles' pods from targets.
+//
+// It weighs two plans, each searched exactly over the pods' sums:
+//   - round each side alone: fill the most within the growing roles' growth,
+//     shed the most within the cut roles' cut;
+//   - shed nothing: fill the most within what the shares add above what the
+//     model holds, open only when they add something or nothing.
+//
+// The model takes the plan that leaves it more GPUs, rounding each side alone
+// on a tie, so a model at its target still moves a pod between its roles.
+// Each plan's GPUs are nondecreasing in the target, and so is the larger of
+// the two: a larger target never leaves the model fewer GPUs, and a target a
+// pod or more below what it holds closes the second plan, so the first sheds
+// a pod. Rounded alone, a growing role short of a pod made a cut role shed
+// one for nothing: a model at its target lost a decode pod and took it back
+// the next cycle.
+func roundExact(e NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState,
+	roles []string, tgt, cur, dem, targets map[string]int) {
+	unit := podUnit(records, stateMap)
+	room := 0 // what the shares add above what the model holds
+	for _, role := range roles {
+		room += tgt[role] - cur[role]
 	}
-	for i, shed := range jointPods(sets, caps, toUnits(total, unit), ideal) {
-		for j, n := range composePods(items[i], shed) {
-			targets[items[i][j].name] -= n
+	fill := fillPlan(records, stateMap, roles, tgt, cur, dem, targets, unit)
+	shed := shedPlan(e, records, stateMap, roles, tgt, cur, targets, unit)
+	fillLayers := jointLayers(fill.sets, fill.caps, fill.bound)
+	fills := fillLayers[len(fillLayers)-1]
+	grow := fills.maxAtMost(fill.bound)
+	shedLayers := jointLayers(shed.sets, shed.caps, shed.bound)
+	drop := shedLayers[len(shedLayers)-1].maxAtMost(shed.bound)
+	if room >= 0 {
+		if only := fills.maxAtMost(min(fill.bound, toUnits(room, unit))); only > grow-drop {
+			grow, drop = only, 0
+		}
+	}
+	for i, a := range jointSplit(fillLayers, fill.sets, fill.caps, grow, fill.ideal) {
+		tgt[fill.roles[i]] = cur[fill.roles[i]] + a*unit
+	}
+	for i, s := range jointSplit(shedLayers, shed.sets, shed.caps, drop, shed.ideal) {
+		for j, n := range composePods(shed.items[i], s) {
+			targets[shed.items[i][j].name] -= n
 		}
 	}
 }
