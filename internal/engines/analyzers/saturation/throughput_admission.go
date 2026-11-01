@@ -427,6 +427,30 @@ func (a *SaturationAnalyzer) siblingYield(key string, reading throughputReading,
 	return c.sibling, true
 }
 
+// lowHeldOut reports whether a measurement under the derived figure has been
+// stale for MeasuredLowHoldFor, so it may give way to the higher derived
+// figure. fresh is its last agreeing reading, or its newest sample, zero
+// when neither is known.
+//
+// An unknown age resolves to the safe side (SwitchMuUnknownAgeSafe;
+// analyzer-learner.md, 3.4), which under the derived figure is to keep
+// pricing the lower measurement: the hold counts from the window's last
+// write, which is never earlier than its newest sample, so a measurement
+// whose sample time is unknown is held at least as long as a known one
+// would be, and a restore never makes it younger than its own last write.
+// With no write time either it is held. Off, as before, an unknown age was
+// as stale as can be, and the hold was skipped.
+func (a *SaturationAnalyzer) lowHeldOut(fresh time.Time, reading throughputReading, t tuning, now time.Time) bool {
+	hold := t.MuChoice.LowHoldFor.Duration()
+	if !fresh.IsZero() {
+		return now.Sub(fresh) >= hold
+	}
+	if !a.muUnknownAgeSafe {
+		return true
+	}
+	return !reading.writtenAt.IsZero() && now.Sub(reading.writtenAt) >= hold
+}
+
 // muChoice is one throughput key's memory for choosing between its measured
 // mu and the derived one (SaturationAnalyzer.throughputMuChoice).
 type muChoice struct {
@@ -549,11 +573,11 @@ func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading through
 	}
 	var yielded bool
 	if ratio >= 1 {
+		// An unknown age is as stale as can be, as it is above: the safe
+		// side for a measurement over the derived figure.
 		yielded = ratio > maxR || (latched && ratio > retR)
 	} else {
-		// An unknown age is as stale as can be, as it is above.
-		heldOut := fresh.IsZero() || now.Sub(fresh) >= t.MuChoice.LowHoldFor.Duration()
-		yielded = heldOut && (ratio < 1/maxR || (latched && ratio < 1/retR))
+		yielded = a.lowHeldOut(fresh, reading, t, now) && (ratio < 1/maxR || (latched && ratio < 1/retR))
 	}
 	if c == nil {
 		if !yielded {
