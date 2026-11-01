@@ -20,6 +20,10 @@ import (
 // sibling (row 4).
 const K2 = "k2"
 
+// Mu is the measured service rate (the saturation analyzer's row 5) and
+// its choice against the rate derived from the ITL line (row 6).
+const Mu = "mu"
+
 // Learners is every learner the forget-learned-state annotation reaches, by
 // name, in the order Forget reaches them. A plain list, not a registry: each
 // analyzer forgets a name on it with code of its own, and a test holds every

@@ -726,6 +726,15 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		if want == measured {
 			continue
 		}
+		// Which learned figures priced the term: the mu key and source of
+		// the role's variant nearest the term's mu (muPricedFor), and the
+		// start time the backlog was projected over, measured or none.
+		mp, _ := a.muPricedFor(input.Namespace, input.ModelID, role, roleOf, term.Mu)
+		startEst, startKnown := startSeconds[role]
+		startFrom := "none"
+		if startKnown {
+			startFrom = startSource(true)
+		}
 		logger.Info("throughput-demand-floor",
 			"modelID", input.ModelID, "namespace", input.Namespace, "role", role,
 			"demandBeforeFloor", measured, "residentDemand", resident, "flooredTo", want,
@@ -734,6 +743,8 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			// replica drains in the drain time; this is the queues uncapped.
 			"queuedRequests", queued[role],
 			"saturatedThroughput", term.Mu, "perReplicaCapacity", term.PerReplica,
+			"muKey", mp.key, "muSource", mp.source,
+			"startEstimateSeconds", startEst, "startSource", startFrom,
 			"replicasImplied", term.Replicas, "heldAtFleet", term.Held, "heldWhy", term.HeldWhy,
 			"orderedBehindQueue", term.OrderedBehindQueue,
 			// The two gates behind heldAtFleet. The hold is a CAP, so

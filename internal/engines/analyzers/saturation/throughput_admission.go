@@ -548,9 +548,26 @@ func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, r
 //     above it; and when it sits as far under it, but only once it has been
 //     stale for MeasuredLowHoldFor -- until then the lower of the two prices.
 func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading throughputReading, derived derivedMu, served float64, t tuning, now time.Time) bool {
+	return a.measuredYield(key, reading, derived, served, t, now) != muYieldNone
+}
+
+// muYield is which way a measured mu gave way to the derived figure, if it
+// did (measuredYield).
+type muYield int
+
+const (
+	muYieldNone muYield = iota
+	// muYieldServed: a Ready replica serves more than the ratio times it.
+	muYieldServed
+	// muYieldStale: stale, and disagreeing past the ratio.
+	muYieldStale
+)
+
+// measuredYield is measuredYieldsToDerived, saying which way it gave way.
+func (a *SaturationAnalyzer) measuredYield(key string, reading throughputReading, derived derivedMu, served float64, t tuning, now time.Time) muYield {
 	maxR, retR := t.MuChoice.MaxRatio, t.MuChoice.ReturnRatio
 	if !derived.ok || !(derived.rate > 0) || !(reading.rate > 0) {
-		return false
+		return muYieldNone
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -583,7 +600,7 @@ func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading through
 		}
 		c.yielded, c.latchKnown = true, true
 		a.paths.add(pathYieldServed, 1)
-		return true
+		return muYieldServed
 	}
 	// The last reading that agreed with the measurement; the newest sample
 	// only where none is on record (a window restored, or its first
@@ -597,7 +614,7 @@ func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading through
 		if c != nil {
 			c.yielded, c.latchKnown = false, true
 		}
-		return false
+		return muYieldNone
 	}
 	var yielded bool
 	if ratio >= 1 {
@@ -609,14 +626,15 @@ func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading through
 	}
 	if c == nil {
 		if !yielded {
-			return false
+			return muYieldNone
 		}
 		c = &muChoice{}
 		a.throughputMuChoice[key] = c
 	}
 	c.yielded, c.latchKnown = yielded, true
-	if yielded {
-		a.paths.add(pathYieldStale, 1)
+	if !yielded {
+		return muYieldNone
 	}
-	return yielded
+	a.paths.add(pathYieldStale, 1)
+	return muYieldStale
 }

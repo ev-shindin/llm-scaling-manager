@@ -184,6 +184,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	keyInput := throughputKeyInput(role, shapeKeyInput, shapeKeyOutput, fleetHitRate)
 	throughputKey := a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
 		keyInput, shapeKeyOutput, config.QueueLengthThreshold)
+	a.noteMuKey(namespace, modelID, rm.VariantName, role, throughputKey)
 	// A window written under engine arguments the variant no longer runs is
 	// not its service rate (window_args.go).
 	args := windowArgs(engineParams)
@@ -298,14 +299,19 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 					"confirmedFor", MeasuredLowConfirmFor.String(),
 					"reason", "under half the derived mu on every saturated cycle for MeasuredLowConfirmFor: the line is the wrong figure, and the reading is recorded")
 				why = ""
+				a.noteMuCount(namespace, modelID, rm.VariantName, muReasonLowConfirmed)
 			}
 			if why != "" {
+				a.noteMuCount(namespace, modelID, rm.VariantName, muRefusalReason(why))
 				logger.V(logging.DEFAULT).Info("saturated-throughput-refused",
 					"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
 					"pod", rm.PodName, "role", role, "rate", mu, "requestRate", rm.RequestRate,
 					"derivedOK", derived.ok, "derivedRate", derived.rate, "servedBound", served.max, "reason", why)
 			} else {
-				a.recordSaturatedThroughputFrom(throughputKey, rm.PodName, mu)
+				// The reading is admitted beside k2's P1-obs write, so it
+				// carries k2's stamp (noteMuWrite).
+				w := a.recordSaturatedThroughputFrom(throughputKey, rm.PodName, mu)
+				a.noteMuWrite(namespace, modelID, rm.VariantName, rm.PodName, mu, w)
 				if args != "" {
 					a.mu.Lock()
 					if _, ok := a.saturatedThroughput[throughputKey]; ok {
@@ -359,7 +365,17 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// stale pair that disagrees prices the lower figure, latched so the
 	// choice does not flip with derived's noise (measuredYieldsToDerived).
 	throughputSamples := reading.samples
-	if useDerived(derived.ok, reading) || a.measuredYieldsToDerived(throughputKey, reading, derived, served.max, tune, a.now()) {
+	yield := muYieldNone
+	if !useDerived(derived.ok, reading) {
+		yield = a.measuredYield(throughputKey, reading, derived, served.max, tune, a.now())
+		switch yield {
+		case muYieldServed:
+			a.noteMuCount(namespace, modelID, rm.VariantName, muReasonYieldServed)
+		case muYieldStale:
+			a.noteMuCount(namespace, modelID, rm.VariantName, muReasonYieldStale)
+		}
+	}
+	if useDerived(derived.ok, reading) || yield != muYieldNone {
 		saturatedThroughput = derived.rate
 		throughputBucket = derivedBucket
 		// Not the stale measured count, which describes a different figure
@@ -367,6 +383,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		throughputSamples = MinDerivedThroughputSamples
 	} else if rate, ok := a.siblingYield(throughputKey, reading, served, tune); ok {
 		a.paths.add(pathYieldSibling, 1)
+		a.noteMuCount(namespace, modelID, rm.VariantName, muReasonYieldSiblings)
 		// A measurement under what the variant's Ready, full replicas serve
 		// is one slow replica's, not the variant's (siblingYield).
 		logger.V(logging.DEFAULT).Info("saturated-throughput-yields-to-siblings",
