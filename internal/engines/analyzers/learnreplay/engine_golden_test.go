@@ -22,9 +22,9 @@ import (
 const engineFixture = "engine"
 
 // engineFixtures is every committed golden whose recording carries engine
-// events: the in-process engine run, and a cluster recording made after the
-// engine layer landed. The others were recorded before it.
-var engineFixtures = []string{engineFixture, "pd-restart"}
+// events: the in-process engine run, and the cluster recordings made after
+// the engine layer landed. The others were recorded before it.
+var engineFixtures = []string{engineFixture, "pd-restart", olsFixture}
 
 // Each golden that carries engine events lists every engine output, and no
 // other lists one. Each compares rows in each, but for an output its replay

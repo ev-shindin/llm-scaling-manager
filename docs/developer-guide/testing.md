@@ -406,6 +406,37 @@ It cannot be written again in-process. To take it again at a new commit:
 5. Copy the recording out, then add it with `make learner-golden-add` at
    that commit.
 
+The `ols-sweep` golden is the cluster recording whose ITL line comes from
+full fits (`itl-ols`), not only from fits with B pinned. A full fit needs
+steady readings at least 0.30 of k apart, and a steady load never gives
+that: it holds k in a narrow band. The stock P/D decode pod cannot get
+there at all. It holds 1.16M tokens of KV at 16 sequences, so k stays
+under about 0.23.
+
+So the run shrinks the decode KV and steps the load. It is the P/D
+benchmark scenario with EPP flow control off, and decode pinned at one
+replica. The load is closed loop and changes every 4.5 minutes, between k
+of about 0.25 and 0.65, over three shapes: 1000 tokens in and 4000 out,
+1000 and 500, and 6000 and 1000. Its replay takes 101 full fits and 94
+pinned ones, the same counts as the controller's own log of that run.
+`TestGoldens_OLSSweepReplayFitsOLS` holds its own replay to those counts.
+
+To take it again at a new commit:
+
+1. Stand up the P/D scenario as for `pd-restart`, step 1. Then give the
+   decode engine `--num-gpu-blocks-override 1024` (131072 tokens) and 64
+   sequences at most, and give the decode ScaledObject 1-1 replicas and
+   the prefill one 1-2.
+2. Remove EPP flow control and turn the recorder on, as for `pd-restart`,
+   steps 2 and 3.
+3. Keep a fixed number of requests in flight, each with `ignore_eos` and
+   `max_tokens` (never `min_tokens`, which the P/D sidecar refuses). Change
+   the count and the shape every 4.5 minutes, so that each level's k is
+   about 0.3 away from the one before it, and stays inside 0.15 to 0.80.
+   Read the decode pod's `vllm:kv_cache_usage_perc` on the first level and
+   scale the other levels from it.
+4. Add the recording with `make learner-golden-add` at that commit.
+
 #### The engine layer
 
 The analyzer events stop at each `Analyze`. The engine layer (issue #345,
