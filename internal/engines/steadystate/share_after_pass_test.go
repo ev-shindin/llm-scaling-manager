@@ -134,7 +134,7 @@ func TestAPromisedNodeIsNoHoleForTheOptimizer(t *testing.T) {
 	t.Cleanup(decision.DefaultHeadroom.Reset)
 	physical := []*allocation.ResourceConstraints{{ProviderName: allocation.PhysicalLimiterName,
 		Pools: map[string]allocation.ResourcePool{"A100": {Limit: 24, Used: 8}}}}
-	target := func(promised map[string]map[string]int) int {
+	target := func(promised map[string]map[string]decision.PromisedHoles) int {
 		decision.PublishSharePromised(promised, clock)
 		o := allocation.NewGreedyByScoreOptimizer()
 		o.Nodes = allocation.NewNodeView(a100Nodes(8, 4, 4))
@@ -146,7 +146,7 @@ func TestAPromisedNodeIsNoHoleForTheOptimizer(t *testing.T) {
 	if got := target(nil); got != 2 {
 		t.Fatalf("setup: nothing promised, ordered %d, want 2 (the 8-GPU node is free)", got)
 	}
-	if got := target(map[string]map[string]int{"": {"A100": 8}}); got != 1 {
+	if got := target(map[string]map[string]decision.PromisedHoles{"": {"A100": {Unplaced: 8}}}); got != 1 {
 		t.Fatalf("ordered m to %d into the node promised to a receiver, want it held at 1", got)
 	}
 }

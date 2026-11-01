@@ -11,6 +11,7 @@ import (
 	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 )
@@ -407,12 +408,12 @@ func (o *GreedyByScoreOptimizer) Optimize(
 // RepublishHeadroom publishes the last pass's headroom again, less what the
 // pass ordered for the models in planned (namespace/modelID: the ones the
 // utilization share plans, whose targets it overrides), with promised GPUs
-// (scope "" for the cluster, else a namespace -> accelerator -> GPUs) also
-// withheld, from the pools and, held on the freest nodes, from the node holes:
-// those the utilization-share optimizer promised after the pass, which a warm
-// pool must not take before their receiver does. Reports false when there is
-// no pass to republish.
-func (o *GreedyByScoreOptimizer) RepublishHeadroom(planned map[string]bool, promised map[string]map[string]int, now time.Time) bool {
+// (scope "" for the cluster, else a namespace -> accelerator -> holes) also
+// withheld, from the pools and, held on the nodes their holes are on, from the
+// node holes: those the utilization-share optimizer promised after the pass,
+// which a warm pool must not take before their receiver does. Reports false
+// when there is no pass to republish.
+func (o *GreedyByScoreOptimizer) RepublishHeadroom(planned map[string]bool, promised map[string]map[string]decision.PromisedHoles, now time.Time) bool {
 	if o.pass == nil {
 		return false
 	}

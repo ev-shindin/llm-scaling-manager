@@ -149,7 +149,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	now := st.clock()
 	// What the active groups have promised, published on every exit: empty
 	// when nothing acts, so wakes and the warm pool stop withholding at once.
-	promised := map[string]map[string]int{}
+	promised := map[string]map[string]decision.PromisedHoles{}
 	defer func() { decision.PublishSharePromised(promised, now) }()
 	// Blocked reasons are published only while the optimizer acts: in shadow
 	// mode "blocked by the optimizer" would be false. Every exit clears what
@@ -354,15 +354,17 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			for reason, n := range act.withheld {
 				metrics.CountUtilizationShareWithheld(g.AcceleratorType, scope, reason, n)
 			}
-			pg.PromisedGPUs = float64(act.promised)
+			pg.PromisedGPUs = float64(act.promised.Total())
 			pg.ReserveDebtGPUs = float64(act.reserveDebt)
 			pg.Releasing, pg.Filling = act.releasing, act.filling
 			pg.HeadroomCapped = act.headroomCapped
-			if act.promised > 0 {
+			if act.promised.Total() > 0 {
 				if promised[g.Scope] == nil {
-					promised[g.Scope] = map[string]int{}
+					promised[g.Scope] = map[string]decision.PromisedHoles{}
 				}
-				promised[g.Scope][g.AcceleratorType] += act.promised
+				// Published with its nodes: a node view holds each hole on
+				// its own node, not on the freest one.
+				promised[g.Scope][g.AcceleratorType] = promised[g.Scope][g.AcceleratorType].Merge(act.promised)
 			}
 			pg.Timings = shareTimingSeries(act.timings, act.sources)
 			for _, k := range act.swinging {

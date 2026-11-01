@@ -203,7 +203,7 @@ func TestAnExclusiveTopologyReplicaLandsInOneDomain(t *testing.T) {
 // hole: ReservePromised takes the freest node whole.
 func TestReservePromisedHoldsTheFreestNodeWhole(t *testing.T) {
 	v := NewNodeView(h100Nodes(8, 4, 4))
-	ReservePromised(v, map[string]map[string]int{"": {famHBM3: 8}})
+	ReservePromised(v, map[string]map[string]decision.PromisedHoles{"": {famHBM3: {Unplaced: 8}}})
 	if n := v.fits(replicaFit{acc: famHBM3, pods: []int{8}}, 1); n != 0 {
 		t.Fatal("the promised node still holds an 8-GPU replica")
 	}

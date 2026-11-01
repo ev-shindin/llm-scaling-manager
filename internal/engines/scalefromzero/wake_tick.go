@@ -192,7 +192,8 @@ func (e *Engine) tickNodeViewFor(ctx context.Context, constraints []*allocation.
 		view, reason := allocation.NodeViewFor(constraints, nil, now)
 		// A node freed for a share receiver is not free to a wake either (the
 		// constraints already withhold the promise from the pools).
-		allocation.ReservePromised(view, decision.LatestSharePromised(now))
+		// Each promise is held on the node its hole is on.
+		allocation.ReservePromised(view, decision.LatestSharePromisedHoles(now))
 		e.tickNodes.built, e.tickNodes.view = true, view.WithLayoutLog(&e.layouts)
 		if reason != e.tickNodes.skipped {
 			if reason != "" {

@@ -387,7 +387,7 @@ func TestUtilizationShareActivePublishesActuationSeries(t *testing.T) {
 				clock = clock.Add(30 * time.Second)
 				return e.evaluateUtilizationShare(ctx, f.requests(), fullQuota(), f.scaleTargets())
 			}
-			decision.PublishSharePromised(map[string]map[string]int{}, clock)
+			decision.PublishSharePromised(map[string]map[string]decision.PromisedHoles{}, clock)
 			started := 0
 			for range 20 {
 				if o := cycle(); o != nil {
@@ -448,7 +448,7 @@ func TestUtilizationSharePublishesPromisedGPUs(t *testing.T) {
 				clock = clock.Add(30 * time.Second)
 				return e.evaluateUtilizationShare(ctx, f.requests(), fullQuota(), f.scaleTargets())
 			}
-			decision.PublishSharePromised(map[string]map[string]int{}, clock)
+			decision.PublishSharePromised(map[string]map[string]decision.PromisedHoles{}, clock)
 			started := 0
 			for range 20 {
 				if o := cycle(); o != nil {

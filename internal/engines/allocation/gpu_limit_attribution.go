@@ -462,17 +462,17 @@ func (h passHeadroom) without(exclude map[string]bool) passHeadroom {
 }
 
 // withheld returns a copy of h with promised GPUs (scope "" for the cluster,
-// else a namespace -> accelerator -> GPUs) debited too, as WithholdPromised
+// else a namespace -> accelerator -> holes) debited too, as WithholdPromised
 // charges them: a namespace promise to the namespace and the cluster budget, a
-// cluster promise to the cluster budget alone; and held on the nodes
-// (ReservePromised).
-func (h passHeadroom) withheld(promised map[string]map[string]int) passHeadroom {
+// cluster promise to the cluster budget alone; and held on the nodes their
+// holes are on (ReservePromised).
+func (h passHeadroom) withheld(promised map[string]map[string]decision.PromisedHoles) passHeadroom {
 	out := h
 	out.available = maps.Clone(h.available)
 	out.byNamespace = cloneNamespaceBudgets(h.byNamespace)
 	for _, scope := range slices.Sorted(maps.Keys(promised)) {
 		for _, acc := range slices.Sorted(maps.Keys(promised[scope])) {
-			g := promised[scope][acc]
+			g := promised[scope][acc].Total()
 			if g <= 0 {
 				continue
 			}

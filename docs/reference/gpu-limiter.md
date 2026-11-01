@@ -335,7 +335,9 @@ the scaling manager asks for must also fit a node:
   wake also takes its GPUs and its hole from the wakes after it.
 - A node the utilization share freed for a receiver whose pod is still
   Pending is held for it: today's optimizer, a wake and the warm pool all see
-  it taken. Which node is not known, so the freest is held. The share's own
+  it taken, on the node the GPUs were freed from. Where that node is not
+  known (for example, a promise read back after a restart once its donor
+  pods are gone), the freest node is held instead. The share's own
   idle fill places only on what today's optimizer left for the models the
   share does not plan.
 - The warm pool grows only by Pods a node can hold, after this cycle's

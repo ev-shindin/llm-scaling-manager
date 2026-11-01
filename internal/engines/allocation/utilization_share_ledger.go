@@ -14,6 +14,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 )
 
 // ShareTransferState is a transfer's place in the state machine of
@@ -512,24 +513,14 @@ func (l *ShareLedger) Promised() int {
 
 // ShareHoles is the GPUs promised to receivers or held for wakes and not yet
 // taken (Promised, WakeHeld), by where their holes are: Nodes on the node a
-// hole is known to be on, Unplaced where it is not known.
-type ShareHoles struct {
-	Nodes    map[string]int
-	Unplaced int
-}
+// hole is known to be on, Unplaced where it is not known. It is the form the
+// promise is published in (decision.PublishSharePromised), so a node view
+// holds each hole on its own node (ReservePromised).
+type ShareHoles = decision.PromisedHoles
 
-// Total is every GPU h holds back, placed or not.
-func (h ShareHoles) Total() int {
-	n := h.Unplaced
-	for _, g := range h.Nodes {
-		n += g
-	}
-	return n
-}
-
-// add places gpus on holes, the nodes in name order, each up to what it
-// opened; what no known hole covers is unplaced.
-func (h *ShareHoles) add(gpus int, holes ...map[string]int) {
+// addHoles places gpus on holes in h, the nodes in name order, each up to
+// what it opened; what no known hole covers is unplaced.
+func addHoles(h *ShareHoles, gpus int, holes ...map[string]int) {
 	if gpus <= 0 {
 		return
 	}
@@ -561,14 +552,14 @@ func (l *ShareLedger) PromisedHoles(now time.Time) ShareHoles {
 	for _, t := range l.transfers {
 		switch t.State {
 		case ShareFilling:
-			h.add(t.GPUs, t.HoleNodes, t.setHoles)
+			addHoles(&h, t.GPUs, t.HoleNodes, t.setHoles)
 		case ShareReleasing:
-			h.add(t.setReleased, t.setHoles)
+			addHoles(&h, t.setReleased, t.setHoles)
 		}
 	}
 	l.WakeHeld(now) // drops the expired holds
 	for _, w := range l.wakeHolds {
-		h.add(w.gpus, w.holes)
+		addHoles(&h, w.gpus, w.holes)
 	}
 	return h
 }
