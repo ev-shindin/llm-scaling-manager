@@ -519,12 +519,13 @@ recording made by driving the analyzer alone must observe a tracker the way
 the engine does (`readers_test.go`, `cmd/learnergolden`); an analyzer given
 none takes its first cycle's replicas as already watched, and its replay
 would read otherwise.
-Only `settle-joined` and `settle-lent` are required. The committed goldens
-reach `settle-restarted` and `settle-rejoined` too, but only through their
-synthetic generators (rows whose Ready time moves every cycle, clocks that
-jump), so requiring them would pin the generators, not the tracker; no
-recording has a rollout under a Pod's own name. The settle suite covers the
-three until a cluster recording reaches them.
+`settle-joined`, `settle-lent` and `settle-restarted` are required. The
+`pd-restart` golden reaches `settle-restarted` from a real container restart
+on a cluster. The in-process goldens reach it too, from their generators
+(rows whose Ready time moves every cycle). The goldens reach `settle-rejoined`
+only through a generator (clocks that jump), so requiring it would pin the
+generator, not the tracker. No recording has a rollout under a Pod's own
+name. The settle suite covers both.
 
 The engine's replay counts its own paths (`LearnerReplay.PathCounts`):
 composites built, composites of a P/D model priced per role, composites that

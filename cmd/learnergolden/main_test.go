@@ -193,13 +193,13 @@ func TestRun_AddCheckUpdate(t *testing.T) {
 	// The settle verdicts the goldens must reach (learnreplay's
 	// requiredSettlePaths) that the recording's own replay never reached.
 	var unrunSettle []string
-	for _, p := range []string{"settle-joined", "settle-lent"} {
+	for _, p := range []string{"settle-joined", "settle-lent", "settle-restarted"} {
 		if rep.Paths[p] == 0 {
 			unrunSettle = append(unrunSettle, p)
 		}
 	}
-	require.Len(t, unrunSettle, 1, "the head recording leaves these required settle paths unrun: %v. "+
-		"It lends no bridge, so settle-lent; check the list and update the 1", unrunSettle)
+	require.Len(t, unrunSettle, 2, "the head recording leaves these required settle paths unrun: %v. "+
+		"It lends no bridge and restarts no replica, so settle-lent and settle-restarted; check the list and update the 2", unrunSettle)
 	out, err = runOut("check", "-dir", dir)
 	require.ErrorContains(t, err, fmt.Sprintf("%d learner paths no golden runs",
 		len(unrun)+len(unrunSettle)+len(steadystate.LearnerReplayPathNames())), out)
