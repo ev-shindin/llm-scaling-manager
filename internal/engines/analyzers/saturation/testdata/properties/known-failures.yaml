@@ -26,20 +26,6 @@
   finding: "The sibling yield prices the full siblings' lower median when the reading on record is a genuinely slow pod's: over the fleet's mean, the SLO side. Declared: it starts to over-price once the slow pod reads under siblingMuTolerance (0.8) of its siblings."
   measured: "100/100 seeds; seed 1: fleet {1, 1, 1, 0.569}, mean 0.892, priced 1.000, 12 % over"
   owner: "PR 3"
-- id: edges/idle/idle-line-030
-  class: edges
-  learner: idle
-  expect: flipped
-  finding: "Idle room has a 2 min dwell and no hysteresis band on the 0.30 idle line (loadImbalance.idleKvUsage): a peak KV sitting on the line with 30 s-correlated noise settles idle and clears again."
-  measured: "98/100 seeds; seed 1: 6 reversals in 116 cycles"
-  owner: "#396"
-- id: edges/k2/key-near-output-boundary
-  class: edges
-  learner: k2
-  expect: flipped
-  finding: "The k2 key's output-length bucket has no hysteresis of its own: with the noise-free output length 6 % above the 500-token medium/long boundary, autocorrelated noise moves the key the analyzer selects, and back."
-  measured: "17/50 seeds; seed 2: the selected key changed 2 times in 112 cycles"
-  owner: "#396"
 - id: first-sample/k2/second-reading
   class: first-sample
   learner: k2

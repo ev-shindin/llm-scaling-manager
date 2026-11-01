@@ -41,6 +41,9 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// shapeKeyOutput is the TRACKED output length: hysteretic, so the window's
 	// bucket does not flip when the fleet's average wobbles across a boundary.
 	shapeKeyOutput float64,
+	// k2KeyOut is the output length the k2 key is built from: the fleet's,
+	// its bucket held across a boundary (k2KeyLength).
+	k2KeyOut float64,
 	// fleetOutput is the output length the fleet is serving RIGHT NOW. A
 	// bucket label wants hysteresis; a physical quantity does not, and mu is
 	// divided by this one.
@@ -107,7 +110,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		engineParams = rec.EngineParams
 	}
 	historyKey := a.historyKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
-		k2KeyOutput(role, shapeKeyOutput, rm.AvgOutputTokens), config.QueueLengthThreshold)
+		k2KeyOutput(role, k2KeyOut, rm.AvgOutputTokens), config.QueueLengthThreshold)
 	// The rows whose saturated reading may become the variant's k2 are the
 	// rows whose saturated throughput may become its mu, below: Ready, and
 	// the variant's own. A warm-pool bridge is filed under the variant it is
@@ -252,8 +255,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// window; the read side already leaves bridges out
 	// (floor.Estimate), and the write side has to match it.
 	//
-	// Recorded and read under the FLEET's output-length bucket, not this
-	// replica's, as the k2 key above is (k2KeyOutput). Its throughput is
+	// Recorded and read under the FLEET's tracked output-length bucket, not
+	// this replica's. The k2 key above is the fleet's too (k2KeyOutput), held
+	// by its own band, so the two can be in different buckets for minutes
+	// after the length crosses a boundary. Its throughput is
 	// priced per role, as the median
 	// over the role's replicas (floor.Estimate), and a median over
 	// readings from different buckets is a reading of nothing. A replica's

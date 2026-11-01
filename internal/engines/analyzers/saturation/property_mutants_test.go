@@ -22,7 +22,8 @@ import (
 //     the production learner;
 //   - rows: the production learner handed rows the way the defect read them;
 //   - stub: the production learner with one fix stubbed through a seam the
-//     analyzer already has for tests (its readySince func);
+//     analyzer already has for tests (its readySince func, or a replay
+//     switch turned off: SetSwitchesForReplay's fields);
 //   - toy-learner: a small learner with the pre-fix estimator, run through the
 //     same check. It proves the check is sensitive to the defect, not that
 //     the production learner would be caught;
@@ -60,9 +61,9 @@ var findings = []finding{
 	{row: "Instant k against a rate[1m] ITL (#273 A5)", status: statusCaught},
 	{row: "Sum of per-pod one-minute peaks", status: statusCaught},
 	{row: "Settle refuses one cycle of a fill (#282 F1)", status: statusCaught},
-	{row: "k2 key flips on the output-length boundary", status: statusEscaping, why: "edges/k2/key-near-output-boundary fails on today's code (a ledger row, #396)"},
+	{row: "k2 key flips on the output-length boundary", status: statusCaught},
 	{row: "measured/derived flips near 2x", status: statusCaught},
-	{row: "the 0.30 idle line", status: statusEscaping, why: "edges/idle/idle-line-030 fails on today's code (a ledger row, #396)"},
+	{row: "the 0.30 idle line", status: statusCaught},
 	{row: "backlogGrew", status: statusCaught},
 	{row: "Headroom counted twice (+17.6 %)", status: statusCaughtToy},
 	{row: "idle room counted twice", status: statusCaughtToy},
@@ -206,6 +207,15 @@ func propertyMutants() []propMutant {
 		{row: "prefill never learns (#144)", caseID: "liveness/prefill-bound/behind-full-decode", level: levelPolicy,
 			how:   "enablePrefillThroughputBound off, its default: behind a full decode computeK2 discards every prefill reading, and prefill learns no mu at all",
 			check: checkBoundAnalyzeOn(1, true, &config.ScalingPolicy{})},
+		{row: "k2 key flips on the output-length boundary", caseID: "edges/k2/key-near-output-boundary", level: levelStub,
+			how:   "SwitchK2KeyBucketHeld off: the key reads the tracked length, with no band or dwell of its own (#396)",
+			check: checkK2KeyEdgeOn(nil, func(a *SaturationAnalyzer) { a.k2KeyBucketHeld = false })},
+		{row: "the 0.30 idle line", caseID: "edges/idle/idle-line-030", level: levelStub,
+			how: "SwitchIdleBand off: a replica in an idle run is held to the line it entered under (#396)",
+			check: checkIdleEdge(func(a *SaturationAnalyzer, frac float64, now time.Time) bool {
+				a.idleBand = false
+				return realIdleVerdict(a, frac, now)
+			})},
 		{row: "Restart fix stubbed", caseID: "transient/k2/restart-same-name", level: levelStub,
 			how:   "the restart fix stubbed: the analyzer's readySince seam reads no Ready time, so the joined test counts from first sight alone",
 			check: checkK2RestartOn(nil, stubRestartFix)},

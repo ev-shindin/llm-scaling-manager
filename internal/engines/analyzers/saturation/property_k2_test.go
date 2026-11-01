@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ func k2Cases() []propCase {
 		{class: classLiveness, learner: "k2", name: "n2-aggregated", family: familyDirect, tuning: tunedDefault, check: checkK2Liveness("aggregated")},
 		{class: classLiveness, learner: "k2", name: "pd-decode", family: familyDirect, tuning: tunedDefault, check: checkK2Liveness("pd")},
 		{class: classLiveness, learner: "k2", name: "flow-control-on", family: familyDirect, tuning: tunedDefault, check: checkK2Liveness("flow-control")},
-		{class: classEdges, learner: "k2", name: "key-near-output-boundary", family: familyDirect, tuning: tunedDefault, seeds: 50, check: checkK2KeyEdge},
+		{class: classEdges, learner: "k2", name: "key-near-output-boundary", family: familyDirect, tuning: tunedDefault, seeds: 50, check: checkK2KeyEdgeOn(nil, nil)},
 		{class: classEdges, learner: "k2", name: "key-follows-output-length", family: familyDirect, tuning: tunedDefault, check: checkK2KeyFollows(nil)},
 	}
 }
@@ -521,10 +522,13 @@ func checkK2Liveness(topology string) func(uint64) error {
 // selectedK2Keys runs a two-replica saturated fleet through one cycle per
 // output length, and returns the k2 key the analyzer selected each cycle, as
 // its k2-decision line names it (historyKey, in logContract). wrap edits each
-// row (a mutant).
-func selectedK2Keys(lengths []float64, wrap func(*domain.ReplicaMetrics)) ([]string, error) {
+// row, and edit the analyzer before the first cycle (mutants).
+func selectedK2Keys(lengths []float64, wrap func(*domain.ReplicaMetrics), edit func(*SaturationAnalyzer)) ([]string, error) {
 	rig := newPropRig()
 	rig.wrap = wrap
+	if edit != nil {
+		edit(rig.a)
+	}
 	core, logs := observer.New(zapcore.Level(-perReplicaLogLevel))
 	rig.ctx = logr.NewContext(context.Background(), zapr.NewLogger(zap.New(core)))
 	keys := make([]string, 0, len(lengths))
@@ -569,25 +573,42 @@ func keyChanges(keys []string) (int, error) {
 	return changes, nil
 }
 
-// checkK2KeyEdge: a saturated fleet whose output length sits 6 % above the
+// checkK2KeyEdgeOn: a saturated fleet whose output length sits 6 % above the
 // 500-token medium/long boundary, with 6 % autocorrelated noise. The
 // noise-free length never crosses, so the k2 key the analyzer selects --
-// counted once it has selected one for two minutes -- never changes.
-func checkK2KeyEdge(seed uint64) error {
-	noise := arNoise(propRand(seed), 120, 0.06, 0.9)
-	lengths := make([]float64, len(noise))
-	for i, e := range noise {
-		lengths[i] = 530 * (1 + e)
+// counted once it has selected one for two minutes -- ends in "long", never
+// leaves it, and changes at most once (into it). A key that moves to
+// "medium" and back is the flap (#396); one that stays in "medium" has taken
+// its bucket from noise. The case is close to its noise: run over 300 seeds
+// the key fails 3 (116, 251, 282, each into "medium" and back), none of them
+// in the 50 it runs, so a change to arNoise or propRand's draw order can turn
+// it red with no defect (restate the rate, testing.md). wrap edits each row
+// and edit the analyzer before the
+// first cycle (mutants).
+func checkK2KeyEdgeOn(wrap func(*domain.ReplicaMetrics), edit func(*SaturationAnalyzer)) func(uint64) error {
+	return func(seed uint64) error {
+		noise := arNoise(propRand(seed), 120, 0.06, 0.9)
+		lengths := make([]float64, len(noise))
+		for i, e := range noise {
+			lengths[i] = 530 * (1 + e)
+		}
+		keys, err := selectedK2Keys(lengths, wrap, edit)
+		if err != nil {
+			return err
+		}
+		changes, err := keyChanges(keys)
+		if err != nil {
+			return err
+		}
+		left := 0
+		for i := keySettle + 1; i < len(keys); i++ {
+			if strings.Contains(keys[i-1], "|long|") && keys[i] != keys[i-1] {
+				left++
+			}
+		}
+		last := keys[len(keys)-1]
+		return holds(changes <= 1 && left == 0 && strings.Contains(last, "|long|"), kindFlipped, "output length 6 %% above the 500-token boundary: the selected k2 key changed %d times in %d cycles, %d of them out of \"long\", and ended on %s", changes, len(keys)-keySettle, left, last)
 	}
-	keys, err := selectedK2Keys(lengths, nil)
-	if err != nil {
-		return err
-	}
-	changes, err := keyChanges(keys)
-	if err != nil {
-		return err
-	}
-	return holds(changes == 0, kindFlipped, "output length 6 %% above the 500-token boundary: the selected k2 key changed %d times in %d cycles", changes, len(keys)-keySettle)
 }
 
 // checkK2KeyFollows is checkK2KeyEdge's positive control: the noise-free
@@ -605,7 +626,7 @@ func checkK2KeyFollows(wrap func(*domain.ReplicaMetrics)) func(uint64) error {
 				lengths[i] = 700 * (1 + e)
 			}
 		}
-		keys, err := selectedK2Keys(lengths, wrap)
+		keys, err := selectedK2Keys(lengths, wrap, nil)
 		if err != nil {
 			return err
 		}
@@ -615,6 +636,36 @@ func checkK2KeyFollows(wrap func(*domain.ReplicaMetrics)) func(uint64) error {
 		}
 		return holds(changes >= 1, kindNotDetected, "the output length stepped 400 -> 700 across the 500-token boundary, and the selected k2 key never changed")
 	}
+}
+
+// The k2-key edge case is not met by a key that takes its bucket from the
+// first reading and keeps it: rows whose output length the key reads is held
+// at the first cycle's, with the band off, fail on the seeds whose first
+// reading falls under 500.
+func TestPropertyK2KeyEdgeRejectsAFrozenFirstBucket(t *testing.T) {
+	seeds := make([]uint64, 50)
+	for i := range seeds {
+		seeds[i] = uint64(i + 1)
+	}
+	failed := 0
+	for _, seed := range seeds {
+		first := 0.0
+		frozen := func(rm *domain.ReplicaMetrics) {
+			if first == 0 {
+				first = rm.AvgOutputTokens
+			}
+			rm.AvgOutputTokens = first
+		}
+		run, err := runCase(checkK2KeyEdgeOn(frozen, func(a *SaturationAnalyzer) { a.k2KeyBucketHeld = false }), []uint64{seed})
+		if err != nil {
+			t.Fatal(err)
+		}
+		failed += len(run.failures)
+	}
+	if failed == 0 {
+		t.Errorf("a key frozen at its first reading's bucket passed every seed; want the seeds whose first reading is under 500 to fail")
+	}
+	t.Logf("a key frozen at its first reading's bucket fails %d/%d seeds", failed, len(seeds))
 }
 
 // The k2-key edge case's positive control. edges/k2/key-near-output-boundary

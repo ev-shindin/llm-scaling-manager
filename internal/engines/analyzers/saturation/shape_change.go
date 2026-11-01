@@ -113,6 +113,9 @@ type shapeMemo struct {
 	// lastSeen is when this model was last analyzed, so the memo can be swept
 	// with the rest of the analyzer's per-model state (EvictStaleHistory).
 	lastSeen time.Time
+	// k2Key is the output length the k2 keys are built from, and the
+	// crossing of its bucket's boundary it is waiting out (k2KeyLength).
+	k2Key k2KeyMemo
 }
 
 // arrivingPromptLength is the prompt length, in tokens, of what is

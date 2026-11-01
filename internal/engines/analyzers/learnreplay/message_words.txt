@@ -473,6 +473,7 @@ bound|
 bridge
 bridgePerReplica
 bridges
+bucket
 bucketRetention
 buckets
 budget
@@ -613,6 +614,7 @@ covers
 creation
 crept
 critical
+crossed
 current
 current-replicas
 currentNeedGPUs
@@ -717,6 +719,7 @@ dtype
 duplicate
 duration
 during
+dwell
 e.g
 each
 earlier
@@ -862,6 +865,7 @@ frees
 fresh
 freshFor
 from
+fromBucket
 fromLastConstraintsAge
 frozen
 full
@@ -957,6 +961,7 @@ huge
 hysteresis
 id
 idle
+idle-line-band
 idleAfterReady
 idleKvUsage
 idlePods
@@ -1047,6 +1052,8 @@ k1MemoryBound
 k2
 k2-compute
 k2-decision
+k2-key-bucket-held
+k2-key-bucket-moved
 k2-obs-admitted
 k2-reads-the-settle-tracker
 k2-unsettled-joined
@@ -1074,6 +1081,7 @@ keeping
 keeps
 kept
 key
+keyOutputTokens
 know
 known
 kueue
@@ -1199,6 +1207,7 @@ manager
 manages
 map
 maps
+margin
 mark
 marked
 marks
@@ -1278,6 +1287,7 @@ more
 most
 mount
 move
+moved
 mu
 mu-exact-repeat-is-use
 mu-latch-restores-safe-side
@@ -1912,6 +1922,7 @@ slow
 slower
 small
 smallest
+smoothed
 snapshot
 snapshotAge
 so
@@ -1991,6 +2002,7 @@ sum
 supply
 supported
 sustainFor
+swap
 sweep
 swing
 swingReversals
@@ -2058,6 +2070,7 @@ tiny
 tls.crt
 tls.key
 to
+toBucket
 today
 together
 token

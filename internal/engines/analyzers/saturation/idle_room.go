@@ -31,6 +31,8 @@ import (
 //     IdleSettledFor, no two readings more than IdleMaxGap apart. One idle
 //     row is not an idle minute: the row is a one-minute peak, and a replica
 //     that turned Ready seconds ago has a peak over those seconds alone.
+//     A run starts below idleKvUsage and, once started, goes on below
+//     IdleLeaveRatio times it (the band, idleBandLevel).
 //   - it is one of the variant's own replicas. A warm-pool bridge runs the
 //     pool's engine and is lent for as long as the pool says; it is no
 //     evidence of room the role keeps.
@@ -46,6 +48,32 @@ const IdleSettledFor = 2 * ThroughputSampleSpacing
 // still counts as one idle run. A reading is a one-minute peak, so readings
 // further apart than that leave a stretch no reading covered.
 const IdleMaxGap = ThroughputSampleSpacing
+
+// IdleLeaveRatio is the top of the idle band, as a multiple of idleKvUsage:
+// a replica starts an idle run below idleKvUsage and ends it at or above
+// IdleLeaveRatio times it. Its KV and its busiest rank against its effective
+// capacity are both held to the higher level once the run has started; a
+// queue, or the replica leaving Ready, still ends the run at once.
+//
+// One line with no band made a replica whose one-minute peak sits on it
+// settle idle and clear again on noise: on the property case
+// edges/idle/idle-line-030 (a peak with 10 % per-second noise, correlated
+// over 30 s, on the 0.30 line) the verdict reversed 6 times in 116 cycles on
+// 98 of 100 seeds (#396). A replica on the line is idle or not by chance; the
+// band makes it the one or the other for as long as it stays near the line.
+//
+// Idle room only relaxes the hold on prefill's demand while decode is
+// saturated, so a replica kept idle up to the top of the band can raise
+// prefill's order and never lower one. The top stays under the effective
+// capacity the replica is priced at, and never more than halfway from
+// idleKvUsage to a full replica (idleBandLevel).
+const IdleLeaveRatio = 1.4
+
+// SwitchIdleBand is the replay switch for the idle band (#396,
+// analyzer-learner.md 2.5). On, a replica in an idle run stays in it up to
+// idleBandLevel. Off, as before the band, every reading is held to
+// idleKvUsage.
+const SwitchIdleBand = "idle-line-band"
 
 // idleRun is one replica's current run of idle readings.
 type idleRun struct {
@@ -70,6 +98,13 @@ func (a *SaturationAnalyzer) settledIdleDecode(
 		}
 	}
 	return n
+}
+
+// idleBandLevel is the top of the idle band for an idleKvUsage of line:
+// IdleLeaveRatio times it, and never more than halfway from it to a full
+// replica.
+func idleBandLevel(line float64) float64 {
+	return min(IdleLeaveRatio*line, (1+line)/2)
 }
 
 // pricedIdle reports whether a replica reads idle against what it can do, not
@@ -117,16 +152,26 @@ func (a *SaturationAnalyzer) noteIdleRuns(
 	// The end of this cycle's pricing: a replica first seen Ready from the
 	// next cycle on has joined the fleet (settleMemo.noteReady).
 	memo.pastFirstCycle = true
+	// The band's top, for a replica already in a run (IdleLeaveRatio).
+	inRun := t
+	if a.idleBand {
+		inRun.idleKvUsage = idleBandLevel(t.idleKvUsage)
+	}
 	for i := range caps {
 		rm := rows[i]
 		key := rm.VariantName + "/" + rm.PodName
+		run, had := memo.idle[key]
+		had = had && now.Sub(run.last) <= IdleMaxGap
+		level := t
+		if had {
+			level = inRun
+		}
 		if rm.FromWarmPool || domain.CanonicalRole(rolesByVariant[rm.VariantName]) != domain.RoleDecode ||
-			!t.pricedIdle(rm, caps[i]) {
+			!level.pricedIdle(rm, caps[i]) {
 			delete(memo.idle, key)
 			continue
 		}
-		run, had := memo.idle[key]
-		if !had || now.Sub(run.last) > IdleMaxGap {
+		if !had {
 			run.since = now
 		}
 		run.last = now

@@ -93,9 +93,11 @@ func (a *SaturationAnalyzer) stableAcceleratorFor(namespace, variantName, accele
 // which a Ready replica with nothing waiting reads idle on one row. It is the
 // load-imbalance diagnostic's number, read from the same policy key
 // (loadImbalance.idleKvUsage, default balance.IdleKvUsage = 0.30, never above
-// kvCacheThreshold: config.ScalingPolicy.IdleKvUsage), so the two cannot
-// disagree. One row is not enough for the analyzer to act on;
-// settledIdleDecode says what more it needs.
+// kvCacheThreshold: config.ScalingPolicy.IdleKvUsage), so the two agree on
+// where idle starts. They can disagree above it: a replica already in an
+// idle run stays in it up to idleBandLevel (IdleLeaveRatio, 0.42 at the
+// default), where the diagnostic has no band. One row is not enough for the
+// analyzer to act on; settledIdleDecode says what more it needs.
 
 // replicaIdle reports whether rm reads idle on this cycle's row: Ready, its
 // busiest engine rank under idleKvUsage and nothing waiting.
