@@ -947,24 +947,37 @@ What is restored, and what is not:
   identified (the `fingerprint_version` label of `wva_engine_config`), or
   from a release that did not record the engine arguments, restores each
   variant's measured capacity only as that lower-only figure
-  (`restores_total{outcome="differs"}`, or `"prior"`, and `P2-prior` in the
-  cycle log). With `differs`, its saturated throughput, start time and
-  latency baseline are not restored; with `prior`, as for any change of
+  (`restores_total{outcome="differs"}` from a release that did not record
+  the arguments, `"prior"` from one with another `fingerprint_version`, and
+  `P2-prior` in the cycle log). With `differs`, its saturated throughput,
+  start time and latency baseline are not restored; with `prior`, as for any change of
   arguments, the old saturated throughput holds the floor hold-only (above);
-- **rolling the controller back** to the previous release, which already
-  records engine arguments under the same `fingerprint_version` (3), restores
-  each variant whose configuration it can read whole, as an ordinary restart
-  does. It does not see what only this release writes: the windows set aside
-  under other arguments for a rollback, the new fields of a k2 lower bound,
-  or the record of a forget annotation acted on. A variant's previous
-  lower-only figure survives only because this release also writes it in the
-  form the previous one reads. Upgrading again restores what the previous
-  release wrote, whole. Only a rollback to a release that did not record
-  engine arguments, or that has another `fingerprint_version`, starts every
-  variant cold once, and upgrading from it restores lower-only figures. The
-  document keeps one key across releases on purpose: under a new key, the
-  older release would read the document it wrote before the upgrade and
-  install figures days stale as its own;
+- **`fingerprint_version` 4** adds `--max-num-active-seqs` to the engine
+  arguments, so a rollout that changes only the active cap is a change of
+  arguments. v0.10.2 and earlier use version 3. The first restart after
+  upgrading from one of them restores every variant as a change of
+  arguments: its measured capacity as a lower-only figure, its saturated
+  throughput hold-only, and its start time and latency baseline not at all.
+  A variant whose flags were read in full counts as
+  `restores_total{outcome="prior"}`; one whose flags were only partly read
+  (`unresolved` not empty) counts as `"incomplete"` and logs `learned state
+  restored under the unread configuration`, with the same lower-only effect.
+  Each variant then measures its own again under load;
+- **rolling the controller back** to a release that records engine
+  arguments under the same `fingerprint_version` restores each variant whose
+  configuration it can read whole, as an ordinary restart does. It does not
+  see what only this release writes: the windows set aside under other
+  arguments for a rollback, the new fields of a k2 lower bound, or the record
+  of a forget annotation acted on. A variant's previous lower-only figure
+  survives only because this release also writes it in the form the previous
+  one reads. Upgrading again restores what the previous release wrote,
+  whole. A rollback to a release with another `fingerprint_version` -- from
+  this release, v0.10.2 or earlier -- restores each variant as a change of
+  arguments, lower-only figures as above, and so does upgrading from it
+  again. Only a rollback to a release that did not record engine arguments
+  starts every variant cold once. The document keeps one key across releases
+  on purpose: under a new key, the older release would read the document it
+  wrote before the upgrade and install figures days stale as its own;
 - the ages travel with the figures, so a restore never makes a figure younger,
   and one past its horizon above is not restored;
 - a figure the new controller has already measured is never replaced;
@@ -976,6 +989,16 @@ What is restored, and what is not:
   the configuration check;
 - a variant forgotten on request (the `llm-d.ai/forget-learned-state`
   annotation) stays forgotten, and the annotation is not acted on again.
+
+An active cap the controller cannot read -- `--max-num-active-seqs` given as
+an unexpanded `$VARIABLE`, or a value it cannot parse -- is listed in
+`wva_engine_config`'s `unresolved` label, as any other unread flag is (v0.10.2
+and earlier left it out). For as long as the cap is written that way, the
+variant's configuration is only partly read: it gets its own figures back
+after a restart only under the same unread configuration, does not share a
+latency line with another variant, and does not take a sibling's measured
+capacity. Its batch cap falls back to `--max-num-seqs`. Writing the cap as a
+literal value lifts all three.
 
 The log line `Learned state: snapshot restored` says how many variants are
 pending their first cycle; a `learned state restored` line (or, with nothing

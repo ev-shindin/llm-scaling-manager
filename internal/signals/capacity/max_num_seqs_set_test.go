@@ -1,6 +1,7 @@
 package capacity
 
 import (
+	"slices"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -109,23 +110,34 @@ func TestMaxNumActiveSeqsIsTheBatchCap(t *testing.T) {
 		}
 	}
 
-	// An unreadable value is NOT recorded: marking the read incomplete would
-	// change the fingerprint and withhold learned-state sharing and restore
-	// for a deployment whose only change is that this flag is now read. The
-	// read stays complete and hashes exactly as it would without the flag.
+	// An unreadable value is recorded in Unresolved, as any hashed flag that
+	// could not be read is: the read is incomplete, and its digest is not the
+	// one of the same flags without the cap. Hashed as unset and not
+	// recorded, a cap set through an env var could change with nothing to
+	// show it.
 	without := parse("--max-num-seqs=256")
 	for _, args := range [][]string{
 		{"--max-num-seqs=256", "--max-num-active-seqs", "$UNSET_ACTIVE"},
 		{"--max-num-seqs=256", "--max-num-active-seqs=0"},
 		{"--max-num-seqs=256", "--max-num-active-seqs=many"},
-		{"--max-num-seqs=256", "--max-num-active-seqs=64"},
+		{"--max-num-seqs=256", "--max-num-active-seqs"},
 	} {
 		p := parse(args...)
-		if !p.Complete() {
-			t.Errorf("%v reads as incomplete: Unresolved=%v", args, p.Unresolved)
+		if p.Complete() || !slices.Contains(p.Unresolved, "max_num_active_seqs") {
+			t.Errorf("%v: Complete=%v Unresolved=%v, want max_num_active_seqs unresolved", args, p.Complete(), p.Unresolved)
 		}
-		if p.Fingerprint() != without.Fingerprint() {
-			t.Errorf("%v changed the fingerprint against the same flags without it", args)
+		if p.Fingerprint() == without.Fingerprint() {
+			t.Errorf("%v hashed as the same flags without it", args)
 		}
+	}
+
+	// A read cap is hashed (issue #334): a rollout that changes only it is a
+	// change of arguments, as IsCapacityCompatible already says.
+	read := parse("--max-num-seqs=256", "--max-num-active-seqs=64")
+	if !read.Complete() {
+		t.Errorf("a read active cap reads as incomplete: Unresolved=%v", read.Unresolved)
+	}
+	if read.ArgsFingerprint() == without.ArgsFingerprint() {
+		t.Error("--max-num-active-seqs=64 left the arguments fingerprint as it is without the flag")
 	}
 }

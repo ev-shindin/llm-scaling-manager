@@ -29,6 +29,9 @@ var fingerprintHashed = []string{
 	"TotalKvTokensOverride",
 	"EffectiveMaxBatchedTokens",
 	"MaxNumSeqs",
+	// The active cap moves the saturated k2 and throughput, so a rollout that
+	// changes only it must be a change of arguments (issue #334).
+	"MaxNumActiveSeqs",
 	"MaxModelLen",
 	"EnforceEager",
 	// Hashed so an incompletely-read configuration cannot collide with a
@@ -70,10 +73,6 @@ var fingerprintExcluded = []string{
 	"IsV1Engine",
 	"ChunkedPrefillEnabled",
 	"MaxNumSeqsSet",
-	// Not hashed: hashing it bumps FingerprintVersion and adds a label to the
-	// published engine-config metric, which moves every stored digest. Read
-	// for the batch cap (ExplicitMaxNumSeqs) and compared for capacity.
-	"MaxNumActiveSeqs",
 }
 
 func TestFingerprintCoversEveryEngineParamsField(t *testing.T) {
@@ -151,6 +150,7 @@ func TestFingerprintChangesWithEveryHashedField(t *testing.T) {
 		"TotalKvTokensOverride":     func(p *EngineParams) { p.TotalKvTokensOverride = 100000 },
 		"EffectiveMaxBatchedTokens": func(p *EngineParams) { p.EffectiveMaxBatchedTokens = 4096 },
 		"MaxNumSeqs":                func(p *EngineParams) { p.MaxNumSeqs = 512 },
+		"MaxNumActiveSeqs":          func(p *EngineParams) { p.MaxNumActiveSeqs = 64 },
 		"MaxModelLen":               func(p *EngineParams) { p.MaxModelLen = 131072 },
 		"EnforceEager":              func(p *EngineParams) { p.EnforceEager = true },
 		"Unresolved": func(p *EngineParams) {
@@ -212,8 +212,6 @@ func TestFingerprintIgnoresTheResolvedInputs(t *testing.T) {
 			p.ChunkedPrefillEnabled = !p.ChunkedPrefillEnabled
 		case "MaxNumSeqsSet":
 			p.MaxNumSeqsSet = !p.MaxNumSeqsSet
-		case "MaxNumActiveSeqs":
-			p.MaxNumActiveSeqs = 64
 		default:
 			t.Fatalf("no case for excluded field %s", name)
 		}
@@ -239,6 +237,22 @@ func TestFingerprintVersionParticipates(t *testing.T) {
 	}
 	if p.Fingerprint() == "" {
 		t.Fatal("a populated configuration must hash to something")
+	}
+}
+
+// The version this release hashes under, pinned on its own: the goldens hold
+// digests too, but a regeneration would record a reverted constant away. A
+// version left at 3 with the field list of 4 would also let a k2 lower bound
+// stored by v0.10.2 compare its arguments as if hashed alike (k2_borrow.go).
+// The digest below is what v0.10.2 (version 3) wrote for this configuration,
+// computed at 354cbb69b.
+func TestFingerprintVersionIsFour(t *testing.T) {
+	if FingerprintVersion != 4 {
+		t.Fatalf("FingerprintVersion is %d, want 4: version 4 adds max_num_active_seqs (#334)", FingerprintVersion)
+	}
+	p := &EngineParams{Engine: "vllm", MaxNumSeqs: 256, Image: "vllm:v1"}
+	if got := p.Fingerprint(); got == "685b446b731842fd" {
+		t.Fatalf("the digest is version 3's (%s)", got)
 	}
 }
 
@@ -375,6 +389,7 @@ func TestFingerprintLabelsDescribeTheirValues(t *testing.T) {
 		"total_kv_tokens_override":     func(p *EngineParams) { p.TotalKvTokensOverride = 100000 },
 		"effective_max_batched_tokens": func(p *EngineParams) { p.EffectiveMaxBatchedTokens = 4096 },
 		"max_num_seqs":                 func(p *EngineParams) { p.MaxNumSeqs = 512 },
+		"max_num_active_seqs":          func(p *EngineParams) { p.MaxNumActiveSeqs = 64 },
 		"max_model_len":                func(p *EngineParams) { p.MaxModelLen = 131072 },
 		"enforce_eager":                func(p *EngineParams) { p.EnforceEager = true },
 		"unresolved": func(p *EngineParams) {
