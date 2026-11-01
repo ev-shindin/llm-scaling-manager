@@ -937,8 +937,9 @@ func (p *sharePlanRun) cancelReversals() {
 		// gives, a donor wants exactly that back, at any size.
 		//
 		// Only a donor planned this cycle is judged: one out of the group --
-		// frozen, or not collected -- has no target, and what it holds reads
-		// as zero, net of its transfer below it.
+		// frozen, or not collected -- has no target and is absent from what
+		// the group holds, so it reads as minus the GPUs it gives: a whole
+		// replica under a zero target (TestShareUnplannedDonorDoesNotCallItsMoveOff).
 		gap := 2 * shareTol(p.cont[t.Donor], dn, in.Tolerance)
 		if t.DonorGPUs > 0 {
 			gap = math.Min(gap, float64(t.DonorGPUs))

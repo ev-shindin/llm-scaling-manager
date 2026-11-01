@@ -148,10 +148,16 @@ func TestShareSwapRightAfterACalledOffDipWaitsOnlyTheReversalHold(t *testing.T) 
 		busy, idle := stallNeeds(0.4*x, 2.6*x), stallNeeds(2.6*x, 0.4*x)
 		noDip := []stallPhase{{31 * m, busy}, {40 * m, idle}}
 		base, ok := stallReached(stallLoopSized(tm, g, map[string]int{"A": g, "B": 3 * g}, false, noDip, nil), 31*m, 3*g, g)
-		if !ok {
-			t.Fatalf("%d-GPU replicas, control: with no dip the swap never reached 3:1", g)
+		if !ok || base != 7*m+30*time.Second {
+			t.Fatalf("%d-GPU replicas, control: with no dip the swap reached 3:1 after %v (reached %v), want the documented 7m30s", g, base, ok)
 		}
-		for _, after := range []time.Duration{m, 2 * m, 4 * m, 6 * m, 10 * m} {
+		// The landings the docs and the release note quote: pinned within
+		// half a minute, so they cannot drift apart.
+		for _, c := range []struct{ after, lands time.Duration }{
+			{m, 17*m + 30*time.Second}, {2 * m, 16*m + 30*time.Second}, {4 * m, 14*m + 30*time.Second},
+			{6 * m, 12*m + 30*time.Second}, {10 * m, 9 * m},
+		} {
+			after := c.after
 			ph := []stallPhase{{30 * m, busy}, {m, stallNeeds(0.4*x, 0.6*x)}, {after, busy}, {40 * m, idle}}
 			cycles := stallLoopSized(tm, g, map[string]int{"A": g, "B": 3 * g}, false, ph, nil)
 			cancelled := 0
@@ -165,6 +171,10 @@ func TestShareSwapRightAfterACalledOffDipWaitsOnlyTheReversalHold(t *testing.T) 
 			if !ok || d > base+tm.ReversalHold {
 				t.Errorf("%d-GPU replicas: a swap %v after a dip called off reached 3:1 after %v (reached %v), want within %v (no dip) + %v (the hold)",
 					g, after, d, ok, base, tm.ReversalHold)
+			}
+			if diff := d - c.lands; diff < -30*time.Second || diff > 30*time.Second {
+				t.Errorf("%d-GPU replicas: a swap %v after a dip called off reached 3:1 after %v, want %v +/- 30s as documented",
+					g, after, d, c.lands)
 			}
 			t.Logf("%d-GPU replicas: swap %v after the dip reached 3:1 after %v; no dip %v", g, after, d, base)
 		}

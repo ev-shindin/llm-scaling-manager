@@ -645,29 +645,14 @@ func (l *ShareLedger) Cancel(id string, now time.Time, tm ShareTimings) bool {
 }
 
 // CancelDonorBack is Cancel for a transfer called off because its donor's own
-// demand came back: the donor's demand went down, so it gave, and up again,
-// so it wants the replica back: one turn of its demand. The turn is counted
-// as a change of direction -- the give it would have made, then the receive
-// its demand turned to -- only when it is the donor's second inside the swing
-// window: an earlier turn was called off before this transfer started, so the
-// donor gave again after its demand came back once and wanted the replica
-// back again. That is a donor chasing a load that swaps faster than a release.
-// Counted as the give alone, such a donor never changed direction, never
-// reached a swing, and started a transfer at every swap. Counted as a change
-// of direction at every turn, a single wobble -- a busy model that read no
-// demand for a cycle or two -- was one more change of direction, and a single
-// swap back after it was held on the mean: measured over 74 wobbles, twice as
-// many held, and 22 swap backs slower than with the rule off. Counted at the
-// second turn also when the first was a landed move against the one before it,
-// a model that had given its spare and been raised again was held on its mean
-// by a single wobble: 28 of the 74 held, 22 slower.
-//
-// Every transfer the turn calls off counts once: a transfer started before
-// the donor's demand came back in a cancel already counted (a second replica
-// started the cycle after the first, called off a cycle later) is the same
-// turn, and records nothing more for the donor. Recorded as a give again, it
-// reversed the receive just counted. A spare return (Entitled) still counts
-// for nothing, and the receiver still counts the receive it would have made.
+// demand came back: one dip and return of the donor's demand. For the donor it
+// records the give it would have made, and also the receive its demand turned
+// to -- a change of direction -- only when the donor already had such a dip
+// inside the swing window, before this transfer started. Every transfer one
+// dip calls off counts once. A spare return (Entitled) counts for nothing, and
+// the receiver counts the receive it would have made, as with Cancel. Why the
+// second dip: TestShareFastSwapsStayPlannedOnTheMean and
+// TestShareWobbleCalledOffDoesNotHoldTheSwapBack.
 func (l *ShareLedger) CancelDonorBack(id string, now time.Time, tm ShareTimings) bool {
 	return l.cancel(id, true, now, tm)
 }
@@ -710,6 +695,9 @@ func (l *ShareLedger) cancel(id string, donorBack bool, now time.Time, tm ShareT
 		switch {
 		case !donorBack:
 			l.recordCancel(t.Donor, false, now, tm)
+		// A dip already counted since this transfer started -- a second
+		// replica of the same dip, called off a cycle later -- records
+		// nothing more for the donor.
 		case !l.turnedSince(t.Donor, t.Started):
 			again := l.turnedBefore(t.Donor, t.Started, now, tm)
 			l.recordCancel(t.Donor, false, now, tm)
@@ -1083,7 +1071,8 @@ func (l *ShareLedger) recordCancel(role string, received bool, now time.Time, tm
 }
 
 // markDonorBack marks role's give cancelled this cycle as one turn of its
-// demand (CancelDonorBack).
+// demand (CancelDonorBack). It also marks a give of the same donor that a
+// plain Cancel recorded in the same cycle: harmless, as both are the same dip.
 func (l *ShareLedger) markDonorBack(role string, now time.Time) {
 	for i, m := range l.cancels[role] {
 		if m.at.Equal(now) && !m.received {
