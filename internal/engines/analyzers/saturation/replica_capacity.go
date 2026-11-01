@@ -292,7 +292,11 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 			// MeasuredLowConfirmFor is a real low rate, not a fill -- unless
 			// a sibling's served rate contradicts it (refusedUnderServed),
 			// which no repetition confirms.
-			if a.noteSaturatedReading(throughputKey, rm.PodName, mu, why == refusedUnderDerived, tune, a.now()) {
+			derivedRate := 0.0
+			if derived.ok {
+				derivedRate = derived.rate
+			}
+			if a.noteSaturatedReading(throughputKey, rm.PodName, mu, why == refusedUnderDerived, derivedRate, tune, a.now()) {
 				logger.V(logging.DEFAULT).Info("saturated-throughput-low-confirmed",
 					"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
 					"pod", rm.PodName, "role", role, "rate", mu, "derivedRate", derived.rate,

@@ -67,18 +67,19 @@ func TestMuRepeat_AFrozenSeriesLetsTheEpisodeEnd(t *testing.T) {
 	}
 }
 
-// An exact repeat does not keep the measurement fresh against the derived
-// figure: freshness is the last saturated reading that agreed with it, and a
-// repeat is not a reading of saturation.
-func TestMuRepeat_DoesNotKeepTheMeasurementFresh(t *testing.T) {
+// Over the derived figure an exact repeat does not keep the measurement
+// fresh: freshness is the last saturated reading that agreed with it, a
+// repeat is not a reading of saturation, and stale over the derived figure
+// the measurement yields to the lower one, the safe side.
+func TestMuRepeat_OverDerivedDoesNotKeepTheMeasurementFresh(t *testing.T) {
 	tn := tuningOf(nil)
 	for _, on := range []bool{true, false} {
 		a, clock := muRepeatRig(t, on)
 		t0 := *clock
-		a.noteSaturatedReading(muRepeatKey, "pod-a", 3.4, false, tn, *clock)
+		a.noteSaturatedReading(muRepeatKey, "pod-a", 3.4, false, 3.0, tn, *clock)
 		a.recordSaturatedThroughputFrom(muRepeatKey, "pod-a", 3.4)
 		*clock = t0.Add(5 * time.Minute)
-		a.noteSaturatedReading(muRepeatKey, "pod-a", 3.4, false, tn, *clock)
+		a.noteSaturatedReading(muRepeatKey, "pod-a", 3.4, false, 3.0, tn, *clock)
 		got := a.throughputMuChoice[muRepeatKey].saturatedAt
 		if on {
 			assert.True(t, got.IsZero(), "a repeat is not agreement: the first reading had no window to agree with")
@@ -87,7 +88,30 @@ func TestMuRepeat_DoesNotKeepTheMeasurementFresh(t *testing.T) {
 		}
 		// A reading that differs, and agrees, still refreshes it.
 		*clock = t0.Add(6 * time.Minute)
-		a.noteSaturatedReading(muRepeatKey, "pod-a", 3.5, false, tn, *clock)
+		a.noteSaturatedReading(muRepeatKey, "pod-a", 3.5, false, 3.0, tn, *clock)
 		assert.Equal(t, *clock, a.throughputMuChoice[muRepeatKey].saturatedAt, "switch %v", on)
+	}
+}
+
+// Under the derived figure an exact repeat still counts as agreement:
+// stale, a real low measurement whose quantized rate repeats would give way
+// to the higher derived figure after MeasuredLowHoldFor, the side that
+// under-orders. Repeated for longer than the hold, it keeps pricing.
+func TestMuRepeat_UnderDerivedStillKeepsTheMeasurementFresh(t *testing.T) {
+	tn := tuningOf(nil)
+	derived := derivedMu{ok: true, rate: 3.0}
+	for _, on := range []bool{true, false} {
+		a, clock := muRepeatRig(t, on)
+		t0 := *clock
+		a.noteSaturatedReading(muRepeatKey, "pod-a", 1.2, false, derived.rate, tn, *clock)
+		a.recordSaturatedThroughputFrom(muRepeatKey, "pod-a", 1.2)
+		for *clock = t0.Add(ThroughputSampleSpacing); clock.Sub(t0) <= MeasuredLowHoldFor+5*time.Minute; *clock = clock.Add(time.Minute) {
+			a.noteSaturatedReading(muRepeatKey, "pod-a", 1.2, false, derived.rate, tn, *clock)
+			a.recordSaturatedThroughputFrom(muRepeatKey, "pod-a", 1.2)
+		}
+		assert.Equal(t, clock.Add(-time.Minute), a.throughputMuChoice[muRepeatKey].saturatedAt, "switch %v", on)
+		reading := a.saturatedThroughputReading(muRepeatKey)
+		assert.False(t, a.measuredYieldsToDerived(muRepeatKey, reading, derived, 0, tn, *clock),
+			"switch %v: the low measurement keeps pricing", on)
 	}
 }

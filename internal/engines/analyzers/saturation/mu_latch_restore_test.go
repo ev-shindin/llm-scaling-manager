@@ -90,9 +90,65 @@ func TestMuLatch_AWindowSeenFromItsFirstSampleIsKnown(t *testing.T) {
 	now := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
 	a.now = func() time.Time { return now }
 	tn := tuningOf(nil)
-	a.noteSaturatedReading(muRepeatKey, "pod-a", 1.8, false, tn, now)
+	a.noteSaturatedReading(muRepeatKey, "pod-a", 1.8, false, 1.0, tn, now)
 	a.recordSaturatedThroughputFrom(muRepeatKey, "pod-a", 1.8)
 	now = now.Add(MeasuredMuFreshFor + time.Minute)
 	reading := a.saturatedThroughputReading(muRepeatKey)
 	assert.False(t, a.measuredYieldsToDerived(muRepeatKey, reading, derivedMu{ok: true, rate: 1.0}, 0, tn, now))
+}
+
+// A window installed through the real restore path after a refused reading
+// already made the key a choice memo: the memo says nothing of the window,
+// whose latch is unknown, so a stale restored measurement 1.8x the derived
+// figure yields to the lower figure, as it does with no memo at all.
+func TestMuLatch_AWindowRestoredAfterARefusedReadingComesBackLatched(t *testing.T) {
+	params := mtParams(64, "vllm:v1")
+	for _, on := range []bool{true, false} {
+		a, _, clock := waProcess(params)
+		require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchMuLatchRestoresSafe: on}))
+		const key = "test-ns|variant-a|test-model|H100|1|decode|imedium|medium|q5"
+		old := clock.Add(-MeasuredLowHoldFor - time.Minute)
+		a.RestoreLearnedState(LearnedState{
+			Config: map[string]string{"test-ns/variant-a": params.Fingerprint()},
+			Args:   map[string]string{"test-ns/variant-a": params.ArgsFingerprint()},
+			Throughput: map[string]ThroughputSnapshot{key: {
+				RollingAverageSnapshot: capacity.RollingAverageSnapshot{Values: []float64{1.8, 1.8, 1.8}, LastUsed: old, LastWritten: old},
+				SampledAt:              old,
+			}},
+		})
+		// A refused reading on the cycle before the variant's record lets the
+		// restore install: a memo, with no window on record.
+		a.noteSaturatedReading(key, "pod-a", 0.1, false, 1.0, tuningOf(nil), *clock)
+		_, done := a.installRestored("test-ns", "test-model", "variant-a")
+		require.True(t, done, "premise: the restore installs")
+		reading := a.saturatedThroughputReading(key)
+		require.InDelta(t, 1.8, reading.rate, 1e-9, "premise: the restored window prices")
+		got := a.measuredYieldsToDerived(key, reading, derivedMu{ok: true, rate: 1.0}, 0, tuningOf(nil), *clock)
+		assert.Equal(t, on, got, "switch %v", on)
+	}
+}
+
+// A window brought back from under other engine arguments has an unknown
+// latch too, whatever memo the key made meanwhile.
+func TestMuLatch_AWindowBroughtBackFromTheStashComesBackLatched(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		now := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
+		a.now = func() time.Time { return now }
+		require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchMuLatchRestoresSafe: on}))
+		old := now.Add(-MeasuredLowHoldFor - time.Minute)
+		ra, ok := capacity.RestoreRollingAverage(capacity.RollingAverageSnapshot{
+			Values: []float64{1.8, 1.8, 1.8}, LastUsed: old, LastWritten: old,
+		}, capacity.RollingAverageWindowSize)
+		require.True(t, ok)
+		a.throughputStash[stashKey(muRepeatKey, "args-a")] = stashedThroughput{window: ra, sampledAt: old}
+		a.noteSaturatedReading(muRepeatKey, "pod-a", 0.1, false, 1.0, tuningOf(nil), now)
+		a.mu.Lock()
+		a.throughputWindowUnderLocked(muRepeatKey, "args-a")
+		a.mu.Unlock()
+		reading := a.saturatedThroughputReading(muRepeatKey)
+		require.InDelta(t, 1.8, reading.rate, 1e-9, "premise: the window is back")
+		got := a.measuredYieldsToDerived(muRepeatKey, reading, derivedMu{ok: true, rate: 1.0}, 0, tuningOf(nil), now)
+		assert.Equal(t, on, got, "switch %v", on)
+	}
 }

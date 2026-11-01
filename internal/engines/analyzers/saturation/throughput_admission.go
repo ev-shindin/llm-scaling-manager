@@ -451,6 +451,16 @@ func (a *SaturationAnalyzer) lowHeldOut(fresh time.Time, reading throughputReadi
 	return !reading.writtenAt.IsZero() && now.Sub(reading.writtenAt) >= hold
 }
 
+// unknownLatchLocked marks key's latch unknown: its window was just
+// installed from a restore, or brought back from under other arguments, so
+// a choice memo made before -- a refused reading creates one -- says
+// nothing of it (SwitchMuLatchRestoresSafe). Callers hold a.mu.
+func (a *SaturationAnalyzer) unknownLatchLocked(key string) {
+	if c, ok := a.throughputMuChoice[key]; ok {
+		c.latchKnown = false
+	}
+}
+
 // muChoice is one throughput key's memory for choosing between its measured
 // mu and the derived one (SaturationAnalyzer.throughputMuChoice).
 type muChoice struct {
@@ -490,10 +500,15 @@ type lowRun struct {
 // MeasuredDerivedMaxRatio keeps the measurement fresh, accepted or not: the
 // bucket is still reading what it measured. One that disagrees does not, and
 // a filling replica's reading -- a fraction of the rate on record -- is one.
-// Nor does an exact repeat of the last reading (exactRepeatLocked): it is
-// evidence of use, not that the bucket saturated again
-// (SwitchMuRepeatIsUse).
-func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, refusedLow bool, t tuning, now time.Time) bool {
+// An exact repeat of the last reading (exactRepeatLocked) is handled by
+// side (SwitchMuRepeatIsUse): it is evidence of use, not that the bucket
+// saturated again, so over the derived figure (derivedRate) it keeps the
+// measurement fresh no longer, and the measurement yields to the lower
+// figure. Under it -- or with no derived figure -- losing freshness would
+// let a real low measurement whose quantized rate repeats give way to the
+// higher derived figure after MeasuredLowHoldFor, the side that
+// under-orders, so there a repeat still counts as agreement.
+func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, refusedLow bool, derivedRate float64, t tuning, now time.Time) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	c, ok := a.throughputMuChoice[key]
@@ -507,7 +522,7 @@ func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, r
 		a.throughputMuChoice[key] = c
 	}
 	repeat := a.muRepeatIsUse && a.exactRepeatLocked(key, mu, now)
-	if ra, ok := a.saturatedThroughput[key]; ok && ra.Len() > 0 && !repeat {
+	if ra, ok := a.saturatedThroughput[key]; ok && ra.Len() > 0 && !(repeat && derivedRate > 0 && ra.Median() > derivedRate) {
 		if m := ra.Median(); m > 0 && mu <= m*t.MuChoice.MaxRatio && mu >= m/t.MuChoice.MaxRatio {
 			c.saturatedAt = now
 			c.yielded, c.latchKnown = false, true

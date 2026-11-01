@@ -54,12 +54,14 @@ func TestMuUnknownAge_UnderDerivedKeepsTheLowHold(t *testing.T) {
 }
 
 // With no write time either, the measurement under the derived figure is
-// held: nothing says it is old.
+// held: nothing says it is old. Off, as before, it gave way at once.
 func TestMuUnknownAge_NoTimeAtAllIsHeld(t *testing.T) {
-	a, now := unknownAgeRig(t, true, 1.0, time.Minute)
-	got := a.measuredYieldsToDerived(muRepeatKey, throughputReading{rate: 1.0, samples: 3},
-		derivedMu{ok: true, rate: 3.0}, 0, tuningOf(nil), now)
-	assert.False(t, got)
+	for _, on := range []bool{true, false} {
+		a, now := unknownAgeRig(t, on, 1.0, time.Minute)
+		got := a.measuredYieldsToDerived(muRepeatKey, throughputReading{rate: 1.0, samples: 3},
+			derivedMu{ok: true, rate: 3.0}, 0, tuningOf(nil), now)
+		assert.Equal(t, !on, got, "switch %v", on)
+	}
 }
 
 // Over the derived figure, stale is the safe side: the measurement yields to
