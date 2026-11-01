@@ -55,12 +55,10 @@ var replaySwitches = map[string][]string{
 // all on, it may move only what it named. A seam's row goes with the seam,
 // in the PR, or cleanup PR, that deletes it with zero golden diff.
 var earlierSeams = map[string][]string{
-	saturation.SwitchBatchCapDeclared: nil,
-	saturation.SwitchBatchCapLearned:  nil,
-	saturation.SwitchK2ReadsSettle:    nil,
-	saturation.SwitchMuKeyBucketHeld:  nil,
-	saturation.SwitchMuMarginClamp:    nil,
-	saturation.SwitchMuSwapFreeze:     nil,
+	saturation.SwitchK2ReadsSettle:   nil,
+	saturation.SwitchMuKeyBucketHeld: nil,
+	saturation.SwitchMuMarginClamp:   nil,
+	saturation.SwitchMuSwapFreeze:    nil,
 	saturation.SwitchK2WaitsAfterRestart: {
 		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
 	},
