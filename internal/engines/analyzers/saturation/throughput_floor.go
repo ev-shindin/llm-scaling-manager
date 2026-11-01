@@ -196,12 +196,16 @@ type podReads struct {
 }
 
 // meanOf is the mean of the readings, zero when there are none.
+//
+// Summed in sorted order: a float sum depends on its order, and a map's is
+// random, so summing in map order left the last digit of the mean -- a
+// recorded mu -- to chance, and a replay of the same cycle could differ.
 func meanOf(reads map[string]float64) float64 {
 	if len(reads) == 0 {
 		return 0
 	}
 	sum := 0.0
-	for _, v := range reads {
+	for _, v := range slices.Sorted(maps.Values(reads)) {
 		sum += v
 	}
 	return sum / float64(len(reads))

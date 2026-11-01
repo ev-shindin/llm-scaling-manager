@@ -57,7 +57,7 @@ func (c *Clock) Pin() (release func()) {
 	}
 	c.mu.Lock()
 	if c.depth == 0 {
-		c.at = c.base.Now()
+		c.at = wall(c.base.Now())
 	}
 	c.depth++
 	c.mu.Unlock()
@@ -72,17 +72,30 @@ func (c *Clock) Pin() (release func()) {
 }
 
 // Now returns the pinned reading while a pin is held, and the base clock's
-// reading otherwise.
+// reading otherwise. Either way it carries no monotonic reading (wall).
 func (c *Clock) Now() time.Time {
 	if c == nil {
-		return clock.RealClock{}.Now()
+		return wall(clock.RealClock{}.Now())
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.depth > 0 {
 		return c.at
 	}
-	return c.base.Now()
+	return wall(c.base.Now())
+}
+
+// wall strips t's monotonic clock reading, keeping its wall time.
+//
+// A recording keeps only wall times, so a replay subtracts wall times. A live
+// time.Now also carries a monotonic reading, and Sub between two that both do
+// uses the monotonic one -- which drifts from the wall clock by nanoseconds as
+// the wall clock is slewed. An age taken live then differed from the same age
+// replayed by those nanoseconds, and the replay of a cycle could not match the
+// recording of it. Every stamp and age read from this clock is wall-only, live
+// and replayed alike.
+func wall(t time.Time) time.Time {
+	return t.Round(0)
 }
 
 // Since returns how long before Now t was.

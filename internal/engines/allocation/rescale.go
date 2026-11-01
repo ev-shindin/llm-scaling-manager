@@ -159,7 +159,10 @@ func roundExtras(in []rescaleInput, extra map[string]float64, targets map[string
 	remainder := make(map[string]float64, len(extra))
 	totalFrac := 0.0
 	sumWhole := 0
-	for id, e := range extra {
+	// In key order: totalFrac is a float sum, whose last bit depends on the
+	// order it is taken in, and it is rounded below.
+	for _, id := range slices.Sorted(maps.Keys(extra)) {
+		e := extra[id]
 		whole := int(math.Floor(e))
 		targets[id] += whole
 		sumWhole += whole
