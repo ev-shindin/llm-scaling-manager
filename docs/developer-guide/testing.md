@@ -734,7 +734,7 @@ is replayed off alone from all on, and may move only those. Every name
 golden is invisible to the runs, so it names the unit tests that hold it
 (`heldBy`, checked to exist): mu's three switches are held by
 `mu_repeat_test.go`, `mu_unknown_age_test.go` and `mu_latch_restore_test.go`,
-not by the goldens.
+and #396's idle and k2-key bands by `flap_band_test.go`, not by the goldens.
 
 Run `make learner-goldens` only when your PR names the change: it rewrites
 every output file from a replay at your commit. Never edit a golden by hand.
