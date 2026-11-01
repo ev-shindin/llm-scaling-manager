@@ -87,59 +87,102 @@ func TestOutputBucketBounds(t *testing.T) {
 	}
 }
 
-// The key leaves its bucket only once the length has been past the margin on
-// every cycle for K2KeyBucketDwell; a cycle back inside the margin starts the
-// dwell again.
-func TestK2KeyBucket_LeavesOnlyPastTheMarginForTheDwell(t *testing.T) {
-	var m k2KeyMemo
-	at := propStart
-	step := func(l float64) string {
-		at = at.Add(propCycle)
-		return classifyOutputLength(m.note(l, at))
-	}
-	require.Equal(t, "long", step(530), "the first reading sets the bucket")
-	assert.Equal(t, "long", step(470), "under 500 but not under 450: held")
-	for range 4 {
-		assert.Equal(t, "long", step(440), "under 450, inside the dwell: held")
-	}
-	assert.Equal(t, "long", step(400), "400 is not under 400: the dwell goes on")
-	assert.Equal(t, "long", step(460), "back inside the margin: the dwell starts again")
-	dwell := int(K2KeyBucketDwell / propCycle)
-	for i := range dwell {
-		assert.Equal(t, "long", step(440), "%d cycles of the dwell", i)
-	}
-	assert.Equal(t, "medium", step(440), "under 450 for the whole dwell: the key leaves")
-	assert.Equal(t, "medium", step(540), "over 500, under 550: held in medium")
-	assert.Equal(t, "long", step(600), "at 600, past 500 by K2KeyBucketJump: at once")
-	assert.Equal(t, "medium", step(399), "under 400: at once")
+// keyRig steps a k2KeyMemo one cycle at a time and returns the key's bucket.
+type keyRig struct {
+	m  k2KeyMemo
+	at time.Time
 }
 
-// The margins are judged at the boundary of the bucket the key leaves: from
-// "long", 1650 and 1800 up, 450 and 400 down. A length that jumps several
-// buckets is past it by more, and moves to its own bucket.
-func TestK2KeyBucket_TheMarginIsAtTheBoundaryLeft(t *testing.T) {
-	after := func(l float64, cycles int) string {
-		var m k2KeyMemo
-		at := propStart
-		m.note(530, at)
-		for range cycles {
-			at = at.Add(propCycle)
-			m.note(l, at)
-		}
-		return classifyOutputLength(m.length)
+func (r *keyRig) step(l float64) string {
+	r.at = r.at.Add(propCycle)
+	return classifyOutputLength(r.m.note(l, r.at))
+}
+
+// steps notes l for n cycles and returns the last bucket.
+func (r *keyRig) steps(l float64, n int) string {
+	got := ""
+	for range n {
+		got = r.step(l)
 	}
-	dwell := int(K2KeyBucketDwell/propCycle) + 1
-	assert.Equal(t, "long", after(1600, dwell), "1600 is in xlong, under 1500 x 1.1")
-	assert.Equal(t, "long", after(1700, 1), "1700 is past 1650: the dwell")
-	assert.Equal(t, "xlong", after(1700, dwell))
-	assert.Equal(t, "xlong", after(1800, 1), "1800 is past 1500 x 1.2: at once")
-	assert.Equal(t, "xxlong", after(4000, 1), "several buckets up: its own bucket, at once")
-	assert.Equal(t, "short", after(50, 1), "several buckets down: its own bucket, at once")
+	return got
+}
+
+// settledKey is a keyRig that has read l for K2KeyBucketSmoothing.
+func settledKey(l float64) *keyRig {
+	r := &keyRig{at: propStart}
+	r.steps(l, int(K2KeyBucketSmoothing/propCycle))
+	return r
+}
+
+// dwellCycles is how many cycles past K2KeyBucketSwap keep the bucket: the
+// one after them swaps.
+const dwellCycles = int(K2KeyBucketDwell / propCycle)
+
+// One early reading does not choose the bucket: the key is judged on the mean
+// of the readings so far, and leaves the first reading's bucket when that
+// mean is past the margin.
+func TestK2KeyBucket_OneEarlyReadingDoesNotChooseTheBucket(t *testing.T) {
+	r := &keyRig{at: propStart}
+	assert.Equal(t, "medium", r.step(480), "one reading: its own bucket")
+	assert.Equal(t, "medium", r.step(540), "the mean, 510, is long's but under 515")
+	assert.Equal(t, "long", r.step(540), "the mean, 520, is past 515")
+	assert.Equal(t, "long", r.steps(530, 40))
+}
+
+// The smoothed length leaves the bucket only once it is past the margin: a
+// length that moves to 470 is held in "long" for minutes (about 14), and
+// leaves once the smoothed length is under 485.
+func TestK2KeyBucket_TheSmoothedLengthLeavesPastTheMargin(t *testing.T) {
+	r := settledKey(530)
+	assert.Equal(t, "long", r.steps(470, 40), "10 min at 470: the smoothed length is still over 485")
+	assert.Equal(t, "medium", r.steps(470, 20), "5 min more: under 485")
+	assert.Equal(t, "medium", r.steps(510, 4), "back at 510: under 515, held")
+}
+
+// No reading moves the key on its own, however far past the boundary, in
+// either direction.
+func TestK2KeyBucket_OneReadingNeverMovesIt(t *testing.T) {
+	r := settledKey(530)
+	assert.Equal(t, "long", r.step(300), "one reading 40 % under 500")
+	assert.Equal(t, "long", r.step(530))
+	assert.Equal(t, "long", r.step(4000), "one reading several buckets up")
+	assert.Equal(t, "long", r.step(530))
+	r = settledKey(470)
+	assert.Equal(t, "medium", r.step(700), "one reading 40 % over 500")
+	assert.Equal(t, "medium", r.step(470))
+}
+
+// A swap, the length past the boundary by K2KeyBucketSwap on every cycle for
+// K2KeyBucketDwell, moves the key to the length's own bucket, the same way in
+// both directions, and is not sticky: the smoothing restarts there.
+func TestK2KeyBucket_ASwapMovesItTheSameWayBothWays(t *testing.T) {
+	r := settledKey(530)
+	assert.Equal(t, "long", r.steps(380, dwellCycles), "380 for under the dwell: held")
+	assert.Equal(t, "medium", r.step(380), "380 for the dwell: a swap down")
+	r = settledKey(470)
+	assert.Equal(t, "medium", r.steps(700, dwellCycles), "700 for under the dwell: held, though the smoothed length is past 515")
+	assert.Equal(t, "long", r.step(700), "700 for the dwell: a swap up")
+	assert.Equal(t, "long", r.step(300), "one reading after a swap moves nothing")
+
+	r = settledKey(530)
+	r.steps(380, dwellCycles+1)
+	assert.Equal(t, "long", r.steps(530, 12), "a swap on noise: back at 530, the restarted mean is past 515 within minutes")
+
+	r = settledKey(1000)
+	assert.Equal(t, "huge", r.steps(8000, dwellCycles+1), "a swap several buckets up lands in its own bucket, not the next one")
+	assert.Equal(t, "short", settledKey(1000).steps(50, dwellCycles+1), "and down")
+}
+
+// The margins are judged at the boundary of the bucket the key leaves.
+func TestK2KeyBucket_TheMarginIsAtTheBoundaryLeft(t *testing.T) {
 	assert.True(t, pastBucketMargin(530, 4000, K2KeyBucketMargin))
-	assert.False(t, pastBucketMargin(530, 540, K2KeyBucketMargin))
-	assert.True(t, pastBucketMargin(530, 449, K2KeyBucketMargin))
-	assert.False(t, pastBucketMargin(530, 451, K2KeyBucketMargin))
-	assert.False(t, pastBucketMargin(7000, 1e6, K2KeyBucketJump), "the last bucket has no upper bound")
+	assert.False(t, pastBucketMargin(530, 1540, K2KeyBucketMargin), "under 1500 x 1.03")
+	assert.True(t, pastBucketMargin(530, 1545, K2KeyBucketMargin))
+	assert.True(t, pastBucketMargin(530, 484, K2KeyBucketMargin))
+	assert.False(t, pastBucketMargin(530, 486, K2KeyBucketMargin))
+	assert.True(t, pastBucketMargin(530, 399, K2KeyBucketSwap))
+	assert.False(t, pastBucketMargin(530, 400, K2KeyBucketSwap))
+	assert.False(t, pastBucketMargin(7000, 1e6, K2KeyBucketSwap), "the last bucket has no upper bound")
 }
 
 // SwitchK2KeyBucketHeld off: the key reads the tracked length, as before.

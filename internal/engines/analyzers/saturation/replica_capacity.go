@@ -250,8 +250,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// window; the read side already leaves bridges out
 	// (floor.Estimate), and the write side has to match it.
 	//
-	// Recorded and read under the FLEET's output-length bucket, not this
-	// replica's, as the k2 key above is (k2KeyOutput). Its throughput is
+	// Recorded and read under the FLEET's tracked output-length bucket, not
+	// this replica's. The k2 key above is the fleet's too (k2KeyOutput), held
+	// by its own band, so the two can be in different buckets for minutes
+	// after the length crosses a boundary. Its throughput is
 	// priced per role, as the median
 	// over the role's replicas (floor.Estimate), and a median over
 	// readings from different buckets is a reading of nothing. A replica's

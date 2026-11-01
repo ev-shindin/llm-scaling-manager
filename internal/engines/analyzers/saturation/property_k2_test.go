@@ -36,7 +36,7 @@ func k2Cases() []propCase {
 		{class: classLiveness, learner: "k2", name: "n2-aggregated", family: familyDirect, tuning: tunedDefault, check: checkK2Liveness("aggregated")},
 		{class: classLiveness, learner: "k2", name: "pd-decode", family: familyDirect, tuning: tunedDefault, check: checkK2Liveness("pd")},
 		{class: classLiveness, learner: "k2", name: "flow-control-on", family: familyDirect, tuning: tunedDefault, check: checkK2Liveness("flow-control")},
-		{class: classEdges, learner: "k2", name: "key-near-output-boundary", family: familyDirect, tuning: tunedDefault, seeds: 50, check: checkK2KeyEdgeOn(nil)},
+		{class: classEdges, learner: "k2", name: "key-near-output-boundary", family: familyDirect, tuning: tunedDefault, seeds: 50, check: checkK2KeyEdgeOn(nil, nil)},
 		{class: classEdges, learner: "k2", name: "key-follows-output-length", family: familyDirect, tuning: tunedDefault, check: checkK2KeyFollows(nil)},
 	}
 }
@@ -576,20 +576,19 @@ func keyChanges(keys []string) (int, error) {
 // checkK2KeyEdgeOn: a saturated fleet whose output length sits 6 % above the
 // 500-token medium/long boundary, with 6 % autocorrelated noise. The
 // noise-free length never crosses, so the k2 key the analyzer selects --
-// counted once it has selected one for two minutes -- never leaves "long",
-// and changes at most once: from "medium", where the first readings can put
-// it (they read under 500 on about one seed in six), to "long". A key that
-// moves to "medium" and back is the flap; one that moves once, to the
-// noise-free length's bucket, has converged. edit is applied to the analyzer
-// before the first cycle (a mutant).
-func checkK2KeyEdgeOn(edit func(*SaturationAnalyzer)) func(uint64) error {
+// counted once it has selected one for two minutes -- ends in "long", never
+// leaves it, and changes at most once (into it). A key that moves to
+// "medium" and back is the flap (#396); one that stays in "medium" has taken
+// its bucket from noise. wrap edits each row and edit the analyzer before the
+// first cycle (mutants).
+func checkK2KeyEdgeOn(wrap func(*domain.ReplicaMetrics), edit func(*SaturationAnalyzer)) func(uint64) error {
 	return func(seed uint64) error {
 		noise := arNoise(propRand(seed), 120, 0.06, 0.9)
 		lengths := make([]float64, len(noise))
 		for i, e := range noise {
 			lengths[i] = 530 * (1 + e)
 		}
-		keys, err := selectedK2Keys(lengths, nil, edit)
+		keys, err := selectedK2Keys(lengths, wrap, edit)
 		if err != nil {
 			return err
 		}
@@ -603,7 +602,8 @@ func checkK2KeyEdgeOn(edit func(*SaturationAnalyzer)) func(uint64) error {
 				left++
 			}
 		}
-		return holds(changes <= 1 && left == 0, kindFlipped, "output length 6 %% above the 500-token boundary: the selected k2 key changed %d times in %d cycles, %d of them out of \"long\"", changes, len(keys)-keySettle, left)
+		last := keys[len(keys)-1]
+		return holds(changes <= 1 && left == 0 && strings.Contains(last, "|long|"), kindFlipped, "output length 6 %% above the 500-token boundary: the selected k2 key changed %d times in %d cycles, %d of them out of \"long\", and ended on %s", changes, len(keys)-keySettle, left, last)
 	}
 }
 
@@ -639,6 +639,36 @@ func checkK2KeyFollows(wrap func(*domain.ReplicaMetrics)) func(uint64) error {
 // ignores the output length would do too. Such an analyzer -- here, rows whose
 // output length the key reads held at 530 -- fails the non-ledgered
 // edges/k2/key-follows-output-length.
+// The k2-key edge case is not met by a key that takes its bucket from the
+// first reading and keeps it: rows whose output length the key reads is held
+// at the first cycle's, with the band off, fail on the seeds whose first
+// reading falls under 500.
+func TestPropertyK2KeyEdgeRejectsAFrozenFirstBucket(t *testing.T) {
+	seeds := make([]uint64, 50)
+	for i := range seeds {
+		seeds[i] = uint64(i + 1)
+	}
+	failed := 0
+	for _, seed := range seeds {
+		first := 0.0
+		frozen := func(rm *domain.ReplicaMetrics) {
+			if first == 0 {
+				first = rm.AvgOutputTokens
+			}
+			rm.AvgOutputTokens = first
+		}
+		run, err := runCase(checkK2KeyEdgeOn(frozen, func(a *SaturationAnalyzer) { a.k2KeyBucketHeld = false }), []uint64{seed})
+		if err != nil {
+			t.Fatal(err)
+		}
+		failed += len(run.failures)
+	}
+	if failed == 0 {
+		t.Errorf("a key frozen at its first reading's bucket passed every seed; want the seeds whose first reading is under 500 to fail")
+	}
+	t.Logf("a key frozen at its first reading's bucket fails %d/%d seeds", failed, len(seeds))
+}
+
 func TestPropertyK2KeyPositiveControl(t *testing.T) {
 	ignores := func(rm *domain.ReplicaMetrics) { rm.AvgOutputTokens = 530 }
 	run, err := runCase(checkK2KeyFollows(ignores), []uint64{1, 2, 3})

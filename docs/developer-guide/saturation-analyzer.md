@@ -884,28 +884,40 @@ shape cannot price another:
 Prefill is keyed `prefillOutputBucket = "noout"` instead: it emits about one
 token per request, so its output length is not a property of its work.
 
-The k2 history is keyed the same way (`k2KeyOutput` in `keys.go`): by the
-fleet's **tracked** output length, which moves only when the shape changes by
-more than `DefaultChangeTolerance`, not by the replica's own average. A
-workload at `max_tokens=500` reads per-replica averages of 482-582 and, keyed
-on those, alternated between the `medium` and `long` windows cycle by cycle,
-each holding a different k2 (260 622 and 187 458 on the run that showed it).
-Prefill keeps its own average, which is always `short`. The key strings are
-unchanged, so stored windows are still found.
+The k2 history is keyed by output length too (`k2KeyOutput` in `keys.go`),
+but by the fleet's length, not the replica's own average: a workload at
+`max_tokens=500` reads per-replica averages of 482-582 and, keyed on those,
+alternated between the `medium` and `long` windows cycle by cycle, each holding
+a different k2 (260 622 and 187 458 on the run that showed it). Prefill keeps
+its own average, which is always `short`. The key strings are unchanged, so
+stored windows are still found.
 
-The tracked length was not enough at a boundary (#396): the tracker declares a
-change on one reading 20 % off its anchor, and with the length 6 % above 500
-and 6 % noise it declared changes either side of 500, so the key moved to
-`medium` and back (property case `edges/k2/key-near-output-boundary`, 17 of 50
-seeds). So the k2 key now follows the fleet's output length this cycle through
-a band and a dwell of its own (`k2KeyLength`, `k2_key_bucket.go`): it leaves
-its bucket only once the length has been past the boundary by
-`K2KeyBucketMargin` (10 %) on every cycle for `K2KeyBucketDwell` (2m), or at
-once when past it by `K2KeyBucketJump` (20 %, the tracker's tolerance), and a
-cycle with no length keeps the bucket. The margins are judged at the boundary
-of the bucket the key leaves. The throughput key still reads the tracked
-length. The band is the replay switch `SwitchK2KeyBucketHeld`; off, the k2 key
-reads the tracked length as before.
+The fleet's length is not enough on its own either. The key used to read the
+tracked length, which the shape tracker moves on one reading 20 % off its
+anchor; with the length 6 % above 500 and 6 % noise it moved either side of
+500, so the key went to `medium` and back (#396; property case
+`edges/k2/key-near-output-boundary`, 17 of 50 seeds). The key now holds its
+bucket by a band of its own (`k2KeyLength`, `k2_key_bucket.go`):
+
+- It is judged on the fleet's length smoothed over `K2KeyBucketSmoothing`
+  (10 min; the mean of every reading until then, so one early reading does not
+  choose the starting bucket). It leaves its bucket when that is
+  `K2KeyBucketMargin` (3 %) past the bucket's boundary.
+- A swap: a length that stays `K2KeyBucketSwap` (20 %, the tracker's
+  tolerance) past the boundary on every cycle for `K2KeyBucketDwell` (2m) moves
+  the key to its own bucket and restarts the smoothing there. While a swap is
+  pending the key holds its bucket, so a swap does not stop in the buckets
+  between.
+- Both rules are the same in both directions, no single reading moves the key,
+  and a cycle with no length keeps the bucket.
+
+The cost is staleness: after a real move, k2 is priced from the old bucket's
+window, and saturated readings of the new shape are written into it, until the
+key moves -- 2 minutes for a swap of 20 % or more past the boundary, about 7
+minutes for 530 -> 440 tokens, about 14 for 530 -> 470. The throughput key
+still reads the tracked length, so the two keys can sit in different buckets
+for that long. The band is the replay switch `SwitchK2KeyBucketHeld`; off, the
+k2 key reads the tracked length as before.
 
 ## Constants
 
@@ -935,9 +947,10 @@ reads the tracked length as before.
 | `IdleSettledFor` | 2m | `saturation` |
 | `IdleMaxGap` | 1m | `saturation` |
 | `IdleLeaveRatio` | 1.4 | `saturation` |
-| `K2KeyBucketMargin` | 0.10 | `saturation` |
+| `K2KeyBucketSmoothing` | 10m | `saturation` |
+| `K2KeyBucketMargin` | 0.03 | `saturation` |
+| `K2KeyBucketSwap` | 0.20 | `saturation` |
 | `K2KeyBucketDwell` | 2m | `saturation` |
-| `K2KeyBucketJump` | 0.20 | `saturation` |
 | `JoinedReplicaWindow` | 1m | `saturation` |
 | `MinMeasuredOfDerived` | 0.5 | `saturation` |
 | `MaxTokensOverCompletions` | 1.15 | `saturation` |

@@ -119,8 +119,10 @@ func (a *SaturationAnalyzer) historyKey(
 }
 
 // k2KeyOutput is the output length a replica's k2 history is keyed by: the
-// fleet's TRACKED length (shapeKeyOutput), the one the throughput key uses,
-// and not the replica's own average.
+// fleet's length (keyOutput), its bucket held across a boundary
+// (k2KeyLength), and not the replica's own average. It is not the length the
+// throughput key reads (the tracked one), so the two keys can sit in
+// different buckets for minutes after the length crosses a boundary.
 //
 // The replica's own average has no hysteresis, and a workload that sits on a
 // bucket boundary crosses it every few cycles. Measured on a two-namespace
@@ -128,17 +130,17 @@ func (a *SaturationAnalyzer) historyKey(
 // alternated between "medium" and "long" on consecutive cycles (541 against
 // 485 decisions), and the two windows held 260 622 and 187 458. Per-replica
 // capacity swung 39 % at constant load, and utilization 1.02 <-> 1.42 with
-// it. The tracked length moves only when the fleet's shape changes, so one
-// workload has one window.
+// it. The fleet's length, its bucket held, moves the key only when the
+// shape has moved (k2_key_bucket.go), so one workload has one window.
 //
 // Prefill keeps its own average. It hands a request to decode after one
 // token, so its own figure is always the same bucket ("short"), which is as
 // stable as a key can be, and the fleet's generating length is not work
 // prefill does (prefillOutputBucket says the same for the throughput key).
-// A fleet with no tracked length yet falls back to the replica's own.
-func k2KeyOutput(role string, shapeKeyOutput, own float64) float64 {
-	if domain.CanonicalRole(role) == domain.RolePrefill || !(shapeKeyOutput > 0) {
+// A fleet with no length yet falls back to the replica's own.
+func k2KeyOutput(role string, keyOutput, own float64) float64 {
+	if domain.CanonicalRole(role) == domain.RolePrefill || !(keyOutput > 0) {
 		return own
 	}
-	return shapeKeyOutput
+	return keyOutput
 }

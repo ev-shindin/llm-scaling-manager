@@ -69,7 +69,8 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestIdleBand_TheSwitchOffHoldsEveryReadingToTheLine"},
 	},
 	saturation.SwitchK2KeyBucketHeld: {
-		{"../saturation", "TestK2KeyBucket_LeavesOnlyPastTheMarginForTheDwell"},
+		{"../saturation", "TestK2KeyBucket_TheSmoothedLengthLeavesPastTheMargin"},
+		{"../saturation", "TestK2KeyBucket_ASwapMovesItTheSameWayBothWays"},
 		{"../saturation", "TestK2KeyBucket_TheSwitchPicksTheLength"},
 	},
 	saturation.SwitchK2ReadsSettle: {
