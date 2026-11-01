@@ -108,6 +108,28 @@ func TestShareOneReplicaMoveIsCalledOffOnABusyModelOfManyReplicas(t *testing.T) 
 	}
 }
 
+// A transfer whose donor is not planned this cycle -- frozen, or not
+// collected -- is not called off on that donor. Absent from what the group
+// holds, the donor reads as holding nothing, net of the transfer below zero,
+// and so a whole replica under a target of zero.
+func TestShareUnplannedDonorDoesNotCallItsMoveOff(t *testing.T) {
+	tm := simTimings()
+	t0 := time.Unix(1_000_000, 0)
+	l := NewShareLedger()
+	tr := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 1, DonorGPUs: 1}, map[string]int{"A": 4, "B": 1}, t0, tm)
+	l.ConfirmStarted(tr.ID, nil)
+	in := SharePlanInput{Roles: []ShareRole{{Key: "B", Weight: 1, Need: 3, Floor: 1, MinFloor: 1, ReplicaGPUs: 1}},
+		Held: map[string]int{"B": 1}, Thresholds: map[string]float64{"B": 0.85}, DownThresholds: map[string]float64{"B": 0.7},
+		Budget: 8, Tolerance: 0.15, PhysicalFree: math.MaxInt}
+	plan := PlanShareTransfers(l, in, t0.Add(time.Minute), tm)
+	if slices.Contains(plan.Cancelled, tr.ID) {
+		t.Fatalf("the transfer of a donor not planned this cycle was called off: %v", plan.Cancelled)
+	}
+	if got, ok := l.Transfer(tr.ID); !ok || got.State != ShareReleasing {
+		t.Fatalf("setup: the transfer is %+v (found %v), want still releasing", got, ok)
+	}
+}
+
 // A real swap right after a dip called off waits out the reversal hold, and
 // no longer. This is the accepted price of calling the move off (issue #285,
 // option b): the cancel holds the donor -> receiver pair for ReversalHold, so
@@ -159,9 +181,13 @@ func TestShareSwapRightAfterACalledOffDipWaitsOnlyTheReversalHold(t *testing.T) 
 // time, the wobble made the swap back a third change of direction, held the
 // busy model on its mean in 36 of these 74 variants against 18 with the
 // cancel judged only on the receiver, and made its swap back slower than with
-// the rule off in 22, against 2. Bounds: no more than those 18 and 2. Swaps
-// back are compared by the cycles the busy model is short after the swap
-// back. With 1-GPU replicas and with whole 8-GPU nodes.
+// the rule off in 22, against 2. Bounds: no more than those 18 and 2, the
+// figures measured before the donor-side cancel existed (main at the time
+// passes at exactly 18 and 2): a regression guard, not a replay that failed
+// first. This change measures 10 and 2, so the bound on slower swaps back has
+// no margin -- any variant made slower trips it. Swaps back are compared by
+// the cycles the busy model is short after the swap back. With 1-GPU
+// replicas and with whole 8-GPU nodes.
 func TestShareWobbleCalledOffDoesNotHoldTheSwapBack(t *testing.T) {
 	const m = time.Minute
 	tm, _ := DeriveShareTimings(ShareTimingInputs{Cycle: simCycle, ReplicaStart: 240 * time.Second}, nil)

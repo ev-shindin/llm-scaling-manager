@@ -1541,13 +1541,15 @@ Work down the list in order.
      would be one whole replica or more under its target: the move is
      exactly reversed. A busy model whose load dips for a cycle or two and
      comes back keeps its replica, however many replicas it runs, with whole
-     8-GPU replicas as with 1-GPU ones. Once the donor's pod has gone, the
-     move is no longer called off.
+     8-GPU replicas as with 1-GPU ones. Once the donor's pod has gone, or
+     the transfer is older than the release window (the donor's scale-down
+     window), the move is no longer called off.
    - Such a cancel holds that donor -> receiver pair like any other, so a
-     real swap in the same direction right after the dip waits for the hold:
-     measured, a swap one minute after the dip lands after about 17 minutes
-     against 7 with no dip. The delay shrinks as the swap comes later and is
-     gone once the hold has run out.
+     real swap in the same direction right after the dip is delayed by up to
+     `waitBeforeReverseMove`. Measured with a 6-minute release (a 12-minute
+     hold), a swap one minute after the dip lands after 17.5 minutes against
+     7.5 with no dip. The delay shrinks as the swap comes later and is gone
+     once the hold has run out.
    - The counter also counts moves withheld by a donor's back-off after an
      aborted release, or by a donor that has given all it can.
    - A donor's calm is judged on the higher of its current and peak need (two

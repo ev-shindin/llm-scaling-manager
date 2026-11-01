@@ -1852,9 +1852,11 @@ replicas. Every figure is a mean of five seeds.
    and noise flipped between them: plan, cancel, plan. Measured, that was 690
    cancels in six hours, and the transfer the step needed **never landed** — the
    receiver stayed exactly as short as if nothing had been done. With
-   hysteresis, a transfer is cancelled only if its donor would now land more
-   than twice its tolerance below target, or its receiver is more than its
-   tolerance above target without it. A cancelled transfer removes exactly
+   hysteresis, a transfer is cancelled only if its donor would now land
+   twice its tolerance or more below target -- or the replica it gives below
+   it, when that is less, so a donor that wants back exactly that replica is
+   a reversal at any size -- or its receiver is more than its tolerance above
+   target without it. A cancelled transfer removes exactly
    its own recorded moves, so it neither holds its roles nor counts toward a
    swing; it holds only that donor -> receiver pair from starting again, for
    one reversal hold.
@@ -1876,7 +1878,11 @@ replicas. Every figure is a mean of five seeds.
    eight decide-to-serve latencies (about 96 minutes) is following load it
    cannot catch; a transfer cancelled on a reversal counts as the move it
    would have made, a change only when it reverses the one before, and a
-   cancelled spare return, which moves nothing between roles, not at all.
+   cancelled spare return, which moves nothing between roles, not at all. A
+   transfer cancelled because its donor's own demand came back is a dip and
+   return of that donor's demand: it counts as the give alone, and as a change
+   of direction only at the donor's second such dip within the window, so a
+   single dip is no step toward a swing.
    (Two, as first written, took a single swap
    back for a swing -- counting the move that first raised the model -- and
    held both models halfway: issue #269. Moves alone never reached three for
