@@ -1170,8 +1170,10 @@ it holds more replicas than its load needs, and `replica-capacity-summary` (or
 what it has learned.
 
 - `P2-hist` is the variant's own measured k2.
-- `P2-prior` is its own k2 from before its engine arguments changed. It is
-  expected after a rollout that changes them, and wears off by itself: held
+- `P2-prior` is its own k2 from before its engine arguments changed, or from
+  the output-length bucket its traffic just left. It is expected after a
+  rollout that changes them, or a lasting change of output length, and wears
+  off by itself: held
   for 30 minutes of serving, then relaxed over 6 hours of serving. Forget it
   only to end it sooner; `disableK2Borrow` does not affect it.
 - `P2-borrow` is a sibling's figure. Forgetting ends a running borrow, but the

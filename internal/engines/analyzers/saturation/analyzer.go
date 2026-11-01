@@ -301,6 +301,11 @@ type SaturationAnalyzer struct {
 	// lastExport is the digest of the last ExportLearnedState document
 	// recorded, so an unchanged one is not recorded again.
 	lastExport [32]byte
+	// idleBand is SwitchIdleBand and k2KeyBucketHeld SwitchK2KeyBucketHeld
+	// (#396): on from the constructor; a replay turns them off
+	// (SetSwitchesForReplay).
+	idleBand        bool
+	k2KeyBucketHeld bool
 }
 
 // Evicted is what one sweep of the analyzer's learned state removed, counted
@@ -445,6 +450,8 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		muUnknownAgeSafe:       true,
 		muLatchRestoresSafe:    true,
 		horizons:               capacity.DefaultHorizons(),
+		idleBand:               true,
+		k2KeyBucketHeld:        true,
 	}
 }
 

@@ -354,6 +354,11 @@ var _ = Describe("SaturationAnalyzer", func() {
 
 	Describe("Output-length bucketing", func() {
 		It("should use different k2 history buckets for different output lengths", func() {
+			// The k2 key moves to a new output bucket only once the length
+			// has stayed there (k2_key_bucket.go): one cycle of the long
+			// workload is not a shape, so it runs for K2KeyBucketDwell.
+			clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			analyzer.now = func() time.Time { return clock }
 			// Short output workload: k2 observation
 			input1 := makeAnalyzerInput(
 				[]domain.ReplicaMetrics{
@@ -376,8 +381,12 @@ var _ = Describe("SaturationAnalyzer", func() {
 					{VariantName: "variant-a", AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},
 				},
 			)
-			result, err := analyzer.Analyze(ctx, input2)
-			Expect(err).NotTo(HaveOccurred())
+			var result *domain.AnalyzerResult
+			var err error
+			for end := clock.Add(K2KeyBucketDwell); !clock.After(end); clock = clock.Add(15 * time.Second) {
+				result, err = analyzer.Analyze(ctx, input2)
+				Expect(err).NotTo(HaveOccurred())
+			}
 			// No "long" history → falls back to k1=12800 (not the "short" k2=8000)
 			Expect(result.VariantCapacities[0].PerReplicaCapacity).To(Equal(float64(12800)))
 		})
