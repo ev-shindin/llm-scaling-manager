@@ -371,11 +371,16 @@ func shedPlan(e NamedAnalyzerResult, records []variantRecord, stateMap map[strin
 // The model takes the plan that leaves it more GPUs, rounding each side alone
 // on a tie, so a model at its target still moves a pod between its roles.
 // Each plan's GPUs are nondecreasing in the target, and so is the larger of
-// the two: a larger target never leaves the model fewer GPUs, and a target a
-// pod or more below what it holds closes the second plan, so the first sheds
-// a pod. Rounded alone, a growing role short of a pod made a cut role shed
-// one for nothing: a model at its target lost a decode pod and took it back
-// the next cycle.
+// the two: a larger target never leaves the model fewer GPUs. The second
+// plan closes as soon as the shares add less than the model holds, and then
+// the first sheds what whole pods of the summed cut allow. Rounded alone, a
+// growing role short of a pod made a cut role shed one for nothing: a model
+// at its target lost a decode pod and took it back the next cycle.
+//
+// Neither plan keeps the model at or below its target: the first can grow one
+// role while a cut no pod meets keeps the other, and a role rounded up to a
+// whole pod can leave the next cycle a cut it cannot shed, so the model can
+// take one more step past its target before it settles (#421).
 func roundExact(e NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState,
 	roles []string, tgt, cur, dem, targets map[string]int) {
 	unit := podUnit(records, stateMap)

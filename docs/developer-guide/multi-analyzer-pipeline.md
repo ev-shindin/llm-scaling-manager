@@ -601,10 +601,14 @@ GPUs, rounding each side alone on a tie:
 Each plan's GPUs are nondecreasing in the target, so the larger is too: a
 larger target never leaves fewer GPUs. Greedy, prefill on an empty 8-GPU
 variant and decode on 2- and 4-GPU pods placed 10 GPUs at a target of 10 and
-8 at 11. A target a pod or more below what the model holds closes the second
-plan, so the first sheds a pod. The second plan is what keeps a model at its
+8 at 11. The second plan closes as soon as the shares add less than the
+model holds, so a cut of a pod or more is shed. The second plan is what keeps a model at its
 target still: rounded alone, a growing role short of a pod made a cut role
-shed one, and the next cycle took it back.
+shed one, and the next cycle took it back. Neither plan keeps the model at
+or below its target, though: a role rounded up to a whole pod can leave the
+next cycle a cut no pod meets while the other role still grows, so a model
+can take one more step past its target before it settles
+([#421](https://github.com/ev-shindin/llm-scaling-manager/issues/421)).
 
 The search takes the most GPUs first and cost order only among equal sums, a
 change from the greedy pass: on a cheap 6-GPU variant and a dearer 4-GPU

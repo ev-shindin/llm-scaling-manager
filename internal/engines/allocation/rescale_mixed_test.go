@@ -275,12 +275,113 @@ func podApplied(req ModelScalingRequest, targetGPUs int) ModelScalingRequest {
 	return next
 }
 
+// podRoleShares is the GPUs rescale's split gives each role at targetGPUs,
+// before any rounding to pods.
+func podRoleShares(req ModelScalingRequest, targetGPUs int) map[string]int {
+	nr := req.CompositeSignal
+	records := variantsOnType(buildVariantRecords(req, nr.Result), "A100")
+	stateMap := buildStateMap(req.VariantStates)
+	roles := modelRolesOnType(records, "A100")
+	cur, dem, floor := map[string]int{}, map[string]int{}, map[string]int{}
+	for _, role := range roles {
+		cur[role] = roleCurrentGPUs(records, stateMap, "A100", role)
+		dem[role] = roleDemandGPUs(nr, records, stateMap, "A100", role)
+		floor[role] = roleFloorGPUs(records, stateMap, "A100", role)
+		if nr.Holds[role].NoScaleDown {
+			floor[role] = max(floor[role], cur[role])
+		}
+	}
+	uncapped := distributeGPUsByWeight(targetGPUs, roles, dem, cur, floor, nil)
+	ceil := roleShareCeilings(records, stateMap, "A100", roles, dem, uncapped)
+	return distributeGPUsByWeight(targetGPUs, roles, dem, cur, floor, ceil)
+}
+
+// TestRescaleMixedKeepsTheScaleDownRules: over a grid of mixed-size models
+// with random holds and minReplicas, the pod search keeps every rule the
+// greedy scale-down keeps. No variant goes below its minReplicas or above its
+// maxReplicas, a role held against scale-down loses no pod and one held
+// against scale-up gains none, and a role is emptied only when its share is
+// zero and its cheapest variant holds no replica (the cheapest-at-one rule).
+func TestRescaleMixedKeepsTheScaleDownRules(t *testing.T) {
+	r := rand.New(rand.NewPCG(219, 4))
+	points, emptied := 0, 0
+	for range 1000 {
+		req := randomPodModel(r, true, false)
+		roles := modelRolesOnType(buildVariantRecords(req, req.CompositeSignal.Result), "A100")
+		holds := map[string]RoleHold{}
+		if r.IntN(3) == 0 {
+			holds[roles[r.IntN(len(roles))]] = RoleHold{NoScaleDown: true}
+		}
+		if r.IntN(3) == 0 {
+			holds[roles[r.IntN(len(roles))]] = RoleHold{NoScaleUp: true}
+		}
+		req.CompositeSignal.Holds = holds
+		if pinnedModel(req.CompositeSignal) {
+			continue
+		}
+		// The cheapest variant of each role, the one the cheapest-at-one
+		// rule protects.
+		records := buildVariantRecords(req, req.CompositeSignal.Result)
+		cheapest := map[string]string{}
+		for _, role := range roles {
+			ordered := sortVariantsForScaleDown(req.CompositeSignal, variantsForRole(records, role))
+			cheapest[role] = ordered[len(ordered)-1].VariantName
+		}
+		cur := podCurrentGPUs(req)
+		for target := 0; target <= cur+24; target++ {
+			points++
+			got := rescaleTargets(req, target, 1<<20)
+			share := podRoleShares(req, target)
+			had, has := map[string]int{}, map[string]int{}
+			for _, st := range req.VariantStates {
+				n, ok := got[st.VariantName]
+				if !ok {
+					n = st.CurrentReplicas
+				}
+				had[st.Role] += st.CurrentReplicas
+				has[st.Role] += n
+				where := func() string { return describePodModel(req, target) }
+				if st.MinReplicas != nil && n < *st.MinReplicas && n < st.CurrentReplicas {
+					require.Fail(t, "below minReplicas", "%s: %s", st.VariantName, where())
+				}
+				if st.MaxReplicas != nil && *st.MaxReplicas > 0 && n > *st.MaxReplicas && n > st.CurrentReplicas {
+					require.Fail(t, "above maxReplicas", "%s: %s", st.VariantName, where())
+				}
+				if holds[st.Role].NoScaleDown && n < st.CurrentReplicas {
+					require.Fail(t, "a role held against scale-down shed", "%s: %s", st.VariantName, where())
+				}
+				if holds[st.Role].NoScaleUp && n > st.CurrentReplicas {
+					require.Fail(t, "a role held against scale-up grew", "%s: %s", st.VariantName, where())
+				}
+			}
+			for role, n := range had {
+				if n == 0 || has[role] > 0 {
+					continue
+				}
+				emptied++
+				require.Zero(t, share[role], "role %s emptied with a share: %s", role, describePodModel(req, target))
+				for _, st := range req.VariantStates {
+					if st.VariantName == cheapest[role] {
+						require.Zero(t, st.CurrentReplicas, "role %s emptied past its cheapest variant's last replica: %s",
+							role, describePodModel(req, target))
+					}
+				}
+			}
+		}
+	}
+	t.Logf("checked %d points, %d roles emptied", points, emptied)
+	assert.Greater(t, points, 30000)
+	assert.Positive(t, emptied, "the grid empties some role, so the last rule is exercised")
+}
+
 // TestRescaleMixedRerunIsStable: run a cycle, take its result as what the
 // model holds, and run the same target again, over targets within 16 GPUs
 // of what the model holds. A model at its target does not move again, and no
 // model goes back to where it started: that is a pod deleted and created
-// again every cycle. Rounded alone, 31 models at their target moved again
-// and 86 went back; the greedy rounding before #219 moved 2 and sent 13 back.
+// again every cycle. A regression guard: rounded alone, 31 models at their
+// target moved again and 86 went back, and the greedy rounding before #219
+// moved 2 and sent 13 back. It passes without the shed-nothing plan of
+// roundExact too; TestRescaleMixedHoldsAModelAtItsTarget pins that plan.
 func TestRescaleMixedRerunIsStable(t *testing.T) {
 	r := rand.New(rand.NewPCG(219, 3))
 	points, moved, flapped, atTarget := 0, 0, 0, 0

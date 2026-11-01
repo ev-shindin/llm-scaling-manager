@@ -64,6 +64,48 @@ func TestPodSearchPrimitives(t *testing.T) {
 	assert.Equal(t, []int{2, 8}, jointPods([]podBits{dec, pre}, []int{6, 16}, 10, []int{2, 8}))
 }
 
+// TestRescaleMixedTieMovesAPodBetweenRoles: when both plans leave a model the
+// same GPUs, it rounds each side alone, so a model at its target still moves
+// a pod to the role its demand has moved to. Prefill holds two 4-GPU pods
+// with demand for one; decode one 8-GPU pod with demand for 12 GPUs. At a
+// target of 16 decode takes a 4-GPU pod and prefill gives one; shedding
+// nothing would leave both as they are, also at 16.
+func TestRescaleMixedTieMovesAPodBetweenRoles(t *testing.T) {
+	req := podRequest(map[string]float64{domain.RolePrefill: 400, domain.RoleDecode: 1200}, []podVariant{
+		{name: "p4", role: domain.RolePrefill, gpus: 4, cur: 2, cost: 4, perGPU: 100},
+		{name: "d8", role: domain.RoleDecode, gpus: 8, cur: 1, cost: 9, perGPU: 100},
+		{name: "d4", role: domain.RoleDecode, gpus: 4, cost: 4, perGPU: 100},
+	})
+	require.Equal(t, map[string]int{domain.RolePrefill: 4, domain.RoleDecode: 12}, podRoleShares(req, 16))
+	assert.Equal(t, map[string]int{"p4": 1, "d8": 1, "d4": 1}, rescaleTargets(req, 16, 1<<20))
+}
+
+// TestFillRoleExactPrefersTheCheaperPod: among fills of equal GPUs the pod
+// search follows cost order: +4 on a cheap and a dear 4-GPU variant, beside
+// an 8-GPU one, is a pod of the cheap one.
+func TestFillRoleExactPrefersTheCheaperPod(t *testing.T) {
+	for _, order := range [][]podVariant{
+		{{name: "cheap", role: domain.RoleDecode, gpus: 4, cost: 4, perGPU: 100},
+			{name: "dear", role: domain.RoleDecode, gpus: 4, cost: 6, perGPU: 100}},
+		{{name: "dear", role: domain.RoleDecode, gpus: 4, cost: 6, perGPU: 100},
+			{name: "cheap", role: domain.RoleDecode, gpus: 4, cost: 4, perGPU: 100}},
+	} {
+		req := podRequest(nil, append(order, podVariant{name: "d8", role: domain.RoleDecode, gpus: 8, cost: 9, perGPU: 100}))
+		records := buildVariantRecords(req, req.CompositeSignal.Result)
+		targets := initTargets(req.VariantStates)
+		require.Equal(t, 4, fillRoleExact(records, domain.RoleDecode, buildStateMap(req.VariantStates), targets, 4))
+		assert.Equal(t, map[string]int{"cheap": 1, "dear": 0, "d8": 0}, targets)
+	}
+}
+
+// TestPodSearchJointTieTakesTheSmallerPick: two picks equally far from a role's
+// ideal go to the smaller, so the role is not given more than it asked for.
+func TestPodSearchJointTieTakesTheSmallerPick(t *testing.T) {
+	first := podSums([]podItem{{size: 2, count: 2}}, 4)  // {0, 2, 4}
+	second := podSums([]podItem{{size: 2, count: 1}}, 2) // {0, 2}
+	assert.Equal(t, []int{4, 0}, jointPods([]podBits{first, second}, []int{4, 2}, 4, []int{3, 1}))
+}
+
 // TestPodSearchIsBounded: a role on 1- and 2-GPU pods wanting more than
 // the search bound grows by the bound this cycle, and at the bound's cost.
 func TestPodSearchIsBounded(t *testing.T) {

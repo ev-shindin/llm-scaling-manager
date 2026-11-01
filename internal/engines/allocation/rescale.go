@@ -585,11 +585,12 @@ func (o *GreedyByScoreOptimizer) fitRescaleToNodes(req ModelScalingRequest, reco
 // role pay for it, and a role with a share does not count its last replica, so
 // the second pass never takes it: with two equal variants the cheapest-at-one
 // rule does not protect a role's one pod, and a role with demand went to zero.
-// The second pass runs only when every role cut has one replica size. The model
-// sheds no more than the summed
+// Within it, the second pass runs only when every role cut has one replica
+// size. The model sheds no more than the summed
 // cut, a role under a scale-down hold is not cut at all, and reclaimRole keeps
 // every variant at its minReplicas. It mutates targets. rescaleModelDecisions
-// calls it only for a model of one replica size; roundExact rounds the rest.
+// calls it only for a model whose variants all take one replica size; a model
+// with more than one is rounded by roundExact instead.
 func reclaimWholeReplicas(ctx context.Context, e NamedAnalyzerResult, records []variantRecord,
 	stateMap map[string]domain.VariantReplicaState, roles []string, tgt, cur, targets map[string]int) {
 	cut := make(map[string]int, len(roles))
