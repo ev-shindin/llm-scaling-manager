@@ -969,25 +969,46 @@ cycle (`TestMuKeyBucket_TheKeysShareABucket`). The switch is
   | long, 530 tokens | 6 % | 0 % | none | 0 |
   | long, 530 tokens | 10 % | 0.95 % | 8 cycles | 2 |
   | long, 530 tokens | 15 % | 5.4 % | 8 cycles | 36 |
-  | long, 490 tokens | 10 % | 1.5 % | 8 cycles | not measured |
-  | long, 490 tokens | 15 % | 6.4 % | 8 cycles | 41 |
+  | 490 tokens | 10 % | 1.5 % | 8 cycles | not measured |
+  | 490 tokens | 15 % | 6.4 % | 8 cycles | 41 |
   | medium, 110 tokens | 15 % | 3.9 % | 8 cycles | 24 |
   | long, 1400 tokens | 15 % | 2.9 % | 8 cycles | 14 |
 
   After a swap more than 20 % past a boundary, the shape-change hold settles
   two spaced samples after the swap lands, so it lasts the dwell longer than
   it did. A move by the margin is not affected.
-- **Not covered: a move by the margin.** A length past the margin but short
-  of the swap line (400-485 tokens out of `long`) moves the key only once the
-  smoothed length crosses the margin: 5 min 15 s for 530 -> 420, 13 min 45 s
-  for 530 -> 470. Until then the shorter shape's readings, about 1.26x the
-  requests/s at 420, go into `long` at full authority, and raise its median
-  for when the fleet returns. The tracker-keyed key moved at once on a shift
-  20 % off its anchor (530 -> 420 is 21 %), and never on a smaller one, so
-  this is a regression only for a shift of 20-24 % that stays short of the
-  swap line. Freezing on this cycle's length past the margin instead would
-  freeze 8.6 % of cycles at 6 % noise around 530 (runs up to 26 cycles) and
-  22-33 % at 10-15 %.
+- **A move by the margin clamps writes** (`marginClamp`). A length past the
+  margin but short of the swap line (400-485 tokens out of `long`) moves the
+  key only once the smoothed length crosses the margin: 5 min 15 s for
+  530 -> 420, 13 min 45 s for 530 -> 470. Until then the key names `long`,
+  and the shorter shape's readings, about 1.26x the requests/s at 420, would
+  raise its median for when the fleet returns. So while this cycle's length
+  is past the margin toward shorter outputs, a reading is written as the
+  lower of itself and the window's median (nothing, when the window is
+  empty), counted as `margin-clamped`: it can lower the window and never
+  raise it. Readings toward longer outputs are lower, the safe side, and are
+  written as read. On 530 -> 420 with a thin `long` window
+  (`TestMuKeyBucket_AMarginMoveNeverRaisesTheWindow`), over the 21 cycles
+  before the key moves: main, whose tracker moves the throughput key at once
+  on this 21 % shift, leaves `long` at 3.10; the band without the clamp
+  raises it to 3.86; with the clamp it stays at 3.10. The switch is
+  `SwitchMuMarginClamp`. A freeze instead would have frozen 8.6 % of cycles
+  at 6 % noise around 530 (runs up to 26 cycles) and 22-33 % at 10-15 %. The
+  clamp applies on the same cycles but writes, and only lowers:
+
+  | Fleet | Noise | Cycles clamped | Longest run |
+  | --- | --- | --- | --- |
+  | long, 530 tokens | 6 % | 8.5 % | 26 cycles |
+  | long, 530 tokens | 10 % | 18.1 % | 24 cycles |
+  | long, 530 tokens | 15 % | 18.9 % | 25 cycles |
+  | 490 tokens | 6 % | 3.9 % | 33 cycles |
+  | 490 tokens | 10 % | 7.5 % | 23 cycles |
+  | 490 tokens | 15 % | 10.0 % | 21 cycles |
+
+  (`k2KeyMemo.note`, 50 seeds of 480 cycles at 15 s, cycles with a swap
+  pending, which are frozen instead, left out.) The cost is a window biased
+  low near a boundary with large swings: the lower readings of the noise are
+  written as read, the higher ones of the shorter side capped at the median.
 - **k2's settle test** still reads the frozen window as its throughput
   reference (`k2Unsettled`, `serviceRateOnRecordLocked`), at full weight, as
   before: that is the k2 window's own hold.

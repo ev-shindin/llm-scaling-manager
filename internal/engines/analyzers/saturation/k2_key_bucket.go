@@ -225,6 +225,11 @@ type outputKeys struct {
 	// key's bucket, and the key has not moved yet. The key's window is then
 	// frozen (muSwapFrozen).
 	muSwapPending bool
+	// muShorterPastMargin is this cycle's length past K2KeyBucketMargin
+	// under the lower bound of the key's bucket, when the throughput keys
+	// read the band: shorter outputs than the key's bucket, whose readings
+	// are clamped to the window's median (marginClamp).
+	muShorterPastMargin bool
 }
 
 // keyLengths is the output length the model's k2 and throughput keys are
@@ -259,6 +264,8 @@ func (a *SaturationAnalyzer) keyLengths(namespace, modelID string, fleetOut, sta
 	if a.muKeyBucketHeld {
 		out.mu, out.muMove, out.muLeft = held, move, memo.k2Key.left
 		out.muSwapPending = a.muSwapFreeze && !memo.k2Key.swapSince.IsZero()
+		lo, _ := outputBucketBounds(held)
+		out.muShorterPastMargin = a.muMarginClamp && fleetOut > 0 && fleetOut < lo*(1-K2KeyBucketMargin)
 	}
 	return out
 }
@@ -300,13 +307,8 @@ const SwitchMuSwapFreeze = "mu-swap-freeze"
 // lasts the dwell lands a swap on noise -- 2 in 50 runs at 10 %, 36 at 15 %
 // around 530 -- and moves the throughput key with the k2 key.
 //
-// Not covered: a move by the margin. A length past the margin but short of
-// the swap line (400-485 tokens out of "long") moves the key only once the
-// smoothed length crosses the margin: 5 min 15 s for 530 -> 420, 13 min 45 s
-// for 530 -> 470. Until then the shorter shape's readings, about 1.26x the
-// requests/s at 420, are written into "long" at full authority. The
-// tracker-keyed key moved at once on a shift 20 % off its anchor, and never
-// on a smaller one.
+// A move by the margin is not frozen; its writes are clamped instead
+// (marginClamp).
 //
 // Nor is k2's settle test: k2Unsettled reads the frozen window as its
 // throughput reference (serviceRateOnRecordLocked) at full weight, as it did
@@ -317,6 +319,46 @@ func muSwapFrozen(r throughputReading, pending bool) throughputReading {
 		r.borrowed = true
 	}
 	return r
+}
+
+// SwitchMuMarginClamp is the replay switch for the clamp on readings written
+// past the margin toward shorter outputs (#415). On, as marginClamp says.
+// Off, those readings are written as read.
+const SwitchMuMarginClamp = "mu-margin-clamp"
+
+// marginClamp is the reading written to the throughput window under key: mu,
+// or, when clamp (outputKeys.muShorterPastMargin), the lower of mu and the
+// window's median; ok is false when clamp is set and the window has no
+// median, and nothing is written.
+//
+// A length past the margin but short of the swap line moves the key only
+// once the smoothed length crosses the margin: 5 min 15 s for 530 -> 420
+// tokens, 13 min 45 s for 530 -> 470 (the 400-485 band out of "long"). Until
+// then the key names the longer bucket, and a shorter shape's readings --
+// about 1.26x the requests/s at 420 -- would raise its window at full
+// authority, to price the fleet too high when it returns to the longer
+// shape: mu's side that breaks the SLO. The tracker-keyed key moved at once
+// on a shift 20 % off its anchor, and never on a smaller one. Clamped to the
+// median, a reading can lower the window and never raise it: one at or under
+// the median, in place of any value, leaves the median where it was or lower.
+// Toward longer outputs the readings are lower than the window's, the safe
+// side, and are written as read; so is every reading when the length is
+// within the margin.
+//
+// Not a freeze: freezing on this cycle's length past the margin froze 8.6 %
+// of cycles at 6 % noise around 530 tokens, in runs of up to 26 cycles, and
+// 22-33 % at 10-15 %.
+func (a *SaturationAnalyzer) marginClamp(key string, mu float64, clamp bool) (float64, bool) {
+	if !clamp {
+		return mu, true
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ra, ok := a.saturatedThroughput[key]
+	if !ok || ra.Len() == 0 {
+		return 0, false
+	}
+	return min(mu, ra.Median()), true
 }
 
 // seedMovedK2Key prices a k2 key the bucket moved to (to) from the one it left

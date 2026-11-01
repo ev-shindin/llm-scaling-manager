@@ -35,14 +35,15 @@ import (
 // replaySwitches is each saturation replay switch, and the golden outputs
 // (fixture/file) it is named to move.
 //
-// #415's band on the throughput (mu) key, and its window's freeze while a
-// swap is pending. Learner PR 2's and PR 3's
+// #415's band on the throughput (mu) key, its window's freeze while a swap
+// is pending, and the clamp on its writes past the margin. Learner PR 2's and PR 3's
 // switches, and #396's bands, are not here: "all off" is this PR's switches,
 // and an earlier PR's stay at their constructor default, on, as the base
 // goldens were written (analyzer-learner.md, 2.5).
 var replaySwitches = map[string][]string{
 	saturation.SwitchMuKeyBucketHeld: nil,
 	saturation.SwitchMuSwapFreeze:    nil,
+	saturation.SwitchMuMarginClamp:   nil,
 }
 
 // earlierSeams is each switch an earlier learner PR added whose seam the
@@ -88,6 +89,9 @@ var heldBy = map[string][]heldTest{
 	saturation.SwitchMuSwapFreeze: {
 		{"../saturation", "TestMuKeyBucket_APendingSwapFreezesTheWindow"},
 		{"../saturation", "TestMuKeyBucket_APendingSwapLeavesPrefillWriting"},
+	},
+	saturation.SwitchMuMarginClamp: {
+		{"../saturation", "TestMuKeyBucket_AMarginMoveNeverRaisesTheWindow"},
 	},
 	saturation.SwitchK2ReadsSettle: {
 		{"../saturation", "TestSettleView_TheTrackerSwitchMovesTheAbsenceRule"},

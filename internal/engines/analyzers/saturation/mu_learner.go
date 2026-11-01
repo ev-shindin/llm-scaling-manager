@@ -60,6 +60,10 @@ const (
 	// muReasonSwapPending is a reading not written because a swap is
 	// pending on the key's band (muSwapFrozen).
 	muReasonSwapPending learn.Reason = "swap-pending"
+	// muReasonMarginClamped is a reading clamped to its window's median, or
+	// not written for want of one, past the margin toward shorter outputs
+	// (marginClamp).
+	muReasonMarginClamped learn.Reason = "margin-clamped"
 )
 
 // muRefusalReason is the Report's reason for a refusal throughputRefusal

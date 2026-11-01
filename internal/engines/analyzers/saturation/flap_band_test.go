@@ -665,3 +665,88 @@ func TestMuKeyBucket_AMarginMoveRecordsTheBucketLeft(t *testing.T) {
 	assert.Equal(t, "long", classifyOutputLength(m.left), "the bucket left")
 	assert.Equal(t, "medium", classifyOutputLength(m.length))
 }
+
+// marginRun is one variant measured at 530 output tokens ("long") at about
+// 3 req/s, then, saturated, at 420 tokens at the same token rate, 3.79 req/s,
+// until the band moves the key (a move by the margin: 420 is not past the
+// swap line). It returns the "long" window's median before the move to 420,
+// the highest it reached while the key was still "long", and the cycles that
+// took.
+func marginRun(t *testing.T, sw map[string]bool) (before, highest float64, cycles int) {
+	t.Helper()
+	store := capacity.NewStore()
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(256, "vllm:v1")}, propStart)
+	a := NewSaturationAnalyzer(store)
+	require.NoError(t, a.SetSwitchesForReplay(sw))
+	clock := propStart
+	a.now = func() time.Time { return clock }
+	run := func(out, rate float64, queue int) {
+		t.Helper()
+		rm := makeReplicaMetrics("pod-a", "variant-a", 12000, 16000, queue, 100, out)
+		rm.RequestRate, rm.GenerationTokenRate, rm.Ready = rate, rate*out, true
+		_, err := a.Analyze(context.Background(), makeAnalyzerInput([]domain.ReplicaMetrics{rm}, mtOneVariant))
+		require.NoError(t, err)
+		clock = clock.Add(propCycle)
+	}
+	median := func() float64 {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		for k, ra := range a.saturatedThroughput {
+			if bucketOf(k) == longBucket {
+				return ra.Median()
+			}
+		}
+		return 0
+	}
+	// Ten minutes at 530 for the band's smoothing, saturated only for the
+	// last two: a window of a few samples, as a fleet that rarely saturates
+	// holds.
+	for i := range 48 {
+		queue := 0
+		if i >= 40 {
+			queue = 6
+		}
+		run(530, 2.9+0.1*float64(i%3), queue)
+	}
+	before = median()
+	require.Positive(t, before, "precondition: the variant measured mu in long")
+	highest = before
+	for cycles = 0; cycles < 120; cycles++ {
+		// Varied, so that no reading repeats exactly (SwitchMuRepeatIsUse).
+		run(420, (3*530/420.0)*(1+0.01*float64(cycles%3)), 6)
+		a.mu.Lock()
+		keyBucket := classifyOutputLength(a.fleetShape["test-ns|test-model"].k2Key.length)
+		a.mu.Unlock()
+		if sw[SwitchMuKeyBucketHeld] && keyBucket != longBucket {
+			break
+		}
+		if !sw[SwitchMuKeyBucketHeld] && cycles >= 21 {
+			break
+		}
+		highest = max(highest, median())
+	}
+	return before, highest, cycles
+}
+
+// A move by the margin toward shorter outputs (530 -> 420 tokens) holds the
+// key in "long" for minutes, and the shorter shape's higher readings must
+// not raise the "long" window meanwhile (marginClamp). Logged for the three
+// builds: main (the throughput key on the tracker, which moves at once on
+// this 21 % shift), the band without the clamp, the band with it. Without
+// the clamp, the mutant, the window rises.
+func TestMuKeyBucket_AMarginMoveNeverRaisesTheWindow(t *testing.T) {
+	all := map[string]bool{SwitchMuKeyBucketHeld: true, SwitchMuSwapFreeze: true, SwitchMuMarginClamp: true}
+	before, highest, cycles := marginRun(t, all)
+	require.Positive(t, cycles, "the key moved at once: the test did not reach the margin path")
+	assert.LessOrEqual(t, highest, before, "with the clamp: the long window rose from %v to %v in the %d cycles before the key moved", before, highest, cycles)
+	t.Logf("with the clamp: long median %.3f, at most %.3f over the %d cycles (%v) before the key moved", before, highest, cycles, time.Duration(cycles)*propCycle)
+
+	noClamp := map[string]bool{SwitchMuKeyBucketHeld: true, SwitchMuSwapFreeze: true, SwitchMuMarginClamp: false}
+	before, highest, cycles = marginRun(t, noClamp)
+	assert.Greater(t, highest, before, "without the clamp the long window should rise; the test cannot see the switch")
+	t.Logf("band without the clamp: long median %.3f, at most %.3f over the %d cycles before the key moved", before, highest, cycles)
+
+	main := map[string]bool{SwitchMuKeyBucketHeld: false, SwitchMuSwapFreeze: true, SwitchMuMarginClamp: true}
+	before, highest, cycles = marginRun(t, main)
+	t.Logf("main (tracker key): long median %.3f, at most %.3f over the same %d cycles", before, highest, cycles)
+}

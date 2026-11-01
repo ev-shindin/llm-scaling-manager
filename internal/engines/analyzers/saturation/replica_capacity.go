@@ -193,6 +193,9 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// Never prefill's: its key has no output bucket (prefillOutputBucket),
 	// so an output swap leaves it naming the right window.
 	frozen := keys.muSwapPending && domain.CanonicalRole(role) != domain.RolePrefill
+	// Whether a reading written to the key's window is clamped to its median
+	// (marginClamp), for the same reason never prefill's.
+	clamped := keys.muShorterPastMargin && domain.CanonicalRole(role) != domain.RolePrefill
 	// The key's window before the band last moved it, where it moved (#415).
 	leftKey := ""
 	if keys.muLeft > 0 {
@@ -331,11 +334,18 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 					"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
 					"pod", rm.PodName, "role", role, "rate", mu, "requestRate", rm.RequestRate,
 					"derivedOK", derived.ok, "derivedRate", derived.rate, "servedBound", served.max, "reason", why)
+			} else if write, ok := a.marginClamp(throughputKey, mu, clamped); !ok {
+				// Past the margin toward shorter outputs with no window to
+				// clamp to: nothing is written (marginClamp).
+				a.noteMuCount(namespace, modelID, rm.VariantName, muReasonMarginClamped)
 			} else {
+				if write < mu {
+					a.noteMuCount(namespace, modelID, rm.VariantName, muReasonMarginClamped)
+				}
 				// The reading is admitted beside k2's P1-obs write, so it
 				// carries k2's stamp (noteMuWrite).
-				w := a.recordSaturatedThroughputFrom(throughputKey, rm.PodName, mu)
-				a.noteMuWrite(namespace, modelID, rm.VariantName, rm.PodName, mu, w)
+				w := a.recordSaturatedThroughputFrom(throughputKey, rm.PodName, write)
+				a.noteMuWrite(namespace, modelID, rm.VariantName, rm.PodName, write, w)
 				if args != "" {
 					a.mu.Lock()
 					if _, ok := a.saturatedThroughput[throughputKey]; ok {
