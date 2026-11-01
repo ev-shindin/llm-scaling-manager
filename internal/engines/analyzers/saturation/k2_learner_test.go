@@ -35,7 +35,7 @@ func TestK2Learner_WritesOnFirstSetOnAMoveOverTheBandAndOnTheHeartbeat(t *testin
 		row.KvCacheUsage = float64(tokens) / float64(row.TotalKvCapacityTokens)
 		ctx, logs := observedCtx(t)
 		r.cycleCtx(ctx, []domain.ReplicaMetrics{row}, decodeVariants("v"))
-		entries := logs.FilterMessage("learner-write").All()
+		entries := learnerWrites(logs, learn.K2)
 		out := make([]map[string]any, 0, len(entries))
 		for _, e := range entries {
 			out = append(out, e.ContextMap())
@@ -98,7 +98,7 @@ func TestK2Learner_AWriteLineListsSixteenPodsLowestFirst(t *testing.T) {
 	ctx := logr.NewContext(context.Background(), zapr.NewLogger(zap.New(zapcore.NewTee(console, observed))))
 	r.cycleCtx(ctx, rows(), states)
 
-	lines := logs.FilterMessage("learner-write").All()
+	lines := learnerWrites(logs, learn.K2)
 	require.Len(t, lines, 1, "one line per key per cycle, however many pods wrote")
 	f := lines[0].ContextMap()
 	assert.EqualValues(t, pods-LearnerWriteMaxPods, f["podsOmitted"])
@@ -137,14 +137,15 @@ func TestK2Learner_LearnerStartIsOneLinePerModelAtTheDefaultLevel(t *testing.T) 
 	}
 	require.Len(t, starts, 1, "one learner-start per model, at the shipped verbosity")
 	assert.Equal(t, restartT0.Add(JoinedReplicaWindow).Format(time.RFC3339), starts[0]["settleUntil"])
-	assert.Equal(t, map[string]int{learn.K2: 0}, starts[0]["restoredKeys"])
-	assert.Equal(t, map[string]int{learn.K2: 1}, starts[0]["coldVariants"])
+	assert.Equal(t, map[string]int{learn.K2: 0, learn.Mu: 0}, starts[0]["restoredKeys"])
+	assert.Equal(t, map[string]int{learn.K2: 1, learn.Mu: 1}, starts[0]["coldVariants"])
 }
 
 // The #303 budget, the first-write burst included (6.1: the first PR that
 // adds learner-write checks the budget test catches it): on the cycle every
-// replica writes its first k2, the shipped verbosity writes the same lines
-// at 8 replicas as at 64, learner-write is not among them, and at V(3) it is.
+// replica writes its first k2 and mu, the shipped verbosity writes the same
+// lines at 8 replicas as at 64, learner-write is not among them, and at V(3)
+// it is, one line per learner's key.
 func TestK2Learner_TheFirstWriteBurstStaysOffTheShippedLog(t *testing.T) {
 	burst := func(verbosity, pods int) string {
 		var buf bytes.Buffer
@@ -165,7 +166,7 @@ func TestK2Learner_TheFirstWriteBurstStaysOffTheShippedLog(t *testing.T) {
 	}
 	shipped8, shipped64 := burst(logging.DEFAULT, 8), burst(logging.DEFAULT, 64)
 	verbose64 := burst(perReplicaLogLevel, 64)
-	require.Equal(t, 1, linesWith(verbose64, "learner-write"), "premise: the burst writes, at V(3)")
+	require.Equal(t, 2, linesWith(verbose64, "learner-write"), "premise: the burst writes, at V(3): k2's key and mu's")
 	assert.Zero(t, linesWith(shipped64, "learner-write"))
 	assert.Equal(t, 1, linesWith(shipped64, "learner-start"))
 	assert.Equal(t, lineCount(shipped8), lineCount(shipped64),
@@ -199,13 +200,13 @@ func TestK2Learner_ForgetReachesEveryLearnerOnTheList(t *testing.T) {
 	down := fullRow("p0", "v", restartT0.Add(-time.Hour))
 	down.QueueLength = 0 // not saturated: nothing written again this cycle
 	r.cycle([]domain.ReplicaMetrics{down}, decodeVariants("v"))
-	reports := r.a.LearnerReports()["test-ns|test-model"]
+	reports := reportsOf(r.a.LearnerReports()["test-ns|test-model"], learn.K2)
 	require.Len(t, reports, 1)
 	assert.Equal(t, []learn.Forgotten{{Key: key, By: learn.ByOperator}}, reports[0].Forgotten)
 	assert.Empty(t, reports[0].PricingKey, "no key remains")
 
 	r.cycle([]domain.ReplicaMetrics{down}, decodeVariants("v"))
-	assert.Empty(t, r.a.LearnerReports()["test-ns|test-model"][0].Forgotten, "reported once")
+	assert.Empty(t, reportsOf(r.a.LearnerReports()["test-ns|test-model"], learn.K2)[0].Forgotten, "reported once")
 
 	// Eviction: a window unused past its retention, its model still served.
 	settled(t, r, row, decodeVariants("v"))
@@ -217,7 +218,7 @@ func TestK2Learner_ForgetReachesEveryLearnerOnTheList(t *testing.T) {
 	r.a.mu.Unlock()
 	r.a.EvictStaleHistory()
 	r.cycle([]domain.ReplicaMetrics{down}, decodeVariants("v"))
-	got := r.a.LearnerReports()["test-ns|test-model"]
+	got := reportsOf(r.a.LearnerReports()["test-ns|test-model"], learn.K2)
 	require.Len(t, got, 1)
 	assert.Equal(t, []learn.Forgotten{{Key: key, By: learn.ByEvicted}}, got[0].Forgotten)
 }
@@ -263,7 +264,7 @@ func TestK2Learner_TheSweepLetsAGoneModelsLearnerStateGo(t *testing.T) {
 	_, err := a.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{row}, decodeVariants("v")))
 	require.NoError(t, err)
 	assert.Equal(t, 1, logs.FilterMessage("learner-start").Len(), "back, the model logs learner-start again")
-	writes := logs.FilterMessage("learner-write").All()
+	writes := learnerWrites(logs, learn.K2)
 	require.Len(t, writes, 1)
 	assert.Equal(t, true, writes[0].ContextMap()["firstWrite"], "and its key's first write is a first write")
 }
@@ -273,7 +274,7 @@ func TestK2Learner_TheSweepLetsAGoneModelsLearnerStateGo(t *testing.T) {
 func TestK2Learner_TheReportCountsTheCycle(t *testing.T) {
 	r := newRestartRig(t, restartT0)
 	r.cycle([]domain.ReplicaMetrics{fullRow("p0", "v", restartT0.Add(-time.Hour))}, decodeVariants("v"))
-	rep := r.a.LearnerReports()["test-ns|test-model"]
+	rep := reportsOf(r.a.LearnerReports()["test-ns|test-model"], learn.K2)
 	require.Len(t, rep, 1)
 	assert.Equal(t, map[learn.Reason]int64{learn.Reason(k2ReasonObsUnsettled): 1}, rep[0].Counts)
 	assert.Zero(t, rep[0].Writes)
@@ -282,7 +283,7 @@ func TestK2Learner_TheReportCountsTheCycle(t *testing.T) {
 	settled(t, r, func() []domain.ReplicaMetrics {
 		return []domain.ReplicaMetrics{fullRow("p0", "v", restartT0.Add(-time.Hour))}
 	}, decodeVariants("v"))
-	rep = r.a.LearnerReports()["test-ns|test-model"]
+	rep = reportsOf(r.a.LearnerReports()["test-ns|test-model"], learn.K2)
 	require.Len(t, rep, 1)
 	assert.Equal(t, map[learn.Reason]int64{p1Obs: 1}, rep[0].Counts)
 	assert.Equal(t, int64(1), rep[0].Writes)
@@ -290,6 +291,28 @@ func TestK2Learner_TheReportCountsTheCycle(t *testing.T) {
 	assert.Equal(t, learn.Source(p1Obs), rep[0].Source)
 	assert.Equal(t, r.now.Add(-restartCycle), rep[0].LastAdmitted)
 	assert.Positive(t, rep[0].Samples)
+}
+
+// learnerWrites is the learner-write lines of one learner.
+func learnerWrites(logs *observer.ObservedLogs, learner string) []observer.LoggedEntry {
+	var out []observer.LoggedEntry
+	for _, e := range logs.FilterMessage("learner-write").All() {
+		if e.ContextMap()["learner"] == learner {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// reportsOf is one learner's reports among rs.
+func reportsOf(rs []learn.Report, learner string) []learn.Report {
+	var out []learn.Report
+	for _, r := range rs {
+		if r.Learner == learner {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // firstKey is the analyzer's one k2 key, "" when it holds none.

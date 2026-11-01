@@ -427,6 +427,40 @@ func (a *SaturationAnalyzer) siblingYield(key string, reading throughputReading,
 	return c.sibling, true
 }
 
+// lowHeldOut reports whether a measurement under the derived figure has been
+// stale for MeasuredLowHoldFor, so it may give way to the higher derived
+// figure. fresh is its last agreeing reading, or its newest sample, zero
+// when neither is known.
+//
+// An unknown age resolves to the safe side (SwitchMuUnknownAgeSafe;
+// analyzer-learner.md, 3.4), which under the derived figure is to keep
+// pricing the lower measurement: the hold counts from the window's last
+// write, which is never earlier than its newest sample, so a measurement
+// whose sample time is unknown is held at least as long as a known one
+// would be, and a restore never makes it younger than its own last write.
+// With no write time either it is held. Off, as before, an unknown age was
+// as stale as can be, and the hold was skipped.
+func (a *SaturationAnalyzer) lowHeldOut(fresh time.Time, reading throughputReading, t tuning, now time.Time) bool {
+	hold := t.MuChoice.LowHoldFor.Duration()
+	if !fresh.IsZero() {
+		return now.Sub(fresh) >= hold
+	}
+	if !a.muUnknownAgeSafe {
+		return true
+	}
+	return !reading.writtenAt.IsZero() && now.Sub(reading.writtenAt) >= hold
+}
+
+// unknownLatchLocked marks key's latch unknown: its window was just
+// installed from a restore, or brought back from under other arguments, so
+// a choice memo made before -- a refused reading creates one -- says
+// nothing of it (SwitchMuLatchRestoresSafe). Callers hold a.mu.
+func (a *SaturationAnalyzer) unknownLatchLocked(key string) {
+	if c, ok := a.throughputMuChoice[key]; ok {
+		c.latchKnown = false
+	}
+}
+
 // muChoice is one throughput key's memory for choosing between its measured
 // mu and the derived one (SaturationAnalyzer.throughputMuChoice).
 type muChoice struct {
@@ -437,6 +471,11 @@ type muChoice struct {
 	// yielded is set while a stale measurement has given way to the derived
 	// figure, and latches it (measuredYieldsToDerived).
 	yielded bool
+	// latchKnown is set once yielded rests on evidence: a window seen from
+	// its first sample, a choice made, an agreeing reading, or a new
+	// episode. A window restored, or brought back, has none until then, and
+	// its latch restores to the safe side (SwitchMuLatchRestoresSafe).
+	latchKnown bool
 	// sibling is the newest rate the key's Ready, full replicas served
 	// (servedRates.saturated), which a measurement under SiblingMuTolerance
 	// of it yields to (siblingYield); zero when none was read, or once
@@ -461,18 +500,32 @@ type lowRun struct {
 // MeasuredDerivedMaxRatio keeps the measurement fresh, accepted or not: the
 // bucket is still reading what it measured. One that disagrees does not, and
 // a filling replica's reading -- a fraction of the rate on record -- is one.
-func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, refusedLow bool, t tuning, now time.Time) bool {
+// An exact repeat of the last reading (exactRepeatLocked) is handled by
+// side (SwitchMuRepeatIsUse): it is evidence of use, not that the bucket
+// saturated again, so over the derived figure (derivedRate) it keeps the
+// measurement fresh no longer, and the measurement yields to the lower
+// figure. Under it -- or with no derived figure -- losing freshness would
+// let a real low measurement whose quantized rate repeats give way to the
+// higher derived figure after MeasuredLowHoldFor, the side that
+// under-orders, so there a repeat still counts as agreement.
+func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, refusedLow bool, derivedRate float64, t tuning, now time.Time) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	c, ok := a.throughputMuChoice[key]
 	if !ok {
-		c = &muChoice{}
+		// A window this analyzer has not seen yet it sees from its first
+		// sample, and has given way to nothing: its latch is known. One
+		// already on record with no memo was restored, or brought back,
+		// and its latch is not (SwitchMuLatchRestoresSafe).
+		_, onRecord := a.saturatedThroughput[key]
+		c = &muChoice{latchKnown: !onRecord}
 		a.throughputMuChoice[key] = c
 	}
-	if ra, ok := a.saturatedThroughput[key]; ok && ra.Len() > 0 {
+	repeat := a.muRepeatIsUse && a.exactRepeatLocked(key, mu, now)
+	if ra, ok := a.saturatedThroughput[key]; ok && ra.Len() > 0 && !(repeat && derivedRate > 0 && ra.Median() > derivedRate) {
 		if m := ra.Median(); m > 0 && mu <= m*t.MuChoice.MaxRatio && mu >= m/t.MuChoice.MaxRatio {
 			c.saturatedAt = now
-			c.yielded = false
+			c.yielded, c.latchKnown = false, true
 		}
 	}
 	for p, r := range c.low {
@@ -510,24 +563,59 @@ func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, r
 //     above it; and when it sits as far under it, but only once it has been
 //     stale for MeasuredLowHoldFor -- until then the lower of the two prices.
 func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading throughputReading, derived derivedMu, served float64, t tuning, now time.Time) bool {
+	return a.measuredYield(key, reading, derived, served, t, now) != muYieldNone
+}
+
+// muYield is which way a measured mu gave way to the derived figure, if it
+// did (measuredYield).
+type muYield int
+
+const (
+	muYieldNone muYield = iota
+	// muYieldServed: a Ready replica serves more than the ratio times it.
+	muYieldServed
+	// muYieldStale: stale, and disagreeing past the ratio.
+	muYieldStale
+)
+
+// measuredYield is measuredYieldsToDerived, saying which way it gave way.
+func (a *SaturationAnalyzer) measuredYield(key string, reading throughputReading, derived derivedMu, served float64, t tuning, now time.Time) muYield {
 	maxR, retR := t.MuChoice.MaxRatio, t.MuChoice.ReturnRatio
 	if !derived.ok || !(derived.rate > 0) || !(reading.rate > 0) {
-		return false
+		return muYieldNone
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	c := a.throughputMuChoice[key]
 	latched := c != nil && c.yielded
 	ratio := reading.rate / derived.rate
+	// Unknown: a memo with no evidence behind it, or none at all for a
+	// window on record (restored, or brought back).
+	_, onRecord := a.saturatedThroughput[key]
+	unknown := a.muLatchRestoresSafe && ((c == nil && onRecord) || (c != nil && !c.latchKnown))
+	if unknown {
+		// The latch is not persisted: with no evidence behind it, it
+		// restores to the safe side (SwitchMuLatchRestoresSafe), latched
+		// over the derived figure, so the measurement yields to the lower
+		// one past the return ratio, and unlatched under it, so the lower
+		// measurement keeps pricing. The choice made from it below is
+		// evidence, and the latch is known from then on.
+		latched = ratio >= 1
+		if c == nil {
+			c = &muChoice{}
+			a.throughputMuChoice[key] = c
+		}
+		c.latchKnown = true
+	}
 	if ratio < 1 && (served > maxR*reading.rate ||
 		(latched && served > retR*reading.rate)) {
 		if c == nil {
 			c = &muChoice{}
 			a.throughputMuChoice[key] = c
 		}
-		c.yielded = true
+		c.yielded, c.latchKnown = true, true
 		a.paths.add(pathYieldServed, 1)
-		return true
+		return muYieldServed
 	}
 	// The last reading that agreed with the measurement; the newest sample
 	// only where none is on record (a window restored, or its first
@@ -539,28 +627,29 @@ func (a *SaturationAnalyzer) measuredYieldsToDerived(key string, reading through
 	}
 	if !fresh.IsZero() && now.Sub(fresh) < t.MuChoice.FreshFor.Duration() {
 		if c != nil {
-			c.yielded = false
+			c.yielded, c.latchKnown = false, true
 		}
-		return false
+		return muYieldNone
 	}
 	var yielded bool
 	if ratio >= 1 {
+		// An unknown age is as stale as can be, as it is above: the safe
+		// side for a measurement over the derived figure.
 		yielded = ratio > maxR || (latched && ratio > retR)
 	} else {
-		// An unknown age is as stale as can be, as it is above.
-		heldOut := fresh.IsZero() || now.Sub(fresh) >= t.MuChoice.LowHoldFor.Duration()
-		yielded = heldOut && (ratio < 1/maxR || (latched && ratio < 1/retR))
+		yielded = a.lowHeldOut(fresh, reading, t, now) && (ratio < 1/maxR || (latched && ratio < 1/retR))
 	}
 	if c == nil {
 		if !yielded {
-			return false
+			return muYieldNone
 		}
 		c = &muChoice{}
 		a.throughputMuChoice[key] = c
 	}
-	c.yielded = yielded
-	if yielded {
-		a.paths.add(pathYieldStale, 1)
+	c.yielded, c.latchKnown = yielded, true
+	if !yielded {
+		return muYieldNone
 	}
-	return yielded
+	a.paths.add(pathYieldStale, 1)
+	return muYieldStale
 }

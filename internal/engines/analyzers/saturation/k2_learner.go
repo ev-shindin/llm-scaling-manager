@@ -248,14 +248,19 @@ func k2WritePods(rs []k2PodReading) ([]map[string]any, int) {
 	return out, omitted
 }
 
-// sweepLearnerMapsLocked drops what k2 as a learner, and the analyzer's own
-// settle tracker, keep for a model the sweep has let go of: its reports, its
-// pending forgotten keys, its learner-start mark and its own-tracker sighting
-// go with its settle memo (k2Settle, swept at VariantTimeout unseen), and
-// what learner-write last logged of a key goes with the key's window. A model
-// that comes back is a model seen for the first time: it logs learner-start,
-// and each key logs its first write. Called at the end of evictStaleHistory;
-// callers hold a.mu.
+// sweepLearnerMapsLocked drops what k2 and mu as learners, and the
+// analyzer's own settle tracker, keep for a model the sweep has let go of:
+// its reports, its pending forgotten keys, its learner-start mark, its
+// own-tracker sighting and its mu cycle go with its settle memo (k2Settle,
+// swept at VariantTimeout unseen). What learner-write last logged of a k2
+// key goes with the key's window; of a mu key, with the key's model, or once
+// the key has no window and its model's last cycle did not price it (a key
+// priced from the derived rate has no window of its own). A model that comes
+// back is a model seen for the first time: it logs learner-start, and each
+// key logs its first write. An Analyze that fails part way leaves its model's
+// mu cycle unclosed, so the next sweep may drop a window-less key's logged
+// value, and that key logs one extra first write. Called at the end of
+// evictStaleHistory; callers hold a.mu.
 func (a *SaturationAnalyzer) sweepLearnerMapsLocked() {
 	gone := func(model string) bool { _, ok := a.k2Settle[model]; return !ok }
 	maps.DeleteFunc(a.learnerReports, func(m string, _ []learn.Report) bool { return gone(m) })
@@ -277,6 +282,31 @@ func (a *SaturationAnalyzer) sweepLearnerMapsLocked() {
 		_, ok := a.computeCapacityHistory[key]
 		return !ok
 	})
+	// Mu's: its cycle with its model, and what learner-write last logged of
+	// a key with the key's model, or once the key has no window and its
+	// model's last cycle did not price it. Not with the window alone: a key
+	// priced from the derived figure, a neighbour or a lower bound has no
+	// window of its own, and dropped each cycle it logged a first write on
+	// every one.
+	maps.DeleteFunc(a.muLogged, func(key string, _ muLogged) bool {
+		name, model, ok := variantOfKey(key)
+		ns, _, _ := strings.Cut(name, "/")
+		if !ok || gone(ns+"|"+model) {
+			return true
+		}
+		if _, ok := a.saturatedThroughput[key]; ok {
+			return false
+		}
+		if c := a.muCycles[ns+"|"+model]; c != nil {
+			for _, p := range c.priced {
+				if p.key == key {
+					return false
+				}
+			}
+		}
+		return true
+	})
+	maps.DeleteFunc(a.muCycles, func(m string, _ *muCycle) bool { return gone(m) })
 }
 
 // LearnerReports is each learner's report of each variant the model priced
@@ -385,33 +415,44 @@ func (a *SaturationAnalyzer) logLearnerStart(ctx context.Context, namespace, mod
 		return
 	}
 	a.learnerStarted[model] = true
-	restored, oldest := 0, time.Duration(-1)
-	warm := map[string]bool{}
-	for key, ra := range a.computeCapacityHistory {
-		name, model, ok := variantOfKey(key)
-		ns, variant, _ := strings.Cut(name, "/")
-		if !ok || ns != namespace || model != modelID || ra.Len() == 0 {
-			continue
+	oldest := time.Duration(-1)
+	// count is the restored windows of the model among windows, the
+	// variants they warm, and the oldest last write among them.
+	count := func(windows map[string]*capacity.RollingAverage, skip func(string) bool) (int, map[string]bool) {
+		n, warm := 0, map[string]bool{}
+		for key, ra := range windows {
+			name, model, ok := variantOfKey(key)
+			ns, variant, _ := strings.Cut(name, "/")
+			if !ok || ns != namespace || model != modelID || ra.Len() == 0 || skip(key) {
+				continue
+			}
+			n++
+			warm[variant] = true
+			if age := now.Sub(ra.LastWritten()); age > oldest {
+				oldest = age
+			}
 		}
-		restored++
-		warm[variant] = true
-		if age := now.Sub(ra.LastWritten()); age > oldest {
-			oldest = age
-		}
+		return n, warm
 	}
+	restored, warm := count(a.computeCapacityHistory, func(string) bool { return false })
+	// The prefill bound's windows share mu's map and are not mu.
+	restoredMu, warmMu := count(a.saturatedThroughput, isPrefillBoundKey)
 	waits := a.k2ReadsSettle && a.k2WaitsAfterRestart
 	a.mu.Unlock()
-	cold := 0
+	cold, coldMu := 0, 0
 	for _, v := range variants {
 		if !warm[v] {
 			cold++
+		}
+		if !warmMu[v] {
+			coldMu++
 		}
 	}
 	settleUntil := now
 	reason := "the analyzer's first cycle for this model, after a controller start or as the model first appears: replicas already Ready keep their settle"
 	if waits {
 		settleUntil = now.Add(JoinedReplicaWindow)
-		reason = "the analyzer's first cycle for this model, after a controller start or as the model first appears: each replica waits its settle, k2 a rate window from the controller's first sight of it, so by settleUntil at the latest"
+		reason = "the analyzer's first cycle for this model, after a controller start or as the model first appears: each replica waits its settle, k2 and the mu written beside it a rate window from the controller's first sight of it, so by settleUntil at the latest"
 	}
 	oldestSeconds := -1.0
 	if oldest >= 0 {
@@ -419,7 +460,8 @@ func (a *SaturationAnalyzer) logLearnerStart(ctx context.Context, namespace, mod
 	}
 	ctrl.LoggerFrom(ctx).V(logging.DEFAULT).Info("learner-start",
 		"modelID", modelID, "namespace", namespace,
-		"restoredKeys", map[string]int{learn.K2: restored}, "coldVariants", map[string]int{learn.K2: cold},
+		"restoredKeys", map[string]int{learn.K2: restored, learn.Mu: restoredMu},
+		"coldVariants", map[string]int{learn.K2: cold, learn.Mu: coldMu},
 		"oldestAdmittedAgeSeconds", oldestSeconds, "settleUntil", settleUntil.UTC().Format(time.RFC3339),
 		"reason", reason)
 }

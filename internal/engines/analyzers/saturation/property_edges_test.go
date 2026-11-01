@@ -512,7 +512,7 @@ func probeLowConfirm(_ *rand.Rand, s float64) (bool, error) {
 	t := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
 	var ok bool
 	for at := time.Duration(0); at <= time.Duration(s)*time.Second; at += propCycle {
-		ok = a.noteSaturatedReading(propMuKey, "p0", 0.3, true, t, propStart.Add(at))
+		ok = a.noteSaturatedReading(propMuKey, "p0", 0.3, true, 0, t, propStart.Add(at))
 	}
 	return ok, nil
 }
@@ -578,7 +578,7 @@ func probeAgreement(r *rand.Rand, x float64) (bool, error) {
 	m.read("p0", level)
 	t := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
 	now := m.clock.Add(time.Hour)
-	m.a.noteSaturatedReading(propMuKey, "p0", x*level, false, t, now)
+	m.a.noteSaturatedReading(propMuKey, "p0", x*level, false, 0, t, now)
 	m.a.mu.Lock()
 	defer m.a.mu.Unlock()
 	return m.a.throughputMuChoice[propMuKey].saturatedAt.Equal(now), nil

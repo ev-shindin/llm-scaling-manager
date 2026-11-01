@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"maps"
+	"slices"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
@@ -106,15 +107,13 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 
 // SetSwitchesForReplay sets the package's replay switches by name: the test
 // seam a replay drives one named change through (analyzer-learner.md, 2.5).
-// The switches are SwitchK2ReadsSettle and SwitchK2WaitsAfterRestart; a name
+// The switches are SwitchK2ReadsSettle, SwitchK2WaitsAfterRestart,
+// SwitchMuRepeatIsUse, SwitchMuUnknownAgeSafe and SwitchMuLatchRestoresSafe; a name
 // it does not know is an error, and sets nothing. Never called on a
 // production path; a test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
-	fields := map[string]*bool{
-		SwitchK2ReadsSettle:       &a.k2ReadsSettle,
-		SwitchK2WaitsAfterRestart: &a.k2WaitsAfterRestart,
-	}
+	fields := a.switchFields()
 	for name := range fields {
 		delete(rest, name)
 	}
@@ -125,6 +124,25 @@ func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) erro
 		*fields[name] = on
 	}
 	return nil
+}
+
+// switchFields is each replay switch by name, and the field it sets.
+func (a *SaturationAnalyzer) switchFields() map[string]*bool {
+	return map[string]*bool{
+		SwitchK2ReadsSettle:       &a.k2ReadsSettle,
+		SwitchK2WaitsAfterRestart: &a.k2WaitsAfterRestart,
+		SwitchMuRepeatIsUse:       &a.muRepeatIsUse,
+		SwitchMuUnknownAgeSafe:    &a.muUnknownAgeSafe,
+		SwitchMuLatchRestoresSafe: &a.muLatchRestoresSafe,
+	}
+}
+
+// ReplaySwitchNames is every name SetSwitchesForReplay accepts, sorted: the
+// switch runs hold each to a row (analyzer-learner.md, 2.5). A test seam,
+// like SetSwitchesForReplay; nothing on a production path calls it, and a
+// test holds that.
+func ReplaySwitchNames() []string {
+	return slices.Sorted(maps.Keys((&SaturationAnalyzer{}).switchFields()))
 }
 
 // Analyze computes capacity signals for a model across all its variants

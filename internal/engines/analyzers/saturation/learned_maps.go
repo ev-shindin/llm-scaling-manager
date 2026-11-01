@@ -110,6 +110,8 @@ func (a *SaturationAnalyzer) learnedMapsLocked() []learnedMap {
 		registered("k2Forgotten", scopeShared, a.k2Forgotten),
 		registered("learnerReports", scopeShared, a.learnerReports),
 		registered("learnerStarted", scopeShared, a.learnerStarted),
+		registered("muCycles", scopeShared, a.muCycles),
+		registered("muLogged", scopeShared, a.muLogged),
 	}
 }
 
