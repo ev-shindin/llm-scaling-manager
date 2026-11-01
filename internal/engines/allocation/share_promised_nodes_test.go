@@ -122,3 +122,22 @@ func TestRepublishedHeadroomHoldsAHoleOnItsOwnNode(t *testing.T) {
 		t.Fatalf("control: %d 8-GPU Pods with the GPU unplaced, want 0", got)
 	}
 }
+
+// The freest-node fallback runs after every known hole of every scope is
+// placed: n00 has 8 free with a 2-GPU hole of namespace ns, n01 has 7 free,
+// and the cluster scope ("" sorts first) has 7 GPUs of unknown node. Placed
+// scope by scope, the 7 took n00 first and ns's hole then came off n01, which
+// left n00 with nothing and n01 with 6: no 6-GPU replica fit n00.
+func TestReservePromisedPlacesEveryKnownHoleFirst(t *testing.T) {
+	v := NewNodeView(h100Nodes(8, 7))
+	ReservePromised(v, map[string]map[string]decision.PromisedHoles{
+		"":   {famHBM3: {Unplaced: 7}},
+		"ns": {famHBM3: {Nodes: map[string]int{"n00": 2}}},
+	})
+	if got := v.DebitsExcept(nil); !maps.Equal(got, map[string]int{"n00": 2, "n01": 7}) {
+		t.Fatalf("promises held on %v, want n00=2 (ns's hole) n01=7 (the unplaced, freest after it)", got)
+	}
+	if n := v.fits(replicaFit{acc: famHBM3, pods: []int{6}}, 1); n != 1 {
+		t.Fatal("n00 does not hold a 6-GPU replica beside its 2-GPU hole")
+	}
+}

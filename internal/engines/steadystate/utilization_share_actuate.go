@@ -746,7 +746,7 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 	// 8-GPU pod is lost to the first other pod that lands on it, and the
 	// receiver's own pod is not even queued until its target is raised.
 	holes := decision.LatestSharePromisedHoles(e.utilizationShare.clock())
-	promised := promisedTotals(holes)
+	promised := decision.PromisedTotals(holes)
 	g, greedy := optimizer.(*allocation.GreedyByScoreOptimizer)
 	e.cycleFitted = greedy && g.Nodes != nil
 	if greedy {
@@ -793,7 +793,7 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 		now := e.utilizationShare.clock()
 		latest := decision.LatestSharePromisedHoles(now)
 		if !greedy || !g.RepublishHeadroom(e.cyclePlanned, newlyPromised(holes, latest), now) {
-			allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, promisedTotals(latest)), now)
+			allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, decision.PromisedTotals(latest)), now)
 		}
 	}
 	return decisions
@@ -812,22 +812,6 @@ func plannedByOverrides(requests []allocation.ModelScalingRequest, overrides map
 				out[utils.GetNamespacedKey(req.Namespace, req.ModelID)] = true
 				break
 			}
-		}
-	}
-	return out
-}
-
-// promisedTotals is the GPUs of each promise, per scope and accelerator: what
-// the quota withholds (allocation.WithholdPromised). nil for nil.
-func promisedTotals(holes map[string]map[string]decision.PromisedHoles) map[string]map[string]int {
-	if holes == nil {
-		return nil
-	}
-	out := make(map[string]map[string]int, len(holes))
-	for scope, perType := range holes {
-		out[scope] = make(map[string]int, len(perType))
-		for acc, h := range perType {
-			out[scope][acc] = h.Total()
 		}
 	}
 	return out

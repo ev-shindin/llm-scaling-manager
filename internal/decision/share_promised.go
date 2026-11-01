@@ -29,7 +29,9 @@ func (h PromisedHoles) Total() int {
 	return n
 }
 
-// Merge returns h with o's GPUs added, node by node.
+// Merge returns h with o's GPUs added, node by node. A publish has one entry
+// per scope and accelerator, as share groups are keyed, so the share merges
+// into an empty h; Merge sums all the same, and never aliases either side.
 func (h PromisedHoles) Merge(o PromisedHoles) PromisedHoles {
 	out := PromisedHoles{Unplaced: h.Unplaced + o.Unplaced}
 	if len(h.Nodes)+len(o.Nodes) > 0 {
@@ -79,8 +81,17 @@ func (s *SharePromisedStore) Latest(maxAge time.Duration, now time.Time) map[str
 	if s.promised == nil || now.Sub(s.at) > maxAge {
 		return nil
 	}
-	c := make(map[string]map[string]int, len(s.promised))
-	for scope, perType := range s.promised {
+	return PromisedTotals(s.promised)
+}
+
+// PromisedTotals is the GPUs of each promise in promised, per scope and
+// accelerator: what the quota withholds. nil for nil.
+func PromisedTotals(promised map[string]map[string]PromisedHoles) map[string]map[string]int {
+	if promised == nil {
+		return nil
+	}
+	c := make(map[string]map[string]int, len(promised))
+	for scope, perType := range promised {
 		c[scope] = make(map[string]int, len(perType))
 		for acc, h := range perType {
 			c[scope][acc] = h.Total()
