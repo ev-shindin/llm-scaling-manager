@@ -79,3 +79,23 @@ goldens:
     saturate, so k2 and mu record readings and each of the three mu yields runs, and
     one replica restarts under its own name. Twelve minutes of synthetic rows, recorder
     on, default analyzerTuning.'
+- name: pd-restart
+  notRun:
+  - slo
+  outputs:
+  - pd-restart/learned-state.csv
+  - pd-restart/lines.csv
+  - pd-restart/results.csv
+  - pd-restart/slo-published.csv
+  - pd-restart/store-records.csv
+  - pd-restart/variant-capacities.csv
+  - pd-restart/composite-holds.csv
+  - pd-restart/composite-release.csv
+  - pd-restart/composite-results.csv
+  - pd-restart/composite-roles.csv
+  - pd-restart/composite-variants.csv
+  - pd-restart/warm-pool-pressure.csv
+  - pd-restart/warm-pool-supply.csv
+  recording: pd-restart/recording.jsonl.gz
+  source: P/D benchmark scenario, flow control off, saturated load, one decode engine
+    restarted in its own pod, recorder on

@@ -165,7 +165,9 @@ func TestLearnerRecording_TheMuPathsRunReachesEveryLearnerPath(t *testing.T) {
 	}
 	t.Logf("path counts: %v", counted)
 	for _, p := range saturation.PathNames() {
-		if saturation.PathAwaitsRecording(p) {
+		if p == saturation.PathK2UnsettledWindow {
+			// Reached only with EPP flow control off, by the pd-restart
+			// cluster golden; the unit tests drive it (k2_settle_test.go).
 			continue
 		}
 		assert.Positive(t, counted[p], "the mu-paths run never ran %s", p)

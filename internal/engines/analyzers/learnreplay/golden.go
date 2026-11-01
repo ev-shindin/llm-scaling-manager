@@ -665,8 +665,9 @@ type GoldenCheck struct {
 	// pins the set (ManifestEntry.NotRun); a replay that disagrees is a
 	// problem.
 	NotRun map[string][]string
-	// mayBeEmpty is, per fixture, each output of emptyRuled its recording
-	// allows to hold no row (emptyRules); any other that holds none is a
+	// mayBeEmpty is, per fixture, each output of emptyRuled and
+	// engineEmptyRuled its replay allows to hold no row (emptyRules,
+	// engineEmptyRules); any other that holds none is a
 	// problem. Kept for the tests, which hold every output to rows but
 	// these.
 	mayBeEmpty map[string]map[string]bool
@@ -678,8 +679,7 @@ type GoldenCheck struct {
 // settle tracker's verdicts the recordings reach (requiredSettlePaths). With
 // the engine's replay registered, its composite paths are required too.
 func requiredPaths() []string {
-	sat := slices.DeleteFunc(saturation.PathNames(), saturation.PathAwaitsRecording)
-	return slices.Concat(sat, requiredSettlePaths(), enginePathNames())
+	return slices.Concat(saturation.PathNames(), requiredSettlePaths(), enginePathNames())
 }
 
 // pathProblems names each required path the fixtures ran on no cycle.
@@ -778,7 +778,8 @@ func CheckGoldens(ctx context.Context, dir string) (*GoldenCheck, error) {
 				continue
 			}
 			c.Rows[f] = len(rows)
-			if len(rows) == 0 && slices.Contains(emptyRuled, path.Base(f)) && !facts.mayBeEmpty[path.Base(f)] {
+			ruled := slices.Contains(emptyRuled, path.Base(f)) || slices.Contains(engineEmptyRuled, path.Base(f))
+			if len(rows) == 0 && ruled && !facts.mayBeEmpty[path.Base(f)] {
 				problem("%s: %s holds no row, and nothing in the recording allows it to be empty", g.Name, f)
 			}
 			d, err := compareOutput(f, b, out)
@@ -843,8 +844,8 @@ type fixtureFacts struct {
 	// notRun names each analyzer the run built and never analyzed
 	// (neverAnalyzed), in a fixed order: no golden compares it.
 	notRun []string
-	// mayBeEmpty is each output of emptyRuled the recording allows to hold
-	// no row (emptyRules).
+	// mayBeEmpty is each output of emptyRuled and engineEmptyRuled the
+	// recording allows to hold no row (emptyRules, engineEmptyRules).
 	mayBeEmpty map[string]bool
 }
 
@@ -885,7 +886,9 @@ func goldenReplay(ctx context.Context, recording []byte, mode Mode) (replayResul
 	if missing := comparedNothing(use.start, outputs, notRun); len(missing) > 0 {
 		return replayResult{}, fmt.Errorf("the goldens would compare nothing for %s", strings.Join(missing, ", "))
 	}
-	return replayResult{outputs: outputs, paths: rep.Paths, facts: fixtureFacts{notRun: notRun, mayBeEmpty: use.emptyRules()}}, nil
+	mayBeEmpty := use.emptyRules()
+	maps.Copy(mayBeEmpty, engineEmptyRules(rep.Paths))
+	return replayResult{outputs: outputs, paths: rep.Paths, facts: fixtureFacts{notRun: notRun, mayBeEmpty: mayBeEmpty}}, nil
 }
 
 // The analyzers a run may leave out, by the name or type a policy lists
@@ -1037,6 +1040,34 @@ func (u analyzerUse) emptyRules() map[string]bool {
 		OutputSLOPublished: u.start.SLO == nil || slices.Contains(u.neverAnalyzed(), analyzerSLO),
 		OutputLines:        u.lines == 0,
 		OutputLearnedState: u.exports == 0,
+	}
+}
+
+// engineEmptyRuled is every engine output a rule may allow to be empty
+// (engineEmptyRules). The engine fixture fills each; a cluster recording
+// fills these two only when its run held a role or bound a release.
+var engineEmptyRuled = []string{OutputCompositeHolds, OutputCompositeRelease}
+
+// The engine's path counters engineEmptyRules reads, by name: the replay
+// cannot import the engine (steadystate.PathCompositeHold and
+// PathCompositeReleaseBound). A test holds them to the engine's own.
+const (
+	enginePathHold         = "composite-hold"
+	enginePathReleaseBound = "composite-release-bound"
+)
+
+// engineEmptyRules is each output of engineEmptyRuled the replay allows to
+// hold no row, read from the replay's own path counts. The check reports
+// any other that holds none.
+//
+//   - composite-holds.csv, when no composite held a role
+//     (composite-hold is 0).
+//   - composite-release.csv, when no other analyzer's frame bounded a
+//     release (composite-release-bound is 0).
+func engineEmptyRules(paths map[string]int64) map[string]bool {
+	return map[string]bool{
+		OutputCompositeHolds:   paths[enginePathHold] == 0,
+		OutputCompositeRelease: paths[enginePathReleaseBound] == 0,
 	}
 }
 

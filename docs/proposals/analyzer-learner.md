@@ -67,8 +67,8 @@
   controller restart is the engine's tracker's first cycle. `learn` holds
   `Report`, `Forgotten` and the list `Learners` (`k2`); k2's
   `learner-write` band is 2 % of the last logged value, not measured on a
-  run. The counter `k2-unsettled-window` is reported and not required
-  until the flow-control-off recording lands (`PathAwaitsRecording`).
+  run. The counter `k2-unsettled-window` is required since the
+  flow-control-off recording landed as the `pd-restart` golden.
   Forget through `learn.Learners` drops the same entries, counted the same,
   so it is behaviour-neutral and has no switch; the clause "when no key
   remains, the variant's learner series are deleted" has nothing to apply
