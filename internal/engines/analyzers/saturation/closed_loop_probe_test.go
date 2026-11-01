@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 )
 
 // The closed-loop probe (analyzer-learner.md, 2.5): the saturation analyzer
@@ -39,6 +40,13 @@ import (
 // no replica queues, and the order is occupancy's: each replica holds 0.95
 // lambda / (n mu) of its KV, priced against k1 (0.8 of it) at the target
 // (0.85), so need is ceil(0.95 lambda / (0.68 mu)) whatever n is.
+//
+// Two verdicts. Over-ordered: the fleet ends more than probeOverTolerance
+// plus one replica over need at the horizon. Under-ordered: the fleet --
+// replicas starting included -- sits below need at the arrival rate of the
+// moment for longer than probeUnderFor in one run, at any point of the run,
+// or ends more than one replica under it. A shorter dip, while an order is
+// starting and settling, is the start time, not a verdict.
 
 const (
 	// probeStart is S, from an order to the replica Ready.
@@ -48,6 +56,10 @@ const (
 	// probeOverTolerance is how far over need the fleet may settle, as a
 	// fraction, plus one replica of rounding.
 	probeOverTolerance = 0.15
+	// probeUnderFor is how long the fleet may sit below need in one run:
+	// the start time, the joined replica's settle, and a cycle or two of
+	// ordering on either side of them.
+	probeUnderFor = 5 * time.Minute
 )
 
 // probePod is one simulated replica.
@@ -67,10 +79,9 @@ type probeCase struct {
 	// mu, when set, is a replica's true mu at an elapsed time, overriding
 	// pods and addedMu (a slow replica that recovers).
 	mu func(i int, elapsed time.Duration) float64
-	// lambda is the arrival rate at an elapsed time.
-	lambda func(elapsed time.Duration) float64
-	// weight is a replica's routing weight; nil splits equally.
-	weight  func(i int) float64
+	// lambda is the arrival rate at an elapsed time, split equally over the
+	// Ready replicas.
+	lambda  func(elapsed time.Duration) float64
 	horizon time.Duration
 	// meanMu is the fleet's mean true mu at the horizon, which need is
 	// priced at.
@@ -83,7 +94,14 @@ type probeResult struct {
 	// overSince is how long before the horizon the fleet has been over
 	// need's tolerance without a break; zero when it ends inside it.
 	overSince time.Duration
-	trace     []int
+	// underFor is the longest run the fleet sat below need at the arrival
+	// rate of the moment.
+	underFor time.Duration
+	// muCounts sums mu's report counts over the run, and muSource is the
+	// source mu priced the variant from on the last cycle that priced it.
+	muCounts map[learn.Reason]int64
+	muSource learn.Source
+	trace    []int
 }
 
 // runProbe drives the case to its horizon and returns what the fleet did.
@@ -109,33 +127,24 @@ func runProbe(t *testing.T, pc probeCase) probeResult {
 		n  int
 	}
 	var orders []order
-	res := probeResult{need: int(math.Ceil(0.95*pc.lambda(pc.horizon)/(0.68*pc.meanMu) - 1e-9))}
+	needAt := func(lambda float64) int { return int(math.Ceil(0.95*lambda/(0.68*pc.meanMu) - 1e-9)) }
+	res := probeResult{need: needAt(pc.lambda(pc.horizon)), muCounts: map[learn.Reason]int64{}}
 	bound := float64(res.need)*(1+probeOverTolerance) + 1
-	var overFrom time.Time
+	var overFrom, underFrom time.Time
 	for rig.clock.Sub(start) < pc.horizon {
 		elapsed := rig.clock.Sub(start)
 		lambda := pc.lambda(elapsed)
 		var ready []int
-		total := 0.0
 		for i, p := range pods {
 			if !p.readyAt.After(rig.clock) {
 				ready = append(ready, i)
-				w := 1.0
-				if pc.weight != nil {
-					w = pc.weight(i)
-				}
-				total += w
 			}
 		}
 		rows := make([]domain.ReplicaMetrics, 0, len(ready))
 		dt := propCycle.Seconds()
 		for _, i := range ready {
 			p, mu := pods[i], trueMu(i, elapsed)
-			w := 1.0
-			if pc.weight != nil {
-				w = pc.weight(i)
-			}
-			offered := lambda * w / total
+			offered := lambda / float64(len(ready))
 			p.backlog = max(p.backlog+(offered-mu)*dt, 0)
 			served, kv := offered, 0.95*offered/mu
 			if p.backlog > 0 || offered >= mu {
@@ -143,8 +152,20 @@ func runProbe(t *testing.T, pc probeCase) probeResult {
 			}
 			rows = append(rows, imbRow(p.name, "v", kv, int(math.Round(p.backlog)), 1000, 1000, served))
 		}
+		now := rig.clock
 		out, err := rig.analyze(rows, aggStates(len(rows)), lambda, propCycle)
 		require.NoError(t, err)
+		for _, r := range rig.a.LearnerReports()["test-ns|test-model"] {
+			if r.Learner != learn.Mu {
+				continue
+			}
+			for reason, n := range r.Counts {
+				res.muCounts[reason] += n
+			}
+			if r.Source != "" {
+				res.muSource = r.Source
+			}
+		}
 		ordered := int(math.Ceil(impliedReplicas(out) - 1e-9))
 		if math.IsNaN(impliedReplicas(out)) || ordered < 1 {
 			ordered = 1
@@ -170,6 +191,14 @@ func runProbe(t *testing.T, pc probeCase) probeResult {
 		}
 		res.trace = append(res.trace, len(pods))
 		res.peak = max(res.peak, len(pods))
+		if len(pods) < needAt(lambda) {
+			if underFrom.IsZero() {
+				underFrom = now
+			}
+			res.underFor = max(res.underFor, rig.clock.Sub(underFrom))
+		} else {
+			underFrom = time.Time{}
+		}
 		if float64(len(pods)) > bound {
 			if overFrom.IsZero() {
 				overFrom = rig.clock
@@ -194,6 +223,9 @@ func (r probeResult) verdict() string {
 			r.final, r.need, bound, r.overSince)
 	case r.final < r.need-1:
 		return fmt.Sprintf("under-ordered: %d replicas against a need of %d", r.final, r.need)
+	case r.underFor > probeUnderFor:
+		return fmt.Sprintf("under-ordered mid-run: below need for %s, over the %s a start and a settle take",
+			r.underFor, probeUnderFor)
 	}
 	return ""
 }
@@ -216,9 +248,10 @@ func TestClosedLoopProbe_ALoadStepOnEqualReplicasSettlesAtNeed(t *testing.T) {
 		name: "step", pods: []float64{1, 1}, addedMu: 1, meanMu: 1,
 		lambda: stepTo(1.2, 6, 2*time.Minute), horizon: 40 * time.Minute,
 	})
-	t.Logf("need %d, final %d, peak %d; fleet by cycle %v", r.need, r.final, r.peak, r.trace)
+	t.Logf("need %d, final %d, peak %d, longest under need %s; fleet by cycle %v", r.need, r.final, r.peak, r.underFor, r.trace)
 	require.Empty(t, r.verdict())
-	require.Positive(t, r.peak, "premise: the loop ran")
+	require.Positive(t, r.muCounts[muReasonSampled], "premise: the step saturated the replicas and mu was measured")
+	require.Equal(t, learn.Source(domain.ServiceRateSourceMeasured), r.muSource, "premise: the floor priced the measured mu")
 }
 
 // #282 review round 3 (H1): one replica degraded to 0.3 of its siblings'
@@ -227,8 +260,9 @@ func TestClosedLoopProbe_ALoadStepOnEqualReplicasSettlesAtNeed(t *testing.T) {
 // never becomes mu, and the fleet settles at need after the recovery.
 func TestClosedLoopProbe_OneSlowReplicaUnderTheServedBoundDoesNotSealTheFleet(t *testing.T) {
 	r := runProbe(t, slowReplicaCase(0.3))
-	t.Logf("need %d, final %d, peak %d; fleet by cycle %v", r.need, r.final, r.peak, r.trace)
+	t.Logf("need %d, final %d, peak %d, longest under need %s; fleet by cycle %v", r.need, r.final, r.peak, r.underFor, r.trace)
 	require.Empty(t, r.verdict())
+	require.Positive(t, r.muCounts[muReasonRefusedUnderServed], "premise: the served bound refused the slow replica's rate")
 }
 
 // The known-failing case, and the probe's negative control: the same slow
