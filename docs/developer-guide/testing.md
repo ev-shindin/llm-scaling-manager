@@ -691,7 +691,10 @@ A PR with replay switches holds its runs in `TestGoldens_TheSwitchRuns`
 commit's goldens (an output a switch names, by the base file's digest),
 each switch alone moves only the outputs it names, and all on is the
 committed goldens. Add a switch and its named outputs there; delete the row
-with the seam.
+with the seam. A switch that moves no committed golden is invisible to the
+runs, so it names the unit tests that hold it (`heldBy`, checked to exist):
+`k2-reads-the-settle-tracker` is held by `settle_view_test.go`
+(`TestSettleView_TheTrackerSwitch*`), not by the goldens.
 
 Run `make learner-goldens` only when your PR names the change: it rewrites
 every output file from a replay at your commit. Never edit a golden by hand.

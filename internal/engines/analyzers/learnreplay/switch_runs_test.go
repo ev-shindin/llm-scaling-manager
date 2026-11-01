@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -35,6 +36,46 @@ var replaySwitches = map[string][]string{
 	saturation.SwitchK2WaitsAfterRestart: {
 		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
 	},
+}
+
+// heldBy is, for a switch that names no output, the unit tests that hold it:
+// no committed golden moves under it, so the runs below see nothing of it,
+// and a switch whose off path were dead would pass them. Each test named
+// must exist (by its func declaration, in the package directory given).
+var heldBy = map[string][]heldTest{
+	saturation.SwitchK2ReadsSettle: {
+		{"../saturation", "TestSettleView_TheTrackerSwitchMovesTheAbsenceRule"},
+		{"../saturation", "TestSettleView_TheTrackerSwitchKeepsTheSettleThroughAZeroReadyTime"},
+	},
+}
+
+// heldTest is a test function, and the package directory that declares it.
+type heldTest struct{ dir, name string }
+
+// A switch that names no golden output names the unit tests that hold it,
+// and they exist.
+func TestGoldens_ASwitchNoGoldenMovesIsHeldByItsTests(t *testing.T) {
+	for name, outs := range replaySwitches {
+		if len(outs) > 0 {
+			continue
+		}
+		tests := heldBy[name]
+		require.NotEmpty(t, tests, "%s moves no golden: name the unit tests that hold it in heldBy", name)
+		for _, h := range tests {
+			files, err := filepath.Glob(filepath.Join(h.dir, "*_test.go"))
+			require.NoError(t, err)
+			found := false
+			for _, f := range files {
+				b, err := os.ReadFile(f)
+				require.NoError(t, err)
+				if strings.Contains(string(b), "func "+h.name+"(t *testing.T)") {
+					found = true
+					break
+				}
+			}
+			require.True(t, found, "%s is held by %s, which %s does not declare", name, h.name, h.dir)
+		}
+	}
 }
 
 // switchBase is the sha256 of each output a switch names, as the base

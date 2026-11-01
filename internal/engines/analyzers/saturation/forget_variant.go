@@ -65,9 +65,8 @@ func (a *SaturationAnalyzer) forgetVariant(namespace, modelID, variant, token st
 	// forgets its own keys and reports them forgotten. A learner not on the
 	// list yet is forgotten below, with the rest of the variant's state.
 	n := 0
-	for _, name := range learn.Learners() {
-		dropped, _ := a.forgetLearnerLocked(name, namespace, modelID, variant, learn.ByOperator)
-		n += dropped
+	for _, learner := range learn.Learners() {
+		n += a.forgetLearnerLocked(learner, namespace, modelID, variant, learn.ByOperator)
 	}
 	n += a.dropVariantLocked(namespace, modelID, variant)
 	// The maps with their own rule (scopeOwnRule). k2's lower bounds were

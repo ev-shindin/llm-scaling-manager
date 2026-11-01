@@ -180,12 +180,12 @@ func TestK2Learner_ForgetReachesEveryLearnerOnTheList(t *testing.T) {
 	a := NewSaturationAnalyzer(capacity.NewStore())
 	a.mu.Lock()
 	for _, name := range learn.Learners() {
-		_, reached := a.forgetLearnerLocked(name, "ns", "m", "v", learn.ByOperator)
-		assert.True(t, reached, "the learner %q is on learn's list and the analyzer does not forget it", name)
+		assert.NotPanics(t, func() { a.forgetLearnerLocked(name, "ns", "m", "v", learn.ByOperator) },
+			"the learner %q is on learn's list and the analyzer does not forget it", name)
 	}
-	_, reached := a.forgetLearnerLocked("no-such-learner", "ns", "m", "v", learn.ByOperator)
+	assert.Panics(t, func() { a.forgetLearnerLocked("no-such-learner", "ns", "m", "v", learn.ByOperator) },
+		"negative control: a name the analyzer does not know is not reached")
 	a.mu.Unlock()
-	assert.False(t, reached, "negative control: a name the analyzer does not know is not reached")
 
 	r := newRestartRig(t, restartT0)
 	row := func() []domain.ReplicaMetrics {
@@ -240,6 +240,8 @@ func TestK2Learner_TheSweepLetsAGoneModelsLearnerStateGo(t *testing.T) {
 	require.NotEmpty(t, a.learnerReports)
 	require.NotEmpty(t, a.learnerStarted)
 	require.NotEmpty(t, a.ownSettled)
+	// A cycle an Analyze left part way.
+	a.k2CycleLocked("test-ns|test-model")
 	a.mu.Unlock()
 
 	now = now.Add(a.Horizons().BucketRetention + time.Hour)
@@ -250,6 +252,7 @@ func TestK2Learner_TheSweepLetsAGoneModelsLearnerStateGo(t *testing.T) {
 	assert.Empty(t, a.learnerReports)
 	assert.Empty(t, a.learnerStarted)
 	assert.Empty(t, a.ownSettled)
+	assert.Empty(t, a.k2Cycles, "a cycle left part way")
 	assert.Empty(t, a.k2Forgotten, "the eviction report of a model that will not report again")
 	a.mu.Unlock()
 	_, ok := a.ownSettle.Replica(settleModel("test-ns", "test-model"), fullRowKey("p0", "v"))

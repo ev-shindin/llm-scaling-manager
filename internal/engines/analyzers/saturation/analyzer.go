@@ -628,8 +628,10 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 			evicted.K2History++
 			// k2 forgets the key itself, unused past its horizon: its
 			// variant's next report says so.
-			if f := strings.Split(key, "|"); len(f) >= 3 {
-				a.noteForgottenLocked(f[0], f[2], f[1], []string{key}, learn.ByEvicted)
+			if name, model, ok := variantOfKey(key); ok {
+				if ns, variant, ok := strings.Cut(name, "/"); ok {
+					a.noteForgottenLocked(ns, model, variant, []string{key}, learn.ByEvicted)
+				}
 			}
 		}
 	}

@@ -201,13 +201,19 @@ really got slower moves its estimate.
 One line per model, on the analyzer's first cycle for it: after the
 controller starts, or when a model first appears (or comes back after being
 unseen long enough to be forgotten). It says what the learners begin with:
-`restoredKeys` (learned keys restored from the snapshot, per learner),
-`coldVariants` (variants with none), `oldestAdmittedAgeSeconds` (the oldest
-restored key's last admitted reading, `-1` when none) and `settleUntil`: when
-the wait every replica starts after a controller restart ends, at the latest;
-and `reason`. Until then a
-saturated replica's reading is `P1-obs-unsettled`, and with the snapshot off a
-variant with no k2 is priced at k1.
+
+- `restoredKeys`: learned keys restored from the snapshot, per learner.
+- `coldVariants`: variants with none.
+- `oldestAdmittedAgeSeconds`: the oldest restored key's last admitted
+  reading, `-1` when none.
+- `settleUntil`: when the wait every replica starts ends, at the latest.
+  Until then a saturated replica's reading is `P1-obs-unsettled`, and with
+  the snapshot off a variant with no k2 is priced at k1.
+- `reason`: one of two. "...each replica waits its settle, k2 a rate window
+  from the controller's first sight of it, so by settleUntil at the latest"
+  is the default. "...replicas already Ready keep their settle" appears only
+  when a replay turns the controller-restart wait off; then `settleUntil` is
+  the cycle itself.
 
 ```text
 2026-11-01T09:00:00.020Z  INFO  learner-start  {"modelID": "my-model",

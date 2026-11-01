@@ -838,6 +838,7 @@ flow-control
 for
 forbidden
 force
+forget
 forgets
 forgotten
 forgotten|
@@ -1112,6 +1113,7 @@ leader-elect
 leader-election-lease-duration
 leader-election-renew-deadline
 leader-election-retry-period
+learn.Learners
 learned
 learned-state
 learner
