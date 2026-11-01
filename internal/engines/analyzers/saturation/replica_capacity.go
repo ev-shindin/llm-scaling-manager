@@ -195,10 +195,11 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	a.throughputWindowUnderLocked(throughputKey, args)
 	ref := a.serviceRateOnRecordLocked(throughputKey)
 	k2Ref := a.k2OnRecordLocked(historyKey)
-	if k2Ref <= 0 {
-		// A window's first readings held for a later cycle's (k2_confirm.go)
-		// are what is on record for the reading that follows them.
-		k2Ref = a.heldOnRecordLocked(historyKey, args)
+	// A window's first readings held for a later cycle's (k2_confirm.go) are
+	// what is on record for the reading that follows them, ahead of a window
+	// past the episode gap, which still holds its old figure.
+	if held := a.heldOnRecordLocked(historyKey, args, a.now()); held > 0 {
+		k2Ref = held
 	}
 	a.mu.Unlock()
 	if ref <= 0 && derived.ok {
@@ -965,7 +966,13 @@ func (a *SaturationAnalyzer) k2Chain(
 			fresh := !ok || ra.WriteGapExceedsAt(now, a.horizons.EpisodeGap)
 			// The first reading of a window waits for a later cycle's
 			// (k2_confirm.go).
-			held, confirmed := a.k2HoldFirstLocked(historyKey, k2Observed, fresh, args, now)
+			held, confirmed, dropped := a.k2HoldFirstLocked(historyKey, k2Observed, fresh, args, now)
+			if len(dropped.readings) > 0 {
+				logger.V(perReplicaLogLevel).Info("k2-held-dropped",
+					"modelID", modelID, "namespace", namespace, "variant", variantName, "historyKey", historyKey,
+					"readings", dropped.readings, "heldAt", dropped.at.UTC().Format(time.RFC3339),
+					"reason", "held under engine arguments the variant no longer runs, or past the episode gap: replaced by this reading, not written")
+			}
 			if held {
 				a.mu.Unlock()
 				*refused = k2ReasonObsUnconfirmed

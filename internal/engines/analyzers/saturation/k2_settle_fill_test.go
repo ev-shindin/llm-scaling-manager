@@ -72,9 +72,13 @@ func readFill(t *testing.T, name string) []fillRow {
 // The first admitted reading is held for the next (k2_confirm.go), so the
 // first figure is recorded a cycle later, and is the mean of the first two
 // admitted readings: the figure the window held a cycle after its first write
-// before the hold. On the long shapes both sit on the fill's peak, 7-10 %
-// over the steady figure (the first alone was within 6 %); the window comes
-// down to it as it fills.
+// before the hold. On the long shapes both sit on the fill's peak: the first
+// figure was 1.042 and 1.053 of the steady one before the hold, and is 1.075
+// and 1.095 with it -- the hold's cost on a long fill, a k2 too high for the
+// cycles until the window comes down to the steady figure. The long shapes'
+// limit is 1.10 for that: the hold may cost this much and no more. (The 6000
+// trace clears it by half a percent; a change that moves it past 1.10 is a
+// change to the hold's cost, to be measured, not a limit to raise.)
 func TestK2Settle_ASlowFillIsLearnedFilled(t *testing.T) {
 	for _, c := range []struct {
 		trace     string

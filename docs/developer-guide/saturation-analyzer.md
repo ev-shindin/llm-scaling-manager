@@ -284,10 +284,14 @@ drops them. While held:
   chain (P2/P3/P4 can be k1, or a window from before the gap), and records
   nothing;
 - the settle test reads the held readings' mean as `k2OnRecord`
-  (`heldOnRecordLocked`), so the next reading is judged as against a window of
+  (`heldOnRecordLocked`), ahead of a window past the episode gap that still
+  holds its old figure, so the next reading is judged as against a window of
   them;
 - the mu written beside a `P1-obs` reading is judged as usual.
 
+Held readings dropped for other arguments or the gap log `k2-held-dropped` at
+`--v=3`. They are not in the learned-state snapshot: a controller restart
+during the held cycle drops them, and the next admitted reading is held again.
 The replay switch `SwitchK2FirstReadingWaits` turns the hold off.
 
 ### Which bound applies

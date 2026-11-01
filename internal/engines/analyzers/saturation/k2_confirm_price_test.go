@@ -78,3 +78,23 @@ func TestK2Hold_TheSettleTestReadsTheHeldReadingsAsOnRecord(t *testing.T) {
 	assert.Equal(t, []string{k2ReasonObsUnconfirmed, "P1-obs"}, prios)
 	assert.Equal(t, int64(235_000), k2s[1], "both readings are written")
 }
+
+// After the episode gap the old window still holds its figure, but the
+// reading that follows a held one is judged against the hold: a suspect
+// reading (a queue deeper than its batch, and 28 % under its reading a minute
+// earlier, so not settled) holding 0.72 of the held figure and
+// completing at the rate on record passes the rate test, where against the
+// old 90 000 it would be refused.
+func TestK2Hold_AfterTheGapTheSettleTestReadsTheHoldNotTheOldWindow(t *testing.T) {
+	cycles := make([]settleCycle, 0, 8)
+	cycles = append(cycles, settleCycle{0, 90_000, 30, 3000}, settleCycle{15 * time.Second, 90_000, 30, 3000})
+	gap := 48 * time.Hour
+	for i := range 5 {
+		cycles = append(cycles, settleCycle{gap + time.Duration(i)*15*time.Second, 10_000, 5, 3000})
+	}
+	cycles = append(cycles, settleCycle{gap + 75*time.Second, 7_200, 160, 3000}) // 240 000 waiting behind 7 200: 28 % under a minute ago, not settled
+	prios, _ := runSettleCycles(t, cycles)
+	n := len(prios)
+	require.Equal(t, k2ReasonObsUnconfirmed, prios[n-2], "premise: the cycle before is held; got %v", prios)
+	assert.Equal(t, "P1-obs", prios[n-1], "judged against the held 10 000, not the old 90 000")
+}

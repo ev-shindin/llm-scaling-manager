@@ -33,12 +33,18 @@ import (
 // no longer runs is dropped (window_args.go says why a window is per
 // arguments).
 //
-// The held cycle is priced at the lower of the reading and what the chain
-// gives (unadmittedPrice): the chain past a held reading may be k1, or a
+// The held cycle is priced no higher than the reading: at the lower of the
+// reading and what the chain gives (unadmittedPrice): the chain past a held reading may be k1, or a
 // window from before the episode gap, far above what the replica holds while
-// it is full. And the settle test reads the held readings as the k2 on
-// record (k2OnRecordLocked), so the reading that follows them is judged as it
-// would be against a window of them.
+// it is full. And the settle test reads usable held readings as the k2 on
+// record, ahead of any window (heldOnRecordLocked): a window that is fresh
+// because of the episode gap still holds its old figure, and the reading
+// that follows the hold is judged against the hold, as it would be against a
+// window of it.
+//
+// Held readings are not in the learned-state snapshot: a controller restart
+// during the held cycle drops them, and the variant's next admitted reading
+// is held again, one more cycle.
 //
 // Nothing else waits. The held reading passed every admission test a P1-obs
 // one does, so the mu beside it is judged as on any P1-obs cycle: the hold is
@@ -79,32 +85,44 @@ type k2PendingReadings struct {
 // reading, and returns false with the readings held from an earlier cycle
 // when this one confirms them: the caller writes them, then its own. Readings
 // held past the episode gap, or under other arguments, are replaced, not
-// written. Callers hold a.mu.
-func (a *SaturationAnalyzer) k2HoldFirstLocked(key string, reading int64, fresh bool, args string, now time.Time) (held bool, confirmed k2PendingReadings) {
+// written, and returned as dropped for the caller to log. Callers hold a.mu.
+func (a *SaturationAnalyzer) k2HoldFirstLocked(key string, reading int64, fresh bool, args string, now time.Time) (held bool, confirmed, dropped k2PendingReadings) {
 	if !a.k2FirstReadingWaits || !fresh {
 		delete(a.k2Pending, key)
-		return false, k2PendingReadings{}
+		return false, k2PendingReadings{}, k2PendingReadings{}
 	}
 	p, ok := a.k2Pending[key]
-	usable := ok && p.args == args && now.Sub(p.at) <= a.horizons.EpisodeGap
+	usable := ok && p.usable(args, now, a.horizons.EpisodeGap)
 	if usable && p.cycle != a.analyzeSeq {
 		delete(a.k2Pending, key)
-		return false, *p
+		return false, *p, k2PendingReadings{}
 	}
 	if !usable {
+		if ok {
+			dropped = *p
+		}
 		p = &k2PendingReadings{at: now, cycle: a.analyzeSeq, args: args}
 		a.k2Pending[key] = p
 	}
 	p.readings = append(p.readings, reading)
-	return true, k2PendingReadings{}
+	return true, k2PendingReadings{}, dropped
 }
 
-// heldOnRecordLocked is the mean of the readings held for key under args,
-// zero when none are: the k2 on record for the settle test while a window's
-// first readings are held. Callers hold a.mu.
-func (a *SaturationAnalyzer) heldOnRecordLocked(key, args string) float64 {
+// usable reports whether readings held at p.at under p.args may still start
+// the window of a reading under args at now: the same arguments, within the
+// episode gap.
+func (p *k2PendingReadings) usable(args string, now time.Time, gap time.Duration) bool {
+	return p.args == args && now.Sub(p.at) <= gap
+}
+
+// heldOnRecordLocked is the mean of the readings held for key from an earlier
+// cycle, usable under args at now, zero when there are none: the k2 on record
+// for the settle test while a window's first readings are held. A sibling's
+// reading held this cycle is not on record for this cycle's readings.
+// Callers hold a.mu.
+func (a *SaturationAnalyzer) heldOnRecordLocked(key, args string, now time.Time) float64 {
 	p, ok := a.k2Pending[key]
-	if !ok || p.args != args || len(p.readings) == 0 {
+	if !ok || p.cycle == a.analyzeSeq || !p.usable(args, now, a.horizons.EpisodeGap) || len(p.readings) == 0 {
 		return 0
 	}
 	sum := 0.0

@@ -768,6 +768,7 @@ env.VLLM_ALL2ALL_BACKEND
 environment
 ep
 ep_size
+episode
 episodeGap
 eplb_config
 eppQueueBytes
@@ -871,6 +872,7 @@ fromLastConstraintsAge
 frozen
 full
 future
+gap
 gate
 gates
 generated
@@ -927,6 +929,7 @@ head
 headroom
 health-probe-bind-address
 held
+heldAt
 heldAtFleet
 heldSince
 heldUntil
@@ -1054,6 +1057,7 @@ k2
 k2-compute
 k2-decision
 k2-first-reading-waits-for-a-second
+k2-held-dropped
 k2-key-bucket-held
 k2-key-bucket-moved
 k2-obs-admitted

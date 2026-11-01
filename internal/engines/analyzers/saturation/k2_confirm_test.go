@@ -67,9 +67,20 @@ func (r *holdRig) cycle(step time.Duration) {
 }
 
 func (r *holdRig) hold(key string, reading int64, args string) (bool, k2PendingReadings) {
+	held, confirmed, _ := r.holdDropping(key, reading, args)
+	return held, confirmed
+}
+
+func (r *holdRig) holdDropping(key string, reading int64, args string) (bool, k2PendingReadings, k2PendingReadings) {
 	r.a.mu.Lock()
 	defer r.a.mu.Unlock()
 	return r.a.k2HoldFirstLocked(key, reading, true, args, r.now)
+}
+
+func (r *holdRig) onRecord(key, args string) float64 {
+	r.a.mu.Lock()
+	defer r.a.mu.Unlock()
+	return r.a.heldOnRecordLocked(key, args, r.now)
 }
 
 func (r *holdRig) pending(key string) []int64 {
@@ -106,15 +117,21 @@ func TestK2Hold_ReadingsPastTheGapOrUnderOtherArgumentsAreReplaced(t *testing.T)
 	r.cycle(0)
 	_, _ = r.hold("k", 10_000, "args-a")
 	r.cycle(propCycle)
-	held, confirmed := r.hold("k", 40_000, "args-b")
+	assert.InDelta(t, 10_000, r.onRecord("k", "args-a"), 0.5, "on record for a reading under the same arguments")
+	assert.Zero(t, r.onRecord("k", "args-b"), "and not for one under other arguments")
+	held, confirmed, dropped := r.holdDropping("k", 40_000, "args-b")
 	assert.True(t, held, "a reading under other arguments does not confirm")
 	assert.Empty(t, confirmed.readings)
-	assert.Equal(t, []int64{40_000}, r.pending("k"), "the reading held under args-a is dropped")
+	assert.Equal(t, []int64{10_000}, dropped.readings, "the reading held under args-a is dropped, for the caller to log")
+	assert.Equal(t, []int64{40_000}, r.pending("k"))
 
 	r.cycle(r.a.horizons.EpisodeGap + time.Minute)
-	held, _ = r.hold("k", 20_000, "args-b")
+	assert.Zero(t, r.onRecord("k", "args-b"), "past the episode gap nothing held is on record")
+	held, _, dropped = r.holdDropping("k", 20_000, "args-b")
 	assert.True(t, held, "past the episode gap nothing confirms")
+	assert.Equal(t, []int64{40_000}, dropped.readings)
 	assert.Equal(t, []int64{20_000}, r.pending("k"))
+	assert.Zero(t, r.onRecord("k", "args-b"), "a reading held this cycle is not on record for this cycle's")
 }
 
 // A window that is not fresh takes the reading at once, and drops anything
@@ -124,7 +141,7 @@ func TestK2Hold_AWindowOnRecordIsNotHeld(t *testing.T) {
 	r.cycle(0)
 	_, _ = r.hold("k", 10_000, "")
 	r.a.mu.Lock()
-	held, _ := r.a.k2HoldFirstLocked("k", 30_000, false, "", r.now)
+	held, _, _ := r.a.k2HoldFirstLocked("k", 30_000, false, "", r.now)
 	_, kept := r.a.k2Pending["k"]
 	r.a.mu.Unlock()
 	assert.False(t, held)
@@ -154,4 +171,22 @@ func TestK2Hold_TheSweepAndAForgetDropHeldReadings(t *testing.T) {
 	r.a.forgetK2Locked("ns", "m", "v", learn.ByOperator)
 	r.a.mu.Unlock()
 	assert.Empty(t, r.pending(key), "a forget drops it")
+}
+
+// With SwitchK2FirstReadingWaits off, a window's first reading is written
+// and prices at once, as before the hold.
+func TestK2Hold_TheSwitchOffWritesTheFirstReadingAtOnce(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchK2FirstReadingWaits: on}))
+		_, err := a.Analyze(context.Background(), makeAnalyzerInput(
+			[]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 4000, 16000, 6, 100, 50)},
+			[]domain.VariantReplicaState{{VariantName: "variant-a", AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1}}))
+		require.NoError(t, err)
+		want := 1
+		if on {
+			want = 0
+		}
+		assert.Equal(t, want, k2Windows(a), "switch on=%v: windows written by the first saturated cycle", on)
+	}
 }
