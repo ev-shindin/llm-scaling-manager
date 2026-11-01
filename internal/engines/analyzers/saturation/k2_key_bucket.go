@@ -116,6 +116,10 @@ type k2KeyMemo struct {
 	length float64
 	// left is the length the keys were built from before the bucket last
 	// moved, 0 before the first move: its bucket is the one the keys left.
+	// It does not expire: it stands until the next move, so a key whose new
+	// window is later swept may be carried from a bucket left hours ago.
+	// The carry is lower only and borrowed (carriedThroughput), so that is
+	// never the risky side.
 	left float64
 	// smoothed is the output length smoothed over K2KeyBucketSmoothing, as
 	// of at; n counts the readings in it.
@@ -282,9 +286,32 @@ const SwitchMuSwapFreeze = "mu-swap-freeze"
 // So while a swap is pending the window is frozen: its readings are not
 // written, and the figure it holds counts as borrowed. The derived mu prices
 // instead where there is one (useDerived), and the floor may hold the fleet
-// on the window but not grow it. The keys keep one bucket. The cost: up to
-// K2KeyBucketDwell on the derived figure at a real swap, and a cycle of no
-// write when noise alone reaches the swap line.
+// on the window but not grow it. The keys keep one bucket. Prefill is never
+// frozen: its key has no output bucket (prefillOutputBucket), so an output
+// swap leaves it naming its own window.
+//
+// The cost: up to K2KeyBucketDwell on the derived figure at a real swap, and
+// the same under noise, which is correlated over minutes, so an excursion
+// past the swap line can last the whole dwell. Measured on k2KeyMemo.note
+// over 50 seeds of 480 cycles at 15 s (noise with a 0.9 one-cycle
+// correlation): at 6 % noise around 530 tokens no cycle is frozen; at 10 %,
+// 0.95 % of cycles; at 15 %, 5.4 % (6.4 % around 490, 3.9 % around 110, 2.9 %
+// around 1400), the longest run the 8 cycles of the dwell. An excursion that
+// lasts the dwell lands a swap on noise -- 2 in 50 runs at 10 %, 36 at 15 %
+// around 530 -- and moves the throughput key with the k2 key.
+//
+// Not covered: a move by the margin. A length past the margin but short of
+// the swap line (400-485 tokens out of "long") moves the key only once the
+// smoothed length crosses the margin: 5 min 15 s for 530 -> 420, 13 min 45 s
+// for 530 -> 470. Until then the shorter shape's readings, about 1.26x the
+// requests/s at 420, are written into "long" at full authority. The
+// tracker-keyed key moved at once on a shift 20 % off its anchor, and never
+// on a smaller one.
+//
+// Nor is k2's settle test: k2Unsettled reads the frozen window as its
+// throughput reference (serviceRateOnRecordLocked) at full weight, as it did
+// before, so on a swap to shorter outputs a reading's rate is compared with
+// the bucket being left. That is the k2 window's own hold (#396).
 func muSwapFrozen(r throughputReading, pending bool) throughputReading {
 	if pending && r.rate > 0 {
 		r.borrowed = true

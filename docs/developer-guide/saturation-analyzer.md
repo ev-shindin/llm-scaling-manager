@@ -953,11 +953,44 @@ cycle (`TestMuKeyBucket_TheKeysShareABucket`). The switch is
   window takes no writes (counted as `swap-pending` in the mu learner's
   report) and its figure counts as borrowed: the derived mu prices where there
   is one, and the floor may hold the fleet on the window but not grow it
-  (`TestMuKeyBucket_APendingSwapFreezesTheWindow`). The cost is up to
-  `K2KeyBucketDwell` (2 minutes) on the derived figure at a real swap, and a
-  cycle with no write when noise alone reaches the swap line. The shape-change
-  hold settles two spaced samples after the swap lands, so it lasts the dwell
-  longer than it did. The switch is `SwitchMuSwapFreeze`.
+  (`TestMuKeyBucket_APendingSwapFreezesTheWindow`). Prefill is never frozen:
+  its key has no output bucket
+  (`TestMuKeyBucket_APendingSwapLeavesPrefillWriting`). The switch is
+  `SwitchMuSwapFreeze`.
+- **The freeze's cost.** Up to `K2KeyBucketDwell` (2 minutes) on the derived
+  figure at a real swap. Under noise the same: the noise is correlated over
+  minutes, so an excursion past the swap line can last the whole dwell, and
+  one that lasts it lands a swap on noise, which now moves the throughput key
+  too. Measured on `k2KeyMemo.note`, 50 seeds of 480 cycles at 15 s, noise
+  with a 0.9 one-cycle correlation:
+
+  | Fleet | Noise | Cycles frozen | Longest freeze | Swaps landed on noise |
+  | --- | --- | --- | --- | --- |
+  | long, 530 tokens | 6 % | 0 % | none | 0 |
+  | long, 530 tokens | 10 % | 0.95 % | 8 cycles | 2 |
+  | long, 530 tokens | 15 % | 5.4 % | 8 cycles | 36 |
+  | long, 490 tokens | 10 % | 1.5 % | 8 cycles | not measured |
+  | long, 490 tokens | 15 % | 6.4 % | 8 cycles | 41 |
+  | medium, 110 tokens | 15 % | 3.9 % | 8 cycles | 24 |
+  | long, 1400 tokens | 15 % | 2.9 % | 8 cycles | 14 |
+
+  After a swap more than 20 % past a boundary, the shape-change hold settles
+  two spaced samples after the swap lands, so it lasts the dwell longer than
+  it did. A move by the margin is not affected.
+- **Not covered: a move by the margin.** A length past the margin but short
+  of the swap line (400-485 tokens out of `long`) moves the key only once the
+  smoothed length crosses the margin: 5 min 15 s for 530 -> 420, 13 min 45 s
+  for 530 -> 470. Until then the shorter shape's readings, about 1.26x the
+  requests/s at 420, go into `long` at full authority, and raise its median
+  for when the fleet returns. The tracker-keyed key moved at once on a shift
+  20 % off its anchor (530 -> 420 is 21 %), and never on a smaller one, so
+  this is a regression only for a shift of 20-24 % that stays short of the
+  swap line. Freezing on this cycle's length past the margin instead would
+  freeze 8.6 % of cycles at 6 % noise around 530 (runs up to 26 cycles) and
+  22-33 % at 10-15 %.
+- **k2's settle test** still reads the frozen window as its throughput
+  reference (`k2Unsettled`, `serviceRateOnRecordLocked`), at full weight, as
+  before: that is the k2 window's own hold.
 - **A moved key is carried lower only** (`carriedThroughput`). When the band
   moves the throughput key to a bucket with no window, it borrows the nearest
   neighbour as before (`nearestSaturatedThroughput`, the shorter bucket on a

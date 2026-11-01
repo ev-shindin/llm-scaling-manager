@@ -189,6 +189,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	keyInput := throughputKeyInput(role, shapeKeyInput, keys.mu, fleetHitRate)
 	throughputKey := a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
 		keyInput, keys.mu, config.QueueLengthThreshold)
+	// Whether the key's window is frozen for a pending swap (muSwapFrozen).
+	// Never prefill's: its key has no output bucket (prefillOutputBucket),
+	// so an output swap leaves it naming the right window.
+	frozen := keys.muSwapPending && domain.CanonicalRole(role) != domain.RolePrefill
 	// The key's window before the band last moved it, where it moved (#415).
 	leftKey := ""
 	if keys.muLeft > 0 {
@@ -285,7 +289,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// key alone, as the shape-shift proposal scopes it. (throughputKey and
 	// keyInput are built above, before computeK2, whose settle test reads the
 	// rate on record under the key.)
-	if k2Priority == capacity.K2SrcObserved && adm.admitted() && keys.muSwapPending {
+	if k2Priority == capacity.K2SrcObserved && adm.admitted() && frozen {
 		// A swap is pending: the reading is the shape arriving, and the key
 		// still names the bucket it is leaving (muSwapFrozen).
 		a.noteMuCount(namespace, modelID, rm.VariantName, muReasonSwapPending)
@@ -362,7 +366,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		}
 	}
 	reading := muSwapFrozen(a.carriedThroughput(throughputKey, leftKey, args,
-		a.saturatedThroughputReadingUnder(throughputKey, args, adm.serving())), keys.muSwapPending)
+		a.saturatedThroughputReadingUnder(throughputKey, args, adm.serving())), frozen)
 	saturatedThroughput, throughputBucket := reading.rate, reading.bucket
 	// A derived figure prices the shape the fleet has NOT measured -- that is
 	// the whole of its job. Where the fleet HAS measured this shape, under this

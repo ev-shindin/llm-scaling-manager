@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 )
 
 // The idle band and the k2 key's bucket band (#396), each with its replay
@@ -409,6 +411,8 @@ type swapCycle struct {
 	pending bool
 	long    []float64
 	source  string
+	// swapPending is the mu learner's swap-pending count on the cycle.
+	swapPending int64
 }
 
 func runSwap(t *testing.T, freeze bool) (before []float64, cycles []swapCycle) {
@@ -461,7 +465,13 @@ func runSwap(t *testing.T, freeze bool) (before []float64, cycles []swapCycle) {
 		a.mu.Lock()
 		pending := !a.fleetShape["test-ns|test-model"].k2Key.swapSince.IsZero()
 		a.mu.Unlock()
-		cycles = append(cycles, swapCycle{pending: pending, long: readings(), source: src})
+		var counted int64
+		for _, r := range a.LearnerReports()["test-ns|test-model"] {
+			if r.Learner == learn.Mu {
+				counted += r.Counts[muReasonSwapPending]
+			}
+		}
+		cycles = append(cycles, swapCycle{pending: pending, long: readings(), source: src, swapPending: counted})
 	}
 	return before, cycles
 }
@@ -482,6 +492,7 @@ func TestMuKeyBucket_APendingSwapFreezesTheWindow(t *testing.T) {
 		pending++
 		assert.Equal(t, before, c.long, "cycle %d, swap pending: the long window was written", i)
 		assert.NotEqual(t, domain.ServiceRateSourceMeasured, c.source, "cycle %d, swap pending: the old bucket's mu priced at full authority", i)
+		assert.Equal(t, int64(1), c.swapPending, "cycle %d, swap pending: the refused write is counted", i)
 	}
 	require.Positive(t, pending, "no cycle had a swap pending: the test did not reach the freeze")
 	assert.False(t, cycles[len(cycles)-1].pending, "the swap never landed")
@@ -495,4 +506,159 @@ func TestMuKeyBucket_APendingSwapFreezesTheWindow(t *testing.T) {
 		}
 	}
 	assert.True(t, wrote && measured, "freeze off: the pending swap should write the long window (%v) and price it as measured (%v); the test cannot see the switch", wrote, measured)
+}
+
+// pdSwapStates is a P/D model: one decode variant and one prefill variant.
+var pdSwapStates = []domain.VariantReplicaState{
+	{VariantName: "decode-v", Role: domain.RoleDecode, AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1},
+	{VariantName: "prefill-v", Role: domain.RolePrefill, AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1},
+}
+
+// Prefill's throughput key has no output bucket (prefillOutputBucket), so an
+// output-only swap does not freeze it: while decode's swap is pending,
+// prefill's saturated readings still write its window and it is priced from
+// its own measurement.
+func TestMuKeyBucket_APendingSwapLeavesPrefillWriting(t *testing.T) {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	clock := propStart
+	a.now = func() time.Time { return clock }
+	prefillKey := ""
+	window := func() []float64 {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		for k, ra := range a.saturatedThroughput {
+			if strings.Contains(k, "|prefill-v|") {
+				prefillKey = k
+				return ra.Snapshot().Values
+			}
+		}
+		return nil
+	}
+	run := func(i int, out float64) string {
+		t.Helper()
+		d := makeReplicaMetrics("d0", "decode-v", 2000, 16000, 0, 1000, out)
+		d.RequestRate, d.GenerationTokenRate, d.Ready = 1, out, true
+		p := makeReplicaMetrics("p0", "prefill-v", 12000, 16000, 10, 1000, 1)
+		p.RequestRate, p.GenerationTokenRate, p.Ready = 4+0.01*float64(i), 4, true
+		res, err := a.Analyze(context.Background(), makeAnalyzerInput([]domain.ReplicaMetrics{d, p}, pdSwapStates))
+		require.NoError(t, err)
+		clock = clock.Add(ThroughputSampleSpacing + time.Second)
+		for _, vc := range res.VariantCapacities {
+			if vc.VariantName == "prefill-v" && vc.ServiceRate != nil {
+				return vc.ServiceRate.RateSource
+			}
+		}
+		return ""
+	}
+	for i := range 4 {
+		run(i, 530)
+	}
+	require.NotEmpty(t, window(), "precondition: prefill measured its mu")
+	pending, wrote := 0, 0
+	for i := 4; i < 8; i++ {
+		before := window()
+		src := run(i, 5500)
+		a.mu.Lock()
+		isPending := !a.fleetShape["test-ns|test-model"].k2Key.swapSince.IsZero()
+		a.mu.Unlock()
+		if !isPending {
+			continue
+		}
+		pending++
+		if !assert.ObjectsAreEqual(before, window()) {
+			wrote++
+		}
+		assert.Equal(t, domain.ServiceRateSourceMeasured, src, "cycle %d, decode's swap pending: prefill priced at less than its own measurement", i)
+	}
+	require.Positive(t, pending, "no cycle had a swap pending: the test did not reach the freeze")
+	assert.Equal(t, pending, wrote, "decode's swap pending: prefill's window %s took no reading", prefillKey)
+}
+
+// The carry is wired into pricing (computeReplicaCapacity): a variant
+// measured at 3 req/s in "long", whose "short" window holds 99, moves to
+// "medium" by a swap with no derived mu. The nearest neighbour, the shorter
+// on a tie, is "short"; priced through Analyze it is "long"'s 3, the lower.
+func TestMuKeyBucket_TheCarryPricesThroughAnalyze(t *testing.T) {
+	store := capacity.NewStore()
+	store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: mtParams(256, "vllm:v1")}, propStart)
+	a := NewSaturationAnalyzer(store)
+	clock := propStart
+	a.now = func() time.Time { return clock }
+	run := func(out, rate float64, queue int, tokens int64) *domain.ServiceRateSignal {
+		t.Helper()
+		rm := makeReplicaMetrics("pod-a", "variant-a", tokens, 16000, queue, 100, out)
+		rm.RequestRate, rm.GenerationTokenRate, rm.Ready = rate, rate*out, true
+		res, err := a.Analyze(context.Background(), makeAnalyzerInput([]domain.ReplicaMetrics{rm}, mtOneVariant))
+		require.NoError(t, err)
+		require.Len(t, res.VariantCapacities, 1)
+		clock = clock.Add(propCycle)
+		return res.VariantCapacities[0].ServiceRate
+	}
+	for range 12 {
+		run(530, 3, 6, 12000)
+	}
+	a.mu.Lock()
+	long := ""
+	for k := range a.saturatedThroughput {
+		if bucketOf(k) == "long" {
+			long = k
+		}
+	}
+	require.NotEmpty(t, long, "precondition: a long window")
+	prefix, _, suffix, _ := splitHistoryKey(long)
+	longMu := a.saturatedThroughput[long].Median()
+	a.mu.Unlock()
+	a.recordSaturatedThroughputFrom(prefix+"short"+suffix, "pod-a", 99)
+	var sr *domain.ServiceRateSignal
+	for range int(K2KeyBucketDwell/propCycle) + 3 {
+		sr = run(380, 1, 0, 2000)
+	}
+	a.mu.Lock()
+	keyBucket := classifyOutputLength(a.fleetShape["test-ns|test-model"].k2Key.length)
+	a.mu.Unlock()
+	require.Equal(t, "medium", keyBucket, "precondition: the band moved the key to medium")
+	require.NotNil(t, sr)
+	assert.Equal(t, longMu, sr.Rate, "priced from the bucket left, the lower, not short's 99")
+	assert.Equal(t, domain.ServiceRateSourceNeighbour, sr.RateSource)
+}
+
+// Lower only, where the bucket left is not the nearest neighbour: a key that
+// swapped from "long" to "short", with "medium" measured at 2 and "long" at 4,
+// keeps the neighbour's 2; the bucket left would raise it.
+func TestMuKeyBucket_TheCarryNeverRaisesTheNeighbour(t *testing.T) {
+	const prefix = "ns|v|m|H200|1|decode|ilong|"
+	short, medium, long := prefix+"short|q5", prefix+"medium|q5", prefix+"long|q5"
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	a.now = func() time.Time { return propStart }
+	a.recordSaturatedThroughputFrom(medium, "p", 2)
+	a.recordSaturatedThroughputFrom(long, "p", 4)
+	near := a.saturatedThroughputReadingUnder(short, "", true)
+	require.Equal(t, 2.0, near.rate, "precondition: the nearest neighbour is medium's")
+	got := a.carriedThroughput(short, long, "", near)
+	assert.Equal(t, near, got, "the bucket left is higher than the neighbour: the neighbour stands")
+}
+
+// A move by the margin, not only a swap, records the bucket left: 530 tokens
+// ("long") then 440 moves the smoothed length under 485 within minutes, and
+// left names "long".
+func TestMuKeyBucket_AMarginMoveRecordsTheBucketLeft(t *testing.T) {
+	var m k2KeyMemo
+	at := propStart
+	for range 40 {
+		m.note(530, at)
+		at = at.Add(propCycle)
+	}
+	moved := false
+	for range 80 {
+		_, mv := m.note(440, at)
+		at = at.Add(propCycle)
+		if mv.from > 0 {
+			require.False(t, mv.swap, "precondition: 440 is not past the swap line")
+			moved = true
+			break
+		}
+	}
+	require.True(t, moved, "the key never moved by the margin")
+	assert.Equal(t, "long", classifyOutputLength(m.left), "the bucket left")
+	assert.Equal(t, "medium", classifyOutputLength(m.length))
 }

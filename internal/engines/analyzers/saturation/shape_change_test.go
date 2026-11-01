@@ -696,8 +696,11 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		in.ArrivalRate = 5.68
 		_, err := analyzer.Analyze(ctx, in)
 		Expect(err).NotTo(HaveOccurred())
+		// Trivially held now: the swap is pending, so this cycle writes no
+		// sample at all (muSwapFrozen). The guard this spec is for -- one
+		// sample does not settle -- is asserted on the landing cycle below.
 		Expect(outstanding()).To(BeTrue(),
-			"one sample is the drain, not a measurement of the new shape")
+			"the declaring cycle does not settle the hold")
 
 		// The throughput key's band waits out K2KeyBucketDwell of the swap
 		// before it moves, and writes nothing while it waits (muSwapFrozen,

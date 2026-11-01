@@ -83,9 +83,11 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestMuKeyBucket_TheSwitchPicksTheLength"},
 		{"../saturation", "TestMuKeyBucket_TheKeysShareABucket"},
 		{"../saturation", "TestMuKeyBucket_AMovedKeyIsCarriedLowerOnly"},
+		{"../saturation", "TestMuKeyBucket_TheCarryPricesThroughAnalyze"},
 	},
 	saturation.SwitchMuSwapFreeze: {
 		{"../saturation", "TestMuKeyBucket_APendingSwapFreezesTheWindow"},
+		{"../saturation", "TestMuKeyBucket_APendingSwapLeavesPrefillWriting"},
 	},
 	saturation.SwitchK2ReadsSettle: {
 		{"../saturation", "TestSettleView_TheTrackerSwitchMovesTheAbsenceRule"},
