@@ -53,16 +53,19 @@ func settlePathNames() []string {
 }
 
 // requiredSettlePaths is the settle verdicts the goldens must keep
-// reaching: a join, and a warm-pool lend. The committed recordings reach a
-// restart and a rejoin too, but only through their synthetic generators
-// (rows whose Ready time moves every cycle, clocks that jump), so requiring
-// them would pin the generators, not the tracker; a rollout under a Pod's
-// own name is in no recording. The settle suite (internal/signals/settle)
-// covers all three until a cluster recording reaches them.
+// reaching: a join, a warm-pool lend, and a restart. This sum over every
+// golden is met by the in-process generators' restarts too; the real one,
+// a decode engine restarted under its own Pod name on a cluster, is pinned
+// per fixture by TestGoldens_PDRestartReplayRestartsForReal. The committed
+// recordings reach a rejoin only through their synthetic generators (clocks
+// that jump), so requiring it would pin the generators, not the tracker; a
+// rollout under a Pod's own name is in no recording. The settle suite
+// (internal/signals/settle) covers the rejoin and the rollout.
 func requiredSettlePaths() []string {
 	return []string{
 		settlePathPrefix + string(settle.Joined),
 		settlePathPrefix + string(settle.Lent),
+		settlePathPrefix + string(settle.Restarted),
 	}
 }
 

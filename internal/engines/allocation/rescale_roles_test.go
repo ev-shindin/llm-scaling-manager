@@ -117,11 +117,11 @@ func TestRescaleCountsOnlyACutARoleCanGive(t *testing.T) {
 	assert.Equal(t, 4, rescaleTargets(req, 20, 0)["d"], "decode cannot shed")
 }
 
-// TestRescaleRoundsMixedPodSizesPerRole: with more than one replica size in a
-// role the summed pass is skipped, as it made a larger target leave fewer
-// GPUs. Prefill holds one 8-GPU and one 4-GPU pod, decode two 8-GPU pods: a
-// target of 18 left 20 GPUs where 17 left 24.
-func TestRescaleRoundsMixedPodSizesPerRole(t *testing.T) {
+// TestRescaleMixedPodSizesStayMonotone: with more than one replica size the
+// cut is shed by an exact pod search, not a summed pass, which made a larger
+// target leave fewer GPUs. Prefill holds one 8-GPU and one 4-GPU pod, decode
+// two 8-GPU pods: summed, a target of 18 left 20 GPUs where 17 left 24.
+func TestRescaleMixedPodSizesStayMonotone(t *testing.T) {
 	req := pdWholeNodeRequest(2, 100, 100)
 	req.CompositeSignal.Result.VariantCapacities[0].ReplicaCount = 1
 	req.CompositeSignal.Result.VariantCapacities[0].PerReplicaCapacity = 200

@@ -213,7 +213,9 @@ sparse debits; `adopt` commits a clone's debits.
   (`ShadowOptimize` clears it: the quota-alone pass has no physical limiter);
   `Optimize` clears it when the pass ends, and drops the previous pass's
   `pass` when it starts. `decideV2` holds the share's promises on it first
-  (`ReservePromised`: the freest nodes, whole, as `shareFreeNodes` does).
+  (`ReservePromised`, from `decision.LatestSharePromisedHoles`): each hole on
+  the node it is on, and what has no known node, or more than its node shows
+  free, off the freest nodes, whole, as `shareFreeNodesAfter` does.
   `fairShareRolePickOn` caps a variant at the replicas `fits` on nodes (0 is
   scarcity), and `fitPairToBudget` runs `fitPairToNodes` after the pool fit:
   the roles are placed a replica at a time, the one furthest behind its share

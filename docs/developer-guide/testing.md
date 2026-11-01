@@ -357,6 +357,10 @@ that is empty without one:
   policy turns learned-state reuse on.
 - `learned-state.csv`, when the recording holds no learned-state export:
   the controller took no learned-state snapshot in the run.
+- `composite-holds.csv`, when the replay held no role (its
+  `composite-hold` count is 0), and `composite-release.csv`, when no other
+  analyzer's frame bounded a release (`composite-release-bound` is 0). Only
+  a golden whose recording carries engine events has these two.
 
 The `acceptance` golden is the in-process acceptance run. It covers little
 learning: twelve cycles of fixed synthetic rows. The start-time average, the
@@ -373,6 +377,34 @@ restarts under its own name. To write it again as a raw recording:
 ```bash
 LEARNREC_MUPATHS_OUT=$HOME/mu-paths.jsonl go test ./internal/engines/steadystate/ -run TestLearnerRecording_TheMuPathsRunReachesEveryLearnerPath -v
 ```
+
+The `pd-restart` golden is a cluster recording of a P/D model, made with
+EPP flow control off, so k2 reads each engine's own queue. The model is the
+P/D benchmark scenario: Qwen3-0.6B, one prefill and one decode pod to start.
+The load is open loop, 1000 tokens in and 1000 out, in steps of 4, 14, 40
+and 4 requests a second. At 40 the decode fleet is at its ceiling of four
+replicas, with hundreds of requests queued on each. Mid-run, one decode
+pod's engine is killed and its container restarts under the same pod name.
+It is the golden that reaches `k2-unsettled-window` (a load step k2 refuses
+to learn from), and the only one in which `settle-restarted` comes from a
+real restart rather than a generator;
+`TestGoldens_PDRestartReplayRestartsForReal` holds its own replay to that.
+
+It cannot be written again in-process. To take it again at a new commit:
+
+1. Stand up the scenario `hack/benchmark/scenarios/guides/pd-disaggregation.yaml`
+   with `MODEL_ID=Qwen/Qwen3-0.6B`. Set decode to 16 sequences at most, and
+   give the decode ScaledObject 1-4 replicas and the prefill one 1-2.
+2. Remove the `flowControl` feature gate and the `flowControl:` block from
+   the EPP's `EndpointPickerConfig`, then restart the EPP.
+3. Install the controller at that commit. Then turn the recorder on, as the
+   last change before any load, so that the controller start that follows
+   begins the recording.
+4. Run the load above. Partway through the 40 request-a-second step, run
+   `kill -9 -1` in the `vllm` container of one Ready decode pod: the
+   container restarts, and the Pod keeps its name and UID.
+5. Copy the recording out, then add it with `make learner-golden-add` at
+   that commit.
 
 #### The engine layer
 
@@ -490,9 +522,9 @@ not where its input arrives:
   as a load step (`k2-unsettled-window`).
 
 The names are one table in `path_counts.go`; `PathCounts` and `PathNames`
-read it. A counter no committed recording reaches yet is reported and not
-required (`PathAwaitsRecording`): `k2-unsettled-window` needs the
-flow-control-off recording, and leaves that set in the PR that adds it.
+read it. Every counter is required. `k2-unsettled-window` runs only with
+EPP flow control off, so the `pd-restart` golden is the one that reaches
+it.
 
 The replay also runs the settle tracker (`internal/signals/settle`) and
 counts its verdicts per reason: `settle-joined`, `settle-rejoined` (back
@@ -508,12 +540,14 @@ recording made by driving the analyzer alone must observe a tracker the way
 the engine does (`readers_test.go`, `cmd/learnergolden`); an analyzer given
 none takes its first cycle's replicas as already watched, and its replay
 would read otherwise.
-Only `settle-joined` and `settle-lent` are required. The committed goldens
-reach `settle-restarted` and `settle-rejoined` too, but only through their
-synthetic generators (rows whose Ready time moves every cycle, clocks that
-jump), so requiring them would pin the generators, not the tracker; no
-recording has a rollout under a Pod's own name. The settle suite covers the
-three until a cluster recording reaches them.
+`settle-joined`, `settle-lent` and `settle-restarted` are required. The
+`pd-restart` golden reaches `settle-restarted` from a real container restart
+on a cluster. The in-process goldens reach it too, from their generators
+(rows whose Ready time moves every cycle). The goldens reach `settle-rejoined`
+only through a generator (clocks that jump), so requiring it would pin the
+generator, not the tracker. No recording has a rollout under a Pod's own
+name. The settle suite (`internal/signals/settle`) covers both the rejoin and
+the rollout.
 
 The engine's replay counts its own paths (`LearnerReplay.PathCounts`):
 composites built, composites of a P/D model priced per role, composites that

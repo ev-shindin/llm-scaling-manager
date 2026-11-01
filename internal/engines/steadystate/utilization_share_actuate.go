@@ -40,8 +40,10 @@ const (
 // shareActuation is what one active cycle of a group did, for the caller to
 // apply and publish.
 type shareActuation struct {
-	overrides   map[string]utilizationShareOverride
-	promised    int
+	overrides map[string]utilizationShareOverride
+	// promised is what the group promised to receivers or holds for wakes,
+	// each GPU on the node its hole is on when the ledger knows it.
+	promised    allocation.ShareHoles
 	reserveDebt int
 	// blocked is each planned model's utilization-share blocked reasons,
 	// keyed by namespace/model, an empty list for a model with none.
@@ -281,7 +283,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		// today's optimizer would lower one model and raise another in the same
 		// cycle, the race this optimizer exists to prevent.
 		out.overrides = e.shareOverrides(g, variantKey, "restart quiet period")
-		out.promised = l.Promised() + l.WakeHeld(now)
+		out.promised = l.PromisedHoles(now)
 		out.reserveDebt = shareDebtNow(l, held, g.Budget)
 		out.blocked = shareBlockedReasons(l, g, ev, nil, nil, shareSkipWaits(us), now, tm)
 		// Said, not only logged: a model under load that stops scaling for
@@ -423,7 +425,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 
 	e.fillIdleShare(logger, l, g, plan.Evaluation, held, shareFit{nodes: plan.Nodes, domains: domains, placements: placements}, variantKey, now, tm)
 	out.overrides = e.shareOverrides(g, variantKey, "utilization share")
-	out.promised = l.Promised() + l.WakeHeld(now)
+	out.promised = l.PromisedHoles(now)
 	out.swinging = plan.Swinging
 	st.reportSwinging(logger, key, plan, tm)
 	out.reserveDebt = shareDebtNow(l, held, g.Budget)
@@ -743,13 +745,15 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 	// not spend GPUs promised to a share receiver: a whole node freed for an
 	// 8-GPU pod is lost to the first other pod that lands on it, and the
 	// receiver's own pod is not even queued until its target is raised.
-	promised := decision.LatestSharePromised(e.utilizationShare.clock())
+	holes := decision.LatestSharePromisedHoles(e.utilizationShare.clock())
+	promised := decision.PromisedTotals(holes)
 	g, greedy := optimizer.(*allocation.GreedyByScoreOptimizer)
 	e.cycleFitted = greedy && g.Nodes != nil
 	if greedy {
 		// The same promises held on the nodes: a node freed for a receiver
-		// whose pod is still Pending looks free in the snapshot.
-		allocation.ReservePromised(g.Nodes, promised)
+		// whose pod is still Pending looks free in the snapshot. Each is held
+		// on the node its hole is on, not on the freest node.
+		allocation.ReservePromised(g.Nodes, holes)
 	}
 	decisions := optimizer.Optimize(ctx, requests, allocation.WithholdPromised(constraints, promised))
 	if e.cycleFitted {
@@ -787,9 +791,9 @@ func (e *Engine) decideV2(ctx context.Context, optimizer allocation.ScalingOptim
 	e.cyclePlanned = plannedByOverrides(requests, overrides)
 	if len(constraints) > 0 {
 		now := e.utilizationShare.clock()
-		latest := decision.LatestSharePromised(now)
-		if !greedy || !g.RepublishHeadroom(e.cyclePlanned, newlyPromised(promised, latest), now) {
-			allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, latest), now)
+		latest := decision.LatestSharePromisedHoles(now)
+		if !greedy || !g.RepublishHeadroom(e.cyclePlanned, newlyPromised(holes, latest), now) {
+			allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, decision.PromisedTotals(latest)), now)
 		}
 	}
 	return decisions
@@ -814,17 +818,34 @@ func plannedByOverrides(requests []allocation.ModelScalingRequest, overrides map
 }
 
 // newlyPromised is what latest promises beyond before, per scope and
-// accelerator: the promises made since before was read.
-func newlyPromised(before, latest map[string]map[string]int) map[string]map[string]int {
-	out := map[string]map[string]int{}
+// accelerator: the promises made since before was read. Its GPUs are on the
+// nodes whose holes grew, in name order, and the rest unplaced.
+func newlyPromised(before, latest map[string]map[string]decision.PromisedHoles) map[string]map[string]decision.PromisedHoles {
+	out := map[string]map[string]decision.PromisedHoles{}
 	for scope, perType := range latest {
-		for acc, g := range perType {
-			if d := g - before[scope][acc]; d > 0 {
-				if out[scope] == nil {
-					out[scope] = map[string]int{}
-				}
-				out[scope][acc] = d
+		for acc, h := range perType {
+			was := before[scope][acc]
+			d := h.Total() - was.Total()
+			if d <= 0 {
+				continue
 			}
+			var grown decision.PromisedHoles
+			for _, n := range slices.Sorted(maps.Keys(h.Nodes)) {
+				take := min(d, h.Nodes[n]-was.Nodes[n])
+				if take <= 0 {
+					continue
+				}
+				if grown.Nodes == nil {
+					grown.Nodes = map[string]int{}
+				}
+				grown.Nodes[n] = take
+				d -= take
+			}
+			grown.Unplaced = d
+			if out[scope] == nil {
+				out[scope] = map[string]decision.PromisedHoles{}
+			}
+			out[scope][acc] = grown
 		}
 	}
 	return out

@@ -1542,6 +1542,20 @@ Work down the list in order.
      other role is that lightly loaded.
    - A cancelled transfer holds only its own donor -> receiver pair; each role
      can still move with any other role.
+   - A transfer is called off on its donor while its replica is still
+     draining if the donor's demand comes back so that, after the move, it
+     would be one whole replica or more under its target: the move is
+     exactly reversed. A busy model whose load dips for a cycle or two and
+     comes back keeps its replica, however many replicas it runs, with whole
+     8-GPU replicas as with 1-GPU ones. Once the donor's pod has gone, or
+     the transfer is older than the release window (the donor's scale-down
+     window), the move is no longer called off.
+   - Such a cancel holds that donor -> receiver pair like any other, so a
+     real swap in the same direction right after the dip is delayed by up to
+     `waitBeforeReverseMove`. Measured with a 6-minute release (a 12-minute
+     hold), a swap one minute after the dip lands after 17.5 minutes against
+     7.5 with no dip. The delay shrinks as the swap comes later and is gone
+     once the hold has run out.
    - The counter also counts moves withheld by a donor's back-off after an
      aborted release, or by a donor that has given all it can.
    - A donor's calm is judged on the higher of its current and peak need (two
@@ -1567,7 +1581,10 @@ Work down the list in order.
    - `swinging` (`wva_utilization_share_swinging == 1`): the role reversed
      direction `stabilization.swingReversals` times (three by default)
      within the swing window (a transfer called off on a reversal counts as
-     the move it would have made) and is planned on its mean need, so it
+     the move it would have made; one called off because the donor's own
+     demand came back is a change of direction only the second time the
+     donor gave and wanted the replica back within the window) and is
+     planned on its mean need, so it
      may look short and still not receive. The controller logs
      `Utilization share: planned on its mean need` with the role,
      `meanNeedGPUs`, `currentNeedGPUs`, the `flappingWindow` and

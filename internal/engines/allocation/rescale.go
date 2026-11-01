@@ -431,9 +431,15 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 		uncapped := distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole, nil)
 		ceilByRole := roleShareCeilings(records, stateMap, accType, roles, demByRole, uncapped)
 		tgtByRole = distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole, ceilByRole)
-		roundFillsToReplicas(records, stateMap, roles, tgtByRole, curByRole, demByRole, targets)
-		// Each role's share is at or above the floor reserved in the split.
-		reclaimWholeReplicas(ctx, satNamed, records, stateMap, roles, tgtByRole, curByRole, targets)
+		if uniformPods(records, stateMap) {
+			roundFillsToReplicas(records, stateMap, roles, tgtByRole, curByRole, demByRole, targets)
+			// Each role's share is at or above the floor reserved in the split.
+			reclaimWholeReplicas(ctx, satNamed, records, stateMap, roles, tgtByRole, curByRole, targets)
+		} else {
+			// With more than one replica size the two greedy passes are not
+			// monotone in the target (#219): fill and shed are searched together.
+			roundExact(satNamed, records, stateMap, roles, tgtByRole, curByRole, demByRole, targets)
+		}
 	}
 
 	limited := make(gpuLimitTracker)
@@ -453,7 +459,7 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 			want = *freeThisCycle
 		}
 		before := maps.Clone(targets)
-		*freeThisCycle -= fillRole(records, role, stateMap, targets, want)
+		*freeThisCycle -= fillRoleExact(records, role, stateMap, targets, want)
 		if gpuCapped {
 			markRoleGPULimited(records, role, stateMap, targets, limited)
 		}
@@ -579,10 +585,12 @@ func (o *GreedyByScoreOptimizer) fitRescaleToNodes(req ModelScalingRequest, reco
 // role pay for it, and a role with a share does not count its last replica, so
 // the second pass never takes it: with two equal variants the cheapest-at-one
 // rule does not protect a role's one pod, and a role with demand went to zero.
-// The second pass runs only when every role cut has one replica size. The model
-// sheds no more than the summed
+// Within it, the second pass runs only when every role cut has one replica
+// size. The model sheds no more than the summed
 // cut, a role under a scale-down hold is not cut at all, and reclaimRole keeps
-// every variant at its minReplicas. It mutates targets.
+// every variant at its minReplicas. It mutates targets. rescaleModelDecisions
+// calls it only for a model whose variants all take one replica size; a model
+// with more than one is rounded by roundExact instead.
 func reclaimWholeReplicas(ctx context.Context, e NamedAnalyzerResult, records []variantRecord,
 	stateMap map[string]domain.VariantReplicaState, roles []string, tgt, cur, targets map[string]int) {
 	cut := make(map[string]int, len(roles))
@@ -963,7 +971,8 @@ func roleFloorGPUs(records []variantRecord, stateMap map[string]domain.VariantRe
 // asks for, or its own cut rounded up to one replica: the leftover also
 // holds what a role at its maxReplicas could not place, and given to the
 // other role that was pods beyond its demand. It fills a copy of targets;
-// the real fill follows tgt.
+// the real fill follows tgt. rescaleModelDecisions calls it only for a model
+// of one replica size; roundExact rounds the rest.
 func roundFillsToReplicas(records []variantRecord, stateMap map[string]domain.VariantReplicaState,
 	roles []string, tgt, cur, dem, targets map[string]int) {
 	trial := maps.Clone(targets)

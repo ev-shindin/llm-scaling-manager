@@ -166,7 +166,7 @@ func TestClusterHeadroomHoldsAFamilyPromise(t *testing.T) {
 	read := func(c []*ResourceConstraints, promised int) map[string]int {
 		o := NewGreedyByScoreOptimizer()
 		o.Optimize(context.Background(), []ModelScalingRequest{famWanting("a", "ma", famHBM3, 0, 8), famWanting("e", "me", famPCIe, 0, 8)}, c)
-		o.RepublishHeadroom(nil, map[string]map[string]int{"a": {"H100": promised}}, time.Now())
+		o.RepublishHeadroom(nil, map[string]map[string]decision.PromisedHoles{"a": {"H100": {Unplaced: promised}}}, time.Now())
 		out := map[string]int{}
 		for _, acc := range []string{famHBM3, famPCIe} {
 			v, state := decision.GPUHeadroomReading("e", acc, 0, time.Minute, time.Now())

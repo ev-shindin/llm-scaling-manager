@@ -14,6 +14,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 )
 
 // ShareTransferState is a transfer's place in the state machine of
@@ -230,6 +231,9 @@ type shareMove struct {
 	at       time.Time
 	received bool
 	id       string
+	// donorBack marks a give called off because the donor's own demand
+	// came back: one turn of its demand (CancelDonorBack).
+	donorBack bool
 }
 
 // sharePair is a donor and the receiver it gives to.
@@ -512,24 +516,14 @@ func (l *ShareLedger) Promised() int {
 
 // ShareHoles is the GPUs promised to receivers or held for wakes and not yet
 // taken (Promised, WakeHeld), by where their holes are: Nodes on the node a
-// hole is known to be on, Unplaced where it is not known.
-type ShareHoles struct {
-	Nodes    map[string]int
-	Unplaced int
-}
+// hole is known to be on, Unplaced where it is not known. It is the form the
+// promise is published in (decision.PublishSharePromised), so a node view
+// holds each hole on its own node (ReservePromised).
+type ShareHoles = decision.PromisedHoles
 
-// Total is every GPU h holds back, placed or not.
-func (h ShareHoles) Total() int {
-	n := h.Unplaced
-	for _, g := range h.Nodes {
-		n += g
-	}
-	return n
-}
-
-// add places gpus on holes, the nodes in name order, each up to what it
-// opened; what no known hole covers is unplaced.
-func (h *ShareHoles) add(gpus int, holes ...map[string]int) {
+// addHoles places gpus on holes in h, the nodes in name order, each up to
+// what it opened; what no known hole covers is unplaced.
+func addHoles(h *ShareHoles, gpus int, holes ...map[string]int) {
 	if gpus <= 0 {
 		return
 	}
@@ -561,14 +555,14 @@ func (l *ShareLedger) PromisedHoles(now time.Time) ShareHoles {
 	for _, t := range l.transfers {
 		switch t.State {
 		case ShareFilling:
-			h.add(t.GPUs, t.HoleNodes, t.setHoles)
+			addHoles(&h, t.GPUs, t.HoleNodes, t.setHoles)
 		case ShareReleasing:
-			h.add(t.setReleased, t.setHoles)
+			addHoles(&h, t.setReleased, t.setHoles)
 		}
 	}
 	l.WakeHeld(now) // drops the expired holds
 	for _, w := range l.wakeHolds {
-		h.add(w.gpus, w.holes)
+		addHoles(&h, w.gpus, w.holes)
 	}
 	return h
 }
@@ -638,6 +632,23 @@ func (l *ShareLedger) Transfer(id string) (ShareTransfer, bool) {
 // no donor pod has moved, and holds its donor from giving to its receiver
 // again (§6.3, §6.7 rule 3). It reports whether the transfer was cancelled.
 func (l *ShareLedger) Cancel(id string, now time.Time, tm ShareTimings) bool {
+	return l.cancel(id, false, now, tm)
+}
+
+// CancelDonorBack is Cancel for a transfer called off because its donor's own
+// demand came back: one dip and return of the donor's demand. For the donor it
+// records the give it would have made, and also the receive its demand turned
+// to -- a change of direction -- only when the donor already had such a dip
+// inside the swing window, before this transfer started. Every transfer one
+// dip calls off counts once. A spare return (Entitled) counts for nothing, and
+// the receiver counts the receive it would have made, as with Cancel. Why the
+// second dip: TestShareFastSwapsStayPlannedOnTheMean and
+// TestShareWobbleCalledOffDoesNotHoldTheSwapBack.
+func (l *ShareLedger) CancelDonorBack(id string, now time.Time, tm ShareTimings) bool {
+	return l.cancel(id, true, now, tm)
+}
+
+func (l *ShareLedger) cancel(id string, donorBack bool, now time.Time, tm ShareTimings) bool {
 	i := slices.IndexFunc(l.transfers, func(t *ShareTransfer) bool { return t.ID == id })
 	if i < 0 {
 		return false
@@ -672,7 +683,20 @@ func (l *ShareLedger) Cancel(id string, now time.Time, tm ShareTimings) bool {
 	}
 	l.Forget(t.ID, tm)
 	if !t.Entitled {
-		l.recordCancel(t.Donor, false, now, tm)
+		switch {
+		case !donorBack:
+			l.recordCancel(t.Donor, false, now, tm)
+		// A dip already counted since this transfer started -- a second
+		// replica of the same dip, called off a cycle later -- records
+		// nothing more for the donor.
+		case !l.turnedSince(t.Donor, t.Started):
+			again := l.turnedBefore(t.Donor, t.Started, now, tm)
+			l.recordCancel(t.Donor, false, now, tm)
+			l.markDonorBack(t.Donor, now)
+			if again {
+				l.recordCancel(t.Donor, true, now, tm)
+			}
+		}
 		if rc != "" {
 			l.recordCancel(rc, true, now, tm)
 		}
@@ -1019,7 +1043,7 @@ func (l *ShareLedger) recordMove(role string, received bool, id string, now time
 	// SwingWindow before it.
 	keep := max(tm.ReversalHold, 2*tm.SwingWindow)
 	l.moves[role] = append(slices.DeleteFunc(l.moves[role], func(m shareMove) bool { return now.Sub(m.at) > keep }),
-		shareMove{now, received, id})
+		shareMove{at: now, received: received, id: id})
 	l.rederive(role, tm)
 }
 
@@ -1035,6 +1059,32 @@ func (l *ShareLedger) recordCancel(role string, received bool, now time.Time, tm
 	}
 	l.cancels[role] = append(cs, shareMove{at: now, received: received})
 	l.rederive(role, tm)
+}
+
+// markDonorBack marks role's give cancelled this cycle as one turn of its
+// demand (CancelDonorBack). It also marks a give of the same donor that a
+// plain Cancel recorded in the same cycle: harmless, as both are the same dip.
+func (l *ShareLedger) markDonorBack(role string, now time.Time) {
+	for i, m := range l.cancels[role] {
+		if m.at.Equal(now) && !m.received {
+			l.cancels[role][i].donorBack = true
+		}
+	}
+}
+
+// turnedSince reports whether role's demand turned back after started: a
+// give of role was called off for it (CancelDonorBack) since then.
+func (l *ShareLedger) turnedSince(role string, started time.Time) bool {
+	return slices.ContainsFunc(l.cancels[role], func(m shareMove) bool { return m.donorBack && m.at.After(started) })
+}
+
+// turnedBefore reports whether role's demand turned back inside the swing
+// window before now, and no later than started: a give of role was called off
+// for it (CancelDonorBack) before the transfer that started then.
+func (l *ShareLedger) turnedBefore(role string, started, now time.Time, tm ShareTimings) bool {
+	return slices.ContainsFunc(l.cancels[role], func(m shareMove) bool {
+		return m.donorBack && now.Sub(m.at) <= tm.SwingWindow && !m.at.After(started)
+	})
 }
 
 // unrecord removes transfer id's moves from role's history, as if it never

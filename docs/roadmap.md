@@ -11,10 +11,8 @@ state. The gaps themselves are summarized in [known gaps](why.md#known-gaps).
   `effectiveQuotas`. Planned: read Kueue per ClusterQueue
   ([#213](https://github.com/ev-shindin/llm-scaling-manager/issues/213)), a
   claims ledger ([#212](https://github.com/ev-shindin/llm-scaling-manager/issues/212)),
-  closing the known limits of borrowing and hand-back
-  ([#214](https://github.com/ev-shindin/llm-scaling-manager/issues/214)), and
-  rescale with mixed replica sizes, which rounds per role and fills greedily
-  ([#219](https://github.com/ev-shindin/llm-scaling-manager/issues/219)).
+  and closing the known limits of borrowing and hand-back
+  ([#214](https://github.com/ev-shindin/llm-scaling-manager/issues/214)).
   · today: [Kueue quotas](well-lit-paths/kueue-bounded-quotas/), [the guide](guides/kueue-borrowing/)
 
 ## Scaling

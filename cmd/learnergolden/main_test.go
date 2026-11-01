@@ -175,32 +175,31 @@ func TestRun_AddCheckUpdate(t *testing.T) {
 	// paths: an add and an update say so, the check fails on it.
 	assert.Contains(t, out, "no golden runs the learner path "+saturation.PathMuSampleWritten)
 	// Each of saturation's required paths the recording's own replay never
-	// ran (a path that awaits a recording is reported, not required), and
-	// every engine path: the recording carries no engine events.
+	// ran, and every engine path: the recording carries no engine events.
 	raw, err := os.ReadFile(in)
 	require.NoError(t, err)
 	rep, err := learnreplay.Replay(context.Background(), raw, learnreplay.Options{Mode: learnreplay.Normal})
 	require.NoError(t, err)
 	var unrun []string
 	for _, p := range saturation.PathNames() {
-		if rep.Paths[p] == 0 && !saturation.PathAwaitsRecording(p) {
+		if rep.Paths[p] == 0 {
 			unrun = append(unrun, p)
 		}
 	}
 	// Pinned, so a change in what the replay counts is a reviewed change; the
 	// replay's own count above is only the cross-check.
-	require.Len(t, unrun, 8, "the head recording leaves these saturation paths unrun: %v. "+
-		"A saturation path added or removed moves this count; check the list and update the 8", unrun)
+	require.Len(t, unrun, 9, "the head recording leaves these saturation paths unrun: %v. "+
+		"A saturation path added or removed moves this count; check the list and update the 9", unrun)
 	// The settle verdicts the goldens must reach (learnreplay's
 	// requiredSettlePaths) that the recording's own replay never reached.
 	var unrunSettle []string
-	for _, p := range []string{"settle-joined", "settle-lent"} {
+	for _, p := range []string{"settle-joined", "settle-lent", "settle-restarted"} {
 		if rep.Paths[p] == 0 {
 			unrunSettle = append(unrunSettle, p)
 		}
 	}
-	require.Len(t, unrunSettle, 1, "the head recording leaves these required settle paths unrun: %v. "+
-		"It lends no bridge, so settle-lent; check the list and update the 1", unrunSettle)
+	require.Len(t, unrunSettle, 2, "the head recording leaves these required settle paths unrun: %v. "+
+		"It lends no bridge and restarts no replica, so settle-lent and settle-restarted; check the list and update the 2", unrunSettle)
 	out, err = runOut("check", "-dir", dir)
 	require.ErrorContains(t, err, fmt.Sprintf("%d learner paths no golden runs",
 		len(unrun)+len(unrunSettle)+len(steadystate.LearnerReplayPathNames())), out)
