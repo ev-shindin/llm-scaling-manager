@@ -68,6 +68,46 @@
   to in PR 2, which adds no learner series, and waits for the first PR that
   publishes one. The switch runs are a committed test
   (`TestGoldens_TheSwitchRuns`).
+- **PR 3's decisions.** Mu (rows 5 and 6) has no joined test of its own: a
+  sample is written only beside a k2 P1-obs write, so it inherits k2's test
+  on the tracker, and with it the wait after a controller restart (PR 2's
+  `k2-waits-after-controller-restart`; no switch of mu's). Each admitted
+  reading carries k2's stamp (how long the replica had been settled, and
+  which settle test passed it), and mu's `learner-write` shows it
+  (`TestMuLearner_AMeasuredMuWaitsOutThePostRestartSettleAndLogsItsFirstSample`).
+  The fold across pods stays the mean. Three named changes, each behind a
+  replay switch, none of which moves a committed golden, so each names the
+  unit tests that hold it (`heldBy`). `mu-exact-repeat-is-use`: a repeat
+  past the spacing touches the use clock only, so it keeps neither the
+  episode (write clock) nor the measurement's freshness (agreement clock),
+  and is judged before the episode, so a frozen series past `EpisodeGap`
+  starts no new window with its frozen value; the prefill bound (row 7)
+  keeps the old rule, a write. `mu-unknown-age-resolves-safe`: over the
+  derived figure an unknown age is still stale; under it the low hold counts
+  from the window's own last write, never earlier than its newest sample, so
+  it holds at least as long as a known sample time would, and with no write
+  time it holds. `mu-latch-restores-safe-side`: the latch is restored, not
+  persisted (the snapshot is PR 5's); a window on record with no choice memo
+  (restored, or brought back) has an unknown latch, which resolves latched
+  over the derived figure and unlatched under it, and its first choice is
+  evidence. Before the fold was touched, two prefill pods in one spacing pin
+  row 7 (`prefill_bound_pin_test.go`): since #395 the bound folds by pod
+  name, so the sample is the pods' mean and the bound the max across
+  minutes. Mu's `learner-write` band is 5 %, over the 4 % noise that flipped
+  the choice, not measured on a run; a source flip (measured, derived,
+  served-siblings, neighbour, borrowed-line, lower-bound) always logs, with
+  `previousSource`. `throughput-demand-floor` names `muKey` and `muSource`
+  of the role's variant nearest the term's mu, and `startEstimateSeconds`
+  with `startSource` `measured`, or `none` where no start is measured: the
+  floor is given no seed today, so `seed` waits for PR 5 to wire one. The
+  closed-loop probe and its fleet simulator land in
+  `D/closed_loop_probe_test.go`; its known-failing case is one slow replica
+  at 0.55 of its siblings, inside the 2x served bound with no full sibling,
+  which seals the fleet over-ordered for good (28 replicas against a need of
+  18), and the test asserts the probe sees it. Mu is not on
+  `learn.Learners` yet: Forget waits for PRs 4a and 4b, with the SLO and
+  throughput lines. The mu counters are re-measured on the flow-control-off
+  P/D recording when it lands.
 - **Problem:** the analyzers learn about fifteen quantities. Each one accepts
   readings, fits, forgets and logs in its own way. The same defects were fixed
   in one learner after another, because no learner could reuse another's fix.
@@ -192,11 +232,13 @@ A measured mu and a derived mu are both offered every cycle, and
 | Yields when stale | freshness is the last saturated reading that **agreed** with it within 2x. Above derived: after `muChoice.freshFor` (5 min). Below derived: after `muChoice.lowHoldFor` (30 min) |
 | Latch | out at `muChoice.maxRatio` (2.0), back at `muChoice.returnRatio` (1.6) |
 
-**Named, not fixed here:** the latch is not persisted. After a restart a
-measured mu between 1.6x and 2x **above** derived comes back unlatched and
-prices from the **higher** measured figure, the SLO side. PR 3 either persists
-the choice or restores it to the safe side ([3.5](#35-hysteresis)). A
-one-replica variant with no line has nothing to yield to.
+**Restored to the safe side (PR 3):** the latch is not persisted. Before PR
+3, after a restart a measured mu between 1.6x and 2x **above** derived came
+back unlatched and priced from the **higher** measured figure, the SLO side.
+A latch with no evidence behind it now restores latched over the derived
+figure and unlatched under it ([3.5](#35-hysteresis);
+`mu-latch-restores-safe-side`). A one-replica variant with no line has
+nothing to yield to.
 
 Also learned and not tabled: the hot-rank hysteresis memo and the share swing,
 which stabilize the controller's own decisions rather than learn from replicas.
@@ -829,12 +871,13 @@ that side that is not driven by a new admitted reading needs a reason in this
 table**, inside a fit or out: carries, `RaiseLast`, defaults, stashes,
 restores, exact repeats and unknown ages. Two rules apply to all:
 
-- An unknown age resolves to the safe side. (`measuredYieldsToDerived` treats
-  a missing `SampledAt` as "as stale as can be", which skips the 30 min low
-  hold. That is the risky move; PR 3 fixes it.)
+- An unknown age resolves to the safe side. (`measuredYieldsToDerived`
+  treated a missing `SampledAt` as "as stale as can be", which skipped the
+  30 min low hold. That was the risky move; PR 3 fixed it,
+  `mu-unknown-age-resolves-safe`.)
 - An exact repeat of a float (`rate == lastRead`) is evidence of use, not of
-  saturation: it is the signature of a frozen series. Today mu counts it as a
-  write and keeps its episode alive; PR 3 fixes it.
+  saturation: it is the signature of a frozen series. Mu counted it as a
+  write and kept its episode alive; PR 3 fixed it, `mu-exact-repeat-is-use`.
 
 | learner | side that breaks the SLO | moves toward it without new evidence, today |
 | --- | --- | --- |
@@ -860,7 +903,7 @@ a demand term declares:
 | --- | --- |
 | set, clear, dwell | three values, stated in the code comment and the developer guide |
 | safe side | which side is safe. The clear direction is never faster toward the risky side. For a two-sided learner (start time) set and clear are symmetric, and the dwell is at least the learner's own noise correlation time |
-| restart | an unpersisted latch restores to the safe-side choice. The mu latch does not today ([the mu choice](#the-mu-choice)) |
+| restart | an unpersisted latch restores to the safe-side choice. The mu latch does since PR 3 ([the mu choice](#the-mu-choice)) |
 | tuning | dwell is tuned on noise with the gauges' real autocorrelation, not iid noise, which over-counts flips |
 
 ### 3.6 Clocks
@@ -1113,7 +1156,7 @@ source. No metric gains a `restored` label value; a restored figure shows as
 | --- | --- | --- |
 | k2 | yes | yes, as `P2-hist` (or `P2-prior`) |
 | ITL | B, its stash and the held slope (`ITLSlopes`, #329) | yes, from the held slope, within `BucketRetention` and under the same args; otherwise not until refit |
-| mu | window yes, choice no | the window yes; the choice starts unlatched |
+| mu | window yes, choice no | the window yes; the choice restores to the safe side (PR 3) |
 | start time | yes | yes |
 
 **`learner-start`**, one line per model at the first cycle after a controller

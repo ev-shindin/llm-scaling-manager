@@ -488,6 +488,36 @@ and a stale high reading must not under-order the fleet. Within 2x the
 measurement keeps winning however old it is: run R's 1.27 req/s against a
 derived 0.67 is the case it is there for.
 
+Three rules keep the choice on the safe side where it has no evidence, each a
+replay switch (`mu_switches.go`):
+
+- **An exact repeat is use** (`SwitchMuRepeatIsUse`). A rate read past the
+  sample spacing at exactly the value last read is the same scrape pair, or
+  a frozen series. It touches the window's use clock only: it keeps neither
+  the window's episode (its write clock, which `EpisodeGap` ages) nor the
+  measurement's freshness (`TestMuRepeat_*`). The prefill bound writes
+  through the same fold and keeps taking a repeat as a write.
+- **An unknown age resolves to the safe side** (`SwitchMuUnknownAgeSafe`). A
+  window with no sample time and no agreeing reading on record is stale over
+  the derived figure, and under it holds for `MeasuredLowHoldFor` from its
+  own last write (`lowHeldOut`, `TestMuUnknownAge_*`).
+- **The latch restores to the safe side** (`SwitchMuLatchRestoresSafe`). The
+  latch is not persisted. A window restored, or brought back, with no choice
+  on record comes back latched over the derived figure and unlatched under
+  it; its first choice is evidence, and the hysteresis runs as it does live
+  from then on (`muChoice.latchKnown`, `TestMuLatch_*`).
+
+Mu has no joined test of its own: a sample is written only beside a k2
+`P1-obs` write, so it waits out k2's settle, the wait after a controller
+restart included. Each admitted reading carries k2's stamp (how long the
+replica had been settled, and which settle test passed it). Each cycle mu
+fills a `learn.Report` per variant (`mu_learner.go`; `LearnerReports`, beside
+k2's), and logs `learner-write` at `--v=3` for a key whose priced figure was
+set for the first time, moved more than `MuWriteBand` (5 %) from the value
+last logged, changed source, or has not logged for `LearnerHeartbeat`. The
+throughput floor's line names the key and source it priced from (`muKey`,
+`muSource`, `muPricedFor`) and the start time it projected over.
+
 ### The pricing point
 
 ```
