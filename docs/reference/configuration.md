@@ -947,18 +947,25 @@ What is restored, and what is not:
   identified (the `fingerprint_version` label of `wva_engine_config`), or
   from a release that did not record the engine arguments, restores each
   variant's measured capacity only as that lower-only figure
-  (`restores_total{outcome="differs"}`, or `"prior"`, and `P2-prior` in the
-  cycle log). With `differs`, its saturated throughput, start time and
+  (`restores_total{outcome="differs"}` from a release that did not record
+  the arguments, `"prior"` from one with another `fingerprint_version`, and
+  `P2-prior` in the cycle log). With `differs`, its saturated throughput, start time and
   latency baseline are not restored; with `prior`, as for any change of
   arguments, the old saturated throughput holds the floor hold-only (above);
 - **`fingerprint_version` 4** adds `--max-num-active-seqs` to the engine
   arguments, so a rollout that changes only the active cap is a change of
   arguments. v0.10.2 and earlier use version 3. The first restart after
   upgrading from one of them restores every variant as a change of
-  arguments (`restores_total{outcome="prior"}`): its measured capacity as a
-  lower-only figure, its saturated throughput hold-only, and its start time
-  and latency baseline not at all. Each variant then measures its own again
-  under load;
+  arguments: its measured capacity as a lower-only figure, its saturated
+  throughput hold-only, and its start time and latency baseline not at all.
+  A variant whose flags were read in full counts as
+  `restores_total{outcome="prior"}`; one whose flags were only partly read
+  (`unresolved` not empty) counts as `"incomplete"` and logs `learned state
+  restored under the unread configuration`, with the same lower-only effect.
+  Each variant then measures its own again under load. A
+  `--max-num-active-seqs` whose value cannot be read (an unexpanded
+  `$VARIABLE`) is now listed in `unresolved`, so such a variant reads as
+  partly read from this release on;
 - **rolling the controller back** to a release that records engine
   arguments under the same `fingerprint_version` restores each variant whose
   configuration it can read whole, as an ordinary restart does. It does not
@@ -968,7 +975,7 @@ What is restored, and what is not:
   survives only because this release also writes it in the form the previous
   one reads. Upgrading again restores what the previous release wrote,
   whole. A rollback to a release with another `fingerprint_version` -- from
-  this release, any v0.10.x -- restores each variant as a change of
+  this release, v0.10.2 or earlier -- restores each variant as a change of
   arguments, lower-only figures as above, and so does upgrading from it
   again. Only a rollback to a release that did not record engine arguments
   starts every variant cold once. The document keeps one key across releases

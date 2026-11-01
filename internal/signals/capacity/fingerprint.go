@@ -80,7 +80,8 @@ const fingerprintLength = 16
 // throughput, and the arguments half of this digest (ArgsFingerprint) is
 // what decides whether a rollout keeps them. The cost on the latency side is
 // the safe one: two engines differing only in the cap each learn their own
-// line. An unreadable cap is left at 0 (see the field) and hashes as unset.
+// line. An unreadable cap is left at 0 and listed in Unresolved (see the
+// field).
 // The EnforceEager half: No CUDA graphs does not change how much KV
 // fits or how many sequences run, so a capacity record survives it -- but it
 // does change the inter-token latency, and this digest also keys a latency

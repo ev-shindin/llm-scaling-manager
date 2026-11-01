@@ -301,7 +301,7 @@ func TestTheValueKeySetMatchesBothApplyFunctions(t *testing.T) {
 		// vLLM
 		"gpu_memory_utilization", "block_size", "kv_cache_dtype", "dtype",
 		"quantization", "tensor_parallel_size", "num_gpu_blocks_override",
-		"max_num_batched_tokens", "max_num_seq", "max_num_seqs", "max_model_len",
+		"max_num_batched_tokens", "max_num_seq", "max_num_seqs", "max_num_active_seqs", "max_model_len",
 		"data_parallel_size", "pipeline_parallel_size", "speculative_config",
 		"kv_transfer_config", "kv_offloading_size", "kv_offloading_backend",
 		"kv_cache_memory_bytes", "num_redundant_experts", "eplb_config", "all2all_backend",

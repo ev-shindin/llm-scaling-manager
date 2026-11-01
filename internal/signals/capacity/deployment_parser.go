@@ -102,17 +102,19 @@ type EngineParams struct {
 	// ExplicitMaxNumSeqs, which folds it into the cap.
 	//
 	// A value that cannot be read (an unresolved reference, not a number,
-	// below 1) also leaves it 0, and is NOT recorded in Unresolved. Recording
-	// it would mark the whole read incomplete, which changes the fingerprint
-	// and withholds the variant's learned-state sharing and restore -- a way
-	// to lose learned state that a deployment which only added this flag
-	// never had before it was read. Left at 0, the cap falls back to
-	// max_num_seqs, still a true upper bound. A later unreadable occurrence
+	// below 1) also leaves it 0, so the cap falls back to max_num_seqs, still
+	// a true upper bound, and it is recorded in Unresolved like any other
+	// hashed flag that could not be read. A later unreadable occurrence
 	// clears an earlier readable one, since the engine takes the last.
 	//
 	// It is hashed into the fingerprint (FingerprintVersion 4), so a rollout
-	// that changes only the active cap is a change of arguments. An
-	// unreadable value hashes as unset.
+	// that changes only the active cap is a change of arguments. Until then
+	// (the 0.10 patch line) it was neither hashed nor recorded when unread:
+	// recording it would have marked reads incomplete within a fingerprint
+	// version. Hashing it moves every digest once anyway, and with it an
+	// unread cap is a gap the read must own: hashed as unset and not
+	// recorded, a cap set through an env var could change with no change to
+	// the digest or to anything published.
 	MaxNumActiveSeqs int64
 
 	// TotalKvTokensOverride is the explicit total KV-cache token capacity, when the
@@ -388,7 +390,6 @@ func (p *EngineParams) BatchCap() int64 {
 var maxNumSeqsKeys = []string{"max_num_seq", "max_num_seqs", "max_running_requests"}
 
 // maxNumActiveSeqsKey is the normalised vLLM flag read into MaxNumActiveSeqs.
-// It is deliberately NOT in mappedValueKeys: see MaxNumActiveSeqs.
 const maxNumActiveSeqsKey = "max_num_active_seqs"
 
 // defaultEngineParams returns EngineParams with vLLM defaults
@@ -594,6 +595,7 @@ var mappedValueKeys = map[string]struct{}{
 	"max_num_seq":             {},
 	"max_num_seqs":            {},
 	"max_model_len":           {},
+	maxNumActiveSeqsKey:       {},
 	"data_parallel_size":      {},
 	"pipeline_parallel_size":  {},
 	"speculative_config":      {},
@@ -839,10 +841,9 @@ func parseArgsWith(args []string, params *EngineParams, env map[string]string,
 					continue
 				}
 				if key == maxNumActiveSeqsKey {
-					// Unknown, so the batch cap falls back to max_num_seqs;
-					// not recorded (see EngineParams.MaxNumActiveSeqs).
+					// Unknown, so the batch cap falls back to max_num_seqs
+					// (see EngineParams.MaxNumActiveSeqs); recorded below.
 					params.MaxNumActiveSeqs = 0
-					continue
 				}
 				if _, ok := modelKeys[key]; ok {
 					params.ModelUnresolved = true
@@ -990,8 +991,8 @@ func applyParam(key, value string, params *EngineParams) applyResult {
 		// requires at least 1, so anything less is not a value it runs.
 		v, err := strconv.ParseInt(value, 10, 64)
 		if err != nil || v < 1 {
-			// Not recorded (the key is not in mappedValueKeys): the cap
-			// falls back to max_num_seqs. See MaxNumActiveSeqs.
+			// Recorded in Unresolved; the cap falls back to max_num_seqs.
+			// See MaxNumActiveSeqs.
 			params.MaxNumActiveSeqs = 0
 			return applyUnusable
 		}

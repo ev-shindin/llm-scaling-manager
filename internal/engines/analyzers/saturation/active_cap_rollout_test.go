@@ -56,3 +56,58 @@ func TestAnActiveCapChangeWhileDownRestoresOnlyAPreviousFigure(t *testing.T) {
 			r.Installed, r.Outcome, RestoredPrior)
 	}
 }
+
+// The digests a FingerprintVersion 3 controller (v0.10.2 and earlier) wrote
+// for the configurations below, computed at 354cbb69b: the snapshot a first
+// restart after the upgrade reads.
+const (
+	v3FullConfig = "685b446b731842fd"
+	v3FullArgs   = "1d2fe7698a350844"
+	v3PartConfig = "a51b159cb6d43294"
+	v3PartArgs   = "94f10548b48ae256"
+)
+
+// The first restart after the upgrade from version 3: every stored digest
+// differs, so each variant restores as after a change of arguments -- prior
+// for a configuration read in full, incomplete for one read in part -- and
+// nothing is installed as its own.
+func TestASnapshotFromFingerprintVersion3RestoresAsAChangeOfArguments(t *testing.T) {
+	part := func() *capacity.EngineParams {
+		p := acParams(0)
+		p.Unresolved = []string{"block_size"}
+		return p
+	}
+	for name, tc := range map[string]struct {
+		params       func() *capacity.EngineParams
+		config, args string
+		want         RestoreOutcome
+	}{
+		"read in full": {func() *capacity.EngineParams { return acParams(0) }, v3FullConfig, v3FullArgs, RestoredPrior},
+		"read in part": {part, v3PartConfig, capacity.IncompleteArgsPrefix + v3PartArgs, RestoredIncomplete},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if tc.params().Fingerprint() == tc.config {
+				t.Fatal("precondition: the version 3 digest is this version's")
+			}
+			a, _, clock := waProcess(tc.params())
+			waRun(t, a, clock, 4000, 6)
+			saved := a.ExportLearnedState()
+			const v = "test-ns/variant-a"
+			if _, ok := saved.Args[v]; !ok {
+				t.Fatalf("precondition: the snapshot records the arguments: %v", saved.Args)
+			}
+			saved.Config[v], saved.Args[v] = tc.config, tc.args
+
+			second, _, _ := waProcess(tc.params())
+			second.RestoreLearnedState(saved)
+			r, done := second.installRestored("test-ns", "test-model", "variant-a")
+			if !done {
+				t.Fatal("precondition: the restore was not checked")
+			}
+			if r.Installed || r.Outcome != tc.want || r.Priors == 0 {
+				t.Errorf("installed=%v outcome=%s priors=%d, want outcome %s, nothing installed, the k2 kept as a prior",
+					r.Installed, r.Outcome, r.Priors, tc.want)
+			}
+		})
+	}
+}
