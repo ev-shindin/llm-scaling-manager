@@ -38,18 +38,20 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	gpuCount int,
 	role string,
 	accelerator string,
-	// shapeKeyOutput is the TRACKED output length: hysteretic, so the window's
-	// bucket does not flip when the fleet's average wobbles across a boundary.
-	shapeKeyOutput float64,
-	// k2KeyOut is the output length the k2 key is built from: the fleet's,
-	// its bucket held across a boundary (k2KeyLength).
-	k2KeyOut float64,
+	// keys is the output length the k2 and throughput keys are built from:
+	// the fleet's, its bucket held across a boundary by one band
+	// (keyLengths), so a window's bucket does not flip when the fleet's
+	// average wobbles across a boundary. keys.muLeft is the bucket a
+	// throughput key with no window of its own is carried from, lower only
+	// (carriedThroughput), and keys.muSwapPending freezes its window while a
+	// swap is pending (muSwapFrozen).
+	keys outputKeys,
 	// fleetOutput is the output length the fleet is serving RIGHT NOW. A
 	// bucket label wants hysteresis; a physical quantity does not, and mu is
 	// divided by this one.
 	fleetOutput float64,
 	// shapeKeyInput is the TRACKED prompt length, hysteretic for the same
-	// reason shapeKeyOutput is: it buckets the throughput key, and a fleet
+	// reason keys.mu is: it buckets the throughput key, and a fleet
 	// whose average wobbles across a boundary must not split its window in two.
 	shapeKeyInput float64,
 	// fleetHitRate is the PREFILL ROLE's prefix-cache hit rate, one figure for
@@ -110,7 +112,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		engineParams = rec.EngineParams
 	}
 	historyKey := a.historyKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
-		k2KeyOutput(role, k2KeyOut, rm.AvgOutputTokens), config.QueueLengthThreshold)
+		k2KeyOutput(role, keys.k2, rm.AvgOutputTokens), config.QueueLengthThreshold)
 	// The rows whose saturated reading may become the variant's k2 are the
 	// rows whose saturated throughput may become its mu, below: Ready, and
 	// the variant's own. A warm-pool bridge is filed under the variant it is
@@ -184,9 +186,22 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// always used -- its capacity is about resident KV, which the shape's
 	// KVreq already discounts on its own path. Why the throughput key is the
 	// fleet's shape at all is said where it is written, below.
-	keyInput := throughputKeyInput(role, shapeKeyInput, shapeKeyOutput, fleetHitRate)
+	keyInput := throughputKeyInput(role, shapeKeyInput, keys.mu, fleetHitRate)
 	throughputKey := a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
-		keyInput, shapeKeyOutput, config.QueueLengthThreshold)
+		keyInput, keys.mu, config.QueueLengthThreshold)
+	// Whether the key's window is frozen for a pending swap (muSwapFrozen).
+	// Never prefill's: its key has no output bucket (prefillOutputBucket),
+	// so an output swap leaves it naming the right window.
+	frozen := keys.muSwapPending && domain.CanonicalRole(role) != domain.RolePrefill
+	// Whether a reading written to the key's window is clamped to its median
+	// (marginClamp), for the same reason never prefill's.
+	clamped := keys.muShorterPastMargin && domain.CanonicalRole(role) != domain.RolePrefill
+	// The key's window before the band last moved it, where it moved (#415).
+	leftKey := ""
+	if keys.muLeft > 0 {
+		leftKey = a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
+			keyInput, keys.muLeft, config.QueueLengthThreshold)
+	}
 	a.noteMuKey(namespace, modelID, rm.VariantName, role, throughputKey)
 	// A window written under engine arguments the variant no longer runs is
 	// not its service rate (window_args.go).
@@ -255,10 +270,9 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// window; the read side already leaves bridges out
 	// (floor.Estimate), and the write side has to match it.
 	//
-	// Recorded and read under the FLEET's tracked output-length bucket, not
-	// this replica's. The k2 key above is the fleet's too (k2KeyOutput), held
-	// by its own band, so the two can be in different buckets for minutes
-	// after the length crosses a boundary. Its throughput is
+	// Recorded and read under the FLEET's output-length bucket, not this
+	// replica's, held by the band the k2 key above reads (keyLengths), so the
+	// two keys sit in one bucket. Its throughput is
 	// priced per role, as the median
 	// over the role's replicas (floor.Estimate), and a median over
 	// readings from different buckets is a reading of nothing. A replica's
@@ -283,7 +297,11 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// key alone, as the shape-shift proposal scopes it. (throughputKey and
 	// keyInput are built above, before computeK2, whose settle test reads the
 	// rate on record under the key.)
-	if k2Priority == capacity.K2SrcObserved && adm.admitted() {
+	if k2Priority == capacity.K2SrcObserved && adm.admitted() && frozen {
+		// A swap is pending: the reading is the shape arriving, and the key
+		// still names the bucket it is leaving (muSwapFrozen).
+		a.noteMuCount(namespace, modelID, rm.VariantName, muReasonSwapPending)
+	} else if k2Priority == capacity.K2SrcObserved && adm.admitted() {
 		// keyInput is the effective prompt length this key was built with, so
 		// the token rate is converted to requests/s at the same figure the
 		// window is keyed by -- a rate divided by one shape and stored under
@@ -321,11 +339,18 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 					"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
 					"pod", rm.PodName, "role", role, "rate", mu, "requestRate", rm.RequestRate,
 					"derivedOK", derived.ok, "derivedRate", derived.rate, "servedBound", served.max, "reason", why)
+			} else if write, ok := a.marginClamp(throughputKey, mu, clamped); !ok {
+				// Past the margin toward shorter outputs with no window to
+				// clamp to: nothing is written (marginClamp).
+				a.noteMuCount(namespace, modelID, rm.VariantName, muReasonMarginClamped)
 			} else {
+				if write < mu {
+					a.noteMuCount(namespace, modelID, rm.VariantName, muReasonMarginClamped)
+				}
 				// The reading is admitted beside k2's P1-obs write, so it
 				// carries k2's stamp (noteMuWrite).
-				w := a.recordSaturatedThroughputFrom(throughputKey, rm.PodName, mu)
-				a.noteMuWrite(namespace, modelID, rm.VariantName, rm.PodName, mu, w)
+				w := a.recordSaturatedThroughputFrom(throughputKey, rm.PodName, write)
+				a.noteMuWrite(namespace, modelID, rm.VariantName, rm.PodName, write, w)
 				if args != "" {
 					a.mu.Lock()
 					if _, ok := a.saturatedThroughput[throughputKey]; ok {
@@ -355,7 +380,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 				"reason", "saturated, but no throughput could be priced: the role's demand floor has no mu and will not bind")
 		}
 	}
-	reading := a.saturatedThroughputReadingUnder(throughputKey, args, adm.serving())
+	reading := muSwapFrozen(a.carriedThroughput(throughputKey, leftKey, args,
+		a.saturatedThroughputReadingUnder(throughputKey, args, adm.serving())), frozen)
 	saturatedThroughput, throughputBucket := reading.rate, reading.bucket
 	// A derived figure prices the shape the fleet has NOT measured -- that is
 	// the whole of its job. Where the fleet HAS measured this shape, under this

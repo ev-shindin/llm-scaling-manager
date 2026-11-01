@@ -154,7 +154,7 @@ cycles of a fleet that is coping have none.
 | `mayOrder`, `borrowedOnly` | whether the role's rate is one the floor may order on, and whether every rate it has is borrowed rather than measured by the role's own replicas |
 | `lowerBound`, `growthCapped` | `lowerBound` is `true` when prefill's rate is a lower bound, learned while prefill queued behind a full decode (only with [`enablePrefillThroughputBound`](scaling-policy.md#enableprefillthroughputbound) on). `growthCapped` is `true` when the floor on that bound was cut to twice the ready prefill fleet |
 | `orderedBehindQueue`, `queueJustifiedReplicas` | whether a held floor still ordered behind a standing queue, and how many replicas the queue was worth when it did |
-| `muKey`, `muSource` | the learned key the role's `saturatedThroughput` was priced under, and where it came from: `measured`, `derived`, `served-siblings` (a measurement yielded to what its full siblings serve), `neighbour`, `borrowed-line` or `lower-bound`. On a role of several variants, the variant whose figure is nearest the role's. Empty on a cycle with none |
+| `muKey`, `muSource` | the learned key the role's `saturatedThroughput` was priced under, and where it came from: `measured`, `derived`, `served-siblings` (a measurement yielded to what its full siblings serve), `neighbour`, `borrowed-line` or `lower-bound`. On a role of several variants, the variant whose figure is nearest the role's. Empty on a cycle with none. The key's output-length bucket is the one the k2 window uses (see `P1-obs` below), so both are read from the same bucket. While the output length is in the middle of a large change (20% past a bucket boundary, for up to 2 minutes) the key keeps its old bucket, that window takes no new readings, and its figure counts as `neighbour`: the derived rate prices where there is one |
 | `startEstimateSeconds`, `startSource` | the replica start time `projectedBacklog` was projected over, and `measured`; `none` (and 0) when no start of the role has been measured, and the floor projects nothing |
 
 On a disaggregated fleet the per-role lines do not add up to the model's
@@ -166,7 +166,7 @@ total, so a second line, `throughput-demand-floor-total`, gives it:
 | Value | Meaning | What changes it |
 | --- | --- | --- |
 | `single-sample` | the role's own throughput window holds one reading | more saturated readings |
-| `borrowed` | the only rate is borrowed from a neighbouring output-length bucket | a reading in the bucket the traffic is in now |
+| `borrowed` | the only rate is borrowed from a neighbouring output-length bucket, or the output length is in the middle of a large change and the old bucket's window is held for up to 2 minutes | a reading in the bucket the traffic is in now |
 | `borrowed-line` | the rate is derived from an inter-token-latency line another variant fitted (shared because `enableLearnedStateReuse` is on) | the variant fitting its own line |
 | `shape-change` | the traffic's shape changed and the rate was measured on the old one | the new shape settling |
 | `lower-bound` | prefill's only rate is a lower bound with one reading | a second reading a minute later, or prefill's own measurement |

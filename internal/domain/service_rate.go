@@ -23,6 +23,11 @@ const (
 	// own yet. Wrong in a known direction; the throughput floor may hold a
 	// fleet on it and may not grow one.
 	//
+	// Also the variant's OWN bucket's window while the fleet's output length
+	// is in a swap the key has not followed yet (up to the 2-minute dwell of
+	// the saturation analyzer's bucket band): the window holds the shape
+	// being left, so it takes no readings and is held, not ordered on.
+	//
 	// A measured window too thin to order on (fewer readings than
 	// floor.MinThroughputSamplesToOrder) is a third hold-only case, and is
 	// not a source of its own: it is measured, and the floor's heldWhy says

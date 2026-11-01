@@ -748,7 +748,7 @@ not cover a key.
 | Instant k against a rate[1m] ITL (#273 A5, caught since #393) | known truth, on the time-base family |
 | Sum of per-pod one-minute peaks | redistribution invariance, on the time-base family |
 | Settle refuses one cycle of a fill (#282 F1) | transient, on the time-base family |
-| k2 key flips on the output-length boundary; measured/derived flips near 2x; the 0.30 idle line; `backlogGrew` | edges by enumeration (the operating point on the boundary, or the ratio built at 2) |
+| k2 key flips on the output-length boundary; mu key flips on the output-length boundary; measured/derived flips near 2x; the 0.30 idle line; `backlogGrew` | edges by enumeration (the operating point on the boundary, or the ratio built at 2) |
 | Headroom counted twice (+17.6 %); idle room counted twice; the rules together always pick the higher mu | known truth |
 | KV and throughput units mixed | scale |
 | Max across replicas (+13.6 % at 16) | N-dependence |

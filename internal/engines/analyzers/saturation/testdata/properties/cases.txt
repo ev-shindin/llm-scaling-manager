@@ -67,6 +67,7 @@ edges/mu/fresh-for
 edges/mu/fresh-for-nondefault
 edges/mu/half-of-served
 edges/mu/half-of-served-nondefault
+edges/mu/key-near-output-boundary
 edges/mu/latch-at-2x
 edges/mu/latch-return
 edges/mu/latch-return-nondefault
