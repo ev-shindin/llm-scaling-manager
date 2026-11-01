@@ -2,7 +2,9 @@ package throughput
 
 import (
 	"context"
+	"maps"
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -327,7 +329,11 @@ func (a *ThroughputAnalyzer) analyze(
 	)
 	variantCapacities := make([]domain.VariantCapacity, 0, len(byVariant))
 
-	for variantName, variantMetrics := range byVariant {
+	// In variant order: the loop sums floats across variants and builds the
+	// capacities others sum in turn, and a map's random order would leave the
+	// last bit of each sum to chance.
+	for _, variantName := range slices.Sorted(maps.Keys(byVariant)) {
+		variantMetrics := byVariant[variantName]
 		key := variantKey(input.Namespace, input.ModelID, variantName)
 		state, ok := a.variantStates[key]
 		if !ok {

@@ -47,8 +47,11 @@ import (
 //     around them can be numbered differently from one recording to the
 //     next. No row carries a sequence number, and each file is sorted by its
 //     key.
-//   - The last bits of a float. A sum over three or more variants taken in
-//     map order can differ in its last bits. Each row's data is compared as
+//   - The last bits of a float. The analyzers' float sums over a map now run
+//     in key order, so one commit replays a recording to the bit; the
+//     tolerance is for files written by a replay at an earlier commit, whose
+//     sums ran in map order or in another order since changed, and which
+//     can differ in their last bits. Each row's data is compared as
 //     JSON; two integers must be equal, and two other numbers are equal
 //     within a relative 1e-9 (FloatTolerance). Everything else is compared
 //     exactly.
