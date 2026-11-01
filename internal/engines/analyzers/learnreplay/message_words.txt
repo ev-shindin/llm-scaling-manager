@@ -580,7 +580,6 @@ configuration
 configured
 confirmCycles
 confirmedFor
-confirms
 consecutiveFailures
 considered
 constrained
@@ -2255,6 +2254,7 @@ would
 write
 writer
 writerNamespace
+writes
 writing
 written
 writtenAt

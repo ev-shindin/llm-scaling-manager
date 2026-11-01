@@ -197,8 +197,10 @@ var _ = Describe("learned state across a restart", func() {
 					}}}},
 				}}), time.Now())
 		}
+		// saturate confirms its reading: a reading held under one set of
+		// arguments is not written under another (k2_confirm.go).
 		saturate := func(a *SaturationAnalyzer) {
-			_, err := a.Analyze(context.Background(), makeAnalyzerInput(
+			_, err := analyzeConfirmed(context.Background(), a, makeAnalyzerInput(
 				[]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 4000, 16000, 6, 100, 50)}, states))
 			Expect(err).NotTo(HaveOccurred())
 		}

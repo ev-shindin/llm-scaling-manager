@@ -61,7 +61,9 @@ func TestRestartSuite_AControllerRestartWaitsAWindowOnce(t *testing.T) {
 	}
 	// Admitted a window on: the bucket's first reading is held for the next
 	// (k2_confirm.go), which writes both.
-	want = append(want, k2ReasonObsUnconfirmed, p1Obs)
+	// The held cycle is priced at its reading (P1-obs-unadmitted), lower
+	// than the chain's k1.
+	want = append(want, k2ReasonObsUnconfirmed, k2ReasonObsUnadmitted, p1Obs)
 	assert.Equal(t, want, got, "a replica Ready an hour waits a window from the controller's first sight of it")
 }
 

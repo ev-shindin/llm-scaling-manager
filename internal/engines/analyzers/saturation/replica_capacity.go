@@ -195,6 +195,11 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	a.throughputWindowUnderLocked(throughputKey, args)
 	ref := a.serviceRateOnRecordLocked(throughputKey)
 	k2Ref := a.k2OnRecordLocked(historyKey)
+	if k2Ref <= 0 {
+		// A window's first readings held for a later cycle's (k2_confirm.go)
+		// are what is on record for the reading that follows them.
+		k2Ref = a.heldOnRecordLocked(historyKey, args)
+	}
 	a.mu.Unlock()
 	if ref <= 0 && derived.ok {
 		ref = derived.rate
@@ -681,7 +686,7 @@ func (a *SaturationAnalyzer) computeK2(
 		avgOutput, avgInput, queueThreshold, engineParams, ranks, k1, kvCeiling, role, downstreamSaturated,
 		adm, borrowDisabled, &refused, logger)
 	k2, src, recordable := a.unadmittedPrice(chain, chainSrc, historyKey, modelID, namespace, variantName,
-		queueLen, tokensInUse, queueThreshold, kvCeiling, downstreamSaturated, adm, logger)
+		queueLen, tokensInUse, queueThreshold, kvCeiling, downstreamSaturated, adm, refused == k2ReasonObsUnconfirmed, logger)
 	if src != chainSrc {
 		// Priced at the unadmitted reading, not at the chain's lower bound.
 		borrowed = k2Borrow{}
@@ -735,17 +740,25 @@ func (a *SaturationAnalyzer) unadmittedPrice(
 	kvCeiling int64,
 	downstreamSaturated bool,
 	adm admission,
+	// held is a reading k2 admitted and held as its window's first
+	// (k2_confirm.go): what the replica holds now, not yet recorded.
+	held bool,
 	logger logr.Logger,
 ) (k2 int64, src capacity.K2Source, recordable int64) {
 	saturated := queueLen >= int(queueThreshold) && tokensInUse > 0
 	plausible := kvCeiling <= 0 || tokensInUse <= kvCeiling
-	// A bridge, or a Ready replica of the variant's own mid-rollout.
-	atReading := adm.bridge || (adm.rollout && adm.admitted())
+	// A bridge, a Ready replica of the variant's own mid-rollout, or a
+	// reading held for a later cycle's: the chain past it may be k1, or a
+	// window from before the episode gap, far above what the replica holds.
+	atReading := adm.bridge || (adm.rollout && adm.admitted()) || held
 	if !atReading || downstreamSaturated || !saturated || !plausible || tokensInUse >= chain {
 		return chain, chainSrc, chain
 	}
 	why := "a warm-pool bridge"
-	if !adm.bridge {
+	switch {
+	case held:
+		why = "held as its window's first reading"
+	case !adm.bridge:
 		why = "mid-rollout"
 	}
 	logger.V(perReplicaLogLevel).Info("k2-decision",
@@ -943,7 +956,7 @@ func (a *SaturationAnalyzer) k2Chain(
 			fresh := !ok || ra.WriteGapExceedsAt(now, a.horizons.EpisodeGap)
 			// The first reading of a window waits for a later cycle's
 			// (k2_confirm.go).
-			held, confirmed := a.k2HoldFirstLocked(historyKey, k2Observed, fresh, now)
+			held, confirmed := a.k2HoldFirstLocked(historyKey, k2Observed, fresh, args, now)
 			if held {
 				a.mu.Unlock()
 				*refused = k2ReasonObsUnconfirmed
@@ -951,7 +964,7 @@ func (a *SaturationAnalyzer) k2Chain(
 					"modelID", modelID, "namespace", namespace, "variant", variantName,
 					"priority", k2ReasonObsUnconfirmed, "historyKey", historyKey,
 					"queueLength", queueLen, "queueThreshold", queueThreshold,
-					"reason", "the first saturated reading of a window with nothing on record: held until a later cycle's reading confirms it; not recorded",
+					"reason", "the first saturated reading of a window with nothing on record: held until a later cycle's admitted reading writes it; not recorded",
 					"tokensInUse", tokensInUse, "k1", k1)
 				break
 			}
@@ -959,8 +972,11 @@ func (a *SaturationAnalyzer) k2Chain(
 				ra = capacity.NewRollingAverage(capacity.RollingAverageWindowSize, now)
 				a.computeCapacityHistory[historyKey] = ra
 			}
-			for _, r := range confirmed {
-				ra.AddAt(float64(r), now)
+			// The held readings at when they were read, then this one; each
+			// counts as a write.
+			for _, r := range confirmed.readings {
+				ra.AddAt(float64(r), confirmed.at)
+				a.paths.add(pathK2Obs, 1)
 			}
 			ra.AddAt(float64(k2Observed), now)
 			a.paths.add(pathK2Obs, 1)
