@@ -580,11 +580,25 @@ role's own cut first, then what is left from the role cut most, never more
 than the summed cut. A role counts toward the sum only what it can give:
 not a cut no replica can meet (a variant with no capacity reading, the
 cheapest held at one), and, while it has a share, not its last replica, so
-the second pass never takes a role with demand to zero. The second pass
-runs only when every role cut has one replica size; with mixed sizes the
-two passes disagreed between adjacent targets, and a larger target left
-fewer GPUs. Cut 4 GPUs from each of two roles on 8-GPU pods, each role
-alone shed nothing.
+the second pass never takes a role with demand to zero. Cut 4 GPUs from
+each of two roles on 8-GPU pods, each role alone shed nothing.
+
+Both roundings, fill and reclaim, are greedy, which is exact while the
+model has one replica size. A model with more than one size, in one role or across roles, is
+rounded by an exact pod search instead (`rescale_pods.go`): a bounded
+knapsack, on bitsets, over each role's variants. Fills (`roundFillsExact`)
+take the most GPUs within the summed growth of the roles not cut, each role
+bounded as the greedy pass bounds it; reclaims (`reclaimExact`) shed the
+most GPUs within the summed cut, each role no further than its cut rounded
+up to its smallest removable pod, keeping `minReplicas`, scale-down holds,
+a role's last replica while it has a share, and the cheapest-at-one rule. A
+larger target only adds choices to a fill and removes them from a reclaim,
+so it never leaves fewer GPUs: greedy, prefill on an empty 8-GPU variant
+and decode on 2- and 4-GPU pods placed 10 GPUs at a target of 10 and 8 at
+11. Each bound is clamped to `podSearchMaxUnits` (4096 units of the pods'
+greatest common divisor), so a search costs at most about 0.27M word
+operations per role, and a model grows or sheds no more than that a cycle.
+The real fill of a mixed role (`fillRoleExact`) uses the same search.
 
 ---
 
