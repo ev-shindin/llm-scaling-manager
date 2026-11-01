@@ -94,6 +94,7 @@ var heldBy = map[string][]heldTest{
 	},
 	saturation.SwitchMuMarginClamp: {
 		{"../saturation", "TestMuKeyBucket_AMarginMoveNeverRaisesTheWindow"},
+		{"../saturation", "TestMuKeyBucket_TheClampWritesNothingToAnEmptyWindow"},
 	},
 	saturation.SwitchK2ReadsSettle: {
 		{"../saturation", "TestSettleView_TheTrackerSwitchMovesTheAbsenceRule"},

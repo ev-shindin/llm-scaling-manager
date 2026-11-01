@@ -1008,7 +1008,7 @@ cycle (`TestMuKeyBucket_TheKeysShareABucket`). The switch is
   | long, 530 tokens | 6 % | 0 % | none | 0 |
   | long, 530 tokens | 10 % | 0.95 % | 8 cycles | 2 |
   | long, 530 tokens | 15 % | 5.4 % | 8 cycles | 36 |
-  | 490 tokens | 10 % | 1.5 % | 8 cycles | not measured |
+  | 490 tokens | 10 % | 1.5 % | 8 cycles | 5 |
   | 490 tokens | 15 % | 6.4 % | 8 cycles | 41 |
   | medium, 110 tokens | 15 % | 3.9 % | 8 cycles | 24 |
   | long, 1400 tokens | 15 % | 2.9 % | 8 cycles | 14 |
@@ -1031,9 +1031,11 @@ cycle (`TestMuKeyBucket_TheKeysShareABucket`). The switch is
   before the key moves: main, whose tracker moves the throughput key at once
   on this 21 % shift, leaves `long` at 3.10; the band without the clamp
   raises it to 3.86; with the clamp it stays at 3.10. The switch is
-  `SwitchMuMarginClamp`. A freeze instead would have frozen 8.6 % of cycles
-  at 6 % noise around 530 (runs up to 26 cycles) and 22-33 % at 10-15 %. The
-  clamp applies on the same cycles but writes, and only lowers:
+  `SwitchMuMarginClamp`. A freeze on every cycle past the margin, in either
+  direction and pending swaps included, would have frozen 8.6 % of cycles at
+  6 % noise around 530 (runs up to 26 cycles) and 22-33 % at 10-15 %. The
+  clamp applies on fewer cycles, those toward shorter outputs with no swap
+  pending, and on those it still writes, and only lowers:
 
   | Fleet | Noise | Cycles clamped | Longest run |
   | --- | --- | --- | --- |
@@ -1048,9 +1050,17 @@ cycle (`TestMuKeyBucket_TheKeysShareABucket`). The switch is
   pending, which are frozen instead, left out.) The cost is a window biased
   low near a boundary with large swings: the lower readings of the noise are
   written as read, the higher ones of the shorter side capped at the median.
+  A clamped reading never raises the window by being appended; a sample still
+  being folded across pods can move by the pods already in it (a review probe
+  saw a rise over the previous step on 0.17 % of clamped writes, and none over
+  the median the clamping started from).
 - **k2's settle test** still reads the frozen window as its throughput
   reference (`k2Unsettled`, `serviceRateOnRecordLocked`), at full weight, as
   before: that is the k2 window's own hold.
+- **The bucket left does not expire.** `k2KeyMemo.left` stands until the
+  next move, so a key whose new window is later swept can be carried from a
+  bucket left hours earlier. The carry is lower only and borrowed, so that is
+  never the risky side; the memo is swept with the model and not persisted.
 - **A moved key is carried lower only** (`carriedThroughput`). When the band
   moves the throughput key to a bucket with no window, it borrows the nearest
   neighbour as before (`nearestSaturatedThroughput`, the shorter bucket on a

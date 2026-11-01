@@ -339,15 +339,23 @@ const SwitchMuMarginClamp = "mu-margin-clamp"
 // authority, to price the fleet too high when it returns to the longer
 // shape: mu's side that breaks the SLO. The tracker-keyed key moved at once
 // on a shift 20 % off its anchor, and never on a smaller one. Clamped to the
-// median, a reading can lower the window and never raise it: one at or under
-// the median, in place of any value, leaves the median where it was or lower.
-// Toward longer outputs the readings are lower than the window's, the safe
-// side, and are written as read; so is every reading when the length is
-// within the margin.
+// median, a reading never raises the window by being appended: one at or
+// under the median, in place of any value, leaves the median where it was or
+// lower. A sample still being folded across pods (recordSaturatedThroughputFrom
+// keeps a mean of the pods' readings within ThroughputSampleSpacing) can
+// still move by the pods already in it: a review probe over 180 000 clamped
+// writes on three pods saw the median rise over the previous step on 0.17 %
+// of them, and never over its value when the clamping began. Toward longer
+// outputs the readings are lower than the window's, the safe side, and are
+// written as read; so is every reading when the length is within the margin.
+// The median is read under one lock and the write takes another: a write
+// that starts a new episode (EpisodeGap) is clamped to the old episode's
+// median, which is lower only.
 //
-// Not a freeze: freezing on this cycle's length past the margin froze 8.6 %
-// of cycles at 6 % noise around 530 tokens, in runs of up to 26 cycles, and
-// 22-33 % at 10-15 %.
+// Not a freeze: freezing on this cycle's length past the margin, in either
+// direction and with pending swaps counted, froze 8.6 % of cycles at 6 %
+// noise around 530 tokens, in runs of up to 26 cycles, and 22-33 % at
+// 10-15 %.
 func (a *SaturationAnalyzer) marginClamp(key string, mu float64, clamp bool) (float64, bool) {
 	if !clamp {
 		return mu, true
