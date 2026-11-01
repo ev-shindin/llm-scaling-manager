@@ -2,6 +2,7 @@ contamination-heterogeneity/batch-cap/bridge-row
 contamination-heterogeneity/batch-cap/kv-bound-pod
 contamination-heterogeneity/batch-cap/preempting-pod
 contamination-heterogeneity/batch-cap/router-holds-idle-pod
+contamination-heterogeneity/batch-cap/uneven-dp-ranks
 contamination-heterogeneity/itl/flagged-contamination-to-50pct
 contamination-heterogeneity/itl/slow-replica-fit
 contamination-heterogeneity/mu/half-served-max-slow-pod

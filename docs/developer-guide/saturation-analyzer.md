@@ -140,15 +140,25 @@ The learned cap (`observeBatchCap`, issue #399) is the max, per engine rank,
 of the running counts a pod held for `BatchCapPlateauCycles` (3) cycles in a
 row, every cycle passing `batchCapRules`: serving (`admission.serving`), not
 joined under `JoinedReplicaWindow`, a queue on the busiest rank of at least 1,
-a decode row's queue reason known (`CapacityQueueKnown`), a running count
+a decode row's queue reason known (`CapacityQueueKnown`), a data-parallel row's
+busiest rank's KV within `BatchCapRankSpread` (10%) of the mean (the running
+count is summed over ranks, so the sample is the mean per rank), a running count
 known, `BusiestRankTokens` under k1, preemption known and zero. A running
 count can never exceed the cap, so every sample is at or below it and the max
 only rises toward it; each rule guards against a sample below it. A refused
 cycle ends the pod's plateau. The cap is reset when the variant's `windowArgs`
-change, swept after `BucketRetention` unconfirmed, and not in the learned-state
+change, swept after `BucketRetention` with neither a plateau nor a use (`pricingBatchCap`
+stamps `usedAt`: it ages on last use, so a fleet it provisions, which stops
+queueing, keeps it), and not in the learned-state
 snapshot. A flow-controlled fleet whose engine queues read 0 gives no sample:
 the router judges the pool, not the pod, so its queue is not evidence that any
-one pod is full. The property cases are `*/batch-cap/*`, and
+one pod is full. Nor does a P/D decode at its cap: the rows are
+`decodeCapacityViews`, and vLLM v0.20.0+ reports a capped decode's waiting
+requests deferred, so the view's queue is 0 (`pd_decode_queue.go`;
+`TestBatchCap_PDDecodeAtCapLearnsNothing`). The declared cap covers it.
+Prefill rows are skipped, since P3 never prices prefill. The property cases
+are `*/batch-cap/*` (run them with `-run 'TestLearnerProperties/.*/batch-cap/.*'`),
+and
 `TestBatchCapMutants` drops each rule in turn.
 
 `B` and `S` bound one engine. A replica running several data-parallel ranks

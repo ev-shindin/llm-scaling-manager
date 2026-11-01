@@ -57,8 +57,17 @@ var batchCapTopologies = []batchCapTopology{
 	{name: "aggregated DP=8", n: 1, ranks: 8},
 }
 
+// learnableTopologies are the topologies a learned cap covers: a P/D
+// decode at its cap reads no capacity queue, so it teaches nothing
+// (TestBatchCap_PDDecodeAtCapLearnsNothing); the declared cap covers it.
+var learnableTopologies = []batchCapTopology{batchCapTopologies[0], batchCapTopologies[2]}
+
 // capRow is one replica of v holding perRank sequences on each of its
-// ranks, with queue waiting on it.
+// ranks, with queue waiting on each rank, the ranks loaded alike.
+//
+// pd is a decode of a P/D model on vLLM v0.20.0 or later, at its cap: vLLM
+// reports every waiting request deferred, none waiting for capacity
+// (pd_decode_queue.go, as #287 measured), so the capacity queue reads 0.
 func capRow(pod string, perRank, ranks, queue int, pd bool) domain.ReplicaMetrics {
 	running := perRank * ranks
 	rm := makeReplicaMetrics(pod, "v", int64(running*batchCapPerSeq), propKv*int64(ranks), queue, 1000, 500)
@@ -67,12 +76,15 @@ func capRow(pod string, perRank, ranks, queue int, pd bool) domain.ReplicaMetric
 	rm.GenerationTokenRate = 6 * 500
 	rm.PrefillComputedTokenRate = 6 * 1000
 	rm.EngineRanks = ranks
+	rm.QueueLength = queue * ranks
 	rm.MaxRankQueueLength = queue
+	if ranks > 1 {
+		rm.MaxRankKvCacheUsage = rm.KvCacheUsage
+	}
 	rm.RunningRequests, rm.RunningRequestsKnown = running, true
 	rm.PreemptionRate, rm.PreemptionRateKnown = 0, true
 	if pd {
-		rm.CapacityQueueKnown, rm.CapacityQueueLength = true, queue
-		rm.MaxRankCapacityQueueLength = queue
+		rm.CapacityQueueKnown = true
 	}
 	return rm
 }
@@ -147,7 +159,7 @@ func pricedNear(what string, got, truth float64) error {
 	return nil
 }
 
-// checkBatchCapSeqBound is #399's case: on each topology, with the engine's
+// checkBatchCapSeqBound is #399's case: on each learnable topology, with the engine's
 // args unread (defaulted, or none filed at all) and its own queue at 1-4,
 // the learned cap prices the replica at its truth once its pods have held
 // their batch for a plateau.
@@ -155,7 +167,7 @@ func checkBatchCapSeqBound(mut func(*SaturationAnalyzer)) func(uint64) error {
 	return func(seed uint64) error {
 		r := propRand(seed)
 		s := 110 + r.IntN(31)
-		for _, t := range batchCapTopologies {
+		for _, t := range learnableTopologies {
 			for _, params := range []*capacity.EngineParams{defaultedParams(), nil} {
 				rig := batchCapRig(params, batchCapPolicy, mut)
 				q := 1 + r.IntN(4)
@@ -236,6 +248,20 @@ func checkBatchCapQueueZero(seed uint64) error {
 		}
 	}
 	return nil
+}
+
+// unevenDPRow is a DP=8 replica with cap 128: one rank full at 128 with 3
+// waiting, seven at 64 with none.
+func unevenDPRow() domain.ReplicaMetrics {
+	rm := capRow("r0", 0, 8, 0, false)
+	running := 128 + 7*64
+	rm.RunningRequests = running
+	rm.TokensInUse = int64(running * batchCapPerSeq)
+	rm.KvCacheUsage = float64(rm.TokensInUse) / float64(rm.TotalKvCapacityTokens)
+	rm.KvUsageInstant = rm.KvCacheUsage
+	rm.MaxRankKvCacheUsage = float64(128*batchCapPerSeq) / float64(propKv)
+	rm.QueueLength, rm.MaxRankQueueLength = 3, 3
+	return rm
 }
 
 // batchCapLow is the running count per rank a row that is NOT at its cap
@@ -339,6 +365,14 @@ func batchCapRefusalChecks(mut func(*SaturationAnalyzer)) map[string]func(uint64
 			rm.KvCacheUsage, rm.KvUsageInstant = 0.85, 0.85
 		})),
 		"preempting": checkBatchCapNeverUnder("preempting", mut, low(func(rm *domain.ReplicaMetrics) { rm.PreemptionRate = 0.5 })),
+		// DP=8, cap 128: one rank full and queued, seven at 64. The mean per
+		// rank, 72, is not the cap.
+		"uneven-ranks": checkBatchCapNeverUnder("uneven DP ranks", mut, func(int, int) ([]domain.ReplicaMetrics, []domain.VariantReplicaState, float64) {
+			rows, states := fleetOf(batchCapTopology{n: 1, ranks: 8}, func(_ int, rm *domain.ReplicaMetrics) {
+				*rm = unevenDPRow()
+			})
+			return rows, states, float64(8 * 128 * batchCapPerSeq)
+		}),
 		// A fill ramps through counts with requests waiting; only the
 		// count it holds is its cap.
 		"not-flat": checkBatchCapNeverUnder("fill ramp", mut, func(c, s int) ([]domain.ReplicaMetrics, []domain.VariantReplicaState, float64) {
@@ -370,6 +404,7 @@ func batchCapCases() []propCase {
 		refusal(classHeterogeneity, "kv-bound-pod", "kv-bound"),
 		refusal(classHeterogeneity, "preempting-pod", "preempting"),
 		refusal(classTransient, "fill-ramp", "not-flat"),
+		refusal(classHeterogeneity, "uneven-dp-ranks", "uneven-ranks"),
 	}
 }
 

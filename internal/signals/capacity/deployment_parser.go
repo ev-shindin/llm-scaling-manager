@@ -30,6 +30,16 @@ func ParseEngineArgs(engine inferenceengine.Engine, scaleTarget scaletarget.Scal
 	return params
 }
 
+// effectiveDeclaredBatchCap is DeclaredBatchCap where it is read -- the flags
+// state no cap -- and 0 where the flags' cap overrides it, so an annotation
+// that changes nothing does not split two otherwise equal configurations.
+func (p *EngineParams) effectiveDeclaredBatchCap() int64 {
+	if p.ExplicitMaxNumSeqs() > 0 {
+		return 0
+	}
+	return p.DeclaredBatchCap
+}
+
 // declaredBatchCap is the batch cap the llm-d.ai/max-num-seqs annotation
 // states (EngineParams.DeclaredBatchCap): a positive integer, and 0 for an
 // absent annotation or any other value.
@@ -138,8 +148,8 @@ type EngineParams struct {
 	// state no cap (ExplicitMaxNumSeqs is 0): what the flags state is what
 	// the engine runs. ExplicitMaxNumSeqs and BatchCap do not read it.
 	//
-	// Compared for capacity (IsCapacityCompatible), so two variants that
-	// declare different caps never price each other. Not hashed into the
+	// Compared for capacity (IsCapacityCompatible) where it is read, so two
+	// variants that declare different caps never price each other. Not hashed into the
 	// fingerprint: the annotation is a statement about the engine, not a
 	// setting of it, and hashing it would move every stored digest.
 	DeclaredBatchCap int64
@@ -1394,7 +1404,7 @@ func (p *EngineParams) IsCapacityCompatible(other *EngineParams) bool {
 		p.EffectiveMaxBatchedTokens == other.EffectiveMaxBatchedTokens &&
 		p.MaxNumSeqs == other.MaxNumSeqs &&
 		p.MaxNumActiveSeqs == other.MaxNumActiveSeqs &&
-		p.DeclaredBatchCap == other.DeclaredBatchCap &&
+		p.effectiveDeclaredBatchCap() == other.effectiveDeclaredBatchCap() &&
 		p.MaxModelLen == other.MaxModelLen &&
 		p.WeightDtype == other.WeightDtype &&
 		p.Quantization == other.Quantization &&

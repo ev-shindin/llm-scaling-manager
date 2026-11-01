@@ -1460,6 +1460,7 @@ kubectl annotate deployment <name> -n <namespace> --overwrite llm-d.ai/max-num-s
   learned.
 - A value that is not a positive whole number is ignored.
 - Two variants that declare different caps never price each other.
+- **On a P/D decode, declare the cap.** Learning does not see it there (below).
 
 **Or let the scaling manager learn it.** **`enableBatchCapLearning` is off by
 default.** On, a variant whose flags state no cap and which declares none
@@ -1468,8 +1469,10 @@ all of these hold for three cycles in a row, at the same count:
 
 - the pod is Ready, the variant's own (not a warm-pool bridge), not mid-rollout,
   and Ready for over a minute;
-- requests wait on the pod itself, and on a P/D decode vLLM says they wait for
-  capacity (vLLM v0.20.0 and later);
+- requests wait on the pod itself;
+- on a data-parallel pod, every rank holds about the same KV (the busiest
+  within 10% of the mean), because the running count is read summed over
+  ranks;
 - its KV is under `kvCacheThreshold`;
 - it is not preempting (SGLang publishes no preemption count, so an SGLang
   fleet does not learn).
@@ -1490,8 +1493,15 @@ more replicas than needed until a higher count is seen. These limits apply:
 - **A pod with nothing waiting on it teaches nothing.** With the router holding
   every request and the engines' own queues at 0, nothing is learned. Declare
   the cap instead.
-- The learned cap is not kept across a controller restart, and is dropped when
-  the variant's engine arguments change or after a week unconfirmed.
+- **A P/D decode does not learn.** At its cap vLLM reports the requests waiting
+  on a decode as deferred, not waiting for capacity, so the decode reads no
+  queue of its own. Learning covers aggregated and data-parallel pods; on a
+  P/D decode, declare the cap.
+- **Uneven data-parallel ranks do not teach.** One full rank beside idle ones
+  says nothing about the others.
+- The learned cap is not kept across a controller restart. It is dropped when
+  the variant's engine arguments change, or after a week in which it neither
+  priced a replica nor was seen again.
 - One direction only, like `enableLearnedStateReuse`.
 
 To see which cap priced a replica, read `batchCapSource` (`flags`, `declared`,

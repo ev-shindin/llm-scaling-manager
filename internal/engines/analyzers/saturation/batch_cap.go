@@ -65,6 +65,15 @@ const (
 // through a count; a cap holds it.
 const BatchCapPlateauCycles = 3
 
+// BatchCapRankSpread is how far the busiest engine rank's KV may sit above
+// the replica's mean for a data-parallel row to be a sample. The collector
+// reports the running count summed over ranks, not per rank, so the sample
+// is the mean per rank -- the cap only where every rank holds it. One full
+// rank beside seven at half would read 72 for a cap of 128, and price the
+// replica at 0.56 of its capacity for as long as the cap is kept. KV per
+// rank is the evidence the ranks hold alike.
+const BatchCapRankSpread = 0.10
+
 // pricedBatchCap is one engine rank's batch cap a derived k2 is priced at,
 // and its source. A zero perRank is no cap: no derived k2 can be priced.
 type pricedBatchCap struct {
@@ -74,12 +83,14 @@ type pricedBatchCap struct {
 
 // learnedBatchCap is a variant's learned batch cap: the most sequences per
 // engine rank one of its pods was seen holding at its cap, under the engine
-// arguments it was learned under (args), last raised from pod at at.
+// arguments it was learned under (args), raised from pod, last confirmed by a
+// plateau at at and last used to price a replica at usedAt.
 type learnedBatchCap struct {
 	perRank int64
 	args    string
 	pod     string
 	at      time.Time
+	usedAt  time.Time
 }
 
 // batchCapPlateau is one pod's run of cycles at the same running count.
@@ -102,6 +113,10 @@ type batchCapObs struct {
 	k1                 int64
 	preemptKnown       bool
 	preempt            float64
+	// ranks, meanKv and busiestKv are the replica's engine ranks, their mean
+	// KV fill and the busiest one's (zero when not collected).
+	ranks             int
+	meanKv, busiestKv float64
 }
 
 // batchCapRule is one admission rule of the learned batch cap: a row it
@@ -139,6 +154,12 @@ func batchCapRules() []batchCapRule {
 		// A preempting engine evicts sequences from its batch. Unknown is
 		// refused too: SGLang publishes no preemption counter.
 		{"preempting", func(o batchCapObs) bool { return !o.preemptKnown || o.preempt > 0 }},
+		// Data-parallel ranks loaded alike (BatchCapRankSpread), or the mean
+		// per rank is under the cap the full rank holds. An unknown busiest
+		// rank is refused.
+		{"uneven-ranks", func(o batchCapObs) bool {
+			return o.ranks > 1 && !(o.busiestKv > 0 && o.busiestKv <= o.meanKv*(1+BatchCapRankSpread))
+		}},
 	}
 }
 
@@ -154,7 +175,8 @@ func batchCapKey(namespace, modelID, variant string) string {
 // switch is on and the policy enables learning.
 func (a *SaturationAnalyzer) observeBatchCap(namespace, modelID, role string, rm domain.ReplicaMetrics,
 	adm admission, k1 int64, params *capacity.EngineParams, enabled bool, logger logr.Logger) {
-	if !a.batchCapLearned || !enabled {
+	// P3 never prices prefill, so a prefill cap would price nothing.
+	if !a.batchCapLearned || !enabled || domain.CanonicalRole(role) == domain.RolePrefill {
 		return
 	}
 	now := a.now()
@@ -170,6 +192,9 @@ func (a *SaturationAnalyzer) observeBatchCap(namespace, modelID, role string, rm
 		k1:                 k1,
 		preemptKnown:       rm.PreemptionRateKnown,
 		preempt:            rm.PreemptionRate,
+		ranks:              rm.Ranks(),
+		meanKv:             rm.KvCacheUsage,
+		busiestKv:          rm.MaxRankKvCacheUsage,
 	}
 	key := batchCapKey(namespace, modelID, rm.VariantName)
 	podKey := key + rm.PodName
@@ -217,6 +242,12 @@ func (a *SaturationAnalyzer) observeBatchCap(namespace, modelID, role string, rm
 // at by the derived k2, and its source: the flags' cap, the declared cap,
 // the learned cap where it is lower than the default, or the default.
 // learning is the policy's enableBatchCapLearning.
+//
+// A learned cap that prices the replica is stamped as used: it ages on its
+// last use, as the k2 and mu windows do. A fleet the cap provisions
+// correctly stops queueing, so nothing confirms the cap; aged on its last
+// confirmation, it would be swept from exactly the fleet it is working for,
+// and the fleet priced at the default again.
 func (a *SaturationAnalyzer) pricingBatchCap(namespace, modelID, variant string,
 	params *capacity.EngineParams, learning bool) pricedBatchCap {
 	if params != nil {
@@ -228,30 +259,34 @@ func (a *SaturationAnalyzer) pricingBatchCap(namespace, modelID, variant string,
 		}
 	}
 	def := params.BatchCap()
-	var learned int64
 	if a.batchCapLearned && learning {
 		a.mu.Lock()
-		if lc := a.batchCaps[batchCapKey(namespace, modelID, variant)]; lc != nil && lc.args == windowArgs(params) {
-			learned = lc.perRank
+		lc := a.batchCaps[batchCapKey(namespace, modelID, variant)]
+		if lc != nil && lc.args == windowArgs(params) && lc.perRank > 0 && (def <= 0 || lc.perRank < def) {
+			lc.usedAt = a.now()
+			learned := lc.perRank
+			a.mu.Unlock()
+			return pricedBatchCap{perRank: learned, source: batchCapLearned}
 		}
 		a.mu.Unlock()
 	}
 	switch {
-	case learned > 0 && (def <= 0 || learned < def):
-		return pricedBatchCap{perRank: learned, source: batchCapLearned}
 	case def > 0:
 		return pricedBatchCap{perRank: def, source: batchCapDefault}
 	}
 	return pricedBatchCap{}
 }
 
-// sweepBatchCapsLocked drops a learned cap no pod has confirmed for
-// bucketRetention, and a plateau no cycle has extended within K2SettleMaxGap.
-// Callers hold a.mu.
-func (a *SaturationAnalyzer) sweepBatchCapsLocked(now time.Time, bucketRetention time.Duration) {
+// sweepBatchCapsLocked drops a learned cap neither confirmed by a pod nor
+// used to price one for bucketRetention, and a plateau no cycle has extended
+// within K2SettleMaxGap. It returns how many caps it dropped. Callers hold
+// a.mu.
+func (a *SaturationAnalyzer) sweepBatchCapsLocked(now time.Time, bucketRetention time.Duration) int {
+	n := 0
 	for k, lc := range a.batchCaps {
-		if now.Sub(lc.at) > bucketRetention {
+		if now.Sub(lc.at) > bucketRetention && now.Sub(lc.usedAt) > bucketRetention {
 			delete(a.batchCaps, k)
+			n++
 		}
 	}
 	for k, p := range a.batchCapPlateaus {
@@ -259,4 +294,5 @@ func (a *SaturationAnalyzer) sweepBatchCapsLocked(now time.Time, bucketRetention
 			delete(a.batchCapPlateaus, k)
 		}
 	}
+	return n
 }

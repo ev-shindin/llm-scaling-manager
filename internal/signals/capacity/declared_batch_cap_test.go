@@ -81,3 +81,14 @@ func TestDeclaredBatchCapRetagsALiveRecord(t *testing.T) {
 	assert.Equal(t, int64(50_000), rec.EffectiveCapacity, "what was measured is kept")
 	assert.Equal(t, int64(128), rec.EngineParams.DeclaredBatchCap, "the declared cap reaches the record")
 }
+
+// An annotation the flags override is not read, and does not split two
+// configurations that agree on everything else.
+func TestDeclaredBatchCapIsComparedOnlyWhereRead(t *testing.T) {
+	a := EngineParams{EffectiveMaxBatchedTokens: 8192, MaxNumSeqs: 64, MaxNumSeqsSet: true}
+	b := a
+	b.DeclaredBatchCap = 128
+	assert.True(t, a.IsCapacityCompatible(&b), "the flags state the cap; the annotation is not read")
+	a.MaxNumSeqsSet, b.MaxNumSeqsSet = false, false
+	assert.False(t, a.IsCapacityCompatible(&b), "with the flags unread, the declared cap is the cap")
+}

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/go-logr/logr"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
@@ -213,25 +215,141 @@ func TestBatchCap_SwitchesOffReproduceTheIssue(t *testing.T) {
 		}
 	}
 	for _, topo := range batchCapTopologies {
-		rig := batchCapRig(defaultedParams(), batchCapPolicy, off)
-		rows, states := fleetOf(topo, func(i int, rm *domain.ReplicaMetrics) {
-			*rm = capRow(fmt.Sprintf("r%d", i), 126, topo.ranks, 3, topo.pd)
-		})
-		var res *domain.AnalyzerResult
-		var err error
-		for range 13 {
-			if res, err = rig.analyze(rows, states, 12, propCycle); err != nil {
+		// Defaulted params price P3 at 256 sequences; none filed, P4 at k1.
+		for _, params := range []*capacity.EngineParams{defaultedParams(), nil} {
+			rig := batchCapRig(params, batchCapPolicy, off)
+			rows, states := fleetOf(topo, func(i int, rm *domain.ReplicaMetrics) {
+				*rm = capRow(fmt.Sprintf("r%d", i), 126, topo.ranks, 3, topo.pd)
+			})
+			var res *domain.AnalyzerResult
+			var err error
+			for range 13 {
+				if res, err = rig.analyze(rows, states, 12, propCycle); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, reason, err := vPerReplica(res)
+			if err != nil {
 				t.Fatal(err)
 			}
+			truth := float64(126 * topo.ranks * batchCapPerSeq)
+			t.Logf("%s, params %v, switches off: priced %.0f against a true %.0f, %.3fx (%s)", topo.name, params != nil, got, truth, got/truth, reason)
+			if got/truth < 1.8 {
+				t.Errorf("%s, params %v: switches off priced %.3fx the truth; the issue's case is 1.905x", topo.name, params != nil, got/truth)
+			}
 		}
-		got, _, err := vPerReplica(res)
+	}
+}
+
+// A P/D decode at its cap on vLLM v0.20.0 or later reports its waiting
+// requests deferred, none waiting for capacity, so the decode view reads no
+// queue and the learner takes no sample: on a P/D decode the declared cap is
+// the source.
+func TestBatchCap_PDDecodeAtCapLearnsNothing(t *testing.T) {
+	rig := batchCapRig(defaultedParams(), batchCapPolicy, nil)
+	rows, states := fleetOf(batchCapTopologies[1], func(i int, rm *domain.ReplicaMetrics) {
+		*rm = capRow(fmt.Sprintf("r%d", i), 126, 1, 3, true)
+	})
+	for range 13 {
+		if _, err := rig.analyze(rows, states, 12, propCycle); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := rig.learnedCap(); got != 0 {
+		t.Fatalf("a P/D decode at its cap learned %d; the capacity queue reads 0 there", got)
+	}
+}
+
+// The learned cap ages on its last use (S1): a fleet it prices correctly
+// stops queueing, so no plateau confirms it, and it must not be swept for
+// that. One nothing uses is swept after the bucket retention.
+func TestBatchCap_AgesOnUse(t *testing.T) {
+	rig := batchCapRig(defaultedParams(), batchCapPolicy, nil)
+	learnCap(t, rig, 120, 4)
+	if rig.learnedCap() != 120 {
+		t.Fatalf("precondition: learned %d", rig.learnedCap())
+	}
+	retention := rig.a.horizons.BucketRetention
+	// The fleet copes: nothing waits on its pods, and the cap prices them.
+	coping := capRow("r0", 120, 1, 0, false)
+	for day := range 10 {
+		rig.clock = rig.clock.Add(retention / 7)
+		res, err := rig.analyze([]domain.ReplicaMetrics{coping}, aggOne(coping), 12, propCycle)
 		if err != nil {
 			t.Fatal(err)
 		}
-		truth := float64(126 * topo.ranks * batchCapPerSeq)
-		t.Logf("%s, switches off: priced %.0f against a true %.0f, %.3fx", topo.name, got, truth, got/truth)
-		if got/truth < 1.8 {
-			t.Errorf("%s: switches off priced %.3fx the truth; the issue's case is 1.905x", topo.name, got/truth)
+		if ev := rig.a.evictStaleHistory(); ev.BatchCaps != 0 {
+			t.Fatalf("day %d: a cap in use was swept", day)
 		}
+		if got, _, _ := vPerReplica(res); got != float64(120*batchCapPerSeq) {
+			t.Fatalf("day %d: priced %.0f, want the learned %d", day, got, 120*batchCapPerSeq)
+		}
+	}
+	// Unused: learning switched off, so nothing reads it.
+	rig.policy = nil
+	for range 2 {
+		rig.clock = rig.clock.Add(retention/2 + 1)
+		if _, err := rig.analyze([]domain.ReplicaMetrics{coping}, aggOne(coping), 12, propCycle); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rig.clock = rig.clock.Add(1)
+	if ev := rig.a.evictStaleHistory(); ev.BatchCaps != 1 || rig.learnedCap() != 0 {
+		t.Fatalf("an unused cap past the retention: evicted %d, left %d", ev.BatchCaps, rig.learnedCap())
+	}
+}
+
+// A change of engine arguments resets the cap through the live path: the
+// old cap prices nothing under the new arguments, and the first plateau
+// under them is the cap, however much lower.
+func TestBatchCap_ArgsChangeResets(t *testing.T) {
+	rig := batchCapRig(defaultedParams(), batchCapPolicy, nil)
+	learnCap(t, rig, 120, 4)
+	moved := defaultedParams()
+	moved.EffectiveMaxBatchedTokens = 16384
+	rig.a.capacityStore.Update("test-ns", "test-model", "v", capacity.Record{EngineParams: moved}, rig.clock)
+	if got := learnCap(t, rig, 90, 1); got != k1Truth {
+		t.Fatalf("under new arguments the old cap priced %.0f; want k1 %.0f", got, k1Truth)
+	}
+	learnCap(t, rig, 90, 3)
+	if got := rig.learnedCap(); got != 90 {
+		t.Fatalf("under new arguments: learned %d, want the reset 90", got)
+	}
+}
+
+// A plateau a cycle has not extended within K2SettleMaxGap is swept, and a
+// row after the gap starts a new one.
+func TestBatchCap_PlateauSweep(t *testing.T) {
+	rig := batchCapRig(defaultedParams(), batchCapPolicy, nil)
+	learnCap(t, rig, 120, 2)
+	rig.a.mu.Lock()
+	n := len(rig.a.batchCapPlateaus)
+	rig.a.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("precondition: %d plateaus", n)
+	}
+	rig.clock = rig.clock.Add(K2SettleMaxGap + 1)
+	rig.a.evictStaleHistory()
+	rig.a.mu.Lock()
+	n = len(rig.a.batchCapPlateaus)
+	rig.a.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("a plateau past the gap was kept")
+	}
+	learnCap(t, rig, 120, 1)
+	if rig.learnedCap() != 0 {
+		t.Fatalf("one cycle after the gap completed a plateau")
+	}
+}
+
+// Prefill is never priced by P3, so a prefill row learns nothing.
+func TestBatchCap_PrefillLearnsNothing(t *testing.T) {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	rm := capRow("p0", 120, 1, 3, false)
+	for range 4 {
+		a.observeBatchCap("test-ns", "test-model", domain.RolePrefill, rm, admissionOf(rm), memoryBound(propKv, 0.8), nil, true, logr.Discard())
+	}
+	if len(a.batchCaps) != 0 || len(a.batchCapPlateaus) != 0 {
+		t.Fatalf("a prefill row was learned from")
 	}
 }
