@@ -524,9 +524,11 @@ func boundAllSpare(nr *allocation.NamedAnalyzerResult, pricings []rolePricing, s
 		}
 	}
 	if lowered {
+		// In role order: a float sum taken in a map's random order differs in
+		// its last bit from one cycle, or one replay, to the next.
 		var sum float64
-		for _, rc := range nr.RoleCapacities {
-			sum += rc.SpareCapacity
+		for _, role := range slices.Sorted(maps.Keys(nr.RoleCapacities)) {
+			sum += nr.RoleCapacities[role].SpareCapacity
 		}
 		nr.SpareCapacity = min(nr.SpareCapacity, sum)
 	}

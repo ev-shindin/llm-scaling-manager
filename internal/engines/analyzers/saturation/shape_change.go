@@ -1,6 +1,8 @@
 package saturation
 
 import (
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -615,7 +617,10 @@ func holdFleetFloor(roleDemand map[string]float64, variants []domain.VariantCapa
 	byRole := aggregation.AggregateByRole(variants)
 	var moved float64
 	raised := make(map[string]float64)
-	for role, demand := range roleDemand {
+	// In role order: moved is a float sum, which a map's random order would
+	// leave to chance in its last bit.
+	for _, role := range slices.Sorted(maps.Keys(roleDemand)) {
+		demand := roleDemand[role]
 		rc, ok := byRole[role]
 		if !ok || rc.TotalSupply <= 0 {
 			continue

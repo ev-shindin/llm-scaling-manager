@@ -57,7 +57,7 @@ func (c *Clock) Pin() (release func()) {
 	}
 	c.mu.Lock()
 	if c.depth == 0 {
-		c.at = c.base.Now()
+		c.at = wall(c.base.Now())
 	}
 	c.depth++
 	c.mu.Unlock()
@@ -72,20 +72,43 @@ func (c *Clock) Pin() (release func()) {
 }
 
 // Now returns the pinned reading while a pin is held, and the base clock's
-// reading otherwise.
+// reading otherwise. Either way it carries no monotonic reading (wall).
 func (c *Clock) Now() time.Time {
 	if c == nil {
-		return clock.RealClock{}.Now()
+		return wall(clock.RealClock{}.Now())
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.depth > 0 {
 		return c.at
 	}
-	return c.base.Now()
+	return wall(c.base.Now())
 }
 
-// Since returns how long before Now t was.
+// wall strips t's monotonic clock reading, keeping its wall time.
+//
+// A recording keeps only wall times, so a replay subtracts wall times. A live
+// time.Now also carries a monotonic reading, and Sub between two that both do
+// uses the monotonic one. time.Now takes the wall and the monotonic readings
+// separately, so the gap between them varies by nanoseconds from one call to
+// the next, and a wall-clock step moves one and not the other. An age taken
+// live then differed from the same age replayed, and the replay of a cycle
+// could not match the recording of it. Every stamp and age read from this
+// clock is wall-only, live and replayed alike.
+//
+// The cost: ages now follow wall-clock steps, as learned state restored after
+// a restart already did. A forward step ages everything at once, and a step
+// longer than a timeout evicts or expires what it guards. A backward step
+// gives a negative age, which holds until the wall clock catches up: a
+// timeout is extended, and a wait for an age to pass (sample spacing,
+// settling) waits longer. Only a step does this, not a gradual NTP
+// adjustment.
+func wall(t time.Time) time.Time {
+	return t.Round(0)
+}
+
+// Since returns how long before Now t was. It is negative when t is after
+// Now, as after a backward wall-clock step (see wall).
 func (c *Clock) Since(t time.Time) time.Duration {
 	return c.Now().Sub(t)
 }
