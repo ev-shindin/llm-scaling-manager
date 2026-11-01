@@ -686,6 +686,13 @@ go run ./cmd/learnergolden export -in RAW.jsonl -out exported.jsonl.gz
 
 #### When an output moves
 
+A PR with replay switches holds its runs in `TestGoldens_TheSwitchRuns`
+(`switch_runs_test.go`, part of `make test`): all off reproduces the base
+commit's goldens (an output a switch names, by the base file's digest),
+each switch alone moves only the outputs it names, and all on is the
+committed goldens. Add a switch and its named outputs there; delete the row
+with the seam.
+
 Run `make learner-goldens` only when your PR names the change: it rewrites
 every output file from a replay at your commit. Never edit a golden by hand.
 `make learner-goldens-check` runs the check alone and prints, per output, how

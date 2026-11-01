@@ -51,8 +51,9 @@
   collector and lws v0.8.0's pod controller), not on a run. k2's joined
   test reads the tracker, keeping #288's rule, behind two replay switches:
   `k2-reads-the-settle-tracker` (a replica unseen past the tracker's
-  absence tolerance waits again; the memo held it 2 min; no committed
-  golden moves with it alone) and `k2-waits-after-controller-restart`
+  absence tolerance waits again, where the memo held it 2 min; and a Ready
+  row whose Ready time reads zero keeps the settle, where the memo waited
+  twice; no committed golden moves with it alone) and `k2-waits-after-controller-restart`
   (every replica waits once after a restart; moves mu-paths only). An
   analyzer given no view, as unit tests build one, observes a tracker of
   its own and takes its first cycle's replicas as already watched; a
@@ -61,6 +62,12 @@
   `learner-write` band is 2 % of the last logged value, not measured on a
   run. The counter `k2-unsettled-window` is reported and not required
   until the flow-control-off recording lands (`PathAwaitsRecording`).
+  Forget through `learn.Learners` drops the same entries, counted the same,
+  so it is behaviour-neutral and has no switch; the clause "when no key
+  remains, the variant's learner series are deleted" has nothing to apply
+  to in PR 2, which adds no learner series, and waits for the first PR that
+  publishes one. The switch runs are a committed test
+  (`TestGoldens_TheSwitchRuns`).
 - **Problem:** the analyzers learn about fifteen quantities. Each one accepts
   readings, fits, forgets and logs in its own way. The same defects were fixed
   in one learner after another, because no learner could reuse another's fix.
