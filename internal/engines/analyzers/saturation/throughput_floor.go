@@ -83,8 +83,11 @@ import (
 // A reading equal to the last one given, at or past the spacing, is the
 // same scrape pair read again across the boundary (a re-read of the
 // previous pair when the next scrape has not landed), or a genuine repeat,
-// and only touches; that costs a cycle or two. Compared to the last
-// READING, not to the sample, which the fold may have raised above it.
+// and starts no sample; that costs a cycle or two. Compared to the last
+// READING, not to the sample, which the fold may have raised above it. Such
+// a repeat is use, not a write (SwitchMuRepeatIsUse): it touches the
+// window's use clock and leaves its write clock, so a frozen series does
+// not keep an episode alive. The prefill bound keeps the old rule, a write.
 //
 // Measured on the shape-swap trace: every saturated rate logged over four
 // passes is N/30 (103/30 = 3.43, 110/30 = 3.67, 165/30 = 5.5 ...) but a
@@ -100,6 +103,21 @@ import (
 func (a *SaturationAnalyzer) recordSaturatedThroughput(key string, rate float64) {
 	a.recordSaturatedThroughputFrom(key, "", rate)
 }
+
+// muWrite is what recordSaturatedThroughputFrom made of one reading.
+type muWrite int
+
+const (
+	// muNotWritten: not a reading (non-positive or +Inf).
+	muNotWritten muWrite = iota
+	// muSampled: the reading started a sample of its own.
+	muSampled
+	// muFolded: the reading was folded into the sample being read.
+	muFolded
+	// muRepeated: an exact repeat of the last reading past the spacing,
+	// which starts no sample (SwitchMuRepeatIsUse says what it touches).
+	muRepeated
+)
 
 // recordSaturatedThroughputFrom is recordSaturatedThroughput for a reading
 // from one named replica (pod).
@@ -128,18 +146,25 @@ func (a *SaturationAnalyzer) recordSaturatedThroughput(key string, rate float64)
 // with its time (throughputPodReads) and start over with the next sample, and
 // a sample with none on record -- restored, or put aside and brought back --
 // counts its own value as the reading of the replica that reads next.
-func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate float64) {
+func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate float64) muWrite {
 	// `!(rate > 0)` rejects a NaN, which `rate <= 0` would admit. +Inf is
 	// excluded too, to match floor.priceable: it passes `rate > 0`, and left in
 	// it would take one of the window's ten slots from a real reading and be
 	// logged verbatim as a saturated rate.
 	if !(rate > 0) || math.IsInf(rate, 1) {
-		return
+		return muNotWritten
 	}
 	now := a.now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	ra, ok := a.saturatedThroughput[key]
+	// An exact repeat is use, not a write (SwitchMuRepeatIsUse), so it is
+	// judged before the episode: a frozen series past EpisodeGap neither
+	// keeps the old episode nor starts a new one with its frozen value.
+	if ok && a.muRepeatIsUse && !isPrefillBoundKey(key) && a.exactRepeatLocked(key, rate, now) {
+		ra.TouchAt(now)
+		return muRepeated
+	}
 	// WriteGapExceedsAt, not StaleAt, for the reason given at the k2 history
 	// write in replica_capacity.go: the floor reads this window every
 	// cycle, so a use-based check never sees the write gap it is asking
@@ -168,11 +193,13 @@ func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate
 			reads.pods[pod] = max(reads.pods[pod], rate)
 			a.throughputPodReads[key] = reads
 			ra.SetLastAt(meanOf(reads.pods), now)
-			return
+			return muFolded
 		}
 		if read && rate == lastRead {
-			ra.ObservedAt(now) // the same pair across the boundary, or a repeat
-			return
+			// The same pair across the boundary, or a repeat; for mu with
+			// SwitchMuRepeatIsUse on, judged above.
+			ra.ObservedAt(now)
+			return muRepeated
 		}
 	}
 	ra.AddAt(rate, now)
@@ -183,6 +210,17 @@ func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate
 	}
 	a.throughputSampledAt[key] = now
 	a.throughputPodReads[key] = podReads{at: now, pods: map[string]float64{pod: rate}}
+	return muSampled
+}
+
+// exactRepeatLocked reports whether rate, read now for key, is an exact
+// repeat of the last reading recorded: at or past the sample spacing, at
+// exactly the value last read (recordSaturatedThroughputFrom). Callers hold
+// a.mu.
+func (a *SaturationAnalyzer) exactRepeatLocked(key string, rate float64, now time.Time) bool {
+	last, sampled := a.throughputSampledAt[key]
+	lastRead, read := a.throughputLastRead[key]
+	return sampled && read && rate == lastRead && now.Sub(last) >= ThroughputSampleSpacing
 }
 
 // podReads is one throughput sample's readings per replica, and the time of

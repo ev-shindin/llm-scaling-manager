@@ -461,6 +461,9 @@ type lowRun struct {
 // MeasuredDerivedMaxRatio keeps the measurement fresh, accepted or not: the
 // bucket is still reading what it measured. One that disagrees does not, and
 // a filling replica's reading -- a fraction of the rate on record -- is one.
+// Nor does an exact repeat of the last reading (exactRepeatLocked): it is
+// evidence of use, not that the bucket saturated again
+// (SwitchMuRepeatIsUse).
 func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, refusedLow bool, t tuning, now time.Time) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -469,7 +472,8 @@ func (a *SaturationAnalyzer) noteSaturatedReading(key, pod string, mu float64, r
 		c = &muChoice{}
 		a.throughputMuChoice[key] = c
 	}
-	if ra, ok := a.saturatedThroughput[key]; ok && ra.Len() > 0 {
+	repeat := a.muRepeatIsUse && a.exactRepeatLocked(key, mu, now)
+	if ra, ok := a.saturatedThroughput[key]; ok && ra.Len() > 0 && !repeat {
 		if m := ra.Median(); m > 0 && mu <= m*t.MuChoice.MaxRatio && mu >= m/t.MuChoice.MaxRatio {
 			c.saturatedAt = now
 			c.yielded = false

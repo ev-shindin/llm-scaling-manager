@@ -1,6 +1,7 @@
 package saturation
 
 import (
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -59,14 +60,17 @@ var _ = Describe("the prefill bound with two pods in one spacing", func() {
 			"a lower minute does not displace the bound's max")
 		Expect(window().Len()).To(Equal(2))
 	})
-	It("takes an exact repeat of the last reading past the spacing as a write of its window", func() {
-		read("prefill-0", 6000)
-		read("prefill-1", 4000)
-		clock = clock.Add(ThroughputSampleSpacing)
-		at := clock
-		Expect(read("prefill-1", 4000)).To(BeNumerically("~", 5000, 1e-6))
-		ra := window()
-		Expect(ra.Len()).To(Equal(1), "a repeat starts no sample")
-		Expect(ra.LastWritten()).To(Equal(at), "a repeat keeps the bound's episode alive, as it did")
-	})
+	for _, on := range []bool{true, false} {
+		It(fmt.Sprintf("takes an exact repeat of the last reading past the spacing as a write of its window (%s %v)", SwitchMuRepeatIsUse, on), func() {
+			Expect(analyzer.SetSwitchesForReplay(map[string]bool{SwitchMuRepeatIsUse: on})).To(Succeed())
+			read("prefill-0", 6000)
+			read("prefill-1", 4000)
+			clock = clock.Add(ThroughputSampleSpacing)
+			at := clock
+			Expect(read("prefill-1", 4000)).To(BeNumerically("~", 5000, 1e-6))
+			ra := window()
+			Expect(ra.Len()).To(Equal(1), "a repeat starts no sample")
+			Expect(ra.LastWritten()).To(Equal(at), "a repeat keeps the bound's episode alive, as it did")
+		})
+	}
 })

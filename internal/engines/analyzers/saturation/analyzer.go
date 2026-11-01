@@ -278,6 +278,13 @@ type SaturationAnalyzer struct {
 	// them off (SetSwitchesForReplay).
 	k2ReadsSettle       bool
 	k2WaitsAfterRestart bool
+	// muRepeatIsUse, muUnknownAgeSafe and muLatchRestoresSafe are mu's
+	// replay switches (mu_learner.go): SwitchMuRepeatIsUse,
+	// SwitchMuUnknownAgeSafe and SwitchMuLatchRestoresSafe. On from the
+	// constructor; a replay turns them off (SetSwitchesForReplay).
+	muRepeatIsUse       bool
+	muUnknownAgeSafe    bool
+	muLatchRestoresSafe bool
 	// horizons is how long each kind of learned state is kept. Defaulted
 	// from capacity.DefaultHorizons and overridable by configuration --
 	// which is the only way any of this is reachable on a cluster, the
@@ -427,6 +434,9 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		learnerStarted:         make(map[string]bool),
 		k2ReadsSettle:          true,
 		k2WaitsAfterRestart:    true,
+		muRepeatIsUse:          true,
+		muUnknownAgeSafe:       true,
+		muLatchRestoresSafe:    true,
 		horizons:               capacity.DefaultHorizons(),
 	}
 }
