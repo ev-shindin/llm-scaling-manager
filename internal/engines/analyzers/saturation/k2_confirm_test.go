@@ -77,10 +77,11 @@ func (r *holdRig) holdDropping(key string, reading int64, args string) (bool, k2
 	return r.a.k2HoldFirstLocked(key, reading, true, args, r.now)
 }
 
-func (r *holdRig) onRecord(key, args string) float64 {
+// onRecord is what is held for key "k" on record for a reading under args.
+func (r *holdRig) onRecord(args string) float64 {
 	r.a.mu.Lock()
 	defer r.a.mu.Unlock()
-	return r.a.heldOnRecordLocked(key, args, r.now)
+	return r.a.heldOnRecordLocked("k", args, r.now)
 }
 
 func (r *holdRig) pending(key string) []int64 {
@@ -117,8 +118,8 @@ func TestK2Hold_ReadingsPastTheGapOrUnderOtherArgumentsAreReplaced(t *testing.T)
 	r.cycle(0)
 	_, _ = r.hold("k", 10_000, "args-a")
 	r.cycle(propCycle)
-	assert.InDelta(t, 10_000, r.onRecord("k", "args-a"), 0.5, "on record for a reading under the same arguments")
-	assert.Zero(t, r.onRecord("k", "args-b"), "and not for one under other arguments")
+	assert.InDelta(t, 10_000, r.onRecord("args-a"), 0.5, "on record for a reading under the same arguments")
+	assert.Zero(t, r.onRecord("args-b"), "and not for one under other arguments")
 	held, confirmed, dropped := r.holdDropping("k", 40_000, "args-b")
 	assert.True(t, held, "a reading under other arguments does not confirm")
 	assert.Empty(t, confirmed.readings)
@@ -126,12 +127,12 @@ func TestK2Hold_ReadingsPastTheGapOrUnderOtherArgumentsAreReplaced(t *testing.T)
 	assert.Equal(t, []int64{40_000}, r.pending("k"))
 
 	r.cycle(r.a.horizons.EpisodeGap + time.Minute)
-	assert.Zero(t, r.onRecord("k", "args-b"), "past the episode gap nothing held is on record")
+	assert.Zero(t, r.onRecord("args-b"), "past the episode gap nothing held is on record")
 	held, _, dropped = r.holdDropping("k", 20_000, "args-b")
 	assert.True(t, held, "past the episode gap nothing confirms")
 	assert.Equal(t, []int64{40_000}, dropped.readings)
 	assert.Equal(t, []int64{20_000}, r.pending("k"))
-	assert.Zero(t, r.onRecord("k", "args-b"), "a reading held this cycle is not on record for this cycle's")
+	assert.Zero(t, r.onRecord("args-b"), "a reading held this cycle is not on record for this cycle's")
 }
 
 // A window that is not fresh takes the reading at once, and drops anything
