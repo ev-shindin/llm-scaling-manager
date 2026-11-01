@@ -79,6 +79,27 @@ goldens:
     saturate, so k2 and mu record readings and each of the three mu yields runs, and
     one replica restarts under its own name. Twelve minutes of synthetic rows, recorder
     on, default analyzerTuning.'
+- name: ols-sweep
+  notRun:
+  - slo
+  outputs:
+  - ols-sweep/learned-state.csv
+  - ols-sweep/lines.csv
+  - ols-sweep/results.csv
+  - ols-sweep/slo-published.csv
+  - ols-sweep/store-records.csv
+  - ols-sweep/variant-capacities.csv
+  - ols-sweep/composite-holds.csv
+  - ols-sweep/composite-release.csv
+  - ols-sweep/composite-results.csv
+  - ols-sweep/composite-roles.csv
+  - ols-sweep/composite-variants.csv
+  - ols-sweep/warm-pool-pressure.csv
+  - ols-sweep/warm-pool-supply.csv
+  recording: ols-sweep/recording.jsonl.gz
+  source: P/D benchmark scenario, flow control off, decode KV of 1024 blocks and 64
+    sequences on one decode replica, load sweeps of concurrency and shape, default
+    analyzerTuning
 - name: pd-restart
   notRun:
   - slo
