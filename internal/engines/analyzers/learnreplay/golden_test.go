@@ -6,7 +6,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -40,10 +39,6 @@ func TestGoldens_EveryCommittedGoldenReproduces(t *testing.T) {
 		for _, o := range g.Outputs {
 			if c.mayBeEmpty[g.Name][path.Base(o)] && c.Rows[o] == 0 {
 				t.Logf("%s is empty, by its rule", o)
-				continue
-			}
-			if g.Name != engineFixture && slices.Contains(engineMayBeEmpty, path.Base(o)) && c.Rows[o] == 0 {
-				t.Logf("%s is empty: the run held no role and bound no release", o)
 				continue
 			}
 			assert.Positive(t, c.Rows[o], "%s compared no row", o)
