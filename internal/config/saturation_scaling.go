@@ -170,6 +170,25 @@ type ScalingPolicy struct {
 	// for every model, and a true in a per-model entry for that model.
 	EnablePrefillThroughputBound bool `yaml:"enablePrefillThroughputBound,omitempty"`
 
+	// EnableBatchCapLearning lets the analyzer learn a variant's batch cap
+	// (max_num_seqs) where the engine's flags state none and no
+	// llm-d.ai/max-num-seqs annotation declares it: the highest running
+	// count one of its pods held flat for three cycles with requests waiting
+	// on it, its KV under kvCacheThreshold and no preemption. The derived
+	// capacity (P3) is then priced at no more than that cap.
+	//
+	// OFF BY DEFAULT. The learned cap can only lower capacity -- a running
+	// count is never above the true cap, and the cap is taken only where it
+	// is lower than the default it replaces -- so its cost is replicas, not
+	// latency: a cap learned below the truth (a fleet that waits for its
+	// token budget rather than its batch, or never fills its batch) orders
+	// more replicas until a higher plateau is seen. The annotation is the
+	// exact source and wins over it.
+	//
+	// An ENABLE for the reason EnableLearnedStateReuse gives: Merge is
+	// one-way for a plain bool.
+	EnableBatchCapLearning bool `yaml:"enableBatchCapLearning,omitempty"`
+
 	// ShapeChangeHoldSeconds overrides how long the fleet is withheld from
 	// release after its shape changes, when nothing settles the hold sooner.
 	// Zero takes the default.
@@ -674,6 +693,10 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	// `default:` entry for every model or in a model's own entry for it.
 	if override.EnablePrefillThroughputBound {
 		c.EnablePrefillThroughputBound = true
+	}
+	// One-way like reuse: a true turns batch-cap learning on.
+	if override.EnableBatchCapLearning {
+		c.EnableBatchCapLearning = true
 	}
 	// The weight is one choice expressed one of two ways, so an override that
 	// states either replaces both: a model that names a class must not inherit a

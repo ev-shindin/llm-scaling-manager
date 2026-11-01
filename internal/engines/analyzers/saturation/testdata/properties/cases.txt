@@ -1,3 +1,8 @@
+contamination-heterogeneity/batch-cap/bridge-row
+contamination-heterogeneity/batch-cap/kv-bound-pod
+contamination-heterogeneity/batch-cap/preempting-pod
+contamination-heterogeneity/batch-cap/router-holds-idle-pod
+contamination-heterogeneity/batch-cap/uneven-dp-ranks
 contamination-heterogeneity/itl/flagged-contamination-to-50pct
 contamination-heterogeneity/itl/slow-replica-fit
 contamination-heterogeneity/mu/half-served-max-slow-pod
@@ -94,6 +99,8 @@ first-sample/mu/low-first-reading
 first-sample/shape-hold/first-shape-no-change
 first-sample/slo-itl/one-reading
 first-sample/start-time/between-sample-and-default
+known-truth/batch-cap/declared-engine-queue-0
+known-truth/batch-cap/seq-bound-flow-control
 known-truth/borrowed-k2/lower-only
 known-truth/floor/steady-order
 known-truth/itl/line-at-kprice
@@ -116,6 +123,9 @@ liveness/mu/n2-aggregated
 liveness/prefill-bound/behind-full-decode
 liveness/prefill-bound/pd-analyze
 liveness/shared-line/sibling-borrows
+missing-duplicated/batch-cap/decode-queue-unknown
+missing-duplicated/batch-cap/engine-queue-0-learns-nothing
+missing-duplicated/batch-cap/running-unknown
 missing-duplicated/borrowed-k2/pause-is-not-serving
 missing-duplicated/decode-memory/unready-or-unsized-row
 missing-duplicated/itl/missed-row
@@ -151,6 +161,8 @@ stale-value/shape-hold/hold-released-nondefault
 stale-value/shared-line/held-slope-not-republished
 stale-value/slo-itl/b-converges-n2
 stale-value/start-time/reaches-measured
+transient/batch-cap/fill-ramp
+transient/batch-cap/joined-fill
 transient/decode-memory/prefill-gated-behind-full-decode
 transient/itl/joiner-warmup
 transient/itl/joiner-warmup-nondefault

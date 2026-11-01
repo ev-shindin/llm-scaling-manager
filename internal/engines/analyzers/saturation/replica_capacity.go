@@ -210,6 +210,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		rate: serviceRate, rateOK: serviceRateOK, ref: ref, k2Ref: k2Ref, ready: rm.Ready, readyAt: a.readySince(rm), bridge: rm.FromWarmPool,
 		tune: tune,
 	})
+	// The batch cap the derived k2 is priced at where the flags state none
+	// (batch_cap.go, issue #399): this row may raise the learned one first.
+	a.observeBatchCap(namespace, modelID, role, rm, adm, k1, engineParams, config.EnableBatchCapLearning, logger)
+	batchCap := a.pricingBatchCap(namespace, modelID, rm.VariantName, engineParams, config.EnableBatchCapLearning)
 	d := a.computeK2(
 		historyKey,
 		modelID, namespace, rm.VariantName,
@@ -217,6 +221,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		rm.AvgOutputTokens, rm.AvgInputTokens,
 		config.QueueLengthThreshold,
 		engineParams,
+		batchCap,
 		rm.Ranks(),
 		k1,
 		rm.TotalKvCapacityTokens,
@@ -660,6 +665,9 @@ func (a *SaturationAnalyzer) computeK2(
 	avgOutput, avgInput float64,
 	queueThreshold float64,
 	engineParams *capacity.EngineParams,
+	// batchCap is the batch cap the derived k2 (P3) prices one engine rank
+	// at, and its source (pricingBatchCap).
+	batchCap pricedBatchCap,
 	// ranks is the engine ranks the replica runs (domain.ReplicaMetrics.Ranks);
 	// the derived k2 (P3) prices one engine and is scaled by it.
 	ranks int,
@@ -674,7 +682,7 @@ func (a *SaturationAnalyzer) computeK2(
 ) k2Decision {
 	var refused string
 	chain, chainSrc, borrowed := a.k2Chain(historyKey, modelID, namespace, variantName, queueLen, tokensInUse,
-		avgOutput, avgInput, queueThreshold, engineParams, ranks, k1, kvCeiling, role, downstreamSaturated,
+		avgOutput, avgInput, queueThreshold, engineParams, batchCap, ranks, k1, kvCeiling, role, downstreamSaturated,
 		adm, borrowDisabled, &refused, logger)
 	k2, src, recordable := a.unadmittedPrice(chain, chainSrc, historyKey, modelID, namespace, variantName,
 		queueLen, tokensInUse, queueThreshold, kvCeiling, downstreamSaturated, adm, logger)
@@ -766,6 +774,7 @@ func (a *SaturationAnalyzer) k2Chain(
 	avgOutput, avgInput float64,
 	queueThreshold float64,
 	engineParams *capacity.EngineParams,
+	batchCap pricedBatchCap,
 	ranks int,
 	k1 int64,
 	kvCeiling int64,
@@ -1074,7 +1083,12 @@ func (a *SaturationAnalyzer) k2Chain(
 		// beside it is already the whole replica's KV, so the derived figure
 		// is scaled to the replica. Left per rank, min(k1, k2) priced a pod of
 		// eight ranks at about one (issue #150).
-		if k2Derived := estimateCapacityFromParams(engineParams, avgInput, avgOutput) * int64(max(ranks, 1)); k2Derived > 0 {
+		//
+		// S is batchCap: the flags' cap, or where they state none the declared
+		// or learned one (batch_cap.go). With no engine params at all a
+		// learned cap still prices it, B unknown and taken as not binding;
+		// min(k1, k2) keeps that at or under the k1 it replaces.
+		if k2Derived := estimateCapacityAtCap(engineParams, batchCap.perRank, avgInput, avgOutput) * int64(max(ranks, 1)); k2Derived > 0 {
 			if b, ok := borrow(min(k1, k2Derived)); ok {
 				logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, min(k1, k2Derived), capacity.K2SrcDerived)
 				return b.k2, b.source(), b
@@ -1083,7 +1097,8 @@ func (a *SaturationAnalyzer) k2Chain(
 				"modelID", modelID, "namespace", namespace, "variant", variantName,
 				"priority", capacity.K2SrcDerived.String(), "historyKey", historyKey,
 				"avgInputTokens", avgInput, "avgOutputTokens", avgOutput,
-				"engineParams", engineParams, "engineRanks", max(ranks, 1), "k2", k2Derived)
+				"engineParams", engineParams, "engineRanks", max(ranks, 1),
+				"batchCap", batchCap.perRank, "batchCapSource", batchCap.source, "k2", k2Derived)
 			return k2Derived, capacity.K2SrcDerived, k2Borrow{}
 		}
 	}
@@ -1262,20 +1277,30 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 // figure, which can only under-price a data-parallel variant and order more
 // on its way up from zero; its first live replica then prices it in full.
 func estimateCapacityFromParams(params *capacity.EngineParams, avgInput, avgOutput float64) int64 {
-	if params == nil || params.EffectiveMaxBatchedTokens <= 0 || avgOutput <= 0 {
+	if params == nil || params.EffectiveMaxBatchedTokens <= 0 {
 		return 0
 	}
-
-	B := float64(params.EffectiveMaxBatchedTokens)
 	// S is the engine's batch cap: max_num_seqs, or a lower
 	// --max-num-active-seqs, the most sequences vLLM runs at once (#335).
-	S := float64(params.BatchCap())
+	return estimateCapacityAtCap(params, params.BatchCap(), avgInput, avgOutput)
+}
+
+// estimateCapacityAtCap is estimateCapacityFromParams at batch cap S, one
+// engine rank's. With no params at all -- a scale target never read, priced
+// from a learned cap -- the budget B is unknown and taken as not binding:
+// nSteady = S. Returns 0 when S or avgOutput is not positive, or when params
+// carry no budget, as estimateCapacityFromParams always has.
+func estimateCapacityAtCap(params *capacity.EngineParams, batchCap int64, avgInput, avgOutput float64) int64 {
+	if batchCap <= 0 || avgOutput <= 0 || (params != nil && params.EffectiveMaxBatchedTokens <= 0) {
+		return 0
+	}
+	S := float64(batchCap)
 	I := avgInput
 	O := avgOutput
 
-	nSteady := B * O / (I + O)
-	if nSteady > S {
-		nSteady = S
+	nSteady := S
+	if params != nil {
+		nSteady = min(float64(params.EffectiveMaxBatchedTokens)*O/(I+O), S)
 	}
 	k2Derived := int64(nSteady * (I + O/2))
 	if k2Derived > 0 {
