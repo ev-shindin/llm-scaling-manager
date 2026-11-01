@@ -135,6 +135,9 @@ type ReplicaMetrics struct {
 	// ReadySince is when this replica last became Ready: the Pod's Ready
 	// condition LastTransitionTime. Zero when the Pod is not Ready, the time
 	// is unset, or the Pod listing could not be read; zero means unknown.
+	// For a LeaderWorkerSet group, whose row is its leader's, it is the latest
+	// Ready time over the leader and its live, Ready workers, so a worker's
+	// restart moves it; a worker not Ready yet adds nothing.
 	//
 	// The load-balance diagnostic (internal/signals/balance) reads it: a
 	// replica that became Ready a moment ago has had no time to receive work,

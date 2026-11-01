@@ -273,11 +273,23 @@ type SaturationAnalyzer struct {
 	k2Forgotten    map[string]map[string][]learn.Forgotten
 	learnerReports map[string][]learn.Report
 	learnerStarted map[string]bool
+	// mu as a learner (mu_learner.go): the cycle per namespace|model, kept
+	// until the next begins so the throughput floor can name what priced
+	// each role, and what learner-write last logged per throughput key.
+	muCycles map[string]*muCycle
+	muLogged map[string]muLogged
 	// k2ReadsSettle is SwitchK2ReadsSettle and k2WaitsAfterRestart
 	// SwitchK2WaitsAfterRestart: on from the constructor; a replay turns
 	// them off (SetSwitchesForReplay).
 	k2ReadsSettle       bool
 	k2WaitsAfterRestart bool
+	// muRepeatIsUse, muUnknownAgeSafe and muLatchRestoresSafe are mu's
+	// replay switches (mu_learner.go): SwitchMuRepeatIsUse,
+	// SwitchMuUnknownAgeSafe and SwitchMuLatchRestoresSafe. On from the
+	// constructor; a replay turns them off (SetSwitchesForReplay).
+	muRepeatIsUse       bool
+	muUnknownAgeSafe    bool
+	muLatchRestoresSafe bool
 	// horizons is how long each kind of learned state is kept. Defaulted
 	// from capacity.DefaultHorizons and overridable by configuration --
 	// which is the only way any of this is reachable on a cluster, the
@@ -425,8 +437,13 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		k2Forgotten:            make(map[string]map[string][]learn.Forgotten),
 		learnerReports:         make(map[string][]learn.Report),
 		learnerStarted:         make(map[string]bool),
+		muCycles:               make(map[string]*muCycle),
+		muLogged:               make(map[string]muLogged),
 		k2ReadsSettle:          true,
 		k2WaitsAfterRestart:    true,
+		muRepeatIsUse:          true,
+		muUnknownAgeSafe:       true,
+		muLatchRestoresSafe:    true,
 		horizons:               capacity.DefaultHorizons(),
 	}
 }

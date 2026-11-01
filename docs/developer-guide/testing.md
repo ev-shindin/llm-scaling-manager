@@ -690,11 +690,17 @@ A PR with replay switches holds its runs in `TestGoldens_TheSwitchRuns`
 (`switch_runs_test.go`, part of `make test`): all off reproduces the base
 commit's goldens (an output a switch names, by the base file's digest),
 each switch alone moves only the outputs it names, and all on is the
-committed goldens. Add a switch and its named outputs there; delete the row
-with the seam. A switch that moves no committed golden is invisible to the
-runs, so it names the unit tests that hold it (`heldBy`, checked to exist):
-`k2-reads-the-settle-tracker` is held by `settle_view_test.go`
-(`TestSettleView_TheTrackerSwitch*`), not by the goldens.
+committed goldens. "All off" is the PR's own switches: replace the table
+with yours, and leave an earlier PR's switches at their constructor default,
+on, as the base goldens were written. An earlier PR's switch whose seam is
+still in the code moves to `earlierSeams`, with the outputs its PR named; it
+is replayed off alone from all on, and may move only those. Every name
+`SetSwitchesForReplay` accepts must have a row in one of the two
+(`TestGoldens_EverySwitchHasARow`); a row goes with its seam. A switch that moves no committed
+golden is invisible to the runs, so it names the unit tests that hold it
+(`heldBy`, checked to exist): mu's three switches are held by
+`mu_repeat_test.go`, `mu_unknown_age_test.go` and `mu_latch_restore_test.go`,
+not by the goldens.
 
 Run `make learner-goldens` only when your PR names the change: it rewrites
 every output file from a replay at your commit. Never edit a golden by hand.
@@ -841,6 +847,30 @@ Each mutant states its level:
 If a mutant starts to pass, the check no longer detects its defect. Look for
 a change that weakened the learner or the case before you touch the
 accounting.
+
+### The closed-loop probe
+
+The replay is open loop: recorded inputs do not depend on what the analyzer
+ordered. Holds, latches, the sibling yield and a self-sealing low mu are
+closed-loop behaviours, and `closed_loop_probe_test.go` drives the
+saturation analyzer with a fleet simulator instead: arrivals split over the
+Ready replicas, each serves up to its true mu and queues the rest, the
+analyzer's order becomes replicas after a 90 s start time, and a release
+waits out a 5-minute stabilization. The verdict compares the fleet the loop
+settles at with need, the fleet a truthful analyzer orders once every
+replica serves the fleet's mean mu, within 15 % plus one replica. It also
+fails a fleet that sits below need at the arrival rate of the moment for
+more than 5 minutes in one run, an under-order mid-run. Each passing case
+asserts its premise from mu's reports: the load step measured mu and priced
+it `measured`, and the slow replica's rate was counted `refused-under-served`.
+
+`TestClosedLoopProbe_KnownFailing_*` is a case today's code fails: one slow
+replica at 0.55 of its siblings' rate passes the served bound, becomes mu,
+and keeps the fleet over-ordered for good once it stops queueing. The test
+asserts the probe sees it, so a change that fixes the defect fails it and
+turns it into a passing case. A PR that changes a closed-loop behaviour runs
+the probe (`go test ./internal/engines/analyzers/saturation/ -run
+TestClosedLoopProbe -v`) and pastes the fleets it logs.
 
 ## End-to-End Tests
 

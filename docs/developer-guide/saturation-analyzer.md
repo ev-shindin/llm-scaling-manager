@@ -159,7 +159,9 @@ The joined test reads the engine's settle tracker (`internal/signals/settle`,
 construction (`WithSettleView`) and never writes it. A replica waits from the
 later of its Pod's Ready time and the controller's first sight of that Ready
 time, so a restart under the same name (an engine or LWS group restart: the
-row is the group leader's, with the leader Pod's Ready time) waits again, a
+row is the group leader's, with the latest Ready time over the leader and its
+Ready workers, so a worker restarted alone under `restartPolicy: None` counts
+too) waits again, a
 node clock behind the controller's does not shorten the wait, and after a
 controller restart every replica waits once. A replica unseen for longer than
 the tracker's absence tolerance (1 min, or 2.5 optimize intervals) is a new
@@ -487,6 +489,41 @@ Under EPP flow control the queue that writes a sample rarely builds again,
 and a stale high reading must not under-order the fleet. Within 2x the
 measurement keeps winning however old it is: run R's 1.27 req/s against a
 derived 0.67 is the case it is there for.
+
+Three rules keep the choice on the safe side where it has no evidence, each a
+replay switch (`mu_switches.go`):
+
+- **An exact repeat is use** (`SwitchMuRepeatIsUse`). A rate read past the
+  sample spacing at exactly the value last read is the same scrape pair, or
+  a frozen series. It touches the window's use clock only, and does not keep
+  the window's episode (its write clock, which `EpisodeGap` ages) alive. Over
+  the derived figure it does not keep the measurement fresh either; under
+  it, or with no derived figure, it still counts as agreement, so a real low
+  rate that repeats is not handed to the higher derived figure after the
+  30-minute hold (`TestMuRepeat_*`). The prefill bound writes through the
+  same fold and keeps taking a repeat as a write.
+- **An unknown age resolves to the safe side** (`SwitchMuUnknownAgeSafe`). A
+  window with no sample time and no agreeing reading on record is stale over
+  the derived figure, and under it holds for `MeasuredLowHoldFor` from its
+  own last write (`lowHeldOut`, `TestMuUnknownAge_*`).
+- **The latch restores to the safe side** (`SwitchMuLatchRestoresSafe`). The
+  latch is not persisted. A window restored, or brought back, with no choice
+  on record comes back latched over the derived figure and unlatched under
+  it; its first choice is evidence, and the hysteresis runs as it does live
+  from then on (`muChoice.latchKnown`, `TestMuLatch_*`). A restore that
+  installs a window, and a bring-back from the stash, mark a memo made
+  before them unknown (`unknownLatchLocked`).
+
+Mu has no joined test of its own: a sample is written only beside a k2
+`P1-obs` write, so it waits out k2's settle, the wait after a controller
+restart included. Each admitted reading carries k2's stamp (how long the
+replica had been settled, and which settle test passed it). Each cycle mu
+fills a `learn.Report` per variant (`mu_learner.go`; `LearnerReports`, beside
+k2's), and logs `learner-write` at `--v=3` for a key whose priced figure was
+set for the first time, moved more than `MuWriteBand` (5 %) from the value
+last logged, changed source, or has not logged for `LearnerHeartbeat`. The
+throughput floor's line names the key and source it priced from (`muKey`,
+`muSource`, `muPricedFor`) and the start time it projected over.
 
 ### The pricing point
 

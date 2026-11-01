@@ -97,6 +97,7 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 	}
 	a.logLearnerStart(ctx, input.Namespace, input.ModelID, variantNames)
 	a.beginK2Cycle(input.Namespace, input.ModelID)
+	a.beginMuCycle(input.Namespace, input.ModelID)
 
 	c := a.newCycle(ctx, input, satConfig)
 	c.observeFleetShape()
@@ -107,8 +108,10 @@ func (a *SaturationAnalyzer) analyze(ctx context.Context, input domain.AnalyzerI
 	if err != nil {
 		return nil, err
 	}
-	// After the last replica is priced: k2's reports and learner-write lines.
+	// After the last replica is priced: k2's and mu's reports and
+	// learner-write lines.
 	a.closeK2Cycle(ctx, input.Namespace, input.ModelID)
+	a.closeMuCycle(ctx, input.Namespace, input.ModelID, caps)
 	c.settleShape(caps)
 
 	d := c.priceDemand(caps)

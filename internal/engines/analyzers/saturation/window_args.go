@@ -232,6 +232,7 @@ func (a *SaturationAnalyzer) throughputWindowUnderLocked(key, args string) {
 			a.throughputHeld[stashKey(key, args)] = heldMark{heldFor: back.heldFor, written: back.window.LastWritten()}
 		}
 		a.saturatedThroughput[key] = back.window
+		a.unknownLatchLocked(key)
 		a.throughputWindowArgs[key] = args
 		if !back.sampledAt.IsZero() {
 			a.throughputSampledAt[key] = back.sampledAt

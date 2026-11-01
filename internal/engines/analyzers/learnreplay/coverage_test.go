@@ -261,11 +261,12 @@ func TestSwitchHooks_AcceptTheEmptySetAndRefuseUnknownNames(t *testing.T) {
 	}
 }
 
-// No production path calls a switch hook: only this package, and tests, may.
+// No production path calls a switch hook, or ReplaySwitchNames: only this
+// package, and tests, may.
 func TestSwitchHooks_NoProductionPathCallsThem(t *testing.T) {
 	root := moduleRoot(t)
 	var callers []string
-	files, defined := 0, 0
+	files, defined, namesDefined := 0, 0, 0
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -290,14 +291,27 @@ func TestSwitchHooks_NoProductionPathCallsThem(t *testing.T) {
 			return err
 		}
 		for _, decl := range f.Decls {
-			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "SetSwitchesForReplay" {
-				defined++
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				switch fn.Name.Name {
+				case "SetSwitchesForReplay":
+					defined++
+				case "ReplaySwitchNames":
+					namesDefined++
+				}
 			}
 		}
+		seam := func(name string) bool { return name == "SetSwitchesForReplay" || name == "ReplaySwitchNames" }
 		ast.Inspect(f, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok {
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SetSwitchesForReplay" {
-					callers = append(callers, rel)
+				switch fn := call.Fun.(type) {
+				case *ast.SelectorExpr:
+					if seam(fn.Sel.Name) {
+						callers = append(callers, rel)
+					}
+				case *ast.Ident:
+					if seam(fn.Name) {
+						callers = append(callers, rel)
+					}
 				}
 			}
 			return true
@@ -308,6 +322,7 @@ func TestSwitchHooks_NoProductionPathCallsThem(t *testing.T) {
 	// The walk reached the four hooks themselves, so it read the packages
 	// that define them, and the rest of the tree with them.
 	require.Equal(t, 4, defined, "the walk found %d SetSwitchesForReplay definitions in %d files", defined, files)
+	require.Equal(t, 1, namesDefined, "the walk found %d ReplaySwitchNames definitions", namesDefined)
 	assert.Empty(t, callers, "a production path calls a replay switch hook")
 }
 

@@ -1172,6 +1172,7 @@ func (a *SaturationAnalyzer) installPreviousK2Locked(s LearnedState, windowsUnde
 		}
 		if ra, ok := capacity.RestoreRollingAverage(snap, capacity.RollingAverageWindowSize); ok && ra.Len() > 0 {
 			a.saturatedThroughput[k] = ra
+			a.unknownLatchLocked(k)
 			a.tagRestoredLocked(a.throughputWindowArgs, k, s.ThroughputArgs, windowsUnder)
 			if !sampledAt.IsZero() {
 				a.throughputSampledAt[k] = sampledAt
@@ -1251,6 +1252,7 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState, windowsUnder string, 
 		}
 		if ra, ok := capacity.RestoreRollingAverage(snap, capacity.RollingAverageWindowSize); ok {
 			a.saturatedThroughput[k] = ra
+			a.unknownLatchLocked(k)
 			a.tagRestoredLocked(a.throughputWindowArgs, k, s.ThroughputArgs, windowsUnder)
 			kept++
 			if !sampledAt.IsZero() {

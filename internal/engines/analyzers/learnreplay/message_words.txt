@@ -836,6 +836,7 @@ flooredTo
 floors
 flow
 flow-control
+folded
 for
 forbidden
 force
@@ -1172,6 +1173,7 @@ longer
 loop
 lose
 lost
+low-confirmed
 lowHoldFor
 lower
 lower-bound
@@ -1269,7 +1271,10 @@ most
 mount
 move
 mu
+mu-exact-repeat-is-use
+mu-latch-restores-safe-side
 mu-sample-written
+mu-unknown-age-resolves-safe
 mu-yield-served
 mu-yield-sibling
 mu-yield-stale
@@ -1280,10 +1285,14 @@ muChoice.maxRatio
 muChoice.maxRatio/returnRatio
 muChoice.minMeasuredOfDerived
 muChoice.returnRatio
+muCycles
 muDecModel
 muDivisor
 muInputTokens
+muKey
+muLogged
 muShortWindow
+muSource
 muWindows
 must
 mutually
@@ -1531,6 +1540,7 @@ present
 pressure-needs-scale-up
 previous
 previous-desired
+previousSource
 previousValue
 price
 priced
@@ -1625,6 +1635,10 @@ redirected
 refilled
 refresh
 refreshInterval
+refused-filling
+refused-no-completion
+refused-under-derived
+refused-under-served
 refusing
 registered
 registering
@@ -1645,6 +1659,7 @@ removedNamespaces
 removes
 removing
 rename
+repeated
 replaced
 replacement
 replay
@@ -1743,6 +1758,7 @@ safety
 same
 sampleAge
 sampleSeconds
+sampled
 samples
 sanity
 sat
@@ -1911,10 +1927,12 @@ staleness
 stalled
 standard
 start
+startEstimateSeconds
 startEstimates
 startOutliers
 startSeconds
 startSeenPods
+startSource
 started
 starting
 starts
@@ -2239,6 +2257,9 @@ xlong
 xxlong
 yes
 yet
+yield-served
+yield-siblings
+yield-stale
 younger
 zero
 zero-replica-capacity-estimate

@@ -154,6 +154,8 @@ cycles of a fleet that is coping have none.
 | `mayOrder`, `borrowedOnly` | whether the role's rate is one the floor may order on, and whether every rate it has is borrowed rather than measured by the role's own replicas |
 | `lowerBound`, `growthCapped` | `lowerBound` is `true` when prefill's rate is a lower bound, learned while prefill queued behind a full decode (only with [`enablePrefillThroughputBound`](scaling-policy.md#enableprefillthroughputbound) on). `growthCapped` is `true` when the floor on that bound was cut to twice the ready prefill fleet |
 | `orderedBehindQueue`, `queueJustifiedReplicas` | whether a held floor still ordered behind a standing queue, and how many replicas the queue was worth when it did |
+| `muKey`, `muSource` | the learned key the role's `saturatedThroughput` was priced under, and where it came from: `measured`, `derived`, `served-siblings` (a measurement yielded to what its full siblings serve), `neighbour`, `borrowed-line` or `lower-bound`. On a role of several variants, the variant whose figure is nearest the role's. Empty on a cycle with none |
+| `startEstimateSeconds`, `startSource` | the replica start time `projectedBacklog` was projected over, and `measured`; `none` (and 0) when no start of the role has been measured, and the floor projects nothing |
 
 On a disaggregated fleet the per-role lines do not add up to the model's
 total, so a second line, `throughput-demand-floor-total`, gives it:
@@ -202,24 +204,26 @@ One line per model, on the analyzer's first cycle for it: after the
 controller starts, or when a model first appears (or comes back after being
 unseen long enough to be forgotten). It says what the learners begin with:
 
-- `restoredKeys`: learned keys restored from the snapshot, per learner.
-- `coldVariants`: variants with none.
+- `restoredKeys`: learned keys restored from the snapshot, per learner (`k2`,
+  `mu`).
+- `coldVariants`: variants with none, per learner.
 - `oldestAdmittedAgeSeconds`: the oldest restored key's last admitted
   reading, `-1` when none.
 - `settleUntil`: when the wait every replica starts ends, at the latest.
   Until then a saturated replica's reading is `P1-obs-unsettled`, and with
   the snapshot off a variant with no k2 is priced at k1.
-- `reason`: one of two. "...each replica waits its settle, k2 a rate window
-  from the controller's first sight of it, so by settleUntil at the latest"
-  is the default. "...replicas already Ready keep their settle" appears only
-  when a replay turns the controller-restart wait off; then `settleUntil` is
-  the cycle itself.
+- `reason`: one of two. "...each replica waits its settle, k2 and the mu
+  written beside it a rate window from the controller's first sight of it,
+  so by settleUntil at the latest" is the default. "...replicas already
+  Ready keep their settle" appears only when a replay turns the
+  controller-restart wait off; then `settleUntil` is the cycle itself.
 
 ```text
 2026-11-01T09:00:00.020Z  INFO  learner-start  {"modelID": "my-model",
-  "namespace": "default", "restoredKeys": {"k2": 0}, "coldVariants": {"k2": 1},
+  "namespace": "default", "restoredKeys": {"k2": 0, "mu": 0},
+  "coldVariants": {"k2": 1, "mu": 1},
   "oldestAdmittedAgeSeconds": -1, "settleUntil": "2026-11-01T09:01:00Z",
-  "reason": "the analyzer's first cycle for this model, after a controller start or as the model first appears: each replica waits its settle, k2 a rate window from the controller's first sight of it, so by settleUntil at the latest"}
+  "reason": "the analyzer's first cycle for this model, after a controller start or as the model first appears: each replica waits its settle, k2 and the mu written beside it a rate window from the controller's first sight of it, so by settleUntil at the latest"}
 ```
 
 ### `learner-write` (`--v=3`)
@@ -232,6 +236,15 @@ pods whose readings were admitted this cycle, lowest reading first, at most 16,
 each with its `reading`, `timeBase`, `passedBy` (the admission test it passed),
 `settledForSeconds` and `queueOverThreshold` (its busiest rank's queue over
 the saturation threshold); `podsOmitted` counts the rest.
+
+For `learner` `mu` the key is the throughput key, `value` the service rate
+the variant was priced at (requests per second), and `source` where it came
+from, as `muSource` above. A change of `source` logs whatever the value, with
+`previousSource`, so each flip of the measured/derived choice is one line;
+otherwise the band is 5 %. `pods` lists the readings admitted this cycle.
+A mu reading is admitted beside a k2 reading, so each entry normally carries
+that reading's `settledForSeconds` and `passedBy`; an entry with no k2
+margin on record leaves both out.
 
 ### `replica-capacity-summary`
 
