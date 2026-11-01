@@ -26,12 +26,19 @@ type podBits []uint64
 // newPodBits returns an empty set over 0..n.
 func newPodBits(n int) podBits { return make(podBits, n/64+1) }
 
+// zeroPodBits returns the set {0} over 0..n: the sum of no pods.
+func zeroPodBits(n int) podBits {
+	b := newPodBits(n)
+	b[0] = 1
+	return b
+}
+
+// has reports whether i is in b.
 func (b podBits) has(i int) bool {
 	return i >= 0 && i/64 < len(b) && b[i/64]&(1<<(uint(i)%64)) != 0
 }
 
-func (b podBits) set(i int) { b[i/64] |= 1 << (uint(i) % 64) }
-
+// unset removes i, which must be within b, from b.
 func (b podBits) unset(i int) { b[i/64] &^= 1 << (uint(i) % 64) }
 
 // orShifted sets b |= src << k, dropping what falls past b's last word. b and
@@ -77,8 +84,7 @@ type podItem struct {
 
 // podSums is the set of sums over 0..bound that items' pods make.
 func podSums(items []podItem, bound int) podBits {
-	b := newPodBits(bound)
-	b.set(0)
+	b := zeroPodBits(bound)
 	for _, it := range items {
 		left := min(it.count, bound/max(it.size, 1))
 		for take := 1; left > 0; take *= 2 {
@@ -96,8 +102,7 @@ func podSums(items []podItem, bound int) podBits {
 // them.
 func composePods(items []podItem, amount int) []int {
 	suffix := make([]podBits, len(items)+1)
-	suffix[len(items)] = newPodBits(amount)
-	suffix[len(items)].set(0)
+	suffix[len(items)] = zeroPodBits(amount)
 	for i := len(items) - 1; i >= 0; i-- {
 		suffix[i] = slices.Clone(suffix[i+1])
 		left := min(items[i].count, amount/max(items[i].size, 1))
@@ -127,8 +132,7 @@ func composePods(items []podItem, amount int) []int {
 // sum never falls as either rises.
 func jointPods(sets []podBits, caps []int, bound int, ideal []int) []int {
 	layers := make([]podBits, len(sets)+1)
-	layers[0] = newPodBits(bound)
-	layers[0].set(0)
+	layers[0] = zeroPodBits(bound)
 	for i, s := range sets {
 		layers[i+1] = newPodBits(bound)
 		for a := s.maxAtMost(min(caps[i], bound)); a >= 0; a = s.maxAtMost(a - 1) {

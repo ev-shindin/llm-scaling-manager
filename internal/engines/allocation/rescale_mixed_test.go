@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -149,7 +150,7 @@ func randomPodModel(r *rand.Rand, mixed, strict bool) ModelScalingRequest {
 		if r.IntN(4) == 0 {
 			roles = []string{domain.RoleBoth}
 		}
-		var vs []podVariant
+		vs := make([]podVariant, 0, 6)
 		dem := map[string]float64{}
 		sized := map[int]bool{}
 		ok := true
@@ -236,21 +237,22 @@ func TestRescaleMixedPodsGrid(t *testing.T) {
 // describePodModel prints a model's variants and demand, and what each of
 // targets splits to per role and ends at, for a readable failure.
 func describePodModel(req ModelScalingRequest, targets ...int) string {
-	out := fmt.Sprintf("demand %v;", req.CompositeSignal.Result.RoleDemand)
+	var out strings.Builder
+	fmt.Fprintf(&out, "demand %v;", req.CompositeSignal.Result.RoleDemand)
 	for _, st := range req.VariantStates {
-		out += fmt.Sprintf(" %s x%d", st.VariantName, st.CurrentReplicas)
+		fmt.Fprintf(&out, " %s x%d", st.VariantName, st.CurrentReplicas)
 		if st.MinReplicas != nil {
-			out += fmt.Sprintf(" min %d", *st.MinReplicas)
+			fmt.Fprintf(&out, " min %d", *st.MinReplicas)
 		}
 		if st.MaxReplicas != nil {
-			out += fmt.Sprintf(" max %d", *st.MaxReplicas)
+			fmt.Fprintf(&out, " max %d", *st.MaxReplicas)
 		}
-		out += ";"
+		out.WriteString(";")
 	}
 	for _, target := range targets {
-		out += fmt.Sprintf(" target %d -> %v;", target, rescaleTargets(req, target, 1<<20))
+		fmt.Fprintf(&out, " target %d -> %v;", target, rescaleTargets(req, target, 1<<20))
 	}
-	return out
+	return out.String()
 }
 
 // TestRescaleWholeNodeMixedStress: whole-node 8-GPU pods beside 4- and

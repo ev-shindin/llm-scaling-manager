@@ -37,8 +37,7 @@ func TestFillRoleExactFindsTheSum(t *testing.T) {
 
 // TestPodSearchPrimitives pins the set arithmetic the pod search runs on.
 func TestPodSearchPrimitives(t *testing.T) {
-	b := newPodBits(200)
-	b.set(0)
+	b := zeroPodBits(200)
 	b.orShifted(b, 70)
 	b.orShifted(b, 3)
 	for _, i := range []int{0, 3, 70, 73} {
