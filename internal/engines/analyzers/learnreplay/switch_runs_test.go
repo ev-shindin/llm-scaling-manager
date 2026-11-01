@@ -79,6 +79,7 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestMuLatch_TheRestoredLatchIsKnownAfterItsFirstChoice"},
 		{"../saturation", "TestMuLatch_AWindowRestoredAfterARefusedReadingComesBackLatched"},
 		{"../saturation", "TestMuLatch_AWindowBroughtBackFromTheStashComesBackLatched"},
+		{"../saturation", "TestMuLatch_AWindowRestoredAsAPriorAfterARefusedReadingComesBackLatched"},
 	},
 }
 
@@ -206,9 +207,9 @@ func TestGoldens_TheSwitchRuns(t *testing.T) {
 	}
 	for _, name := range slices.Sorted(maps.Keys(replaySwitches)) {
 		got := moved(name, off, run(set(name)))
-		for _, f := range got {
-			require.Contains(t, replaySwitches[name], f, "%s alone moved %s, which it does not name", name, f)
-		}
+		// Exactly what it names: a named output that does not move is an off
+		// path that went dead.
+		require.ElementsMatch(t, replaySwitches[name], got, "%s alone must move exactly the outputs it names", name)
 		t.Logf("%s alone moves %d outputs: %v", name, len(got), got)
 	}
 	on := run(set(slices.Collect(maps.Keys(replaySwitches))...))
@@ -223,9 +224,7 @@ func TestGoldens_TheSwitchRuns(t *testing.T) {
 		sw := set(slices.Collect(maps.Keys(replaySwitches))...)
 		sw[name] = false
 		got := moved(name, on, run(sw))
-		for _, f := range got {
-			require.Contains(t, earlierSeams[name], f, "%s off alone moved %s, which its PR did not name", name, f)
-		}
+		require.ElementsMatch(t, earlierSeams[name], got, "%s off alone must move exactly the outputs its PR named", name)
 		t.Logf("%s off alone moves %d outputs: %v", name, len(got), got)
 	}
 }

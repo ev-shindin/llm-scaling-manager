@@ -214,9 +214,9 @@ unseen long enough to be forgotten). It says what the learners begin with:
   the snapshot off a variant with no k2 is priced at k1.
 - `reason`: one of two. "...each replica waits its settle, k2 and the mu
   written beside it a rate window from the controller's first sight of it,
-  so by settleUntil at the latest" is the default. "...replicas already Ready keep their settle" appears only
-  when a replay turns the controller-restart wait off; then `settleUntil` is
-  the cycle itself.
+  so by settleUntil at the latest" is the default. "...replicas already
+  Ready keep their settle" appears only when a replay turns the
+  controller-restart wait off; then `settleUntil` is the cycle itself.
 
 ```text
 2026-11-01T09:00:00.020Z  INFO  learner-start  {"modelID": "my-model",
@@ -241,9 +241,10 @@ For `learner` `mu` the key is the throughput key, `value` the service rate
 the variant was priced at (requests per second), and `source` where it came
 from, as `muSource` above. A change of `source` logs whatever the value, with
 `previousSource`, so each flip of the measured/derived choice is one line;
-otherwise the band is 5 %. `pods` lists the readings admitted this cycle,
-each with the `settledForSeconds` and `passedBy` of the k2 reading it was
-taken beside: a mu reading is admitted only with one.
+otherwise the band is 5 %. `pods` lists the readings admitted this cycle.
+A mu reading is admitted beside a k2 reading, so each entry normally carries
+that reading's `settledForSeconds` and `passedBy`; an entry with no k2
+margin on record leaves both out.
 
 ### `replica-capacity-summary`
 

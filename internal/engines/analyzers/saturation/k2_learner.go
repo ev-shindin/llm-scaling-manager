@@ -248,14 +248,19 @@ func k2WritePods(rs []k2PodReading) ([]map[string]any, int) {
 	return out, omitted
 }
 
-// sweepLearnerMapsLocked drops what k2 as a learner, and the analyzer's own
-// settle tracker, keep for a model the sweep has let go of: its reports, its
-// pending forgotten keys, its learner-start mark and its own-tracker sighting
-// go with its settle memo (k2Settle, swept at VariantTimeout unseen), and
-// what learner-write last logged of a key goes with the key's window. A model
-// that comes back is a model seen for the first time: it logs learner-start,
-// and each key logs its first write. Called at the end of evictStaleHistory;
-// callers hold a.mu.
+// sweepLearnerMapsLocked drops what k2 and mu as learners, and the
+// analyzer's own settle tracker, keep for a model the sweep has let go of:
+// its reports, its pending forgotten keys, its learner-start mark, its
+// own-tracker sighting and its mu cycle go with its settle memo (k2Settle,
+// swept at VariantTimeout unseen). What learner-write last logged of a k2
+// key goes with the key's window; of a mu key, with the key's model, or once
+// the key has no window and its model's last cycle did not price it (a key
+// priced from the derived rate has no window of its own). A model that comes
+// back is a model seen for the first time: it logs learner-start, and each
+// key logs its first write. An Analyze that fails part way leaves its model's
+// mu cycle unclosed, so the next sweep may drop a window-less key's logged
+// value, and that key logs one extra first write. Called at the end of
+// evictStaleHistory; callers hold a.mu.
 func (a *SaturationAnalyzer) sweepLearnerMapsLocked() {
 	gone := func(model string) bool { _, ok := a.k2Settle[model]; return !ok }
 	maps.DeleteFunc(a.learnerReports, func(m string, _ []learn.Report) bool { return gone(m) })

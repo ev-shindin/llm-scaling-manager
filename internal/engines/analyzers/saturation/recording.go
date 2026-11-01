@@ -138,7 +138,9 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 }
 
 // ReplaySwitchNames is every name SetSwitchesForReplay accepts, sorted: the
-// switch runs hold each to a row (analyzer-learner.md, 2.5).
+// switch runs hold each to a row (analyzer-learner.md, 2.5). A test seam,
+// like SetSwitchesForReplay; nothing on a production path calls it, and a
+// test holds that.
 func ReplaySwitchNames() []string {
 	return slices.Sorted(maps.Keys((&SaturationAnalyzer{}).switchFields()))
 }

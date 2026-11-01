@@ -152,3 +152,33 @@ func TestMuLatch_AWindowBroughtBackFromTheStashComesBackLatched(t *testing.T) {
 		assert.Equal(t, on, got, "switch %v", on)
 	}
 }
+
+// The same through installPreviousK2Locked: a document from other engine
+// arguments installs its throughput window as the variant's previous
+// figure, after a refused reading made the key a memo.
+func TestMuLatch_AWindowRestoredAsAPriorAfterARefusedReadingComesBackLatched(t *testing.T) {
+	stored := mtParams(256, "vllm:v1")
+	for _, on := range []bool{true, false} {
+		a, _, clock := waProcess(mtParams(64, "vllm:v1"))
+		require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchMuLatchRestoresSafe: on}))
+		const key = "test-ns|variant-a|test-model|H100|1|decode|imedium|medium|q5"
+		old := clock.Add(-MeasuredLowHoldFor - time.Minute)
+		a.RestoreLearnedState(LearnedState{
+			Config: map[string]string{"test-ns/variant-a": stored.Fingerprint()},
+			Args:   map[string]string{"test-ns/variant-a": stored.ArgsFingerprint()},
+			Throughput: map[string]ThroughputSnapshot{key: {
+				RollingAverageSnapshot: capacity.RollingAverageSnapshot{Values: []float64{1.8, 1.8, 1.8}, LastUsed: old, LastWritten: old},
+				SampledAt:              old,
+			}},
+		})
+		a.noteSaturatedReading(key, "pod-a", 0.1, false, 1.0, tuningOf(nil), *clock)
+		r, done := a.installRestored("test-ns", "test-model", "variant-a")
+		require.True(t, done, "premise: the restore runs")
+		require.Equal(t, RestoredPrior, r.Outcome, "premise: through installPreviousK2Locked")
+		require.Equal(t, 1, r.Throughput, "premise: the throughput window is installed")
+		reading := a.saturatedThroughputReading(key)
+		require.InDelta(t, 1.8, reading.rate, 1e-9)
+		got := a.measuredYieldsToDerived(key, reading, derivedMu{ok: true, rate: 1.0}, 0, tuningOf(nil), *clock)
+		assert.Equal(t, on, got, "switch %v", on)
+	}
+}

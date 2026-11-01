@@ -4,7 +4,6 @@ import (
 	"context"
 	"math"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -225,7 +224,7 @@ func (a *SaturationAnalyzer) closeMuCycle(ctx context.Context, namespace, modelI
 	for name := range c.variants {
 		variants = append(variants, name)
 	}
-	sort.Strings(variants)
+	slices.Sort(variants)
 	for _, variant := range variants {
 		v := c.variants[variant]
 		r := learn.Report{Learner: learn.Mu, Namespace: namespace, ModelID: modelID, Variant: variant,
