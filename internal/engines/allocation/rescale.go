@@ -453,7 +453,7 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 			want = *freeThisCycle
 		}
 		before := maps.Clone(targets)
-		*freeThisCycle -= fillRole(records, role, stateMap, targets, want)
+		*freeThisCycle -= fillRoleExact(records, role, stateMap, targets, want)
 		if gpuCapped {
 			markRoleGPULimited(records, role, stateMap, targets, limited)
 		}
@@ -579,12 +579,17 @@ func (o *GreedyByScoreOptimizer) fitRescaleToNodes(req ModelScalingRequest, reco
 // role pay for it, and a role with a share does not count its last replica, so
 // the second pass never takes it: with two equal variants the cheapest-at-one
 // rule does not protect a role's one pod, and a role with demand went to zero.
-// The second pass runs only when every role cut has one replica size. The model
-// sheds no more than the summed
-// cut, a role under a scale-down hold is not cut at all, and reclaimRole keeps
-// every variant at its minReplicas. It mutates targets.
+// The model sheds no more than the summed cut, a role under a scale-down hold
+// is not cut at all, and reclaimRole keeps every variant at its minReplicas.
+// A model with more than one replica size is shed by reclaimExact instead:
+// summed GPUs and per-role rounding disagree between adjacent targets there,
+// so a larger target left fewer GPUs. It mutates targets.
 func reclaimWholeReplicas(ctx context.Context, e NamedAnalyzerResult, records []variantRecord,
 	stateMap map[string]domain.VariantReplicaState, roles []string, tgt, cur, targets map[string]int) {
+	if !uniformPods(records, stateMap) {
+		reclaimExact(e, records, stateMap, roles, tgt, cur, targets)
+		return
+	}
 	cut := make(map[string]int, len(roles))
 	total := 0
 	trialCtx := ctrl.LoggerInto(ctx, logr.Discard())
@@ -609,15 +614,6 @@ func reclaimWholeReplicas(ctx context.Context, e NamedAnalyzerResult, records []
 		if cut[role] > 0 {
 			shed[role] = reclaimRole(ctx, e, records, role, stateMap, targets, cut[role])
 			total -= shed[role]
-		}
-	}
-	// With more than one replica size in a role, the per-role rounding of the
-	// first pass and the summed second pass can disagree between adjacent
-	// targets, so a larger target left fewer GPUs; such a model is rounded
-	// per role only, as before.
-	for _, role := range roles {
-		if cut[role] > 0 && !uniformReplicaGPUs(records, role, stateMap) {
-			return
 		}
 	}
 	order := slices.Clone(roles)
@@ -963,9 +959,15 @@ func roleFloorGPUs(records []variantRecord, stateMap map[string]domain.VariantRe
 // asks for, or its own cut rounded up to one replica: the leftover also
 // holds what a role at its maxReplicas could not place, and given to the
 // other role that was pods beyond its demand. It fills a copy of targets;
-// the real fill follows tgt.
+// the real fill follows tgt. That pass is greedy, and with more than one
+// replica size it is not monotone in the target, so such a model is
+// rounded by roundFillsExact instead.
 func roundFillsToReplicas(records []variantRecord, stateMap map[string]domain.VariantReplicaState,
 	roles []string, tgt, cur, dem, targets map[string]int) {
+	if !uniformPods(records, stateMap) {
+		roundFillsExact(records, stateMap, roles, tgt, cur, dem, targets)
+		return
+	}
 	trial := maps.Clone(targets)
 	cut := make(map[string]int, len(roles))
 	leftover := 0
