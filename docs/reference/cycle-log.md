@@ -196,6 +196,43 @@ and recovers reports the pod's age as its start time, which is the usual cause.
 After three rejections in a row the next sample is accepted, so a variant that
 really got slower moves its estimate.
 
+### `learner-start`
+
+One line per model, on the analyzer's first cycle for it: after the
+controller starts, or when a model first appears (or comes back after being
+unseen long enough to be forgotten). It says what the learners begin with:
+
+- `restoredKeys`: learned keys restored from the snapshot, per learner.
+- `coldVariants`: variants with none.
+- `oldestAdmittedAgeSeconds`: the oldest restored key's last admitted
+  reading, `-1` when none.
+- `settleUntil`: when the wait every replica starts ends, at the latest.
+  Until then a saturated replica's reading is `P1-obs-unsettled`, and with
+  the snapshot off a variant with no k2 is priced at k1.
+- `reason`: one of two. "...each replica waits its settle, k2 a rate window
+  from the controller's first sight of it, so by settleUntil at the latest"
+  is the default. "...replicas already Ready keep their settle" appears only
+  when a replay turns the controller-restart wait off; then `settleUntil` is
+  the cycle itself.
+
+```text
+2026-11-01T09:00:00.020Z  INFO  learner-start  {"modelID": "my-model",
+  "namespace": "default", "restoredKeys": {"k2": 0}, "coldVariants": {"k2": 1},
+  "oldestAdmittedAgeSeconds": -1, "settleUntil": "2026-11-01T09:01:00Z",
+  "reason": "the analyzer's first cycle for this model, after a controller start or as the model first appears: each replica waits its settle, k2 a rate window from the controller's first sight of it, so by settleUntil at the latest"}
+```
+
+### `learner-write` (`--v=3`)
+
+At most one line per learned key per cycle, when its figure is set for the
+first time, moves more than its band from the value last logged (k2: 2 %), or
+has not logged for 10 minutes: `learner` (`k2`), `variant`, `role`, `key`,
+`value`, `previousValue`, `firstWrite`, `source`, `samples`, and `pods`: the
+pods whose readings were admitted this cycle, lowest reading first, at most 16,
+each with its `reading`, `timeBase`, `passedBy` (the admission test it passed),
+`settledForSeconds` and `queueOverThreshold` (its busiest rank's queue over
+the saturation threshold); `podsOmitted` counts the rest.
+
 ### `replica-capacity-summary`
 
 One line per variant per cycle: which replicas the saturation analyzer priced,

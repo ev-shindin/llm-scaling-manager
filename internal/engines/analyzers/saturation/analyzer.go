@@ -12,7 +12,9 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learn"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
 )
 
 // The analyzer itself: its state, its lifecycle, and the lookups that belong
@@ -250,9 +252,32 @@ type SaturationAnalyzer struct {
 	// (WithClock), and tests set it.
 	now func() time.Time
 	// readySince is when a replica's Pod last became Ready, as the
-	// collector reports it, zero when unknown (replicaReadySince); tests
-	// may set it to stand in for the collector.
+	// collector reports it, zero when unknown (replicaReadySince): what the
+	// analyzer's own settle tracker reads. Tests may set it to stand in for
+	// the collector.
 	readySince func(domain.ReplicaMetrics) time.Time
+	// settle is the engine's settle tracker, read-only (WithSettleView);
+	// nil when the engine gave none, and ownSettle, observed by the
+	// analyzer itself, stands in (settle_view.go).
+	settle    settle.View
+	ownSettle *settle.Tracker
+	// ownSettled is the models ownSettle has observed (observeOwnSettle).
+	ownSettled map[string]bool
+	// k2 as a learner (k2_learner.go): the cycle in progress per
+	// namespace|model, the value learner-write last logged per k2 key, the
+	// keys forgotten per namespace|model and variant since its last report,
+	// each model's reports of its last cycle, and the models whose
+	// learner-start line is logged.
+	k2Cycles       map[string]*k2Cycle
+	k2Logged       map[string]k2Logged
+	k2Forgotten    map[string]map[string][]learn.Forgotten
+	learnerReports map[string][]learn.Report
+	learnerStarted map[string]bool
+	// k2ReadsSettle is SwitchK2ReadsSettle and k2WaitsAfterRestart
+	// SwitchK2WaitsAfterRestart: on from the constructor; a replay turns
+	// them off (SetSwitchesForReplay).
+	k2ReadsSettle       bool
+	k2WaitsAfterRestart bool
 	// horizons is how long each kind of learned state is kept. Defaulted
 	// from capacity.DefaultHorizons and overridable by configuration --
 	// which is the only way any of this is reachable on a cluster, the
@@ -393,6 +418,15 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		variantSeenAt:          make(map[string]time.Time),
 		now:                    clock.RealClock{}.Now,
 		readySince:             replicaReadySince,
+		ownSettle:              newOwnSettle(),
+		ownSettled:             make(map[string]bool),
+		k2Cycles:               make(map[string]*k2Cycle),
+		k2Logged:               make(map[string]k2Logged),
+		k2Forgotten:            make(map[string]map[string][]learn.Forgotten),
+		learnerReports:         make(map[string][]learn.Report),
+		learnerStarted:         make(map[string]bool),
+		k2ReadsSettle:          true,
+		k2WaitsAfterRestart:    true,
 		horizons:               capacity.DefaultHorizons(),
 	}
 }
@@ -592,6 +626,13 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 		if ra.StaleAt(now, bucketRetention) {
 			delete(a.computeCapacityHistory, key)
 			evicted.K2History++
+			// k2 forgets the key itself, unused past its horizon: its
+			// variant's next report says so.
+			if name, model, ok := variantOfKey(key); ok {
+				if ns, variant, ok := strings.Cut(name, "/"); ok {
+					a.noteForgottenLocked(ns, model, variant, []string{key}, learn.ByEvicted)
+				}
+			}
 		}
 	}
 	// A window's arguments go with the window.
@@ -850,8 +891,9 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 	evicted.K2Settle = settled - len(a.k2Settle)
 	// The fleet-shape memo is per namespace|model and exists only to key and
 	// stabilise the capacity figures, so it goes when they do. Without this it
-	// is the one map on this struct that grows without bound as models and
-	// namespaces come and go.
+	// would grow without bound as models and namespaces come and go; the
+	// learner maps (k2_learner.go) go by the rule below, with the settle memo
+	// (sweepLearnerMapsLocked).
 	//
 	// maps.DeleteFunc rather than the hand-rolled loops above: those predate
 	// it and two of them cannot use it anyway, one because it needs the key
@@ -887,6 +929,7 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 	})
 	evicted.FleetShapes = before - len(a.fleetShape)
 	evicted.Pods = a.evictStartSeenPods(now, variantTimeout)
+	a.sweepLearnerMapsLocked()
 	return evicted
 }
 

@@ -92,7 +92,10 @@ func build(start learnrec.Start, now time.Time, opts Options, rec *learnrec.Reco
 	}
 	// BorrowTickGap is max(BorrowedK2TickGap, 3 x interval): a third of it
 	// sets it back exactly.
-	r.sat = sat.WithOptimizationInterval(start.Saturation.BorrowTickGap / 3).WithRecorder(rec)
+	// k2 reads the replay's settle tracker, as it read the engine's
+	// (settle.go).
+	r.sat = sat.WithOptimizationInterval(start.Saturation.BorrowTickGap / 3).WithRecorder(rec).
+		WithSettleView(r.settle.tracker)
 	if got := r.sat.BorrowTickGap(); got != start.Saturation.BorrowTickGap {
 		return nil, fmt.Errorf("learnreplay: borrow tick gap %v, the recording has %v", got, start.Saturation.BorrowTickGap)
 	}

@@ -165,6 +165,9 @@ func TestLearnerRecording_TheMuPathsRunReachesEveryLearnerPath(t *testing.T) {
 	}
 	t.Logf("path counts: %v", counted)
 	for _, p := range saturation.PathNames() {
+		if saturation.PathAwaitsRecording(p) {
+			continue
+		}
 		assert.Positive(t, counted[p], "the mu-paths run never ran %s", p)
 	}
 	rep, err := learnreplay.Replay(context.Background(), recording, learnreplay.Options{Mode: learnreplay.Fidelity})

@@ -110,3 +110,43 @@ func TestReplicaCapacityPricesEveryRank(t *testing.T) {
 	assert.Equal(t, int64(384000), one.EffectiveCapacity,
 		"the same row read as one engine is priced at one engine: the issue's 8x")
 }
+
+// The restart suite's 8-GPU case (analyzer-learner.md, section 7, PR 2): a
+// whole-node pod of eight data-parallel ranks, one row, restarts under its
+// own name. Its one Ready time stands for all eight ranks, so the pod waits
+// a window as a one-rank replica does, and once settled k2 records the
+// busiest rank's occupancy scaled to the pod (BusiestRankTokens), not the
+// mean over the ranks.
+func TestRestartSuite_AnEightRankPodRestartedUnderItsNameWaitsAWindow(t *testing.T) {
+	const ranks, perRank = 8, int64(376_480)
+	row := func(ready time.Time) domain.ReplicaMetrics {
+		rm := makeReplicaMetrics("dp8-0", "decode-v", 4*perRank, ranks*perRank, 160, 1000, 500)
+		rm.EngineRanks = ranks
+		rm.MaxRankQueueLength = 20
+		rm.MaxRankKvCacheUsage = 260_000.0 / float64(perRank)
+		rm.GenerationTokenRate = ranks * 3000
+		rm.RequestRate = ranks * 6
+		rm.ReadySince = ready
+		return rm
+	}
+	r := newRestartRig(t, restartT0)
+	old := restartT0.Add(-time.Hour)
+	settled(t, r, func() []domain.ReplicaMetrics { return []domain.ReplicaMetrics{row(old)} }, decodeVariants("decode-v"))
+	require.Equal(t, int64(ranks*260_000), row(old).BusiestRankTokens(), "premise: the busiest rank's occupancy, scaled to the pod")
+
+	down := row(time.Time{})
+	down.Ready = false
+	r.cycle([]domain.ReplicaMetrics{down}, decodeVariants("decode-v"))
+	back := r.now.Add(-5 * time.Second)
+	assert.Equal(t, waitThenAdmit(), runCycles(r, waitWindow+1, func() []domain.ReplicaMetrics {
+		return []domain.ReplicaMetrics{row(back)}
+	}, decodeVariants("decode-v")), "the eight-rank pod back under its own name with a new Ready time")
+
+	r.a.mu.Lock()
+	defer r.a.mu.Unlock()
+	for _, ra := range r.a.computeCapacityHistory {
+		for _, v := range ra.Snapshot().Values {
+			assert.InDelta(t, float64(ranks*260_000), v, 1, "every k2 reading is the busiest rank's, scaled to the pod")
+		}
+	}
+}

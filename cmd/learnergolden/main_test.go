@@ -24,6 +24,9 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/settle/settlerow"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 )
 
 // goldens is the committed golden directory, from this package.
@@ -56,7 +59,13 @@ func headRecording(t *testing.T) string {
 	at := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	clk := clocktesting.NewFakePassiveClock(at)
 	store := capacity.NewStore()
-	sat := saturation.NewSaturationAnalyzer(store).WithClock(clk)
+	// The engine's settle tracker, observed before each Analyze as the
+	// engine observes it; the recording carries no observation, so its
+	// replay observes its own at each Analyze's clock, at the default
+	// interval, and the two read alike.
+	tracker := settle.NewTracker()
+	tracker.SetInterval(config.DefaultOptimizationInterval)
+	sat := saturation.NewSaturationAnalyzer(store).WithClock(clk).WithSettleView(tracker)
 	var buf bytes.Buffer
 	rec := learnrec.New(&buf, 0)
 	store.WithRecorder(rec)
@@ -77,6 +86,7 @@ func headRecording(t *testing.T) string {
 				KvUsageInstant: k, TotalKvCapacityTokens: 10_000, NumGpuBlocks: 625, BlockSize: 16,
 				TokensInUse: int64(k * 10_000), AvgInputTokens: 500, AvgOutputTokens: 200, RunningRequests: 8})
 		}
+		tracker.Observe(utils.GetNamespacedKey(ns, model), settlerow.Of(rows, nil), now)
 		_, err := sat.Analyze(context.Background(), domain.AnalyzerInput{ModelID: model, Namespace: ns,
 			ReplicaMetrics: rows, Config: &config.ScalingPolicy{KvCacheThreshold: 0.8},
 			VariantStates: []domain.VariantReplicaState{{VariantName: variant, CurrentReplicas: len(rows),
@@ -164,7 +174,8 @@ func TestRun_AddCheckUpdate(t *testing.T) {
 	// The one golden reproduces again, and reaches none of mu's measured
 	// paths: an add and an update say so, the check fails on it.
 	assert.Contains(t, out, "no golden runs the learner path "+saturation.PathMuSampleWritten)
-	// Each of saturation's paths the recording's own replay never ran, and
+	// Each of saturation's required paths the recording's own replay never
+	// ran (a path that awaits a recording is reported, not required), and
 	// every engine path: the recording carries no engine events.
 	raw, err := os.ReadFile(in)
 	require.NoError(t, err)
@@ -172,7 +183,7 @@ func TestRun_AddCheckUpdate(t *testing.T) {
 	require.NoError(t, err)
 	var unrun []string
 	for _, p := range saturation.PathNames() {
-		if rep.Paths[p] == 0 {
+		if rep.Paths[p] == 0 && !saturation.PathAwaitsRecording(p) {
 			unrun = append(unrun, p)
 		}
 	}

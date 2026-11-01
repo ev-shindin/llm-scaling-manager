@@ -188,7 +188,13 @@ func replicaReadySince(rm domain.ReplicaMetrics) time.Time {
 // a join (byReadyAt): it is the later time, or a new one began the sighting.
 // A new readyAt is a new sighting: the pod is back from a
 // restart under the same name. Callers hold a.mu.
-func (m *settleMemo) noteReady(pod string, ready bool, readyAt, now time.Time) (joined, byReadyAt bool) {
+//
+// It is the joined test from before the settle tracker, kept behind
+// SwitchK2ReadsSettle (off) so a replay can hold it to the goldens it wrote;
+// k2Joined is the one the controller runs. waits is
+// SwitchK2WaitsAfterRestart: on, a sighting on the memo's first cycle counts
+// from that cycle, as any later one does.
+func (m *settleMemo) noteReady(pod string, ready bool, readyAt, now time.Time, waits bool) (joined, byReadyAt bool) {
 	if m.readySince == nil {
 		m.readySince = make(map[string]readySighting)
 	}
@@ -199,7 +205,7 @@ func (m *settleMemo) noteReady(pod string, ready bool, readyAt, now time.Time) (
 	s, seen := m.readySince[pod]
 	if !seen || !s.readyAt.Equal(readyAt) {
 		s = readySighting{readyAt: readyAt, firstSeen: now, restarted: seen && !readyAt.IsZero()}
-		if !m.pastFirstCycle {
+		if !m.pastFirstCycle && !waits {
 			s.firstSeen = time.Time{} // already serving when the memo began
 		}
 		m.readySince[pod] = s
