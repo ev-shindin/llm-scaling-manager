@@ -62,13 +62,14 @@ func runSettleCycles(t *testing.T, cycles []settleCycle) ([]string, []int64) {
 func TestK2Settle_ALoadStepIsNotALimit(t *testing.T) {
 	prios, k2s := runSettleCycles(t, []settleCycle{
 		{0, 270_539, 30, 3000},                // a replica full and queued: 6 req/s at 500 out
+		{15 * time.Second, 270_539, 30, 3000}, // and again, which writes the window (k2_confirm.go)
 		{65 * time.Second, 12_000, 0, 1.2},    // the load goes; the replica idles
 		{80 * time.Second, 31_713, 160, 0.95}, // the step: a deep queue on an empty batch
 		{95 * time.Second, 260_123, 160, 3000},
 	})
-	assert.Equal(t, []string{"P1-obs", "P2-hist", "P1-obs-unsettled", "P1-obs"}, prios)
-	assert.Equal(t, int64(270_539), k2s[2], "the step's reading is not folded in; the window prices the replica")
-	assert.Equal(t, int64((270_539+260_123)/2), k2s[3], "the next, settled reading is")
+	assert.Equal(t, []string{"P1-obs-unconfirmed", "P1-obs", "P2-hist", "P1-obs-unsettled", "P1-obs"}, prios)
+	assert.Equal(t, int64(270_539), k2s[3], "the step's reading is not folded in; the window prices the replica")
+	assert.Equal(t, int64((2*270_539+260_123)/3), k2s[4], "the next, settled reading is")
 }
 
 // The same step's mu: the idle minute's 0.0019 req/s was recorded as a
@@ -117,8 +118,9 @@ func TestK2Settle_AComputeBoundAtLowOccupancyIsLearned(t *testing.T) {
 		{60 * time.Second, 46_000, 40, 800},
 		{75 * time.Second, 45_500, 40, 800},
 	})
+	// The first admitted reading waits for the next (k2_confirm.go).
 	assert.Equal(t, []string{
-		"P1-obs-unsettled", "P1-obs-unsettled", "P1-obs-unsettled", "P1-obs-unsettled", "P1-obs", "P1-obs",
+		"P1-obs-unsettled", "P1-obs-unsettled", "P1-obs-unsettled", "P1-obs-unsettled", "P1-obs-unconfirmed", "P1-obs",
 	}, prios)
 	assert.Equal(t, int64(45_750), k2s[5], "the low bound is the variant's k2")
 }
@@ -144,15 +146,17 @@ func TestK2Settle_AFillIsNotFlatCycleToCycle(t *testing.T) {
 	for i, p := range prios[:8] {
 		assert.Equal(t, "P1-obs-unsettled", p, "cycle %d is mid-fill", i)
 	}
-	assert.Equal(t, "P1-obs", prios[8], "a window after the fill slowed to under 25 %% a minute")
-	assert.Equal(t, int64(245_000), k2s[8], "the first figure recorded is the filled one")
+	assert.Equal(t, "P1-obs-unconfirmed", prios[8], "a window after the fill slowed to under 25 %% a minute, held for the next (k2_confirm.go)")
+	assert.Equal(t, "P1-obs", prios[9])
+	assert.Equal(t, int64(245_000), k2s[9], "the first figure recorded is the filled one")
 }
 
 // A reading whose queue is the overflow of a batch at least as large is a
-// replica at its limit however it got there, and is recorded on sight.
-func TestK2Settle_AFullReplicaIsRecordedOnSight(t *testing.T) {
-	prios, _ := runSettleCycles(t, []settleCycle{{0, 260_000, 160, 0}})
-	assert.Equal(t, []string{"P1-obs"}, prios, "160 x 1500 = 240 000 waiting behind 260 000 resident")
+// replica at its limit however it got there, and is admitted on sight: held
+// as its window's first reading, and recorded with the next (k2_confirm.go).
+func TestK2Settle_AFullReplicaIsAdmittedOnSight(t *testing.T) {
+	prios, _ := runSettleCycles(t, []settleCycle{{0, 260_000, 160, 0}, {15 * time.Second, 260_000, 160, 0}})
+	assert.Equal(t, []string{"P1-obs-unconfirmed", "P1-obs"}, prios, "160 x 1500 = 240 000 waiting behind 260 000 resident")
 }
 
 // A suspect reading whose service rate has reached the rate on record, and
@@ -161,10 +165,11 @@ func TestK2Settle_AFullReplicaIsRecordedOnSight(t *testing.T) {
 func TestK2Settle_ARateAtTheRecordIsALimit(t *testing.T) {
 	prios, _ := runSettleCycles(t, []settleCycle{
 		{0, 270_000, 30, 3000},
+		{15 * time.Second, 270_000, 30, 3000}, // writes the window (k2_confirm.go)
 		{65 * time.Second, 12_000, 0, 1.2},
 		{80 * time.Second, 200_000, 160, 2900}, // 240 000 waiting behind 200 000, 0.74 of k2
 	})
-	assert.Equal(t, []string{"P1-obs", "P2-hist", "P1-obs"}, prios)
+	assert.Equal(t, []string{"P1-obs-unconfirmed", "P1-obs", "P2-hist", "P1-obs"}, prios)
 }
 
 // A rate alone shows a replica is busy, not that it is at its limit. One
@@ -173,11 +178,12 @@ func TestK2Settle_ARateAtTheRecordIsALimit(t *testing.T) {
 func TestK2Settle_ARateWithoutTheResidencyIsNotALimit(t *testing.T) {
 	prios, k2s := runSettleCycles(t, []settleCycle{
 		{0, 270_000, 30, 3000},
+		{15 * time.Second, 270_000, 30, 3000}, // writes the window (k2_confirm.go)
 		{65 * time.Second, 12_000, 0, 1.2},
 		{80 * time.Second, 60_000, 160, 2900},
 	})
-	assert.Equal(t, []string{"P1-obs", "P2-hist", "P1-obs-unsettled"}, prios)
-	assert.Equal(t, int64(270_000), k2s[2], "the filling reading is not folded in")
+	assert.Equal(t, []string{"P1-obs-unconfirmed", "P1-obs", "P2-hist", "P1-obs-unsettled"}, prios)
+	assert.Equal(t, int64(270_000), k2s[3], "the filling reading is not folded in")
 }
 
 // The router moves the hot queue onto a sibling that was already busy: it
@@ -236,7 +242,7 @@ func TestK2Settle_AFallIsNotSettling(t *testing.T) {
 	})
 	assert.Equal(t, []string{
 		"P1-obs-unsettled", "P1-obs-unsettled", "P1-obs-unsettled", "P1-obs-unsettled",
-		"P1-obs", "P1-obs", "P1-obs-unsettled",
+		"P1-obs-unconfirmed", "P1-obs", "P1-obs-unsettled",
 	}, prios)
 	assert.Equal(t, int64((46_000+36_000)/2), k2s[6], "the fall is not folded in")
 }

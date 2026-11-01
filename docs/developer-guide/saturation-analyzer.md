@@ -269,6 +269,31 @@ k2 window nor the throughput window. Each replica's readings over
 beside `hotRankHeld`. A refusal can only keep k2 where it was; nothing here
 raises a recorded k2.
 
+A reading that passes and would be the first in an empty window is held, not
+written (`k2_confirm.go`, #392): it logs `P1-obs-unconfirmed` and waits in
+`k2Pending` under its key with the engine arguments it was read under. The
+next cycle's admitted reading (a later `Analyze`, counted by `analyzeSeq`; a
+sibling in the same cycle does not count) writes the held readings, at the
+time they were read, and its own. That is averaging, not an agreement test,
+and with one-minute peaks read every 15 s the second reading shares most of
+the first's minute. Held readings under other arguments, or past
+`EpisodeGap`, are replaced; the sweep drops them past the gap, and a forget
+drops them. While held:
+
+- the cycle is priced by `unadmittedPrice` at the lower of the reading and the
+  chain (P2/P3/P4 can be k1, or a window from before the gap), and records
+  nothing;
+- the settle test reads the held readings' mean as `k2OnRecord`
+  (`heldOnRecordLocked`), ahead of a window past the episode gap that still
+  holds its old figure, so the next reading is judged as against a window of
+  them;
+- the mu written beside a `P1-obs` reading is judged as usual.
+
+Held readings dropped for other arguments or the gap log `k2-held-dropped` at
+`--v=3`. They are not in the learned-state snapshot: a controller restart
+during the held cycle drops them, and the next admitted reading is held again.
+The replay switch `SwitchK2FirstReadingWaits` turns the hold off.
+
 ### Which bound applies
 
 ```

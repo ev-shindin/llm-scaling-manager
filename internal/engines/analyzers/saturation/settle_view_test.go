@@ -19,15 +19,17 @@ func TestSettleView_TheRestartSwitchOffTakesTheFirstCycleAsEstablished(t *testin
 	for _, tc := range []struct {
 		name  string
 		ready time.Duration
-		want  string
+		want  []string
 	}{
-		{"Ready an hour", time.Hour, p1Obs},
-		{"Ready 10 s", 10 * time.Second, k2ReasonObsUnsettled},
+		// Admitted: held as its window's first reading (k2_confirm.go), and
+		// priced at it, under the chain's k1.
+		{"Ready an hour", time.Hour, []string{k2ReasonObsUnconfirmed, k2ReasonObsUnadmitted}},
+		{"Ready 10 s", 10 * time.Second, []string{k2ReasonObsUnsettled}},
 	} {
 		r := newRestartRig(t, restartT0)
 		require.NoError(t, r.a.SetSwitchesForReplay(map[string]bool{SwitchK2WaitsAfterRestart: false}))
 		got := r.cycle([]domain.ReplicaMetrics{fullRow("p0", "v", restartT0.Add(-tc.ready))}, decodeVariants("v"))
-		assert.Equal(t, []string{tc.want}, got, "%s, on the controller's first cycle, the switch off", tc.name)
+		assert.Equal(t, tc.want, got, "%s, on the controller's first cycle, the switch off", tc.name)
 	}
 }
 

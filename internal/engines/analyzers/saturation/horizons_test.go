@@ -194,27 +194,36 @@ var _ = Describe("learned-state horizons", func() {
 		a.computeCapacityHistory[historyKey] = ra
 
 		// A saturated queue, so Priority 1 fires and takes the reset branch.
-		d := a.computeK2(historyKey, "m", "ns", "decode-v",
-			20,     // queueLen, above the threshold below
-			900000, // tokensInUse: this episode's reading
-			600,    // avgOutput
-			1000,   // avgInput
-			10,     // queueThreshold
-			nil,    // engineParams
-			pricedBatchCap{},
-			1,       // ranks
-			2000000, // k1
-			2000000, // kvCeiling, at or above tokensInUse or the read is refused
-			domain.RoleDecode, false, admission{}, false, logr.Discard())
+		saturated := func() k2Decision {
+			return a.computeK2(historyKey, "m", "ns", "decode-v",
+				20,     // queueLen, above the threshold below
+				900000, // tokensInUse: this episode's reading
+				600,    // avgOutput
+				1000,   // avgInput
+				10,     // queueThreshold
+				nil,    // engineParams
+				pricedBatchCap{},
+				1,       // ranks
+				2000000, // k1
+				2000000, // kvCeiling, at or above tokensInUse or the read is refused
+				domain.RoleDecode, false, admission{}, false, logr.Discard())
+		}
+		// The window the reading would start waits for a later cycle's
+		// (k2_confirm.go): the first is held, and the old one still prices.
+		d := saturated()
+		Expect(d.refused).To(Equal(k2ReasonObsUnconfirmed))
+		Expect(d.k2).To(Equal(int64(50000)))
+		a.analyzeSeq++ // the next cycle
+		d = saturated()
 		k2, src := d.k2, d.src
 
 		Expect(src).To(Equal(capacity.K2SrcObserved))
 		Expect(k2).To(Equal(int64(900000)),
 			"a one-hour episode gap must RESET the window after two hours, so k2 is "+
-				"this episode's reading alone; blending with the retained 50000 would "+
-				"read 475000, and that is what reading the 24h default would produce")
-		Expect(a.computeCapacityHistory[historyKey].Len()).To(Equal(1),
-			"a reset window holds exactly the one new sample")
+				"this episode's readings alone; blending with the retained 50000 would "+
+				"read 616667, and that is what reading the 24h default would produce")
+		Expect(a.computeCapacityHistory[historyKey].Len()).To(Equal(2),
+			"a reset window holds exactly the two new samples")
 	})
 })
 

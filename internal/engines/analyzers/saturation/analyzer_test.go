@@ -69,7 +69,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 				},
 			)
 
-			result, err := analyzer.Analyze(ctx, input)
+			result, err := analyzeConfirmed(ctx, analyzer, input)
 			Expect(err).NotTo(HaveOccurred())
 			// k1 = 12800, k2 = 8000 (observed: tokensInUse when queue saturated)
 			// effective = min(12800, 8000) = 8000
@@ -88,7 +88,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 				},
 			)
 
-			result, err := analyzer.Analyze(ctx, input)
+			result, err := analyzeConfirmed(ctx, analyzer, input)
 			Expect(err).NotTo(HaveOccurred())
 			// k1 = 12800, k2 = 4000 (observed), effective = 4000
 			Expect(result.VariantCapacities[0].PerReplicaCapacity).To(Equal(float64(4000)))
@@ -129,7 +129,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 				},
 			)
 
-			_, err := analyzer.Analyze(ctx, input)
+			_, err := analyzeConfirmed(ctx, analyzer, input)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify k2 was stored in history
@@ -271,7 +271,9 @@ var _ = Describe("SaturationAnalyzer", func() {
 			analyzer.mu.Unlock()
 
 			// The window is discarded, so this observation stands alone rather
-			// than being blended to (9*8000 + 3000)/10 = 7500.
+			// than being blended to (9*8000 + 3000)/10 = 7500. The new
+			// window's first reading waits for a second (k2_confirm.go).
+			steady(3000)
 			result := steady(3000)
 			Expect(result.VariantCapacities[0].PerReplicaCapacity).To(Equal(float64(3000)))
 			Expect(result.VariantCapacities[0].Reason).To(Equal(capacity.K2SrcObserved.String()))
@@ -292,7 +294,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 				},
 			)
 
-			result, err := analyzer.Analyze(ctx, input)
+			result, err := analyzeConfirmed(ctx, analyzer, input)
 			Expect(err).NotTo(HaveOccurred())
 
 			ra, ok := analyzer.computeCapacityHistory["test-ns|variant-a|test-model|H100|1|both|short|q5"]
@@ -332,7 +334,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 					{VariantName: "variant-a", AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},
 				},
 			)
-			_, err := analyzer.Analyze(ctx, input1)
+			_, err := analyzeConfirmed(ctx, analyzer, input1)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Second call: queue below threshold → uses historical k2
@@ -408,7 +410,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 					{VariantName: "variant-a", AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},
 				},
 			)
-			_, err := analyzer.Analyze(ctx, resolved)
+			_, err := analyzeConfirmed(ctx, analyzer, resolved)
 			Expect(err).NotTo(HaveOccurred())
 			ra, ok := analyzer.computeCapacityHistory["test-ns|variant-a|test-model|H100|1|both|short|q5"]
 			Expect(ok).To(BeTrue())
@@ -430,7 +432,8 @@ var _ = Describe("SaturationAnalyzer", func() {
 			_, spurious := analyzer.computeCapacityHistory["test-ns|variant-a|test-model|unknown|1|both|short|q5"]
 			Expect(spurious).To(BeFalse(),
 				"an unresolved accelerator opened a second history bucket; this is the oscillation")
-			Expect(ra.Average()).To(Equal(float64(8500)),
+			// The resolved reading twice (it confirmed itself), and this one.
+			Expect(ra.Average()).To(BeNumerically("~", (8000+8000+9000)/3.0, 1e-9),
 				"the unresolved cycle must land in the variant's existing bucket")
 		})
 
@@ -479,7 +482,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 					{VariantName: "variant-a", AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},
 				},
 			)
-			_, err := analyzer.Analyze(ctx, seed)
+			_, err := analyzeConfirmed(ctx, analyzer, seed)
 			Expect(err).NotTo(HaveOccurred())
 			_, ok := analyzer.computeCapacityHistory["test-ns|variant-a|test-model|H100|1|both|short|q5"]
 			Expect(ok).To(BeTrue())
@@ -524,13 +527,13 @@ var _ = Describe("SaturationAnalyzer", func() {
 				{VariantName: "variant-p", AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1, Role: domain.RolePrefill},
 				{VariantName: "variant-d", AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1, Role: domain.RoleDecode},
 			}
-			_, err := analyzer.Analyze(ctx, makeAnalyzerInput(
+			_, err := analyzeConfirmed(ctx, analyzer, makeAnalyzerInput(
 				[]domain.ReplicaMetrics{
 					makeReplicaMetrics("pod-p", "variant-p", 8000, 16000, 6, 100, 50),
 					makeReplicaMetrics("pod-d", "variant-d", 3000, 16000, 0, 100, 50),
 				}, states))
 			Expect(err).NotTo(HaveOccurred())
-			_, err = analyzer.Analyze(ctx, makeAnalyzerInput(
+			_, err = analyzeConfirmed(ctx, analyzer, makeAnalyzerInput(
 				[]domain.ReplicaMetrics{
 					makeReplicaMetrics("pod-p", "variant-p", 8000, 16000, 0, 100, 50),
 					makeReplicaMetrics("pod-d", "variant-d", 3000, 16000, 6, 100, 50),

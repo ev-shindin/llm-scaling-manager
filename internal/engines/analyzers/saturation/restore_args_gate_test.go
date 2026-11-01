@@ -38,9 +38,13 @@ var _ = Describe("learned state restored by engine arguments", func() {
 	// for each liveness key so the latency figure's fate can be read.
 	learn := func(p *capacity.EngineParams) LearnedState {
 		a := newProcess(p)
-		_, err := a.Analyze(context.Background(), makeAnalyzerInput(
-			[]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 4000, 16000, 6, 100, 50)}, states))
-		Expect(err).NotTo(HaveOccurred())
+		// Twice: a window's first reading waits for a later cycle's
+		// (k2_confirm.go).
+		for range 2 {
+			_, err := a.Analyze(context.Background(), makeAnalyzerInput(
+				[]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 4000, 16000, 6, 100, 50)}, states))
+			Expect(err).NotTo(HaveOccurred())
+		}
 		Expect(capacityOf(a)).To(Equal(float64(4000)), "precondition: k2 learned")
 		s := a.ExportLearnedState()
 		Expect(s.VariantSeenAt).NotTo(BeEmpty(), "precondition: liveness exported")

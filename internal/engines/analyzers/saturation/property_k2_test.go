@@ -64,18 +64,16 @@ func (r *propRig) runK2(readings ...k2Reading) error {
 // deep queue lands on an idle replica, which reads 8 % of its cache. The
 // step's reading is refused.
 //
-// It assumes one saturated reading is admitted: the k2 on record before the
-// step comes from a single reading. The fix for first-sample/k2/second-reading
-// (withhold until a second reading) breaks that premise, and this case then
-// fails as not-learned. The owner of that ledger row reworks this case in the
-// same PR, with two saturated readings before the step.
+// The k2 on record before the step is two saturated readings: a window's
+// first waits for a second (k2_confirm.go, first-sample/k2/second-reading).
 func checkK2LoadStep(policy func(*config.ScalingPolicy)) func(uint64) error {
 	return func(seed uint64) error {
 		r := propRand(seed)
 		rig := newPropRig()
 		rig.policy = policy
 		full := int64(270_000 * (1 + 0.05*r.Float64()))
-		if err := rig.runK2(k2Reading{full, 30, 6, 65 * time.Second}, k2Reading{12_000, 0, 0.0024, propCycle}); err != nil {
+		if err := rig.runK2(k2Reading{full, 30, 6, propCycle}, k2Reading{full, 30, 6, 65 * time.Second},
+			k2Reading{12_000, 0, 0.0024, propCycle}); err != nil {
 			return err
 		}
 		before := rig.k2("")
@@ -240,6 +238,18 @@ func checkK2FillOn(newL func() k2FillLearner) func(uint64) error {
 // 12 % off the other way. The figure the first set moves by at most the
 // band. A first reading withheld until a second is a pass.
 func checkK2FirstSample(seed uint64) error {
+	return checkK2FirstSampleOn(nil)(seed)
+}
+
+// checkK2FirstSampleOn is checkK2FirstSample with edit applied to the rig's
+// analyzer first (a mutant).
+func checkK2FirstSampleOn(edit func(*SaturationAnalyzer)) func(uint64) error {
+	return func(seed uint64) error {
+		return k2FirstSample(seed, edit)
+	}
+}
+
+func k2FirstSample(seed uint64, edit func(*SaturationAnalyzer)) error {
 	r := propRand(seed)
 	sign := 1.0
 	if r.IntN(2) == 0 {
@@ -247,6 +257,9 @@ func checkK2FirstSample(seed uint64) error {
 	}
 	truth := 250_000.0 * (1 + 0.1*r.Float64())
 	rig := newPropRig()
+	if edit != nil {
+		edit(rig.a)
+	}
 	if err := rig.runK2(k2Reading{int64(truth * (1 + 0.12*sign)), 10, 6, propCycle}); err != nil {
 		return err
 	}

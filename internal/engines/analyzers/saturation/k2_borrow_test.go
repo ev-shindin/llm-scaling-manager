@@ -73,6 +73,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 	}
 
 	It("starts a new variant from a compatible sibling's lower k2", func() {
+		cycle(4000, 6, 1000, 16000, 0) // held (k2_confirm.go)
 		cycle(4000, 6, 1000, 16000, 0) // variant-a measures 4000; variant-b has nothing
 		result := cycle(1000, 0, 1000, 16000, 0)
 
@@ -95,6 +96,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			Fail("no capacity reported for " + variant)
 			return nil
 		}
+		cycle(4000, 6, 1000, 16000, 0) // held (k2_confirm.go)
 		cycle(4000, 6, 1000, 16000, 0)
 		result := cycle(1000, 0, 1000, 16000, 0)
 		Expect(borrowedOf(result, "variant-b")).To(Equal([]domain.LearnedStateBorrow{
@@ -135,10 +137,12 @@ var _ = Describe("borrowing a sibling's k2", func() {
 	})
 
 	It("is displaced by the variant's own first measurement", func() {
+		cycle(4000, 6, 1000, 16000, 0) // held (k2_confirm.go)
 		cycle(4000, 6, 1000, 16000, 0)
 		Expect(capacityOf(cycle(1000, 0, 1000, 16000, 0), "variant-b")).To(Equal(float64(4000)),
 			"precondition: variant-b is borrowing")
 
+		cycle(1000, 0, 9000, 16000, 6) // held (k2_confirm.go)
 		cycle(1000, 0, 9000, 16000, 6) // variant-b saturates at 9000
 		Expect(capacityOf(cycle(1000, 0, 1000, 16000, 0), "variant-b")).To(Equal(float64(9000)),
 			"once variant-b has measured itself, its own reading is what it reads")

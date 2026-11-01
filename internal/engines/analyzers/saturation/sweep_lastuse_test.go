@@ -169,14 +169,23 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 			Expect(ra.WriteGapExceedsAt(time.Now(), capacity.HistoryEvictionTimeout)).To(BeTrue(),
 				"but nothing has been WRITTEN for a day, and that is the write path's question")
 
-			// Now the queue saturates and today's true figure is much lower.
-			d := a.computeK2(historyKey, model, ns, variant,
-				50,    // queueLen over threshold: Priority 1 fires
-				10000, // tokensInUse -> k2Observed well below the stored 90,000
-				600, 1000, 10,
-				nil, pricedBatchCap{}, 1,
-				1000000, 1000000,
-				domain.RoleDecode, false, admission{}, false, logr.Discard())
+			// Now the queue saturates and today's true figure is much lower:
+			// held on its first cycle (k2_confirm.go), written on the next.
+			saturated := func() k2Decision {
+				return a.computeK2(historyKey, model, ns, variant,
+					50,    // queueLen over threshold: Priority 1 fires
+					10000, // tokensInUse -> k2Observed well below the stored 90,000
+					600, 1000, 10,
+					nil, pricedBatchCap{}, 1,
+					1000000, 1000000,
+					domain.RoleDecode, false, admission{}, false, logr.Discard())
+			}
+			held := saturated()
+			Expect(held.refused).To(Equal(k2ReasonObsUnconfirmed))
+			Expect(held.k2).To(Equal(int64(10000)),
+				"the held cycle is priced at today's reading, not the 90,000 from before the gap")
+			a.analyzeSeq++
+			d := saturated()
 			src := d.src
 			Expect(src).To(Equal(capacity.K2SrcObserved))
 
@@ -184,7 +193,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 			// taken before the write still points at the old one.
 			fresh := a.computeCapacityHistory[historyKey]
 			Expect(fresh).NotTo(BeIdenticalTo(ra), "the window must have been replaced, not appended to")
-			Expect(fresh.Len()).To(Equal(1),
+			Expect(fresh.Len()).To(Equal(2),
 				"a new episode must REPLACE the window, not blend into it: averaged "+
 					"against nine readings from before the gap, today's lower, truer "+
 					"figure is diluted to a tenth and capacity stays high -- fewer "+

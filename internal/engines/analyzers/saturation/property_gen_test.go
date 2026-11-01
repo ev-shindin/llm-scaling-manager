@@ -252,6 +252,16 @@ func (r *propRig) k2(role string) float64 {
 	return sum / float64(len(keys))
 }
 
+// k2Admitted reports whether k2 admitted a saturated reading: a window holds
+// one, or one is held for its window's next (k2_confirm.go). The edge
+// probes judge where a reading is admitted, not the cycle it is written on.
+func (r *propRig) k2Admitted() bool {
+	r.a.mu.Lock()
+	held := len(r.a.k2Pending) > 0
+	r.a.mu.Unlock()
+	return held || r.k2("") > 0
+}
+
 // propKv is one replica's KV cache in tokens.
 const propKv = int64(376_480)
 

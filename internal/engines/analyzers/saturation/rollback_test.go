@@ -416,7 +416,7 @@ func rrAnalyzeTwo(t *testing.T, a *SaturationAnalyzer, tokens int64, queue int) 
 		makeReplicaMetrics("pod-a", "variant-a", tokens, 16000, queue, 100, 50),
 		makeReplicaMetrics("pod-b", "variant-a", tokens, 16000, queue, 100, 50),
 	}, states)
-	if _, err := a.Analyze(context.Background(), in); err != nil {
+	if _, err := analyzeConfirmed(context.Background(), a, in); err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
 }

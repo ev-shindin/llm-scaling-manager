@@ -83,6 +83,7 @@ var findings = []finding{
 	{row: "Settle holes: restart", status: statusCaught},
 	{row: "Settle holes: fall, rate escape, idle return, lend", status: statusEscaping, why: "only the restart and joiner events have a case; the others need the settle tracker (PR 1)"},
 	{row: "Restart fix stubbed", status: statusCaught},
+	{row: "k2 adopts its first reading (#392)", status: statusCaught},
 	{row: "'For good' self-sealing low mu", status: statusEscaping, why: "the closed-loop probe lands in PR 3"},
 }
 
@@ -223,6 +224,9 @@ func propertyMutants() []propMutant {
 		{row: "Restart fix stubbed", caseID: "transient/k2/restart-same-name", level: levelStub,
 			how:   "the restart fix stubbed: the analyzer's readySince seam reads no Ready time, so the joined test counts from first sight alone",
 			check: checkK2RestartOn(nil, stubRestartFix)},
+		{row: "k2 adopts its first reading (#392)", caseID: "first-sample/k2/second-reading", level: levelStub,
+			how:   "SwitchK2FirstReadingWaits off: a window's first reading is written, and prices, at once",
+			check: checkK2FirstSampleOn(func(a *SaturationAnalyzer) { a.k2FirstReadingWaits = false })},
 	}
 }
 

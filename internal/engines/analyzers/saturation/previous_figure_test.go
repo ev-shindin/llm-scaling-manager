@@ -242,7 +242,7 @@ func TestARolloutFreezesARunningSiblingBorrow(t *testing.T) {
 	run := func(n int) float64 {
 		var b float64
 		for range n {
-			result, err := a.Analyze(context.Background(), makeAnalyzerInput([]domain.ReplicaMetrics{
+			result, err := analyzeConfirmed(context.Background(), a, makeAnalyzerInput([]domain.ReplicaMetrics{
 				makeReplicaMetrics("pod-a", "variant-a", 4000, 16000, 6, 100, 50),
 				makeReplicaMetrics("pod-b", "variant-b", 1000, 16000, 0, 100, 50),
 			}, states))

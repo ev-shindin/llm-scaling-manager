@@ -210,6 +210,12 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	a.throughputWindowUnderLocked(throughputKey, args)
 	ref := a.serviceRateOnRecordLocked(throughputKey)
 	k2Ref := a.k2OnRecordLocked(historyKey)
+	// A window's first readings held for a later cycle's (k2_confirm.go) are
+	// what is on record for the reading that follows them, ahead of a window
+	// past the episode gap, which still holds its old figure.
+	if held := a.heldOnRecordLocked(historyKey, args, a.now()); held > 0 {
+		k2Ref = held
+	}
 	a.mu.Unlock()
 	if ref <= 0 && derived.ok {
 		ref = derived.rate
@@ -297,11 +303,16 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// key alone, as the shape-shift proposal scopes it. (throughputKey and
 	// keyInput are built above, before computeK2, whose settle test reads the
 	// rate on record under the key.)
-	if k2Priority == capacity.K2SrcObserved && adm.admitted() && frozen {
+	//
+	// A first k2 reading held for a later cycle's (k2_confirm.go) passed
+	// every admission test P1-obs does, and its mu is judged here as one
+	// written beside it, a pending swap's freeze included: the hold is k2's,
+	// not mu's.
+	if (k2Priority == capacity.K2SrcObserved || d.refused == k2ReasonObsUnconfirmed) && adm.admitted() && frozen {
 		// A swap is pending: the reading is the shape arriving, and the key
 		// still names the bucket it is leaving (muSwapFrozen).
 		a.noteMuCount(namespace, modelID, rm.VariantName, muReasonSwapPending)
-	} else if k2Priority == capacity.K2SrcObserved && adm.admitted() {
+	} else if (k2Priority == capacity.K2SrcObserved || d.refused == k2ReasonObsUnconfirmed) && adm.admitted() {
 		// keyInput is the effective prompt length this key was built with, so
 		// the token rate is converted to requests/s at the same figure the
 		// window is keyed by -- a rate divided by one shape and stored under
@@ -711,7 +722,7 @@ func (a *SaturationAnalyzer) computeK2(
 		avgOutput, avgInput, queueThreshold, engineParams, batchCap, ranks, k1, kvCeiling, role, downstreamSaturated,
 		adm, borrowDisabled, &refused, logger)
 	k2, src, recordable := a.unadmittedPrice(chain, chainSrc, historyKey, modelID, namespace, variantName,
-		queueLen, tokensInUse, queueThreshold, kvCeiling, downstreamSaturated, adm, logger)
+		queueLen, tokensInUse, queueThreshold, kvCeiling, downstreamSaturated, adm, refused == k2ReasonObsUnconfirmed, logger)
 	if src != chainSrc {
 		// Priced at the unadmitted reading, not at the chain's lower bound.
 		borrowed = k2Borrow{}
@@ -765,17 +776,25 @@ func (a *SaturationAnalyzer) unadmittedPrice(
 	kvCeiling int64,
 	downstreamSaturated bool,
 	adm admission,
+	// held is a reading k2 admitted and held as its window's first
+	// (k2_confirm.go): what the replica holds now, not yet recorded.
+	held bool,
 	logger logr.Logger,
 ) (k2 int64, src capacity.K2Source, recordable int64) {
 	saturated := queueLen >= int(queueThreshold) && tokensInUse > 0
 	plausible := kvCeiling <= 0 || tokensInUse <= kvCeiling
-	// A bridge, or a Ready replica of the variant's own mid-rollout.
-	atReading := adm.bridge || (adm.rollout && adm.admitted())
+	// A bridge, a Ready replica of the variant's own mid-rollout, or a
+	// reading held for a later cycle's: the chain past it may be k1, or a
+	// window from before the episode gap, far above what the replica holds.
+	atReading := adm.bridge || (adm.rollout && adm.admitted()) || held
 	if !atReading || downstreamSaturated || !saturated || !plausible || tokensInUse >= chain {
 		return chain, chainSrc, chain
 	}
 	why := "a warm-pool bridge"
-	if !adm.bridge {
+	switch {
+	case held:
+		why = "held as its window's first reading"
+	case !adm.bridge:
 		why = "mid-rollout"
 	}
 	logger.V(perReplicaLogLevel).Info("k2-decision",
@@ -971,9 +990,36 @@ func (a *SaturationAnalyzer) k2Chain(
 			// a bucket the fleet is still serving -- two episodes weeks
 			// apart would blend, and a stale high reading would hold
 			// capacity up against today's lower, truer one.
-			if !ok || ra.WriteGapExceedsAt(now, a.horizons.EpisodeGap) {
+			fresh := !ok || ra.WriteGapExceedsAt(now, a.horizons.EpisodeGap)
+			// The first reading of a window waits for a later cycle's
+			// (k2_confirm.go).
+			held, confirmed, dropped := a.k2HoldFirstLocked(historyKey, k2Observed, fresh, args, now)
+			if len(dropped.readings) > 0 {
+				logger.V(perReplicaLogLevel).Info("k2-held-dropped",
+					"modelID", modelID, "namespace", namespace, "variant", variantName, "historyKey", historyKey,
+					"readings", dropped.readings, "heldAt", dropped.at.UTC().Format(time.RFC3339),
+					"reason", "held under engine arguments the variant no longer runs, or past the episode gap: replaced by this reading, not written")
+			}
+			if held {
+				a.mu.Unlock()
+				*refused = k2ReasonObsUnconfirmed
+				logger.V(perReplicaLogLevel).Info("k2-decision",
+					"modelID", modelID, "namespace", namespace, "variant", variantName,
+					"priority", k2ReasonObsUnconfirmed, "historyKey", historyKey,
+					"queueLength", queueLen, "queueThreshold", queueThreshold,
+					"reason", "the first saturated reading of a window with nothing on record: held until a later cycle's admitted reading writes it; not recorded",
+					"tokensInUse", tokensInUse, "k1", k1)
+				break
+			}
+			if fresh {
 				ra = capacity.NewRollingAverage(capacity.RollingAverageWindowSize, now)
 				a.computeCapacityHistory[historyKey] = ra
+			}
+			// The held readings at when they were read, then this one; each
+			// counts as a write.
+			for _, r := range confirmed.readings {
+				ra.AddAt(float64(r), confirmed.at)
+				a.paths.add(pathK2Obs, 1)
 			}
 			ra.AddAt(float64(k2Observed), now)
 			a.paths.add(pathK2Obs, 1)

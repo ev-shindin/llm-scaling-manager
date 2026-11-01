@@ -136,7 +136,7 @@ func TestSummarySaysWhyAReadingWasNotRecorded(t *testing.T) {
 	prefill := makeReplicaMetrics("pod-p", "variant-p", 357_800, 1_149_312, 30, 6000, 1)
 	decode := makeReplicaMetrics("pod-d", "variant-d", 1_039_474, 1_162_240, 81, 6000, 1000)
 	prefill.Ready, decode.Ready = true, true
-	_, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{prefill, decode},
+	_, err := analyzeAfterHold(ctx, analyzer, makeAnalyzerInput([]domain.ReplicaMetrics{prefill, decode},
 		[]domain.VariantReplicaState{
 			{VariantName: "variant-p", AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1, Role: domain.RolePrefill},
 			{VariantName: "variant-d", AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1, Role: domain.RoleDecode},

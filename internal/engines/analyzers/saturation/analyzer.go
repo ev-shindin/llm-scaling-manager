@@ -326,6 +326,15 @@ type SaturationAnalyzer struct {
 	muKeyBucketHeld bool
 	muSwapFreeze    bool
 	muMarginClamp   bool
+	// k2FirstReadingWaits is SwitchK2FirstReadingWaits (#392): on from the
+	// constructor; a replay turns it off (SetSwitchesForReplay).
+	k2FirstReadingWaits bool
+	// k2Pending is the readings held for each k2 key whose window they would
+	// start, until a later cycle confirms them (k2_confirm.go), and
+	// analyzeSeq numbers the Analyze calls, the cycles a confirmation is
+	// judged by (beginK2Cycle).
+	k2Pending  map[string]*k2PendingReadings
+	analyzeSeq uint64
 }
 
 // Evicted is what one sweep of the analyzer's learned state removed, counted
@@ -485,6 +494,8 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		muKeyBucketHeld:        true,
 		muSwapFreeze:           true,
 		muMarginClamp:          true,
+		k2FirstReadingWaits:    true,
+		k2Pending:              make(map[string]*k2PendingReadings),
 	}
 }
 
@@ -692,6 +703,7 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 			}
 		}
 	}
+	a.sweepK2PendingLocked(now)
 	evicted.BatchCaps += a.sweepBatchCapsLocked(now, bucketRetention)
 	// A window's arguments go with the window.
 	maps.DeleteFunc(a.k2WindowArgs, func(key, _ string) bool {

@@ -163,7 +163,12 @@ func TestHotRankRecordsK2ScaledToThePod(t *testing.T) {
 			cycles = append(cycles, brRepeat(3, brUniform("pod-a", 0.3, 0))...)
 			got := brRun(t, role, cycles...)
 
-			for i := range 3 {
+			// The window's first reading is held for the next
+			// (k2_confirm.go): the first cycle is priced from the derived
+			// figure.
+			assert.Equal(t, []string{k2ReasonObsUnconfirmed, capacity.K2SrcDerived.String()}, got[0].k2,
+				"cycle 0: the busiest rank is full and queued: a saturated reading, held")
+			for i := 1; i < 3; i++ {
 				assert.Equal(t, []string{capacity.K2SrcObserved.String()}, got[i].k2,
 					"cycle %d: the busiest rank is full and queued: a saturated reading", i)
 				assert.Equal(t, float64(brPodK1), got[i].perReplica,

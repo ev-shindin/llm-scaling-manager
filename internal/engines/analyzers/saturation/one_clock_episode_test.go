@@ -60,15 +60,16 @@ func TestOneClock_EpisodeGapOnTheAnalyzerClockResetsTheK2Window(t *testing.T) {
 	require.Equal(t, 3, onlyWindow(t, a.computeCapacityHistory).Len(), "precondition: one sample per full cycle")
 
 	// Unseen that long, the replica is a new sighting on the settle tracker
-	// and waits a window before its reading is written.
+	// and waits a window before its reading is written; the new window's
+	// first reading waits for the next (k2_confirm.go).
 	now = now.Add(capacity.EpisodeGap + time.Minute)
-	for i := range 5 {
+	for i := range 6 {
 		fullReplicaCycle(t, a)
-		if i < 4 {
+		if i < 5 {
 			now = now.Add(15 * time.Second)
 		}
 	}
-	assert.Equal(t, 1, onlyWindow(t, a.computeCapacityHistory).Len(),
+	assert.Equal(t, 2, onlyWindow(t, a.computeCapacityHistory).Len(),
 		"a write past EpisodeGap on the analyzer's clock starts a new k2 window")
 }
 

@@ -70,6 +70,7 @@ var _ = Describe("the source and age of the k2 a variant is priced on", func() {
 	}
 
 	It("reports a figure measured this cycle as P1-obs, just written", func() {
+		cycle(4000, 6, 1000, 0) // held (k2_confirm.go)
 		got := cycle(4000, 6, 1000, 0)["variant-a"]
 		Expect(got.K2Source).To(Equal("P1-obs"))
 		Expect(got.HasK2Age).To(BeTrue(), "a measured figure has an age")
@@ -77,6 +78,7 @@ var _ = Describe("the source and age of the k2 a variant is priced on", func() {
 	})
 
 	It("ages an own figure from when it was measured, not from when it was last read", func() {
+		cycle(4000, 6, 1000, 0) // held (k2_confirm.go)
 		cycle(4000, 6, 1000, 0)
 		ageWindow("variant-a", 3*time.Hour)
 		cycle(1000, 0, 1000, 0) // read, and touched, every cycle from here
@@ -89,6 +91,7 @@ var _ = Describe("the source and age of the k2 a variant is priced on", func() {
 	})
 
 	It("ages a borrowed figure from when the donor measured it", func() {
+		cycle(4000, 6, 1000, 0) // held (k2_confirm.go)
 		cycle(4000, 6, 1000, 0)
 		ageWindow("variant-a", 2*time.Hour)
 		got := cycle(1000, 0, 1000, 0)["variant-b"]
@@ -115,6 +118,7 @@ var _ = Describe("the source and age of the k2 a variant is priced on", func() {
 	// k1: the age of a k2 that prices nothing would send an operator after
 	// the wrong figure.
 	It("names k1 when the k2 is at or above it, with no age", func() {
+		cycle(14000, 6, 1000, 0) // held (k2_confirm.go)
 		got := cycle(14000, 6, 1000, 0)["variant-a"]
 
 		Expect(got.Reason).To(Equal("P1-obs"), "precondition: the cycle log names the k2's source")

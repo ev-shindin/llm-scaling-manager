@@ -60,7 +60,8 @@ var _ = Describe("a borrow clock across a restart", func() {
 	BeforeEach(func() {
 		clock = time.Now()
 		first = newProcess()
-		cycle(first, 4000, 6) // variant-a measures 4000
+		cycle(first, 4000, 6) // variant-a measures 4000, held (k2_confirm.go)
+		cycle(first, 4000, 6) // and confirmed
 		Expect(cycle(first, 1000, 0)).To(Equal(float64(4000)), "precondition: variant-b borrows")
 		own = first.historyKey("test-model", "test-ns", "variant-b", "H100", 1, domain.RoleBoth, 50, 5)
 		Expect(borrowClocks(first)).To(HaveKey(own), "precondition: the borrow's clock started")

@@ -47,6 +47,7 @@ func TestK2Learner_WritesOnFirstSetOnAMoveOverTheBandAndOnTheHeartbeat(t *testin
 	for range waitWindow {
 		assert.Empty(t, writes(260_000))
 	}
+	assert.Empty(t, writes(260_000), "the window's first reading is held for the next (k2_confirm.go)")
 	first := writes(260_000)
 	require.Len(t, first, 1, "the first write logs")
 	assert.Equal(t, true, first[0]["firstWrite"])
@@ -56,7 +57,7 @@ func TestK2Learner_WritesOnFirstSetOnAMoveOverTheBandAndOnTheHeartbeat(t *testin
 
 	assert.Empty(t, writes(261_000), "a move under the band does not log")
 	moved := writes(330_000)
-	require.Len(t, moved, 1, "a move over the band logs: mean(260k, 261k, 330k) is 9 % over 260k")
+	require.Len(t, moved, 1, "a move over the band logs: mean(260k, 260k, 261k, 330k) is 7 % over 260k")
 	assert.Equal(t, int64(260_000), moved[0]["previousValue"], "against the last LOGGED value")
 	assert.Equal(t, false, moved[0]["firstWrite"])
 
@@ -85,7 +86,8 @@ func TestK2Learner_AWriteLineListsSixteenPodsLowestFirst(t *testing.T) {
 		}
 		return out
 	}
-	for range waitWindow {
+	// The window, and the cycle that holds its first readings (k2_confirm.go).
+	for range waitWindow + 1 {
 		r.cycle(rows(), states)
 	}
 	// The first write, logged twice over: to the console encoding the
@@ -159,8 +161,9 @@ func TestK2Learner_TheFirstWriteBurstStaysOffTheShippedLog(t *testing.T) {
 		states := decodeVariants("variant-d")
 		states[0].CurrentReplicas = pods
 		// The analyzer alone takes its first cycle's replicas as watched
-		// already, so this first cycle writes every replica's first k2.
-		_, err := NewSaturationAnalyzer(capacity.NewStore()).Analyze(ctx, makeAnalyzerInput(rows, states))
+		// already, so these first cycles write every replica's first k2:
+		// held on the first (k2_confirm.go), written on the second.
+		_, err := analyzeConfirmed(ctx, NewSaturationAnalyzer(capacity.NewStore()), makeAnalyzerInput(rows, states))
 		require.NoError(t, err)
 		return buf.String()
 	}
@@ -261,7 +264,7 @@ func TestK2Learner_TheSweepLetsAGoneModelsLearnerStateGo(t *testing.T) {
 	assert.False(t, ok, "the own tracker forgot the model")
 
 	ctx, logs := observedCtx(t)
-	_, err := a.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{row}, decodeVariants("v")))
+	_, err := analyzeConfirmed(ctx, a, makeAnalyzerInput([]domain.ReplicaMetrics{row}, decodeVariants("v")))
 	require.NoError(t, err)
 	assert.Equal(t, 1, logs.FilterMessage("learner-start").Len(), "back, the model logs learner-start again")
 	writes := learnerWrites(logs, learn.K2)

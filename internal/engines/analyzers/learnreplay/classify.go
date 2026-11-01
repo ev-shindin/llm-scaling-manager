@@ -265,7 +265,7 @@ var vocabulary = withWords(enginerec.Words(), setOf(
 	"queueing-model", "default",
 	// Capacity sources and reasons.
 	"P0-store", "P1-obs", "P1-obs-downstream", "P1-obs-invalid", "P1-obs-rollout", "P1-obs-unadmitted",
-	"P1-obs-unsettled", "P2-borrow", "P2-hist", "P2-prior", "P3-k2", "P4-k1",
+	"P1-obs-unconfirmed", "P1-obs-unsettled", "P2-borrow", "P2-hist", "P2-prior", "P3-k2", "P4-k1",
 	"T1-ols", "T2-default", "T2-failed", "T2-pinned",
 	"no-change", "no-data", "no-itl", "no-line", "no-rate", "no-separators", "no-seqs", "no-shape",
 	"slo-model", "slo-own", "slo-pinned", "slo-tpot", "slo-transient", "slo-ttft", "slo-variant",

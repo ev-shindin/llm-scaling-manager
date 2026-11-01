@@ -163,7 +163,7 @@ var _ = Describe("a borrow around the operator's controls", func() {
 		It("does not undo a forget acted on before the restore ran", func() {
 			ownPod := makeReplicaMetrics("pod-b", "variant-b", 4000, 16000, 6, 100, 50)
 			ownPod.Ready = true
-			_, err := a.Analyze(context.Background(), makeAnalyzerInput([]domain.ReplicaMetrics{ownPod}, states[1:]))
+			_, err := analyzeConfirmed(context.Background(), a, makeAnalyzerInput([]domain.ReplicaMetrics{ownPod}, states[1:]))
 			Expect(err).NotTo(HaveOccurred())
 			saved := a.ExportLearnedState()
 			Expect(saved.K2).To(HaveKey(own), "precondition: variant-b learned a k2")

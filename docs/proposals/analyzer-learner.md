@@ -762,13 +762,14 @@ not cover a key.
 | Settle holes: fall, rate escape, restart, idle return, lend | transient, one case per event |
 | Restart fix stubbed | per-path counter "joined refusals with a known ReadySince", required from 0b (the Ready time is on since #288) |
 | "For good" self-sealing low mu | closed-loop probe (PR 3) |
+| k2 adopts its first reading (#392) | first sample |
 
 **Where each row stands after 0b.** The code table is `findings` in
 `D/property_mutants_test.go`, and a test holds it to the mutants. Each
 finding above is in exactly one state:
 
-- **Caught:** 27 findings. For each, a mutant puts the defect back, and its
-  class fails on that mutant. For 18 a mutant runs the production learner
+- **Caught:** 28 findings. For each, a mutant puts the defect back, and its
+  class fails on that mutant. For 19 a mutant runs the production learner
   (a policy key, rows, or a stub); 9 are caught only by a toy, and the code
   table marks them "caught (toy)". "Restart fix stubbed" is caught: its
   mutant stubs the Ready time through the analyzer's `readySince` seam, the
@@ -782,7 +783,9 @@ finding above is in exactly one state:
   truth on the time base on 15 of 100 seeds. "k2 key flips on the
   output-length boundary" and "The 0.30 idle line" are caught since #396:
   a stub mutant turns each band's replay switch off, and its edge case
-  fails (13 of 50 seeds, and 98 of 100). The replay counts that counter and the others of 2.5, and the golden
+  fails (13 of 50 seeds, and 98 of 100). "k2 adopts its first reading" is caught since
+  #392: a stub mutant turns the hold's replay switch off, and
+  first-sample/k2/second-reading fails (20 of 20 seeds). The replay counts that counter and the others of 2.5, and the golden
   check fails when a counter is zero over every committed golden.
 - **Still escaping:** the rest, listed below. A row is escaping either because
   no mutant reproduces it, or because today's code already fails its class,

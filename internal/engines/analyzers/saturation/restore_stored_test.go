@@ -83,7 +83,7 @@ func TestTheRestartLineSaysWhetherTheSnapshotHeldAWindow(t *testing.T) {
 			}
 			a.RestoreLearnedState(doc)
 			in := makeAnalyzerInput([]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 1000, 16000, 0, 100, 50)}, mtOneVariant)
-			if _, err := a.Analyze(ctx, in); err != nil {
+			if _, err := analyzeConfirmed(ctx, a, in); err != nil {
 				t.Fatalf("Analyze: %v", err)
 			}
 			for _, l := range logged {
@@ -143,7 +143,7 @@ func TestARestoredBoundFigureIsReportedAsRestored(t *testing.T) {
 	second, _, _ := waProcess(mtParams(128, "vllm:v1"))
 	second.RestoreLearnedState(doc)
 	in := makeAnalyzerInput([]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 1000, 16000, 0, 100, 50)}, mtOneVariant)
-	res, err := second.Analyze(ctx, in)
+	res, err := analyzeConfirmed(ctx, second, in)
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
