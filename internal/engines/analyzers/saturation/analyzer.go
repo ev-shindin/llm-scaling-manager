@@ -889,8 +889,9 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 	evicted.K2Settle = settled - len(a.k2Settle)
 	// The fleet-shape memo is per namespace|model and exists only to key and
 	// stabilise the capacity figures, so it goes when they do. Without this it
-	// is the one map on this struct that grows without bound as models and
-	// namespaces come and go.
+	// would grow without bound as models and namespaces come and go; the
+	// learner maps (k2_learner.go) go by the rule below, with the settle memo
+	// (sweepLearnerMapsLocked).
 	//
 	// maps.DeleteFunc rather than the hand-rolled loops above: those predate
 	// it and two of them cannot use it anyway, one because it needs the key
@@ -926,6 +927,7 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 	})
 	evicted.FleetShapes = before - len(a.fleetShape)
 	evicted.Pods = a.evictStartSeenPods(now, variantTimeout)
+	a.sweepLearnerMapsLocked()
 	return evicted
 }
 

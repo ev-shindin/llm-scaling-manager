@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"context"
+	"maps"
 	"math"
 	"slices"
 	"sort"
@@ -127,6 +128,9 @@ func (a *SaturationAnalyzer) noteK2(namespace, modelID, variant, role, key, pod 
 		v = &k2VariantCycle{counts: map[learn.Reason]int64{}, pods: map[string][]k2PodReading{}}
 		c.variants[variant] = v
 	}
+	// A variant's replicas share one key (the fleet's tracked output length
+	// keys it, not each replica's), so the last replica's key and source
+	// are the variant's.
 	v.role, v.key, v.source = role, key, d.src.String()
 	switch {
 	case d.src == capacity.K2SrcObserved:
@@ -242,6 +246,34 @@ func k2WritePods(rs []k2PodReading) ([]map[string]any, int) {
 		})
 	}
 	return out, omitted
+}
+
+// sweepLearnerMapsLocked drops what k2 as a learner, and the analyzer's own
+// settle tracker, keep for a model the sweep has let go of: its reports, its
+// pending forgotten keys, its learner-start mark and its own-tracker sighting
+// go with its settle memo (k2Settle, swept at VariantTimeout unseen), and
+// what learner-write last logged of a key goes with the key's window. A model
+// that comes back is a model seen for the first time: it logs learner-start,
+// and each key logs its first write. Called at the end of evictStaleHistory;
+// callers hold a.mu.
+func (a *SaturationAnalyzer) sweepLearnerMapsLocked() {
+	gone := func(model string) bool { _, ok := a.k2Settle[model]; return !ok }
+	maps.DeleteFunc(a.learnerReports, func(m string, _ []learn.Report) bool { return gone(m) })
+	maps.DeleteFunc(a.k2Forgotten, func(m string, _ map[string][]learn.Forgotten) bool { return gone(m) })
+	maps.DeleteFunc(a.learnerStarted, func(m string, _ bool) bool { return gone(m) })
+	maps.DeleteFunc(a.ownSettled, func(m string, _ bool) bool {
+		if !gone(m) {
+			return false
+		}
+		if ns, model, ok := strings.Cut(m, "|"); ok && a.ownSettle != nil {
+			a.ownSettle.Forget(settleModel(ns, model))
+		}
+		return true
+	})
+	maps.DeleteFunc(a.k2Logged, func(key string, _ k2Logged) bool {
+		_, ok := a.computeCapacityHistory[key]
+		return !ok
+	})
 }
 
 // LearnerReports is each learner's report of each variant the model priced
@@ -369,10 +401,10 @@ func (a *SaturationAnalyzer) logLearnerStart(ctx context.Context, namespace, mod
 		}
 	}
 	settleUntil := now
-	reason := "the first cycle after a controller start: replicas already Ready keep their settle"
+	reason := "the analyzer's first cycle for this model, after a controller start or as the model first appears: replicas already Ready keep their settle"
 	if waits {
 		settleUntil = now.Add(JoinedReplicaWindow)
-		reason = "the first cycle after a controller start: every replica waits its settle again, k2 a rate window from the controller's first sight of it"
+		reason = "the analyzer's first cycle for this model, after a controller start or as the model first appears: each replica waits its settle, k2 a rate window from the controller's first sight of it, so by settleUntil at the latest"
 	}
 	oldestSeconds := -1.0
 	if oldest >= 0 {

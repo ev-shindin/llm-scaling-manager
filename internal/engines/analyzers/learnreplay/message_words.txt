@@ -373,6 +373,7 @@ any
 anything
 app.kubernetes.io/component
 app.kubernetes.io/part-of
+appears
 applied
 appliedByNamespace
 applies
@@ -1104,6 +1105,7 @@ larger
 last
 lastAccelerator
 later
+latest
 launcher
 layout
 leader-elect

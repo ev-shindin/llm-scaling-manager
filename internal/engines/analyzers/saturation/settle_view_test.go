@@ -35,7 +35,7 @@ func TestSettleView_TheRestartSwitchOffTakesTheFirstCycleAsEstablished(t *testin
 // from before the tracker: it holds a replica across a gap of up to
 // K2SettleMaxGap, where the tracker's absence tolerance (1 min at a 15 s
 // interval) makes it a new sighting.
-func TestSettleView_TheTrackerSwitchMovesOnlyTheAbsenceRule(t *testing.T) {
+func TestSettleView_TheTrackerSwitchMovesTheAbsenceRule(t *testing.T) {
 	run := func(reads bool) []string {
 		r := newRestartRig(t, restartT0)
 		require.NoError(t, r.a.SetSwitchesForReplay(map[string]bool{SwitchK2ReadsSettle: reads}))
@@ -46,6 +46,32 @@ func TestSettleView_TheTrackerSwitchMovesOnlyTheAbsenceRule(t *testing.T) {
 	}
 	assert.Equal(t, []string{k2ReasonObsUnsettled}, run(true), "on the tracker: unseen 90 s is a new sighting")
 	assert.Equal(t, []string{p1Obs}, run(false), "on the memo: unseen 90 s, under K2SettleMaxGap, is the same one")
+}
+
+// The switch's second change: a Ready row whose Ready time reads zero for a
+// cycle (the collector missed the Pod) is an unknown on the tracker, and
+// changes nothing; on the memo it was a new sighting, and the old Ready time
+// coming back was another, so the replica waited twice over.
+func TestSettleView_TheTrackerSwitchKeepsTheSettleThroughAZeroReadyTime(t *testing.T) {
+	run := func(reads bool) []string {
+		r := newRestartRig(t, restartT0)
+		require.NoError(t, r.a.SetSwitchesForReplay(map[string]bool{SwitchK2ReadsSettle: reads}))
+		ready := restartT0.Add(-time.Hour)
+		settled(t, r, func() []domain.ReplicaMetrics { return []domain.ReplicaMetrics{fullRow("p0", "v", ready)} }, decodeVariants("v"))
+		got := r.cycle([]domain.ReplicaMetrics{fullRow("p0", "v", time.Time{})}, decodeVariants("v"))
+		for range waitWindow + 1 {
+			got = append(got, r.cycle([]domain.ReplicaMetrics{fullRow("p0", "v", ready)}, decodeVariants("v"))...)
+		}
+		return got
+	}
+	on := run(true)
+	for i, p := range on {
+		assert.Equal(t, p1Obs, p, "on the tracker, cycle %d: the zero Ready time is an unknown", i)
+	}
+	off := run(false)
+	assert.Equal(t, k2ReasonObsUnsettled, off[0], "on the memo: the zero Ready time is a new sighting")
+	assert.Equal(t, k2ReasonObsUnsettled, off[1], "and the old Ready time back is another")
+	assert.Equal(t, p1Obs, off[len(off)-1], "a window after it, admitted")
 }
 
 // Given the engine's tracker, the analyzer reads it and observes nothing of

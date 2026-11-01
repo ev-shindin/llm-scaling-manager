@@ -130,7 +130,14 @@ func TestRestartSuite_AnLWSGroupRestartWithMixedReadyTimes(t *testing.T) {
 // A warm-pool Pod lent to the variant keeps the Ready time it had in the
 // pool, hours old. Its rows are a bridge's: k2 records no reading from one,
 // whatever its age (P1-obs-unadmitted), so the lend writes nothing, and the
-// variant's own replica, already settled, is not moved by it.
+// variant's own replica, already settled, is not moved by it. Admission
+// refuses a bridge before the settle test is read, so the lend half guards
+// admission, not the tracker's lend event (that is the settle suite's,
+// internal/signals/settle). What reaches the tracker is its key: the same
+// Pod in a row of the variant's own (the bridge flag off) is a new key, first
+// seen now, so it waits a window although its Ready time is hours old. The
+// memo before the tracker keyed by variant and pod alone, and took it as the
+// replica it had seen lent.
 func TestRestartSuite_ABridgeLendWritesNothing(t *testing.T) {
 	r := newRestartRig(t, restartT0)
 	own := func() domain.ReplicaMetrics { return fullRow("own-0", "v", restartT0.Add(-time.Hour)) }
@@ -145,6 +152,11 @@ func TestRestartSuite_ABridgeLendWritesNothing(t *testing.T) {
 		require.Len(t, d, 2)
 		assert.Equal(t, p1Obs, d[0], "the variant's own replica, cycle %d of the lend", i)
 		assert.Equal(t, k2ReasonObsUnadmitted, d[1], "the bridge, cycle %d of the lend", i)
+	}
+	for i := range waitWindow + 1 {
+		d := r.cycle([]domain.ReplicaMetrics{own(), fullRow("pool-0", "v", restartT0.Add(-3*time.Hour))}, states)
+		require.Len(t, d, 2)
+		assert.Equal(t, waitThenAdmit()[i], d[1], "the Pod in a row of the variant's own, cycle %d", i)
 	}
 }
 

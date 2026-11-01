@@ -23,10 +23,13 @@ import (
 // tracker (analyzer-learner.md, 2.5 and section 7, PR 2). On, the test reads
 // the engine's tracker (k2Joined). Off, it reads the analyzer's own memo of
 // each Ready time (settleMemo.noteReady), as before the tracker. The rule is
-// the same (#288); what moves is how long a replica may go without a row
+// the same (#288); two things move. How long a replica may go without a row
 // before it is a new sighting: the tracker's absence tolerance
 // (settle.Tolerance: 1 min, or 2.5 optimize intervals), not the memo's
-// K2SettleMaxGap (2 min).
+// K2SettleMaxGap (2 min). And a Ready row whose Ready time reads zero (the
+// collector missed the Pod): the tracker takes it as unknown and keeps the
+// settle, where the memo took it, and the old Ready time coming back, as two
+// new sightings, and the replica waited again.
 const SwitchK2ReadsSettle = "k2-reads-the-settle-tracker"
 
 // SwitchK2WaitsAfterRestart is the replay switch for k2's wait after a
@@ -95,8 +98,10 @@ func (a *SaturationAnalyzer) observeOwnSettle(input domain.AnalyzerInput, now ti
 	}
 	model := settleModel(input.Namespace, input.ModelID)
 	a.mu.Lock()
-	first := !a.ownSettled[model]
-	a.ownSettled[model] = true
+	// Keyed namespace|model, as the settle memo the sweep reads
+	// (sweepLearnerMapsLocked).
+	first := !a.ownSettled[input.Namespace+"|"+input.ModelID]
+	a.ownSettled[input.Namespace+"|"+input.ModelID] = true
 	a.mu.Unlock()
 	if first {
 		a.ownSettle.Observe(model, rows, now.Add(-JoinedReplicaWindow))
@@ -146,7 +151,8 @@ func settleModel(namespace, modelID string) string {
 func (a *SaturationAnalyzer) k2Joined(in k2SettleInput, firstCycle, now time.Time) (joined, byReadyAt, readyKnown bool, since time.Time) {
 	view := a.settleView()
 	model := settleModel(in.namespace, in.modelID)
-	key := settle.Key{Pod: in.pod, Variant: in.variant, Bridge: in.bridge}
+	// The engine's spelling of the key, so the two cannot drift apart.
+	key := settlerow.Key(domain.ReplicaMetrics{PodName: in.pod, VariantName: in.variant, FromWarmPool: in.bridge})
 	trace := view.Trace(model, key)
 	if n := len(trace); n > 0 && trace[n-1].At.Equal(now) {
 		readyKnown = !trace[n-1].Row.ReadySince.IsZero()

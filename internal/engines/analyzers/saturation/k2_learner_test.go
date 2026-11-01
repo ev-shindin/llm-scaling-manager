@@ -206,15 +206,62 @@ func TestK2Learner_ForgetReachesEveryLearnerOnTheList(t *testing.T) {
 	r.cycle([]domain.ReplicaMetrics{down}, decodeVariants("v"))
 	assert.Empty(t, r.a.LearnerReports()["test-ns|test-model"][0].Forgotten, "reported once")
 
-	// Eviction: a window unused past its retention.
+	// Eviction: a window unused past its retention, its model still served.
 	settled(t, r, row, decodeVariants("v"))
 	key = firstKey(r.a)
-	r.now = r.now.Add(r.a.Horizons().BucketRetention + time.Hour)
+	r.a.mu.Lock()
+	aged := r.now.Add(-r.a.horizons.BucketRetention - time.Hour)
+	r.a.computeCapacityHistory[key].ObservedAt(aged)
+	r.a.computeCapacityHistory[key].TouchAt(aged)
+	r.a.mu.Unlock()
 	r.a.EvictStaleHistory()
 	r.cycle([]domain.ReplicaMetrics{down}, decodeVariants("v"))
 	got := r.a.LearnerReports()["test-ns|test-model"]
 	require.Len(t, got, 1)
 	assert.Equal(t, []learn.Forgotten{{Key: key, By: learn.ByEvicted}}, got[0].Forgotten)
+}
+
+// What k2 keeps as a learner goes when the sweep lets its model go: a model
+// unseen past VariantTimeout leaves no report, no pending forgotten key, no
+// learner-start mark, no own-tracker sighting and, its windows gone, no
+// logged value. Back, it is a model seen for the first time.
+func TestK2Learner_TheSweepLetsAGoneModelsLearnerStateGo(t *testing.T) {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	now := restartT0
+	a.now = func() time.Time { return now }
+	row := fullRow("p0", "v", restartT0.Add(-time.Hour))
+	for range 3 {
+		_, err := a.Analyze(context.Background(), makeAnalyzerInput([]domain.ReplicaMetrics{row}, decodeVariants("v")))
+		require.NoError(t, err)
+		now = now.Add(restartCycle)
+	}
+	a.mu.Lock()
+	require.NotEmpty(t, a.k2Logged, "premise: a write was logged")
+	require.NotEmpty(t, a.learnerReports)
+	require.NotEmpty(t, a.learnerStarted)
+	require.NotEmpty(t, a.ownSettled)
+	a.mu.Unlock()
+
+	now = now.Add(a.Horizons().BucketRetention + time.Hour)
+	a.EvictStaleHistory()
+	a.mu.Lock()
+	assert.Empty(t, a.k2Settle, "premise: the settle memo is swept")
+	assert.Empty(t, a.k2Logged)
+	assert.Empty(t, a.learnerReports)
+	assert.Empty(t, a.learnerStarted)
+	assert.Empty(t, a.ownSettled)
+	assert.Empty(t, a.k2Forgotten, "the eviction report of a model that will not report again")
+	a.mu.Unlock()
+	_, ok := a.ownSettle.Replica(settleModel("test-ns", "test-model"), fullRowKey("p0", "v"))
+	assert.False(t, ok, "the own tracker forgot the model")
+
+	ctx, logs := observedCtx(t)
+	_, err := a.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{row}, decodeVariants("v")))
+	require.NoError(t, err)
+	assert.Equal(t, 1, logs.FilterMessage("learner-start").Len(), "back, the model logs learner-start again")
+	writes := logs.FilterMessage("learner-write").All()
+	require.Len(t, writes, 1)
+	assert.Equal(t, true, writes[0].ContextMap()["firstWrite"], "and its key's first write is a first write")
 }
 
 // A report carries the cycle's admission outcomes by reason, the key that

@@ -128,14 +128,24 @@ func TestReadySince_AKnownOldReadyTimeIsEstablished(t *testing.T) {
 	assert.True(t, joined(true, "u", cycle{now, time.Time{}}), "unknown on the first cycle: waits a window from first sight")
 	assert.False(t, joined(true, "p", cycle{now, old}, cycle{window, old}), "the same Ready time a window after the first cycle")
 
-	// After the first cycle, with either setting.
+	// After the first cycle, with either setting: the replica watched every
+	// cycle for two windows before now (within the tracker's absence
+	// tolerance, so no case is a rejoin), Ready since readyAt.
+	watched := func(readyAt time.Time, then ...cycle) []cycle {
+		var out []cycle
+		for at := now.Add(-2 * JoinedReplicaWindow); at.Before(now); at = at.Add(15 * time.Second) {
+			out = append(out, cycle{at, readyAt})
+		}
+		return append(out, then...)
+	}
 	for _, waits := range []bool{false, true} {
-		pre := cycle{now.Add(-time.Hour), old}
-		assert.True(t, joined(waits, "p", cycle{now.Add(-time.Hour), time.Time{}}, cycle{now, old}), "a Ready time two windows old, first seen now: a node clock behind")
-		assert.True(t, joined(waits, "p", pre, cycle{now, old.Add(time.Second)}, cycle{half, old.Add(time.Second)}), "a new Ready time half a window later")
-		assert.False(t, joined(waits, "p", pre, cycle{now, old}, cycle{window, old}), "the same Ready time a window after it was first seen")
-		assert.True(t, joined(waits, "p", pre, cycle{now, old}, cycle{window, window}), "a new Ready time: back from a restart")
-		assert.True(t, joined(waits, "f", pre, cycle{now, now.Add(time.Minute)}), "a Ready time in the future: a node clock ahead")
-		assert.True(t, joined(waits, "f", pre, cycle{now, now.Add(time.Minute)}, cycle{window, now.Add(time.Minute)}), "held a window from that Ready time, not from first sight")
+		assert.False(t, joined(waits, "p", watched(old, cycle{now, old})...), "control: the same Ready time, watched two windows")
+		assert.True(t, joined(waits, "p", watched(time.Time{}, cycle{now, old})...), "a Ready time two windows old, first seen now: a node clock behind")
+		assert.True(t, joined(waits, "p", watched(old, cycle{now, old.Add(time.Second)}, cycle{half, old.Add(time.Second)})...), "a new Ready time half a window later")
+		assert.False(t, joined(waits, "p", watched(old, cycle{now, old}, cycle{half, old})...), "control: the same Ready time half a window later")
+		assert.False(t, joined(waits, "p", watched(time.Time{}, cycle{now, old}, cycle{window, old})...), "the same Ready time a window after it was first seen")
+		assert.True(t, joined(waits, "p", watched(old, cycle{now, old}, cycle{window, window})...), "a new Ready time: back from a restart")
+		assert.True(t, joined(waits, "f", watched(old, cycle{now, now.Add(time.Minute)})...), "a Ready time in the future: a node clock ahead")
+		assert.True(t, joined(waits, "f", watched(old, cycle{now, now.Add(time.Minute)}, cycle{window, now.Add(time.Minute)})...), "held a window from that Ready time, not from first sight")
 	}
 }
