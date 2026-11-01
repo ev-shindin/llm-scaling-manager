@@ -51,7 +51,13 @@ func stallLoopServed(tm ShareTimings, initial map[string]int, lag bool, phases [
 // of four replicas: initial, every need and every split are in GPUs.
 func stallLoopSized(tm ShareTimings, g int, initial map[string]int, lag bool, phases []stallPhase,
 	served func(need float64, held int) float64) []stallCycle {
-	budget := 4 * g
+	return stallLoopQuota(tm, g, 4, initial, lag, phases, served)
+}
+
+// stallLoopQuota is stallLoopSized in a quota of the given number of replicas.
+func stallLoopQuota(tm ShareTimings, g, replicas int, initial map[string]int, lag bool, phases []stallPhase,
+	served func(need float64, held int) float64) []stallCycle {
+	budget := replicas * g
 	keys := []string{"A", "B"}
 	l := NewShareLedger()
 	t0 := time.Unix(1_000_000, 0)

@@ -263,6 +263,33 @@ var _ = Describe("ShareLedger", func() {
 		Expect(l.Swinging("A", at(2760))).To(BeTrue())
 	})
 
+	// A give called off because the donor's own demand came back
+	// (CancelDonorBack) is a change of direction only at the donor's second
+	// such dip inside the swing window. A first dip older than the window is
+	// forgotten: the next dip is a first turn again, recorded as the give
+	// alone. Without that bound a dip from hours ago made any later one a
+	// change of direction, and two real moves after it a swing.
+	It("counts a donor's dip as a change of direction only at its second inside the swing window", func() {
+		swingsAfter := func(gap time.Duration) bool {
+			l := NewShareLedger()
+			held := map[string]int{"A": 24, "B": 8}
+			c := l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 8}, held, t0, tm) // first dip
+			l.ConfirmStarted(c.ID, nil)
+			Expect(l.CancelDonorBack(c.ID, t0.Add(time.Minute), tm)).To(BeTrue())
+			d := t0.Add(time.Minute + gap)
+			c = l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 8}, held, d, tm) // second dip
+			l.ConfirmStarted(c.ID, nil)
+			Expect(l.CancelDonorBack(c.ID, d.Add(time.Minute), tm)).To(BeTrue())
+			l.Start(ShareTransfer{Donor: "A", Receiver: "B", GPUs: 8}, held, d.Add(5*time.Minute), tm)  // A gives
+			l.Start(ShareTransfer{Donor: "B", Receiver: "A", GPUs: 8}, held, d.Add(20*time.Minute), tm) // A receives
+			return l.Swinging("A", d.Add(20*time.Minute))
+		}
+		By("control: the second dip inside the window is a change of direction, and the two moves after it a swing")
+		Expect(swingsAfter(30 * time.Minute)).To(BeTrue())
+		By("the first dip outside the window: the second is a first turn, one change in all")
+		Expect(swingsAfter(tm.SwingWindow + 10*time.Minute)).To(BeFalse())
+	})
+
 	It("counts consecutive actionable cycles and resets on a miss", func() {
 		l := NewShareLedger()
 		Expect(l.Confirm(map[string]bool{"A": true})["A"]).To(Equal(1))
