@@ -35,13 +35,13 @@ import (
 // replaySwitches is each saturation replay switch, and the golden outputs
 // (fixture/file) it is named to move.
 //
-// Learner PR 3's switches (mu). PR 2's k2 switches are not here: "all off"
-// is this PR's switches, and an earlier PR's stay at their constructor
-// default, on, as the base goldens were written (analyzer-learner.md, 2.5).
+// #396's bands: the idle band and the k2 key's bucket band. Learner PR 2's
+// and PR 3's switches are not here: "all off" is this PR's switches, and an
+// earlier PR's stay at their constructor default, on, as the base goldens
+// were written (analyzer-learner.md, 2.5).
 var replaySwitches = map[string][]string{
-	saturation.SwitchMuRepeatIsUse:       nil,
-	saturation.SwitchMuUnknownAgeSafe:    nil,
-	saturation.SwitchMuLatchRestoresSafe: nil,
+	saturation.SwitchIdleBand:        nil,
+	saturation.SwitchK2KeyBucketHeld: nil,
 }
 
 // earlierSeams is each switch an earlier learner PR added whose seam the
@@ -54,6 +54,9 @@ var earlierSeams = map[string][]string{
 	saturation.SwitchK2WaitsAfterRestart: {
 		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
 	},
+	saturation.SwitchMuRepeatIsUse:       nil,
+	saturation.SwitchMuUnknownAgeSafe:    nil,
+	saturation.SwitchMuLatchRestoresSafe: nil,
 }
 
 // heldBy is, for a switch that names no output, the unit tests that hold it:
@@ -61,6 +64,14 @@ var earlierSeams = map[string][]string{
 // and a switch whose off path were dead would pass them. Each test named
 // must exist (by its func declaration, in the package directory given).
 var heldBy = map[string][]heldTest{
+	saturation.SwitchIdleBand: {
+		{"../saturation", "TestIdleBand_ARunStartsUnderTheLineAndEndsAtTheTop"},
+		{"../saturation", "TestIdleBand_TheSwitchOffHoldsEveryReadingToTheLine"},
+	},
+	saturation.SwitchK2KeyBucketHeld: {
+		{"../saturation", "TestK2KeyBucket_LeavesOnlyPastTheMarginForTheDwell"},
+		{"../saturation", "TestK2KeyBucket_TheSwitchPicksTheLength"},
+	},
 	saturation.SwitchK2ReadsSettle: {
 		{"../saturation", "TestSettleView_TheTrackerSwitchMovesTheAbsenceRule"},
 		{"../saturation", "TestSettleView_TheTrackerSwitchKeepsTheSettleThroughAZeroReadyTime"},
@@ -134,7 +145,7 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch names, as the base
-// commit's goldens hold it (e3ecadd63, learner PR 2).
+// commit's goldens hold it (354cbb69b, learner PR 3).
 var switchBase = map[string]string{}
 
 func TestGoldens_TheSwitchRuns(t *testing.T) {

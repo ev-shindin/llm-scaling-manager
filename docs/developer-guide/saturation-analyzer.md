@@ -713,7 +713,13 @@ only raise prefill's order. Idle is `pricedIdle`: `replicaIdle` (Ready,
 busiest-rank KV under `idleKvUsage` = 0.30 of the cache, nothing waiting) AND
 busiest-rank tokens under 0.30 x `EffectiveCapacity` (min(k1, k2)), on every
 cycle for `IdleSettledFor`, no two readings over `IdleMaxGap` (1m) apart, own
-replicas only. The runs live in `settleMemo.idle`.
+replicas only. The line is a band (#396): a run starts under `idleKvUsage` and,
+once started, goes on under `idleBandLevel`, `IdleLeaveRatio` (1.4) times it
+and never more than halfway to a full replica, on both figures. With one line,
+a replica whose peak sat on 0.30 settled idle and cleared again on noise
+(property case `edges/idle/idle-line-030`: 6 reversals in 116 cycles on 98 of
+100 seeds). The runs live in `settleMemo.idle`. The band is the replay switch
+`SwitchIdleBand`.
 
 ### The scheduler queue
 
@@ -887,6 +893,20 @@ each holding a different k2 (260 622 and 187 458 on the run that showed it).
 Prefill keeps its own average, which is always `short`. The key strings are
 unchanged, so stored windows are still found.
 
+The tracked length was not enough at a boundary (#396): the tracker declares a
+change on one reading 20 % off its anchor, and with the length 6 % above 500
+and 6 % noise it declared changes either side of 500, so the key moved to
+`medium` and back (property case `edges/k2/key-near-output-boundary`, 17 of 50
+seeds). So the k2 key now follows the fleet's output length this cycle through
+a band and a dwell of its own (`k2KeyLength`, `k2_key_bucket.go`): it leaves
+its bucket only once the length has been past the boundary by
+`K2KeyBucketMargin` (10 %) on every cycle for `K2KeyBucketDwell` (2m), or at
+once when past it by `K2KeyBucketJump` (20 %, the tracker's tolerance), and a
+cycle with no length keeps the bucket. The margins are judged at the boundary
+of the bucket the key leaves. The throughput key still reads the tracked
+length. The band is the replay switch `SwitchK2KeyBucketHeld`; off, the k2 key
+reads the tracked length as before.
+
 ## Constants
 
 | constant | value | package |
@@ -914,6 +934,10 @@ unchanged, so stored windows are still found.
 | `balance.IdleKvUsage` (as `tuning.idleKvUsage`) | 0.30 | `internal/signals/balance` |
 | `IdleSettledFor` | 2m | `saturation` |
 | `IdleMaxGap` | 1m | `saturation` |
+| `IdleLeaveRatio` | 1.4 | `saturation` |
+| `K2KeyBucketMargin` | 0.10 | `saturation` |
+| `K2KeyBucketDwell` | 2m | `saturation` |
+| `K2KeyBucketJump` | 0.20 | `saturation` |
 | `JoinedReplicaWindow` | 1m | `saturation` |
 | `MinMeasuredOfDerived` | 0.5 | `saturation` |
 | `MaxTokensOverCompletions` | 1.15 | `saturation` |

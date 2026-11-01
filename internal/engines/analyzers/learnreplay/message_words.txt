@@ -950,6 +950,7 @@ huge
 hysteresis
 id
 idle
+idle-line-band
 idleAfterReady
 idleKvUsage
 idlePods
@@ -1040,6 +1041,7 @@ k1MemoryBound
 k2
 k2-compute
 k2-decision
+k2-key-bucket-held
 k2-obs-admitted
 k2-reads-the-settle-tracker
 k2-unsettled-joined

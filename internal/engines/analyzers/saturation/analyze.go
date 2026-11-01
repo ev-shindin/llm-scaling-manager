@@ -189,6 +189,9 @@ type cycle struct {
 	stableInput  float64
 	stableOutput float64
 	shapeChanged bool
+	// k2KeyOutput is the output length the k2 keys are built from: the
+	// fleet's, its bucket held across a boundary (k2KeyLength).
+	k2KeyOutput float64
 
 	// resolvePricing: the shape mu is priced at, which is not always the one
 	// above.
@@ -324,6 +327,7 @@ func (c *cycle) observeFleetShape() {
 	c.stableOutput, c.stableInput, c.shapeChanged = c.a.noteFleetShape(
 		c.input.Namespace, c.input.ModelID,
 		c.fleetInput, c.fleetOutput, arriving, arrivingOK, holdFor, c.logger)
+	c.k2KeyOutput = c.a.k2KeyLength(c.input.Namespace, c.input.ModelID, c.fleetOutput, c.stableOutput)
 }
 
 // resolvePricing decides the output length the derived mu divides by, and the
@@ -658,7 +662,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 		c.a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq,
 			c.itlBorrowedFrom[rm.VariantName], c.logger)
 		rc := c.a.computeReplicaCapacity(rm, c.cfg, c.tune, c.input.ModelID, c.input.Namespace, gpuCount,
-			role, c.accelByVariant[rm.VariantName], c.stableOutput, c.fleetOutput, c.stableInput,
+			role, c.accelByVariant[rm.VariantName], c.stableOutput, c.k2KeyOutput, c.fleetOutput, c.stableInput,
 			c.fleetHitRate, derived, served[rm.VariantName], downstreamSaturated, mixed[rm.VariantName],
 			replicaRouting{
 				kvFromInstant: c.tune.kvFromInstant(raw, c.busyNowRoles[domain.CanonicalRole(role)]),
