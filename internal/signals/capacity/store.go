@@ -274,7 +274,12 @@ func (s *Store) fileScaleTarget(namespace, modelID, variantName, accelerator str
 			return
 		}
 		if sameHW && sameArguments(*existing.EngineParams, params) {
-			if existing.EngineParams.Image != params.Image || existing.RollingOut != rolling {
+			// The declared batch cap (the llm-d.ai/max-num-seqs annotation)
+			// re-tags too: it is not an argument the record was measured
+			// under, and an operator setting it means it to price the next
+			// derived k2.
+			if existing.EngineParams.Image != params.Image || existing.RollingOut != rolling ||
+				existing.EngineParams.DeclaredBatchCap != params.DeclaredBatchCap {
 				// A copy: Get hands out the store's own record.
 				swapped := *existing
 				swapped.EngineParams = &params

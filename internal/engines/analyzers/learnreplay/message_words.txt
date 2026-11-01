@@ -420,7 +420,12 @@ baselines
 bash
 basis
 batch
+batch-cap-declared
+batch-cap-learned
 batchCap
+batchCapPlateaus
+batchCapSource
+batchCaps
 be
 because
 become
@@ -633,6 +638,7 @@ declares
 declined
 decode
 decode-only
+decode-queue-unknown
 decode-style
 decodeSaturatedAt
 decodeSaturation
@@ -820,6 +826,7 @@ fit
 fitted
 fitting
 fix
+flags
 flappingWindow
 flavor
 fleet
@@ -1086,6 +1093,7 @@ kueue.borrowNamespaces
 kueue.enabled
 kueue.releaseToNonReclaimingLenders
 kueueBorrowedGPUs
+kv-bound
 kv-cache-utilization-scorer
 kvCacheThreshold
 kvCacheUsagePct
@@ -1361,6 +1369,7 @@ no-node-fits
 no-rate
 no-seqs
 no-shape
+no-waiting
 noDemandFor
 noITL
 noK
@@ -1387,6 +1396,7 @@ noout
 nor
 not
 not-actionable
+not-serving
 notReady
 note
 nothing
@@ -1517,6 +1527,7 @@ planned
 planning
 planningFrom
 plans
+plateauCycles
 pod
 pod/
 podGPUs
@@ -1537,6 +1548,7 @@ predictedITL
 prediction
 preempted
 preemptedAt
+preempting
 preemption
 preemptions
 preempts
@@ -1767,6 +1779,7 @@ rows-instant-kv
 rows-ready-since
 run
 running
+running-unknown
 runs
 s
 safety
@@ -2120,6 +2133,7 @@ under
 underKeys
 undispatched
 undone
+uneven-ranks
 unexported
 unit
 unknown

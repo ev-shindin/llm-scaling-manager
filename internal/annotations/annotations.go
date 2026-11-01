@@ -50,6 +50,15 @@ const (
 	// The value is a token, acted on once: change it to ask again. Any
 	// non-empty value works; a timestamp is a convenient one.
 	ForgetLearnedState = "llm-d.ai/forget-learned-state"
+
+	// MaxNumSeqs, set on a variant's scale target (the Deployment or
+	// LeaderWorkerSet itself, not its pod template, so nothing rolls), states
+	// one engine rank's batch cap -- vLLM's max_num_seqs, SGLang's
+	// max_running_requests -- for an engine whose flags the scaling manager
+	// cannot read: a launcher script, or the value passed as a variable
+	// nothing resolves. A positive integer; anything else is ignored. A cap
+	// the engine's flags state wins over it.
+	MaxNumSeqs = "llm-d.ai/max-num-seqs"
 )
 
 // IsSynthetic reports whether va was synthesized by WVA rather than read from a

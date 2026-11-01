@@ -163,6 +163,7 @@ func (p *ChangeReporter) ReportEffectivePolicy(ctx context.Context, namespace, m
 		// reaches for in an incident, and needs to see take effect.
 		"disableK2Borrow", cfg.DisableK2Borrow,
 		"enablePrefillThroughputBound", cfg.EnablePrefillThroughputBound,
+		"enableBatchCapLearning", cfg.EnableBatchCapLearning,
 		// The SLO targets and whether the analyzer that reads them is listed:
 		// both halves resolve through the overlay separately, and this is the
 		// one place that shows the model ended up with both.
@@ -189,10 +190,10 @@ func formatBand(cfg config.ScalingPolicy) string {
 	// toggling it would log nothing: the readout fires only when this string
 	// changes, so a field reported but not keyed is reported once and then
 	// never again when it actually changes.
-	return fmt.Sprintf("%.3f|%.3f|%.3f|%.3f|%d|%t|%t|%t|%s",
+	return fmt.Sprintf("%.3f|%.3f|%.3f|%.3f|%d|%t|%t|%t|%t|%s",
 		cfg.ScaleUpThreshold, cfg.ScaleDownBoundary, cfg.KvCacheThreshold, cfg.Priority,
 		cfg.DefaultOutputTokens, cfg.EnableLearnedStateReuse, cfg.DisableK2Borrow,
-		cfg.EnablePrefillThroughputBound, cfg.SLOSummary())
+		cfg.EnablePrefillThroughputBound, cfg.EnableBatchCapLearning, cfg.SLOSummary())
 }
 
 // joinSorted renders a deterministic list, so a set of policies reported in a

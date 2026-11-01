@@ -53,14 +53,14 @@ func TestChangeReporter_EachMethodKeepsItsOwnKey(t *testing.T) {
 	assert.Len(t, r.seen, 4)
 	assert.Equal(t, "unknown|gold", r.seen["ns/v"])
 	assert.Equal(t, "conflict|gold|gold,silver", r.seen["ns|m"])
-	assert.Equal(t, "gold|0.000|0.000|0.000|0.000|0|false|false|false|off", r.seen["effective|ns|m"])
+	assert.Equal(t, "gold|0.000|0.000|0.000|0.000|0|false|false|false|false|off", r.seen["effective|ns|m"])
 	assert.Equal(t, "false", r.seen["accel|ns/v"])
 }
 
 func TestChangeReporter_AModelOnNoTierIsReportedAsTheDefaultEntry(t *testing.T) {
 	r := NewChangeReporter()
 	r.ReportEffectivePolicy(context.Background(), "ns", "m", "", config.ScalingPolicy{})
-	assert.Equal(t, "(default entry)|0.000|0.000|0.000|0.000|0|false|false|false|off", r.seen["effective|ns|m"],
+	assert.Equal(t, "(default entry)|0.000|0.000|0.000|0.000|0|false|false|false|false|off", r.seen["effective|ns|m"],
 		"an empty tier name reads as the default entry, not as an empty string")
 }
 
@@ -252,4 +252,16 @@ func TestChangeReporter_TheEffectivePolicyChangesWithThePrefillBoundSwitch(t *te
 	cfg.EnablePrefillThroughputBound = true
 	r.ReportEffectivePolicy(ctx, "ns", "m", "gold", cfg)
 	assert.NotEqual(t, first, r.seen["effective|ns|m"], "turning the prefill bound on must be reported")
+}
+
+func TestChangeReporter_TheEffectivePolicyChangesWithBatchCapLearning(t *testing.T) {
+	ctx := context.Background()
+	r := NewChangeReporter()
+	cfg := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70}
+	r.ReportEffectivePolicy(ctx, "ns", "m", "gold", cfg)
+	first := r.seen["effective|ns|m"]
+
+	cfg.EnableBatchCapLearning = true
+	r.ReportEffectivePolicy(ctx, "ns", "m", "gold", cfg)
+	assert.NotEqual(t, first, r.seen["effective|ns|m"], "turning batch-cap learning on must be reported")
 }

@@ -73,6 +73,10 @@ var fingerprintExcluded = []string{
 	"IsV1Engine",
 	"ChunkedPrefillEnabled",
 	"MaxNumSeqsSet",
+	// Not hashed: an operator's statement about the engine (the
+	// llm-d.ai/max-num-seqs annotation), not a setting of it. Read only for
+	// the derived k2 where the flags state no cap, and compared for capacity.
+	"DeclaredBatchCap",
 }
 
 func TestFingerprintCoversEveryEngineParamsField(t *testing.T) {
@@ -212,6 +216,8 @@ func TestFingerprintIgnoresTheResolvedInputs(t *testing.T) {
 			p.ChunkedPrefillEnabled = !p.ChunkedPrefillEnabled
 		case "MaxNumSeqsSet":
 			p.MaxNumSeqsSet = !p.MaxNumSeqsSet
+		case "DeclaredBatchCap":
+			p.DeclaredBatchCap = 128
 		default:
 			t.Fatalf("no case for excluded field %s", name)
 		}

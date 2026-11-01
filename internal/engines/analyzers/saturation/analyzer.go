@@ -290,6 +290,22 @@ type SaturationAnalyzer struct {
 	muRepeatIsUse       bool
 	muUnknownAgeSafe    bool
 	muLatchRestoresSafe bool
+	// batchCapDeclared and batchCapLearned are the batch cap's replay
+	// switches (batch_cap.go): SwitchBatchCapDeclared and
+	// SwitchBatchCapLearned. On from the constructor; a replay turns them
+	// off (SetSwitchesForReplay).
+	batchCapDeclared bool
+	batchCapLearned  bool
+	// batchCaps is each variant's learned batch cap, and batchCapPlateaus
+	// each pod's run of cycles at one running count (batch_cap.go). Keyed
+	// namespace|variant|model|, and the pod after it.
+	batchCaps        map[string]*learnedBatchCap
+	batchCapPlateaus map[string]*batchCapPlateau
+	// batchCapAdmission and batchCapPlateauCycles are the learned cap's
+	// admission rules and plateau length: batchCapRules and
+	// BatchCapPlateauCycles, held here so a mutant can drop one.
+	batchCapAdmission     []batchCapRule
+	batchCapPlateauCycles int
 	// horizons is how long each kind of learned state is kept. Defaulted
 	// from capacity.DefaultHorizons and overridable by configuration --
 	// which is the only way any of this is reachable on a cluster, the
@@ -374,6 +390,10 @@ type Evicted struct {
 	// StashedWindows is k2 and throughput windows put aside under engine
 	// arguments the variant no longer runs, unread for a bucket retention.
 	StashedWindows int
+	// BatchCaps is learned batch caps neither confirmed nor used for a
+	// bucket retention (batch_cap.go). Omitted when zero, so the eviction
+	// a recording holds from before it existed replays unchanged.
+	BatchCaps int `json:",omitempty"`
 }
 
 // Any reports whether the sweep evicted anything at all.
@@ -381,7 +401,7 @@ func (e Evicted) Any() bool {
 	return e.K2History > 0 || e.MuWindows > 0 || e.K2Borrows > 0 || e.K2Priors > 0 || e.PendingRestores > 0 || e.ITLWindows > 0 ||
 		e.ITLBaselines > 0 || e.StartEstimates > 0 || e.StartOutliers > 0 ||
 		e.Pods > 0 || e.ITLLines > 0 || e.Accelerators > 0 || e.DecodeSaturation > 0 ||
-		e.HotRankHolds > 0 || e.K2Settle > 0 || e.FleetShapes > 0 || e.VariantStamps > 0 || e.ForgetMarks > 0 || e.StashedWindows > 0
+		e.HotRankHolds > 0 || e.K2Settle > 0 || e.FleetShapes > 0 || e.VariantStamps > 0 || e.ForgetMarks > 0 || e.StashedWindows > 0 || e.BatchCaps > 0
 }
 
 // learnedLine is one measured ITL(k) line, with who measured it and when.
@@ -453,6 +473,12 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		muRepeatIsUse:          true,
 		muUnknownAgeSafe:       true,
 		muLatchRestoresSafe:    true,
+		batchCapDeclared:       true,
+		batchCapLearned:        true,
+		batchCaps:              make(map[string]*learnedBatchCap),
+		batchCapPlateaus:       make(map[string]*batchCapPlateau),
+		batchCapAdmission:      batchCapRules(),
+		batchCapPlateauCycles:  BatchCapPlateauCycles,
 		horizons:               capacity.DefaultHorizons(),
 		idleBand:               true,
 		k2KeyBucketHeld:        true,
@@ -666,6 +692,7 @@ func (a *SaturationAnalyzer) evictStaleHistory() Evicted {
 			}
 		}
 	}
+	evicted.BatchCaps += a.sweepBatchCapsLocked(now, bucketRetention)
 	// A window's arguments go with the window.
 	maps.DeleteFunc(a.k2WindowArgs, func(key, _ string) bool {
 		_, ok := a.computeCapacityHistory[key]

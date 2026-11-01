@@ -36,10 +36,10 @@ import (
 // (fixture/file) it is named to move.
 //
 // #415's band on the throughput (mu) key, its window's freeze while a swap
-// is pending, and the clamp on its writes past the margin. Learner PR 2's and PR 3's
-// switches, and #396's bands, are not here: "all off" is this PR's switches,
-// and an earlier PR's stay at their constructor default, on, as the base
-// goldens were written (analyzer-learner.md, 2.5).
+// is pending, and the clamp on its writes past the margin. Learner PR 2's
+// and PR 3's switches, #396's bands and #399's batch cap are not here: "all
+// off" is this PR's switches, and an earlier PR's stay at their constructor
+// default, on, as the base goldens were written (analyzer-learner.md, 2.5).
 var replaySwitches = map[string][]string{
 	saturation.SwitchMuKeyBucketHeld: nil,
 	saturation.SwitchMuSwapFreeze:    nil,
@@ -61,6 +61,8 @@ var earlierSeams = map[string][]string{
 	saturation.SwitchMuLatchRestoresSafe: nil,
 	saturation.SwitchIdleBand:            nil,
 	saturation.SwitchK2KeyBucketHeld:     nil,
+	saturation.SwitchBatchCapDeclared:    nil,
+	saturation.SwitchBatchCapLearned:     nil,
 }
 
 // heldBy is, for a switch that names no output, the unit tests that hold it:
@@ -105,6 +107,13 @@ var heldBy = map[string][]heldTest{
 	saturation.SwitchMuUnknownAgeSafe: {
 		{"../saturation", "TestMuUnknownAge_UnderDerivedKeepsTheLowHold"},
 		{"../saturation", "TestMuUnknownAge_NoTimeAtAllIsHeld"},
+	},
+	saturation.SwitchBatchCapDeclared: {
+		{"../saturation", "TestBatchCapSwitch_DeclaredOffPricesTheDefault"},
+	},
+	saturation.SwitchBatchCapLearned: {
+		{"../saturation", "TestBatchCapSwitch_LearnedOffLearnsNothing"},
+		{"../saturation", "TestBatchCap_SwitchesOffReproduceTheIssue"},
 	},
 	saturation.SwitchMuLatchRestoresSafe: {
 		{"../saturation", "TestMuLatch_ARestoredMeasurementOverDerivedComesBackLatched"},
@@ -166,7 +175,7 @@ func mergedRows() map[string][]string {
 }
 
 // switchBase is the sha256 of each output a switch names, as the base
-// commit's goldens hold it (354cbb69b, learner PR 3).
+// commit's goldens hold it (2ea8f0aa1). No switch of this PR names one.
 var switchBase = map[string]string{}
 
 func TestGoldens_TheSwitchRuns(t *testing.T) {
