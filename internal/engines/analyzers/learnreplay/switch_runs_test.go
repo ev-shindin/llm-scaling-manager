@@ -27,7 +27,10 @@ import (
 //   - Each switch alone moves, from all off, only the outputs it names.
 //
 // A PR that adds a switch adds it to replaySwitches, and the base digests of
-// the outputs it names; one that deletes a seam deletes its row.
+// the outputs it names. An earlier PR's switch whose seam is still in the
+// code moves to earlierSeams, and is replayed off alone from all on; the PR
+// that deletes a seam deletes its row. Every name SetSwitchesForReplay
+// accepts has a row in one of the two.
 
 // replaySwitches is each saturation replay switch, and the golden outputs
 // (fixture/file) it is named to move.
@@ -41,15 +44,31 @@ var replaySwitches = map[string][]string{
 	saturation.SwitchMuLatchRestoresSafe: nil,
 }
 
+// earlierSeams is each switch an earlier learner PR added whose seam the
+// code still has, and the golden outputs that PR named it to move. Each
+// stays on, at its constructor default, in this PR's runs; off alone, from
+// all on, it may move only what it named. A seam's row goes with the seam,
+// in the PR, or cleanup PR, that deletes it with zero golden diff.
+var earlierSeams = map[string][]string{
+	saturation.SwitchK2ReadsSettle: nil,
+	saturation.SwitchK2WaitsAfterRestart: {
+		"mu-paths/learned-state.csv", "mu-paths/store-records.csv", "mu-paths/variant-capacities.csv",
+	},
+}
+
 // heldBy is, for a switch that names no output, the unit tests that hold it:
 // no committed golden moves under it, so the runs below see nothing of it,
 // and a switch whose off path were dead would pass them. Each test named
 // must exist (by its func declaration, in the package directory given).
 var heldBy = map[string][]heldTest{
+	saturation.SwitchK2ReadsSettle: {
+		{"../saturation", "TestSettleView_TheTrackerSwitchMovesTheAbsenceRule"},
+		{"../saturation", "TestSettleView_TheTrackerSwitchKeepsTheSettleThroughAZeroReadyTime"},
+	},
 	saturation.SwitchMuRepeatIsUse: {
 		{"../saturation", "TestMuRepeat_IsUseNotAWrite"},
 		{"../saturation", "TestMuRepeat_AFrozenSeriesLetsTheEpisodeEnd"},
-		{"../saturation", "TestMuRepeat_DoesNotKeepTheMeasurementFresh"},
+		{"../saturation", "TestMuRepeat_OverDerivedDoesNotKeepTheMeasurementFresh"},
 	},
 	saturation.SwitchMuUnknownAgeSafe: {
 		{"../saturation", "TestMuUnknownAge_UnderDerivedKeepsTheLowHold"},
@@ -58,7 +77,23 @@ var heldBy = map[string][]heldTest{
 	saturation.SwitchMuLatchRestoresSafe: {
 		{"../saturation", "TestMuLatch_ARestoredMeasurementOverDerivedComesBackLatched"},
 		{"../saturation", "TestMuLatch_TheRestoredLatchIsKnownAfterItsFirstChoice"},
+		{"../saturation", "TestMuLatch_AWindowRestoredAfterARefusedReadingComesBackLatched"},
+		{"../saturation", "TestMuLatch_AWindowBroughtBackFromTheStashComesBackLatched"},
 	},
+}
+
+// Every switch the saturation hook accepts has a row: this PR's, or an
+// earlier PR's seam still in the code. A seam with no row is a switch no
+// run drives.
+func TestGoldens_EverySwitchHasARow(t *testing.T) {
+	for _, name := range saturation.ReplaySwitchNames() {
+		_, mine := replaySwitches[name]
+		_, earlier := earlierSeams[name]
+		require.True(t, mine || earlier, "%s is accepted by SetSwitchesForReplay and is in neither replaySwitches nor earlierSeams", name)
+	}
+	for name := range earlierSeams {
+		require.Contains(t, saturation.ReplaySwitchNames(), name, "%s's seam is gone: delete its row", name)
+	}
 }
 
 // heldTest is a test function, and the package directory that declares it.
@@ -67,7 +102,7 @@ type heldTest struct{ dir, name string }
 // A switch that names no golden output names the unit tests that hold it,
 // and they exist.
 func TestGoldens_ASwitchNoGoldenMovesIsHeldByItsTests(t *testing.T) {
-	for name, outs := range replaySwitches {
+	for name, outs := range mergedRows() {
 		if len(outs) > 0 {
 			continue
 		}
@@ -88,6 +123,13 @@ func TestGoldens_ASwitchNoGoldenMovesIsHeldByItsTests(t *testing.T) {
 			require.True(t, found, "%s is held by %s, which %s does not declare", name, h.name, h.dir)
 		}
 	}
+}
+
+// mergedRows is replaySwitches and earlierSeams together.
+func mergedRows() map[string][]string {
+	out := maps.Clone(replaySwitches)
+	maps.Copy(out, earlierSeams)
+	return out
 }
 
 // switchBase is the sha256 of each output a switch names, as the base
@@ -176,5 +218,14 @@ func TestGoldens_TheSwitchRuns(t *testing.T) {
 		d, err := compareOutput(f, committed, b)
 		require.NoError(t, err)
 		require.Nil(t, d, "all on: %s is not the committed golden", f)
+	}
+	for _, name := range slices.Sorted(maps.Keys(earlierSeams)) {
+		sw := set(slices.Collect(maps.Keys(replaySwitches))...)
+		sw[name] = false
+		got := moved(name, on, run(sw))
+		for _, f := range got {
+			require.Contains(t, earlierSeams[name], f, "%s off alone moved %s, which its PR did not name", name, f)
+		}
+		t.Logf("%s off alone moves %d outputs: %v", name, len(got), got)
 	}
 }
