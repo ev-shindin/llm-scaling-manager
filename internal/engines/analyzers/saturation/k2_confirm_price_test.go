@@ -25,8 +25,9 @@ func TestK2Hold_AColdPrefillIsPricedAtTheHeldReadingNotK1(t *testing.T) {
 	res, err := a.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{rm}, []domain.VariantReplicaState{
 		{VariantName: "variant-p", AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1, Role: domain.RolePrefill}}))
 	require.NoError(t, err)
-	var prios []string
-	for _, e := range logs.FilterMessage("k2-decision").All() {
+	decisions := logs.FilterMessage("k2-decision").All()
+	prios := make([]string, 0, len(decisions))
+	for _, e := range decisions {
 		prios = append(prios, stringField(t, e.ContextMap(), "priority"))
 	}
 	require.Contains(t, prios, k2ReasonObsUnconfirmed, "premise: the reading is held")
@@ -41,10 +42,11 @@ func TestK2Hold_AColdPrefillIsPricedAtTheHeldReadingNotK1(t *testing.T) {
 // window. The held cycle is priced at today's lower reading, not at the old
 // window's figure.
 func TestK2Hold_AWindowPastTheEpisodeGapIsNotPricedFromTheOldFigure(t *testing.T) {
-	cycles := []settleCycle{
-		{0, 90_000, 30, 3000},
-		{15 * time.Second, 90_000, 30, 3000},
-	}
+	cycles := make([]settleCycle, 0, 10)
+	cycles = append(cycles,
+		settleCycle{0, 90_000, 30, 3000},
+		settleCycle{15 * time.Second, 90_000, 30, 3000},
+	)
 	gap := 48 * time.Hour
 	for i := range 8 {
 		cycles = append(cycles, settleCycle{gap + time.Duration(i)*15*time.Second, 10_000, 5, 3000})
