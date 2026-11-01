@@ -422,6 +422,9 @@ bash
 basis
 batch
 batch-cap-declared
+batch-cap-decode-view
+batch-cap-derived-mu
+batch-cap-itl-admission
 batch-cap-learned
 batchCap
 batchCapPlateaus
@@ -1921,6 +1924,8 @@ skippedWaits
 skipping
 slo
 slo-
+slo-batch-cap-admission
+slo-batch-cap-per-rank
 slo-model
 slo-transient
 slo-variant

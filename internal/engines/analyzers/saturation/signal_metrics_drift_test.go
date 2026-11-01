@@ -52,6 +52,8 @@ var derivedMuMetricFields = map[string]derivedMuField{
 	"seqs":             {excluded: "per-pod intermediate of rate (k*C/KVreq capped at maxNumSeqs); rate carries the result"},
 	"tokenSec":         {excluded: "per-pod intermediate of rate (rate = tokenSec / muDivisor)"},
 	"maxNumActiveSeqs": {excluded: "wva_engine_config has no max_num_active_seqs label; the field shows the cap that lowers maxNumSeqs when it binds (issue #335)"},
+	"batchCap":         {excluded: "the cap per rank seqs was capped at (issue #420): maxNumSeqs's figure where the flags state it, else the declared or learned cap, which no engine-config label carries"},
+	"batchCapSource":   {excluded: "a diagnostic: where batchCap came from (flags, declared, learned, default), the k2-decision line's batchCapSource for the same cap"},
 	"engineRanks":      {excluded: "per-pod: the data-parallel ranks the row reports, which scale maxNumSeqs; the configured size is the data_parallel_size label of wva_engine_config"},
 	"lineBorrowed":     {metric: constants.WVAServiceRatePerReplica}, // source=borrowed-line
 	"lineBorrowedFrom": {excluded: "a lender variant name: a label value that changes with the lender, published as donor on wva_learned_state_borrowed (PR #152), not here"},

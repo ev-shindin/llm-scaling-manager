@@ -92,7 +92,32 @@ type Analyzer struct {
 	// rec records every call the engine makes, with what it returned
 	// (recording.go); nil when recording is off.
 	rec *learnrec.Recorder
+
+	// batchCapAdmission is SwitchBatchCapAdmission and batchCapPerRank
+	// SwitchBatchCapPerRank (issue #420): on from the constructor; a replay
+	// turns them off (SetSwitchesForReplay).
+	batchCapAdmission bool
+	batchCapPerRank   bool
 }
+
+// The batch cap's readers in this analyzer (issue #420). Each took the cap
+// from the engine's flags alone, so where the flags are unread the
+// llm-d.ai/max-num-seqs annotation reached the saturation analyzer's P3 and
+// not this one. Each now reads capacity.EngineParams.StatedBatchCap, behind
+// its own switch. The saturation analyzer's learned cap is not read here:
+// it is that analyzer's memory, which this one cannot see.
+
+// SwitchBatchCapAdmission is the replay switch for the line's sequence-cap
+// admission (issue #420). On, a replica is at its cap (itl.Admission) at the
+// cap the flags or the annotation state (StatedBatchCap). Off, as before, at
+// the flags' cap alone.
+const SwitchBatchCapAdmission = "slo-batch-cap-admission"
+
+// SwitchBatchCapPerRank is the replay switch for the batch cap a replica is
+// priced at (issue #420). On, at the cap the flags or the annotation state,
+// and the parser's default where neither does. Off, as before, at the
+// flags' cap or the default (capacity.EngineParams.BatchCap).
+const SwitchBatchCapPerRank = "slo-batch-cap-per-rank"
 
 type acceleratorMemo struct {
 	name     string
@@ -114,6 +139,9 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		args:         make(map[string]string),
 		accelerators: make(map[string]acceleratorMemo),
 		transients:   make(map[string]*transientMemo),
+
+		batchCapAdmission: true,
+		batchCapPerRank:   true,
 	}
 }
 
@@ -316,7 +344,7 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	// Analyze has checked the config's type; a direct caller may pass none,
 	// which reads as the defaults.
 	cfg, _ := input.Config.(*config.ScalingPolicy)
-	adm := admission(cfg, params)
+	adm := admission(cfg, params, a.batchCapAdmission)
 	// A held slope ends on the retention and on a change of engine arguments
 	// (itl.Admission), and a change of arguments forgets the window first, so
 	// the old engine's readings are neither refitted nor held as the new one's.
@@ -356,7 +384,11 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 		d.maxSeqs = params.MaxNumSeqs * d.ranks
 		d.activeSeqs = params.MaxNumActiveSeqs * d.ranks
 	}
-	maxSeqs := params.BatchCap() * d.ranks
+	perRank := params.BatchCap()
+	if stated := params.StatedBatchCap(); a.batchCapPerRank && stated > 0 {
+		perRank = stated
+	}
+	maxSeqs := perRank * d.ranks
 	capTokens := fleet.capacityTokens(vs.VariantName, params)
 	d.capTokens = capTokens
 	fill := reachableFill(band, p.fill, capTokens, fleet.shape.KVreq, maxSeqs)
@@ -376,15 +408,21 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 }
 
 // admission is which rows teach the variant's line: the policy's ITL band, and
-// the sequence cap only when the engine's flag stated it (itl.Admission). The
-// saturation analyzer builds the same from the same two sources, so both
-// analyzers read a variant's rows alike.
-func admission(cfg *config.ScalingPolicy, params *capacity.EngineParams) itl.Admission {
+// the sequence cap only when something states it (itl.Admission): with stated
+// (SwitchBatchCapAdmission) the flags or the llm-d.ai/max-num-seqs annotation
+// (StatedBatchCap), without it the flags alone. The saturation analyzer
+// builds the same from the same sources, and its learned cap besides, so
+// both analyzers read a variant's rows alike where nothing is learned.
+func admission(cfg *config.ScalingPolicy, params *capacity.EngineParams, stated bool) itl.Admission {
 	if cfg == nil {
 		cfg = &config.ScalingPolicy{}
 	}
 	lo, hi := cfg.ITLBand()
-	return itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: params.ExplicitMaxNumSeqs(),
+	batchCap := params.ExplicitMaxNumSeqs()
+	if stated {
+		batchCap = params.StatedBatchCap()
+	}
+	return itl.Admission{MinK: lo, MaxK: hi, MaxNumSeqs: batchCap,
 		CapMaxPreemptionRate: cfg.ITLCapPreemptionRate(), Steady: cfg.ITLSteadiness()}
 }
 

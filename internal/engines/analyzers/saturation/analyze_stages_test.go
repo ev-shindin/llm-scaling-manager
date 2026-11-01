@@ -33,6 +33,7 @@ import (
 var derivedMuFields = []string{
 	"avgInputTokens",
 	"avgOutputTokens",
+	"batchCap", "batchCapSource",
 	"engineRanks",
 	"itlA",
 	"itlAtKPrice",

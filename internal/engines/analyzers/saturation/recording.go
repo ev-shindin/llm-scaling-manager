@@ -111,9 +111,10 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // SwitchMuRepeatIsUse, SwitchMuUnknownAgeSafe, SwitchMuLatchRestoresSafe,
 // SwitchIdleBand, SwitchK2KeyBucketHeld, SwitchBatchCapDeclared,
 // SwitchBatchCapLearned, SwitchMuKeyBucketHeld, SwitchMuSwapFreeze,
-// SwitchMuMarginClamp and SwitchK2FirstReadingWaits; a name it does not know
-// is an error, and sets nothing. Never called on a production path; a test
-// holds that.
+// SwitchMuMarginClamp, SwitchK2FirstReadingWaits, SwitchBatchCapITLAdmission,
+// SwitchBatchCapDecodeView and SwitchBatchCapDerivedMu; a name it does not
+// know is an error, and sets nothing. Never called on a production path; a
+// test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
 	rest := maps.Clone(switches)
 	fields := a.switchFields()
@@ -132,19 +133,22 @@ func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) erro
 // switchFields is each replay switch by name, and the field it sets.
 func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 	return map[string]*bool{
-		SwitchK2ReadsSettle:       &a.k2ReadsSettle,
-		SwitchK2WaitsAfterRestart: &a.k2WaitsAfterRestart,
-		SwitchMuRepeatIsUse:       &a.muRepeatIsUse,
-		SwitchMuUnknownAgeSafe:    &a.muUnknownAgeSafe,
-		SwitchMuLatchRestoresSafe: &a.muLatchRestoresSafe,
-		SwitchIdleBand:            &a.idleBand,
-		SwitchK2KeyBucketHeld:     &a.k2KeyBucketHeld,
-		SwitchBatchCapDeclared:    &a.batchCapDeclared,
-		SwitchBatchCapLearned:     &a.batchCapLearned,
-		SwitchMuKeyBucketHeld:     &a.muKeyBucketHeld,
-		SwitchMuSwapFreeze:        &a.muSwapFreeze,
-		SwitchMuMarginClamp:       &a.muMarginClamp,
-		SwitchK2FirstReadingWaits: &a.k2FirstReadingWaits,
+		SwitchK2ReadsSettle:        &a.k2ReadsSettle,
+		SwitchK2WaitsAfterRestart:  &a.k2WaitsAfterRestart,
+		SwitchMuRepeatIsUse:        &a.muRepeatIsUse,
+		SwitchMuUnknownAgeSafe:     &a.muUnknownAgeSafe,
+		SwitchMuLatchRestoresSafe:  &a.muLatchRestoresSafe,
+		SwitchIdleBand:             &a.idleBand,
+		SwitchK2KeyBucketHeld:      &a.k2KeyBucketHeld,
+		SwitchBatchCapDeclared:     &a.batchCapDeclared,
+		SwitchBatchCapLearned:      &a.batchCapLearned,
+		SwitchMuKeyBucketHeld:      &a.muKeyBucketHeld,
+		SwitchMuSwapFreeze:         &a.muSwapFreeze,
+		SwitchMuMarginClamp:        &a.muMarginClamp,
+		SwitchK2FirstReadingWaits:  &a.k2FirstReadingWaits,
+		SwitchBatchCapITLAdmission: &a.batchCapITLAdmission,
+		SwitchBatchCapDecodeView:   &a.batchCapDecodeView,
+		SwitchBatchCapDerivedMu:    &a.batchCapDerivedMu,
 	}
 }
 

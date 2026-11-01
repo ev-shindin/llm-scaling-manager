@@ -144,9 +144,10 @@ type EngineParams struct {
 	// It exists for an engine whose flags this parser cannot read -- a
 	// launcher script, or the cap passed as a variable nothing resolves --
 	// where MaxNumSeqs is the default of 256 standing in for something
-	// unknown. Only the derived k2 (P3) reads it, and only where the flags
-	// state no cap (ExplicitMaxNumSeqs is 0): what the flags state is what
-	// the engine runs. ExplicitMaxNumSeqs and BatchCap do not read it.
+	// unknown. It is read only where the flags state no cap
+	// (ExplicitMaxNumSeqs is 0): what the flags state is what the engine
+	// runs. ExplicitMaxNumSeqs and BatchCap do not read it; StatedBatchCap
+	// does, and the analyzers read the cap through that (issue #420).
 	//
 	// Compared for capacity (IsCapacityCompatible) where it is read, so two
 	// variants that declare different caps never price each other. Not hashed into the
@@ -420,6 +421,22 @@ func (p *EngineParams) BatchCap() int64 {
 		return stated
 	}
 	return p.MaxNumSeqs
+}
+
+// StatedBatchCap is one engine rank's batch cap where the scale target states
+// it: ExplicitMaxNumSeqs when the flags state a cap, and DeclaredBatchCap,
+// the llm-d.ai/max-num-seqs annotation, when they do not. 0 when neither
+// does, or when p is nil: unlike BatchCap it never falls back to the
+// parser's default, so a reader that asks whether a replica is at its cap
+// reads it.
+func (p *EngineParams) StatedBatchCap() int64 {
+	if p == nil {
+		return 0
+	}
+	if stated := p.ExplicitMaxNumSeqs(); stated > 0 {
+		return stated
+	}
+	return p.DeclaredBatchCap
 }
 
 // maxNumSeqsKeys are the normalised flags either parser reads into

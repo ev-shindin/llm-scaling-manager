@@ -296,6 +296,14 @@ type SaturationAnalyzer struct {
 	// off (SetSwitchesForReplay).
 	batchCapDeclared bool
 	batchCapLearned  bool
+	// batchCapITLAdmission, batchCapDecodeView and batchCapDerivedMu are the
+	// replay switches of the batch cap's other readers (batch_cap.go, issue
+	// #420): SwitchBatchCapITLAdmission, SwitchBatchCapDecodeView and
+	// SwitchBatchCapDerivedMu. On from the constructor; a replay turns them
+	// off (SetSwitchesForReplay).
+	batchCapITLAdmission bool
+	batchCapDecodeView   bool
+	batchCapDerivedMu    bool
 	// batchCaps is each variant's learned batch cap, and batchCapPlateaus
 	// each pod's run of cycles at one running count (batch_cap.go). Keyed
 	// namespace|variant|model|, and the pod after it.
@@ -484,6 +492,9 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		muLatchRestoresSafe:    true,
 		batchCapDeclared:       true,
 		batchCapLearned:        true,
+		batchCapITLAdmission:   true,
+		batchCapDecodeView:     true,
+		batchCapDerivedMu:      true,
 		batchCaps:              make(map[string]*learnedBatchCap),
 		batchCapPlateaus:       make(map[string]*batchCapPlateau),
 		batchCapAdmission:      batchCapRules(),

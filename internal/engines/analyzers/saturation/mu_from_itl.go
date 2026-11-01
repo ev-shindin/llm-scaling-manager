@@ -226,6 +226,18 @@ func pricingK(cfg *config.ScalingPolicy) float64 {
 // about 1.5%.
 func deriveMu(model itl.Model, params *capacity.EngineParams, ranks int,
 	totalKvTokens int64, fleet shape.Shape, kPrice float64, avgOutput float64) derivedMu {
+	return deriveMuAtCap(model, params, params.BatchCap(), ranks, totalKvTokens, fleet, kPrice, avgOutput)
+}
+
+// deriveMuAtCap is deriveMu with the resident sequences capped at batchCap
+// per engine rank rather than at the flags' cap or the parser's default
+// (params.BatchCap). The analyzer passes the cap the derived k2 is priced at
+// (pricingBatchCap): where the flags are unread, the declared or learned cap
+// in place of 256, which priced a sequence-bound engine above what it can
+// run and so ordered too few replicas (issue #420). A batchCap of 0 caps
+// nothing.
+func deriveMuAtCap(model itl.Model, params *capacity.EngineParams, batchCap int64, ranks int,
+	totalKvTokens int64, fleet shape.Shape, kPrice float64, avgOutput float64) derivedMu {
 	if model.IsZero() {
 		return derivedMu{why: "no-line"}
 	}
@@ -250,7 +262,7 @@ func deriveMu(model itl.Model, params *capacity.EngineParams, ranks int,
 	if seqs <= 0 {
 		return derivedMu{why: "no-seqs"}
 	}
-	if batchCap := params.BatchCap(); batchCap > 0 {
+	if batchCap > 0 {
 		seqs = min(seqs, float64(batchCap)*float64(max(ranks, 1)))
 	}
 	itlSec := model.ITLAt(kPrice)

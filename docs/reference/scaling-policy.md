@@ -1456,6 +1456,10 @@ kubectl annotate deployment <name> -n <namespace> --overwrite llm-d.ai/max-num-s
 ```
 
 - It is used only where the flags state no cap. A cap in the flags wins.
+- Everything that reads the cap reads it: the derived capacity, the derived
+  throughput (mu), the ITL line's reading of a replica at its cap, a P/D
+  decode's queue at its cap, and the `slo` analyzer. A learned cap (below)
+  reaches the same readers, except the `slo` analyzer.
 - It takes effect on the next cycle and keeps everything the variant has
   learned.
 - A value that is not a positive whole number is ignored.
@@ -1571,7 +1575,7 @@ long-context:
 |-----|---------|-------|--------------|
 | `minObservableK` | `0.15` | (0, 1), below `maxObservableK` | Lowest KV fill at which a replica's inter-token latency teaches its ITL line. Below it the engine barely batches and the latency is noise. It judges the fill averaged over the latency's minute when the collector has it, else the instant fill. |
 | `maxObservableK` | `0.80` | (0, 1) | Highest KV fill at which the latency teaches the line. Above it an engine short of memory preempts and its latency leaves the line. It judges the fill averaged over the latency's minute when the collector has it, else the instant fill, so a replica that bursts above it for part of a minute can still teach the line. If the merged policy leaves it at or below `minObservableK`, both edges go back to their defaults, and the controller logs a `WARNING: tuning figure not used` line when it reads the ConfigMap. |
-| `capMaxPreemptionRate` | `0` | >= 0 | A replica above `maxObservableK` still teaches the line when it is at its sequence cap: its running batch is exactly `--max-num-seqs` (set on the engine, not defaulted) times its ranks, and requests are waiting. With `--max-num-active-seqs` set (vLLM v0.31+), the cap is the lower of the two. This is the most preemptions per second it may show over the ITL window. An explicit `0` overrides a tier that raised it. vLLM only: SGLang publishes no preemption counter. |
+| `capMaxPreemptionRate` | `0` | >= 0 | A replica above `maxObservableK` still teaches the line when it is at its sequence cap: its running batch is exactly `--max-num-seqs` (set on the engine or declared with the `llm-d.ai/max-num-seqs` annotation, not defaulted) times its ranks, and requests are waiting. With `--max-num-active-seqs` set (vLLM v0.31+), the cap is the lower of the two. This is the most preemptions per second it may show over the ITL window. An explicit `0` overrides a tier that raised it. vLLM only: SGLang publishes no preemption counter. |
 
 These three were top-level keys (`itlMinObservableK`, `itlMaxObservableK`,
 `itlCapMaxPreemptionRate`) before any release shipped them; the top-level
@@ -2231,8 +2235,10 @@ the decode pod drains, so the queue there is read differently:
   Except at the sequence cap: when the pod runs exactly `--max-num-seqs`
   sequences on every engine, the whole queue counts. There, vLLM still
   reports a request as deferred after its KV has arrived, although it waits
-  only for a free slot on this pod. This needs `--max-num-seqs` set on the
-  engine's command line; a cap the engine picks by default is not known.
+  only for a free slot on this pod. This needs the cap stated: `--max-num-seqs`
+  on the engine's command line, or, where the flags cannot be read, the
+  [`llm-d.ai/max-num-seqs` annotation](#the-batch-cap-llm-daimax-num-seqs-and-enablebatchcaplearning).
+  A cap the engine picks by default is not known.
   `--max-num-active-seqs` (vLLM v0.31+) also sets the cap, alone or with
   `--max-num-seqs`; with both, the lower one counts.
 - Older vLLM: the whole queue counts, as before. The requests waiting for

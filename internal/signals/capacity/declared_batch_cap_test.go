@@ -92,3 +92,15 @@ func TestDeclaredBatchCapIsComparedOnlyWhereRead(t *testing.T) {
 	a.MaxNumSeqsSet, b.MaxNumSeqsSet = false, false
 	assert.False(t, a.IsCapacityCompatible(&b), "with the flags unread, the declared cap is the cap")
 }
+
+// StatedBatchCap is the flags' cap, else the declared one, and never the
+// parser's default (issue #420).
+func TestStatedBatchCap(t *testing.T) {
+	assert.EqualValues(t, 0, (*EngineParams)(nil).StatedBatchCap())
+	assert.EqualValues(t, 0, (&EngineParams{MaxNumSeqs: 256}).StatedBatchCap(), "a default is no stated cap")
+	assert.EqualValues(t, 64, (&EngineParams{MaxNumSeqs: 256, DeclaredBatchCap: 64}).StatedBatchCap())
+	assert.EqualValues(t, 32, (&EngineParams{MaxNumSeqs: 32, MaxNumSeqsSet: true, DeclaredBatchCap: 64}).StatedBatchCap(),
+		"the flags win over the annotation")
+	assert.EqualValues(t, 16, (&EngineParams{MaxNumSeqs: 256, MaxNumActiveSeqs: 16, DeclaredBatchCap: 64}).StatedBatchCap(),
+		"a stated active cap is a stated cap")
+}

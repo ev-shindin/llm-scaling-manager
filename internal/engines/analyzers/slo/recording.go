@@ -2,6 +2,8 @@ package slo
 
 import (
 	"context"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -80,10 +82,38 @@ func (a *Analyzer) SlopeHoldFor() time.Duration { return a.slopeHoldFor }
 
 // SetSwitchesForReplay sets the package's replay switches by name: the test
 // seam a replay drives one named change through (analyzer-learner.md, 2.5).
-// No switch exists yet, so the only set it accepts is the empty one. Never
-// called on a production path; a test holds that.
+// The switches are SwitchBatchCapAdmission and SwitchBatchCapPerRank; a name
+// it does not know is an error, and sets nothing. Never called on a
+// production path; a test holds that.
 func (a *Analyzer) SetSwitchesForReplay(switches map[string]bool) error {
-	return learnrec.UnknownSwitches("slo", switches)
+	rest := maps.Clone(switches)
+	fields := a.switchFields()
+	for name := range fields {
+		delete(rest, name)
+	}
+	if err := learnrec.UnknownSwitches("slo", rest); err != nil {
+		return err
+	}
+	for name, on := range switches {
+		*fields[name] = on
+	}
+	return nil
+}
+
+// switchFields is each replay switch by name, and the field it sets.
+func (a *Analyzer) switchFields() map[string]*bool {
+	return map[string]*bool{
+		SwitchBatchCapAdmission: &a.batchCapAdmission,
+		SwitchBatchCapPerRank:   &a.batchCapPerRank,
+	}
+}
+
+// ReplaySwitchNames is every name SetSwitchesForReplay accepts, sorted: the
+// switch runs hold each to a row (analyzer-learner.md, 2.5). A test seam,
+// like SetSwitchesForReplay; nothing on a production path calls it, and a
+// test holds that.
+func ReplaySwitchNames() []string {
+	return slices.Sorted(maps.Keys((&Analyzer{}).switchFields()))
 }
 
 // Analyze implements domain.Analyzer (analyze), and records the call.

@@ -132,6 +132,21 @@ and the `k2-decision` line names its source (`batchCapSource`):
 | `learned` | `batchCaps[namespace\|variant\|model\|].perRank` | the flags state none, none is declared, the policy sets `enableBatchCapLearning`, and it is lower than the default (`SwitchBatchCapLearned`) |
 | `default` | `EngineParams.MaxNumSeqs`, the parser's 256 | otherwise |
 
+The same chain feeds the cap's other readers (issue #420), each behind its
+own replay switch:
+
+| reader | reads | switch |
+|---|---|---|
+| ITL admission at the cap (`itl.Admission.MaxNumSeqs`, `fitLines`) | `statedBatchCap`: the chain, and 0 where only the default stands | `SwitchBatchCapITLAdmission` |
+| P/D decode view's at-cap exception (`decodeCapacityViews`, `atCapBatchCaps`) | `statedBatchCap` | `SwitchBatchCapDecodeView` |
+| derived mu's sequence cap (`deriveMuAtCap`) | `pricingBatchCap`, default included; `derived-mu` logs `batchCap` and `batchCapSource` | `SwitchBatchCapDerivedMu` |
+| `slo` analyzer's admission (`slo.admission`) | `EngineParams.StatedBatchCap`: flags, else declared | `slo.SwitchBatchCapAdmission` |
+| `slo` analyzer's per-rank cap (`priceVariant`) | `StatedBatchCap`, else `BatchCap` | `slo.SwitchBatchCapPerRank` |
+
+The `slo` analyzer does not read the learned cap: it lives in the saturation
+analyzer's memory. The zero-replica estimate (`estimateCapacityFromParams`)
+still prices at `BatchCap`.
+
 With no `EngineParams` at all (the scale target was never read), a learned cap
 still prices P3, with `B` taken as not binding (`estimateCapacityAtCap`);
 `min(k1, k2)` keeps that at or under the k1 it replaces.

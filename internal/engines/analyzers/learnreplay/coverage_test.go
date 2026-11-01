@@ -322,7 +322,7 @@ func TestSwitchHooks_NoProductionPathCallsThem(t *testing.T) {
 	// The walk reached the four hooks themselves, so it read the packages
 	// that define them, and the rest of the tree with them.
 	require.Equal(t, 4, defined, "the walk found %d SetSwitchesForReplay definitions in %d files", defined, files)
-	require.Equal(t, 1, namesDefined, "the walk found %d ReplaySwitchNames definitions", namesDefined)
+	require.Equal(t, 2, namesDefined, "the walk found %d ReplaySwitchNames definitions", namesDefined)
 	assert.Empty(t, callers, "a production path calls a replay switch hook")
 }
 
