@@ -57,6 +57,98 @@ func TestShareOneReplicaMoveIsCalledOffWhenTheDonorsDemandReturns(t *testing.T) 
 	}
 }
 
+// A busy model on four or more replicas has a one-replica move called off
+// too. The band is the tolerance of the target, never under half a replica,
+// so at the default 0.15 twice the band passes one replica above a target of
+// about 3.3 replicas: judged on twice the band alone, a busy model on four
+// replicas or more was never short enough for its move to be called off,
+// and lost the replica its demand had come back for. The busy model holds n
+// of n+1 replicas at a need of n-0.4 beside a light one at 0.8; for one
+// minute it reads n-2.6, one replica less, and starts giving that one
+// replica to the light model; then its demand is back. n from 3 (the test
+// above, where twice the band is still one replica) to 8, with 1-GPU
+// replicas and whole 8-GPU nodes, both orders.
+func TestShareOneReplicaMoveIsCalledOffOnABusyModelOfManyReplicas(t *testing.T) {
+	const m = time.Minute
+	for _, g := range []int{1, 8} {
+		x := float64(g)
+		for n := 3; n <= 8; n++ {
+			busyNeed, dip := (float64(n)-0.4)*x, (float64(n)-2.6)*x
+			phases := []stallPhase{{30 * m, stallNeeds(0.8*x, busyNeed)}, {m, stallNeeds(0.8*x, dip)}, {15 * m, stallNeeds(0.8*x, busyNeed)}}
+			for _, order := range []struct {
+				name    string
+				busy    string
+				phases  []stallPhase
+				initial map[string]int
+			}{
+				{"B busy", "B", phases, map[string]int{"A": g, "B": n * g}},
+				{"A busy", "A", stallSwap(phases), map[string]int{"A": n * g, "B": g}},
+			} {
+				name := fmt.Sprintf("%d-GPU replicas, busy on %d of %d, %s", g, n, n+1, order.name)
+				cycles := stallLoopQuota(simTimings(), g, n+1, order.initial, false, order.phases, nil)
+				onDip, cancelled, lowest := 0, 0, n*g
+				for _, c := range cycles {
+					if c.at >= 30*m {
+						cancelled += c.cancelled
+						lowest = min(lowest, c.held[order.busy])
+					}
+					if c.at >= 30*m && c.at < 32*m {
+						onDip += c.started
+					}
+				}
+				if onDip != 1 {
+					t.Fatalf("%s, setup: %d moves started on the dip, want the one replica; the scenario no longer reaches the boundary", name, onDip)
+				}
+				if lowest < n*g || cancelled == 0 {
+					t.Errorf("%s: after its demand came back the busy model fell to %d of its %d GPUs, and the move was not called off: "+
+						"a move exactly reversed ran on", name, lowest, n*g)
+				}
+			}
+		}
+	}
+}
+
+// A real swap right after a dip called off waits out the reversal hold, and
+// no longer. This is the accepted price of calling the move off (issue #285,
+// option b): the cancel holds the donor -> receiver pair for ReversalHold, so
+// that fast swaps stay planned on the mean, and a swap in that same direction
+// one minute after the dip's return lands after 17m30s, against 7m30s with no
+// dip -- and 6m30s before this change, when the move the dip started ran on
+// and took the busy model's replica in the meantime. The delay shrinks as the
+// swap comes later and is gone once the hold has run out. The bound is the
+// no-dip time plus the hold: a later swap is a regression, not the price.
+// With 1-GPU replicas and whole 8-GPU nodes.
+func TestShareSwapRightAfterACalledOffDipWaitsOnlyTheReversalHold(t *testing.T) {
+	const m = time.Minute
+	tm := simTimings()
+	for _, g := range []int{1, 8} {
+		x := float64(g)
+		busy, idle := stallNeeds(0.4*x, 2.6*x), stallNeeds(2.6*x, 0.4*x)
+		noDip := []stallPhase{{31 * m, busy}, {40 * m, idle}}
+		base, ok := stallReached(stallLoopSized(tm, g, map[string]int{"A": g, "B": 3 * g}, false, noDip, nil), 31*m, 3*g, g)
+		if !ok {
+			t.Fatalf("%d-GPU replicas, control: with no dip the swap never reached 3:1", g)
+		}
+		for _, after := range []time.Duration{m, 2 * m, 4 * m, 6 * m, 10 * m} {
+			ph := []stallPhase{{30 * m, busy}, {m, stallNeeds(0.4*x, 0.6*x)}, {after, busy}, {40 * m, idle}}
+			cycles := stallLoopSized(tm, g, map[string]int{"A": g, "B": 3 * g}, false, ph, nil)
+			cancelled := 0
+			for _, c := range cycles {
+				cancelled += c.cancelled
+			}
+			if cancelled == 0 {
+				t.Fatalf("%d-GPU replicas, swap %v after the dip, setup: nothing was called off; the dip no longer reaches the rule", g, after)
+			}
+			d, ok := stallReached(cycles, 31*m+after, 3*g, g)
+			if !ok || d > base+tm.ReversalHold {
+				t.Errorf("%d-GPU replicas: a swap %v after a dip called off reached 3:1 after %v (reached %v), want within %v (no dip) + %v (the hold)",
+					g, after, d, ok, base, tm.ReversalHold)
+			}
+			t.Logf("%d-GPU replicas: swap %v after the dip reached 3:1 after %v; no dip %v", g, after, d, base)
+		}
+	}
+}
+
 // A single wobble called off on its donor does not hold the swap back after
 // it on the mean. The swap and swap back of issue #269
 // (TestShareSingleSwapBackIsNotHeldOnTheMean), with the first swap's load

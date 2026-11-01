@@ -929,11 +929,22 @@ func (p *sharePlanRun) cancelReversals() {
 		// replica to an idle one, wanted it back 15s later, and lost it six
 		// minutes later, when its scale-down window let the pod go.
 		//
+		// The gap is also never more than the replica the donor gives: the
+		// band grows with the target (the tolerance of it), and at the default
+		// tolerance twice it passes one replica above a target of about 3.3
+		// replicas, so a busy model on four or more never had a one-replica
+		// move called off however far its demand came back. Short by what it
+		// gives, a donor wants exactly that back, at any size.
+		//
 		// Only a donor planned this cycle is judged: one out of the group --
 		// frozen, or not collected -- has no target, and what it holds reads
 		// as zero, net of its transfer below it.
+		gap := 2 * shareTol(p.cont[t.Donor], dn, in.Tolerance)
+		if t.DonorGPUs > 0 {
+			gap = math.Min(gap, float64(t.DonorGPUs))
+		}
 		donorShort := planned &&
-			float64(donorAfter) <= p.cont[t.Donor]-2*shareTol(p.cont[t.Donor], dn, in.Tolerance)+shareCancelSlack &&
+			float64(donorAfter) <= p.cont[t.Donor]-gap+shareCancelSlack &&
 			donorAfter < p.integ[t.Donor]
 		// A returned spare is called off, while it is free, when its role's
 		// demand came back: the GPUs would otherwise drain from it only for
