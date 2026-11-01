@@ -46,7 +46,15 @@ import (
 // but not interpreted (SharingUnresolved) and the memory layout
 // (MemoryLayout), within the same version since no release carried version 3
 // without them.
-const FingerprintVersion = 3
+//
+// Version 4 adds the active cap, MaxNumActiveSeqs. Compared for capacity
+// (IsCapacityCompatible) but not hashed, a rollout that changed only
+// --max-num-active-seqs kept the same arguments, so the variant went on
+// reading the k2, throughput and ITL windows it measured under the old cap
+// (issue #334). It is the first bump to cross a release: on the first
+// restart after the upgrade every variant's restored k2 is a lower-only
+// previous figure, as after any change of arguments.
+const FingerprintVersion = 4
 
 // fingerprintLength is how much of the digest reaches the label. 16 hex
 // characters is 64 bits: for the few hundred distinct engine configurations a
@@ -65,10 +73,14 @@ const fingerprintLength = 16
 // be done in one place; a fingerprint on its own identifies a configuration,
 // never a thing being served.
 //
-// Relative to IsCapacityCompatible this adds one field, EnforceEager, and
-// drops one, MaxNumActiveSeqs; both asymmetries are deliberate. The active cap
-// bounds how far along the ITL line a replica runs, not the line, and hashing
-// it would need a FingerprintVersion bump that re-keys every stored digest.
+// Relative to IsCapacityCompatible this adds one field, EnforceEager, and the
+// asymmetry is deliberate. It also hashes MaxNumActiveSeqs, which that
+// predicate compares: the active cap bounds how far along the ITL line a
+// replica runs rather than the line, but it moves the saturated k2 and
+// throughput, and the arguments half of this digest (ArgsFingerprint) is
+// what decides whether a rollout keeps them. The cost on the latency side is
+// the safe one: two engines differing only in the cap each learn their own
+// line. An unreadable cap is left at 0 (see the field) and hashes as unset.
 // The EnforceEager half: No CUDA graphs does not change how much KV
 // fits or how many sequences run, so a capacity record survives it -- but it
 // does change the inter-token latency, and this digest also keys a latency
@@ -109,6 +121,7 @@ func (p *EngineParams) Fingerprint() string {
 		"total_kv_tokens_override=" + strconv.FormatInt(p.TotalKvTokensOverride, 10),
 		"effective_max_batched_tokens=" + strconv.FormatInt(p.EffectiveMaxBatchedTokens, 10),
 		"max_num_seqs=" + strconv.FormatInt(p.MaxNumSeqs, 10),
+		"max_num_active_seqs=" + strconv.FormatInt(p.MaxNumActiveSeqs, 10),
 		"max_model_len=" + strconv.FormatInt(p.MaxModelLen, 10),
 		"enforce_eager=" + strconv.FormatBool(p.EnforceEager),
 		// WHICH FIELDS ABOVE ARE REAL. Every value in this list is either the
@@ -261,6 +274,7 @@ func (p *EngineParams) FingerprintValues() []string {
 		strconv.FormatInt(p.TotalKvTokensOverride, 10),
 		strconv.FormatInt(p.EffectiveMaxBatchedTokens, 10),
 		strconv.FormatInt(p.MaxNumSeqs, 10),
+		strconv.FormatInt(p.MaxNumActiveSeqs, 10),
 		strconv.FormatInt(p.MaxModelLen, 10),
 		strconv.FormatBool(p.EnforceEager),
 		strings.Join(p.Unresolved, ","),

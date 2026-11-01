@@ -123,7 +123,7 @@ func TestGoldens_TheCheckFails(t *testing.T) {
 		editGolden(t, dir, OutputLines, func(rows []row) []row { return rows[1:] })
 		p := checkProblems(t, dir)
 		require.Len(t, p, 1, "%v", p)
-		assert.Contains(t, p[0], "acceptance/lines.csv: 0 of 19 rows changed, 1 added, 0 removed")
+		assert.Contains(t, p[0], "acceptance/lines.csv: 0 of 18 rows changed, 1 added, 0 removed")
 		t.Log(p[0])
 	})
 	t.Run("when a file is not listed", func(t *testing.T) {

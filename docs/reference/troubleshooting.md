@@ -1070,7 +1070,9 @@ failed reads and writes, and the log says why (logger `learned-state`):
   - `learned state restored as lower-only figures: the variant's engine
     arguments changed, so its k2 windows become previous figures (P2-prior)
     for the buckets they were measured in` -- its flags changed while the
-    controller was down. The old capacity is used only where it is lower, and
+    controller was down. Expect it for every variant on the first restart
+    after an upgrade that changes the `fingerprint_version` label on
+    `wva_engine_config` (from v0.10.2 or earlier, which use 3). The old capacity is used only where it is lower, and
     expires (30 minutes of serving from a bucket's first use, then a 6-hour
     relaxation). The old service rate comes back too, and holds the
     throughput floor hold-only -- it may keep the fleet, never grow it -- for

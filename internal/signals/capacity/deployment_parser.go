@@ -109,6 +109,10 @@ type EngineParams struct {
 	// never had before it was read. Left at 0, the cap falls back to
 	// max_num_seqs, still a true upper bound. A later unreadable occurrence
 	// clears an earlier readable one, since the engine takes the last.
+	//
+	// It is hashed into the fingerprint (FingerprintVersion 4), so a rollout
+	// that changes only the active cap is a change of arguments. An
+	// unreadable value hashes as unset.
 	MaxNumActiveSeqs int64
 
 	// TotalKvTokensOverride is the explicit total KV-cache token capacity, when the
@@ -1330,9 +1334,9 @@ func applyAll2AllEnv(container *corev1.Container, params *EngineParams) {
 // inter-token latency, and so the ITL line, but it does not change how much
 // KV fits or how many sequences run. A capacity record stays reusable across
 // it. Keying a latency model on these params is a different equality, and it
-// needs this one plus EnforceEager, minus MaxNumActiveSeqs: the active cap
-// bounds how far along the ITL line a replica can go, not the line itself, and
-// the fingerprint does not hash it (fingerprint.go).
+// needs this one plus EnforceEager. The fingerprint also hashes
+// MaxNumActiveSeqs, as this predicate compares it, so a rollout that changes
+// only the active cap is a change of arguments (fingerprint.go).
 // Completeness is deliberately NOT checked here, and the reason is worth
 // stating because the first version of this change got it wrong. Gating the
 // predicate on Complete() makes it non-reflexive: a variant whose

@@ -118,7 +118,6 @@ func TestMaxNumActiveSeqsIsTheBatchCap(t *testing.T) {
 		{"--max-num-seqs=256", "--max-num-active-seqs", "$UNSET_ACTIVE"},
 		{"--max-num-seqs=256", "--max-num-active-seqs=0"},
 		{"--max-num-seqs=256", "--max-num-active-seqs=many"},
-		{"--max-num-seqs=256", "--max-num-active-seqs=64"},
 	} {
 		p := parse(args...)
 		if !p.Complete() {
@@ -127,5 +126,15 @@ func TestMaxNumActiveSeqsIsTheBatchCap(t *testing.T) {
 		if p.Fingerprint() != without.Fingerprint() {
 			t.Errorf("%v changed the fingerprint against the same flags without it", args)
 		}
+	}
+
+	// A read cap is hashed (issue #334): a rollout that changes only it is a
+	// change of arguments, as IsCapacityCompatible already says.
+	read := parse("--max-num-seqs=256", "--max-num-active-seqs=64")
+	if !read.Complete() {
+		t.Errorf("a read active cap reads as incomplete: Unresolved=%v", read.Unresolved)
+	}
+	if read.ArgsFingerprint() == without.ArgsFingerprint() {
+		t.Error("--max-num-active-seqs=64 left the arguments fingerprint as it is without the flag")
 	}
 }

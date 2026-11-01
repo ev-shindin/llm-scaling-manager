@@ -166,6 +166,9 @@ func TestSameArgumentsIsTheArgumentsFingerprint(t *testing.T) {
 		"the checkpoint path re-spelled":       {parse("/models/org/m"), false},
 		"the offload resized":                  {parse("org/m", "--kv-offloading-size", "64"), false},
 		"only the image":                       {func() EngineParams { p := base; p.Image = "vllm:other"; return p }(), true},
+		// Issue #334: IsCapacityCompatible compares the active cap, so a
+		// rollout that changes only it must not keep the record either.
+		"only the active cap": {parse("org/m", "--max-num-active-seqs", "64"), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if tc.same {
