@@ -511,24 +511,13 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 // of the rest: the fill then made the role's new pods next cycle's floor, so
 // at a constant target it took a share of the other role's GPUs every cycle
 // and moved pods to it for cycle after cycle (#440).
-//
-// A role with no demand, beside a role that has some, gets no share above its
-// floor (idleRoles), or above what it holds when it is held. When no role's
-// demand sizes to GPUs the split is by what each role holds, and a role with
-// no demand took the share the other role could not fill: each pod it gained
-// raised its weight on the next cycle, one pod a cycle at a constant target
-// (#449).
 func splitRoles(e NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState,
 	accType string, roles []string, total int, dem, cur, floor map[string]int) map[string]int {
 	low := maps.Clone(floor)
 	kept := map[string]int{}
-	idle := idleRoles(e, roles)
 	for {
 		uncapped := distributeGPUsByWeight(total, roles, dem, cur, low, kept)
 		ceil := roleShareCeilings(records, stateMap, accType, roles, dem, uncapped)
-		for _, role := range idle {
-			ceil[role] = low[role]
-		}
 		maps.Copy(ceil, kept)
 		out := distributeGPUsByWeight(total, roles, dem, cur, low, ceil)
 		more := false
@@ -546,26 +535,6 @@ func splitRoles(e NamedAnalyzerResult, records []variantRecord, stateMap map[str
 			return out
 		}
 	}
-}
-
-// idleRoles is the roles of e with no demand, when another role has some. A
-// model with no demand on any role has no idle role: its split is by what
-// each role holds.
-func idleRoles(e NamedAnalyzerResult, roles []string) []string {
-	var idle []string
-	busy := false
-	for _, role := range roles {
-		// Written as !(d > 0) so a NaN demand counts as none.
-		if d := rescaleRoleDemand(e, role); !(d > 0) {
-			idle = append(idle, role)
-		} else {
-			busy = true
-		}
-	}
-	if !busy {
-		return nil
-	}
-	return idle
 }
 
 // roleGrowth is n replicas a rescale fill added to variant.

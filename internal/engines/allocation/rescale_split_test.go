@@ -74,13 +74,19 @@ func TestSplitRolesKeepsAHeldRoleAtWhatItHolds(t *testing.T) {
 	}
 }
 
-// TestSplitRolesGivesAnIdleRoleNoShare: a role with no demand, beside a role
-// with some, gets its floor, or what it holds when held against scale-down,
-// and nothing above it (#449). Prefill is on 1-GPU pods; decode on 8-GPU pods
-// with a capacity reading or, where noted, none, so its demand sizes to no
-// GPUs and the split falls back to what the roles hold.
-func TestSplitRolesGivesAnIdleRoleNoShare(t *testing.T) {
-	unsized := podVariant{name: "d", role: domain.RoleDecode, gpus: 8, cur: 2, maxR: 4, cost: 8, perGPU: 100, noCapacityRdg: true}
+// TestSplitRolesWithAnIdleRole is a regression guard for #449: every case
+// passes on the code it was written against, and none of it is a fix.
+// Prefill has no demand. When decode's demand sizes to GPUs, prefill gets
+// nothing above its floor. When it does not (decode has no capacity reading,
+// or its demand reads NaN), the split goes by what each role holds, so given
+// a target above what the model holds, prefill would take a share it never
+// had. applyRescale never gives such a model that target: rescaleInputsForGroup
+// caps it at its floors plus what its held roles hold, the GPUs it is given
+// below. Called on its own at a target of 34, the split gave prefill 3, and
+// one more GPU each rerun (#449); that target never reaches it.
+func TestSplitRolesWithAnIdleRole(t *testing.T) {
+	unsized := podVariant{name: "d", role: domain.RoleDecode, gpus: 8, cur: 2, minR: 1, maxR: 4, cost: 8, perGPU: 100, noCapacityRdg: true}
+	idle := podVariant{name: "p", role: domain.RolePrefill, gpus: 1, cur: 2, cost: 1, perGPU: 100}
 	cases := []struct {
 		name            string
 		prefill, decode podVariant
@@ -89,23 +95,28 @@ func TestSplitRolesGivesAnIdleRoleNoShare(t *testing.T) {
 		holds           map[string]RoleHold
 		want            map[string]int
 	}{{
-		// Split by what the roles hold, 2 and 16, prefill was given 3 of 34
-		// and decode 31; next cycle 4 and 30, and on.
-		name:    "decode unsized: prefill gets nothing",
-		prefill: podVariant{name: "p", role: domain.RolePrefill, gpus: 1, cur: 2, cost: 1, perGPU: 100},
-		decode:  unsized, demD: 1700, target: 34,
-		want: map[string]int{domain.RolePrefill: 0, domain.RoleDecode: 32},
+		// The model's cap is decode's floor, 8: prefill is cut, not grown.
+		name:    "decode unsized, at the model's cap",
+		prefill: idle, decode: unsized, demD: 1700, target: 8,
+		want: map[string]int{domain.RolePrefill: 0, domain.RoleDecode: 8},
 	}, {
-		name:    "decode unsized: prefill gets its floor",
-		prefill: podVariant{name: "p", role: domain.RolePrefill, gpus: 1, cur: 2, minR: 1, cost: 1, perGPU: 100},
-		decode:  unsized, demD: 1700, target: 34,
-		want: map[string]int{domain.RolePrefill: 1, domain.RoleDecode: 32},
-	}, {
-		name:    "decode unsized: held prefill keeps what it holds",
-		prefill: podVariant{name: "p", role: domain.RolePrefill, gpus: 1, cur: 2, cost: 1, perGPU: 100},
-		decode:  unsized, demD: 1700, target: 34,
+		// Held, prefill raises the cap to 10 and keeps its 2.
+		name:    "decode unsized, prefill held, at the model's cap",
+		prefill: idle, decode: unsized, demD: 1700, target: 10,
 		holds: map[string]RoleHold{domain.RolePrefill: {NoScaleDown: true}},
-		want:  map[string]int{domain.RolePrefill: 2, domain.RoleDecode: 32},
+		want:  map[string]int{domain.RolePrefill: 2, domain.RoleDecode: 8},
+	}, {
+		// Held, decode raises the cap to 16 and keeps it all.
+		name:    "decode unsized, decode held, at the model's cap",
+		prefill: idle, decode: unsized, demD: 1700, target: 16,
+		holds: map[string]RoleHold{domain.RoleDecode: {NoScaleDown: true}},
+		want:  map[string]int{domain.RolePrefill: 0, domain.RoleDecode: 16},
+	}, {
+		// A NaN demand sizes to no GPUs, as an unsized role does.
+		name:    "decode reads NaN, at the model's cap",
+		prefill: idle, decode: podVariant{name: "d", role: domain.RoleDecode, gpus: 8, cur: 2, minR: 1, maxR: 4, cost: 8, perGPU: 100},
+		demD: math.NaN(), target: 8,
+		want: map[string]int{domain.RolePrefill: 0, domain.RoleDecode: 8},
 	}, {
 		// Decode at its maxReplicas leaves 14 of the 20 unassigned; prefill,
 		// with no demand, takes none of it.
@@ -130,27 +141,6 @@ func TestSplitRolesGivesAnIdleRoleNoShare(t *testing.T) {
 			req.CompositeSignal.Holds = c.holds
 			assert.Equal(t, c.want, podRoleShares(req, c.target))
 		})
-	}
-}
-
-// TestIdleRoles: a role is idle when it has no demand and another role has
-// some. A NaN demand is no demand.
-func TestIdleRoles(t *testing.T) {
-	roles := []string{domain.RoleDecode, domain.RolePrefill}
-	for _, c := range []struct {
-		dem  map[string]float64
-		want []string
-	}{
-		{dem: map[string]float64{domain.RolePrefill: 0, domain.RoleDecode: 100}, want: []string{domain.RolePrefill}},
-		{dem: map[string]float64{domain.RolePrefill: math.NaN(), domain.RoleDecode: 100}, want: []string{domain.RolePrefill}},
-		{dem: map[string]float64{domain.RolePrefill: 0, domain.RoleDecode: 0}},
-		{dem: map[string]float64{domain.RolePrefill: 50, domain.RoleDecode: 100}},
-	} {
-		req := podRequest(c.dem, []podVariant{
-			{name: "p", role: domain.RolePrefill, gpus: 1, cur: 1, cost: 1, perGPU: 100},
-			{name: "d", role: domain.RoleDecode, gpus: 1, cur: 1, cost: 1, perGPU: 100},
-		})
-		assert.Equal(t, c.want, idleRoles(req.CompositeSignal, roles), "demand %v", c.dem)
 	}
 }
 

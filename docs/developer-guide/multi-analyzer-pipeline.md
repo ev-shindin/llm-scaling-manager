@@ -558,19 +558,7 @@ its held roles hold, and is not reserved that beneath its share of the rest,
 which let a model with a held role grow toward two thirds of a budget it
 shared evenly. So while a role is held against scale-down and holds more than
 its model's share, the model's other roles can drop to their last pod; this
-clears when the hold lifts.
-
-A role with no demand, in a model where another role has some, gets no share
-above its floor (`idleRoles`). If it is held against scale-down, it keeps what
-it holds and gets nothing more. This matters when no role's demand sizes to
-GPUs, for example when the role with demand has no capacity reading. The split
-then goes by what each role holds. The role with demand could not fill its
-share, so the role with no demand took the GPUs left over. Each pod it gained
-raised its weight on the next cycle, so it grew by one pod a cycle at a constant
-target. A model where no role has demand still splits by what each role
-holds.
-
-A model's
+clears when the hold lifts. A model's
 water-fill cap is each role's demand in GPUs capped at that role's
 `maxReplicas` GPUs, summed: counted uncapped, prefill at its maximum of 16
 GPUs sized the cap on 560, and the GPUs that share left free stayed free
