@@ -2,6 +2,7 @@ package allocation
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -70,6 +71,86 @@ func TestSplitRolesKeepsAHeldRoleAtWhatItHolds(t *testing.T) {
 			req.CompositeSignal.Holds = c.holds
 			assert.Equal(t, c.want, podRoleShares(req, c.target))
 		})
+	}
+}
+
+// TestSplitRolesGivesAnIdleRoleNoShare: a role with no demand, beside a role
+// with some, gets its floor, or what it holds when held against scale-down,
+// and nothing above it (#449). Prefill is on 1-GPU pods; decode on 8-GPU pods
+// with a capacity reading or, where noted, none, so its demand sizes to no
+// GPUs and the split falls back to what the roles hold.
+func TestSplitRolesGivesAnIdleRoleNoShare(t *testing.T) {
+	unsized := podVariant{name: "d", role: domain.RoleDecode, gpus: 8, cur: 2, maxR: 4, cost: 8, perGPU: 100, noCapacityRdg: true}
+	cases := []struct {
+		name            string
+		prefill, decode podVariant
+		demP, demD      float64
+		target          int
+		holds           map[string]RoleHold
+		want            map[string]int
+	}{{
+		// Split by what the roles hold, 2 and 16, prefill was given 3 of 34
+		// and decode 31; next cycle 4 and 30, and on.
+		name:    "decode unsized: prefill gets nothing",
+		prefill: podVariant{name: "p", role: domain.RolePrefill, gpus: 1, cur: 2, cost: 1, perGPU: 100},
+		decode:  unsized, demD: 1700, target: 34,
+		want: map[string]int{domain.RolePrefill: 0, domain.RoleDecode: 32},
+	}, {
+		name:    "decode unsized: prefill gets its floor",
+		prefill: podVariant{name: "p", role: domain.RolePrefill, gpus: 1, cur: 2, minR: 1, cost: 1, perGPU: 100},
+		decode:  unsized, demD: 1700, target: 34,
+		want: map[string]int{domain.RolePrefill: 1, domain.RoleDecode: 32},
+	}, {
+		name:    "decode unsized: held prefill keeps what it holds",
+		prefill: podVariant{name: "p", role: domain.RolePrefill, gpus: 1, cur: 2, cost: 1, perGPU: 100},
+		decode:  unsized, demD: 1700, target: 34,
+		holds: map[string]RoleHold{domain.RolePrefill: {NoScaleDown: true}},
+		want:  map[string]int{domain.RolePrefill: 2, domain.RoleDecode: 32},
+	}, {
+		// Decode at its maxReplicas leaves 14 of the 20 unassigned; prefill,
+		// with no demand, takes none of it.
+		name:    "decode sized and at its ceiling",
+		prefill: podVariant{name: "p", role: domain.RolePrefill, gpus: 1, cur: 4, cost: 1, perGPU: 100},
+		decode:  podVariant{name: "d", role: domain.RoleDecode, gpus: 1, cur: 4, maxR: 6, cost: 1, perGPU: 100},
+		demD:    1000, target: 20,
+		want: map[string]int{domain.RolePrefill: 0, domain.RoleDecode: 6},
+	}, {
+		// No role has demand: neither is idle, and the split is by what
+		// each holds, 2 and 6 of 8.
+		name:    "no role has demand",
+		prefill: podVariant{name: "p", role: domain.RolePrefill, gpus: 1, cur: 2, cost: 1, perGPU: 100},
+		decode:  podVariant{name: "d", role: domain.RoleDecode, gpus: 1, cur: 6, cost: 1, perGPU: 100},
+		target:  16,
+		want:    map[string]int{domain.RolePrefill: 4, domain.RoleDecode: 12},
+	}}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := podRequest(map[string]float64{domain.RolePrefill: c.demP, domain.RoleDecode: c.demD},
+				[]podVariant{c.prefill, c.decode})
+			req.CompositeSignal.Holds = c.holds
+			assert.Equal(t, c.want, podRoleShares(req, c.target))
+		})
+	}
+}
+
+// TestIdleRoles: a role is idle when it has no demand and another role has
+// some. A NaN demand is no demand.
+func TestIdleRoles(t *testing.T) {
+	roles := []string{domain.RoleDecode, domain.RolePrefill}
+	for _, c := range []struct {
+		dem  map[string]float64
+		want []string
+	}{
+		{dem: map[string]float64{domain.RolePrefill: 0, domain.RoleDecode: 100}, want: []string{domain.RolePrefill}},
+		{dem: map[string]float64{domain.RolePrefill: math.NaN(), domain.RoleDecode: 100}, want: []string{domain.RolePrefill}},
+		{dem: map[string]float64{domain.RolePrefill: 0, domain.RoleDecode: 0}},
+		{dem: map[string]float64{domain.RolePrefill: 50, domain.RoleDecode: 100}},
+	} {
+		req := podRequest(c.dem, []podVariant{
+			{name: "p", role: domain.RolePrefill, gpus: 1, cur: 1, cost: 1, perGPU: 100},
+			{name: "d", role: domain.RoleDecode, gpus: 1, cur: 1, cost: 1, perGPU: 100},
+		})
+		assert.Equal(t, c.want, idleRoles(req.CompositeSignal, roles), "demand %v", c.dem)
 	}
 }
 

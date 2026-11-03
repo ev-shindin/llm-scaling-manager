@@ -715,6 +715,30 @@ func TestRescaleMixedHeldRoleSettles(t *testing.T) {
 		"the held role grows no further than its share: %s", describePodModel(got, 50))
 }
 
+// TestRescaleMixedIdleRoleSettles is #449. Prefill has no demand and holds two
+// 1-GPU pods beside an empty 8-GPU variant. Decode holds two 8-GPU pods (min
+// 1, max 4) with demand, but its variant has no capacity reading, so its
+// demand sizes to no GPUs. With no role sized, the split went by what each
+// role holds. Decode cannot fill a variant with no reading, so prefill took
+// the spare share, and the pod it gained raised its weight on the next cycle:
+// at a target of 34 it went 2, 3, 4, ... 9 GPUs and settled after 7 cycles.
+// A role with no demand gets no share above its floor, so prefill never grows.
+func TestRescaleMixedIdleRoleSettles(t *testing.T) {
+	req := podRequest(map[string]float64{domain.RolePrefill: 0, domain.RoleDecode: 1700}, []podVariant{
+		{name: "p1", role: domain.RolePrefill, gpus: 1, cur: 2, cost: 1.3, perGPU: 65},
+		{name: "p8", role: domain.RolePrefill, gpus: 8, cost: 10, perGPU: 113},
+		{name: "d8", role: domain.RoleDecode, gpus: 8, cur: 2, minR: 1, maxR: 4, cost: 10, perGPU: 100, noCapacityRdg: true},
+	})
+	require.Equal(t, 18, podCurrentGPUs(req))
+	for target := 31; target <= 34; target++ {
+		got, cycles := podSettle(req, target, 8)
+		require.NotEqual(t, -1, cycles, "target %d: still moving after 8 cycles: %s", target, describePodModel(got, target))
+		assert.LessOrEqual(t, cycles, 2, "target %d: settles within two cycles: %s", target, describePodModel(got, target))
+		assert.LessOrEqual(t, podRoleGPUs(got, domain.RolePrefill), 2,
+			"target %d: the role with no demand grows no further than what it held: %s", target, describePodModel(got, target))
+	}
+}
+
 // TestRescaleMixedHeldRerunSettles: over a grid of mixed-size models, two
 // thirds of them with a role held against scale-up or scale-down, and targets
 // within 16 GPUs of what each holds, rerunning the same target reaches a cycle
