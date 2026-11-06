@@ -1393,7 +1393,7 @@ model reads all of them `0`, including the two marked "on every answer":
 | `TransferOmitted` | No KV transfer time measured: left out, so TTFT reads low. |
 | `DecodeEngineMeasured` | No decode line: decode's part is the decode engine's measured mean TTFT, held at the rate it was measured at. |
 | `DecodeSideOmitted`, `DecodeTTFTUnmeasured` | No decode line and no measured TTFT: decode's part is left out, so TTFT reads low. They always come together. |
-| `FlowControlInferredOff` | `slo.flowControl` is unset and no flow-control series exist. A scrape gap looks the same: declare it. |
+| `FlowControlInferredOff` | `slo.flowControl` is unset and the flow-control queue series does not exist. A scrape gap looks the same: declare it. |
 | `FlowControlMismatch` | The declared `slo.flowControl` contradicts the series. Priced as declared; the log says so. |
 | `AboveFlowControlOnset` | At the rate answered, the prefill gate is closing: the model is not proven conservative there. |
 | `HeldByDecodeAdmission` | The decode wait lowers the rate a little. Informational below `decode-bound`. |

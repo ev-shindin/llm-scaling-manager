@@ -163,7 +163,7 @@
           "V_P 30000 tok/s (--assume-vp)",
           "prompt 1000 tokens (--assume-input-tokens)",
           "prompt cv 2 (no computed-prompt histogram)",
-          "flow control off (no series)",
+          "flow control off (no queue series)",
           "Poisson arrivals"
         ]
       },

@@ -141,8 +141,8 @@ const (
 	// FlowControlOff is flow control known to be off (the upstream default):
 	// the router admits everything, W_router = 0.
 	FlowControlOff FlowControlState = iota
-	// FlowControlNoSeries is off because none of its series exist: priced
-	// as off, flagged FlowControlInferredOff.
+	// FlowControlNoSeries is off because its queue series does not exist:
+	// priced as off, flagged FlowControlInferredOff.
 	FlowControlNoSeries
 	// FlowControlOn is the flowControl feature gate on, with the default
 	// utilization detector under the static policy, one band.

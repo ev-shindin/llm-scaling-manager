@@ -1,7 +1,7 @@
 role     est. rate at SLO   bound by                                 basis
 prefill  refused: TargetBelowFloor (target 0.001 s at or below the TTFT floor 0.2083 s)
          inputs V_P 130000 ASSUMED; a 11.58 ms learned; f 1 (one pod); N_p 1 (recording); prompt 15975 tokens (measured, cycles 83-102); decode engine TTFT 73.9 ms at 16608 tokens, measured
-         assumed V_P 130000 tok/s (--assume-vp); prompt cv 2 (no computed-prompt histogram); flow control off (no series); Poisson arrivals
+         assumed V_P 130000 tok/s (--assume-vp); prompt cv 2 (no computed-prompt histogram); flow control off (no queue series); Poisson arrivals
 fleet    refused: TargetBelowFloor (target 0.001 s at or below the TTFT floor 0.2083 s)
 estimate from no readings of the line's own of a 105-cycle recording, not a guarantee; see basis (-o json)
 TTFT is UNVALIDATED until the staircase run (M2) and is not a bound: at the assumed prompt cv 2 it read 1.1x to 4.1x the router's percentile on the P2 recordings; at the sent spread (cv 0.06) up to 34% under it. V_P ASSUMED.

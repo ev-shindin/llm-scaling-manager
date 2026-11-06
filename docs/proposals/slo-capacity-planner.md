@@ -57,7 +57,7 @@ mean TPOT       3.66 ms     [3.58 .. 3.79]   line ols, observed fill up to 0.62
 TPOT p90        4.76 ms                      per request; R_q 1.3 ASSUMED (no TPOT histogram)
 TTFT p90        160 ms      [146 .. 207]     end to end; UNVALIDATED; V_P ASSUMED
                 (154 ms if prefill and decode waits were independent)
-flags: flow control inferred off (no series); T_xfer omitted (not collected);
+flags: flow control inferred off (no queue series); T_xfer omitted (not collected);
        prompt spread assumed (cv 1)
 estimate from cycles 1-226, not a guarantee; see basis (-o json)
 
@@ -823,12 +823,13 @@ TTFT: the decode answers are as they were.
 | Arrivals | None | Poisson, flagged `AssumedPoissonArrivals`, the S1 flag, kept in `cmd/whatif` because P3 has none |
 | `T_xfer` | Decode rows' `AvgKVTransferTime` over the measured prompt | Left out, flagged `TransferOmitted` |
 | Decode side | The decode variant's line, if `whatif.KneeRate` prices it | The decode engine's `AvgTTFT`, readings above 0 only: the largest of the last 5 cycles, with that cycle's prompt, flagged `DecodeEngineMeasured`. A cycle with no reading holds an empty slot, so the figure ages out of an idle tail. Else left out, flagged `DecodeSideOmitted` and `DecodeTTFTUnmeasured` |
-| Flow control | On when the scheduler queue, a pool joined to the model or its wait histogram exists at the cycle | Off, flagged `FlowControlInferredOff`. On takes the upstream thresholds 5 and 0.8, and is named as assumed. On with no decode line is answered, flagged `DecodeOnsetUnchecked`; S1 refuses that case, a planner reads the flag. `--flow-control` is not built |
+| Flow control | On when the scheduler queue exists at the cycle, S1's rule (`domain.AnalyzerInput.FlowControlSeries`). A pool or a wait histogram does not count: both are filled only while recording, and wait buckets read at rate 0 within a run's first 3 to 4 minutes on runs `goldens.yaml` describes as off, cause not known (74 cycles across five committed recordings) | Off, flagged `FlowControlInferredOff`. On takes the upstream thresholds 5 and 0.8, and is named as assumed. On with no decode line is answered, flagged `DecodeOnsetUnchecked`; S1 refuses that case, a planner reads the flag. `--flow-control` is not built |
 
 Every assumed input is named on the `assumed` row, and in `ttft.assumed` in the
 JSON, the two whole-rate assumptions among them: `--prefill-variant` gives one
 variant the whole rate, and with several decode variants each is priced at the
-model's whole rate, as S1 prices decode.
+model's whole rate, as S1 prices decode. The assumed figures are S1's own: both
+read them from `internal/signals/whatif/ttft_assumed.go`.
 
 Two more flags are S1's (#486):
 
@@ -859,7 +860,7 @@ TTFT p90        353.4 ms                     end to end; UNVALIDATED; V_P ASSUME
                 (323.4 ms if prefill and decode waits were independent)
                 (floor 113.3 ms, pooled 311.4 ms, worst pod utilization 0.377)
 ttft inputs     V_P 30000 ASSUMED; a 11.04 ms learned; f 1 (one pod); N_p 1 (--prefill); prompt 1000 tokens (assumed); decode by its line
-assumed         V_P 30000 tok/s (--assume-vp); prompt 1000 tokens (--assume-input-tokens); prompt cv 2 (no computed-prompt histogram); flow control off (no series); Poisson arrivals
+assumed         V_P 30000 tok/s (--assume-vp); prompt 1000 tokens (--assume-input-tokens); prompt cv 2 (no computed-prompt histogram); flow control off (no queue series); Poisson arrivals
 ```
 
 That is the worked example with the CLI's `cv` of 2, so 353 ms where the page,

@@ -130,14 +130,14 @@ func TestTTFTFleet_FIsLearnedAtItsOwnCount(t *testing.T) {
 	// minutes, and the assumed f is used.
 	in.pods = 4
 	fl, _ = ttftFleet(in, 4)
-	assert.Equal(t, fFloor, fl.Prefill.Imbalance)
+	assert.Equal(t, whatif.ImbalanceFloor, fl.Prefill.Imbalance)
 	assert.True(t, fl.Prefill.ImbalanceAssumed)
 	assert.Equal(t, 4, fl.Prefill.Replicas)
 
 	// P1's F, a median over every count, is never what is priced.
 	in.est.F = 3.9
 	fl, _ = ttftFleet(in, 4)
-	assert.Equal(t, fFloor, fl.Prefill.Imbalance)
+	assert.Equal(t, whatif.ImbalanceFloor, fl.Prefill.Imbalance)
 }
 
 // Test 5: the assumed f, its floor and its clamp; one pod gives no f.
@@ -234,9 +234,9 @@ func TestNoteShare_TheWindow(t *testing.T) {
 	assert.Equal(t, 1.3, a.noteShare("k", 4, 0, false, ttftNow).largest, "a cycle with no share leaves the window")
 	assert.Equal(t, shareWindow{}, a.noteShare("k2", 4, 0, false, ttftNow), "no share yet")
 
-	// Least, and full only at ttftWindowCycles readings.
+	// Least, and full only at whatif.TTFTWindowCycles readings.
 	var w shareWindow
-	for i := range ttftWindowCycles {
+	for i := range whatif.TTFTWindowCycles {
 		assert.False(t, w.full, "after %d", i)
 		w = a.noteShare("k3", 2, 1.7+float64(i)*0.01, true, ttftNow)
 	}
@@ -479,7 +479,7 @@ func TestTTFT_ASpreadAboveThePeakIsFlagged(t *testing.T) {
 }
 
 // The table is the gamma's: the prompt's own quantile, as the model prices it
-// at no load, peaks where promptCVPeak says at each percentile.
+// at no load, peaks where whatif.PromptCVPeak says at each percentile.
 func TestTTFT_PromptCVPeakIsTheGammas(t *testing.T) {
 	floor := func(cv, q float64) float64 {
 		in := ttftInputsAt(1, 0)
@@ -498,11 +498,11 @@ func TestTTFT_PromptCVPeakIsTheGammas(t *testing.T) {
 				best, at = f, cv
 			}
 		}
-		assert.InDelta(t, at, promptCVPeak(percent), 0.03, "p%d", percent)
+		assert.InDelta(t, at, whatif.PromptCVPeak(float64(percent)/100), 0.03, "p%d", percent)
 	}
-	assert.Equal(t, 2.22, promptCVPeak(90))
-	assert.Equal(t, maxMeasuredPromptCV, promptCVPeak(94))
-	assert.Equal(t, 0.0, promptCVPeak(40))
+	assert.Equal(t, 2.22, whatif.PromptCVPeak(0.90))
+	assert.Equal(t, whatif.PromptCVStop, whatif.PromptCVPeak(0.94))
+	assert.Equal(t, 0.0, whatif.PromptCVPeak(0.40))
 }
 
 // Test 8: the prompt V_P was read at and the curve reach the model through
@@ -658,7 +658,7 @@ func TestProperty_TTFTIsMonotoneInCV(t *testing.T) {
 		require.True(t, ok)
 		rate := knee.Value * (0.05 + 0.9*r.Float64())
 		var cvs []float64
-		for cv := 0.3; cv <= promptCVPeak(percent)+1e-9; cv += 0.1 {
+		for cv := 0.3; cv <= whatif.PromptCVPeak(float64(percent)/100)+1e-9; cv += 0.1 {
 			cvs = append(cvs, cv)
 		}
 		var floor float64
@@ -737,7 +737,7 @@ func TestTTFT_TheCVClaimsThatDoNotHold(t *testing.T) {
 	// by multiples between the peak and the stop.
 	for _, percent := range []int{90, 92, 93} {
 		q := float64(percent) / 100
-		peak := promptCVPeak(percent)
+		peak := whatif.PromptCVPeak(float64(percent) / 100)
 		in := ttftInputsAt(1, 0)
 		rateAt := func(cv float64, target whatif.TTFTTarget) float64 {
 			in.spread.cv = cv
@@ -835,15 +835,17 @@ func TestTTFT_FlowControlThroughAnalyze(t *testing.T) {
 	assert.Equal(t, constants.SLOTTFTReasonNoDecodeSide, r.one(t).Reason, "on, with no decode side")
 }
 
-// FlowControlPools is filled only while a learner recording is on. The state
-// reads SchedulerQueue alone, so a run recorded and the same run unrecorded
-// price alike, which is what lets a replay stand for production.
+// FlowControlPools and the wait histogram are filled only while a learner
+// recording is on. The state reads SchedulerQueue alone, so a run recorded and
+// the same run unrecorded price alike, which is what lets a replay stand for
+// production.
 func TestTTFT_TheFlowControlStateDoesNotDependOnARecording(t *testing.T) {
 	for _, queue := range []*domain.SchedulerQueueMetrics{nil, {}} {
 		r := newTTFTRig(ttftEstimate(), prefillRows("pre", 4000))
 		r.in.SchedulerQueue = queue
 		unrecorded := r.one(t)
 		r.in.FlowControlPools = []domain.FlowControlPool{{}}
+		r.in.RouterLatency = &domain.RouterLatency{FlowControlWaitBuckets: []domain.LatencyBucket{{UpperBound: 1, Rate: 1}}}
 		recorded := r.one(t)
 		assert.Equal(t, unrecorded.Reason, recorded.Reason)
 		assert.Equal(t, unrecorded.Flags, recorded.Flags)

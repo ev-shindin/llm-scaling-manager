@@ -42,9 +42,6 @@ import (
 const SwitchTTFTPrice = "slo-ttft-price"
 
 const (
-	// routingBoundShare is the f / N_p at which one pod takes the work and
-	// more pods would mostly sit idle behind the router. Not measured.
-	routingBoundShare = 0.8
 	// decodeBoundRatio is how far the prefill side's own rate must exceed
 	// the full rate for decode to count as setting it: any decode wait lowers
 	// the full rate a little, and reading that as a hold would stop S2
@@ -273,10 +270,7 @@ func (a *Analyzer) priceTTFTVariants(logger logr.Logger, input domain.AnalyzerIn
 	}
 	target := whatif.TTFTTarget{Seconds: cfg.SLO.TTFT.Target.Seconds(), Percentile: float64(cfg.SLO.TTFTPercentile()) / 100}
 	statistic := "p" + strconv.Itoa(cfg.SLO.TTFTPercentile())
-	// From SchedulerQueue alone, which is collected every cycle: FlowControlPools
-	// is filled only while a learner recording is on, and reading it would make
-	// the state depend on that.
-	flow, mismatch := flowControlState(cfg.SLO, input.SchedulerQueue != nil)
+	flow, mismatch := flowControlState(cfg.SLO, input.FlowControlSeries())
 	if mismatch {
 		logger.V(logging.VERBOSE).Info("slo.flowControl contradicts the router's flow-control series; priced as declared",
 			"modelID", input.ModelID, "namespace", input.Namespace, "declared", string(cfg.SLO.FlowControl),

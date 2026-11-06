@@ -111,7 +111,7 @@
         "assumed": [
           "V_P 130000 tok/s (--assume-vp)",
           "prompt cv 2 (no computed-prompt histogram)",
-          "flow control off (no series)",
+          "flow control off (no queue series)",
           "Poisson arrivals"
         ]
       },

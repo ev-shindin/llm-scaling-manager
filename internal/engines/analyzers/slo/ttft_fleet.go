@@ -16,76 +16,28 @@ import (
 // it: only err toward more replicas. An unknown input takes the value that
 // asks for more, and is flagged.
 
-const (
-	// fFloor is the least f assumed on more than one pod. Not measured: it
-	// is the TTFT model's own synthetic multi-pod case, near P1's 2:1:1:1
-	// example (1.6). The prefill-stress run at three pods read a raw share of
-	// at most 1.33 over its loaded cycles, so it held there. At light load the
-	// raw share is chance: the same run read 3.00 at 0.06 r/s.
-	fFloor = 1.5
-	// ttftWindowCycles is how many cycles the raw share and the decode
-	// engine's TTFT are held over.
-	ttftWindowCycles = 5
-	// assumedPromptCV is the prompt spread with no histogram: not measured,
-	// the top of the spread taken as plausible.
-	assumedPromptCV = 2.0
-	// maxMeasuredPromptCV is the most spread passed. It is a stop, not the
-	// value that prices the longest TTFT: at no load that is promptCVPeak, 2.22
-	// at p90, and past 3 the p90 falls fast, to 1.96 times the mean by cv 4.
-	maxMeasuredPromptCV = 3.0
-	// flowControlQueueThreshold and flowControlKVThreshold are the EPP
-	// detector's upstream defaults, which this repository's install leaves
-	// unchanged.
-	flowControlQueueThreshold = 5.0
-	flowControlKVThreshold    = 0.8
-)
-
 // The analyzer's own flags, added to the TTFT model's on an answer.
 const (
 	// AssumedPoissonArrivals is every S1 answer: arrivals are taken as
 	// Poisson, which over-promises on bursty traffic.
 	AssumedPoissonArrivals whatif.Flag = "AssumedPoissonArrivals"
 	// PromptSpreadClamped is a measured prompt spread with mass past the
-	// histogram's last bound, or above maxMeasuredPromptCV: priced at that stop.
+	// histogram's last bound, or above whatif.PromptCVStop: priced at that stop.
 	PromptSpreadClamped whatif.Flag = "PromptSpreadClamped"
 	// FlowControlMismatch is a declared slo.flowControl the router's series
 	// contradict: priced as declared.
 	FlowControlMismatch whatif.Flag = "FlowControlMismatch"
-	// PromptSpreadAbovePeak is a cv, assumed or measured, above promptCVPeak
+	// PromptSpreadAbovePeak is a cv, assumed or measured, above whatif.PromptCVPeak
 	// for the objective's percentile: the prompt's own tail shrinks as cv
 	// rises from there, so a larger cv prices a shorter floor and can price a
 	// higher rate. On S2's no-act list.
 	PromptSpreadAbovePeak whatif.Flag = "PromptSpreadAbovePeak"
-	// ImbalanceNotSustained is an f at or above routingBoundShare of the pods
+	// ImbalanceNotSustained is an f at or above whatif.RoutingBoundShare of the pods
 	// that has not held over the whole window: chance alone can read that at
 	// two pods. Priced at it, the side that asks for more replicas, and not
 	// routing-bound.
 	ImbalanceNotSustained whatif.Flag = "ImbalanceNotSustained"
 )
-
-// promptCVPeaks is, from p50 to p93, the cv at which a mean-one gamma's quantile
-// peaks on [0, 3], to 0.01. From p94 it is still rising at 3. Below 0.5 the
-// figure is a median, under the mean at any cv, so its peak is cv 0.
-var promptCVPeaks = [...]float64{
-	0, 0.04, 0.08, 0.11, 0.15, 0.19, 0.23, 0.26, 0.30, 0.34,
-	0.38, 0.42, 0.46, 0.50, 0.54, 0.58, 0.62, 0.66, 0.70, 0.74,
-	0.79, 0.83, 0.87, 0.92, 0.97, 1.02, 1.07, 1.12, 1.18, 1.24,
-	1.30, 1.36, 1.43, 1.50, 1.58, 1.66, 1.75, 1.85, 1.96, 2.08,
-	2.22, 2.38, 2.56, 2.78,
-}
-
-// promptCVPeak is the cv that prices the longest prompt at the percentile, at
-// no load (TestTTFT_PromptCVPeakIsTheGammas).
-func promptCVPeak(percent int) float64 {
-	i := percent - 50
-	switch {
-	case i < 0:
-		return 0
-	case i >= len(promptCVPeaks):
-		return maxMeasuredPromptCV
-	}
-	return promptCVPeaks[i]
-}
 
 // Where f came from, on the log line.
 const (
@@ -147,7 +99,7 @@ func (in ttftInputs) imbalance(pods int) (f float64, assumed bool, source string
 	if pods == in.pods {
 		return f, assumed, source
 	}
-	f = min(float64(pods), max(fFloor, f))
+	f = min(float64(pods), max(whatif.ImbalanceFloor, f))
 	return f, pods > 1, fSourceAssumed
 }
 
@@ -160,20 +112,20 @@ func (in ttftInputs) imbalanceNow() (float64, bool, string) {
 	if in.pods <= 1 {
 		return 0, false, fSourceOnePod
 	}
-	return min(float64(in.pods), max(fFloor, in.shares.largest)), true, fSourceAssumed
+	return min(float64(in.pods), max(whatif.ImbalanceFloor, in.shares.largest)), true, fSourceAssumed
 }
 
-// routing reads f at the current count against routingBoundShare of the pods:
+// routing reads f at the current count against whatif.RoutingBoundShare of the pods:
 // bound when it holds, which a learned f has shown over its minutes and a raw
 // share must show over the whole window; transient when f reads there and has
 // not held. One pod has no router to blame: f / N_p is 1 by construction.
 func (in ttftInputs) routing() (bound, transient bool) {
 	f, _, source := in.imbalanceNow()
 	pods := float64(in.pods)
-	if in.pods < 2 || f/pods < routingBoundShare {
+	if in.pods < 2 || f/pods < whatif.RoutingBoundShare {
 		return false, false
 	}
-	if source == fSourceLearned || in.shares.full && in.shares.least/pods >= routingBoundShare {
+	if source == fSourceLearned || in.shares.full && in.shares.least/pods >= whatif.RoutingBoundShare {
 		return true, false
 	}
 	return false, true
@@ -206,7 +158,7 @@ func ttftFleet(in ttftInputs, pods int) (whatif.TTFTFleet, []whatif.Flag) {
 	if in.mismatch {
 		flags = append(flags, FlowControlMismatch)
 	}
-	if in.spread.cv > promptCVPeak(in.percent) {
+	if in.spread.cv > whatif.PromptCVPeak(float64(in.percent)/100) {
 		flags = append(flags, PromptSpreadAbovePeak)
 	}
 	if _, transient := in.routing(); transient && pods == in.pods {
@@ -221,8 +173,8 @@ func ttftFleet(in ttftInputs, pods int) (whatif.TTFTFleet, []whatif.Flag) {
 // series counts as a mismatch, the conservative reading; whether an on gate
 // publishes its queue series while empty is not verified.
 func flowControlState(p *config.SLOPolicy, seriesSeen bool) (whatif.FlowControl, bool) {
-	on := whatif.FlowControl{State: whatif.FlowControlOn, QueueThreshold: flowControlQueueThreshold,
-		KVThreshold: flowControlKVThreshold}
+	on := whatif.FlowControl{State: whatif.FlowControlOn, QueueThreshold: whatif.FlowControlQueueThreshold,
+		KVThreshold: whatif.FlowControlKVThreshold}
 	switch {
 	case p != nil && p.FlowControl == config.SLOFlowControlEnabled:
 		return on, !seriesSeen
@@ -249,9 +201,9 @@ type promptSpread struct {
 // The second moment uses each bucket's upper bound, so cv reads high, never
 // low: that costs replicas, not safety. Mass past the last finite bound has no
 // upper bound, so cv is the top and flagged, as is a cv above it. With no
-// histogram it is assumedPromptCV, flagged by the model.
+// histogram it is whatif.AssumedPromptCV, flagged by the model.
 func readPromptSpread(rows []domain.ReplicaMetrics, mean float64) promptSpread {
-	assumed := promptSpread{cv: assumedPromptCV, assumed: true}
+	assumed := promptSpread{cv: whatif.AssumedPromptCV, assumed: true}
 	pooled := map[float64]float64{}
 	for _, rm := range rows {
 		if !prefill.Serving(rm) {
@@ -282,11 +234,11 @@ func readPromptSpread(rows []domain.ReplicaMetrics, mean float64) promptSpread {
 		below = max(below, pooled[u])
 	}
 	if total > below {
-		return promptSpread{cv: maxMeasuredPromptCV, clamped: true}
+		return promptSpread{cv: whatif.PromptCVStop, clamped: true}
 	}
 	cv := math.Sqrt(max(second/total/(mean*mean)-1, 0))
-	if !whatif.Finite(cv) || cv > maxMeasuredPromptCV {
-		return promptSpread{cv: maxMeasuredPromptCV, clamped: true}
+	if !whatif.Finite(cv) || cv > whatif.PromptCVStop {
+		return promptSpread{cv: whatif.PromptCVStop, clamped: true}
 	}
 	return promptSpread{cv: cv}
 }
@@ -316,7 +268,7 @@ func rawShare(rows []domain.ReplicaMetrics, view *prefill.Settle, now time.Time)
 }
 
 // imbalanceWindow is a prefill variant's raw shares over the last
-// ttftWindowCycles cycles at its current Ready count.
+// whatif.TTFTWindowCycles cycles at its current Ready count.
 type imbalanceWindow struct {
 	pods   int
 	shares []float64
@@ -327,7 +279,7 @@ type imbalanceWindow struct {
 type shareWindow struct {
 	// largest and least are over the window; 0 with none.
 	largest, least float64
-	// full is a window of ttftWindowCycles readings.
+	// full is a window of whatif.TTFTWindowCycles readings.
 	full bool
 }
 
@@ -344,11 +296,11 @@ func (a *Analyzer) noteShare(key string, pods int, share float64, ok bool, now t
 	w.seen = now
 	if ok {
 		w.shares = append(w.shares, share)
-		if len(w.shares) > ttftWindowCycles {
+		if len(w.shares) > whatif.TTFTWindowCycles {
 			w.shares = w.shares[1:]
 		}
 	}
-	out := shareWindow{full: len(w.shares) == ttftWindowCycles}
+	out := shareWindow{full: len(w.shares) == whatif.TTFTWindowCycles}
 	for i, s := range w.shares {
 		out.largest = max(out.largest, s)
 		if i == 0 || s < out.least {
@@ -359,7 +311,7 @@ func (a *Analyzer) noteShare(key string, pods int, share float64, ok bool, now t
 }
 
 // decodeTTFTWindow is a decode variant's measured TTFT over the last
-// ttftWindowCycles cycles, each with the prompt of its cycle. A cycle with no
+// whatif.TTFTWindowCycles cycles, each with the prompt of its cycle. A cycle with no
 // reading holds an empty slot, so a figure ages out when the rows stop
 // carrying one.
 type decodeTTFTWindow struct {
@@ -379,7 +331,7 @@ func (a *Analyzer) noteDecodeTTFT(key string, cycle whatif.DecodeTTFT, now time.
 	}
 	w.seen = now
 	w.cycles = append(w.cycles, cycle)
-	if len(w.cycles) > ttftWindowCycles {
+	if len(w.cycles) > whatif.TTFTWindowCycles {
 		w.cycles = w.cycles[1:]
 	}
 	var largest whatif.DecodeTTFT

@@ -83,7 +83,7 @@ func TestTTFT_SaysUnvalidatedAndAssumedInTextAndJSON(t *testing.T) {
 		assert.Contains(t, text, "UnvalidatedTTFT")
 		assert.Contains(t, text, "AssumedVP")
 		// Each assumed input is named.
-		for _, name := range []string{"V_P 30000 tok/s (--assume-vp)", "prompt cv 2", "Poisson arrivals", "flow control off (no series)"} {
+		for _, name := range []string{"V_P 30000 tok/s (--assume-vp)", "prompt cv 2", "Poisson arrivals", "flow control off (no queue series)"} {
 			assert.Contains(t, text, name)
 		}
 
@@ -357,7 +357,7 @@ func TestTTFT_FlowControl(t *testing.T) {
 	st := learnedState()
 	pf := fleetOf(t, st, answerFlags{})
 	assert.Equal(t, whatif.FlowControlNoSeries, pf.fleet.FlowControl.State)
-	assert.Contains(t, pf.in.Assumed, "flow control off (no series)")
+	assert.Contains(t, pf.in.Assumed, "flow control off (no queue series)")
 
 	st.FlowControlSeries = true
 	pf = fleetOf(t, st, answerFlags{})
@@ -627,7 +627,7 @@ func TestTTFT_PromptSpreadAbovePeak(t *testing.T) {
 		q    float64
 		peak float64
 	}{{0.70, 0.79}, {0.80, 1.30}, {0.85, 1.66}, {0.88, 1.96}, {0.90, 2.22}, {0.92, 2.56}, {0.93, 2.78}, {0.94, 3}, {0.999, 3}, {0.4, 0}} {
-		assert.Equal(t, c.peak, promptCVPeak(c.q), "q %g", c.q)
+		assert.Equal(t, c.peak, whatif.PromptCVPeak(c.q), "q %g", c.q)
 	}
 	flagged := func(q float64) bool {
 		f := answerFlags{set: map[string]bool{}}
@@ -927,6 +927,9 @@ func pdRichServer(t *testing.T) *promtest.Server {
 	}
 	srv.Add(q(registration.QueryFlowControlPoolModels), promtest.Series{Value: stepped(func(int) float64 { return 0 }),
 		Labels: map[string]string{"inference_pool": "pool-m", "model_name": "m", "target_model_name": "m"}})
+	// The same gauge, by model: what says the gate is on.
+	srv.Add(q(registration.QuerySchedulerQueueSize), promtest.Series{Value: stepped(func(int) float64 { return 0 }),
+		Labels: map[string]string{"model_name": "m", "target_model_name": "m", "namespace": sweepNS}})
 	return srv
 }
 

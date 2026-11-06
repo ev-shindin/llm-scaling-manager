@@ -194,7 +194,7 @@ data:
     slo:
       tpot: {target: 100ms}                  # a mean
       ttft: {target: 3s, percentile: 90}     # a percentile; observed only (TTFT enforce is step 2c)
-      flowControl: disabled                  # S1: the EPP's flow-control gate, declared (not parsed yet)
+      flowControl: disabled                  # S1: the EPP's flow-control gate, declared
       mode: enforce                          # phase 1: not parsed yet, ignored today
 ```
 
@@ -1389,7 +1389,8 @@ P2](slo-capacity-planner-ttft.md#as-built-p3-after-p2), 7 each at p90 and p95:
 6. **Flow control is inferred from `SchedulerQueue` alone**, collected every
    cycle. `FlowControlPools` is filled only while a learner recording is on, so
    reading it would have made a replay differ from production
-   (`TestTTFT_TheFlowControlStateDoesNotDependOnARecording`). `AvgKVTransferTime`
+   (`TestTTFT_TheFlowControlStateDoesNotDependOnARecording`). The what-if CLI
+   reads the same rule, `domain.AnalyzerInput.FlowControlSeries`. `AvgKVTransferTime`
    still differs that way: it is recorded and not collected, so `TransferOmitted`
    stands in production until Q1.
 7. **Flags.** `PromptSpreadAbovePeak` and `ImbalanceNotSustained` join the list.
@@ -1406,7 +1407,7 @@ on this path: S1 always passes `f`, and `RateForTTFT` stays below both limits.
 
 **Decision 3's monotonicity is narrower than stated.** The prompt's quantile
 peaks below `cv` 3 up to p93: 0.79 at p70, 1.30 at p80, 1.66 at p85, 2.22 at
-p90, 2.78 at p93 (`promptCVPeak`, `TestTTFT_PromptCVPeakIsTheGammas`). At p90
+p90, 2.78 at p93 (`whatif.PromptCVPeak`, `TestTTFT_PromptCVPeakIsTheGammas`). At p90
 it is 8% lower at `cv` 3 than at the peak. What holds, on seeded fleets at p90
 to p93, p95 and p99 (`TestProperty_TTFTIsMonotoneInCV`), is that from `cv` 0.3
 up to the peak a larger `cv` prices no shorter TTFT from 0.05 of the knee and no

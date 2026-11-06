@@ -153,14 +153,14 @@ func TestTTFTSamples_RawShare(t *testing.T) {
 	assert.False(t, full)
 
 	// An idle tail forgets nothing: S1 appends only the cycles that read one.
-	for c := 5; c < 5+2*rawShareCycles; c++ {
+	for c := 5; c < 5+2*whatif.TTFTWindowCycles; c++ {
 		s.note(pdInput(prefillRow("p0", 0, 0), prefillRow("p1", 0, 0)), c)
 	}
 	largest, _, full = s.shares["pre"].read()
 	assert.InDelta(t, 4.0/3, largest, 1e-9)
 	assert.False(t, full)
 
-	for c := 20; c < 20+rawShareCycles; c++ {
+	for c := 20; c < 20+whatif.TTFTWindowCycles; c++ {
 		s.note(pdInput(prefillRow("p0", 300, 1), prefillRow("p1", 200, 1)), c)
 	}
 	largest, least, full = s.shares["pre"].read()
@@ -197,7 +197,7 @@ func TestTTFTSamples_EngineTTFTIsAPair(t *testing.T) {
 	idle(12)
 	assert.InDelta(t, 0.05, largestTTFT(s.engineTTFT["dec"]).Seconds, 1e-12, "the 0.25 has aged out")
 	idle(13)
-	assert.Len(t, s.engineTTFT["dec"], decodeTTFTCycles)
+	assert.Len(t, s.engineTTFT["dec"], whatif.TTFTWindowCycles)
 	assert.Zero(t, largestTTFT(s.engineTTFT["dec"]))
 }
 
@@ -270,15 +270,25 @@ func TestEstimateAt(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// Each of the router's flow-control series says it is on; a nil router
-// latency, or one with no wait histogram, says nothing.
-func TestFlowControlSeries(t *testing.T) {
-	assert.False(t, flowControlSeries(domain.AnalyzerInput{}))
-	assert.False(t, flowControlSeries(domain.AnalyzerInput{RouterLatency: &domain.RouterLatency{}}))
-	assert.True(t, flowControlSeries(domain.AnalyzerInput{SchedulerQueue: &domain.SchedulerQueueMetrics{}}))
-	assert.True(t, flowControlSeries(domain.AnalyzerInput{FlowControlPools: []domain.FlowControlPool{{}}}))
-	assert.True(t, flowControlSeries(domain.AnalyzerInput{RouterLatency: &domain.RouterLatency{
-		FlowControlWaitBuckets: []domain.LatencyBucket{{UpperBound: 1, Rate: 1}}}}))
+// Cycle 5 of the short run holds a wait histogram at rate 0 and no queue, on a
+// run goldens.yaml describes as flow control off. The state reads no queue
+// series there, as S1 does.
+func TestStateAt_AZeroRateWaitHistogramIsNoFlowControl(t *testing.T) {
+	assert.False(t, goldenState(t, ttftOpenShortFixture, 5).FlowControlSeries)
+}
+
+// The acceptance run holds a queue for one model of its three, and the state
+// says so for that model and not for the others.
+func TestStateAt_AQueueIsFlowControl(t *testing.T) {
+	gz, err := os.ReadFile(filepath.Join(goldenDir, "acceptance", RecordingName))
+	require.NoError(t, err)
+	raw, err := gunzip(gz)
+	require.NoError(t, err)
+	for model, want := range map[string]bool{"model-01": true, "model-03": false} {
+		st, err := StateAt(context.Background(), raw, Options{}, StateQuery{ModelID: model})
+		require.NoError(t, err)
+		assert.Equal(t, want, st.FlowControlSeries, model)
+	}
 }
 
 // The transfer is the mean over the rows that read one, and an unread row is

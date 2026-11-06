@@ -9,8 +9,11 @@ import (
 
 // The router's flow-control layer per InferencePool, recorded for the TTFT
 // model and read by nothing yet (docs/proposals/analyzer-learner.md, 2.9;
-// slo-capacity-planner-ttft.md, "The router queue"). The series exist only
-// while the EPP's flowControl feature gate is on.
+// slo-capacity-planner-ttft.md, "The router queue"). The EPP publishes the
+// series with its flowControl feature gate on, and with it off they are
+// normally absent. Not always: wait buckets at rate 0 were recorded within a
+// run's first 3 to 4 minutes on runs goldens.yaml describes as off, cause not
+// known.
 //
 // The saturation gauge and the outcome counter carry the pool
 // (inference_pool) and no model. The pool is joined to a model by the

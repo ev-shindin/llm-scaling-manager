@@ -25,53 +25,6 @@ import (
 // Every assumed input is named twice: in the flags, and in the words of the
 // fleet's assumed list, which the text prints and the JSON carries.
 
-// The inputs S1 fixes when the recording has no reading of them.
-const (
-	// assumedPromptCV is S1's prompt spread with no computed-prompt histogram
-	// (slo-tiers.md, "The prompt spread"). No committed recording carries
-	// that histogram: the collector gains it with Q1.
-	assumedPromptCV = 2.0
-	// imbalanceFloor is S1's least assumed f on more than one pod
-	// (slo-tiers.md, decision 1).
-	imbalanceFloor = 1.5
-	// upstreamQueueThreshold and upstreamKVThreshold are the flow-control
-	// detector's defaults, which S1 assumes with the gate on: nothing
-	// recorded reads them.
-	upstreamQueueThreshold = 5.0
-	upstreamKVThreshold    = 0.8
-	// routingBoundShare is the f / N_p at which one pod takes the work and
-	// more pods would mostly sit idle behind the router (S1, decision 1).
-	// Not measured.
-	routingBoundShare = 0.8
-	// maxPromptCV is the most spread S1 passes, and where the peak table
-	// below ends.
-	maxPromptCV = 3.0
-)
-
-// promptCVPeaks is S1's table, from p50 to p93: the cv at which a mean-one
-// gamma's quantile peaks on [0, 3], to 0.01. From p94 it is still rising at
-// 3. Below p50 the figure is a median, under the mean at any cv.
-var promptCVPeaks = [...]float64{
-	0, 0.04, 0.08, 0.11, 0.15, 0.19, 0.23, 0.26, 0.30, 0.34,
-	0.38, 0.42, 0.46, 0.50, 0.54, 0.58, 0.62, 0.66, 0.70, 0.74,
-	0.79, 0.83, 0.87, 0.92, 0.97, 1.02, 1.07, 1.12, 1.18, 1.24,
-	1.30, 1.36, 1.43, 1.50, 1.58, 1.66, 1.75, 1.85, 1.96, 2.08,
-	2.22, 2.38, 2.56, 2.78,
-}
-
-// promptCVPeak is the cv that prices the longest prompt at percentile q, read
-// at the whole percent below it, the lower peak, which flags sooner.
-func promptCVPeak(q float64) float64 {
-	i := int(math.Floor(100*q+1e-9)) - 50
-	switch {
-	case i < 0:
-		return 0
-	case i >= len(promptCVPeaks):
-		return maxPromptCV
-	}
-	return promptCVPeaks[i]
-}
-
 // The words the JSON and the text name a source or a role by.
 const (
 	sourceLearned    = "learned"
@@ -83,15 +36,15 @@ const (
 const (
 	// assumedPoisson is Poisson arrivals: P3 has no flag for them.
 	assumedPoisson whatif.Flag = "AssumedPoissonArrivals"
-	// promptSpreadAbovePeak is a cv above promptCVPeak for the percentile: the
+	// promptSpreadAbovePeak is a cv above whatif.PromptCVPeak for the percentile: the
 	// prompt's own tail shrinks as cv rises from there, so a larger cv can
 	// price a shorter floor and a higher rate.
 	promptSpreadAbovePeak whatif.Flag = "PromptSpreadAbovePeak"
-	// routingBound is one pod taking at least routingBoundShare of the work,
+	// routingBound is one pod taking at least whatif.RoutingBoundShare of the work,
 	// sustained: more pods would mostly sit idle behind the router. Priced at
 	// that f.
 	routingBound whatif.Flag = "RoutingBound"
-	// imbalanceNotSustained is an f at routingBoundShare of the pods that has
+	// imbalanceNotSustained is an f at whatif.RoutingBoundShare of the pods that has
 	// not held over the whole window: chance alone can read that at two pods.
 	// Priced at it, the side that asks for more replicas.
 	imbalanceNotSustained whatif.Flag = "ImbalanceNotSustained"
@@ -367,7 +320,7 @@ func (f *answerFlags) fleetFor(st *learnreplay.State, ps *learnreplay.PrefillSta
 // flags read f at the recorded count, where the window was read.
 func (pf *pricedFleet) raiseFlags(ps *learnreplay.PrefillState) {
 	p := pf.fleet.Prefill
-	if pf.q > 0 && p.PromptCV > promptCVPeak(pf.q) {
+	if pf.q > 0 && p.PromptCV > whatif.PromptCVPeak(pf.q) {
 		pf.flags = append(pf.flags, promptSpreadAbovePeak)
 	}
 	if p.Replicas != ps.Pods {
@@ -375,8 +328,8 @@ func (pf *pricedFleet) raiseFlags(ps *learnreplay.PrefillState) {
 	}
 	pods := float64(p.Replicas)
 	switch {
-	case p.Replicas < 2 || p.Imbalance/pods < routingBoundShare:
-	case !p.ImbalanceAssumed, ps.RawShareFull && ps.RawShareLeast/pods >= routingBoundShare:
+	case p.Replicas < 2 || p.Imbalance/pods < whatif.RoutingBoundShare:
+	case !p.ImbalanceAssumed, ps.RawShareFull && ps.RawShareLeast/pods >= whatif.RoutingBoundShare:
 		pf.flags = append(pf.flags, routingBound)
 	default:
 		pf.flags = append(pf.flags, imbalanceNotSustained)
@@ -462,7 +415,7 @@ func imbalanceAt(ps *learnreplay.PrefillState, pods int) (f float64, assumed boo
 	if v, ok := ps.Estimate.FByPods[ps.Pods]; ok && v >= 1 {
 		base = v
 	}
-	return min(float64(pods), max(imbalanceFloor, base)), true, shapeAssumed
+	return min(float64(pods), max(whatif.ImbalanceFloor, base)), true, shapeAssumed
 }
 
 // prefillShape is the prompt: --assume-input-tokens, else what the prefill
@@ -486,9 +439,9 @@ func (f *answerFlags) prefillShape(pf *pricedFleet, ps *learnreplay.PrefillState
 	}
 	pf.in.PromptTokens = p.PromptTokens
 
-	p.PromptCV, p.PromptCVAssumed = assumedPromptCV, true
-	pf.in.PromptCV, pf.in.PromptCVSource = assumedPromptCV, shapeAssumed
-	pf.assume("prompt cv %s (no computed-prompt histogram)", num(assumedPromptCV))
+	p.PromptCV, p.PromptCVAssumed = whatif.AssumedPromptCV, true
+	pf.in.PromptCV, pf.in.PromptCVSource = whatif.AssumedPromptCV, shapeAssumed
+	pf.assume("prompt cv %s (no computed-prompt histogram)", num(whatif.AssumedPromptCV))
 
 	if pv != nil && pv.state.DecodeTTFT.TransferSeconds > 0 && ps.PromptTokens > 0 {
 		p.TransferSecondsPerToken = pv.state.DecodeTTFT.TransferSeconds / ps.PromptTokens
@@ -532,19 +485,21 @@ func (pf *pricedFleet) decodeSide() {
 	pf.in.DecodeSide = "omitted"
 }
 
-// flowControl is flow control inferred from its series: S1's rule, with no
-// policy field to declare it yet. On carries the upstream thresholds.
+// flowControl is flow control inferred from its series: S1's rule with
+// slo.flowControl unset. The CLI does not read that field, so a tier that
+// declares the state is still inferred here. On carries the upstream
+// thresholds.
 func (pf *pricedFleet) flowControl(st *learnreplay.State) {
 	if st.FlowControlSeries {
 		pf.fleet.FlowControl = whatif.FlowControl{State: whatif.FlowControlOn,
-			QueueThreshold: upstreamQueueThreshold, KVThreshold: upstreamKVThreshold}
+			QueueThreshold: whatif.FlowControlQueueThreshold, KVThreshold: whatif.FlowControlKVThreshold}
 		pf.in.FlowControl = "on"
-		pf.assume("flow-control thresholds %s and %s (upstream defaults)", num(upstreamQueueThreshold), num(upstreamKVThreshold))
+		pf.assume("flow-control thresholds %s and %s (upstream defaults)", num(whatif.FlowControlQueueThreshold), num(whatif.FlowControlKVThreshold))
 		return
 	}
 	pf.fleet.FlowControl = whatif.FlowControl{State: whatif.FlowControlNoSeries}
 	pf.in.FlowControl = "off, inferred"
-	pf.assume("flow control off (no series)")
+	pf.assume("flow control off (no queue series)")
 }
 
 // describe is the fleet's inputs, in a line.
@@ -591,7 +546,7 @@ func (pf *pricedFleet) verdict() string {
 // footerNote is the fleets' closing note. The direction turns on the spread:
 // a measured cv (the collector's Q1) has only the sent spread's row to go by.
 func footerNote(fleets []*pricedFleet) string {
-	note := ttftNoteOpen + fmt.Sprintf(ttftNoteAssumed, num(assumedPromptCV))
+	note := ttftNoteOpen + fmt.Sprintf(ttftNoteAssumed, num(whatif.AssumedPromptCV))
 	if slices.ContainsFunc(fleets, func(pf *pricedFleet) bool { return pf.refused == nil && !pf.fleet.Prefill.PromptCVAssumed }) {
 		note = ttftNoteOpen + ttftNoteMeasured
 	}

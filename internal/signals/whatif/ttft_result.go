@@ -98,8 +98,8 @@ const (
 	// rescale it by: the V_P is held, and on a longer prompt it reads high
 	// and over-promises. No caller acts on it.
 	VPShapeMoved Flag = "VPShapeMoved"
-	// FlowControlInferredOff is flow control taken as off because none of its
-	// series exist (a scrape gap looks the same).
+	// FlowControlInferredOff is flow control taken as off because its queue
+	// series does not exist (a scrape gap looks the same).
 	FlowControlInferredOff Flag = "FlowControlInferredOff"
 	// AboveFlowControlOnset is a rate at or above the prefill gate's onset
 	// with flow control on: the router holds the excess and the answer is the

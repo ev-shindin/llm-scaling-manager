@@ -43,9 +43,10 @@ type RouterLatency struct {
 	// FlowControlWaitBuckets is the router's flow-control queue wait
 	// histogram, seconds, of this model's dispatched requests, as per-second
 	// bucket rates over the same window, sorted by bound: the router-queue
-	// part of the TTFT above. Nil when flow control is off or the query
-	// failed. Collected only while a learner recording is on, read by
-	// nothing yet, and left out of a recording while nil.
+	// part of the TTFT above. Nil with no such series or a failed query, and
+	// non-nil does not prove the gate is on (AnalyzerInput.FlowControlSeries).
+	// Collected only while a learner recording is on, read by nothing yet,
+	// and left out of a recording while nil.
 	FlowControlWaitBuckets []LatencyBucket `learnrec:"omitzero"`
 }
 

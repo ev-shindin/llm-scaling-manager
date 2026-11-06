@@ -337,9 +337,12 @@ In the worked example the decode onset is 12.50 r/s (0.94 of the knee) and the
 prefill onset 25.6 r/s, so both answers there are the same with flow control on
 or off.
 
-**Detecting it.** The flow-control series exist only when the gate is on. Absence
-means off, flagged "flow control inferred off (no series)" (a scrape gap looks
-the same). `FlowControlUnknown` is refused only when it is on and the detector's
+**Detecting it.** The EPP publishes the flow-control series with the gate on,
+and the queue series is the signal. Its absence means off, flagged "flow control
+inferred off (no queue series)" (a scrape gap looks the same). Whether an on gate
+publishes it while empty is not verified. The other series are not the signal:
+wait buckets at rate 0 were recorded within a run's first 3 to 4 minutes on runs
+`goldens.yaml` describes as off, cause not known. `FlowControlUnknown` is refused only when it is on and the detector's
 thresholds are neither readable nor given (`--fc-queue-threshold`,
 `--fc-kv-threshold`, `--fc-max-concurrency`).
 

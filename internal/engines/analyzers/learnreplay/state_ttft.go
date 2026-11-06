@@ -38,10 +38,10 @@ type PrefillState struct {
 	PromptFromCycle, PromptToCycle, PromptCycles int
 	// RawShare is f_raw, the busiest pod's share of the computed-token rate
 	// over the mean share, not de-biased: the largest over the latest
-	// rawShareCycles cycles that read one at the cycle's pod count. A pod with
+	// whatif.TTFTWindowCycles cycles that read one at the cycle's pod count. A pod with
 	// no rate counts as a pod that computed nothing. 0 with none, or one pod.
 	// RawShareLeast is the window's least, and RawShareFull says it holds
-	// rawShareCycles readings: what the routing-bound flag reads. The
+	// whatif.TTFTWindowCycles readings: what the routing-bound flag reads. The
 	// slo-tiers rule reads settled rows; here a pod still warming up reads
 	// low, which raises the share, the side that rule permits.
 	RawShare, RawShareLeast float64
@@ -51,7 +51,7 @@ type PrefillState struct {
 // DecodeTTFTState is what a decode variant's rows say of the decode side of
 // a TTFT, read from its serving rows.
 type DecodeTTFTState struct {
-	// EngineTTFT is the decode engine's TTFT: of the latest decodeTTFTCycles
+	// EngineTTFT is the decode engine's TTFT: of the latest whatif.TTFTWindowCycles
 	// cycles, the largest, each a mean over the rows weighted by their
 	// request rate, with the mean effective prompt of the same cycle (the
 	// pair is never split). A cycle with no reading holds an empty slot, so a
@@ -61,14 +61,6 @@ type DecodeTTFTState struct {
 	// one, over the latest shapeCycles cycles with a reading; 0 with none.
 	TransferSeconds float64
 }
-
-// The windows the rows are read over.
-const (
-	// rawShareCycles is slo-tiers' window for f_raw.
-	rawShareCycles = 5
-	// decodeTTFTCycles is slo-tiers' window for the decode engine's TTFT.
-	decodeTTFTCycles = 5
-)
 
 // promptSample is one cycle's computed tokens and requests of a prefill
 // variant, per second.
@@ -91,7 +83,7 @@ func (w *shareWindow) note(pods int, share float64, ok bool) {
 		w.pods, w.shares = pods, nil
 	}
 	if ok {
-		w.shares = keepLast(w.shares, share, rawShareCycles)
+		w.shares = keepLast(w.shares, share, whatif.TTFTWindowCycles)
 	}
 }
 
@@ -103,7 +95,7 @@ func (w *shareWindow) read() (largest, least float64, full bool) {
 			least = s
 		}
 	}
-	return largest, least, len(w.shares) == rawShareCycles
+	return largest, least, len(w.shares) == whatif.TTFTWindowCycles
 }
 
 // ttftSamples is the windows of the rows a TTFT question reads, by variant.
@@ -230,7 +222,7 @@ func (t *ttftSamples) note(in domain.AnalyzerInput, cycle int) {
 				slot.Seconds = d.ttftWeighted / d.ttftWeight
 			}
 		}
-		t.engineTTFT[v] = keepLast(t.engineTTFT[v], slot, decodeTTFTCycles)
+		t.engineTTFT[v] = keepLast(t.engineTTFT[v], slot, whatif.TTFTWindowCycles)
 	}
 }
 
@@ -292,7 +284,7 @@ func (r *replayer) fillTTFT(st *State, in domain.AnalyzerInput, t *ttftSamples) 
 			vs.DecodeTTFT.TransferSeconds = sum / float64(len(xs))
 		}
 	}
-	st.FlowControlSeries = flowControlSeries(in)
+	st.FlowControlSeries = in.FlowControlSeries()
 }
 
 // estimateAt is a variant's estimate read through read, when it was stashed
@@ -317,11 +309,4 @@ func largestTTFT(samples []whatif.DecodeTTFT) whatif.DecodeTTFT {
 		}
 	}
 	return top
-}
-
-// flowControlSeries reports whether any of the router's flow-control series
-// exists for the model at the cycle.
-func flowControlSeries(in domain.AnalyzerInput) bool {
-	return in.SchedulerQueue != nil || len(in.FlowControlPools) > 0 ||
-		(in.RouterLatency != nil && len(in.RouterLatency.FlowControlWaitBuckets) > 0)
 }

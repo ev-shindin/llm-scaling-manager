@@ -3,7 +3,7 @@ decode   11.32 r/s          operating-point cap (TPOT alone: 12.03)  ols [11.2 .
          shape IL 1000 OL 1000 (assumed)
 prefill  1.19 r/s           TTFT p95                                 UNVALIDATED; V_P ASSUMED
          inputs V_P 30000 ASSUMED; a 11.04 ms learned; f 1 (one pod); N_p 1 (--prefill); prompt 1000 tokens (assumed); decode by its line
-         assumed V_P 30000 tok/s (--assume-vp); prompt 1000 tokens (--assume-input-tokens); prompt cv 2 (no computed-prompt histogram); flow control off (no series); Poisson arrivals
+         assumed V_P 30000 tok/s (--assume-vp); prompt 1000 tokens (--assume-input-tokens); prompt cv 2 (no computed-prompt histogram); flow control off (no queue series); Poisson arrivals
 fleet    1.19 r/s           TTFT p95, end to end                     UNVALIDATED; V_P ASSUMED
 flags: LineNearGate (22/200); AssumedShape (IL 1000, OL 1000); UnvalidatedTTFT; AssumedVP; AssumedPromptSpread; TransferOmitted; FlowControlInferredOff; BelowFittedBand; AssumedPoissonArrivals
 estimate from 15 readings (cycles 197-220) of a 226-cycle recording, not a guarantee; see basis (-o json)

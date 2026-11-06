@@ -7,7 +7,7 @@ TTFT p90        353.4 ms                     end to end; UNVALIDATED; V_P ASSUME
                 (323.4 ms if prefill and decode waits were independent)
                 (floor 113.3 ms, pooled 311.4 ms, worst pod utilization 0.377)
 ttft inputs     V_P 30000 ASSUMED; a 11.04 ms learned; f 1 (one pod); N_p 1 (--prefill); prompt 1000 tokens (assumed); decode by its line
-assumed         V_P 30000 tok/s (--assume-vp); prompt 1000 tokens (--assume-input-tokens); prompt cv 2 (no computed-prompt histogram); flow control off (no series); Poisson arrivals
+assumed         V_P 30000 tok/s (--assume-vp); prompt 1000 tokens (--assume-input-tokens); prompt cv 2 (no computed-prompt histogram); flow control off (no queue series); Poisson arrivals
 shape           IL 1000 OL 1000 (assumed)
 flags: LineNearGate (22/200); AssumedShape (IL 1000, OL 1000); ExtrapolatedFill (fill 0.732, 0.231 above the readings); AssumedTPOTRatio; UnvalidatedTTFT; AssumedVP; AssumedPromptSpread; TransferOmitted; FlowControlInferredOff; AssumedPoissonArrivals
 estimate from 15 readings (cycles 197-220) of a 226-cycle recording, not a guarantee; see basis (-o json)
