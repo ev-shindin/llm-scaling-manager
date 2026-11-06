@@ -886,7 +886,7 @@ slo:
   no-act. Declared `enabled` with no series for the model is treated as the
   same mismatch. That is the right reading once the model has had a request:
   an on gate then publishes the series at 0 while the queue is empty, on 652
-  cycles of the staircase's on phases and with none missing, up to 45 s after
+  cycles of the staircase's on phases and with none missing, up to 82 s after
   the load ended; longer idle is not measured. Before the router's first
   request the series does not exist (4 cycles of each on phase), so a router
   with the gate on that has served nothing reads as this mismatch

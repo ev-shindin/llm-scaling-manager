@@ -343,8 +343,9 @@ inferred off (no queue series)" (a scrape gap looks the same). An on gate publis
 it at 0 while the queue is empty, once the router has had a request, and not before
 ([as built, M2](#as-built-m2)). The other series are not the signal: wait buckets
 at rate 0 were recorded within a run's first 3 to 4 minutes on runs `goldens.yaml`
-describes as off. On the staircase that was an on phase's counters still inside the
-5-minute rate window; on the earlier runs the cause is not known. `FlowControlUnknown` is refused only when it is on and the detector's
+describes as off. On the staircase they follow an on phase; the non-zero rates fit
+its 5-minute window, and the rest of the cause is not known, here or on the earlier
+runs. `FlowControlUnknown` is refused only when it is on and the detector's
 thresholds are neither readable nor given (`--fc-queue-threshold`,
 `--fc-kv-threshold`, `--fc-max-concurrency`).
 
@@ -1137,9 +1138,13 @@ whole bracket, 36.0 to 38.7 r/s, they give 0.96 to 1.04, still in the mark.
 | C | on | p95 | 510.3 ms | 37.3 | 36.5 | 1.02 | in the mark | 36.8 | 1.01 | in the mark |
 
 A and B fail in both flow-control states, by both witnesses. C is in the mark in
-both, one figure of it only as a bound. Turning flow control on lowered the client's rate by 1.7 to 2.5 r/s in B
-and by 0.9 to 1.9 r/s in C, and the frozen prediction for on and off is the same
-rate.
+both, one figure of it only as a bound. In this repeat the client's rate was lower
+with flow control on by 1.7 to 2.5 r/s in B and by 0.9 r/s in C at p90. At p95 in C
+it was lower by 1.9 r/s or more: C off's figure there is a bound, 38.7 to 41.3 r/s,
+so 1.9 is a difference from the bound's low end. That is one repeat with the phases
+run in sequence, and the differences are about a ladder step (2.6 r/s at C, 6.6 r/s
+at B), so they say nothing of the gate. The frozen prediction is the same rate on
+and off.
 
 ### TPOT, frozen
 
@@ -1201,8 +1206,9 @@ and 35.9 ms on. An error in the floor alone would not grow. The runaway rule, tw
 the target, stopped A at 0.70 of the knee, so A's queue was never reached.
 
 **The capacity knee reads high, and the result does not split by flow-control
-state.** B and C predict 44.0 r/s. All four phases held step 6, 38.7 r/s. At step
-7, 41.3 r/s:
+state.** B and C predict 44.0 r/s. A phase held a step if completions over the
+judged window came within 3% of the step rate and nothing failed. By that rule all
+four held step 6, 38.7 r/s (38.5, 38.5, 38.8 and 38.8 r/s). At step 7, 41.3 r/s:
 
 | Phase | Completions, first minute, r/s | Then, r/s | Peak in flight | Stopped by |
 | --- | --- | --- | --- | --- |
@@ -1212,11 +1218,18 @@ state.** B and C predict 44.0 r/s. All four phases held step 6, 38.7 r/s. At ste
 | B on | 41.2 | 40.4 to 42.9 | 234 | the p90 rule, held |
 
 That is two collapses off, one collapse on and one hold on, at one rate in one
-repeat. In the three that collapsed the knee lies between 38.7 and 41.3 r/s, and
-the prediction reads 6% to 14% high. In B on it is at or above 41.3 r/s, and the
-prediction reads at most 6% high. The one hold is not evidence for the gate: C on
-collapsed with it, and B on and C on differ in `Ca²`. Why the fleet collapses below
-the priced knee is not known.
+repeat. In B off and C off the knee lies between 38.7 and 41.3 r/s, and the
+prediction reads 6% to 14% high. In B on it is at or above 41.3 r/s, and the
+prediction reads at most 6% high.
+
+C on's step 6 held by that rule and no more. Inside its window the client's p90 went
+from 424 ms to 636 ms, 1.50 times, in flight from 90 to 136, and the residual is 32.7
+ms against 17.8 at step 5. So C on's knee may be below 38.7 r/s, and there 14% is a
+lower bound on how high the prediction reads: from step 5, which was steady, it
+could be as much as 22%.
+
+The one hold is not evidence for the gate: C on collapsed with it, and B on and C on
+differ in `Ca²`. Why the fleet collapses below the priced knee is not known.
 
 **C on's step 7 is a 429 storm.** Of the 17503 requests due in the judged window,
 9527 failed, 54%. Over the whole step 10731 of 24823 did, 43%. All were 429
@@ -1325,9 +1338,12 @@ From the recordings:
 | C on | 292 | 245 | 43 | 4 | 288 |
 
 - With the gate on and the queue empty, the gauge reads 0: 652 cycles over the
-  three on phases, none absent once it has appeared. That includes each phase's
-  last 2 or 3 cycles, after the load had ended, so 45 s of idle at most. Longer
-  idle was not measured.
+  three on phases, none absent once it has appeared. It still reads 0 at the end
+  of each recording, 70 to 82 s after the last completion. Longer idle was not
+  measured. The test's count of 3 cycles with no arrivals, in every on phase, is
+  not all idle: in A on and B on one of the 3 is at 60 s, 11 to 12 s after the first
+  request, before the arrival rate reads. After the last completion it is 2, 2 and
+  3.
 - Before a router's first request the gauge does not exist. Each on phase's first
   4 cycles hold none. Prometheus agrees: the pool saturation series reads from
   its first sample, 28 to 31 s into the run, and the gauge first at 58 to 61 s,
@@ -1335,9 +1351,13 @@ From the recordings:
   served nothing still reads as no series.
 - The wait histogram is no signal of the gate. B off and C off, each after an on
   phase, hold it for the first 195 to 210 s, at a non-zero rate for the first
-  60 s. That ends about 5 minutes after the on phase's last completion, 73 and
-  79 s into the run, as a 5-minute rate window would. A off follows an off warm-up
-  and holds none.
+  60 s. The non-zero part fits a 5-minute rate window: the on phase's last send and
+  last completion are 231 and 227 s before B off's recording starts, 226 and 222 s
+  before C off's, so the window empties them at 69 to 78 s, and the next cycle, at
+  75 s, reads 0. Why the buckets then stay at rate 0 until 195 to 210 s is not known.
+  It would take the old router's last two scrapes to end before the config patch
+  that restarted it, and no file records them. A off follows an off warm-up and
+  holds none.
 - B's gate hardly worked: B on's effective saturation, a 5-minute mean, peaked at
   0.83, under 1, and the queue was above 0 on 4 cycles. C on is the only phase
   that queued for long.
