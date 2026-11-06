@@ -376,28 +376,6 @@ goldens:
     before it off too, two prefill and two decode replicas fixed, staircase of Poisson
     rate steps of 10 minutes, 1000 tokens in and 1000 out, stopped at step 3 when
     the TTFT ran away, slo listed with a TTFT target, recorder on, default analyzerTuning
-- name: ttft-staircase-a-on
-  outputs:
-  - ttft-staircase-a-on/learned-state.csv
-  - ttft-staircase-a-on/lines.csv
-  - ttft-staircase-a-on/results.csv
-  - ttft-staircase-a-on/slo-published.csv
-  - ttft-staircase-a-on/store-records.csv
-  - ttft-staircase-a-on/variant-capacities.csv
-  - ttft-staircase-a-on/composite-holds.csv
-  - ttft-staircase-a-on/composite-release.csv
-  - ttft-staircase-a-on/composite-results.csv
-  - ttft-staircase-a-on/composite-roles.csv
-  - ttft-staircase-a-on/composite-variants.csv
-  - ttft-staircase-a-on/warm-pool-pressure.csv
-  - ttft-staircase-a-on/warm-pool-supply.csv
-  recording: ttft-staircase-a-on/recording.jsonl.gz
-  source: P/D benchmark scenario, flow control on as the scenario renders it, one
-    priority band of 2000 requests, 30 s request TTL, detector at its defaults, the
-    router restarted before the recording, two prefill and two decode replicas fixed,
-    staircase of Poisson rate steps of 10 minutes, 1000 tokens in and 1000 out, stopped
-    at step 3 when the TTFT ran away, slo listed with a TTFT target, recorder on,
-    default analyzerTuning
 - name: ttft-staircase-b-off
   outputs:
   - ttft-staircase-b-off/learned-state.csv
@@ -442,28 +420,6 @@ goldens:
     staircase of Poisson rate steps of 10 minutes, 8000 tokens in and 200 out, stopped
     at step 7 when the TTFT ran away, slo listed with a TTFT target, recorder on,
     default analyzerTuning
-- name: ttft-staircase-c-off
-  outputs:
-  - ttft-staircase-c-off/learned-state.csv
-  - ttft-staircase-c-off/lines.csv
-  - ttft-staircase-c-off/results.csv
-  - ttft-staircase-c-off/slo-published.csv
-  - ttft-staircase-c-off/store-records.csv
-  - ttft-staircase-c-off/variant-capacities.csv
-  - ttft-staircase-c-off/composite-holds.csv
-  - ttft-staircase-c-off/composite-release.csv
-  - ttft-staircase-c-off/composite-results.csv
-  - ttft-staircase-c-off/composite-roles.csv
-  - ttft-staircase-c-off/composite-variants.csv
-  - ttft-staircase-c-off/warm-pool-pressure.csv
-  - ttft-staircase-c-off/warm-pool-supply.csv
-  recording: ttft-staircase-c-off/recording.jsonl.gz
-  source: P/D benchmark scenario, flow control off, the gate and its block removed
-    from the router config and the router restarted before the recording, the run
-    before it on, and this one holds its wait histogram for the first 4 minutes, two
-    prefill and two decode replicas fixed, staircase of bursty rate steps of 10 minutes,
-    gaps of squared cv 4, 8000 tokens in and 200 out, stopped at step 7 when 4000
-    requests were in flight, slo listed with a TTFT target, recorder on, default analyzerTuning
 - name: ttft-staircase-c-on
   outputs:
   - ttft-staircase-c-on/learned-state.csv

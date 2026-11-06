@@ -886,7 +886,8 @@ slo:
   no-act. Declared `enabled` with no series for the model is treated as the
   same mismatch. That is the right reading once the model has had a request:
   an on gate then publishes the series at 0 while the queue is empty, on 652
-  cycles of the staircase's on phases and with none missing, up to 82 s after
+  cycles of the staircase's three on phases (526 in the two with a committed
+  golden) and with none missing, up to 82 s after
   the load ended; longer idle is not measured. Before the router's first
   request the series does not exist (4 cycles of each on phase), so a router
   with the gate on that has served nothing reads as this mismatch
@@ -1436,7 +1437,8 @@ priced cycle, so the flow-control paths still ran on synthetic fleets only. The 
 
 - **Priced coverage.** No committed recording prices end to end, so S2 needs one
   run with `V_P`, `a` and `slo` listed, and a decode line that prices. The
-  staircase's six goldens do not: `slo` is listed on all 1414 cycles, and none
+  staircase's recordings do not: `slo` is listed on all 1414 cycles of its six
+  phases (998 in the four committed goldens), and none
   holds `a` ([as built, M2](slo-capacity-planner-ttft.md#as-built-m2)).
 - **The union bound is untested on a recording.** On runs 1 and 2 every answered
   cycle carries `DecodeEngineMeasured`, so item 2's "the prefill side binds" is

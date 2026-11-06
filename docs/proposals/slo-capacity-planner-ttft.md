@@ -1052,8 +1052,14 @@ every predicted onset (decode 42.4 r/s and prefill 54.6 r/s in B).
 ### The run
 
 Qwen3-0.6B at TP 1 on H200, 2 prefill and 2 decode replicas, one warm-up with
-flow control off, then each bucket off and on. The goldens are
-`ttft-staircase-{a,b,c}-{off,on}` ([Learner Goldens](../developer-guide/testing.md#learner-goldens)).
+flow control off, then each bucket off and on.
+
+Four phases have a committed golden: `ttft-staircase-a-off`, `-b-off`, `-b-on` and
+`-c-on` ([Learner Goldens](../developer-guide/testing.md#learner-goldens)). A on and
+C off are in this section's tables only. Their figures rest on the run's own
+request logs, Prometheus captures and raw recordings, which are outside the
+repository, and no test here replays them. Every figure below was derived the same
+way for all six phases.
 
 Where it departs from [the specification](#ground-truth-and-the-staircase):
 
@@ -1321,9 +1327,10 @@ every cycle:
 `a` is the wall: a phase sends one prompt length, so P1 refuses it
 (`NoPromptSpread`, `TooFewLowLoadMinutes`). The warm-up has the other half: 44 of
 317 cycles hold `V_P` and `a` together, and it ends with a decode line, but it
-ran before `slo` was listed and is not a golden. S2 still needs one run with a
+ran before `slo` was listed and is not a golden. A on and C off are read from the
+run's raw recordings; the other four rows hold on the goldens too. S2 still needs one run with a
 prompt sweep and `slo` listed from its start.
-`TestGoldens_TTFTStaircaseHoldsNoS2GateCycle` freezes these counts.
+`TestGoldens_TTFTStaircaseHoldsNoS2GateCycle` freezes the four committed rows.
 
 **An on gate publishes the queue gauge at 0.** `slo-tiers.md` left this open.
 From the recordings:
@@ -1338,7 +1345,8 @@ From the recordings:
 | C on | 292 | 245 | 43 | 4 | 288 |
 
 - With the gate on and the queue empty, the gauge reads 0: 652 cycles over the
-  three on phases, none absent once it has appeared. It still reads 0 at the end
+  three on phases, 526 of them in the two committed goldens, none absent once it
+  has appeared. It still reads 0 at the end
   of each recording, 70 to 82 s after the last completion. Longer idle was not
   measured. The test's count of 3 cycles with no arrivals, in every on phase, is
   not all idle: in A on and B on one of the 3 is at 60 s, 11 to 12 s after the first
@@ -1362,7 +1370,8 @@ From the recordings:
   0.83, under 1, and the queue was above 0 on 4 cycles. C on is the only phase
   that queued for long.
 
-`TestGoldens_TTFTStaircaseFlowControlSeries` freezes the table. The golden check
+`TestGoldens_TTFTStaircaseFlowControlSeries` freezes the table's four committed
+rows; A on and C off are read from the run's raw recordings. The golden check
 holds it too: `slo-published.csv` reads `no-decode-side` on the on phases' cycles
 with a gauge and no decode line, a reason only the on state reaches.
 

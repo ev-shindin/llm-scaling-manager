@@ -20,15 +20,16 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/learnrec"
 )
 
-// The what-if TTFT staircase's recordings, one golden per phase
+// The what-if TTFT staircase's recordings, four of its six phases as goldens
 // (docs/proposals/slo-capacity-planner-ttft.md, "As built (M2)"). The router's
 // and the driver's figures live outside the repository; what these tests
 // hold is what the recordings themselves say: S2's gate, and the router's
 // flow-control series.
 
-// staircaseFixtures is the staircase's goldens, in the order they ran.
-var staircaseFixtures = []string{"ttft-staircase-a-off", "ttft-staircase-a-on", "ttft-staircase-b-off",
-	"ttft-staircase-b-on", "ttft-staircase-c-off", "ttft-staircase-c-on"}
+// staircaseFixtures is the staircase's goldens, in the order they ran: both
+// gate states, off on buckets A and B and on on buckets B and C.
+var staircaseFixtures = []string{"ttft-staircase-a-off", "ttft-staircase-b-off", "ttft-staircase-b-on",
+	"ttft-staircase-c-on"}
 
 // staircaseCycles is what one phase's replay says of S2's gate
 // (slo-tiers.md, "What this leaves for S2's gate"), by cycle: slo analyzed
@@ -69,18 +70,12 @@ var ttftStaircase = []struct {
 	{"ttft-staircase-a-off", false,
 		staircaseCycles{cycles: 128},
 		staircaseSeries{noGauge: 128}},
-	{"ttft-staircase-a-on", true,
-		staircaseCycles{cycles: 130},
-		staircaseSeries{gaugeEmpty: 126, gaugeEmptyIdle: 3, noGauge: 4, waitBuckets: 125}},
 	{"ttft-staircase-b-off", false,
 		staircaseCycles{cycles: 289, vp: 29},
 		staircaseSeries{noGauge: 289, waitBuckets: 15}},
 	{"ttft-staircase-b-on", true,
 		staircaseCycles{cycles: 289, decodeLine: 34},
 		staircaseSeries{gaugeEmpty: 281, gaugeQueued: 4, gaugeEmptyIdle: 3, noGauge: 4, waitBuckets: 284}},
-	{"ttft-staircase-c-off", false,
-		staircaseCycles{cycles: 286, vp: 30},
-		staircaseSeries{noGauge: 286, waitBuckets: 14}},
 	{"ttft-staircase-c-on", true,
 		staircaseCycles{cycles: 292, vp: 36},
 		staircaseSeries{gaugeEmpty: 245, gaugeQueued: 43, gaugeEmptyIdle: 3, noGauge: 4, waitBuckets: 288}},
@@ -145,7 +140,7 @@ func readGate(t *testing.T, raw []byte) staircaseCycles {
 	return got
 }
 
-// No phase holds S2's gate on one cycle: V_P, a, slo and a decode line that
+// No committed phase holds S2's gate on one cycle: V_P, a, slo and a decode line that
 // prices. So S1 prices no cycle of the staircase, and the staircase's
 // validation rests on the warm-up's state and the frozen prediction, not on
 // these replays. The counts are frozen: a change that lets a phase price one
@@ -202,7 +197,7 @@ func readSeries(t *testing.T, raw []byte) staircaseSeries {
 // An on gate publishes the queue gauge at 0 while the queue is empty, once a
 // request has passed; an off gate never publishes it. The first is what
 // slo-tiers.md's "declared enabled with no series" assumed, and no recording
-// before these could say: the three on phases are the first with the gate on.
+// before these could say: the on phases are the first with the gate on.
 //
 // Each on phase's first 4 cycles hold no gauge: no request had reached the
 // new router yet. So a router that has served nothing reads as no series, and
@@ -235,23 +230,19 @@ func TestGoldens_TTFTStaircaseFlowControlSeries(t *testing.T) {
 //   - slo.SwitchTTFTPrice is S1: slo is listed, so each cycle has a reading.
 //   - saturation.SwitchStartBlendsFirstSamples moves RoleStartSeconds (121.5
 //     to 111.7 on the first row of b-off).
-//   - saturation.SwitchK2FirstReadingWaits moves b-off, c-off and c-on, and
-//     saturation.SwitchKVPerRequestOutputDispersion all six.
+//   - saturation.SwitchK2FirstReadingWaits moves b-off and c-on, and
+//     saturation.SwitchKVPerRequestOutputDispersion all four.
 var staircaseSwitchMoves = map[string][]string{
 	saturation.SwitchStartBlendsFirstSamples: {
 		"ttft-staircase-a-off/composite-results.csv", "ttft-staircase-a-off/results.csv",
-		"ttft-staircase-a-on/composite-results.csv", "ttft-staircase-a-on/results.csv",
 		"ttft-staircase-b-off/composite-results.csv", "ttft-staircase-b-off/results.csv",
 		"ttft-staircase-b-on/composite-results.csv", "ttft-staircase-b-on/results.csv",
-		"ttft-staircase-c-off/composite-results.csv", "ttft-staircase-c-off/results.csv",
 		"ttft-staircase-c-on/composite-results.csv", "ttft-staircase-c-on/results.csv",
 	},
 	slo.SwitchTTFTPrice: {
 		"ttft-staircase-a-off/slo-published.csv",
-		"ttft-staircase-a-on/slo-published.csv",
 		"ttft-staircase-b-off/slo-published.csv",
 		"ttft-staircase-b-on/slo-published.csv",
-		"ttft-staircase-c-off/slo-published.csv",
 		"ttft-staircase-c-on/slo-published.csv",
 	},
 }
@@ -259,25 +250,17 @@ var staircaseSwitchMoves = map[string][]string{
 var staircaseSeamMoves = map[string][]string{
 	saturation.SwitchK2FirstReadingWaits: {
 		"ttft-staircase-b-off/variant-capacities.csv",
-		"ttft-staircase-c-off/composite-results.csv", "ttft-staircase-c-off/composite-roles.csv",
-		"ttft-staircase-c-off/composite-variants.csv", "ttft-staircase-c-off/variant-capacities.csv",
-		"ttft-staircase-c-off/warm-pool-pressure.csv",
 		"ttft-staircase-c-on/variant-capacities.csv",
 	},
 	saturation.SwitchKVPerRequestOutputDispersion: {
 		"ttft-staircase-a-off/composite-results.csv", "ttft-staircase-a-off/composite-roles.csv",
 		"ttft-staircase-a-off/composite-variants.csv", "ttft-staircase-a-off/store-records.csv",
 		"ttft-staircase-a-off/variant-capacities.csv", "ttft-staircase-a-off/warm-pool-pressure.csv",
-		"ttft-staircase-a-on/composite-results.csv", "ttft-staircase-a-on/composite-roles.csv",
-		"ttft-staircase-a-on/composite-variants.csv", "ttft-staircase-a-on/store-records.csv",
-		"ttft-staircase-a-on/variant-capacities.csv", "ttft-staircase-a-on/warm-pool-pressure.csv",
 		"ttft-staircase-b-off/composite-results.csv", "ttft-staircase-b-off/composite-roles.csv",
 		"ttft-staircase-b-off/composite-variants.csv", "ttft-staircase-b-off/results.csv",
 		"ttft-staircase-b-off/store-records.csv", "ttft-staircase-b-off/variant-capacities.csv",
 		"ttft-staircase-b-on/composite-results.csv", "ttft-staircase-b-on/composite-roles.csv",
 		"ttft-staircase-b-on/results.csv", "ttft-staircase-b-on/variant-capacities.csv",
-		"ttft-staircase-c-off/composite-results.csv", "ttft-staircase-c-off/composite-roles.csv",
-		"ttft-staircase-c-off/results.csv", "ttft-staircase-c-off/variant-capacities.csv",
 		"ttft-staircase-c-on/composite-results.csv", "ttft-staircase-c-on/composite-roles.csv",
 		"ttft-staircase-c-on/results.csv", "ttft-staircase-c-on/variant-capacities.csv",
 	},
@@ -289,18 +272,12 @@ var staircaseBase = map[string]string{
 	"ttft-staircase-a-off/composite-results.csv": "b9370e54b3dcb83c0ddef99adc82e14977f7f09c102355685151a7756b860cbf",
 	"ttft-staircase-a-off/results.csv":           "40a230b5f61cbf849262b771347d2b582d205f8c63a2bd13c3c40975f5965c51",
 	"ttft-staircase-a-off/slo-published.csv":     "d08ec336ae845d257b51e51a09d824d4dd9ff69e648ea665a26aac271776445f",
-	"ttft-staircase-a-on/composite-results.csv":  "cfe0f38884aff0addb094aa7e15209399bbc7b6426d279aee6832b52d04e5a44",
-	"ttft-staircase-a-on/results.csv":            "81ba84b1ce75653e63b5ca0b651668077fc0246493d1a54c41d72f42eef8f266",
-	"ttft-staircase-a-on/slo-published.csv":      "bee777d4880e914f40fbb67bc6df85825ff0b78c9a2a88dea183e44196f3cb34",
 	"ttft-staircase-b-off/composite-results.csv": "1efe56bdcae56cac7f7811e61f6718a8c9ffd6f3af95fc0a55419e7c08ec29cc",
 	"ttft-staircase-b-off/results.csv":           "c698695070f8e3882a48f8713221c8d3eb9d9cc949c71670f01b7e0387a16175",
 	"ttft-staircase-b-off/slo-published.csv":     "b80436315ca91b6be8c58f0f0ada03448c2e16f4258759af1df11cab10ac2beb",
 	"ttft-staircase-b-on/composite-results.csv":  "5cd25e0d0b1dc60385ccadfd7898f4528cbafbbb0cbd71da8854bd287936cd89",
 	"ttft-staircase-b-on/results.csv":            "6d9d32f9a37f382e0693cd42b2993bf3ad6c82e180243094a767c98689ccb373",
 	"ttft-staircase-b-on/slo-published.csv":      "28d8b2aac88fbb33babed2502651640158ccfb65e0ce22e43e6fc942373a1bfa",
-	"ttft-staircase-c-off/composite-results.csv": "cf0baec6450ef374588b293b0829ee2652ce9cb2400e16f05aff8abb960a6f79",
-	"ttft-staircase-c-off/results.csv":           "6672e1ff6b4ebf7757adb86927926bfd3ba752da12144828637a54309b9c85d2",
-	"ttft-staircase-c-off/slo-published.csv":     "8766d3086ca1fe705fc7bafd53d6c5ec58c9107f111acf12a59391f2032440d2",
 	"ttft-staircase-c-on/composite-results.csv":  "9f0616e5e8552357ac815f33d8f59ece8465db642faa08ef4b2b970a3505e5e2",
 	"ttft-staircase-c-on/results.csv":            "c1e27a80d68e5e70ba94988e7a6c72a7e3ebdb2181709f133360e5efdbda60da",
 	"ttft-staircase-c-on/slo-published.csv":      "ad46354cbb452fec5116aadac1cefd387638136226fcf495c25e5bd73c999a6f",
