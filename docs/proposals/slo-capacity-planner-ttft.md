@@ -1062,6 +1062,7 @@ Where it departs from [the specification](#ground-truth-and-the-staircase):
 | Load | One driver for all buckets, streamed, Poisson on A and B. It is not in the repository | guidellm has no bucket C. Poisson is what A and B are predicted at |
 | Steps | 0.40, 0.55, 0.70, then +0.06 to 1.12 of the predicted knee: 10 steps | 100 minutes a phase, not 3 hours |
 | Warm-up | One, flow control off | The model's inputs do not depend on the gate |
+| Stop | A, B on and C on stopped on the frozen client p90 rule. B off and C off stopped on the driver's own cap, `--max-inflight 4000`, at 4535 and 4157 in flight, 330 s into step 7 and 150 s into its 420 s window | The frozen criteria do not name the cap. It ended the two runs before the p90 rule could read a full window |
 | Targets | Proposed, none being documented: `TTFTAt` at 0.85 of the knee, flow control off, frozen. TPOT: the mean priced there, and that mean times the warm-up's `R_q` (2.39 at p90, 2.44 at p95, flagged `CoarseTPOTBucket`) | |
 | Router figures | Prometheus' 1-minute rates, summed over the window. No raw EPP scrape | The EPP's metrics were not readable through the API proxy |
 
@@ -1077,10 +1078,46 @@ step that already misses the target, so the ratio is a lower bound. The mark is
 the page's: a ratio above 1.10 over-promises, below 0.75 under-promises. Reading
 the achieved rate in place of the step rate changes no mark.
 
-Validity. No engine error. Send lag and `Ca²` were in bounds on every step.
-C off's step 3 ran 3.3% under its rate, past the proposed 3%, and is kept: no
-crossing falls there. B off's and C off's step 7 were cut short by the runaway
-stop. C on's step 7 failed 54%, and counts as a miss.
+Validity. No engine error, and both roles stayed at 2 Ready. Send lag and `Ca²`
+were in bounds on every step. Step 3 of C off ran 3.3% under its rate, past the
+proposed 3%, and is kept: no crossing falls there. Step 7 of B off and C off ran
+64.1% and 65.7% under, because the in-flight cap stopped them 150 s into the
+window. A crossing that lands on one of those steps is reported as a bound, 38.7
+to 41.3 r/s, and not interpolated. C on's step 7 failed 54%, and counts as a miss.
+
+Noise floor. A step's window must hold 4 relaxation times, where a relaxation time
+is `E[S](Ca² + Cs²)/(1 − √ρ)²`: the page's formula, with `Ca²` kept for bucket C.
+On prefill the inputs are measured (`E[S]` is `I/V_P`, `Cs²` the prompt spread) and
+it never binds: 4 relaxation times are 17.3 s at most. Decode has no measured
+`E[S]` or `Cs²` for a request in the queue, so this is an estimate: `E[S]` is 2 over
+the frozen knee, `ρ` the step rate over that knee, and `Cs²` is assumed to be 1.
+
+| Phase | Step | Rate | Decode rho | 4T, s | Window, s | Window over 4T | Flagged |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| B-off | 6 | 38.7 | 0.88 | 95 | 420 | 4.42 | no |
+| B-off | 7 | 41.3 | 0.94 | 392 | 150 | 0.38 | yes |
+| B-on | 6 | 38.7 | 0.88 | 95 | 420 | 4.42 | no |
+| B-on | 7 | 41.3 | 0.94 | 392 | 420 | 1.07 | no |
+| C-off | 6 | 38.7 | 0.88 | 247 | 420 | 1.70 | no |
+| C-off | 7 | 41.3 | 0.94 | 1113 | 150 | 0.13 | yes |
+| C-on | 6 | 38.7 | 0.88 | 240 | 420 | 1.75 | no |
+| C-on | 7 | 41.3 | 0.94 | 968 | 420 | 0.43 | yes |
+
+- Steps 1 to 5 clear it by at least 4.13 times. B's step 6 clears it by 4.42, and
+  C's by 1.70 and 1.75, a thin margin on an assumed `Cs²`.
+- Three step 7s are flagged, and B on's clears it by 1.07. With the knee where
+  [the readings](#readings) put it, at or under 41.3 r/s, `ρ` at step 7 is at or
+  above 1 and no window holds it, B on's included.
+- The steps were not lengthened: the hold was fixed at 10 minutes, and the proposed
+  exception starts above `ρ` 0.95. At 0.94 this departs from the page.
+- No mark moves. A crossing on a flagged step is a bound, which adds C on's client
+  TPOT p90 to the four the 3% rule catches. B on's TPOT crossings rest on step 7,
+  and as a bound would read 0.90 to 0.97, still in the mark.
+
+The window's own drift agrees. Client p90 in the second half of the window over the
+first is 0.94 to 1.09 on every step through 6, except C on's step 6 at 1.50, and it
+is 1.18 on B on's step 7. C on's TTFT crossings end on that step 6: read as the
+whole bracket, 36.0 to 38.7 r/s, they give 0.96 to 1.04, still in the mark.
 
 ### TTFT, frozen
 
@@ -1095,12 +1132,12 @@ stop. C on's step 7 failed 54%, and counts as a miss.
 | B | on | p90 | 164.3 ms | 37.4 | below the ladder (17.6) | > 2.13 | FAIL, over-promises | 18.3 | 2.04 | FAIL, over-promises |
 | B | on | p95 | 189.6 ms | 37.4 | below the ladder (17.6) | > 2.13 | FAIL, over-promises | 19.8 | 1.89 | FAIL, over-promises |
 | C | off | p90 | 394.1 ms | 37.3 | 36.2 | 1.03 | in the mark | 37.2 | 1.00 | in the mark |
-| C | off | p95 | 510.3 ms | 37.3 | 37.5 | 0.99 | in the mark | 38.7 | 0.96 | in the mark |
+| C | off | p95 | 510.3 ms | 37.3 | 37.5 | 0.99 | in the mark | 38.7 to 41.3 (bound) | 0.90 to 0.96 | in the mark, a bound |
 | C | on | p90 | 394.1 ms | 37.3 | 36.1 | 1.03 | in the mark | 36.3 | 1.03 | in the mark |
 | C | on | p95 | 510.3 ms | 37.3 | 36.5 | 1.02 | in the mark | 36.8 | 1.01 | in the mark |
 
 A and B fail in both flow-control states, by both witnesses. C is in the mark in
-both. Turning flow control on lowered the client's rate by 1.7 to 2.5 r/s in B
+both, one figure of it only as a bound. Turning flow control on lowered the client's rate by 1.7 to 2.5 r/s in B
 and by 0.9 to 1.9 r/s in C, and the frozen prediction for on and off is the same
 rate.
 
@@ -1117,20 +1154,20 @@ The predicted rate is the operating rate: each target was set there.
 | A | on | p90 | 16.7 ms | 36.3 | at least 29.9 | at most 1.21 | no mark | at least 29.9 | at most 1.21 | no mark |
 | A | on | p95 | 17.1 ms | 36.3 | at least 29.9 | at most 1.21 | no mark | at least 29.9 | at most 1.21 | no mark |
 | B | off | mean | 9.5 ms | 37.4 | 36.1 | 1.03 | in the mark | 36.1 | 1.03 | in the mark |
-| B | off | p90 | 22.7 ms | 37.4 | 38.9 | 0.96 | in the mark | 39.2 | 0.95 | in the mark |
-| B | off | p95 | 23.2 ms | 37.4 | 38.9 | 0.96 | in the mark | 39.1 | 0.96 | in the mark |
+| B | off | p90 | 22.7 ms | 37.4 | 38.7 to 41.3 (bound) | 0.90 to 0.97 | in the mark, a bound | 38.7 to 41.3 (bound) | 0.90 to 0.97 | in the mark, a bound |
+| B | off | p95 | 23.2 ms | 37.4 | 38.7 to 41.3 (bound) | 0.90 to 0.97 | in the mark, a bound | 38.7 to 41.3 (bound) | 0.90 to 0.97 | in the mark, a bound |
 | B | on | mean | 9.5 ms | 37.4 | 36.4 | 1.03 | in the mark | 36.3 | 1.03 | in the mark |
 | B | on | p90 | 22.7 ms | 37.4 | 39.3 | 0.95 | in the mark | 40.7 | 0.92 | in the mark |
 | B | on | p95 | 23.2 ms | 37.4 | 39.2 | 0.95 | in the mark | 40.7 | 0.92 | in the mark |
 | C | off | mean | 9.5 ms | 37.4 | 34.6 | 1.08 | in the mark | 35.2 | 1.06 | in the mark |
-| C | off | p90 | 22.7 ms | 37.4 | 37.0 | 1.01 | in the mark | 38.7 | 0.96 | in the mark |
+| C | off | p90 | 22.7 ms | 37.4 | 37.0 | 1.01 | in the mark | 38.7 to 41.3 (bound) | 0.90 to 0.97 | in the mark, a bound |
 | C | off | p95 | 23.2 ms | 37.4 | 36.3 | 1.03 | in the mark | 38.2 | 0.98 | in the mark |
 | C | on | mean | 9.5 ms | 37.4 | 34.8 | 1.07 | in the mark | 34.7 | 1.08 | in the mark |
-| C | on | p90 | 22.7 ms | 37.4 | 37.2 | 1.00 | in the mark | 38.7 | 0.97 | in the mark |
+| C | on | p90 | 22.7 ms | 37.4 | 37.2 | 1.00 | in the mark | 38.7 to 41.3 (bound) | 0.90 to 0.97 | in the mark, a bound |
 | C | on | p95 | 23.2 ms | 37.4 | 36.8 | 1.02 | in the mark | 38.3 | 0.97 | in the mark |
 
 - **B and C are in the mark** on the mean and on both percentiles, by both
-  witnesses. Ratios run 0.92 to 1.08.
+  witnesses. Ratios run 0.92 to 1.08, or 0.90 at the far end of a bound.
 - **A's TPOT is "at least".** A TTFT runaway stopped A at step 3, while mean TPOT
   was 4.4 ms against a 7.0 ms target. The rate where TPOT meets its target was
   never reached, so A has no TPOT mark, only a bound: the ratio is at most 1.21.
@@ -1157,20 +1194,29 @@ A fail on it too.
 
 ### Readings
 
-**A's target is nearly its floor.** The frozen p90 target, 31.8 ms, is 1.03 times
-the model's floor, 31.0 ms. At step 1 the client read 47.3 ms off and 51.0 ms on,
-1.52 and 1.64 times the model's 31.1 ms. The runaway rule, twice the target,
-stopped A at 0.70 of the knee. So A's fail reads as an error in the floor, and A
-says nothing yet of the queue.
+**A's target sits on the model's floor, and the gap grows with load.** The frozen
+p90 target, 31.8 ms, is 1.03 times the model's floor, 31.0 ms. The client's p90 is
+above the model's by 16.2, 23.6 and 37.4 ms over steps 1 to 3 off, and 19.9, 26.3
+and 35.9 ms on. An error in the floor alone would not grow. The runaway rule, twice
+the target, stopped A at 0.70 of the knee, so A's queue was never reached.
 
-**The capacity knee reads high with flow control off.** B and C predict 44.0 r/s.
-At step 7, 41.3 r/s, both off phases ran away: the backlog passed 3600, and
-completions fell from about 38 to 40 r/s to between 13 and 26 r/s. Step 6, at
-38.7 r/s, held. So off, the knee lies between 38.7 and 41.3 r/s, and the
-prediction reads 6% to 14% high. With flow control on, B held step 7 at 40.4 to
-42.9 completions a second with a backlog under 240. Why the off phases collapse
-below the knee and B on does not is not known. Repeat 1 cannot say whether it is
-the gate.
+**The capacity knee reads high, and the result does not split by flow-control
+state.** B and C predict 44.0 r/s. All four phases held step 6, 38.7 r/s. At step
+7, 41.3 r/s:
+
+| Phase | Completions, first minute, r/s | Then, r/s | Peak in flight | Stopped by |
+| --- | --- | --- | --- | --- |
+| B off | 39.8 | 13.8 to 36.8 | 4535 | the in-flight cap |
+| C off | 37.8 | 13.3 to 32.9 | 4157 | the in-flight cap |
+| C on | 39.7 | 14.9 to 26.9 | 1657, with the router's queue peaking at 1455 | the p90 rule |
+| B on | 41.2 | 40.4 to 42.9 | 234 | the p90 rule, held |
+
+That is two collapses off, one collapse on and one hold on, at one rate in one
+repeat. In the three that collapsed the knee lies between 38.7 and 41.3 r/s, and
+the prediction reads 6% to 14% high. In B on it is at or above 41.3 r/s, and the
+prediction reads at most 6% high. The one hold is not evidence for the gate: C on
+collapsed with it, and B on and C on differ in `Ca²`. Why the fleet collapses below
+the priced knee is not known.
 
 **C on's step 7 is a 429 storm.** Of the 17503 requests due in the judged window,
 9527 failed, 54%. Over the whole step 10731 of 24823 did, 43%. All were 429
@@ -1178,8 +1224,51 @@ the gate.
 finished; the client's is infinite. The router's effective saturation peaked at
 15.3 and its queue at 1455.
 
-**Hypothesis, not a finding: C passes by cancelling errors.** Two numbers point
-that way, and one repeat at one `Ca²` cannot tell them from a real pass:
+**Where the time goes.** The terms below are means, in ms: the model's own terms
+against the client's mean and the engines' counters over the same window.
+
+| Phase | Step, r/s | Client mean | Model mean | Prefill, measured | Prefill, priced | Decode and hop, measured | Decode and hop, priced | Residual | Client p90 | Model p90 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A off | 1, 17.1 | 39.5 | 30.2 | 13.2 | 15.6 | 26.3 | 14.6 | 5.1 | 47.3 | 31.1 |
+| A off | 3, 29.9 | 57.5 | 30.2 | 15.6 | 15.6 | 42.0 | 14.6 | 8.0 | 68.7 | 31.3 |
+| B off | 1, 17.6 | 118.7 | 81.7 | 49.8 | 45.5 | 69.0 | 36.1 | 10.9 | 147.2 | 106.7 |
+| B off | 5, 36.0 | 188.5 | 103.8 | 72.5 | 65.8 | 115.9 | 38.0 | 13.9 | 261.0 | 156.7 |
+| B on | 5, 36.0 | 185.7 | 103.8 | 71.1 | 65.8 | 114.6 | 38.0 | 13.3 | 255.6 | 156.7 |
+| C off | 1, 17.6 | 132.3 | 98.7 | 57.2 | 62.6 | 75.1 | 36.1 | 12.3 | 182.6 | 159.7 |
+| C off | 5, 36.0 | 233.0 | 177.2 | 101.4 | 139.2 | 131.6 | 38.0 | 13.9 | 359.7 | 366.2 |
+| C on | 5, 36.0 | 246.3 | 177.2 | 105.4 | 139.2 | 141.0 | 38.0 | 17.8 | 380.1 | 366.2 |
+
+Measured:
+
+- Prefill is priced close on A and B through step 6: within 2.4 ms on A and 4 to
+  9 ms low on B.
+- Decode and the hop are where A and B are lost. On A off they grow from 26.3 to
+  42.0 ms against 14.6 priced, on B off from 69.0 to 115.9 ms against 36 to 38
+  priced.
+- The residual, the client's mean less the two engines' TTFT, is 5.1 to 15.2 ms on
+  every phase through step 6, but for C on's steps 5 and 6 (17.8 and 32.7 ms).
+  Nothing in the model prices it.
+- B's gap is not a fixed offset. Its gap at step 1 is 34% to 44% of the gap at
+  steps 3 to 6 off, and 46% to 61% on.
+
+Fitted, on the warm-up alone, 305 decode rows: decode TTFT is -3.0 ms, plus 4.06 ms
+per 1000 tokens, plus 7.02 times ITL, rms 4.15 ms. Applied to the staircase, which
+it never saw, its mean error is -2.2 ms on A, -6.5 ms on B and -14.0 ms on C. Fitted
+on the staircase itself, the slope on the client's TPOT is 6.81 on A and 6.95 on B
+and C.
+
+Inferred:
+
+- The decode side scales with step time, at about 7 steps, where the model prices
+  one first step and the transfer. That is why A's and B's gaps grow with load.
+- The residual is the hop between the router and the engines.
+
+**C passes by cancelling errors: measured, no longer a hypothesis.** At 36 r/s on C
+off the model has prefill 37.8 ms over, 139.2 against 101.4, and decode and hop
+93.6 ms under, 38.0 against 131.6. C on gives 33.8 ms over and 103.0 ms under. Its
+mean is 55.8 ms low, while its p90 reads 366.2 ms against the client's 359.7 off and
+380.1 on. The over side is the bursts: from B to C at 36 r/s the prefill engine
+gained 28.9 ms off and 34.3 ms on, where the model adds 73.4 ms.
 
 | Reading | p90 | p95 |
 | --- | --- | --- |
@@ -1195,17 +1284,11 @@ that way, and one repeat at one `Ca²` cannot tell them from a real pass:
 | C off, step 1 at 17.6 r/s: model, then client | 159.7, 182.6 ms (1.14x) | 214.0, 201.0 ms (0.94x) |
 | C on, step 1 at 17.6 r/s: model, then client | 159.7, 183.6 ms (1.15x) | 214.0, 204.2 ms (0.95x) |
 
-- The model says going from `Ca²` 1 to 4 multiplies the TTFT 2.40 times at p90 and
-  2.69 at p95 at the operating rate. The measured C over B, step by step, is 1.14
-  to 1.80 at p90 and 1.13 to 2.04 at p95 by the client, so the model overstates
-  the bursts' cost.
-- The model reads low at light load: at step 1 of B the client is 1.38 to 1.57
-  times the model, and B's p90 floor is 80.2 ms against a client median of 111 ms
-  off and 113 ms on. That is the error that fails B.
-- At the operating rate, B's client p90 is 1.69 times the target off and 1.66
-  on, and C's is 1.01 off and 1.15 on. One error too low and one too high would
-  look like this. A step at `Ca²` near 2 would test it: the two errors would not
-  cancel at the same place.
+The model says going from `Ca²` 1 to 4 multiplies the TTFT 2.40 times at p90 and 2.69
+at p95 at the operating rate, and the client measured 1.14 to 1.80 and 1.13 to 2.04.
+So C's pass says nothing of the model at any other `Ca²`, and the two errors would
+not cancel at the same place at `Ca²` near 2. That step was not run, so C's pass is
+not evidence that the model prices bursts.
 
 ### S2's gate and the flow-control series
 
@@ -1265,9 +1348,9 @@ with a gauge and no decode line, a reason only the on state reaches.
 
 ### Not done
 
-The onsets (check 8), the mean residual, the union bound, the domain check per
-step and the noise floor are report-only, and are not in this section: they were
-not derived from this run. The run's files, its driver and the script that
+The onsets (check 8), the mean residual against its 10 ms budget, the union bound
+and the domain check per step are report-only, and are not in this section: they
+were not derived from this run. The run's files, its driver and the script that
 derives these tables are outside the repository.
 
 ## Open questions
