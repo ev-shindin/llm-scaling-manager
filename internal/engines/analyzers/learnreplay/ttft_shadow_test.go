@@ -135,6 +135,8 @@ func TestGoldens_TTFTPriceReadsTheObservation(t *testing.T) {
 			if !strings.HasPrefix(f, "ttft-staircase-") {
 				assert.Equal(t, constants.SLOTTFTReasonNoPrefillCapacity, on[i].Reason, f)
 				assert.Equal(t, constants.SLOTTFTVPNone, on[i].VPSource, f)
+			} else {
+				assert.NotEqual(t, constants.SLOTTFTReasonNoEstimate, on[i].Reason, f)
 			}
 			assert.Equal(t, constants.SLOTTFTReasonNoEstimate, without[i].Reason, f)
 		}

@@ -416,11 +416,10 @@ goldens:
   recording: ttft-staircase-b-off/recording.jsonl.gz
   source: P/D benchmark scenario, flow control off, the gate and its block removed
     from the router config and the router restarted before the recording, the run
-    before it on, so its wait histogram stays in the 5 minute window for the first
-    4 minutes of this one, two prefill and two decode replicas fixed, staircase of
-    Poisson rate steps of 10 minutes, 8000 tokens in and 200 out, stopped at step
-    7 when 4000 requests were in flight, slo listed with a TTFT target, recorder on,
-    default analyzerTuning
+    before it on, and this one holds its wait histogram for the first 4 minutes, two
+    prefill and two decode replicas fixed, staircase of Poisson rate steps of 10 minutes,
+    8000 tokens in and 200 out, stopped at step 7 when 4000 requests were in flight,
+    slo listed with a TTFT target, recorder on, default analyzerTuning
 - name: ttft-staircase-b-on
   outputs:
   - ttft-staircase-b-on/learned-state.csv
@@ -461,11 +460,10 @@ goldens:
   recording: ttft-staircase-c-off/recording.jsonl.gz
   source: P/D benchmark scenario, flow control off, the gate and its block removed
     from the router config and the router restarted before the recording, the run
-    before it on, so its wait histogram stays in the 5 minute window for the first
-    4 minutes of this one, two prefill and two decode replicas fixed, staircase of
-    bursty rate steps of 10 minutes, gaps of squared cv 4, 8000 tokens in and 200
-    out, stopped at step 7 when 4000 requests were in flight, slo listed with a TTFT
-    target, recorder on, default analyzerTuning
+    before it on, and this one holds its wait histogram for the first 4 minutes, two
+    prefill and two decode replicas fixed, staircase of bursty rate steps of 10 minutes,
+    gaps of squared cv 4, 8000 tokens in and 200 out, stopped at step 7 when 4000
+    requests were in flight, slo listed with a TTFT target, recorder on, default analyzerTuning
 - name: ttft-staircase-c-on
   outputs:
   - ttft-staircase-c-on/learned-state.csv

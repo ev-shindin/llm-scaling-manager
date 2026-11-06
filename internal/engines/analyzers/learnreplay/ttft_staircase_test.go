@@ -208,8 +208,7 @@ func readSeries(t *testing.T, raw []byte) staircaseSeries {
 // new router yet. So a router that has served nothing reads as no series, and
 // that much of the mismatch stays. The wait histogram is no signal of the
 // gate: the two off phases that follow an on phase hold it for their first
-// minutes, while the on phase's counters are still inside the 5 minute rate
-// window.
+// minutes.
 func TestGoldens_TTFTStaircaseFlowControlSeries(t *testing.T) {
 	t.Parallel() // reads the goldens, writes nowhere
 	for _, c := range ttftStaircase {

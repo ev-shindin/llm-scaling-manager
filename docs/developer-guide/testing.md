@@ -758,8 +758,8 @@ start, so its own recording.
 Each was added whole at 59772fce2, the commit that recorded it, and carried
 over. Off means the gate and the `flowControl:` block were removed from the
 `EndpointPickerConfig` and the EPP restarted; on is the block as the scenario
-renders it. `b-off` and `c-off` follow an on phase, so the wait histogram stays
-in their recordings for the first minutes; it is not a sign of the gate.
+renders it. `b-off` and `c-off` follow an on phase, and their recordings hold the
+wait histogram for the first minutes; it is not a sign of the gate.
 `ttft_staircase_test.go` freezes what the recordings say of S2's gate and of the
 flow-control series. The load driver and the run's other files live outside
 the repository.
