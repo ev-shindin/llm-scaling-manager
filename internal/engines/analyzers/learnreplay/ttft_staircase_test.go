@@ -27,7 +27,7 @@ import (
 // flow-control series.
 
 // staircaseFixtures is the staircase's goldens, in the order they ran: both
-// gate states, off on buckets A and B and on on buckets B and C.
+// gate states: off for buckets A and B, on for buckets B and C.
 var staircaseFixtures = []string{"ttft-staircase-a-off", "ttft-staircase-b-off", "ttft-staircase-b-on",
 	"ttft-staircase-c-on"}
 
