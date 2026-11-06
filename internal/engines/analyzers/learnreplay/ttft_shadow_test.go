@@ -104,8 +104,9 @@ func ttftPublished(t *testing.T, b []byte) []metrics.SLOTTFTReading {
 }
 
 // Test 22, the pairwise switch run: P1's observation off with the TTFT
-// pricing on moves exactly the two outputs the table names from all on, and
-// every prefill variant reads no-estimate in place of no-prefill-capacity.
+// pricing on moves exactly the outputs the table names from all on, and every
+// prefill variant reads no-estimate in place of its reason: no-prefill-capacity
+// on the two ols-sweep-slo goldens, and whichever a staircase cycle gives.
 func TestGoldens_TTFTPriceReadsTheObservation(t *testing.T) {
 	t.Parallel() // reads the goldens, writes nowhere
 	m, err := ReadManifest(goldenDir)
@@ -129,8 +130,10 @@ func TestGoldens_TTFTPriceReadsTheObservation(t *testing.T) {
 		require.NotEmpty(t, on)
 		require.Len(t, without, len(on), f)
 		for i := range on {
-			assert.Equal(t, constants.SLOTTFTReasonNoPrefillCapacity, on[i].Reason, f)
-			assert.Equal(t, constants.SLOTTFTVPNone, on[i].VPSource, f)
+			if !strings.HasPrefix(f, "ttft-staircase-") {
+				assert.Equal(t, constants.SLOTTFTReasonNoPrefillCapacity, on[i].Reason, f)
+				assert.Equal(t, constants.SLOTTFTVPNone, on[i].VPSource, f)
+			}
 			assert.Equal(t, constants.SLOTTFTReasonNoEstimate, without[i].Reason, f)
 		}
 	}

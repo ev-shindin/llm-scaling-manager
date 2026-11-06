@@ -1,9 +1,12 @@
 acceptance
 analyzertuning
 average
+away
 barely
 benchmark
+bursty
 call
+detector
 exercises
 fails
 fixed
@@ -21,6 +24,7 @@ metadata
 paths
 pd
 recorder
+renders
 restarts
 restores
 rows
@@ -28,11 +32,14 @@ saturate
 scenario
 seeded
 simulator
+squared
+staircase
 start-time
 sweeps
 synthetic
 third
 three
+ttl
 tuned
 twelve
 warm
