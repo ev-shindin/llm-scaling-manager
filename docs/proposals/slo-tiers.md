@@ -884,9 +884,14 @@ slo:
   flow-control queue series exist for the model is a contradiction: S1 logs
   a warning, prices as declared, and flags `FlowControlMismatch`, which is
   no-act. Declared `enabled` with no series for the model is treated as the
-  same mismatch: it is the conservative reading, but it assumes an on gate
-  publishes its queue series while empty, which is unverified; the S1 PR
-  checks it against an EPP with the gate on and no traffic.
+  same mismatch. That is the right reading once the model has had a request:
+  an on gate then publishes the series at 0 while the queue is empty, on 652
+  cycles of the staircase's on phases and with none missing, up to 45 s after
+  the load ended; longer idle is not measured. Before the router's first
+  request the series does not exist (4 cycles of each on phase), so a router
+  with the gate on that has served nothing reads as this mismatch
+  ([as built, M2](slo-capacity-planner-ttft.md#as-built-m2),
+  `TestGoldens_TTFTStaircaseFlowControlSeries`).
 - **Validation** is the `slo` block's: a value other than the two drops the
   tier entry, as a bad duration does. The field is in `config.SLOPolicy`,
   `FlowControl SLOFlowControl \`yaml:"flowControl,omitempty"\``, with
@@ -1419,15 +1424,19 @@ higher rate at the target. Outside that (`TestTTFT_TheCVClaimsThatDoNotHold`):
 the percentile. So at p85 and below the assumed 2 is flagged. The stop at 3
 stays: it is where a measured `cv` is held, not the value that prices the most.
 
-**Not checked:** an EPP with the gate on and no traffic, so "declared `enabled`
-with no series" stays the unverified reading decision 3 calls it. The
-flow-control paths ran on synthetic fleets only. The `f` floor 1.5, the 0.8, the
+**Checked since:** an EPP with the gate on and no traffic yet publishes no queue
+series, and one that has had traffic publishes it at 0: decision 3's "declared
+`enabled` with no series" holds for the first, on the staircase's on phases
+([as built, M2](slo-capacity-planner-ttft.md#as-built-m2)). They recorded no
+priced cycle, so the flow-control paths still ran on synthetic fleets only. The `f` floor 1.5, the 0.8, the
 10% and `cv` 2 remain stated, not measured.
 
 **What this leaves for S2's gate:**
 
 - **Priced coverage.** No committed recording prices end to end, so S2 needs one
-  run with `V_P`, `a` and `slo` listed, and a decode line that prices.
+  run with `V_P`, `a` and `slo` listed, and a decode line that prices. The
+  staircase's six goldens do not: `slo` is listed on all 1414 cycles, and none
+  holds `a` ([as built, M2](slo-capacity-planner-ttft.md#as-built-m2)).
 - **The union bound is untested on a recording.** On runs 1 and 2 every answered
   cycle carries `DecodeEngineMeasured`, so item 2's "the prefill side binds" is
   vacuous there: no decode line priced. Run 2's decode rows never reached the
