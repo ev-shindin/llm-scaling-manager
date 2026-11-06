@@ -53,8 +53,9 @@ type staircaseSeries struct {
 	// gaugeEmpty and gaugeQueued are the cycles the queue gauge read 0, and
 	// above 0; gaugeEmptyIdle those of gaugeEmpty with no arrivals.
 	gaugeEmpty, gaugeQueued, gaugeEmptyIdle int
-	// noGauge is the cycles with no gauge at all.
-	noGauge int
+	// noGauge is the cycles with no gauge at all, and gaugeless those of them
+	// after the first cycle that held one: a gauge that went missing.
+	noGauge, gaugeless int
 	// waitBuckets is the cycles holding the wait histogram.
 	waitBuckets int
 }
@@ -166,6 +167,7 @@ func readSeries(t *testing.T, raw []byte) staircaseSeries {
 	rec, err := learnrec.Read(raw)
 	require.NoError(t, err)
 	var got staircaseSeries
+	seen := false
 	for _, ev := range rec.Events {
 		if ev.Kind != saturation.KindAnalyze {
 			continue
@@ -177,9 +179,14 @@ func readSeries(t *testing.T, raw []byte) staircaseSeries {
 		switch q := in.SchedulerQueue; {
 		case q == nil:
 			got.noGauge++
+			if seen {
+				got.gaugeless++
+			}
 		case q.QueueSize > 0:
+			seen = true
 			got.gaugeQueued++
 		default:
+			seen = true
 			got.gaugeEmpty++
 			if in.ArrivalRate == 0 {
 				got.gaugeEmptyIdle++
@@ -210,6 +217,8 @@ func TestGoldens_TTFTStaircaseFlowControlSeries(t *testing.T) {
 		t.Logf("%s: %+v", c.fixture, got)
 		assert.Equal(t, c.series, got, c.fixture)
 		if c.on {
+			assert.Equal(t, 4, got.noGauge, "%s: the cycles before the first request", c.fixture)
+			assert.Zero(t, got.gaugeless, "%s: the gauge went missing after it first appeared", c.fixture)
 			assert.Positive(t, got.gaugeEmpty, "%s: an on gate with an empty queue published no gauge", c.fixture)
 			assert.Positive(t, got.gaugeEmptyIdle, "%s: no idle cycle read the gauge", c.fixture)
 		} else {

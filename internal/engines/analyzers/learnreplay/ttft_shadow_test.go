@@ -73,9 +73,11 @@ func TestS1_TheCaveatIsTheFrozenTable(t *testing.T) {
 	assert.Equal(t, []int{6, 7, 5, 4}, []int{overP90, overP95, underP90, underP95}, "the docs' split by percentile")
 }
 
-// S1 on the recordings. The two goldens slo-published.csv moves in have no
-// prefill capacity to price; the prefill-stress goldens were recorded with no
-// slo analyzer listed, so their slo-published.csv is empty whatever S1 does.
+// S1 on the recordings. The two ols-sweep-slo goldens have no prefill capacity
+// to price, and the staircase goldens price no cycle
+// (TestGoldens_TTFTStaircaseHoldsNoS2GateCycle); the prefill-stress goldens were
+// recorded with no slo analyzer listed, so their slo-published.csv is empty
+// whatever S1 does.
 // These tests drive the analyzer over those recordings' own rows, as the
 // engine would have with a TTFT target listed.
 

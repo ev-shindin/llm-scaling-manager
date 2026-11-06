@@ -419,8 +419,8 @@ goldens:
     before it on, so its wait histogram stays in the 5 minute window for the first
     4 minutes of this one, two prefill and two decode replicas fixed, staircase of
     Poisson rate steps of 10 minutes, 8000 tokens in and 200 out, stopped at step
-    7 when the TTFT ran away, slo listed with a TTFT target, recorder on, default
-    analyzerTuning
+    7 when 4000 requests were in flight, slo listed with a TTFT target, recorder on,
+    default analyzerTuning
 - name: ttft-staircase-b-on
   outputs:
   - ttft-staircase-b-on/learned-state.csv
@@ -464,8 +464,8 @@ goldens:
     before it on, so its wait histogram stays in the 5 minute window for the first
     4 minutes of this one, two prefill and two decode replicas fixed, staircase of
     bursty rate steps of 10 minutes, gaps of squared cv 4, 8000 tokens in and 200
-    out, stopped at step 7 when the TTFT ran away, slo listed with a TTFT target,
-    recorder on, default analyzerTuning
+    out, stopped at step 7 when 4000 requests were in flight, slo listed with a TTFT
+    target, recorder on, default analyzerTuning
 - name: ttft-staircase-c-on
   outputs:
   - ttft-staircase-c-on/learned-state.csv

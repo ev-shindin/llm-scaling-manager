@@ -741,9 +741,10 @@ the repository; the windows are in the test.
 The six `ttft-staircase-*` goldens are the what-if TTFT staircase, repeat 1
 ([as built, M2](../proposals/slo-capacity-planner-ttft.md#as-built-m2)): the
 P/D scenario with Qwen3-0.6B at TP 1 on H200, 2 prefill and 2 decode replicas
-pinned, the recorder on, and slo listed with a TTFT target, so these are the
-first goldens where S1 runs on every cycle and the first with the flow-control
-gate on. Each phase has its own controller start, so its own recording.
+pinned, the recorder on, and slo listed with a TTFT target. They are the first
+goldens with the flow-control gate on, and S1 reads on every cycle, as it does on
+`ols-sweep-slo` and `ols-sweep-slo-restart`. Each phase has its own controller
+start, so its own recording.
 
 | Golden | Load | Flow control | Cycles | Compressed |
 | --- | --- | --- | --- | --- |

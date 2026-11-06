@@ -209,13 +209,14 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// S1 of the TTFT track (docs/proposals/slo-tiers.md, decision 4), on main
 	// after #482 (59772fce2): each prefill variant of a model with a TTFT
 	// target is priced against it, in shadow. It moves slo-published.csv in
-	// the two goldens with a TTFT target and a prefill variant, and nothing
-	// else: no result moves, so no replica count can. Alone from all off,
+	// the two ols-sweep-slo goldens, and nothing else: no result moves, so
+	// no replica count can. Alone from all off,
 	// P1's observation is off too, so the reason reads no-estimate; with it
 	// on, as committed, no-prefill-capacity
 	// (TestGoldens_TTFTPriceReadsTheObservation holds the pair). The
-	// engine golden's P/D model is TPOT-only, and the ttft-* recordings have
-	// no slo.Analyze to replay.
+	// engine golden's P/D model is TPOT-only, and the four prefill-stress
+	// recordings have no slo.Analyze to replay. The staircase goldens, added
+	// since, have one on every cycle: their rows are staircaseSwitchMoves.
 	slo.SwitchTTFTPrice: {
 		"ols-sweep-slo/slo-published.csv", "ols-sweep-slo-restart/slo-published.csv",
 	},
