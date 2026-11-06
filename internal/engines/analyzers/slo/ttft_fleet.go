@@ -170,8 +170,9 @@ func ttftFleet(in ttftInputs, pods int) (whatif.TTFTFleet, []whatif.Flag) {
 // flowControlState is what the tier declares, or else what the router's series
 // say, and whether the two disagree. seriesSeen is whether the router's
 // flow-control queue series exist for the model. Declared enabled with no
-// series counts as a mismatch, the conservative reading; whether an on gate
-// publishes its queue series while empty is not verified.
+// series counts as a mismatch: an on gate publishes its queue series at 0 while
+// the queue is empty, but not before the router's first request
+// (TestGoldens_TTFTStaircaseFlowControlSeries).
 func flowControlState(p *config.SLOPolicy, seriesSeen bool) (whatif.FlowControl, bool) {
 	on := whatif.FlowControl{State: whatif.FlowControlOn, QueueThreshold: whatif.FlowControlQueueThreshold,
 		KVThreshold: whatif.FlowControlKVThreshold}

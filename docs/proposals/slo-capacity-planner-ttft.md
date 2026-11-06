@@ -339,10 +339,12 @@ or off.
 
 **Detecting it.** The EPP publishes the flow-control series with the gate on,
 and the queue series is the signal. Its absence means off, flagged "flow control
-inferred off (no queue series)" (a scrape gap looks the same). Whether an on gate
-publishes it while empty is not verified. The other series are not the signal:
-wait buckets at rate 0 were recorded within a run's first 3 to 4 minutes on runs
-`goldens.yaml` describes as off, cause not known. `FlowControlUnknown` is refused only when it is on and the detector's
+inferred off (no queue series)" (a scrape gap looks the same). An on gate publishes
+it at 0 while the queue is empty, once the router has had a request, and not before
+([as built, M2](#as-built-m2)). The other series are not the signal: wait buckets
+at rate 0 were recorded within a run's first 3 to 4 minutes on runs `goldens.yaml`
+describes as off. On the staircase that was an on phase's counters still inside the
+5-minute rate window; on the earlier runs the cause is not known. `FlowControlUnknown` is refused only when it is on and the detector's
 thresholds are neither readable nor given (`--fc-queue-threshold`,
 `--fc-kv-threshold`, `--fc-max-concurrency`).
 
