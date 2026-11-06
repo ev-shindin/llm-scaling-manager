@@ -443,11 +443,11 @@ check-doc-comment-owner: ## Fail on a doc comment describing a different declara
 # The per-package limit for make test. go test's default is 10 minutes, and
 # the learnreplay package, which replays every learner golden many times
 # (the golden check and its negative controls, the switch runs), measured
-# 503 s on a GitHub runner before the TTFT goldens: too close to 600. 30
-# minutes is about twice that package's time on a runner with the goldens
-# (CheckGoldens replays them in parallel since). One -timeout covers every
-# package of one go test, so it cannot be scoped to learnreplay alone.
-TEST_TIMEOUT ?= 30m
+# 503 s on a GitHub runner before the TTFT goldens: too close to 600. 50
+# minutes is about twice that package's time on a runner with the goldens:
+# 868 s before the TTFT staircase's six, 1456 s with them. One -timeout covers
+# every package of one go test, so it cannot be scoped to learnreplay alone.
+TEST_TIMEOUT ?= 50m
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest helm check-import-direction check-doc-comment-owner ## Run tests.
