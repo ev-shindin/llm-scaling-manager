@@ -26,6 +26,10 @@ import (
 // hold is what the recordings themselves say: S2's gate, and the router's
 // flow-control series.
 
+// staircaseFixtures is the staircase's goldens, in the order they ran.
+var staircaseFixtures = []string{"ttft-staircase-a-off", "ttft-staircase-a-on", "ttft-staircase-b-off",
+	"ttft-staircase-b-on", "ttft-staircase-c-off", "ttft-staircase-c-on"}
+
 // staircaseCycles is what one phase's replay says of S2's gate
 // (slo-tiers.md, "What this leaves for S2's gate"), by cycle: slo analyzed
 // on every cycle of every phase, so each count is of cycles with slo listed.

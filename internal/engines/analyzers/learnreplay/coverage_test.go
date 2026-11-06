@@ -433,10 +433,11 @@ const (
 var startSeedFixtures = []string{startSeedFixture, startSeedRestartFixture, startSeedRestart2Fixture}
 
 // r1Goldens is the goldens recorded with the R1 fields: the TTFT track's
-// prefill-stress runs (P2), the start-seed runs and the throughput-sweep runs.
-var r1Goldens = []string{ttftThreePodsFixture, ttftSaturatedFixture, ttftOpenLongFixture, ttftOpenShortFixture,
+// prefill-stress runs (P2), the start-seed runs, the throughput-sweep runs and
+// the TTFT staircase.
+var r1Goldens = append([]string{ttftThreePodsFixture, ttftSaturatedFixture, ttftOpenLongFixture, ttftOpenShortFixture,
 	startSeedFixture, startSeedRestartFixture, startSeedRestart2Fixture, startRestoredFixture,
-	throughputSweepFixture, throughputSweepRestartFixture}
+	throughputSweepFixture, throughputSweepRestartFixture}, staircaseFixtures...)
 
 // ttftFieldNames are the R1 field names as a recording writes them.
 var ttftFieldNames = []string{"QueueLengthKnown", "AvgServiceTimeKnown", "AvgTTFTKnown", "PromptTokensBuckets",
