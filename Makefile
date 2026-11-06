@@ -445,8 +445,8 @@ check-doc-comment-owner: ## Fail on a doc comment describing a different declara
 # (the golden check and its negative controls, the switch runs), measured
 # 503 s on a GitHub runner before the TTFT goldens: too close to 600. 60
 # minutes is about twice that package's time on a runner with the goldens:
-# 868 s before the TTFT staircase's six, and up to 1833 s with them, past the
-# 30 minutes this was. One -timeout covers every package of one go test, so it
+# 868 s before the TTFT staircase's four, and 1729 s with them, 96% of the 30
+# minutes this was. One -timeout covers every package of one go test, so it
 # cannot be scoped to learnreplay alone.
 TEST_TIMEOUT ?= 60m
 
