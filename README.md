@@ -26,15 +26,12 @@ Sharing is **experimental**: nine benchmark runs so far, two models at 1 GPU
 per Pod. Whole-node and multi-GPU pods, more than two models, a cluster-wide
 quota and the physical GPU limiter are not yet measured on real hardware.
 
-This project is an independently developed, advanced fork of llm-d's
-workload-variant-autoscaler (WVA). It is not affiliated with or endorsed by
-llm-d. llm-d itself autoscales with KEDA, mainly on the router's (EPP)
-metrics, one ScaledObject per Deployment, and leaves a shared GPU budget to
-Kueue; this project plugs into the same KEDA, as an external scaler.
-Kubernetes objects, make targets and metrics keep their `wva-` / `wva_` names.
+llm-d itself autoscales with KEDA, mainly on the router's (EPP) metrics, one
+ScaledObject per Deployment, and leaves a shared GPU budget to Kueue; this
+project plugs into the same KEDA, as an external scaler.
 ([Sharing a GPU budget, compared with Kueue](docs/comparison/gpu-sharing.md);
 [KEDA alone, compared](docs/comparison/keda-alone.md);
-[what is different from upstream](#what-is-different-from-upstream).)
+[beyond per-model scaling](#beyond-per-model-scaling).)
 
 **Choose it** for several models whose GPUs are paid for whether used or not
 (on-prem, a reservation, a team allotment) and whose peaks come at different
@@ -119,8 +116,7 @@ registration.
   Kueue's quotas (**experimental**). Sharing needs one of them.
 - **Cost-aware variant choice**: it grows the variant with the lowest cost per
   unit of capacity (`variantCost`). Unit-tested; an end-to-end proof and a
-  two-GPU-type benchmark are on the roadmap
-  ([#142](https://github.com/ev-shindin/llm-scaling-manager/issues/142)).
+  two-GPU-type benchmark are on the roadmap.
 - **Scale to zero and back**: KEDA's own scale to zero. The controller polls
   the router queue every 100 ms and pushes activation without waiting for
   KEDA's poll.
@@ -266,14 +262,11 @@ A model's share weight is set on its scaling-policy entry (`weightClass:
 important`), not on the trigger
 ([for model owners](docs/reference/scaling-policy.md#for-model-owners-what-the-optimizer-may-take-and-how-to-protect-a-model)).
 
-## What is different from upstream
-
-The fork keeps WVA's core idea, variant-aware autoscaling for LLM inference,
-and has diverged substantially. The largest additions:
+## Beyond per-model scaling
 
 - the **utilization-share optimizer** (experimental), which shares one GPU
   quota between models and moves GPUs by transfer, and **quotas read from
-  Kueue**, on top of the GPU and quota limiters upstream already had;
+  Kueue**, alongside the GPU and quota limiters;
 - a **KEDA external scaler**: it answers KEDA directly over gRPC instead of
   publishing a metric, and pushes activation from zero instead of waiting for a
   poll;
@@ -281,9 +274,9 @@ and has diverged substantially. The largest additions:
   already loaded and asleep;
 - **ScaledObject discovery and install tooling**: `make scaledobjects-plan`
   writes an editable plan before anything is applied;
-- **capacity model changes**: demand priced from the throughput one replica
-  sustains, and holds through a request-shape change. Scale-from-zero itself
-  came from upstream.
+- a **capacity model** that prices demand from the throughput one replica
+  sustains and holds through a request-shape change, with **learners** that
+  measure each fleet instead of relying on fixed defaults.
 
 ## Contributing
 
@@ -294,13 +287,15 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Questions, bugs and ideas:
 
 Apache 2.0 - see [LICENSE](LICENSE) for details.
 
+## Origin
+
+Started in 2026 from the code of llm-d's workload-variant-autoscaler; since
+redesigned. Nearly 90% of the production Go code is new since August 2026,
+and nothing has been taken from that project since. Not affiliated with or
+endorsed by llm-d.
+
 ## Related Projects
 
-- [llm-d-autoscaling](https://github.com/llm-d/llm-d-autoscaling) - the upstream project this fork derives from; it holds llm-d's KEDA autoscaling blueprints
+- [llm-d-autoscaling](https://github.com/llm-d/llm-d-autoscaling) - llm-d's KEDA autoscaling blueprints
 - [llm-d infrastructure](https://github.com/llm-d/llm-d-infra)
 - [llm-d main repository](https://github.com/llm-d/llm-d)
-
-## References
-- [WVA paper](https://arxiv.org/abs/2603.09730)
-- [WVA use case doc](https://docs.google.com/document/d/1ZcMXO0x42qn4X5cu6efgMomYC4pKPwm6r7L79y1AQH4/edit?tab=t.0)
-- [Saturation based design discussion](https://docs.google.com/document/d/1iGHqdxRUDpiKwtJFr5tMCKM7RF6fbTfZBL7BTn6UkwA/edit?tab=t.0#heading=h.mdte0lq44ul4)

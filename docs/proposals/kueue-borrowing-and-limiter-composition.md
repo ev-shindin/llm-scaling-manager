@@ -24,10 +24,6 @@ borrowing is either **withheld** (borrowable 0, capped at nominal as with
 `countBorrowable: false`) or **frozen** (nothing new is borrowed and the last
 figures are kept). Either way the reason is published on `wva_quota_borrow_withheld`.
 
-This also covers the in-repo part of upstream
-[llm-d WVA #1003](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1003)
-(bound by `min(physical, quota)`).
-
 ## Terms
 
 - **Nominal**: a ClusterQueue's `nominalQuota`.

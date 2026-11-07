@@ -1,9 +1,8 @@
 # A release the swap can survive
 
-**Status:** design. Nothing here is built. It completes one clause of
-[WVA as a KEDA external scaler](wva-keda-external-scaler.md) §6 — the
-`wvaOwnership` flag — and introduces no configuration surface that proposal has
-not already reserved.
+**Status:** design. Nothing here is built. It adds one trigger key,
+`wvaOwnership`, and one tier field, `swapScaleDownWindowSeconds` (§5). How the
+scaler drives KEDA today: [how the scaling manager fits together](../concepts/architecture.md).
 
 **Read §2 before §3.** The release latency this proposal shortens is measured.
 The *swap* it is motivated by has never been observed firing, and the staging in
@@ -23,7 +22,7 @@ long as a swap is pending, through the opt-in ownership flag the external-scaler
 proposal already reserves. An operator who has not opted in keeps the
 ScaledObject they wrote.
 
-This is deliberately the *weakest* lever in §5 of the parent proposal. It never
+This is deliberately the *weakest* lever. It never
 changes a replica count: it only lets the HPA act sooner on the count WVA has
 already published.
 
@@ -153,7 +152,7 @@ that never helps.
 
 ## 5. The configuration surface
 
-Unchanged from the parent proposal §6. One key in trigger metadata:
+One key in trigger metadata:
 
 ```yaml
   triggers:
@@ -169,9 +168,8 @@ is retired and `internal/annotations/annotations.go` records why — KEDA only
 calls a scaler its trigger names, so being called is what being managed means,
 and an opt-in *discovery* marker has nothing left to opt into. Ownership is a
 different question from discovery, which is why it survives as its own key;
-`wvaOwnership` is the name the parent proposal (§6, §13), its ScaledObject
-templates and `docs/plans/engine/keda-driven-discovery.md` already use. Nothing
-is invented here.
+`wvaOwnership` is the name `docs/plans/engine/keda-driven-discovery.md`
+already reserves.
 
 Absent or `"false"` — **unmanaged**: WVA writes nothing. `behavior` is read as a
 constraint, and the swap is *reported* (§8) rather than fixed. This is the
@@ -197,7 +195,7 @@ One field:
     spec.advanced.horizontalPodAutoscalerConfig.behavior.scaleDown.stabilizationWindowSeconds
 
 Server-Side Apply, under its own field manager (`wva`), so ownership is precise
-and a GitOps `ignoreDifferences` can name exactly it (parent §6.1). Five bounds,
+and a GitOps `ignoreDifferences` can name exactly it. Five bounds,
 each of which exists to keep this reversible:
 
 - **It only ever shortens.** `min(configured, swapScaleDownWindowSeconds)`. An
@@ -226,7 +224,7 @@ corrected in the same change, or the next reader will trust it.
 
 ## 7. Why this and not the urgent ceiling
 
-Parent §5 already describes lowering `maxReplicaCount` to force an immediate
+The other lever is lowering `maxReplicaCount` to force an immediate
 scale-down that bypasses stabilization entirely. That is a stronger lever and
 should remain the second one tried:
 
@@ -270,7 +268,7 @@ Two series, following the conventions already in the tree:
    which cost most of a session to establish by hand and was initially got wrong.
 2. **`wvaOwnership` plumbed.** Parsed in `internal/registry/scalermeta.go`
    beside the other trigger keys and surfaced on `Meta`, with the rest of managed
-   mode inert. Cheap, and parent §6 needs it for everything else too.
+   mode inert. Cheap, and every later step needs it.
 3. **The override.** SSA patch, the five bounds, the `patch` verb, the rbac.go
    comment correction, the counter. Gated on §9.1 having fired in a real run.
 4. **Measure.** A P/D shape-swap run with `maxReplicaCount` set *below* the

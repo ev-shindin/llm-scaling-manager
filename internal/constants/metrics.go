@@ -118,7 +118,7 @@ const (
 // These metric names are used to query SGLang inference engine metrics from Prometheus.
 // Names and types were taken from SGLang's metrics collector
 // (python/sglang/srt/observability/metrics_collector.py). SGLang labels its metrics
-// with model_name, matching the label WVA filters on. See docs/proposals/sglang-backend.md.
+// with model_name, matching the label WVA filters on. See docs/reference/sglang-backend.md.
 const (
 	// SGLangNumRunningReqs is the number of running requests (gauge).
 	// SGLang equivalent of vllm:num_requests_running.
@@ -619,8 +619,8 @@ const (
 	//
 	// If a SECOND variant-scoped condition ever appears, convert this into
 	// wva_variant_scaling_blocked{variant_name, reason} at that point — the
-	// argument in docs/proposals/scale-from-zero-missing-signal.md §4 applies to
-	// every scope, but a reason enum with one member is ceremony, not design.
+	// one metric with a reason label serves every scope, but a reason enum with
+	// one member is ceremony, not design.
 	WVAVariantAtMaxReplicas = "wva_variant_at_max_replicas"
 
 	// WVAModelScalingBlocked is a gauge, present and 1 for each reason a model

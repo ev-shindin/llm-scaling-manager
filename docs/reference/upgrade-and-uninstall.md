@@ -1108,8 +1108,7 @@ A new controller pod starts with no decision in memory. Until it has one:
   stops it. On older KEDA run
   `NAMESPACE=<namespace> make scaledobjects-rewire`, adding
   `WVA_NS=wva-<namespace>` in the out-of-reach shape; without it the command
-  finds nothing and exits 0
-  ([#340](https://github.com/ev-shindin/llm-scaling-manager/issues/340)).
+  finds nothing and exits 0.
 - **What it learned is held in memory by default.** Learned capacity and
   throughput are re-learned after every restart or leader change, so a request
   shape it had already priced is sized from occupancy again until it saturates

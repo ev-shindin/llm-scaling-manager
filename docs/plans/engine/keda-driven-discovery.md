@@ -85,7 +85,7 @@ triggers:
 ```
 
 Reserved for later increments, parsed but not yet consumed: `inferencePool`,
-`engine`, `scalingPolicy`, `wvaOwnership` (see the external-scaler proposal §7).
+`engine`, `scalingPolicy`, `wvaOwnership` (see [named policy tiers](../../reference/scaling-policy.md#3-named-policy-tiers)).
 
 `minReplicaCount` / `maxReplicaCount` / `advanced.horizontalPodAutoscalerConfig`
 are NOT metadata — they stay on the ScaledObject, where KEDA needs them anyway,

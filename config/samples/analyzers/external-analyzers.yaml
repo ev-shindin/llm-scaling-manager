@@ -34,7 +34,7 @@ kind: ConfigMap
 # query). The trust boundary is RBAC on the SYSTEM-NAMESPACE scaling ConfigMap —
 # treat editing it as a privileged operation. Definitions are cluster-scope for
 # this reason: a policy tier selects and weights analyzers by name, but cannot
-# define one (docs/proposals/wva-keda-external-scaler.md §7.6). The interpolated {{.modelID}}/{{.namespace}} are escaped
+# define one (docs/reference/scaling-policy.md#external-analyzers-analyzerdefinitions). The interpolated {{.modelID}}/{{.namespace}} are escaped
 # by the controller before substitution.
 #
 # A query that FAILS is an error: the analyzer reports nothing that cycle, and

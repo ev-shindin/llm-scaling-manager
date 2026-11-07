@@ -1,12 +1,13 @@
 # Benchmark results
 
-> **These are historical baselines.** Every run below was measured on the scaling manager
-> v0.6.0, whose saturation engine was the one now called v1 in these tables.
-> That engine no longer exists — the steady-state engine replaced it — so
-> these numbers are the record a new analyzer is compared against, not a
-> description of what the scaling manager does today. The `_TBD_` cells were never filled.
+> **These are historical baselines.** Every run below was measured on
+> llm-d's workload-variant-autoscaler v0.6.0 and v0.7.0, from before this
+> project began. Its saturation engine is the one called v1 in these tables; the steady-state
+> engine replaced it here, so these numbers are the record a new analyzer is
+> compared against, not a description of what the scaling manager does today.
+> The `_TBD_` cells were never filled.
 
-Summary of the scaling manager benchmark runs with configuration details. 
+Summary of those runs with configuration details.
 
 ## Environment
 
@@ -22,7 +23,7 @@ Summary of the scaling manager benchmark runs with configuration details.
 | Scorer weights | queue=2, kv-cache=2, prefix-cache=3 | TBD |
 | Feature gates | flowControl | TBD |
 
-## llm-scaling-manager Configuration
+## Autoscaler Configuration
 
 | Parameter | Default | Tuned (prefill heavy) | Tuned (decode heavy) |
 |-----------|---------|----------------------|-----------------------|
@@ -52,7 +53,7 @@ Summary of the scaling manager benchmark runs with configuration details.
 | Scale-up policy | 10 Pods / 150s |
 | Scale-down stabilization | 240s |
 | Scale-down policy | 10 Pods / 150s |
-| Metric source | External (`wva_desired_replicas`) |
+| Metric source | External: the other project's desired-replicas metric |
 
 ## EPP+KEDA Saturation Configuration
 
@@ -83,7 +84,7 @@ Summary of the scaling manager benchmark runs with configuration details.
 **Workload:** 4000 prompt tokens, 1000 output tokens, 20 RPS, 600s duration
 **Saturation Engine:** Default(v1), Tuned(v1)
 
-| Metric | llm-scaling-manager v0.6.0 Default(v1) Run 1 | llm-scaling-manager v0.6.0 Default(v1) Run 2 | llm-scaling-manager v0.6.0 Default(v1) Run 3 | Avg | llm-scaling-manager v0.6.0 Tuned(v1) (prefill) |
+| Metric | v0.6.0 Default(v1) Run 1 | v0.6.0 Default(v1) Run 2 | v0.6.0 Default(v1) Run 3 | Avg | v0.6.0 Tuned(v1) (prefill) |
 |--------|------------------------------|------------------------------|------------------------------|-----|--------------------------------|
 | P99 TTFT (ms) | 98,810 | 97,811 | 98,638 | 98,420 | _TBD_ |
 | P99 ITL (ms/token) | 55.06 | 54.4 | 54.98 | 54.8 | _TBD_ |
@@ -118,7 +119,7 @@ Summary of the scaling manager benchmark runs with configuration details.
 
 **Model:** Qwen/Qwen3-32B
 **Workload:** 4000 prompt tokens, 1000 output tokens, 20 RPS, 600s duration
-**Setup:** HPA Saturation V1 (KV cache target=700m, queue depth target=2, min=1, max=10 replicas, scaleUp=180s, scaleDown=300s) ([#1220](https://github.com/llm-d/llm-d-workload-variant-autoscaler/pull/1220))
+**Setup:** HPA Saturation V1 (KV cache target=700m, queue depth target=2, min=1, max=10 replicas, scaleUp=180s, scaleDown=300s)
 
 | Metric | Run 1 | Run 2 | Run 3 | Avg |
 |--------|-------|-------|-------|-----|
@@ -134,10 +135,10 @@ Summary of the scaling manager benchmark runs with configuration details.
 
 ### Prefill Heavy — Qwen/Qwen3-32B (Static 2 Replicas, 600s)
 
-**llm-d Release:** main (includes v0.7.0 the scaling manager)
+**llm-d Release:** main (includes llm-d's workload-variant-autoscaler v0.7.0)
 **Model:** Qwen/Qwen3-32B
 **Workload:** 4000 prompt tokens, 1000 output tokens, 20 RPS, 600s duration
-**Setup:** the scaling manager disabled, HPA deleted, 2 constant replicas ([#1139](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1139))
+**Setup:** autoscaler disabled, HPA deleted, 2 constant replicas
 
 | Metric | Run 1 | Run 2 | Run 3 | Avg |
 |--------|-------|-------|-------|-----|
@@ -213,7 +214,7 @@ Summary of the scaling manager benchmark runs with configuration details.
 **Workload:** 1000 prompt tokens, 4000 output tokens, 20 RPS, 600s duration
 **Saturation Engine:** Default(v1), Tuned(v1)
 
-| Metric | llm-scaling-manager v0.6.0 Default(v1) Run 1 | llm-scaling-manager v0.6.0 Default(v1) Run 2 | llm-scaling-manager v0.6.0 Default(v1) Run 3 | Avg | llm-scaling-manager v0.6.0 Tuned(v1) (decode) |
+| Metric | v0.6.0 Default(v1) Run 1 | v0.6.0 Default(v1) Run 2 | v0.6.0 Default(v1) Run 3 | Avg | v0.6.0 Tuned(v1) (decode) |
 |--------|------------------------------|------------------------------|------------------------------|-----|-------------------------------|
 | P99 TTFT (ms) | 85,612 | 85,397 | 63,144 | 78,051 | _TBD_ |
 | P99 ITL (ms/token) | 47.09 | 47.05 | 47.26 | 47.13 | _TBD_ |
@@ -248,7 +249,7 @@ Summary of the scaling manager benchmark runs with configuration details.
 
 **Model:** Qwen/Qwen3-32B
 **Workload:** 1000 prompt tokens, 4000 output tokens, 20 RPS, 600s duration
-**Setup:** HPA Saturation V1 (KV cache target=700m, queue depth target=2, min=1, max=10 replicas, scaleUp=180s, scaleDown=300s) ([#1220](https://github.com/llm-d/llm-d-workload-variant-autoscaler/pull/1220))
+**Setup:** HPA Saturation V1 (KV cache target=700m, queue depth target=2, min=1, max=10 replicas, scaleUp=180s, scaleDown=300s)
 
 | Metric | Run 1 | Run 2 | Run 3 | Avg |
 |--------|-------|-------|-------|-----|
@@ -264,10 +265,10 @@ Summary of the scaling manager benchmark runs with configuration details.
 
 ### Decode Heavy — Qwen/Qwen3-32B (Static 2 Replicas, 600s)
 
-**llm-d Release:** main (includes v0.7.0 the scaling manager)
+**llm-d Release:** main (includes llm-d's workload-variant-autoscaler v0.7.0)
 **Model:** Qwen/Qwen3-32B
 **Workload:** 1000 prompt tokens, 4000 output tokens, 20 RPS, 600s duration
-**Setup:** the scaling manager disabled, HPA deleted, 2 constant replicas ([#1139](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1139))
+**Setup:** autoscaler disabled, HPA deleted, 2 constant replicas
 
 | Metric | Run 1 | Run 2 | Run 3 | Avg |
 |--------|-------|-------|-------|-----|
@@ -416,7 +417,7 @@ Summary of the scaling manager benchmark runs with configuration details.
 **Workload:** 1000 prompt tokens, 1000 output tokens, 20 RPS, 600s duration
 **Saturation Engine:** Default(v1)
 
-| Metric | llm-scaling-manager v0.6.0 Default(v1) Run 1 | llm-scaling-manager v0.6.0 Default(v1) Run 2 | llm-scaling-manager v0.6.0 Default(v1) Run 3 | Avg |
+| Metric | v0.6.0 Default(v1) Run 1 | v0.6.0 Default(v1) Run 2 | v0.6.0 Default(v1) Run 3 | Avg |
 |--------|------------------------------|------------------------------|------------------------------|-----|
 | P99 TTFT (ms) | 101,083 | 99,542 | 99,937 | 100,187 |
 | P99 ITL (ms/token) | 67.61 | 67.0 | 67.25 | 67.29 |
@@ -451,7 +452,7 @@ Summary of the scaling manager benchmark runs with configuration details.
 
 **Model:** Qwen/Qwen3-32B
 **Workload:** 1000 prompt tokens, 1000 output tokens, 20 RPS, 600s duration
-**Setup:** HPA Saturation V1 (KV cache target=700m, queue depth target=2, min=1, max=10 replicas, scaleUp=180s, scaleDown=300s) ([#1220](https://github.com/llm-d/llm-d-workload-variant-autoscaler/pull/1220))
+**Setup:** HPA Saturation V1 (KV cache target=700m, queue depth target=2, min=1, max=10 replicas, scaleUp=180s, scaleDown=300s)
 
 | Metric | Run 1 | Run 2 | Run 3 | Avg |
 |--------|-------|-------|-------|-----|
@@ -467,10 +468,10 @@ Summary of the scaling manager benchmark runs with configuration details.
 
 ### Symmetrical — Qwen/Qwen3-32B (Static 2 Replicas, 600s)
 
-**llm-d Release:** main (includes v0.7.0 the scaling manager)
+**llm-d Release:** main (includes llm-d's workload-variant-autoscaler v0.7.0)
 **Model:** Qwen/Qwen3-32B
 **Workload:** 1000 prompt tokens, 1000 output tokens, 20 RPS, 600s duration
-**Setup:** the scaling manager disabled, HPA deleted, 2 constant replicas ([#1139](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1139))
+**Setup:** autoscaler disabled, HPA deleted, 2 constant replicas
 
 | Metric | Run 1 | Run 2 | Run 3 | Avg |
 |--------|-------|-------|-------|-----|
@@ -529,7 +530,7 @@ spillover to the cheaper TP=1 secondary.
 
 **Hardware:** NVIDIA H100 (OpenShift cluster)
 **Setup:** Primary TP=2 (cost=10, max=10), secondary TP=1 (cost=5, max=10),
-llm-scaling-manager V2 saturation engine, HPA scaleUp window=0s
+V2 saturation engine, HPA scaleUp window=0s
 
 > **Cost formula:** `(avg_primary × 2 + avg_secondary × 1) × GPU/hr` — weights
 > each variant by its TP (GPU) count so the cost column is a true GPU-hour proxy.

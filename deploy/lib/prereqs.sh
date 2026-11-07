@@ -1427,7 +1427,7 @@ wva_report_scaledobjects() {
         return 0
     fi
     # The count above is ScaledObjects naming THIS scaler, not every ScaledObject:
-    # mid-migration, upstream ones still sit on the same workloads. Saying "none"
+    # ones that use another scaler can sit on the same workloads. Saying "none"
     # beside them read as a fresh cluster. The commands go through wva_make_cmd
     # so they carry WVA_NS: printed without it, apply looks for the scaler in the
     # default namespace and exits 2.

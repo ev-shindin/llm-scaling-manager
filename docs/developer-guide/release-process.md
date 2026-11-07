@@ -74,8 +74,7 @@ have merged since) and not your local branch. The command checks that the tagged
 commit pins the release and is on `main`, and pushes only then.
 
 `REMOTE` is the name of your remote for `ev-shindin/llm-scaling-manager`
-(`git remote -v` lists them). In a clone of upstream WVA with this repository
-added as a second remote, it is not `origin`.
+(`git remote -v` lists them). It is not always `origin`.
 
 ```bash
 REMOTE=<remote for ev-shindin/llm-scaling-manager>
@@ -88,8 +87,8 @@ git show vX.Y.Z:config/base/manager/kustomization.yaml | grep -x '  newTag: vX.Y
 `-m` makes an annotated tag, and with `tag.gpgSign` set a signed one; without
 `-m`, a signing setup opens an editor for the tag message. The workflow reads
 the commit the tag points at, so a lightweight, annotated or signed tag all
-work. Push the tag by name: `git push --tags` would also push any upstream WVA
-tags your clone holds.
+work. Push the tag by name: `git push --tags` would also push every other tag
+your clone holds.
 
 The push starts [`ci-release.yaml`](../../.github/workflows/ci-release.yaml).
 Watch it in the **Actions** tab.

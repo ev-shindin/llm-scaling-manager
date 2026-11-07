@@ -1,9 +1,7 @@
 # See the OWNERS docs: https://git.k8s.io/community/contributors/guide/owners.md
 #
-# This is a fork, and this file is prow's list for THIS repository -- not
-# upstream's. It arrived carrying llm-d's maintainers, none of whom work here,
-# which meant /lgtm and /approve answered to people who had never seen this fork
-# while refusing the two who do most of the work on it.
+# This file is prow's list for THIS repository: /lgtm and /approve answer to
+# the people listed here, who review and maintain it.
 #
 # It confers no GitHub access. Being assignable as a reviewer, or pushing a
 # branch under main's protection, comes from collaborator permissions in
@@ -13,10 +11,8 @@
 reviewers:
   - ev-shindin
   - deanlorenz
-  - biranofer
 
 # List of usernames who may use /approve
 approvers:
   - ev-shindin
   - deanlorenz
-  - biranofer

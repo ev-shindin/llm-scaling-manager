@@ -286,7 +286,7 @@ type ScalingPolicy struct {
 	// entry: definitions are a tier-level concern, never a policy one.
 	//
 	// "Policies select/weight; they don't define"
-	// (docs/proposals/wva-keda-external-scaler.md §7.6). A named policy references
+	// (docs/reference/scaling-policy.md, External analyzers). A named policy references
 	// an analyzer by name and sets `enabled`, `score` and a threshold; it cannot
 	// invent the query behind it. Two reasons, and both are about the query rather
 	// than about trust: an expensive or high-cardinality one runs against the

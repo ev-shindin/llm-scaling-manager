@@ -62,8 +62,7 @@ enabled in the shipped configuration, which names the saturation analyzer only.
 
 **What is not modelled.** There is no queueing-theoretic model of the server,
 no batch-size-to-latency fit, and no parameter tuner. Earlier versions of this
-page described all three, inherited from the project this one forked from;
-none of it is in this repository. There is also no forecasting. The decision
+page described all three; none of it is in this repository. There is also no forecasting. The decision
 uses what is measured now: an operator can read and argue with it, but it
 cannot arrive before the load.
 

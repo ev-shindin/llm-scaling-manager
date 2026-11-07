@@ -55,13 +55,12 @@ better served by llm-d's own recipes ([below](#against-the-alternatives)).
 | **Idle models off the GPUs, back when needed.** | [Scale to zero](well-lit-paths/scale-to-zero/) is KEDA's own mechanism; the controller polls the router queue every 100 ms and pushes activation without waiting for KEDA's poll. A wake from zero is a cold start (about 41 s on an H100 test cluster); a model resident in a [warm-pool](well-lit-paths/warm-pool-bridge/) Pod switches in about 437 ms. |
 | **Prefill and decode sized apart.** | [P/D roles](well-lit-paths/pd-disaggregation/) (experimental) are sized from their own demand and committed together. The joint commit is unit-tested only; the P/D benchmark never ordered a second prefill replica. |
 | **Many models on one GPU fleet.** | Every model and variant is decided together, inside a GPU budget when you declare one. Two opt-in ways move GPUs between models: priority-weighted rescale (`enableRescale`, off by default, acts only under a budget, unit-tested only) and the experimental [utilization-share optimizer](well-lit-paths/utilization-share/), which holds headroom in advance and slows the second model to rise (≈5.5 min in the first run). |
-| **Mixed GPU generations.** | Each [variant](well-lit-paths/accelerator-variants/) carries its own per-replica capacity and cost; the cheapest per unit of capacity grows. Unit specs assert the cost order; no end-to-end spec asserts which variant grows, and the benchmark used one GPU type ([#142](https://github.com/ev-shindin/llm-scaling-manager/issues/142)). |
+| **Mixed GPU generations.** | Each [variant](well-lit-paths/accelerator-variants/) carries its own per-replica capacity and cost; the cheapest per unit of capacity grows. Unit specs assert the cost order; no end-to-end spec asserts which variant grows, and the benchmark used one GPU type. |
 | **Per-team GPU budgets.** | [Quotas per namespace or cluster](well-lit-paths/tenant-gpu-quotas/), [from Kueue](well-lit-paths/kueue-bounded-quotas/) (experimental), or [the GPUs physically free](well-lit-paths/bound-by-gpus/). Budgets are advisory; the hard bound is a namespace GPU `ResourceQuota` ([bound at admission](guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission)). A capped decision raises `wva_decisions_limited_total` and a `ResourceConstrained` Event; a fully spent quota can record neither ([monitoring](reference/monitoring.md)). On this release, Kueue grants are honoured only where tenants cannot create LocalQueues on queues not meant for them. |
 | **Different urgency for interactive and batch work.** | [Workload classes](well-lit-paths/workload-classes/): named threshold tiers, set per ScaledObject. |
 | **Decisions you can explain.** | A closed-form capacity model, two log lines per model per cycle that say why ([cycle log](reference/cycle-log.md)), Events and metrics. It decides; KEDA acts. |
 
-**Not covered yet:** forecasting load, scaling to an SLA target
-([#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)),
+**Not covered yet:** forecasting load, scaling to an SLA target,
 pre-scaling before planned maintenance, and telling a failed node from a
 replica that is still starting.
 
@@ -102,8 +101,7 @@ intervals.
 - **What it learned is held in memory** by default, so a restart or leader
   change learns it again. `LEARNED_STATE_SNAPSHOT=true` carries it across
   ([learned state across a restart](reference/configuration.md#learned-state-across-a-restart);
-  [#227](https://github.com/ev-shindin/llm-scaling-manager/issues/227) decides
-  whether it becomes the default).
+  whether it becomes the default is still open).
 - **One more port.** KEDA calls the scaler on `:9090`. A new install serves
   it over mutual TLS when it can, and says why when it stays on plaintext; an
   upgrade with existing ScaledObjects stays on plaintext until you move them
@@ -144,20 +142,14 @@ cover.
   [KEDA alone](comparison/keda-alone.md) compares them need by need; the only
   head-to-head is one July 2026 study of five scenarios, one run each, on an
   older controller and recipe.
-- **llm-d's workload-variant-autoscaler**: the project this one forked from.
-  Upstream already had GPU budgets and scale-from-zero. This fork adds the
-  KEDA external scaler with pushed activation, Kueue quotas, the
-  utilization-share optimizer, the warm pool, the install tooling, and
-  throughput-priced demand.
 - **NVIDIA Dynamo Planner**: SLA-driven: it forecasts load and profiles before
   deployment, for one model on one GPU type. SLA-target scaling is on this
-  project's roadmap ([#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)).
+  project's roadmap.
   [The comparison](comparison/) has the detail.
 
 ## Known gaps
 
-No load forecasting; no scaling to an SLA target, only threshold tiers
-([#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)). A model
+No load forecasting; no scaling to an SLA target, only threshold tiers. A model
 has to saturate once before its capacity is priced for a new request shape: the
 P/D result above is the second exposure, and the cold pass before it ordered a
 spare replica and reached a 3.9 s p99. The warm pool and P/D numbers are single
@@ -171,7 +163,7 @@ runs per arm on one cluster type (the P/D pair repeated once).
   `LEARNED_STATE_SNAPSHOT` is on, and even then a new engine image rolled out
   while the controller was down re-fits the ITL line, and so mu, from fresh
   readings ([what is restored](reference/configuration.md#learned-state-across-a-restart);
-  the default is [#227](https://github.com/ev-shindin/llm-scaling-manager/issues/227)).
+  whether it becomes the default is still open).
 - The scaler port stays on plaintext where the installer cannot turn mutual
   TLS on, for example when KEDA is absent or not found, when the cluster
   admin has not yet written KEDA's side, or when existing ScaledObjects have
@@ -182,14 +174,12 @@ runs per arm on one cluster type (the P/D pair repeated once).
   [hand-back](reference/quota-limiter.md#lenders-kueue-does-not-reclaim-for)
   is on, only from lenders Kueue would reclaim for; elsewhere it counts none
   and caps at nominal
-  ([cohort borrowing](reference/quota-limiter.md#cohort-borrowing);
-  [#214](https://github.com/ev-shindin/llm-scaling-manager/issues/214)).
+  ([cohort borrowing](reference/quota-limiter.md#cohort-borrowing)).
 - On KEDA 2.19 and older, a ScaledObject created or changed within about two
   minutes of a controller restart can stay unwired: its HPA keeps only the
   CPU default and never scales. It is a KEDA bug fixed in 2.20; upgrade KEDA
   to 2.21, or on older KEDA run `make scaledobjects-rewire`
-  ([KEDA](reference/keda.md#unwired-hpa-before-keda-220);
-  [#340](https://github.com/ev-shindin/llm-scaling-manager/issues/340)).
+  ([KEDA](reference/keda.md#unwired-hpa-before-keda-220)).
 
 Planned work, with its issues, is on the [roadmap](roadmap.md).
 
@@ -207,12 +197,10 @@ Planned work, with its issues, is on the [roadmap](roadmap.md).
 Remove its ScaledObjects and KEDA returns each workload to the replica count it
 had before autoscaling, or point their triggers back at KEDA's own scalers;
 then uninstall ([upgrade and uninstall](reference/upgrade-and-uninstall.md)).
-Kubernetes objects, make targets and metrics keep their `wva-` / `wva_` names
-from upstream, which is the only naming to change in dashboards.
 
 ## Project status and support
 
-An independently developed, advanced fork of
-[llm-d/llm-d-workload-variant-autoscaler](https://github.com/llm-d/llm-d-workload-variant-autoscaler),
-not affiliated with or endorsed by llm-d. Apache 2.0. Questions and
+Started in 2026 from the code of
+[llm-d's workload-variant-autoscaler](https://github.com/llm-d/llm-d-workload-variant-autoscaler)
+and since redesigned; not affiliated with or endorsed by llm-d. Apache 2.0. Questions and
 bugs: [GitHub issues](https://github.com/ev-shindin/llm-scaling-manager/issues).

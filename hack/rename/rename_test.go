@@ -478,9 +478,8 @@ func InactiveVariantAutoscalingByModel()              {}
 
 func TestSweepGivesEveryHitAReason(t *testing.T) {
 	dir := repo(t, map[string]string{
-		"hack/rename/x.go":                        "// wva\n",
-		docsDir + "guides/from-upstream-wva/a.md": "text\n",
-		docsDir + "a.md":                          "upstream WVA and newValue and a stray xWVAx\n",
+		"hack/rename/x.go": "// wva\n",
+		docsDir + "a.md":   "upstream WVA and newValue and a stray xWVAx\n",
 	})
 	e := newEngine(t)
 	files, err := trackedFiles(dir)
@@ -495,7 +494,7 @@ func TestSweepGivesEveryHitAReason(t *testing.T) {
 	for _, h := range s.Hits {
 		reasons[h.Reason]++
 	}
-	if reasons[reasonTool] != 1 || reasons[reasonPartial] != 1 || reasons["keep-other-product-paths"] != 1 ||
+	if reasons[reasonTool] != 1 || reasons[reasonPartial] != 1 ||
 		reasons["keep-upstream-prose"] != 1 || reasons[reasonNone] != 1 || s.Unexplained != 1 {
 		t.Errorf("reasons = %v", reasons)
 	}
@@ -524,31 +523,5 @@ func TestReplacementsNameRealGroups(t *testing.T) {
 				t.Errorf("rule %s: %s in Replace is not a group", r.Name, m[0])
 			}
 		}
-	}
-}
-
-func TestManualFileIsLaidDownAndHeld(t *testing.T) {
-	const manual = "docs/guides/from-upstream-wva/README.md"
-	dir := repo(t, map[string]string{
-		manual: "half renamed WVA\r\n",
-		"hack/rename/overlay/" + manual + ".overlay": "see https://github.com/ev-shindin/llm-scaling-manager/tree/main/x\n",
-	})
-	report := filepath.Join(t.TempDir(), "r.md")
-	if err := run([]string{"--root", dir, "--report", report, "--apply"}, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	b, _ := os.ReadFile(filepath.Join(dir, filepath.FromSlash(manual)))
-	if string(b) != "see https://github.com/ev-shindin/llm-scaling-manager/tree/main/x\r\n" {
-		t.Errorf("overlay: %q", b)
-	}
-	if err := run([]string{"--root", dir, "--report", report, "--expect-noop", "--sweep"}, io.Discard); err != nil {
-		t.Errorf("second run: %v", err)
-	}
-	if err := run([]string{"--root", dir, "--report", report, "--code-moved", "--apply"}, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	b, _ = os.ReadFile(filepath.Join(dir, filepath.FromSlash(manual)))
-	if !bytes.Contains(b, []byte("llm-d-incubation/llm-d-scaling-manager/tree/main/x")) {
-		t.Errorf("the held rows did not reach the overlay: %q", b)
 	}
 }

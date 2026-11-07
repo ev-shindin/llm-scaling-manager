@@ -2757,7 +2757,7 @@ deploy_wva_prerequisites_kube_like() {
         log_warning "No secret $PROMETHEUS_SECRET_NAME in $MONITORING_NAMESPACE — skipping CA extraction. Expected when using a Prometheus this install did not deploy. Point PROMETHEUS_SECRET_NAME/PROMETHEUS_SECRET_NS at yours, or set PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true to connect without verifying it."
     fi
 
-    # LeaderWorkerSet (WVA dependency; see upstream chart / #910).
+    # LeaderWorkerSet (the controller depends on its CRD).
     if [ "${DEPLOY_LWS:-true}" = "true" ]; then
         if kubectl get crd leaderworkersets.leaderworkerset.x-k8s.io &> /dev/null; then
             log_info "LeaderWorkerSet CRD already installed, skipping LWS deployment"

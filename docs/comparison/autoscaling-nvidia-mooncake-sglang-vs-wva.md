@@ -1,7 +1,7 @@
 # Autoscaling Landscape vs. llm-scaling-manager — NVIDIA Dynamo, Mooncake, SGLang, Fireworks AI, Together AI
 
 > **Status:** research comparison · **Date:** 2026-08-03, managed providers added 2026-08-09, the scaling manager's column updated 2026-10-25 (v0.10.0)
-> **Baseline:** llm-scaling-manager (**the scaling manager**), an independently developed, advanced fork of llm-d's workload-variant-autoscaler
+> **Baseline:** llm-scaling-manager (**the scaling manager**)
 > **Compared — deployable systems:** NVIDIA Dynamo Planner, Mooncake, SGLang · **managed platforms:** Fireworks AI, Together AI
 > All claims are sourced against latest docs/code — see [Sources](#sources).
 
@@ -37,11 +37,11 @@
 | **Scope** | **Multi-model, multi-tenant, global**; one controller can cover one namespace, a list of them, or the cluster | **Single DGD** (GlobalPlanner = same model only) | Single cluster, fixed | Per-deployment (external) |
 | **Signals** | Prometheus: queue depth (engine and router), KV util, request rate, token supply/demand, ITL vs batch size, prefix-cache hits; router TTFT/TPOT for the SLO analyzer | Prometheus (rate, ISL/OSL, KV-hit) **+** event-plane ForwardPassMetrics | KV reuse, P/D load, TTFT/TBT, predicted decode load | Engine Prometheus (`num_queue_reqs`, `token_usage`, TTFT/TPOT) → external |
 | **Forecasting** | **None** (reactive; EWMA/rate-anchored smoothing only) | **Yes** — Constant/ARIMA(default)/Kalman/Prophet, 1-interval look-ahead | For **admission** only (predict decode load to reject early), not capacity | None |
-| **SLA→capacity** | Saturation optimizer; greedy-by-saturation; learns online per variant, **no profiling needed**; opt-in: carry what it learned across restarts, and start a new variant from a sibling on the same engine configuration. No SLA-target sizing yet (#141) | Interpolated perf model from **pre-deployment profiling** (AIC rapid / AIPerf thorough) | No (SLA → which requests to admit/reject) | None (thresholds live in external KEDA rules) |
+| **SLA→capacity** | Saturation optimizer; greedy-by-saturation; learns online per variant, **no profiling needed**; opt-in: carry what it learned across restarts, and start a new variant from a sibling on the same engine configuration. No SLA-target sizing yet | Interpolated perf model from **pre-deployment profiling** (AIC rapid / AIPerf thorough) | No (SLA → which requests to admit/reject) | None (thresholds live in external KEDA rules) |
 | **Cost / heterogeneity** | **Yes** — heterogeneous accelerators first-class; cost-aware optimizer (relative `variantCost` in the ScaledObject trigger); **GPU limiters that compose**: free GPUs, quotas per namespace or cluster, or Kueue's quotas with cohort borrowing; experimental utilization-share optimizer moves GPUs between models | **No** — homogeneous single GPU type, cost-blind; only a GPU-count cap (`max_gpu_budget=8`) | No (reuses idle CPU/DRAM/SSD on fixed HW) | No (only heterogeneous-TP KV transfer, a data-plane opt) |
 | **Actuation** | **KEDA external scaler (gRPC)**: KEDA's HPA reads the desired replicas; registration is the ScaledObject; it never writes replica counts itself, scale-from-zero included; mutual TLS to KEDA by default | **Own controller** patches DGD CRD via operator (`DynamoGraphDeploymentScalingAdapter`); **VirtualConnector** publishes decisions without managing infra (suggest-only) | Actuates on **requests** (route/reject/replicate KV); no fleet actuation | Dynamic worker register/deregister + K8s service discovery (membership, not scaling) |
 | **P/D disaggregation** | Roles first-class (`llm-d.ai/role`), role-aware demand, both roles committed together; decode does not count KV-transfer waits as backlog; opt-in prefill sizing from the arrival rate. Experimental | **Independent prefill/decode scaling** (core feature) | Separate P/D pools, **preset ratio** | Separate pools, **manual** scaling |
-| **Maturity** | Active; first release v0.10.0 (25 Oct 2026); Stable and Experimental paths marked per scenario ([well-lit paths](../well-lit-paths/)); upstream WVA paper published | GA v1.0 (Mar 2026, unverified), v1.3.1 (6 Aug 2026); both modes production-ready | Production at Kimi; **Conductor + rejection policy NOT open-sourced** | Engine mature; router shipped but mid-rewrite; PD scaling manual |
+| **Maturity** | Active; first release v0.10.0 (25 Oct 2026); Stable and Experimental paths marked per scenario ([well-lit paths](../well-lit-paths/)) | GA v1.0 (Mar 2026, unverified), v1.3.1 (6 Aug 2026); both modes production-ready | Production at Kimi; **Conductor + rejection policy NOT open-sourced** | Engine mature; router shipped but mid-rewrite; PD scaling manual |
 | **Openness** | Open (Apache-2.0); independent of the llm-d project | Open (ai-dynamo) | **Partial** — transport/store open; scheduler internal | Open (sgl-project) |
 
 ---
@@ -173,10 +173,7 @@ Two consequences. First, a **~2-minute** provisioning latency is the real-world 
 **the scaling manager (baseline)**
 - Repo: https://github.com/ev-shindin/llm-scaling-manager · releases (v0.10.0): https://github.com/ev-shindin/llm-scaling-manager/releases
 - What it does and how mature each part is: [why.md](../why.md); measured runs and known limits: [KEDA alone](keda-alone.md#what-was-measured-and-what-failed)
-- Upstream it forked from: https://github.com/llm-d/llm-d-workload-variant-autoscaler
-- KEDA integration: [docs/proposals/wva-external-scaler-proposal.md](../proposals/wva-external-scaler-proposal.md)
-- Component doc: https://llm-d.ai/docs/architecture/Components/workload-variant-autoscaler
-- Paper (the scaling manager global optimization control plane): https://arxiv.org/abs/2603.09730
+- How it plugs into KEDA: [how the scaling manager fits together](../concepts/architecture.md)
 
 **NVIDIA Dynamo Planner**
 - Autoscaling overview (HPA/KEDA/Planner + scaling adapter): https://docs.nvidia.com/dynamo/kubernetes-deployment/operate/autoscaling.md

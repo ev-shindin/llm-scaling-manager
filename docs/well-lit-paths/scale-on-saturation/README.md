@@ -45,9 +45,6 @@ No benchmark has been run on this engine yet.
 
 - A [July 2026 study](../../comparison/keda-alone.md) compared five scenarios
   against a KEDA threshold, one run each, on an older controller.
-- The numbers in [benchmark-results.md](../../developer-guide/benchmark-results.md)
-  were measured on upstream WVA v0.6.0's earlier engine. They are a historical
-  baseline only.
 - Benchmark scenario: `hack/benchmark/scenarios/guides/workload-autoscaling.yaml`,
   run with [Benchmark the scaling manager](../../guides/benchmarking/).
 

@@ -3,9 +3,8 @@
 llm-d autoscales with KEDA, mainly on the router's (EPP) metrics, one
 ScaledObject per Deployment, and leaves a shared GPU budget to Kueue
 ([autoscaling workflow](https://github.com/llm-d/llm-d-autoscaling/blob/e036371f7d04317920ef03a596fbe0c64745942a/docs/developer-guide/autoscaling-workflow.md)).
-llm-scaling-manager is an independently developed, advanced fork of llm-d's
-workload-variant-autoscaler. It plugs into the same KEDA, as an external
-scaler. It is not affiliated with or endorsed by llm-d.
+llm-scaling-manager plugs into the same KEDA, as an external scaler. It is
+not affiliated with or endorsed by llm-d.
 
 **KEDA scales your pods in both setups.** This page covers the one thing that
 differs: what computes the replica count KEDA applies.
@@ -84,7 +83,7 @@ Evidence levels follow [why.md](../why.md#how-mature-each-part-is).
 | **Prefill and decode** | The [token-aware P/D recipe](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/workload-autoscaling/keda-epp-token-aware/README.md) uses one ScaledObject per role: *"prefill and decode scale independently"*. The llm-d-autoscaling [P/D blueprint](https://github.com/llm-d/llm-d-autoscaling/blob/e036371f7d04317920ef03a596fbe0c64745942a/benchmark/config/scenarios/guides/pd-disaggregation.yaml) is also one ScaledObject per role. Neither couples the two. | Each role is sized from its own demand. The pair is committed together, so one role cannot outrun the other. On decode, requests waiting for their KV from prefill are not counted as a backlog (vLLM v0.20.0 and later), except at the `--max-num-seqs` cap, where they really wait for a slot ([how](../reference/scaling-policy.md#per-replica-demand-and-the-role-aware-waiting-queue-charge)). Opt-in: [`enablePrefillThroughputBound`](../reference/scaling-policy.md#enableprefillthroughputbound) grows prefill from the router's arrival rate before its own queue builds. | [P/D disaggregation](../well-lit-paths/pd-disaggregation/) (experimental): the benchmark, run twice, never scaled prefill (1 replica throughout); it predates the decode-queue fix and the prefill bound, and neither has a benchmark yet. The joint commit has unit tests only (`internal/engines/allocation`) |
 | **A GPU budget** | Below the autoscaler: Kueue cohorts with per-model floors, borrowing and preemption (experimental). Demand over budget waits as Pending Pods. | Optional `limiters:`: GPUs free, a quota per namespace, or the quotas Kueue holds. Declared together, they all bound (a replica must also fit on one node). Each model is fitted inside the budget before KEDA sees a number. A capped decision raises `wva_decisions_limited_total` and a `ResourceConstrained` Event, though a fully spent quota can record neither. The limiter is advisory, and a `ResourceQuota` stays the hard bound. **With Kueue under both setups, enforcement is the same** (Kueue admits, holds or preempts); the difference is that this side reads Kueue's quota and sizes every model inside it, so it does not ask for Pods Kueue would leave Pending. It counts cohort borrowing where it is safe (on by default), and only capacity Kueue would take back for its lender: Kueue takes borrowed replicas back when that lender needs them. Opt-in, `kueue.releaseToNonReclaimingLenders` also counts lenders Kueue does not reclaim for, and gives back just enough to admit a waiting lender ([Kueue borrowing](../guides/kueue-borrowing/)). On this release, Kueue grants are honoured only where tenants cannot create LocalQueues on queues not meant for them. | [Bound by GPUs](../well-lit-paths/bound-by-gpus/): end-to-end. [Tenant quotas](../well-lit-paths/tenant-gpu-quotas/): unit tests, with the refusal path end-to-end. [Kueue](../well-lit-paths/kueue-bounded-quotas/): experimental |
 | **Many models on one fleet** | Each ScaledObject scales alone, and Kueue decides who is admitted. | An opt-in priority-weighted rescale under a budget (unit tests only). The experimental [utilization-share optimizer](../well-lit-paths/utilization-share/) moves GPUs between models as demand shifts, with a shadow mode that plans and moves nothing. The budget can be one namespace quota, a [list of namespaces](../guides/utilization-share-namespaced/) under one controller, the [whole cluster](../guides/utilization-share-cluster-wide/), or Kueue's quota. | Utilization share, 1 GPU per replica, on H200: two P/D models (four roles) under one 10-GPU quota, [run three times](../well-lit-paths/utilization-share/measured.md#pd-two-disaggregated-models-under-one-quota). In the two runs on the same settings, per-burst p95 TTFT was 90 and 93 ms against 51 and 73 s without sharing on the output-heavy model, and 6.0 and 3.5 s against 96 and 100 s on the prompt-heavy one, with 0 requests dropped against 116 and 123; it cost 39–43 % more GPU-seconds. The first run (20 000-token prompts, a 30 s router timeout) overloaded the prompt-heavy model in every arm, and sharing dropped more of its requests: 257 against 240, at 36 % more GPU-seconds. Earlier single runs on two plain models cost 24–81 % more (the 81 % approximate, from a build with a since-fixed bug). Not yet measured: multi-GPU or whole-node replicas (kind e2e only), a cluster-wide quota, and the physical GPU limiter |
-| **A latency SLO** | The SLO-aware recipe scales on p90 TTFT and TPOT against the SLO, for *"one variant, one SLO pair"*. llm-d measured 95.8 % attainment at 5.93 average replicas, where a static pool of 8 attains 100 %. Conditions: GKE, H100, Qwen3-32B at TP=2, TTFT ≤ 3 s and TPOT ≤ 100 ms, a staged 2→10→1 rps ramp, bounds 3–8, with a calibrated latency predictor (85.6 % with a cold one). | A tier can declare a TTFT and TPOT target and see each model judged against it ([observe only](../reference/scaling-policy.md#slo-observe-only)); nothing is sized to it yet ([#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)). It reads the router's TTFT and TPOT, publishes attainment per model, and can alert (`WVAModelSLOAttainmentLow`, `WVAModelSLOMissed`). Replicas are sized from capacity, and tiers set how full they may run. | Experimental; its figures have not been checked against a live router yet |
+| **A latency SLO** | The SLO-aware recipe scales on p90 TTFT and TPOT against the SLO, for *"one variant, one SLO pair"*. llm-d measured 95.8 % attainment at 5.93 average replicas, where a static pool of 8 attains 100 %. Conditions: GKE, H100, Qwen3-32B at TP=2, TTFT ≤ 3 s and TPOT ≤ 100 ms, a staged 2→10→1 rps ramp, bounds 3–8, with a calibrated latency predictor (85.6 % with a cold one). | A tier can declare a TTFT and TPOT target and see each model judged against it ([observe only](../reference/scaling-policy.md#slo-observe-only)); nothing is sized to it yet. It reads the router's TTFT and TPOT, publishes attainment per model, and can alert (`WVAModelSLOAttainmentLow`, `WVAModelSLOMissed`). Replicas are sized from capacity, and tiers set how full they may run. | Experimental; its figures have not been checked against a live router yet |
 | **Interactive and batch urgency** | A different threshold per ScaledObject. | Named tiers in one policy ([workload classes](../well-lit-paths/workload-classes/)). | End-to-end suite (simulator) |
 | **Scale to zero** | KEDA's own `minReplicaCount: 0`. The router buffers requests, and its queue metric wakes the target. llm-d's caveat: a request queued at zero is lost if the router restarts. | KEDA's own mechanism. The controller also reads the router's queue every 100 ms and pushes activation, instead of waiting for the next poll. Only the 0 → 1 step is pushed. The request waits in the same router queue, so a router restart loses it here too. The wake is still a cold start, about 41 s on an H100 test cluster, unless a warm pool holds the model. | [Scale to zero](../well-lit-paths/scale-to-zero/): end-to-end, cluster-verified |
 | **Flapping** | HPA behaviour windows (300 s both ways in the default) and the HPA's 10 % tolerance. | The same HPA behaviour (our generated ScaledObject uses 0 s up and 300 s down). The controller adds holds of its own: sticky scale-down and shape-change holds. | End-to-end suites |
@@ -157,7 +156,7 @@ path"*. It is the better choice in these cases:
 - **No shared GPU budget.** Each model has GPUs reserved for its maximum, or
   Kueue cohorts are enough.
 - **You scale to a latency SLO** on a single variant. llm-d's SLO-aware recipe
-  targets it directly; we do not yet ([#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)).
+  targets it directly; we do not yet.
 - **Latency first, cost second.** A low threshold over-provisions, which is the
   safe direction when the tail is the SLO.
 
@@ -187,8 +186,7 @@ path"*. It is the better choice in these cases:
   engine configuration can price a new variant higher only with the opt-in
   [`enableLearnedStateReuse`](../reference/scaling-policy.md#enablelearnedstatereuse);
   one that can only price it lower is used either way.
-  Whether the snapshot should be on by default is still open
-  ([#227](https://github.com/ev-shindin/llm-scaling-manager/issues/227)).
+  Whether the snapshot should be on by default is still open.
 - **One more port.** KEDA reaches the controller over gRPC on `:9090`. A new
   install serves it over mutual TLS when it can, and says why when it stays on
   plaintext; an upgrade with existing ScaledObjects stays on plaintext until
@@ -237,8 +235,7 @@ The first release, v0.10.0 (2026-10-25, after release candidates from
 - **Sizing.** Analyzers listed beside saturation now size the model, to the
   largest need. An observe-only `slo` analyzer judges each model against a
   TTFT and TPOT target. Prefix-cache hits and data-parallel ranks are now
-  priced, though a hit still occupies KV
-  ([#277](https://github.com/ev-shindin/llm-scaling-manager/issues/277)). Advanced knobs for the capacity model sit in one
+  priced, though a hit still occupies KV. Advanced knobs for the capacity model sit in one
   [`analyzerTuning`](../reference/scaling-policy.md#advanced-tuning-analyzertuning-and-loadimbalance)
   block; leave them alone unless a measurement says otherwise.
 - **P/D.** Decode no longer counts requests waiting for prefill's KV as a
@@ -270,24 +267,18 @@ run per arm unless it says otherwise.
 | P/D sizes for a request shape | 2 decode replicas at 5–15 % KV, a 3rd after the shape change, no queue; run twice, a day apart | [P/D, measured](../well-lit-paths/pd-disaggregation/measured.md) |
 | Sharing one quota, two plain models | six runs, each once: 24–81 % more GPU-seconds where measured. Five of them, on other burst shapes, found failures the first could not show. In the latest, the model that burst first had a median TTFT of 0.07 s against 25.6 s with the same fleet planned but not moved, and the second was no worse (GPU cost not measured) | [utilization share, measured](../well-lit-paths/utilization-share/measured.md) |
 | Sharing one quota, two P/D models | three runs. Two on the same settings: both bursts served far faster, no dropped requests against 116 and 123, 39–43 % more GPU-seconds. The first, with longer prompts and a 30 s router timeout, overloaded the prompt-heavy model in every arm, and sharing dropped more of its requests (257 against 240) at 36 % more GPU-seconds | [utilization share, P/D](../well-lit-paths/utilization-share/measured.md#pd-two-disaggregated-models-under-one-quota) |
-| Two models trading a quota across namespaces (failed) | the first load swap was served late: the model giving up a GPU was held about ten minutes, six of them after its new pod was Ready, with no reason logged. Fixed after the run ([#290](https://github.com/ev-shindin/llm-scaling-manager/issues/290)). A one-replica move that is not called off when the giving model's load returns is still open ([#285](https://github.com/ev-shindin/llm-scaling-manager/issues/285)) | the issues |
+| Two models trading a quota across namespaces (failed) | the first load swap was served late: the model giving up a GPU was held about ten minutes, six of them after its new pod was Ready, with no reason logged. Fixed after the run. A one-replica move that is not called off when the giving model's load returns is still open | - |
 | The same, with the fix | passed every check except timing: the first two load swaps took about 16 and 15 minutes to settle, against a 12-minute target | [below](#analyzer-experiments-october-2026) |
 | The router overloads one of four replicas | run twice, on two builds; both passed: no scale-up, what the controller learned unchanged, the imbalance reported and cleared. The overloaded replica still held about 767 queued requests | [below](#analyzer-experiments-october-2026) |
 | A busy model goes quiet | utilization 0.22 against the 0.26 of capacity actually served | [below](#analyzer-experiments-october-2026) |
 | Controller log volume | 3922 down to 1547 bytes per replica per cycle at the default level | [below](#analyzer-experiments-october-2026) |
 
-Known limits on this release that bear on the comparison: no sizing to an SLO
-([#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)); no
-end-to-end proof of variant choice on two GPU types, and no repeated runs
-([#142](https://github.com/ev-shindin/llm-scaling-manager/issues/142)); no
-nightly run on real GPUs
-([#143](https://github.com/ev-shindin/llm-scaling-manager/issues/143)); Kueue
-modelled per namespace, not per ClusterQueue, with borrowing limits still open
-([#213](https://github.com/ev-shindin/llm-scaling-manager/issues/213),
-[#214](https://github.com/ev-shindin/llm-scaling-manager/issues/214)); and
-capacity-model gaps for speculative decoding, mixed prefill and decode pods,
-variable output length and prefix-cache residency
-([#274](https://github.com/ev-shindin/llm-scaling-manager/issues/274)–[#277](https://github.com/ev-shindin/llm-scaling-manager/issues/277)).
+Known limits on this release that bear on the comparison: no sizing to an SLO;
+no end-to-end proof of variant choice on two GPU types, and no repeated runs;
+no nightly run on real GPUs; Kueue modelled per namespace, not per
+ClusterQueue, with borrowing limits still open; and capacity-model gaps for
+speculative decoding, mixed prefill and decode pods, variable output length
+and prefix-cache residency.
 The full list is in the
 [release notes](https://github.com/ev-shindin/llm-scaling-manager/releases).
 
@@ -297,7 +288,7 @@ These check the capacity model on real GPUs. Setup: an H200 cluster,
 `Qwen/Qwen3-32B-FP8` on 1 GPU per replica, decode only (no P/D), load sent at
 a fixed request rate whatever the fleet does. All ran on 2026-10-24, one run
 each unless it says otherwise. The quota-trading run and the first router run
-used one build (main plus the fixes for #290, #287 and #278); the second router
+used one build (main plus three fixes, one of them for the quota hold described below); the second router
 run and the rest used a later one (main plus the P/D decode fix,
 `analyzerTuning`, the light-load fix and the smaller log).
 
@@ -316,8 +307,8 @@ throughput.
   took 12. A move waits twice: the giving model lets its replica go only after
   its scale-down window (about 5 minutes), and the receiving model's new
   replica then takes about 4 minutes to start. In the first phase the giving
-  model was also held about 4 minutes while its own new pod started; with the
-  fix for #290, that hold ended once the pod was stable, and the log said why.
+  model was also held about 4 minutes while its own new pod started; with
+  that fix, that hold ended once the pod was stable, and the log said why.
 
 **The router sends all load to one of four replicas** (run twice, on the two
 builds above). One phase routes every request to one replica while three sit
@@ -347,8 +338,8 @@ keeps reflecting the work served once the busy readings have aged out.
   was measuring).
 - Utilization read 0.22 (median) against the 0.26 of that capacity actually
   served, while KV-cache use was only 0.04.
-- A model that has never been busy still reads KV-cache use alone; #284
-  measured 0.064 at the same rate. This fix does not change that, and no run
+- A model that has never been busy still reads KV-cache use alone; an earlier
+  run measured 0.064 at the same rate. This fix does not change that, and no run
   measured the busy-then-quiet case before the fix.
 
 **Log volume.** At the default log level, the controller wrote 3922 bytes per
@@ -361,5 +352,4 @@ fleet growth, and repeats of the quota-trading and quiet-model runs.
 ### Re-run against llm-d's current recipe
 
 Not run yet. A re-run, Run 3 included, with the threshold arm on llm-d's
-current default recipe is planned
-([#142](https://github.com/ev-shindin/llm-scaling-manager/issues/142)).
+current default recipe is planned.

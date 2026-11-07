@@ -57,13 +57,9 @@ Read the review first; the implementation design says what was built.
 
 ## Scaling and actuation
 
-- **[WVA as a KEDA external scaler](wva-keda-external-scaler.md)** — the actuation
-  design: how WVA drives KEDA, and the ScalingPolicy tiers.
-- **[Scale-from-zero: the missing signal](scale-from-zero-missing-signal.md)** —
-  why a parked model needs a push, and where it comes from.
 - **[Priority scoping](priority-scoping.md)** — parked. Read before redesigning.
 - **[Kueue borrowing, and limiters that compose](kueue-borrowing-and-limiter-composition.md)**
-  — built (fork #136, upstream WVA #1003). #164 makes every declared limiter
+  — built (#136). #164 makes every declared limiter
   bound together and a replica fit a node; #180 counts borrowable cohort
   capacity from lenders Kueue would reclaim for, where Kueue governs the pods
   and a GPU bound is declared. Counting other lenders (PR-C) is an open,
@@ -99,12 +95,6 @@ Read the review first; the implementation design says what was built.
   KEDA's own triggers so KEDA scales and we observe. Records the audit of what
   compares against the controller's own previous output.
 
-- **[WVA as a KEDA external scaler: the argument](wva-external-scaler-proposal.md)**
-  — the shorter framing of the same design: compute the target, let KEDA
-  actuate, and why that beats publishing a metric.
-- **[The alternative framing](wva-external-scaler-alternative.md)** — the reply
-  to "WVA as a metric shop", keeping the capacity model in WVA.
-
 ## Engine and analyzers
 
 - **[Replicas that change P/D role in place](pd-role-switch/)** —
@@ -120,7 +110,6 @@ Read the review first; the implementation design says what was built.
   How listed analyzers combine into the one signal the optimizer reads, the
   decisions behind it, its known limits (#305, #226) and the target: each
   analyzer at its own band, and no dependence on saturation's units.
-- **[SGLang backend](sglang-backend.md)**
 - **[Sizing a backlog](backlog-sizing.md)** — what the shape-swap P/D run
   showed: peaks of 7 and 9 decode replicas against a need of 2, troughs of 1
   that caused the next peak. Three fixes landed (the throughput floor among
@@ -221,8 +210,3 @@ last; it is the unit change that makes the other two land.
   flow-control queue above the rate where its gate closes, and an optimised
   union bound for the percentile. Shared with the SLO analyzer's TTFT pricing;
   validated by a fixed-replica staircase.
-
-## Product and lifecycle
-
-- **[Capacity-planner positioning](capacity-planner-positioning.md)** — where a
-  cluster capacity planner sits relative to WVA.

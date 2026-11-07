@@ -58,8 +58,8 @@ export PROMETHEUS_SECRET_NAME_EXPLICIT PROMETHEUS_SECRET_NS_EXPLICIT
 PROMETHEUS_SECRET_NS=${PROMETHEUS_SECRET_NS:-$MONITORING_NAMESPACE}
 
 # WVA Configuration (required when DEPLOY_WVA=true)
-# This tree's manifests pass --external-scaler-bind-address, a flag no
-# RELEASED upstream image has: ghcr.io/llm-d/...:latest crash-loops on it with
+# This tree's manifests pass --external-scaler-bind-address, a flag the
+# images under ghcr.io/llm-d do not have: :latest there crash-loops on it with
 # "unknown flag" and the install has nothing to run. The default therefore
 # points at a build of THIS repository, matching the Makefile's IMG.
 #

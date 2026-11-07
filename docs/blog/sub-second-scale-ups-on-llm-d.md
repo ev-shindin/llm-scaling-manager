@@ -15,9 +15,7 @@ GPU bridging the rise, the same spikes served at **0.11–0.83 s** — and cost
 
 We are [llm-scaling-manager](https://github.com/ev-shindin/llm-scaling-manager): a
 multi-model autoscaler for llm-d, with warm capacity and scale-to-zero on top. It
-decides the replica count; KEDA and the HPA actuate it. It is an advanced fork
-of llm-d's Workload Variant Autoscaler, developed independently, and has diverged
-substantially since.
+decides the replica count; KEDA and the HPA actuate it.
 
 llm-d itself autoscales with KEDA, mainly on the router's (EPP) metrics, one
 ScaledObject per Deployment, and leaves a shared GPU budget to Kueue. This

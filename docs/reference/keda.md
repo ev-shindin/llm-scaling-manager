@@ -58,7 +58,7 @@ Upgrade KEDA to 2.21, which also fixes the CVE above. Until then, run
 ([re-wiring](#the-scalers-tls-in-kedas-namespace)), or restart the KEDA
 operator. On a KEDA below 2.20 the installer says so in its CVE warning, and
 `make verify-deployment` names this cause when it finds an unwired HPA. A
-controller-side repair for older KEDA is tracked in [#340](https://github.com/ev-shindin/llm-scaling-manager/issues/340).
+controller-side repair for older KEDA is planned.
 
 ### Upgrading a KEDA the cluster already has
 

@@ -27,7 +27,7 @@ import (
 // Identity in the BODY, not the key. See PolicyEntryKey for why the original
 // {modelID}#{namespace} key form could never work.
 //
-// See docs/proposals/wva-keda-external-scaler.md §7.5.
+// See docs/reference/scaling-policy.md (Named Policy Tiers).
 
 // ModelTiers returns the policy tiers a model is resolved under, given the tier
 // each of its variants names (one element per variant, "" for none). Sorted
@@ -166,7 +166,7 @@ func ResolveScalingPolicy(
 //	  â–¼ overridden by
 //	model override entry     an entry whose body names this model, most specific
 //
-// Most specific wins, per docs/proposals/wva-keda-external-scaler.md Â§7.5. The
+// Most specific wins, per docs/reference/scaling-policy.md (Named Policy Tiers). The
 // per-model override stays the innermost layer so existing configs keep working
 // while tiers are adopted: a fleet moves to policies model by model, not all at
 // once.

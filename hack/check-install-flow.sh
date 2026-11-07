@@ -1053,15 +1053,15 @@ else
     fail "cluster scope: the not-Ready recreate command must carry SCOPE=cluster WVA_NS=wva-system" "$out"
 fi
 
-# The count is ScaledObjects naming this scaler. Upstream ones on the same
-# workloads are not "none on the cluster": say what was counted, and name them.
+# The count is ScaledObjects naming this scaler. Those of another scaler on
+# the same workloads are not "none on the cluster": say what was counted, and name them.
 out="$(SO_LIST='{"items":[{"metadata":{"namespace":"team-a","name":"up"},"spec":{"triggers":[{"type":"prometheus","metadata":{"serverAddress":"http://prom:9090"}}]}}]}' so_report cluster)"
 if printf '%s' "$out" | grep -q 'none on the cluster registered with WVA yet' \
     && printf '%s' "$out" | grep -q '1 other ScaledObject(s) on the cluster use another scaler' \
     && ! printf '%s' "$out" | grep -q 'none on the cluster yet'; then
-    ok "cluster scope: an upstream ScaledObject is named, not reported as none on the cluster"
+    ok "cluster scope: another scaler's ScaledObject is named, not reported as none on the cluster"
 else
-    fail "cluster scope: with only an upstream ScaledObject, say none registered with WVA and name the other one" "$out"
+    fail "cluster scope: with only another scaler's ScaledObject, say none registered with WVA and name the other one" "$out"
 fi
 out="$(SO_NONE=1 so_report cluster)"
 if ! printf '%s' "$out" | grep -q 'other ScaledObject'; then
@@ -1092,9 +1092,9 @@ fi
 out="$(SO_NS_LIST='{"items":[{"metadata":{"namespace":"wva-system","name":"up"},"spec":{"triggers":[{"type":"prometheus","metadata":{"serverAddress":"http://prom:9090"}}]}}]}' so_report namespace)"
 if printf '%s' "$out" | grep -q 'none in wva-system registered with WVA yet' \
     && printf '%s' "$out" | grep -q '1 other ScaledObject(s) in wva-system use another scaler'; then
-    ok "namespace scope: an upstream ScaledObject in the namespace is named"
+    ok "namespace scope: another scaler's ScaledObject in the namespace is named"
 else
-    fail "namespace scope: with only an upstream ScaledObject, name it as using another scaler" "$out"
+    fail "namespace scope: with only another scaler's ScaledObject, name it as using another scaler" "$out"
 fi
 
 # A list that fails is not an empty one. Forbidden folded into a count of 0

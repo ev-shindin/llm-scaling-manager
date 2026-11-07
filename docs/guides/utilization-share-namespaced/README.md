@@ -915,8 +915,7 @@ before step 13. KEDA and Prometheus stay. To remove them too, add
   the number.
 - **Option C limit: one budget per ClusterQueue, not per namespace.**
   Namespaces on one queue share it, and two that grow in the same minute can
-  ask for more than it admits; Kueue holds the extra pods
-  ([#213](https://github.com/ev-shindin/llm-scaling-manager/issues/213)).
+  ask for more than it admits; Kueue holds the extra pods.
 - **Option C limit: GPUs Kueue granted are never taken back by the
   optimizer.** Kueue preempts what it must
   ([the scaling policy](../../reference/scaling-policy.md#optimizer-cluster-default-only-live)).

@@ -64,12 +64,6 @@ If you find a bug in this process, create an [issue].
 Unpin any dependencies that were pinned for the release, and update the
 release tracking issue with the final release link.
 
-> Upstream's template also opened a pull request against `llm-d/llm-d` to
-> update the autoscaling guides for the new version. That step is not
-> available here and has been removed: this is an independent fork with no
-> push access to that repository, and it publishes its own guides under
-> `docs/guides/`.
-
 ## Announce the Release
 
 Use the following steps to announce the release.
@@ -93,9 +87,7 @@ Use the following steps to announce the release.
    ```
 
 1. Copy the generated subject and body and send it wherever this project
-   announces releases. (Upstream's template mailed
-   `llm-d-contributors@googlegroups.com`; that is their list, not this
-   project's, so it is not the default here.)
+   announces releases.
 
 1. Add a link to the final release in this issue.
 

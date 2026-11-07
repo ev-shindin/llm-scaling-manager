@@ -27,9 +27,7 @@ tell you what you need to know. We have a benchmark where the request rate
 never changed, no queue formed, and cache occupancy said one replica would do,
 while the load needed two replicas, and three after the request shape changed.
 
-It is an advanced fork of llm-d's Workload Variant Autoscaler
-(`llm-d/llm-d-workload-variant-autoscaler`, still the module path in `go.mod`),
-developed independently and a long way on since. The one-page case for
+The one-page case for
 evaluators, with costs and maturity: [Why llm-scaling-manager](why.md). Shorter
 version, for readers outside the repository:
 [Sub-second scale-ups on llm-d](blog/sub-second-scale-ups-on-llm-d.md).

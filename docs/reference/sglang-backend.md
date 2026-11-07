@@ -97,5 +97,4 @@ vLLM's:
 
 ## See also
 
-- Design proposal: [`docs/proposals/sglang-backend.md`](../proposals/sglang-backend.md)
 - SGLang server arguments: <https://docs.sglang.io/advanced_features/server_arguments.html>

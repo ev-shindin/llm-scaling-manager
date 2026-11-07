@@ -76,15 +76,6 @@ that.
   reads them.
 - Images published under the old owner, until they are republished.
 
-## The file written by hand
-
-`docs/guides/from-upstream-wva/` uses both projects' names in one sentence, and
-no rule can tell them apart, so it is class `manual`. The tool does not rewrite
-these two files: it lays down `hack/rename/overlay/<path>.overlay`, with only the
-held rows run over it, so `--code-moved` still reaches their links. It writes the
-same bytes on every run, so the no-op check holds. Change the guide in the overlay
-until the rename has run.
-
 ## How Go is rewritten
 
 Go goes through its syntax tree, never a pattern over the source. Regular

@@ -1575,5 +1575,3 @@ source.window.to string
   the recorder.
 - [Traffic shape shifts](shape-shift-treatment.md) and
   [a per-token economy](per-token-economy.md): the shape and units.
-- [Capacity-planner positioning](capacity-planner-positioning.md): a planner at a
-  different altitude, which would call this model.

@@ -18,7 +18,7 @@ the dashboard, with no standup.
 - [ ] A **ReadWriteMany** StorageClass for the model cache
   ([why](#the-model-cache-must-be-readwritemany)).
 - [ ] An `IMG` built from this branch, or a release image from a checkout of
-  the same release. Upstream WVA's images reject a flag these manifests pass
+  the same release. Images under `ghcr.io/llm-d/` reject a flag these manifests pass
   ([why](#img-decides-what-is-measured)).
 - [ ] Running Fast Model Actuation in the namespace? Read
   [FMA namespaces](#fma-namespaces) first.
@@ -288,8 +288,8 @@ volume it cannot attach. Many clusters' default StorageClass is RWO (kind's
 
 ### `IMG` decides what is measured
 
-Nothing in the results says which binary produced them. Upstream WVA's images
-(`ghcr.io/llm-d/...`) reject `--external-scaler-bind-address`, which these
+Nothing in the results says which binary produced them. Images under
+`ghcr.io/llm-d/...` reject `--external-scaler-bind-address`, which these
 manifests pass, so a run against one measures a CrashLoopBackOff. Set `IMG` to
 your own build whenever you change controller code.
 

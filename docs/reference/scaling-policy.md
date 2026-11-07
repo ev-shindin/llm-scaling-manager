@@ -32,7 +32,7 @@ What each threshold controls:
 
 ## ScalingPolicy Schema (Phase 1)
 
-Phase 1 of the [ScalingPolicy proposal](https://github.com/llm-d/llm-d-workload-variant-autoscaler/pull/1245)
+Phase 1 of the ScalingPolicy design
 adds a plugin envelope to each entry of this ConfigMap. It is additive: no CRD,
 no migration, no new install step. Flat entries keep working; adopt it per entry
 if you want.
@@ -2362,16 +2362,16 @@ What to know before you rely on one:
 - **Units are yours to get right.** Use a `sum(...)` query. `count()` and
   `avg()` count engine instances, not Pods; collapse them by Pod first
   (`count(count by (pod) (...))`).
-- **Model-level only** ([#343](https://github.com/ev-shindin/llm-scaling-manager/issues/343)). It reports demand for the whole
+- **Model-level only**. It reports demand for the whole
   model, not per role, so it **cannot size a P/D model**; the log says
   `listed analyzer reports no per-role demand`. It can still hold one: when
   its query fails, no role of the model scales down for up to three cycles.
 - **The threshold is a constant.** It does not learn per-replica capacity;
-  a target query is planned ([#344](https://github.com/ev-shindin/llm-scaling-manager/issues/344)).
+  a target query is planned.
 - **An empty result is 0 demand.** If the query matches nothing, the
   analyzer asks for 0 replicas. Listed alone, that lets the model scale
   down; beside saturation, saturation's larger need wins. Treating an empty
-  result as missing is planned ([#344](https://github.com/ev-shindin/llm-scaling-manager/issues/344)). A query that
+  result as missing is planned. A query that
   **fails** is no reading instead: for three cycles no role of the model
   scales down, then it stops counting.
 - **Its own `scaleUpThreshold`/`scaleDownBoundary` decide nothing**, as for

@@ -18,7 +18,7 @@ export REPO_ROOT
 # config/base/manager/kustomization.yaml, as deploy/install.sh reads it. On main
 # that is :main, a floating build of main. On a checkout of a release tag
 # (git checkout v0.10.2) it is that release, so the guides install the
-# release and not whatever main last pushed. Upstream WVA images do not accept
+# release and not whatever main last pushed. Images under ghcr.io/llm-d do not accept
 # --external-scaler-bind-address, which these manifests pass: pointing the
 # guides at ghcr.io/llm-d/...:latest gave a CrashLoopBackOff on "unknown flag",
 # which reads like a broken image rather than version skew.

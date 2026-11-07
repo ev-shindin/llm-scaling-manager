@@ -92,7 +92,7 @@ data:
   #       parameters: { scaleUpThreshold: 0.95 }
   #
   # ---------------------------------------------------------------------------
-  # Named scaling policies (tiers) — docs/proposals/wva-keda-external-scaler.md §7.5
+  # Named scaling policies (tiers) — docs/reference/scaling-policy.md#3-named-policy-tiers
   # ---------------------------------------------------------------------------
   #
   # A policy is a reusable TIER, not a per-model entry: it carries no model_id and

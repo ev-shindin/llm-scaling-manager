@@ -155,9 +155,9 @@ try it: a P/D role switch already exists on our vLLM fork. That is a separate
 proposal, not this one, but it is the lever that attacks the part of the delay
 a better capacity model cannot.
 
-Upstream's own attempt at token-velocity autoscaling (llm-d/llm-d-autoscaling
+llm-d's own attempt at token-velocity autoscaling (llm-d/llm-d-autoscaling
 PR #1544) added benchmark tooling only and was closed stale on 2026-09-24 with
-no reviews, so nothing here conflicts with a shipped upstream design.
+no reviews, so nothing here conflicts with a shipped llm-d design.
 
 ## What this does not need
 

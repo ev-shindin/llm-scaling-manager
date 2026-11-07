@@ -416,7 +416,7 @@ scenario:
         # -----------------------------------------------------------------------
         # Probes
         #
-        # HTTP probes aligned with the upstream WVA well-lit-path guide
+        # HTTP probes aligned with llm-d's workload-autoscaling guide
         # (llm-d/guides/workload-autoscaling/ms-workload-autoscaling/values.yaml):
         #   - startupProbe + readinessProbe use /v1/models — only returns 200
         #     once vLLM has finished loading weights, so "Ready" truly means
@@ -457,7 +457,7 @@ scenario:
         # prometheus-adapter; no PodMonitor → no metrics → HPA never sees a
         # value for wva_desired_replicas → autoscaling silently broken.
         # The `release: llmd` label is what user-workload-monitoring keys
-        # on for discovery, matching the upstream WVA guide's example.
+        # on for discovery, matching llm-d's workload-autoscaling guide.
         # -----------------------------------------------------------------------
         monitoring:
           podmonitor:
@@ -492,7 +492,7 @@ scenario:
       # Controller container image.
       # Pin `tag` to a release version for reproducibility, or set to "auto"
       # to let the version-resolver pick latest at plan time.
-      # NOTE: the WVA controller is installed from the upstream kustomize
+      # NOTE: the WVA controller is installed from its kustomize
       # overlay (see wva.repoRef), not a helm chart -- there is no separate
       # `chartVersions.wva` to keep in sync.
       # Available version tags can be listed with:
@@ -625,7 +625,7 @@ scenario:
     # =========================================================================
     # CHART VERSIONS
     #
-    # The WVA controller itself is installed from the upstream kustomize
+    # The WVA controller itself is installed from its kustomize
     # overlay (see wva.image.tag / wva.repoRef above), not a helm chart --
     # this block only pins helm charts still installed by step_03.
     # =========================================================================
@@ -722,7 +722,6 @@ scenario:
       # prometheus-adapter chart (prometheus-community/prometheus-adapter).
       # Pinned because newer releases have broken external-metric
       # compatibility with the rule format the WVA chart emits.
-      # The upstream WVA README also pins this version.
       prometheusAdapter: 5.2.0
     # =========================================================================
     # WORKLOAD / HARNESS

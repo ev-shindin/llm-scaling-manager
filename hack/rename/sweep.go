@@ -18,7 +18,6 @@ const (
 	reasonTool    = "the tool itself"
 	reasonBinary  = "binary or compressed, never edited"
 	reasonPartial = "not the name: a capital inside a word, as in newValue"
-	reasonManual  = "manual: written by hand in hack/rename/overlay"
 	reasonNone    = "UNEXPLAINED"
 )
 
@@ -102,9 +101,6 @@ func (e *Engine) FinalSweep(root string, files []tracked) (*Sweep, error) {
 func (e *Engine) reason(p, line string, start, end int) string {
 	if classify(p) == ClassTool {
 		return reasonTool
-	}
-	if matchAny(manualFiles, p) {
-		return reasonManual
 	}
 	if hit := line[start:end]; strings.EqualFold(hit, "wva") && hit != "wva" && hit != "Wva" && hit != "WVA" {
 		return reasonPartial

@@ -17,9 +17,7 @@ already argued once, and does not reopen.
 
 ## The line: observability, not actuation
 
-"WVA as a metric shop" was proposed and rejected. The argument is in
-[`wva-external-scaler-alternative.md`](wva-external-scaler-alternative.md),
-and the sentence that settles it is:
+"WVA as a metric shop" was proposed and rejected. The sentence that settles it is:
 
 > A raw Prometheus metric is not enough. Right scaling needs *measured
 > per-variant capacity + drift tracking*, not *metric + static threshold*. The

@@ -576,7 +576,7 @@ references below are from the pre-removal plan and no longer resolve.
 ## 10. #1455 external analyzers — as built
 
 The external-analyzer wrapper is wired through the **ScalingPolicy configuration system**, split
-across ConfigMaps exactly as §7.6 of the KEDA-external-scaler proposal describes — not collapsed into
+across ConfigMaps exactly as [the scaling-policy reference](../../reference/scaling-policy.md#external-analyzers-analyzerdefinitions) describes — not collapsed into
 a single policy entry:
 
 - **Catalog** (`analyzerDefinitions` on the cluster `default` entry of the scaling-policy

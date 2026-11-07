@@ -35,5 +35,4 @@ models have been measured on their own, not against KEDA; the
 [table](keda-alone.md#what-was-measured-and-what-failed) lists each run, with
 the one that failed.
 
-The scaling manager is an advanced fork of llm-d's
-workload-variant-autoscaler, developed independently; these pages compare mechanisms, not the two projects.
+These pages compare mechanisms, not projects.

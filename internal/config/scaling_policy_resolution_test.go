@@ -5,7 +5,7 @@ import "testing"
 // Named policies are reusable TIERS, selected per variant by trigger metadata.
 // The point is that they carry no model identity: one tier serves many models, so
 // retuning a tier is one edit rather than an edit per model. These pin the
-// layering from docs/proposals/wva-keda-external-scaler.md §7.5 —
+// layering from docs/reference/scaling-policy.md (Named Policy Tiers) —
 //
 //	default entry → named policy tier → {modelID}#{namespace} override
 //

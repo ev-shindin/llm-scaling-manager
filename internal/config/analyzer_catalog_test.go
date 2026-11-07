@@ -9,7 +9,7 @@ import (
 
 // External analyzers are DECLARED on the cluster "default" scaling entry and
 // SELECTED by name in policy tiers — "policies select/weight; they don't define"
-// (docs/proposals/wva-keda-external-scaler.md §7.6). They used to live in a
+// (docs/reference/scaling-policy.md, External analyzers). They used to live in a
 // ConfigMap of their own (wva-analyzers), two objects away from the policies that
 // reference them.
 func TestExternalAnalyzerCatalogComesFromTheDefaultEntry(t *testing.T) {

@@ -120,8 +120,7 @@ what they document. Index and conventions: **[guides/](guides/)**.
 
 **Installing** — [in a namespace](guides/install-in-namespace/) (the common
 case) · [cluster-wide](guides/install-cluster-wide/) · [a small llm-d model
-first](guides/install-small-model/), if nothing is serving yet ·
-[coming from llm-d's workload-variant-autoscaler](guides/from-upstream-wva/)
+first](guides/install-small-model/), if nothing is serving yet
 
 **Administering** — [cluster-admin setup for a
 namespace](guides/admin-cluster-setup/) · [bound every install by real
@@ -158,7 +157,7 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 - **[The steady-state engine](concepts/steady-state-engine.md)** — what it measures, and how a measurement becomes a replica count
 - **[GPU capacity accounting](concepts/gpu-capacity-accounting.md)** — what each limiter bounds, how they combine, node fit, Kueue borrowing, and where the figures can still be wrong
 - **[Modeling and optimization](concepts/modeling-and-optimization.md)** — what is modelled, what is not, and how per-variant demands become replica counts
-- **[llm-d autoscaling](https://llm-d.ai/docs/architecture/advanced/autoscaling)** — upstream's page, describing the autoscaler this project forked from; kept for context, not as a description of this one
+- **[llm-d autoscaling](https://llm-d.ai/docs/architecture/advanced/autoscaling)** — llm-d's own autoscaling page, for context; it does not describe this project
 
 ## Developing the scaling manager
 

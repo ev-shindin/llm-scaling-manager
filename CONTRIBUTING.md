@@ -2,9 +2,7 @@
 
 Thanks for contributing to llm-scaling-manager.
 
-This project is a fork of [llm-d's workload-variant-autoscaler](https://github.com/llm-d/llm-d-workload-variant-autoscaler),
-and much of its design and code comes from there. Issues and pull requests for
-this fork go to
+Issues and pull requests go to
 [github.com/ev-shindin/llm-scaling-manager](https://github.com/ev-shindin/llm-scaling-manager).
 
 ## Setting Up

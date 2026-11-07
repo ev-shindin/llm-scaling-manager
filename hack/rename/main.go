@@ -197,9 +197,6 @@ func (e *Engine) Plan(root string, files []tracked) (*Result, error) {
 			res.Binary = append(res.Binary, BinaryFile{f.path, e.countInBinary(f.path, b)})
 		} else {
 			out, err := e.rewriteFile(f.path, class, b)
-			if matchAny(manualFiles, f.path) {
-				out, err = e.overlay(root, f.path, b)
-			}
 			if err != nil {
 				return nil, fmt.Errorf("%s: %w", f.path, err)
 			}
@@ -253,30 +250,6 @@ func (e *Engine) rewriteFile(p, class string, b []byte) ([]byte, error) {
 		return nil, err
 	}
 	if endings == endCRLF {
-		out = toCRLF(out)
-	}
-	return out, nil
-}
-
-// overlay returns what a manual file becomes: its hand-written replacement, with
-// the held rows run over it and the line endings of the file it replaces. It runs
-// on every pass and gives the same bytes, so a second run changes nothing.
-func (e *Engine) overlay(root, p string, current []byte) ([]byte, error) {
-	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(overlayDir+p+".overlay")))
-	if err != nil {
-		return nil, err
-	}
-	held := *e
-	held.Stats = NewStats()
-	held.Rules = nil
-	for _, r := range e.Rules {
-		if r.Action == HoldUntilMoved {
-			held.Rules = append(held.Rules, r)
-		}
-	}
-	b = toLF(b)
-	out := held.RewriteText(p, ClassDocs, CtxText, b, 0)
-	if detectEndings(current) == endCRLF {
 		out = toCRLF(out)
 	}
 	return out, nil

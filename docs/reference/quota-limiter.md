@@ -5,9 +5,7 @@ the physical inventory. Use it to cap accelerator use whatever nodes exist: to
 reserve burst capacity, divide a cluster across tenants, or test a smaller
 budget than the hardware allows.
 
-This page covers its configuration, design and place in the pipeline. The
-implementation closes
-[#1002](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1002).
+This page covers its configuration, design and place in the pipeline.
 
 ## Enabling
 

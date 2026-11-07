@@ -1,8 +1,8 @@
 # Image URL to use all building/pushing image targets
-# This branch's manifests pass --external-scaler-bind-address, a flag no
-# RELEASED image has: ghcr.io/llm-d/...:latest crash-loops on it with "unknown
-# flag", and the install has nothing to run. The default therefore points at a
-# build of THIS tree. Change it back when the external scaler ships upstream.
+# The manifests pass --external-scaler-bind-address, a flag the images under
+# ghcr.io/llm-d do not have: they crash-loop on it with "unknown flag", and
+# the install has nothing to run. The default therefore points at a build of
+# THIS tree.
 IMAGE_TAG_BASE ?= ghcr.io/ev-shindin
 # `main`, built by ci-main-image on every push to main -- reproducible from a
 # commit and multi-arch, unlike a tag pushed by hand from a laptop. Rebuilt
@@ -2335,7 +2335,7 @@ benchmark-deploy-wva: ## Install WVA from deploy/ into BENCHMARK_NAMESPACE (name
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-deploy-wva BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-	@# A scenario that still installs WVA itself (the upstream ones do) would leave
+	@# A scenario that installs its own autoscaler (llm-d-benchmark's own ones do) would leave
 	@# two controllers optimizing the same namespace and writing the same replica
 	@# counts. Refuse rather than produce a benchmark of the two of them fighting.
 	@existing=$$(kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get deploy -n $(BENCHMARK_NAMESPACE) \
