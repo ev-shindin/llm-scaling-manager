@@ -75,6 +75,13 @@ const (
 	// not written for want of one, past the margin toward shorter outputs
 	// (marginClamp).
 	muReasonMarginClamped learn.Reason = "margin-clamped"
+	// muReasonWeighedFleet is a sample that counted the Ready replicas it
+	// did not read (weighUnreadReplicas).
+	muReasonWeighedFleet learn.Reason = "weighed-fleet"
+	// muReasonMinorityExpired is a cycle whose measured mu was released:
+	// written by a minority of the fleet, with no line, and stale past
+	// MuChoice.LowHoldFor (minorityFigureExpired).
+	muReasonMinorityExpired learn.Reason = "minority-expired"
 )
 
 // muRefusalReason is the Report's reason for a refusal throughputRefusal
@@ -104,6 +111,11 @@ type muPodReading struct {
 	reading float64
 	stamp   k2Margin
 	stamped bool
+	// unread is how many Ready replicas the sample counted beside its
+	// readers, and unreadAt the rate it counted them at
+	// (weighUnreadReplicas); zero when it weighed none.
+	unread   int
+	unreadAt float64
 }
 
 // muVariantCycle is one variant's mu on one cycle.
@@ -187,8 +199,10 @@ func (a *SaturationAnalyzer) noteMuCount(namespace, modelID, variant string, rea
 
 // noteMuWrite records what the window made of one admitted reading: a
 // sample started or folded, with k2's stamp on it, or an exact repeat, which
-// is use and no write (SwitchMuRepeatIsUse).
-func (a *SaturationAnalyzer) noteMuWrite(namespace, modelID, variant, pod string, reading float64, w muWrite) {
+// is use and no write (SwitchMuRepeatIsUse). unread and unreadAt are the
+// replicas the sample counted beside its reader and their rate
+// (weighUnreadReplicas), shown on the reading's learner-write entry.
+func (a *SaturationAnalyzer) noteMuWrite(namespace, modelID, variant, pod string, reading float64, w muWrite, unread int, unreadAt float64) {
 	model := namespace + "|" + modelID
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -201,7 +215,7 @@ func (a *SaturationAnalyzer) noteMuWrite(namespace, modelID, variant, pod string
 		}
 		v.counts[reason]++
 		v.writes++
-		r := muPodReading{pod: pod, reading: reading}
+		r := muPodReading{pod: pod, reading: reading, unread: unread, unreadAt: unreadAt}
 		if k2 := a.k2Cycles[model]; k2 != nil {
 			r.stamp, r.stamped = k2.margins[variant+"/"+pod]
 		}
@@ -380,6 +394,9 @@ func muWritePods(rs []muPodReading) ([]map[string]any, int) {
 		if r.stamped {
 			m["settledForSeconds"] = r.stamp.settledFor.Seconds()
 			m["passedBy"] = r.stamp.passedBy
+		}
+		if r.unread > 0 {
+			m["unreadReplicas"], m["unreadAt"] = r.unread, r.unreadAt
 		}
 		out = append(out, m)
 	}

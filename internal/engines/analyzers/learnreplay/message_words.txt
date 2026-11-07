@@ -503,6 +503,8 @@ ago
 agree
 agreeCycles
 agreed
+agreeing
+agrees
 aim
 alignment
 aligns
@@ -1199,6 +1201,7 @@ held
 heldAt
 heldAtFleet
 heldCycles
+heldFor
 heldSince
 heldUntil
 heldUntilStableOrBy
@@ -1633,6 +1636,8 @@ minSamples
 minValue
 minimum
 minimumPreserved
+minority
+minority-expired
 minute
 minutes
 misconfigured
@@ -1672,9 +1677,14 @@ mu-forget-reported
 mu-key-bucket-held
 mu-latch-restores-safe-side
 mu-margin-clamp
+mu-minority-figure-expires
+mu-sample-weighs-the-fleet
 mu-sample-written
 mu-swap-freeze
 mu-unknown-age-resolves-safe
+mu-unread-replica-at-target
+mu-yield-capped
+mu-yield-capped-at-measurement
 mu-yield-served
 mu-yield-sibling
 mu-yield-stale
@@ -2291,6 +2301,7 @@ sanity
 sat
 saturated
 saturated-throughput-low-confirmed
+saturated-throughput-minority-expired
 saturated-throughput-not-priced
 saturated-throughput-refused
 saturated-throughput-yields-to-siblings
@@ -2373,9 +2384,11 @@ series
 seriesPresent
 serve
 served
+served-bound
 served-siblings
 servedBound
 server
+serves
 service
 serviceable
 serving
@@ -2771,6 +2784,8 @@ unmark
 unmet
 unparseable
 unread
+unreadAt
+unreadReplicas
 unreadable
 unresolved
 unservable
@@ -2875,6 +2890,7 @@ way
 webhook-cert-key
 webhook-cert-name
 webhook-cert-path
+weighed-fleet
 weight
 weightClass
 weight_dtype

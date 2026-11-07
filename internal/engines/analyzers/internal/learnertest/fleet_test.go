@@ -156,3 +156,28 @@ func TestOnlyTestsImportLearnertest(t *testing.T) {
 		t.Fatalf("the walk read %d Go files and found %d importers: it did not read the module", files, importers)
 	}
 }
+
+// A router's weights split the arrivals by share; weights that sum to zero,
+// or to no number, split them equally rather than offer NaN.
+func TestFleet_WeightsSplitTheArrivals(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		weight func(i int, _ time.Duration) float64
+		want   []float64
+	}{
+		{"three to one", func(i int, _ time.Duration) float64 { return float64(3 - 2*i) }, []float64{3, 1}},
+		{"all zero", func(int, time.Duration) float64 { return 0 }, []float64{2, 2}},
+		{"negative", func(int, time.Duration) float64 { return -1 }, []float64{2, 2}},
+	} {
+		f := Fleet{Pods: []float64{10, 10}, AddedMu: 10, Lambda: func(time.Duration) float64 { return 4 },
+			Weight: c.weight, Need: Ceil, Horizon: Cycle}
+		f.Run(func(_ time.Time, _ time.Duration, _ float64, ready []Replica) int {
+			for i, r := range ready {
+				if r.Offered != c.want[i] {
+					t.Errorf("%s: %s offered %g, want %g", c.name, r.Name, r.Offered, c.want[i])
+				}
+			}
+			return Hold
+		})
+	}
+}

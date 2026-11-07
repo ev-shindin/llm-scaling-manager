@@ -335,7 +335,13 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 			// Nor is one under half of what a Ready replica of the variant
 			// served this cycle (served): a served rate is a lower bound on
 			// what one replica sustains.
-			why := tune.throughputRefusal(rm.RequestRate, mu, derived, served.max,
+			// With SwitchMuWeighsFleet on no served rate refuses it: it counts
+			// by its weight (mu_slow_pod.go).
+			servedBound := served.max
+			if a.muWeighsFleet {
+				servedBound = 0
+			}
+			why := tune.throughputRefusal(rm.RequestRate, mu, derived, servedBound,
 				tune.tokensOutrunCompletions(rm, role, fleetOutput))
 			// A low reading that repeats on every saturated cycle for
 			// MeasuredLowConfirmFor is a real low rate, not a fill -- unless
@@ -371,7 +377,12 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 				// The reading is admitted beside k2's P1-obs write, so it
 				// carries k2's stamp (noteMuWrite).
 				w := a.recordSaturatedThroughputFrom(throughputKey, rm.PodName, write)
-				a.noteMuWrite(namespace, modelID, rm.VariantName, rm.PodName, write, w)
+				unread, unreadAt := a.weighUnreadReplicas(throughputKey, served, w, tune)
+				a.noteMuWrite(namespace, modelID, rm.VariantName, rm.PodName, write, w, unread, unreadAt)
+				if unread > 0 {
+					a.noteMuCount(namespace, modelID, rm.VariantName, muReasonWeighedFleet)
+				}
+				a.noteSampleWriters(throughputKey, served, w)
 				if args != "" {
 					a.mu.Lock()
 					if _, ok := a.saturatedThroughput[throughputKey]; ok {
@@ -403,6 +414,21 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	}
 	reading := muSwapFrozen(a.carriedThroughput(throughputKey, leftKey, args,
 		a.saturatedThroughputReadingUnder(throughputKey, args, adm.serving())), frozen)
+	if rel := a.minorityFigureExpired(throughputKey, reading, served, derived.OK, tune, a.now()); rel.released {
+		// A minority's figure, no line to give way to, stale past the hold
+		// and under what the fleet serves: it gives way to that served bound,
+		// as the hold gives way to the derived figure under a line. Logged
+		// once per key on the transition, counted on every replica.
+		a.noteMuCount(namespace, modelID, rm.VariantName, muReasonMinorityExpired)
+		if rel.first {
+			logger.V(logging.DEFAULT).Info("saturated-throughput-minority-expired",
+				"modelID", modelID, "namespace", namespace, "variant", rm.VariantName,
+				"role", role, "measuredRate", reading.rate, "servedBound", rel.bound,
+				"heldFor", tune.MuChoice.LowHoldFor.Duration().String(),
+				"reason", "written by a minority of the fleet, with no line, under what the fleet serves, and no saturated reading agreeing with it for lowHoldFor: priced at the fleet's served bound until a reading agrees again")
+		}
+		reading.rate, reading.bucket = rel.bound, servedBoundBucket
+	}
 	saturatedThroughput, throughputBucket := reading.rate, reading.bucket
 	// A derived figure prices the shape the fleet has NOT measured -- that is
 	// the whole of its job. Where the fleet HAS measured this shape, under this
@@ -700,6 +726,10 @@ func pricedDerivedRate(derived whatif.DerivedMu, reading throughputReading) floa
 // from the ITL model rather than measured. classifyOutputLength can never
 // produce it, so it cannot be spoofed by a real output bucket.
 const derivedBucket = "derived"
+
+// servedBoundBucket is the bucket name logged for a minority's measured mu
+// that gave way to the fleet's served bound (minorityFigureExpired).
+const servedBoundBucket = "served-bound"
 
 // servedBucket is the bucket name logged for a measured mu that yielded to
 // what the variant's Ready, full replicas serve (siblingYield).

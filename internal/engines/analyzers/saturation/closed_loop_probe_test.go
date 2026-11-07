@@ -54,8 +54,9 @@ type probeCase struct {
 	// pods and addedMu (a slow replica that recovers).
 	mu func(i int, elapsed time.Duration) float64
 	// lambda is the arrival rate at an elapsed time, split equally over the
-	// Ready replicas.
+	// Ready replicas, or by weight when set (learnertest.Fleet.Weight).
 	lambda  func(elapsed time.Duration) float64
+	weight  func(i int, elapsed time.Duration) float64
 	horizon time.Duration
 	// meanMu is the fleet's mean true mu at the horizon, which need is
 	// priced at.
@@ -130,10 +131,12 @@ func runProbe(t *testing.T, pc probeCase) probeResult {
 	var st *settle.Tracker
 	if pc.decode {
 		st = probeProcess(t, rig, pc.switches)
+	} else {
+		require.NoError(t, rig.a.SetSwitchesForReplay(pc.switches))
 	}
 	restarted := false
 	fleet := learnertest.Fleet{
-		Pods: pc.pods, AddedMu: pc.addedMu, Mu: pc.mu, Lambda: pc.lambda, Horizon: pc.horizon,
+		Pods: pc.pods, AddedMu: pc.addedMu, Mu: pc.mu, Lambda: pc.lambda, Weight: pc.weight, Horizon: pc.horizon,
 		Need:  func(lambda float64) int { return int(math.Ceil(0.95*lambda/(0.68*pc.meanMu) - 1e-9)) },
 		Start: rig.clock, StartTime: probeStart, Stabilization: pc.stabilization,
 	}
@@ -227,38 +230,111 @@ func TestClosedLoopProbe_ALoadStepOnEqualReplicasSettlesAtNeed(t *testing.T) {
 }
 
 // #282 review round 3 (H1): one replica degraded to 0.3 of its siblings'
-// rate, queued, while they serve unqueued; then it recovers. Its low rate is
-// refused by the served bound (a sibling serves more than twice it), so it
-// never becomes mu, and the fleet settles at need after the recovery.
-func TestClosedLoopProbe_OneSlowReplicaUnderTheServedBoundDoesNotSealTheFleet(t *testing.T) {
+// rate, queued, while they serve unqueued; then it recovers. Its low rate
+// counts by its weight, with the unread siblings at what they serve over the
+// target (mu_slow_pod.go), so the fleet grows while it is slow, to 24 at its
+// peak, and settles at 20, inside the bound. 20 is a fixed point: each of
+// the twenty serves 0.64, which over the target is the figure on record, so
+// the figure sits at the fleet's served bound and the minority rule keeps it
+// (minorityFigureExpired releases only a figure under that bound).
+//
+// Measured (60 min): need 18 (bound 21.7), peak 24, at 20 from 21.5 min to
+// the end. The weighing's hold is what keeps the peak at 24: read fresh
+// (h := mean in weighUnreadReplicas) it peaked at 28. Before #495, when the
+// served bound refused the reading, peak 19 and 18 from 27 min.
+func TestClosedLoopProbe_OneSlowReplicaUnderHalfItsSiblingsDoesNotSealTheFleet(t *testing.T) {
 	r := runProbe(t, slowReplicaCase(0.3))
 	t.Logf("need %d, final %d, peak %d, longest under need %s; fleet by cycle %v", r.need, r.final, r.peak, r.underFor, r.trace)
 	require.Empty(t, r.verdict())
-	require.Positive(t, r.muCounts[muReasonRefusedUnderServed], "premise: the served bound refused the slow replica's rate")
+	require.LessOrEqual(t, r.peak, 24, "the weighing's hold keeps the fleet from chasing its own falling served rate")
+	require.LessOrEqual(t, r.final, 20)
+	require.Positive(t, r.muCounts[muReasonWeighedFleet], "premise: the slow replica's reading counted the fleet it did not read")
 }
 
-// The known-failing case, and the probe's negative control: the same slow
-// replica at 0.55 of its siblings' rate passes the served bound (they serve
-// 0.8, under twice 0.55), and with no line, and siblings not full, nothing
-// it yields to. Its rate becomes mu, the floor orders the fleet on it, the
-// replica stops queueing in the larger fleet -- and recovers -- and nothing
-// saturates to correct the figure: the fleet stays over-ordered for good,
-// the self-sealing low mu of analyzer-learner.md 3.4 (cost side). The probe
-// must see it. Open, on #495: when a change fixes it, this test fails, and
-// the fix turns it into a passing case.
-func TestClosedLoopProbe_KnownFailing_ASlowReplicaInsideTheServedBoundSealsTheFleet(t *testing.T) {
+// The self-sealing low mu of analyzer-learner.md 3.4 (cost side), fixed on
+// #495. The same slow replica at 0.55 of its siblings' rate, with no line:
+// before, its rate alone became mu (12.8 / 0.55 / 0.85 = 27.4), the fleet
+// went to 29 and 28, nothing queued at 28, and nothing rewrote the figure --
+// over-ordered for good. Now the sample counts the fifteen unread siblings
+// at what they serve over the target, which keeps the fleet under the bound
+// throughout. It settles at 20, the fixed point where the figure equals what
+// the fleet serves over the target, so the minority rule, which releases
+// only a figure under the fleet's served bound, does not act here.
+//
+// Measured (60 min): need 18 (bound 21.7), 21 from 1.75 min, 20 from 16.25
+// min to the end; peak 21. The margin to the bound is zero replicas: 22
+// would be over it. Negative control: with SwitchMuUnreadAtTarget off the
+// peak is 29 and the fleet stays at 28 for good, as before #495.
+func TestClosedLoopProbe_ASlowReplicaInsideTheServedBoundStaysUnderTheBound(t *testing.T) {
 	r := runProbe(t, slowReplicaCase(0.55))
 	t.Logf("need %d, final %d, peak %d; fleet by cycle %v", r.need, r.final, r.peak, r.trace)
-	v := r.verdict()
-	require.NotEmpty(t, v, "the probe no longer sees the self-sealing low mu: if it was fixed, make this a passing case")
-	require.Contains(t, v, "over-ordered")
-	require.GreaterOrEqual(t, r.overSince, 20*time.Minute, "over-ordered for good, not for a transient: %s", v)
-	t.Logf("the probe's verdict: %s", v)
+	require.Empty(t, r.verdict())
+	bound := float64(r.need)*(1+learnertest.OverTolerance) + 1
+	require.LessOrEqual(t, float64(r.peak), bound, "over the bound while the replica was slow: the unread siblings were counted at a limit they never showed")
+	require.LessOrEqual(t, r.final, 20)
+	require.Positive(t, r.muCounts[muReasonWeighedFleet], "premise: the slow replica's reading counted the fleet it did not read")
+
+	noCredit := slowReplicaCase(0.55)
+	noCredit.switches = map[string]bool{SwitchMuUnreadAtTarget: false}
+	c := runProbe(t, noCredit)
+	t.Logf("unread replicas at what they serve: final %d, peak %d; %s", c.final, c.peak, c.verdict())
+	require.Greater(t, float64(c.peak), bound, "the credit is what keeps the slow period under the bound")
+	require.Contains(t, c.verdict(), "over-ordered", "without the credit the low figure seals the fleet")
+}
+
+// A router that steers, and a minority figure that is right. Eighteen
+// replicas at mu 1 under 12 req/s, the router sending twice the share to
+// four of them: those four queue and are read at 1, their limit, while the
+// fourteen others serve unqueued, so a minority of the fleet wrote the figure.
+// Then a lull at 2 req/s from 10 to 45 min, which queues nothing for longer
+// than lowHoldFor, and the load returns at 12. The figure is not under what
+// the fleet serves in the lull (a fleet at a fraction of its limit serves a
+// fraction of it), so the minority rule keeps it, and the fleet meets the
+// return at need.
+//
+// Measured (60 min): need 17; 17, down to 3 in the lull, back to 17 at 45
+// min, peak 33 at the return, 19 at the end; never under need past the
+// start. Negative control, F as first built (released to no mu, no bound
+// gate), patched in by hand since it has no switch: the figure was released
+// on 45 cycles and the fleet moved the same way, because the first queued
+// reading at the return writes it back within a cycle. The simulator cannot
+// show the cost of that release: its floor never binds above occupancy
+// without a queue.
+func TestClosedLoopProbe_ASteeringRouterKeepsARightMinorityFigure(t *testing.T) {
+	pods := make([]float64, 18)
+	for i := range pods {
+		pods[i] = 1
+	}
+	pc := probeCase{
+		name: "steered", pods: pods, addedMu: 1, meanMu: 1,
+		lambda: func(e time.Duration) float64 {
+			if e >= 10*time.Minute && e < 45*time.Minute {
+				return 2
+			}
+			return 12
+		},
+		weight: func(i int, _ time.Duration) float64 {
+			if i < 4 {
+				return 2
+			}
+			return 1
+		},
+		horizon: 60 * time.Minute,
+	}
+	r := runProbe(t, pc)
+	t.Logf("need %d, final %d, peak %d, longest under need %s; fleet by cycle %v", r.need, r.final, r.peak, r.underFor, r.trace)
+	require.Empty(t, r.verdict())
+	require.Zero(t, r.underFor, "the fleet never sat under need")
+	require.Zero(t, r.muCounts[muReasonMinorityExpired], "a right minority figure, not under what the fleet serves, is kept")
+	require.Positive(t, r.muCounts[muReasonSampled], "premise: the steered replicas were read")
 }
 
 // slowReplicaCase is sixteen replicas at mu 1, one of them at slow for its
 // first 10 min and at 1 after, under 12.8 req/s split equally: 0.8 each, so
-// the slow one queues and the rest serve unqueued under a full cache.
+// the slow one queues and the rest serve unqueued at KV 0.76, under the 0.8
+// line. The horizon is 60 min, past lowHoldFor (30 min) after the slow
+// replica's last saturated reading and the 5 min scale-down stabilization,
+// so the run covers the minority rule's decision.
 func slowReplicaCase(slow float64) probeCase {
 	pods := make([]float64, 16)
 	for i := range pods {
@@ -274,7 +350,7 @@ func slowReplicaCase(slow float64) probeCase {
 			return 1
 		},
 		lambda:  func(time.Duration) float64 { return 12.8 },
-		horizon: 45 * time.Minute,
+		horizon: 60 * time.Minute,
 	}
 }
 

@@ -89,7 +89,7 @@ var findings = []finding{
 	{row: "k2 adopts its first reading (#392)", status: statusCaught},
 	{row: "Speculative decoding prices the ITL step as a token (#274)", status: statusCaught},
 	{row: "KV per request assumes one output length (#276)", status: statusCaught},
-	{row: "'For good' self-sealing low mu", status: statusEscaping, why: "today's code has it, so no mutant can put it back: TestClosedLoopProbe_KnownFailing_ASlowReplicaInsideTheServedBoundSealsTheFleet holds the probe to seeing it, and the fix is #495's"},
+	{row: "'For good' self-sealing low mu", status: statusEscaping, why: "fixed on #495, but no property class runs a closed loop: TestClosedLoopProbe_ASlowReplicaInsideTheServedBoundStaysUnderTheBound holds the fix, and fails with SwitchMuUnreadAtTarget off"},
 }
 
 // Mutant levels.

@@ -179,6 +179,7 @@ func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate
 		// readings is about the replica, and stands.
 		if c, ok := a.throughputMuChoice[key]; ok {
 			c.saturatedAt, c.yielded, c.sibling = time.Time{}, false, 0
+			c.unread, c.unreadLast, c.minority, c.released = 0, 0, false, false
 			c.latchKnown = true // a new window has given way to nothing
 		}
 	}
@@ -752,14 +753,8 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		// one replica of mu 6 read 319 763 before it and 280 704, 354 736
 		// under occupancy's 387 263 and 454 573, for the three cycles the
 		// queue tripled.
-		want := max(measured, tokens)
-		if term.MayOrder && !term.Held && !grew[role] {
-			trust := 1.0
-			if resident > 0 {
-				trust = tune.floorTrust(term.ArrivalDemand / resident)
-			}
-			want -= trust * (want - max(resident, tokens))
-		}
+		want := tune.flooredDemand(measured, resident, tokens, term.ArrivalDemand,
+			term.MayOrder && !term.Held && !grew[role])
 		if want == measured {
 			continue
 		}
@@ -1005,6 +1000,26 @@ func localQueueBacklog(rc capacity.ReplicaCapacity, horizon float64) float64 {
 		return min(q, mu*horizon)
 	}
 	return q
+}
+
+// flooredDemand is a role's demand once the floor has spoken
+// (applyThroughputFloor): the higher of occupancy's measured demand and the
+// floor's tokens, and, where swap allows it, that blended toward the higher
+// of the resident KV and the floor's tokens by floorTrust of the arrival
+// demand (lambda x P / mu) over the resident KV. mu enters twice: in tokens,
+// which rise as it falls, and in the trust, which rises with it too, so on a
+// role whose measured demand carries a queue's residency charge a lower mu
+// can lower the result (analyzer-learner.md, "One slow pod, as built").
+func (t tuning) flooredDemand(measured, resident, tokens, arrivalDemand float64, swap bool) float64 {
+	want := max(measured, tokens)
+	if swap {
+		trust := 1.0
+		if resident > 0 {
+			trust = t.floorTrust(arrivalDemand / resident)
+		}
+		want -= trust * (want - max(resident, tokens))
+	}
+	return want
 }
 
 // floorTrust is how far the floor's drain price may replace the queues'

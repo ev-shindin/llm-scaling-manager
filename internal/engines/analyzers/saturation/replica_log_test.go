@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
@@ -43,6 +44,35 @@ func cycleLog(t *testing.T, verbosity, pods int) string {
 	})
 	_, err := NewSaturationAnalyzer(capacity.NewStore()).Analyze(ctx, input)
 	require.NoError(t, err)
+	return buf.String()
+}
+
+// releasedCycleLog is what a controller at the shipped verbosity writes over
+// eight cycles around a minority figure's release (minorityFigureExpired):
+// one of pods replicas queued at 0.55 for 3 min beside the rest unqueued at
+// 0.6, then every replica unqueued for lowHoldFor, unlogged, and the eight
+// cycles that cross its end, logged.
+func releasedCycleLog(t *testing.T, pods int) string {
+	t.Helper()
+	var buf bytes.Buffer
+	enc := zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig())
+	core := zapcore.NewCore(enc, zapcore.AddSync(&buf), zapcore.Level(int8(-logging.DEFAULT)))
+	rig := newPropRig()
+	for range 12 {
+		_, err := rig.analyze(slowPodRows(pods, 1, 0.55, 0.6, 0.5), aggStates(pods), 2.4, propCycle)
+		require.NoError(t, err)
+	}
+	quietFrom := rig.clock
+	hold := tuningDefault.WithDefaults().MuChoice.LowHoldFor.Duration()
+	for rig.clock.Sub(quietFrom) < hold-time.Minute {
+		_, err := rig.analyze(slowPodRows(pods, 0, 0, 0.6, 0.4), aggStates(pods), 2.4, propCycle)
+		require.NoError(t, err)
+	}
+	rig.ctx = logr.NewContext(context.Background(), zapr.NewLogger(zap.New(core)))
+	for range 8 {
+		_, err := rig.analyze(slowPodRows(pods, 0, 0, 0.6, 0.4), aggStates(pods), 2.4, propCycle)
+		require.NoError(t, err)
+	}
 	return buf.String()
 }
 
@@ -93,6 +123,14 @@ func TestCycleLogAtTheShippedVerbosityDoesNotGrowPerReplica(t *testing.T) {
 	for i := range large {
 		assert.Contains(t, shipped8, fmt.Sprintf("decode-%d=", i),
 			"replica-capacity-summary must name every priced replica")
+	}
+
+	// A minority's figure released (minorityFigureExpired) logs once per key
+	// on the transition, not once per replica per cycle.
+	for _, n := range []int{4, large} {
+		released := releasedCycleLog(t, n)
+		assert.Equal(t, 1, linesWith(released, "saturated-throughput-minority-expired"),
+			"%d replicas over eight cycles across the release: one line, on the transition", n)
 	}
 }
 

@@ -15,7 +15,8 @@ import (
 //
 // The simulator, one Cycle at a time:
 //
-//   - Arrivals split equally over the Ready replicas.
+//   - Arrivals split equally over the Ready replicas, or by Weight, a
+//     router that steers.
 //   - Each replica serves up to its true mu; what it cannot serve queues on
 //     it, and its queue drains when its share falls under its mu.
 //   - The step (the analyzer under test, and how its rows are made from the
@@ -54,7 +55,12 @@ type Fleet struct {
 	// Pods and AddedMu (a slow replica that recovers).
 	Mu func(i int, elapsed time.Duration) float64
 	// Lambda is the arrival rate at an elapsed time.
-	Lambda  func(elapsed time.Duration) float64
+	Lambda func(elapsed time.Duration) float64
+	// Weight, when set, is a replica's share of the arrivals relative to
+	// the other Ready replicas' at an elapsed time: a router that steers.
+	// Nil splits them equally, and so do weights that sum to zero or less,
+	// or to no number, on a cycle.
+	Weight  func(i int, elapsed time.Duration) float64
 	Horizon time.Duration
 	// Need is the fleet a truthful analyzer orders at arrival rate lambda.
 	Need func(lambda float64) int
@@ -167,9 +173,22 @@ func (f Fleet) Run(step Step) Result {
 			}
 		}
 		replicas := make([]Replica, 0, len(ready))
+		weights := 0.0
+		weight := func(i int) float64 {
+			if f.Weight == nil {
+				return 1
+			}
+			return f.Weight(i, elapsed)
+		}
+		for _, i := range ready {
+			weights += weight(i)
+		}
+		if !(weights > 0) || math.IsInf(weights, 1) {
+			weight, weights = func(int) float64 { return 1 }, float64(len(ready))
+		}
 		for _, i := range ready {
 			p, mu := pods[i], trueMu(i, elapsed)
-			offered := lambda / float64(len(ready))
+			offered := lambda * weight(i) / weights
 			p.backlog = max(p.backlog+(offered-mu)*dt, 0)
 			saturated := p.backlog > 0 || offered >= mu
 			served := offered

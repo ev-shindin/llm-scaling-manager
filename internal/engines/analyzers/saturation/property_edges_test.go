@@ -555,7 +555,13 @@ func probeFilling(tn config.AnalyzerTuning) probe {
 // serve: it yields under siblingMuTolerance.
 func probeSibling(tn config.AnalyzerTuning) probe {
 	return func(r *rand.Rand, x float64) (bool, error) {
+		// The edge is the tolerance's, which the cap
+		// (SwitchMuYieldCappedAtMeasurement) keeps from ever pricing: probed
+		// with the cap off, where the yield still prices.
 		a := NewSaturationAnalyzer(capacity.NewStore())
+		if err := a.SetSwitchesForReplay(map[string]bool{SwitchMuYieldCappedAtMeasurement: false}); err != nil {
+			return false, err
+		}
 		sib := 1 + r.Float64()
 		_, y := a.siblingYield(propMuKey, throughputReading{rate: x * sib}, servedRates{max: sib, saturated: sib, unqueued: true},
 			tuning{AnalyzerTuning: tn.WithDefaults()})

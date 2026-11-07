@@ -232,44 +232,67 @@ func checkMuChoiceTruth(choose muChooser) func(uint64) error {
 	}
 }
 
-// checkMuSiblingYield: a fleet with one genuinely slow pod, its reading the
-// one on record. The sibling yield prices the siblings' lower median, over
-// the fleet's mean: the risky side. Declared: it over-prices once the slow
-// pod reads under siblingMuTolerance (0.8) of its siblings.
-func checkMuSiblingYield(seed uint64) error {
-	r := propRand(seed)
-	a := NewSaturationAnalyzer(capacity.NewStore())
-	t := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
-	slow := 0.5 + 0.25*r.Float64()
-	priced := slow
-	if s, yielded := a.siblingYield(propMuKey, throughputReading{rate: slow}, servedRates{max: 1, saturated: 1, unqueued: true}, t); yielded {
-		priced = s
+// checkMuSiblingYield: a fleet with one genuinely slow pod, queued, its
+// reading the one on record, beside three full siblings at 1 serving
+// unqueued. The yield never prices above the measurement (yieldCapped), so
+// mu is at most the slow reading, under the fleet's mean. Before #495 it
+// yielded to the siblings' lower median, 12 % over {1, 1, 1, 0.569}: the
+// risky side (checkMuSiblingYieldWith, with SwitchMuYieldCappedAtMeasurement
+// off).
+func checkMuSiblingYield(seed uint64) error { return checkMuSiblingYieldWith(nil)(seed) }
+
+// checkMuSiblingYieldWith is checkMuSiblingYield under switches.
+func checkMuSiblingYieldWith(switches map[string]bool) func(uint64) error {
+	return func(seed uint64) error {
+		r := propRand(seed)
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		if err := a.SetSwitchesForReplay(switches); err != nil {
+			return err
+		}
+		t := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
+		slow := 0.5 + 0.25*r.Float64()
+		served := servedRates{max: 1, saturated: 1, unqueued: true}
+		priced := slow
+		if s, yielded := a.siblingYield(propMuKey, throughputReading{rate: slow}, served, t); yielded {
+			priced = s
+		}
+		mean := (3 + slow) / 4
+		return holds(priced <= mean*(1+propTruthTol), kindOverPriced, "fleet {1, 1, 1, %.3f} (mean %.3f): the sibling yield priced %.3f, %.0f%% over", slow, mean, priced, 100*(priced/mean-1))
 	}
-	mean := (3 + slow) / 4
-	return holds(priced <= mean*(1+propTruthTol), kindOverPriced, "fleet {1, 1, 1, %.3f} (mean %.3f): the sibling yield priced %.3f, %.0f%% over", slow, mean, priced, 100*(priced/mean-1))
 }
 
-// checkMuHalfServed: a fleet with one genuinely slow pod under half the
-// fastest's rate. Its readings are refused (half the served max), so mu is
-// the others' mean, over the fleet's.
-func checkMuHalfServed(seed uint64) error {
-	r := propRand(seed)
-	t := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
-	slow := 0.3 + 0.15*r.Float64()
-	var sum float64
-	var n int
-	for _, v := range []float64{1, 1, 1, slow} {
-		if t.throughputRefusal(v, v, whatif.DerivedMu{}, 1, false) == "" {
-			sum += v
-			n++
+// checkMuHalfServed: a fleet of four queued replicas, one genuinely slow
+// under half the others' rate, through Analyze. The slow reading counts by
+// its weight, so mu is the fleet's mean. Before #495 it was refused (half
+// the served max), and mu was the others' mean, 20 % over {1, 1, 1, 0.341}
+// (checkMuHalfServedWith, with SwitchMuWeighsFleet off).
+func checkMuHalfServed(seed uint64) error { return checkMuHalfServedWith(nil)(seed) }
+
+// checkMuHalfServedWith is checkMuHalfServed under switches.
+func checkMuHalfServedWith(switches map[string]bool) func(uint64) error {
+	return func(seed uint64) error {
+		r := propRand(seed)
+		rig := newPropRig()
+		if err := rig.a.SetSwitchesForReplay(switches); err != nil {
+			return err
 		}
+		slow := 0.3 + 0.15*r.Float64()
+		for range 13 {
+			rows := make([]domain.ReplicaMetrics, 0, 4)
+			for i, v := range []float64{1, 1, 1, slow} {
+				rows = append(rows, satRow(fmt.Sprintf("r%d", i), 330_000, 10, v*(1+0.01*r.NormFloat64())))
+			}
+			if _, err := rig.analyze(rows, aggStates(4), 3+slow, propCycle); err != nil {
+				return err
+			}
+		}
+		priced := rig.measuredMu()
+		if !(priced > 0) {
+			return violation(kindNotLearned, "fleet {1, 1, 1, %.3f}: no mu", slow)
+		}
+		mean := (3 + slow) / 4
+		return holds(priced <= mean*(1+propTruthTol), kindOverPriced, "fleet {1, 1, 1, %.3f} (mean %.3f): mu %.3f, %.0f%% over", slow, mean, priced, 100*(priced/mean-1))
 	}
-	if n == 0 {
-		return violation(kindNotLearned, "every reading refused")
-	}
-	mean := (3 + slow) / 4
-	priced := sum / float64(n)
-	return holds(priced <= mean*(1+propTruthTol), kindOverPriced, "fleet {1, 1, 1, %.3f} (mean %.3f): admitted readings price %.3f, %.0f%% over", slow, mean, priced, 100*(priced/mean-1))
 }
 
 // checkMuLatch: measured over derived sits at 2x, the latch's set point, with

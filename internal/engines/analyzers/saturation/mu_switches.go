@@ -42,3 +42,35 @@ const SwitchMuUnknownAgeSafe = "mu-unknown-age-resolves-safe"
 // yields to the lower one past the return ratio), unlatched while it sits
 // under it (it keeps pricing the lower one).
 const SwitchMuLatchRestoresSafe = "mu-latch-restores-safe-side"
+
+// SwitchMuWeighsFleet is the replay switch for one slow pod in a sample
+// (mu_slow_pod.go; analyzer-learner.md, 2.6). On, a reading under half of what
+// a Ready replica served counts by its weight, and a sample whose readers sit
+// under the tolerance of what the replicas it did not read serve counts those
+// too, so it is the fleet's and not the part that queued. Off, as before, that
+// reading was refused, and the sample was the readers' mean alone.
+const SwitchMuWeighsFleet = "mu-sample-weighs-the-fleet"
+
+// SwitchMuYieldCappedAtMeasurement is the replay switch for the sibling
+// yield's cap (yieldCapped; analyzer-learner.md, 2.6 and 3.4). On, a yield
+// never prices mu above the measurement it replaces; since the yield opens
+// only under the tolerance of a higher figure, it no longer moves the price.
+// Off, as before, a measurement under SiblingMuTolerance of its full
+// siblings' lower median priced at that median, which left the slow pod out
+// and sat over the fleet's mean.
+const SwitchMuYieldCappedAtMeasurement = "mu-yield-capped-at-measurement"
+
+// SwitchMuUnreadAtTarget is the replay switch for the rate an unread replica
+// under the KV line counts at (servedPod.credit; analyzer-learner.md, 2.6).
+// On, it counts at what it serves over the scale-up target: its rate is what
+// it was offered, not its limit, and the floor charges the target on mu
+// again. Off, as SwitchMuWeighsFleet alone, it counted at what it serves.
+const SwitchMuUnreadAtTarget = "mu-unread-replica-at-target"
+
+// SwitchMuMinorityFigureExpires is the replay switch for a measured mu no
+// line can replace, written by a minority of the fleet
+// (minorityFigureExpired; analyzer-learner.md, 3.4). On, a figure under the
+// fleet's served bound gives way to that bound after MuChoice.LowHoldFor with
+// no saturated reading in agreement with it. Off, as before, with no line the
+// measurement stood for good.
+const SwitchMuMinorityFigureExpires = "mu-minority-figure-expires"

@@ -12,20 +12,6 @@
 # measured is the fail rate over the case's seeds and the first failure, when
 # the row was written. owner is what clears the row: an issue ("#394"), or
 # "open". CheckLedger holds that form only, so a closed issue passes.
-- id: contamination-heterogeneity/mu/half-served-max-slow-pod
-  class: contamination-heterogeneity
-  learner: mu
-  expect: over-priced
-  finding: "A genuinely slow pod under half the fastest's rate is refused (half the served max, a section-5 value estimator), so mu is its siblings' mean: over the fleet's, the SLO side. Declared: it starts to over-price once one pod serves under half the fastest."
-  measured: "100/100 seeds; seed 1: fleet {1, 1, 1, 0.341}, mean 0.835, priced 1.000, 20 % over"
-  owner: "#495"
-- id: contamination-heterogeneity/mu/sibling-yield-slow-pod
-  class: contamination-heterogeneity
-  learner: mu
-  expect: over-priced
-  finding: "The sibling yield prices the full siblings' lower median when the reading on record is a genuinely slow pod's: over the fleet's mean, the SLO side. Declared: it starts to over-price once the slow pod reads under siblingMuTolerance (0.8) of its siblings."
-  measured: "100/100 seeds; seed 1: fleet {1, 1, 1, 0.569}, mean 0.892, priced 1.000, 12 % over"
-  owner: "#495"
 - id: first-sample/mu/joiner-rate-timebase
   class: first-sample
   learner: mu

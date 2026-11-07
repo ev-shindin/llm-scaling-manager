@@ -72,7 +72,10 @@ import (
 //     serve, 55.5 for thirty minutes after it recovered. No repetition
 //     confirms a reading the served rate contradicts. Within the ratio, not
 //     at it: equally saturated replicas read a few percent apart, and a
-//     strict bound would refuse every one but the fastest.
+//     strict bound would refuse every one but the fastest. With
+//     SwitchMuWeighsFleet on this refuses nothing: such a reading counts by
+//     its weight (mu_slow_pod.go), and the same replica at 0.3 beside three
+//     at 3.6 writes 2.775, what the four serve.
 //   - is not implausibly far under the derived figure for the same line:
 //     under MinMeasuredOfDerived of it. A saturated replica at its limit
 //     completes about what its ITL line prices; one completing a fiftieth of
@@ -119,7 +122,13 @@ import (
 // so the measurement is not what one replica does. That is what a confirmed
 // low reading cannot survive once the replica recovers, or a sibling shows
 // it was one replica's. With no line there is no derived figure to give way
-// to, and the measurement stands.
+// to, and the measurement stands -- unless a minority of the fleet wrote it
+// and it sits under what the fleet's Ready replicas serve
+// (SwitchMuMinorityFigureExpires): then, stale for MeasuredLowHoldFor, it
+// gives way to that served bound, never to no mu. The reason is the hold's
+// own: an over-ordered fleet never saturates to correct a low figure
+// (minorityFigureExpired). A figure the whole fleet wrote stands, and so does
+// one at or over the bound.
 //
 // Nor does a measurement outrank what the variant's Ready replicas serve
 // with a full cache, at least one of them unqueued: under SiblingMuTolerance
@@ -127,7 +136,11 @@ import (
 // they stop filling, until they read what it does (siblingYield). A replica at 0.55x its siblings passes the served bound
 // above, and as the only queued replica it is the window: in review it priced
 // the fleet at 1.8x the replicas for as long as it stayed slow, and neither
-// the bound nor MeasuredLowHoldFor released it.
+// the bound nor MeasuredLowHoldFor released it. Since #495 the yield is
+// capped at the measurement (SwitchMuYieldCappedAtMeasurement), so it no
+// longer prices: the siblings reach mu through the weighed sample
+// (mu_slow_pod.go), and a slow replica's figure under what the fleet serves
+// gives way to it by the minority rule instead.
 //
 // The yield is latched: once a stale measurement has given way it stays given
 // way until the two figures come back within MeasuredDerivedReturnRatio, or
@@ -319,6 +332,12 @@ type servedRates struct {
 	// queued replica is measured, and the window already holds what it
 	// serves.
 	unqueued bool
+	// pods is each of them by name (mu_slow_pod.go).
+	pods map[string]servedPod
+	// target is the scale-up target an unread replica under the KV line is
+	// credited at (servedPod.credit): the policy's ScaleUpThreshold with
+	// SwitchMuUnreadAtTarget on (withTarget), zero with it off.
+	target float64
 }
 
 // servedBounds is, per variant, what its Ready own replicas served this
@@ -345,6 +364,10 @@ func (t tuning) servedBounds(rows []domain.ReplicaMetrics, rolesByVariant map[st
 		}
 		s := out[rm.VariantName]
 		s.max = max(s.max, rate)
+		if s.pods == nil {
+			s.pods = make(map[string]servedPod)
+		}
+		s.pods[rm.PodName] = servedPod{rate: rate, queued: rm.BusiestRankQueue() >= int(queueThreshold), full: kvFull(rm, kvCacheThreshold)}
 		out[rm.VariantName] = s
 		if kvFull(rm, kvCacheThreshold) {
 			if full[rm.VariantName] == nil {
@@ -399,6 +422,10 @@ const SiblingMuTolerance = config.DefaultSiblingMuTolerance
 // give way to the slow figure again the cycle after. The yield holds until
 // newer sibling evidence moves or drops it, the measurement comes within the
 // tolerance of it, or the window starts over (recordSaturatedThroughputFrom).
+//
+// With SwitchMuYieldCappedAtMeasurement on no yield prices mu above the
+// measurement it replaces (yieldCapped), so the yield memo is still kept but
+// the price stays the measurement's.
 func (a *SaturationAnalyzer) siblingYield(key string, reading throughputReading, served servedRates, t tuning) (float64, bool) {
 	tol := t.Admission.SiblingMuTolerance
 	if !(reading.rate > 0) {
@@ -423,6 +450,10 @@ func (a *SaturationAnalyzer) siblingYield(key string, reading throughputReading,
 		c.sibling = sibling
 	}
 	if c == nil || !(reading.rate < tol*c.sibling) {
+		return 0, false
+	}
+	if a.yieldCapped(reading, c.sibling) {
+		a.paths.add(pathYieldCapped, 1)
 		return 0, false
 	}
 	return c.sibling, true
@@ -482,6 +513,20 @@ type muChoice struct {
 	// of it yields to (siblingYield); zero when none was read, or once
 	// queued siblings read what the measurement does.
 	sibling float64
+	// unread is the rate the replicas a sample did not read held over two
+	// samples while its readers sat under the tolerance of them, and
+	// unreadLast what they served on the newest of those samples
+	// (weighUnreadReplicas). Zero outside that state.
+	unread, unreadLast float64
+	// minority is set while the replicas that read the window's newest
+	// sample are a minority of the fleet (noteSampleWriters), which lets a
+	// figure no line can replace expire (minorityFigureExpired). Unset for
+	// a window restored or brought back with no choice on record.
+	minority bool
+	// released is set while the minority's figure has given way to the
+	// fleet's served bound (minorityFigureExpired), so the release logs once
+	// per run of released cycles, not per replica per cycle.
+	released bool
 	// low is, per replica, its current run of saturated readings refused as
 	// under MinMeasuredOfDerived of the derived figure.
 	low map[string]lowRun

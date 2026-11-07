@@ -722,6 +722,14 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 	rows := decodeCapacityViews(c.input.ReplicaMetrics, c.rolesByVariant, c.atCapBatchCaps())
 	served := c.tune.servedBounds(rows, c.rolesByVariant, c.cfg.QueueLengthThreshold, c.cfg.KvCacheThreshold, c.fleetOutput,
 		c.stableInput, c.stableOutput, c.fleetHitRate)
+	if c.a.muUnreadAtTarget {
+		// The target the floor charges on mu (throughput_floor.go), the
+		// saturation analyzer's own: a per-analyzer override, where set, not
+		// the policy-wide figure. Credited at another, the unread replica
+		// would count over (or under) what the floor then takes back off.
+		scaleUp, _ := c.cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
+		served = withTarget(served, scaleUp)
+	}
 	for i, rm := range rows {
 		raw := c.input.ReplicaMetrics[i]
 		select {
