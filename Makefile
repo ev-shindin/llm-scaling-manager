@@ -209,6 +209,18 @@ BENCHMARK_CAPTURE_DIR ?= /tmp
 BENCHMARK_RUN_ID      := $(shell date -u +%Y%m%dT%H%M%S)-$(shell echo $$PPID)
 BENCHMARK_SAMPLES     ?= $(BENCHMARK_CAPTURE_DIR)/wva_replica_samples-$(BENCHMARK_NAMESPACE)-$(BENCHMARK_RUN_ID).json
 BENCHMARK_WVA_LOG     ?= $(BENCHMARK_CAPTURE_DIR)/wva_controller_tail-$(BENCHMARK_NAMESPACE)-$(BENCHMARK_RUN_ID).log
+# The learner recordings copied out of the controller (hack/benchmark/learner_recordings.sh).
+# They live in an emptyDir, so a teardown or a controller restart deletes them;
+# benchmark-run copies them during the run and files them under the results'
+# learner-recordings/, and benchmark-teardown and benchmark-restart-controller
+# copy once more before the Pod goes. The prefix is how a teardown finds an
+# interrupted run's copy and finishes it.
+BENCHMARK_RECORDINGS_PREFIX = $(BENCHMARK_CAPTURE_DIR)/wva_learner_recordings-$(BENCHMARK_NAMESPACE)-
+BENCHMARK_RECORDINGS  ?= $(BENCHMARK_RECORDINGS_PREFIX)$(BENCHMARK_RUN_ID)
+# Seconds between copies during a run. The final copy at the end is the one
+# that matters; these keep a recent one if the Pod dies first.
+BENCHMARK_RECORDINGS_INTERVAL ?= 300
+BENCHMARK_RECORDINGS_ENV = RECORDINGS_INTERVAL=$(BENCHMARK_RECORDINGS_INTERVAL) RECORDINGS_MAX_SECONDS=$$(( $(BENCHMARK_WAIT_TIMEOUT) + 3600 )) RECORDINGS_REQUEST_TIMEOUT=$(BENCHMARK_KUBECTL_TIMEOUT)
 # Passed to both captures so the cluster they watch is explicit rather than
 # inherited. Empty means "whatever KUBECONFIG says", which is the old behaviour.
 BENCHMARK_KUBE_CONTEXT ?=
@@ -2562,9 +2574,16 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 	@# first run's sampler before being refused.
 	@echo "  capture: $(BENCHMARK_SAMPLES)"
 	@echo "  capture: $(BENCHMARK_WVA_LOG)"
-	@rm -f "$(BENCHMARK_SAMPLES).startfailed" "$(BENCHMARK_WVA_LOG).startfailed"
+	@echo "  capture: $(BENCHMARK_RECORDINGS)"
+	@rm -f "$(BENCHMARK_SAMPLES).startfailed" "$(BENCHMARK_WVA_LOG).startfailed" "$(BENCHMARK_RECORDINGS).startfailed"
 	@bash hack/benchmark/sample_replicas.sh $(BENCHMARK_CAPTURE_CTX) start $(BENCHMARK_NAMESPACE) "$(BENCHMARK_SAMPLES)" || touch "$(BENCHMARK_SAMPLES).startfailed"
 	@bash hack/benchmark/tail_wva_logs.sh $(BENCHMARK_CAPTURE_CTX) start $(BENCHMARK_NAMESPACE) "$(BENCHMARK_WVA_LOG)" || touch "$(BENCHMARK_WVA_LOG).startfailed"
+	@# The learner recordings, copied out every BENCHMARK_RECORDINGS_INTERVAL
+	@# seconds and once more at the stop below. The copy runs in its own process
+	@# group, so a Ctrl-C of this make leaves it copying: benchmark-teardown
+	@# finds it by BENCHMARK_RECORDINGS_PREFIX, takes the final copy and stops
+	@# it, and it stops itself after BENCHMARK_WAIT_TIMEOUT plus an hour.
+	@$(BENCHMARK_RECORDINGS_ENV) bash hack/benchmark/learner_recordings.sh $(BENCHMARK_CAPTURE_CTX) start $(BENCHMARK_NAMESPACE) "$(BENCHMARK_RECORDINGS)" || touch "$(BENCHMARK_RECORDINGS).startfailed"
 	@# Collect the results tree as a gzipped tar over exec rather than with
 	@# kubectl cp. The harness ships both paths and defaults to cp, which on a
 	@# large tree either runs for hours or drops: its own source puts cp at
@@ -2593,6 +2612,9 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 	@rm -f "$(BENCHMARK_SAMPLES).stopfailed" "$(BENCHMARK_WVA_LOG).stopfailed"
 	@bash hack/benchmark/sample_replicas.sh $(BENCHMARK_CAPTURE_CTX) stop "$(BENCHMARK_SAMPLES)" $(BENCHMARK_NAMESPACE) || touch "$(BENCHMARK_SAMPLES).stopfailed"
 	@bash hack/benchmark/tail_wva_logs.sh $(BENCHMARK_CAPTURE_CTX) stop $(BENCHMARK_NAMESPACE) "$(BENCHMARK_WVA_LOG)" || touch "$(BENCHMARK_WVA_LOG).stopfailed"
+	@# The final copy of the recordings, taken whether the run succeeded,
+	@# failed or timed out: the `-` on the run lets every one of them reach here.
+	@$(BENCHMARK_RECORDINGS_ENV) bash hack/benchmark/learner_recordings.sh $(BENCHMARK_CAPTURE_CTX) stop $(BENCHMARK_NAMESPACE) "$(BENCHMARK_RECORDINGS)" || true
 	@# The filing DECISION lives in a script, not here, because nothing could
 	@# test it in a recipe -- and two defects landed in this block while the
 	@# capture scripts beside it were covered by an executable check. It judges
@@ -2600,7 +2622,7 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 	@# and for JSON that it parses. Gating on the stop's exit status does not
 	@# work, because every way this goes wrong exits 0.
 	@LATEST=$$(ls -td "$(BENCHMARK_WORKSPACE)"/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
-	bash hack/benchmark/file_capture.sh "$$LATEST" "$(BENCHMARK_SAMPLES)" "$(BENCHMARK_WVA_LOG)"
+	bash hack/benchmark/file_capture.sh "$$LATEST" "$(BENCHMARK_SAMPLES)" "$(BENCHMARK_WVA_LOG)" "$(BENCHMARK_RECORDINGS)"
 	@echo ""
 	@echo "========================================="
 	@echo "  Generating benchmark report..."
@@ -2763,6 +2785,7 @@ benchmark-restart-controller: ## Restart WVA controller to flush learned state (
 	if [ -z "$$replicas" ] || [ -z "$$selector" ]; then \
 		echo "ERROR: could not read the replicas and selector of $(WVA_CONTROLLER_DEPLOY)"; exit 1; \
 	fi; \
+	$(BENCHMARK_RECORDINGS_ENV) bash hack/benchmark/learner_recordings.sh $(BENCHMARK_CAPTURE_CTX) snapshot $(BENCHMARK_NAMESPACE) "$(BENCHMARK_RECORDINGS)" || true; \
 	$$K scale $(WVA_CONTROLLER_DEPLOY) --replicas=0; \
 	pods=$$($$K get pods -l "$$selector" -o name); \
 	if [ -n "$$pods" ]; then $$W wait --for=delete $$pods --timeout=$(WVA_ROLLOUT_TIMEOUT); fi; \
@@ -2814,7 +2837,12 @@ benchmark-run-all: ## Run all scenarios: teardown → standup → run per scenar
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run-all BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-	@for scenario in $(BENCHMARK_SCENARIOS_DIR)/*.yaml.in; do \
+	@# Each scenario's learner recordings are copied after its run, failed or
+	@# not, and before the next teardown deletes the controller; an interrupt
+	@# copies them too, then exits.
+	@rec() { $(BENCHMARK_RECORDINGS_ENV) bash hack/benchmark/learner_recordings.sh $(BENCHMARK_CAPTURE_CTX) snapshot $(BENCHMARK_NAMESPACE) "$(BENCHMARK_RECORDINGS)/$$1" || true; }; \
+	trap 'rec "$${scenario_name:-interrupted}"; exit 130' INT TERM; \
+	for scenario in $(BENCHMARK_SCENARIOS_DIR)/*.yaml.in; do \
 		scenario_name=$$(basename "$$scenario" .in); \
 		echo ""; \
 		echo "=========================================="; \
@@ -2831,6 +2859,7 @@ benchmark-run-all: ## Run all scenarios: teardown → standup → run per scenar
 			$(if $(BENCHMARK_MODEL_ID),-m $(BENCHMARK_MODEL_ID),) \
 			$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,) || { \
 			echo "ERROR: Standup failed for $$scenario_name"; \
+			rec "$$scenario_name"; \
 			exit 1; \
 		}; \
 		echo ""; \
@@ -2843,8 +2872,10 @@ benchmark-run-all: ## Run all scenarios: teardown → standup → run per scenar
 			-w "$$scenario_name" \
 			$(if $(BENCHMARK_MODEL_ID),-m $(BENCHMARK_MODEL_ID),) || { \
 			echo "ERROR: Scenario $$scenario_name failed"; \
+			rec "$$scenario_name"; \
 			exit 1; \
 		}; \
+		rec "$$scenario_name"; \
 	done
 	@echo ""
 	@echo "=========================================="
@@ -2857,6 +2888,11 @@ benchmark-teardown: ## Tear down the benchmark environment (set BENCHMARK_NAMESP
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-teardown BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
+	@# The learner recordings go with the controller's Pod, so copy them first.
+	@# A run that was interrupted left its copy running: stop-all finishes it
+	@# into that run's directory. Only when there was none is a copy taken here.
+	@$(BENCHMARK_RECORDINGS_ENV) bash hack/benchmark/learner_recordings.sh $(BENCHMARK_CAPTURE_CTX) stop-all $(BENCHMARK_NAMESPACE) "$(BENCHMARK_RECORDINGS_PREFIX)" || \
+		$(BENCHMARK_RECORDINGS_ENV) bash hack/benchmark/learner_recordings.sh $(BENCHMARK_CAPTURE_CTX) snapshot $(BENCHMARK_NAMESPACE) "$(BENCHMARK_RECORDINGS)" || true
 	@# Before the namespace goes: a namespace-scoped install still creates
 	@# cluster-scoped RBAC, which deleting the namespace would leave behind.
 	@if [ "$(BENCHMARK_DIRECT_KEDA)" != "true" ] && [ "$(BENCHMARK_WVA_DEPLOY)" = "true" ]; then \
@@ -3093,6 +3129,12 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# they selected the controller by, so a pool Pod's log was read as the
 	@# controller's -- and the selector parses perfectly.
 	@bash hack/check-benchmark-controller-pod.sh
+	@echo "Checking the benchmark keeps the learner recordings on every exit path..."
+	@# Executes learner_recordings.sh and the harness paths that call it
+	@# against a stub kubectl. The recordings live in an emptyDir, so a
+	@# teardown that copied nothing deleted them, and parsed perfectly.
+	@bash -n hack/benchmark/learner_recordings.sh
+	@bash hack/check-learner-recordings.sh
 	@echo "Checking the k1/k2 report's Restored column..."
 	@# Fixture events through render_report: a restore is a field, not a source.
 	@bash hack/check-k2-decisions-restored.sh

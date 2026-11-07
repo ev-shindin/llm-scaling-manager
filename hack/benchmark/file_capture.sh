@@ -19,7 +19,13 @@
 #   say why not    otherwise, naming the file and the reason
 #
 # Usage:
-#   file_capture.sh <results-dir> <samples-json> <controller-log>
+#   file_capture.sh <results-dir> <samples-json> <controller-log> [<recordings-dir>]
+#
+# <recordings-dir> is what hack/benchmark/learner_recordings.sh copied out of
+# the controller. It is filed whole under <results-dir>/learner-recordings/,
+# with its collection.tsv (which Pod, when, what each copy found). A
+# directory that holds no recording is said, not skipped: an empty result is
+# not a pass.
 #
 # A missing results dir is not an error: a run that produced no results directory
 # has nothing to file into, and saying so once is enough.
@@ -41,6 +47,7 @@ esac
 RESULTS="${1-}"
 SAMPLES="${2:?samples path required}"
 WVALOG="${3:?controller log path required}"
+RECORDINGS="${4-}"
 
 filed=0
 skipped=0
@@ -91,8 +98,49 @@ _file() {
     fi
 }
 
+# _file_recordings <recordings-dir> <destination> -- the learner recordings,
+# one directory per controller Pod. Judged on what is there: a copy that never
+# started is withheld, as above, and so is a directory holding no recording.
+_file_recordings() {
+    local src="$1" dst="$2" n=0 f d
+    if [ -f "$src.startfailed" ]; then
+        echo "  not filing the learner recordings: their capture never started (whatever the final copy took is in $src)"
+        skipped=$((skipped + 1))
+        return 0
+    fi
+    for f in "$src"/*/*; do
+        # `*` skips dot-directories, so the copier's .incoming.* temporaries
+        # are never counted or filed.
+        [ -f "$f" ] || continue
+        n=$((n + 1))
+    done
+    if [ "$n" -eq 0 ]; then
+        echo "  NO learner recordings to file: $src holds none (see $src/collection.tsv for why)"
+        if [ -s "$src/collection.tsv" ]; then
+            mkdir -p "$dst" 2>/dev/null && cp "$src/collection.tsv" "$dst/" 2>/dev/null || true
+        fi
+        skipped=$((skipped + 1))
+        return 0
+    fi
+    mkdir -p "$dst" 2>/dev/null || true
+    for d in "$src"/*/; do
+        d="${d%/}"
+        cp -R "$d" "$dst/" 2>/dev/null || {
+            echo "  not filing the learner recordings: could not copy $d to $dst"
+            skipped=$((skipped + 1))
+            return 0
+        }
+    done
+    cp "$src/collection.tsv" "$dst/" 2>/dev/null || true
+    echo "  filed $n learner recording file(s) -> $dst"
+    filed=$((filed + 1))
+}
+
 if [ -z "$RESULTS" ] || [ ! -d "$RESULTS" ]; then
     echo "  no results directory yet, so nothing is filed"
+    if [ -n "$RECORDINGS" ]; then
+        echo "  the learner recordings stay in $RECORDINGS"
+    fi
     exit 0
 fi
 
@@ -102,5 +150,8 @@ fi
 _file "$SAMPLES" "$RESULTS/metrics/processed/wva_replica_samples.json" json "$SAMPLES"
 _file "$SAMPLES.pod_timings.json" "$RESULTS/metrics/processed/wva_pod_timings.json" json "$SAMPLES"
 _file "$WVALOG" "$RESULTS/wva_controller.log" text "$WVALOG"
+if [ -n "$RECORDINGS" ]; then
+    _file_recordings "$RECORDINGS" "$RESULTS/learner-recordings"
+fi
 
 echo "  capture artefacts: $filed filed, $skipped withheld"

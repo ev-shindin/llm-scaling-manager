@@ -22,10 +22,18 @@ As a command, it reads a Pod list (`kubectl get pods -o json`) on stdin and
 prints that selector. It exits 1, printing nothing on stdout, when the list
 holds no controller Pod or cannot be read.
 
+With --pods it prints one line per controller Pod instead, tab-separated:
+its name, its phase, the learner recording directory the manager was given
+(LEARNER_RECORDING_DIR or --learner-recording-dir), and the container that can
+read it (the `recordings` sidecar of the recorder patch). An absent field is
+`-`. hack/benchmark/learner_recordings.sh reads it. A list with no controller
+Pod prints nothing and exits 0; only a list it cannot read exits 1.
+
 Usage
 -----
   kubectl get pods -n NS -l control-plane=controller-manager -o json \\
       | python3 hack/benchmark/controller_pods.py
+  ... | python3 hack/benchmark/controller_pods.py --pods [deployment]
 """
 import json
 import subprocess
@@ -92,13 +100,68 @@ def controller_log_selector(namespace, deployment=CONTROLLER_DEPLOYMENT):
     return selector
 
 
+MANAGER_CONTAINER = "manager"
+RECORDINGS_CONTAINER = "recordings"
+RECORDING_DIR_ENV = "LEARNER_RECORDING_DIR"
+RECORDING_DIR_FLAG = "--learner-recording-dir"
+
+
+def recording_dir(pod):
+    """Returns the recording directory the manager container was given, or ""."""
+    for c in (pod.get("spec") or {}).get("containers") or []:
+        if c.get("name") != MANAGER_CONTAINER:
+            continue
+        found = ""
+        for e in c.get("env") or []:
+            if e.get("name") == RECORDING_DIR_ENV:
+                found = e.get("value") or ""
+        # The flag wins over the variable, as it does in the controller.
+        args = list(c.get("command") or []) + list(c.get("args") or [])
+        for i, a in enumerate(args):
+            if a.startswith(RECORDING_DIR_FLAG + "="):
+                found = a.split("=", 1)[1]
+            elif a == RECORDING_DIR_FLAG and i + 1 < len(args):
+                found = args[i + 1]
+        return found
+    return ""
+
+
+def pod_rows(pod_list, deployment=CONTROLLER_DEPLOYMENT):
+    """Returns (name, phase, recording dir, reader container) per controller Pod."""
+    rows = []
+    for p in pod_list.get("items") or []:
+        if not is_controller_pod(p, deployment):
+            continue
+        names = [c.get("name") for c in (p.get("spec") or {}).get("containers") or []]
+        rows.append((
+            p["metadata"].get("name") or "-",
+            (p.get("status") or {}).get("phase") or "-",
+            recording_dir(p) or "-",
+            RECORDINGS_CONTAINER if RECORDINGS_CONTAINER in names else "-",
+        ))
+    return sorted(rows)
+
+
 def main():
-    deployment = sys.argv[1] if len(sys.argv) > 1 else CONTROLLER_DEPLOYMENT
+    args = sys.argv[1:]
+    rows_mode = bool(args) and args[0] == "--pods"
+    if rows_mode:
+        args = args[1:]
+    deployment = args[0] if args else CONTROLLER_DEPLOYMENT
     try:
         pods = json.load(sys.stdin)
     except json.JSONDecodeError as e:
         print(f"controller_pods.py: not a Pod list: {e}", file=sys.stderr)
         return 1
+    if rows_mode:
+        # No controller Pod is an answer, not a failure: exit 0 with no rows,
+        # so a caller can tell it from a list it could not read (exit 1).
+        if not isinstance(pods, dict):
+            print("controller_pods.py: not a Pod list", file=sys.stderr)
+            return 1
+        for r in pod_rows(pods, deployment):
+            print("\t".join(r))
+        return 0
     selector = log_selector(pods, deployment)
     if selector is None:
         print(f"controller_pods.py: no Pod of Deployment {deployment}", file=sys.stderr)
