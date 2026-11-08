@@ -4456,12 +4456,17 @@ Each change runs the switch on and off in its test.
   against 9.33, and its control, the same read at the cap, prices 7.57.
 - **While the backlog grows, mu is also capped at what the queued replicas
   complete.** That is their median `RequestRate`, read only from a majority
-  of the role's replicas and only at or over `MinMeasuredOfDerived` (0.5) of
-  the floor's mu. A queue that grows shows a replica serves no more than
-  that. The floor's derived mu on the staircase (26) is over what its
-  replicas served (17 to 19). Without the 0.5 bar, a rate that had just begun
-  to queue read a step late and priced `pd-restart` at 12:45:05 at 18.9
-  replicas and `e1-tuned` at 16:24:13 at 35.
+  of the role's replicas, and clamped at `MinMeasuredOfDerived` (0.5) of the
+  floor's mu. A queue that grows shows a replica serves no more than that.
+  The floor's derived mu on the staircase (26) is over what its replicas
+  served (17 to 19). Unclamped, a rate that had just begun to queue read a
+  step late and priced `pd-restart` at 12:45:05 at 18.9 replicas and
+  `e1-tuned` at 16:24:13 at 35. Clamped they price 4.43 and 8.19 (main: 7.47
+  and 5.49), at most 2x the spend of the floor's mu. The first round dropped
+  the cap below the bar instead. Second review measured that a floor mu read
+  2.1x to 3.0x high then priced at the full figure, 0.56 to 0.66 of need;
+  clamped, `TestQueueDrain_TheServedCapIsClampedNotDropped` reads 1.13 to
+  1.31 of need at reads of 1.4x to 3.0x.
 - **A haircut hold ends.**
   - It prices only while a backlog stands.
   - It counts starting replicas through one floor helper
@@ -4500,7 +4505,7 @@ bound. The ledger is unchanged; only the restart row's `measured` moves.
 | fixture | down | up |
 | --- | --- | --- |
 | e1 | 7, to -19.6 % | 16, to +21.1 % |
-| e1-tuned | 5, to -25.3 % | 25, to +24.9 % |
+| e1-tuned | 4, to -16.4 % | 26, to +49.3 % (16:24:13, the clamp) |
 | pd-restart | 17, to -79.1 % | 1, +8.5 % |
 | start-restored | 9, to -99.1 % | none |
 | start-seed | 3, to -99.2 % | none |
@@ -4522,7 +4527,13 @@ three sets of cycles price under it:
 
 On the staircase the price uses what the queued replicas served on those
 cycles, 16.8 to 19.4 req/s, so it is at need at that rate; the 18 used for
-the need is the reviewer's settled figure. On `pd-restart` the need charges
+the need is the reviewer's settled figure. At 18 those cycles sit at 0.91 to
+0.97 of need at 100 %. The fleet stays served only because the engine orders
+at the 0.85 scale-up target, which leaves 15 % of headroom; nothing in the
+drain price itself covers that gap. The second review also adds
+`TestQueueDrain_AShapeChangeDropsTheHold` and
+`TestQueueDrain_AHoldPricesNothingWithoutABacklog` (mutants 13 and 14). The
+growing test's dip cycle is pinned at its measured 0.90. On `pd-restart` the need charges
 the whole queue of 1366, while the drain price caps each replica's queue at
 what it drains in T (937 of it). A request waiting in one engine's queue is
 served by that engine only (`localQueueBacklog`). `e1`, `e1-tuned` and

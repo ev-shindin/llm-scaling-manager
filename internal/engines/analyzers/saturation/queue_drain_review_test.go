@@ -174,6 +174,10 @@ func TestQueueDrain_AGrowingQueueIsPricedAtWhatTheReplicasServe(t *testing.T) {
 			t.Logf("P %.0f mu read %.1f: off %v, need %v", p, muRead, scaledReplicas(off), scaledReplicas(need))
 			for i := 1; i < len(on); i++ {
 				assert.GreaterOrEqual(t, on[i], 0.85*need[i], "P %.0f mu %.1f cycle %d", p, muRead, i)
+				if i == 3 {
+					// The dip cycle, pinned at its measured 0.90 of need.
+					assert.InDelta(t, 0.90, on[i]/need[i], 0.01, "P %.0f mu %.1f: the dip cycle moved", p, muRead)
+				}
 				if i >= 4 {
 					assert.GreaterOrEqual(t, on[i], need[i]-1e-9, "P %.0f mu %.1f cycle %d: under the true arrivals plus the queue", p, muRead, i)
 				}
@@ -235,4 +239,113 @@ func TestQueueDrain_AKVSaturatedFirstReadIsNotRead(t *testing.T) {
 	atCap, _ := firstReadKVSaturated(drainBatchCap)
 	t.Logf("control, at the cap: %.2f", atCap)
 	assert.Less(t, atCap, need, "control: read as a first read, a 1.45x row under-prices")
+}
+
+// While the backlog grows, mu is capped at what the queued replicas serve,
+// clamped at MinMeasuredOfDerived (0.5) of the floor's mu, not dropped. The
+// floor's mu reads 1.4x to 3.0x what four replicas truly serve (1 each); the
+// rows sit one under their batch cap, so there is no first read, and lambda
+// lags a 4 -> 8 req/s step. Dropping the cap under the bar priced 2.1x to
+// 3.0x reads at the full floor mu, 0.56 to 0.66 of need; clamped, every
+// cycle after the step is at or over need. Off, occupancy prices the queue
+// as resident. (Adopted from the second review.)
+func TestQueueDrain_TheServedCapIsClampedNotDropped(t *testing.T) {
+	const p = 20_000.0
+	for _, muRead := range []float64{1.4, 1.9, 2.1, 2.5, 3.0} {
+		for _, on := range []bool{true, false} {
+			clock := propStart
+			a := drainAnalyzer(t, on, &clock)
+			q := 10.0
+			worst := math.Inf(1)
+			demand := make([]float64, 0, 8)
+			for i := range 8 {
+				clock = propStart.Add(time.Duration(i) * propCycle)
+				if i > 0 {
+					q += 15
+				}
+				lambda := min(4+float64(i), 8)
+				rows := make([]domain.ReplicaMetrics, 0, 4)
+				for _, pod := range []string{"a", "b", "c", "d"} {
+					rm := drainRow(pod, int(q), 0.95, drainBatchCap-1, float64(drainBatchCap-1)/muRead)
+					rm.RequestRate = 1
+					rows = append(rows, rm)
+				}
+				got := drainCycle(a, lambda, rows, 0, muRead, 2, p, 4*0.95*p) / p
+				demand = append(demand, got)
+				if i >= 1 {
+					worst = min(worst, got/(8+4*min(q, 60)/60))
+				}
+			}
+			t.Logf("floor mu read %.1f, switch %v: demand %v, least demand/need after the step %.2f",
+				muRead, on, scaledReplicas(demand), worst)
+			if on {
+				assert.GreaterOrEqual(t, worst, 1.0, "floor mu read %.1f", muRead)
+			}
+		}
+	}
+}
+
+// A shape change drops the haircut holds: the read they were taken at is the
+// shape the fleet has left. A hold taken on the first cycle, a shape change
+// on the next, and on the third (rows under their cap, so no read of their
+// own, nine replicas still starting) nothing prices at the held read:
+// occupancy stands, as with the switch off. The control runs the same cycles
+// with no shape change, and the hold prices.
+func TestQueueDrain_AShapeChangeDropsTheHold(t *testing.T) {
+	const p = 100_000.0
+	atCap := []domain.ReplicaMetrics{
+		drainRow("a", 60, 0.95, drainBatchCap, drainBatchCap),
+		drainRow("b", 60, 0.95, drainBatchCap, drainBatchCap),
+	}
+	under := []domain.ReplicaMetrics{
+		drainRow("a", 60, 0.95, drainBatchCap-1, drainBatchCap-1),
+		drainRow("b", 60, 0.95, drainBatchCap-1, drainBatchCap-1),
+	}
+	run := func(on, shapeChange bool) (float64, bool) {
+		clock := propStart
+		a := drainAnalyzer(t, on, &clock)
+		drainCycle(a, 6, atCap, 0, 0, 0, p, 2*0.95*p)
+		clock = propStart.Add(propCycle)
+		drainCycleShape(a, 6, under, 9, 0, 0, p, 2*0.95*p, shapeChange)
+		_, held := a.drainHoldOf("test-ns", "test-model", domain.RoleDecode)
+		clock = propStart.Add(2 * propCycle)
+		return drainCycle(a, 6, under, 9, 0, 0, p, 2*0.95*p), held
+	}
+	dropped, held := run(true, true)
+	off, _ := run(false, true)
+	kept, keptHeld := run(true, false)
+	t.Logf("after a shape change %.2f (held %v), off %.2f, no shape change %.2f (held %v)",
+		dropped/p, held, off/p, kept/p, keptHeld)
+	assert.False(t, held, "the shape change drops the hold")
+	assert.InDelta(t, off, dropped, 1, "no held read prices after the shape change")
+	assert.True(t, keptHeld, "control: no shape change, the hold stands")
+	assert.Greater(t, kept, off+1, "control: the held read prices the queue as drain, over occupancy here")
+}
+
+// A hold prices only while a backlog stands. After the first cycle's
+// haircut price the queue drains to nothing with nine replicas still
+// starting and the floor's mu orderable: the hold adds nothing, and the
+// demand is the switch off's. The control keeps the queue standing, and the
+// held price stands over the floor's.
+func TestQueueDrain_AHoldPricesNothingWithoutABacklog(t *testing.T) {
+	const p = 100_000.0
+	rows := func(q int) []domain.ReplicaMetrics {
+		return []domain.ReplicaMetrics{
+			drainRow("a", q, 0.95, drainBatchCap, drainBatchCap),
+			drainRow("b", q, 0.95, drainBatchCap, drainBatchCap),
+		}
+	}
+	run := func(on bool, q int) float64 {
+		clock := propStart
+		a := drainAnalyzer(t, on, &clock)
+		drainCycle(a, 6, rows(60), 0, 0, 0, p, 2*0.95*p)
+		clock = propStart.Add(propCycle)
+		return drainCycle(a, 6, rows(q), 9, 1, 2, p, 2*0.95*p)
+	}
+	drained, off := run(true, 0), run(false, 0)
+	standing, standingOff := run(true, 60), run(false, 60)
+	t.Logf("no backlog: on %.2f, off %.2f; backlog standing: on %.2f, off %.2f",
+		drained/p, off/p, standing/p, standingOff/p)
+	assert.InDelta(t, off, drained, 1, "no backlog: the hold prices nothing")
+	assert.Greater(t, standing, standingOff, "control: with the queue standing the hold prices")
 }

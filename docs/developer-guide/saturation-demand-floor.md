@@ -157,8 +157,8 @@ so each must keep up with all of it), and on the total otherwise.
     drain horizons after it was set. A shape change drops the holds.
   - While the backlog grows, `mu` is the lowest of the floor's `mu`, that
     first read, and what the queued replicas complete (their median
-    `RequestRate`, from a majority of the role's replicas, and only at or
-    over `MinMeasuredOfDerived` of the floor's `mu`).
+    `RequestRate`, from a majority of the role's replicas, clamped at
+    `MinMeasuredOfDerived` of the floor's `mu`).
   - A lambda that is not a finite positive figure prices nothing.
   - The design and its measurements are in
     [the proposal](../proposals/analyzer-learner.md#queued-work-priced-by-drain-time-as-built-520).

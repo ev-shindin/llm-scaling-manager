@@ -443,14 +443,17 @@ func (a *SaturationAnalyzer) priceDrain(namespace, modelID, role string, d drain
 				// serves: a mu above it (a derived mu, a first read taken
 				// while the batch still climbed) prices them over what they
 				// do. Read from a majority only, as the first read is: one
-				// slow pod's queue is not the fleet's rate. And not under
-				// MinMeasuredOfDerived of the floor's mu, the bar mu's own
-				// choice sets a measurement: a one-minute rate that has
-				// just begun to queue reads a step late, and priced
-				// pd-restart's 12:45:05 at 18.9 replicas (one queued
-				// replica, mu 6.2) and e1-tuned's 16:24:13 at 35.
-				if d.served > 0 && d.served >= c.minServedShare*t.term.Mu {
-					out.mu = min(out.mu, d.served)
+				// slow pod's queue is not the fleet's rate. Clamped, not
+				// dropped, at MinMeasuredOfDerived of the floor's mu, the
+				// bar mu's own choice sets a measurement: a one-minute rate
+				// that has just begun to queue reads a step late, and
+				// unclamped priced pd-restart's 12:45:05 at 18.9 replicas
+				// (one queued replica, mu 6.2) and e1-tuned's 16:24:13 at
+				// 35. Dropped instead, a floor mu read 2.1x to 3.0x over
+				// what the replicas serve priced at the full high figure,
+				// 0.56 to 0.66 of need; clamped, at most 2x spend.
+				if d.served > 0 {
+					out.mu = min(out.mu, max(d.served, c.minServedShare*t.term.Mu))
 				}
 			case firstRead > 0:
 				region, out.mu, p = drainBeforeTwoReadings, a.drainHaircut*firstRead, d.perReplica

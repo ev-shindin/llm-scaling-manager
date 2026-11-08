@@ -37,6 +37,13 @@ func drainRow(pod string, queue int, kv float64, running int, svc float64) domai
 // without the queues' residency charge, which is 2000 tokens a request.
 func drainCycle(a *SaturationAnalyzer, lambda float64, rows []domain.ReplicaMetrics, pending int,
 	mu float64, samples int, p, resident float64) float64 {
+	return drainCycleShape(a, lambda, rows, pending, mu, samples, p, resident, false)
+}
+
+// drainCycleShape is drainCycle with the fleet's shape change outstanding
+// (staleShape) or not.
+func drainCycleShape(a *SaturationAnalyzer, lambda float64, rows []domain.ReplicaMetrics, pending int,
+	mu float64, samples int, p, resident float64, staleShape bool) float64 {
 	in := makeAnalyzerInput(rows, nil)
 	in.ArrivalRate = lambda
 	measured := resident
@@ -51,7 +58,7 @@ func drainCycle(a *SaturationAnalyzer, lambda float64, rows []domain.ReplicaMetr
 	vcs := []domain.VariantCapacity{{VariantName: "v", Role: domain.RoleDecode, ReplicaCount: len(rows),
 		PendingReplicas: pending, PerReplicaCapacity: p}}
 	return a.applyThroughputFloor(in, in.Config.(*config.ScalingPolicy), rcs, vcs,
-		measured, nil, nil, 0, false, logr.Discard())
+		measured, nil, nil, 0, staleShape, logr.Discard())
 }
 
 // drainBatchCap is the batch cap drainAnalyzer's variant states.

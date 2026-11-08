@@ -617,7 +617,7 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// 9.87 -> 3.51 replicas at the target at 12:28:02, never under the
 	// arrivals at the settled mu; down at most 70 % on ttft-staircase-b-off),
 	// and rises where the arrivals the replicas complete outrun what
-	// occupancy held (up to +31 % on throughput-sweep-restart, +25 % on
+	// occupancy held (up to +31 % on throughput-sweep-restart, +49 % on
 	// e1-tuned, +21 % on e1). The start fixtures fall by two orders
 	// of magnitude in tokens: their P is a few tokens, so the residency charge
 	// priced a queue of 50 at over a thousand replicas.
