@@ -724,9 +724,14 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	// (queue_drain.go, SwitchQueuePricedAsDrain): read per generating role.
 	// Not under a shape change: the service-time window then mixes two
 	// shapes, an error the first-read haircut does not bound.
+	// A shape change also drops the haircut holds: their first read is the
+	// shape the fleet has left.
 	var drain map[string]drainRead
+	if a.queuePricedAsDrain && staleShape {
+		a.clearDrainHolds(input.Namespace, input.ModelID)
+	}
 	if a.queuePricedAsDrain && !staleShape {
-		drain = a.drainReads(input, replicas, variants, roleOf, cfg.KvCacheThreshold)
+		drain = a.drainReads(input, replicas, variants, roleOf)
 	}
 	if len(tf.ByRole) == 0 && len(drain) == 0 {
 		return totalDemand
@@ -742,11 +747,11 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	roles := slices.Sorted(maps.Keys(roleSet))
 	var drainCtx drainContext
 	if drain != nil {
-		drainCtx = drainContext{lambda: offeredArrivalRate(input), startSeconds: startSeconds,
-			freshPending: freshPendingByRole(variants, startSeconds), grew: grew}
+		var now time.Time
 		if a.now != nil {
-			drainCtx.now = a.now()
+			now = a.now()
 		}
+		drainCtx = newDrainContext(offeredArrivalRate(input), startSeconds, variants, grew, now, tune.MuChoice.MinMeasuredOfDerived)
 	}
 	modelTotalBefore := totalDemand
 	// Each role the floor raised, at its floored figure: its variants follow.

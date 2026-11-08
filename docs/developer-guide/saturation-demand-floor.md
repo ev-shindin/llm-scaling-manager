@@ -135,7 +135,7 @@ so each must keep up with all of it), and on the total otherwise.
   on that step, 452 469 / 485 046 at 15 s and 30 s, the true 9 req/s plus the
   queue over 60 s, never under the 390 933 the arrivals alone need. Occupancy's
   387 263 was under them
-  (`TestThroughputFloor_AGrowingQueueKeepsTheOccupancyDemand`).
+  (`TestThroughputFloor_AGrowingQueueIsPricedAtTheTrueArrivals`).
 - **Queued work priced by drain time** (`queue_drain.go`, switch
   `queue-priced-as-drain`, #520). On a decode or aggregated role with a
   backlog, where the swap above does not run, the queue is priced as
@@ -148,12 +148,18 @@ so each must keep up with all of it), and on the total otherwise.
   - `B` is each replica's queue, capped at what it drains in `T`, plus the
     scheduler's queue for its owner. `T` is `DrainHorizon`.
   - Before two readings, `mu` is `FirstReadHaircut` (0.85) times the median
-    `RunningRequests / AvgServiceTime` of the role's saturated rows: at the
-    batch cap, or KV at or over k1 with a queue, read only when at least half
-    the role's replicas are. That price, and its read, hold until every
-    replica ordered under it is Ready.
-  - While the backlog grows, `mu` is the lower of the floor's `mu` and that
-    first read.
+    `RunningRequests / AvgServiceTime` of the role's rows at their stated
+    batch cap, read only when at least half the role's replicas are there.
+    A row saturated by its KV under the cap reads 1.6x to 1.9x high and
+    gives no read. That price, and its read, hold while a backlog stands and
+    until every replica ordered under it is Ready (stuck replicas and ages
+    past two starts do not count, `floor.FreshStarting`), and never past two
+    drain horizons after it was set. A shape change drops the holds.
+  - While the backlog grows, `mu` is the lowest of the floor's `mu`, that
+    first read, and what the queued replicas complete (their median
+    `RequestRate`, from a majority of the role's replicas, and only at or
+    over `MinMeasuredOfDerived` of the floor's `mu`).
+  - A lambda that is not a finite positive figure prices nothing.
   - The design and its measurements are in
     [the proposal](../proposals/analyzer-learner.md#queued-work-priced-by-drain-time-as-built-520).
 - A role with no `mu` and no saturated row keeps the residency charge, except

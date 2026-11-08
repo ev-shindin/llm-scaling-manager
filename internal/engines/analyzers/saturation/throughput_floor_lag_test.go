@@ -112,7 +112,7 @@ func TestFloorTrust(t *testing.T) {
 // 45 s (-0.8 %) and 60 s (-6.6 %), which charged the queue as resident. Off,
 // as before, a queue that grew keeps the occupancy demand, which at 15 s is
 // 387 263: under the arrivals alone.
-func TestThroughputFloor_AGrowingQueueKeepsTheOccupancyDemand(t *testing.T) {
+func TestThroughputFloor_AGrowingQueueIsPricedAtTheTrueArrivals(t *testing.T) {
 	for _, on := range []bool{true, false} {
 		t.Run(fmt.Sprintf("queue-priced-as-drain=%v", on), func(t *testing.T) {
 			growingQueueKeepsDemand(t, on)

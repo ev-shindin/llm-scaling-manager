@@ -106,21 +106,30 @@ type probeCase struct {
 	drainHaircut float64
 }
 
-// probeServiceSeconds is a replica's true service time at its limit in the
-// probe, so RunningRequests at the limit is 16 at mu 1.
-const probeServiceSeconds = 16.0
+// probeBatchCap is the batch cap every probe replica states
+// (--max-num-seqs, probeParams), and what it runs at its limit: a replica's
+// service time at the limit is probeBatchCap / mu, so a saturated row is at
+// its cap and gives the drain price its first read (queue_drain.go). 1024 is
+// the cap the probe's decode variant was priced at before it was stated, so
+// the batch cap prices nothing it did not.
+const probeBatchCap = 1024
+
+// probeParams is the engine configuration every probe variant states.
+func probeParams() *capacity.EngineParams {
+	return &capacity.EngineParams{Engine: "vllm", MaxNumSeqs: probeBatchCap, MaxNumSeqsSet: true, Image: "vllm:v1"}
+}
 
 // probeServiceWindow is the cycles the reported service time averages over:
 // one minute at the probe's 15 s cycle, as the collector's rate window.
 const probeServiceWindow = 4
 
-// probeServiceTime is a replica's service time now at load (served / mu):
-// shorter on a smaller batch, its true figure at the limit. 0.6 of it at no
-// load puts the first saturated row's one-minute mean at +13.6 % over the
-// limit from a load of 0.6, inside the +5 % to +15 % the recordings showed
-// (FirstReadHaircut).
-func probeServiceTime(load float64) float64 {
-	return probeServiceSeconds * (0.6 + 0.4*min(max(load, 0), 1))
+// probeServiceTime is the service time now of a replica of true rate mu at
+// load (served / mu): shorter on a smaller batch, probeBatchCap / mu at the
+// limit. 0.6 of it at no load puts the first saturated row's one-minute mean
+// at +13.6 % over the limit from a load of 0.6, inside the +5 % to +15 % the
+// recordings showed (FirstReadHaircut).
+func probeServiceTime(mu, load float64) float64 {
+	return probeBatchCap / mu * (0.6 + 0.4*min(max(load, 0), 1))
 }
 
 // probeITL is the decode replicas' ITL at fill k: a line on which the mu
@@ -134,7 +143,7 @@ func probeITL(k float64) float64 { return 0.119 + 0.6*k }
 func probeProcess(t probeTB, rig *propRig, switches map[string]bool) *settle.Tracker {
 	t.Helper()
 	store := capacity.NewStore()
-	store.Update("test-ns", "test-model", "v", capacity.Record{EngineParams: mtParams(1024, "vllm:v1")}, rig.clock)
+	store.Update("test-ns", "test-model", "v", capacity.Record{EngineParams: probeParams()}, rig.clock)
 	st := settle.NewTracker()
 	st.SetInterval(propCycle)
 	rig.a = NewSaturationAnalyzer(store).WithSettleView(st)
@@ -184,6 +193,7 @@ func runProbe(t probeTB, pc probeCase) probeResult {
 	if pc.decode {
 		st = probeProcess(t, rig, pc.switches)
 	} else {
+		rig.a.capacityStore.Update("test-ns", "test-model", "v", capacity.Record{EngineParams: probeParams()}, rig.clock)
 		require.NoError(t, rig.a.SetSwitchesForReplay(pc.switches))
 	}
 	if pc.drainHaircut > 0 {
@@ -241,7 +251,7 @@ func runProbe(t probeTB, pc probeCase) probeResult {
 			// What the replica runs now and its one-minute service time, as
 			// Little's law relates them: RunningRequests / AvgServiceTime is
 			// what it completes, read high on its first saturated rows.
-			svc := probeServiceTime(r.Served / r.Mu)
+			svc := probeServiceTime(r.Mu, r.Served/r.Mu)
 			if pc.serviceNoise != nil {
 				svc *= 1 + pc.serviceNoise(r.Index, elapsed)
 			}
@@ -255,7 +265,7 @@ func runProbe(t probeTB, pc probeCase) probeResult {
 				mean += s
 			}
 			rm.AvgServiceTime = mean / float64(len(h))
-			rm.RunningRequests = int(math.Round(r.Served * probeServiceTime(r.Served/r.Mu)))
+			rm.RunningRequests = int(math.Round(r.Served * probeServiceTime(r.Mu, r.Served/r.Mu)))
 			if pc.start > 0 {
 				rm.StartSeconds = pc.start.Seconds()
 			}

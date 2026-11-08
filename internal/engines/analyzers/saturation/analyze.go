@@ -1130,7 +1130,10 @@ func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandPart
 	// move when replicas are added -- so it holds the fleet at the size the
 	// LOAD implies once occupancy stops implying anything.
 	//
-	// Strictly a floor: it never lowers demand. It does order -- lambda / mu
+	// A floor: it raises demand, and lowers it only where it prices a queue
+	// as work to drain instead of as resident KV -- the swap
+	// (flooredDemand) and the drain price (queue_drain.go) -- never under
+	// the resident KV. It does order -- lambda / mu
 	// against a fleet that is short is the earliest signal there is, some 50 s
 	// ahead of occupancy on the measured runs -- and it prices a backlog as
 	// work to drain within BacklogDrainSeconds rather than as KV that must be

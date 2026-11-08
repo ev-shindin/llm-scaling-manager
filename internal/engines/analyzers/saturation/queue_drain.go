@@ -26,13 +26,15 @@ import (
 //	N       = (arrival + B / T) / mu
 //	demand  = max(resident KV, N x P, the floor's tokens)
 //
-// mu before two readings is FirstReadHaircut of the first-read mu (mu0), the
-// median of RunningRequests / AvgServiceTime over the role's saturated
-// replicas; while the backlog grows it is the lower of the floor's mu and mu0.
-// B is each replica's queue capped at what it drains in T, plus the
-// scheduler's queue for the role that owns it; T is floor.DrainHorizon. No
-// starting replica is credited: the engine subtracts them as anticipated
-// supply already, and crediting them here too counted them twice (#520).
+// dB/dt is signed and counted on every cycle (backlogGrowthRate). mu before
+// two readings is FirstReadHaircut of the first-read mu (mu0), the median of
+// RunningRequests / AvgServiceTime over the role's replicas at their stated
+// batch cap; while the backlog grows it is the lowest of the floor's mu, mu0
+// and what the queued replicas complete (drainRead.served). B is
+// each replica's queue capped at what it drains in T, plus the scheduler's
+// queue for the role that owns it; T is floor.DrainHorizon. No starting
+// replica is credited: the engine subtracts them as anticipated supply
+// already, and crediting them here too counted them twice (#520).
 
 // SwitchQueuePricedAsDrain is the replay switch for queued work priced by
 // drain time where the floor's swap does not run (queue_drain.go). On, a
@@ -47,21 +49,30 @@ const SwitchQueuePricedAsDrain = "queue-priced-as-drain"
 //
 // The first read is high: its one-minute service-time window still holds
 // completions from before the replica reached its cap, which ran on a smaller
-// batch and so faster. Measured on the first saturated row of three
-// recordings: 7.13 against the 6.2 it settled at (+15 %, pd-restart), 14.29
-// against 12.6 (+13 %, throughput-sweep-restart), 6.53 to 6.58 against 6.2
-// (+5 % to +6 %, e1 and e1-tuned). A mu read high under-orders, the side that
-// breaks the SLO. At 0.85 every one of those lands at or under its settled
-// figure (6.06, 12.15, 5.58). The cost is at most 1 / 0.85 = 1.18x on the
-// cycles it prices, and on the probe's 463 s starts it is what puts the first
-// order at need: without it the time under need came within 1m42s of its
-// bound.
+// batch and so faster. Measured on the first at-cap row of three recordings:
+// 7.13 against the 6.2 it settled at (+15 %, pd-restart), 14.29 against 12.6
+// (+13 %, throughput-sweep-restart), 6.53 to 6.58 against 6.2 (+5 % to +6 %,
+// e1 and e1-tuned). A mu read high under-orders, the side that breaks the
+// SLO. At 0.85 every one of those lands at or under its settled figure (6.06,
+// 12.15, 5.58). The cost is at most 1 / 0.85 = 1.18x on the cycles it prices.
+//
+// It bounds a read at the batch cap only. A row saturated by its KV, under the
+// cap, reads far higher, because its batch and its service time are still
+// climbing: on ttft-staircase-b-off at 02:06:23 two replicas at batches of 126
+// and 128 under a cap of 256 read 31.3 req/s against the 16.7 to 19.3 they
+// served, 1.6x to 1.9x. So such rows give no first read (drainReads).
 const FirstReadHaircut = 0.85
 
 // drainHoldFreshFor is how many cycles a haircut price holds after the cycle
 // that set it whether or not any replica is reported starting: the order it
 // placed is seen as starting only on a later cycle.
 const drainHoldFreshFor = 2
+
+// drainHoldHorizons caps a hold at this many drain horizons after it was last
+// set, however many replicas still report starting: a start longer than two
+// horizons (each at least one start) is not a start (floor.FreshStarting), and
+// a replica that reports no age cannot be told from one that never lands.
+const drainHoldHorizons = 2
 
 // Drain regions, as the throughput-demand-floor line names them.
 const (
@@ -71,22 +82,27 @@ const (
 )
 
 // drainHold is a role's haircut price, held while the replicas ordered under
-// it start (SwitchQueuePricedAsDrain): the first-read mu it was priced at, and
-// the cycles since it last priced.
+// it start (SwitchQueuePricedAsDrain): the first-read mu it was priced at, the
+// cycles since it last priced, and when that was.
 type drainHold struct {
 	mu0    float64
 	cycles int
+	setAt  time.Time
 }
 
 // drainRead is what one role's rows say this cycle for the drain price.
 type drainRead struct {
-	// mu0 is the first-read mu: the median, over the role's own replicas
-	// that are saturated now, of RunningRequests / AvgServiceTime. Zero with
-	// none.
+	// mu0 is the first-read mu: the median, over the role's own replicas at
+	// their stated batch cap, of RunningRequests / AvgServiceTime. Zero with
+	// none, or with fewer than half the role's replicas at the cap.
 	mu0 float64
 	// throughput is what the role's own replicas complete now: the sum of
 	// RunningRequests / AvgServiceTime over every replica that reports both.
 	throughput float64
+	// served is what the role's own replicas with a queue complete each
+	// (RequestRate), the median over them; zero with fewer than half the
+	// role's replicas queued.
+	served float64
 	// queues is each own replica's queue as the floor reads it
 	// (ReplicaCapacity.QueueLength: on decode of a P/D model, the part that
 	// waits for capacity, the full count at the sequence cap).
@@ -97,19 +113,21 @@ type drainRead struct {
 }
 
 // drainReads reads, per role that generates output, the rows' first-read mu,
-// current throughput, queues and P. A replica is saturated when it is at its
-// stated batch cap (domain.ReplicaMetrics.AtBatchCap) or holds KV at or over
-// k1 with a queue: a queue alone is not, since on decode of a P/D model the
-// requests waiting for their KV from prefill read as one while the batch runs
-// far under its cap (pd-restart, 12:28:32: 3.0 req/s against a true 6.2).
-// The first-read mu is read only when at least half the role's replicas are
-// saturated.
-// AvgServiceTime excludes queue wait, and at the cap the batch is fixed, so
-// RunningRequests / AvgServiceTime is the replica's own rate for this shape;
-// that is not the retired Little's-law floor, which priced the service time
-// of whatever batch the replica ran.
+// current throughput, completions, queues and P.
+//
+// The first read comes only from rows at their stated batch cap
+// (domain.ReplicaMetrics.AtBatchCap), and only when at least half the role's
+// replicas are there. At the cap the batch is fixed, so RunningRequests /
+// AvgServiceTime (service time excludes queue wait) is the replica's own rate
+// for this shape, high by no more than the window's mix of earlier
+// completions (FirstReadHaircut); that is not the retired Little's-law floor,
+// which priced the service time of whatever batch the replica ran. A row
+// saturated by its KV under the cap is still growing its batch, and reads
+// 1.6x to 1.9x high: it keeps occupancy's pricing. A queue alone is not
+// saturation either: on decode of a P/D model the requests waiting for their
+// KV from prefill read as one while the batch runs far under its cap.
 func (a *SaturationAnalyzer) drainReads(input domain.AnalyzerInput, replicas []capacity.ReplicaCapacity,
-	variants []domain.VariantCapacity, roleOf map[string]string, k1 float64) map[string]drainRead {
+	variants []domain.VariantCapacity, roleOf map[string]string) map[string]drainRead {
 	perReplica := make(map[string]float64, len(variants))
 	for _, vc := range variants {
 		perReplica[vc.VariantName] = vc.PerReplicaCapacity
@@ -123,6 +141,7 @@ func (a *SaturationAnalyzer) drainReads(input domain.AnalyzerInput, replicas []c
 	caps := make(map[string]int64)
 	mus := make(map[string][]float64)
 	ps := make(map[string][]float64)
+	queuedServed := make(map[string][]float64)
 	out := make(map[string]drainRead)
 	for _, rm := range input.ReplicaMetrics {
 		role, known := roleOf[rm.VariantName]
@@ -135,11 +154,14 @@ func (a *SaturationAnalyzer) drainReads(input domain.AnalyzerInput, replicas []c
 		}
 		d := out[role]
 		d.queues = append(d.queues, float64(q))
-		if p := perReplica[rm.VariantName]; p > 0 && !math.IsInf(p, 1) {
+		if p := perReplica[rm.VariantName]; finitePositive(p) {
 			ps[role] = append(ps[role], p)
 		}
+		if q > 0 && finitePositive(rm.RequestRate) {
+			queuedServed[role] = append(queuedServed[role], rm.RequestRate)
+		}
 		svc, running := rm.AvgServiceTime, float64(rm.RunningRequests)
-		if svc > 0 && running > 0 && !math.IsInf(svc, 1) {
+		if finitePositive(svc) && running > 0 {
 			rate := running / svc
 			d.throughput += rate
 			c, seen := caps[rm.VariantName]
@@ -147,7 +169,7 @@ func (a *SaturationAnalyzer) drainReads(input domain.AnalyzerInput, replicas []c
 				c = a.atCapBatchCap(engineParamsFor(a, input.Namespace, input.ModelID, rm.VariantName), true).perRank
 				caps[rm.VariantName] = c
 			}
-			if rm.AtBatchCap(c) || (k1 > 0 && rm.KvCacheUsage >= k1 && q > 0) {
+			if rm.AtBatchCap(c) {
 				mus[role] = append(mus[role], rate)
 			}
 		}
@@ -163,6 +185,9 @@ func (a *SaturationAnalyzer) drainReads(input domain.AnalyzerInput, replicas []c
 			d.mu0, _ = medianRate(mus[role])
 		}
 		d.perReplica, _ = medianRate(ps[role])
+		if 2*len(queuedServed[role]) >= len(d.queues) {
+			d.served, _ = medianRate(queuedServed[role])
+		}
 		out[role] = d
 	}
 	return out
@@ -182,9 +207,10 @@ func cappedBacklog(queues []float64, scheduler, mu, horizon float64) float64 {
 
 // drainReplicas is N = (arrival + backlog / horizon) / mu, the replicas at
 // 100 % that keep up with arrival and clear backlog in horizon. Zero when mu
-// or the horizon cannot price it.
+// or the horizon cannot price it, or arrival or backlog is not finite.
 func drainReplicas(arrival, backlog, horizon, mu float64) float64 {
-	if !(mu > 0) || math.IsInf(mu, 1) || !(horizon > 0) {
+	if !finitePositive(mu) || !(horizon > 0) || math.IsNaN(arrival) || math.IsInf(arrival, 0) ||
+		math.IsNaN(backlog) || math.IsInf(backlog, 0) {
 		return 0
 	}
 	return (max(arrival, 0) + max(backlog, 0)/horizon) / mu
@@ -195,11 +221,13 @@ func drainReplicas(arrival, backlog, horizon, mu float64) float64 {
 // slope over the last cycle and the slope since the reading it compared with.
 // Negative while the backlog drains. Zero with fewer than two readings.
 //
-// Signed, because what the replicas complete includes the backlog they
-// drain: served + dB/dt is the arrivals whichever way the queue moves. Floored
-// at zero it read the drain as arrivals, and priced the same queue twice,
-// once as arrivals and once as B / T: on pd-restart at 12:47:36 the replicas
-// completed 25.4 req/s against 20.7 arriving, with 988 queued.
+// Signed, and read on every cycle, not only while backlogGrew is set: what
+// the replicas complete includes the backlog they drain, so served + dB/dt is
+// the arrivals whichever way the queue moves. Floored at zero it read the
+// drain as arrivals, and priced the same queue twice, once as arrivals and
+// once as B / T: on pd-restart at 12:47:36 the replicas completed 25.4 req/s
+// against 20.7 arriving, with 988 queued. The max with lambda keeps a noisy
+// negative slope from pricing under the router's rate.
 //
 // The smaller, not the larger: backlogGrew lingers for a minute after the
 // growth stops, and so does the slope over that minute. Read as the larger,
@@ -222,18 +250,22 @@ func (a *SaturationAnalyzer) backlogGrowthRate(namespace, modelID, role string) 
 			rate = min(rate, (cur.byRole[role]-ref.byRole[role])/dt)
 		}
 	}
-	if math.IsInf(rate, 1) || math.IsNaN(rate) {
+	if math.IsInf(rate, 0) || math.IsNaN(rate) {
 		return 0
 	}
 	return rate
 }
 
-// noteDrainHold updates a role's haircut hold and returns it, and whether it
-// holds this cycle. set records a haircut price taken this cycle at mu0. A
-// hold lasts while a replica of the role is starting (freshPending) or for
-// drainHoldFreshFor cycles after it was last set, whichever is longer.
-func (a *SaturationAnalyzer) noteDrainHold(namespace, modelID, role string, set bool, mu0 float64,
-	freshPending int, now time.Time) (drainHold, bool) {
+// drainHoldStep reads and updates a role's haircut hold in one locked step.
+// decide is given the hold as the last cycle left it (and whether there is
+// one) and returns whether this cycle took a haircut price, at which first
+// read. The hold then lasts while a replica of the role is still starting
+// (freshPending), or for drainHoldFreshFor cycles after it was last set,
+// whichever is longer, and never past drainHoldHorizons horizons after it was
+// set. It returns the hold after the update and whether it holds. decide runs
+// under a.mu and must take no lock.
+func (a *SaturationAnalyzer) drainHoldStep(namespace, modelID, role string, freshPending int, horizon float64,
+	now time.Time, decide func(prev drainHold, held bool) (set bool, mu0 float64)) (drainHold, bool) {
 	model := namespace + "|" + modelID
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -249,14 +281,16 @@ func (a *SaturationAnalyzer) noteDrainHold(namespace, modelID, role string, set 
 		memo.drainHolds = make(map[string]drainHold)
 	}
 	h, held := memo.drainHolds[role]
+	set, mu0 := decide(h, held)
 	if held {
 		h.cycles++
-		if freshPending == 0 && h.cycles >= drainHoldFreshFor {
+		expired := horizon > 0 && now.Sub(h.setAt).Seconds() > drainHoldHorizons*horizon
+		if expired || (freshPending == 0 && h.cycles >= drainHoldFreshFor) {
 			held = false
 		}
 	}
 	if set && mu0 > 0 {
-		h, held = drainHold{mu0: mu0}, true
+		h, held = drainHold{mu0: mu0, setAt: now}, true
 	}
 	if !held {
 		delete(memo.drainHolds, role)
@@ -279,36 +313,53 @@ func (a *SaturationAnalyzer) drainHoldOf(namespace, modelID, role string) (drain
 	return h, ok
 }
 
+// clearDrainHolds drops every haircut hold of a model: a shape change
+// (staleShape) makes the first read it was taken at another shape's.
+func (a *SaturationAnalyzer) clearDrainHolds(namespace, modelID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if memo := a.k2Settle[namespace+"|"+modelID]; memo != nil {
+		memo.drainHolds = nil
+	}
+}
+
 // freshPendingByRole is, per role, the replicas starting that are still
-// plausibly starting: within floor's two starts where an age is known
-// (startSeconds), every one where none is.
+// plausibly starting (floor.FreshStarting): stuck ones left out, and those
+// with an age past two starts.
 func freshPendingByRole(variants []domain.VariantCapacity, startSeconds map[string]float64) map[string]int {
 	out := make(map[string]int)
 	for _, vc := range variants {
 		role := domain.CanonicalRole(vc.Role)
-		s := startSeconds[role]
-		if len(vc.PendingAges) == 0 || !(s > 0) {
-			out[role] += max(vc.PendingReplicas, 0)
-			continue
-		}
-		n := 0
-		for _, age := range vc.PendingAges {
-			if age <= floor.StaleStartFactor*s {
-				n++
-			}
-		}
-		out[role] += min(n, max(vc.PendingReplicas, 0))
+		out[role] += floor.FreshStarting(vc.PendingReplicas, vc.StuckReplicas, vc.PendingAges, startSeconds[role])
 	}
 	return out
 }
 
 // drainContext is what every role's drain price reads this cycle.
 type drainContext struct {
+	// lambda is the model's arrival rate, zero when it is not a finite
+	// positive figure (newDrainContext).
 	lambda       float64
 	startSeconds map[string]float64
 	freshPending map[string]int
 	grew         map[string]bool
 	now          time.Time
+	// minServedShare is the least share of the floor's mu what the queued
+	// replicas complete may price at (MuChoice.MinMeasuredOfDerived).
+	minServedShare float64
+}
+
+// newDrainContext is the drain price's view of a cycle. A lambda that is not
+// a finite positive figure is read as none, as floor.Estimate refuses it: a
+// NaN passes the builtin max, and an +Inf priced demand at +Inf.
+func newDrainContext(lambda float64, startSeconds map[string]float64, variants []domain.VariantCapacity,
+	grew map[string]bool, now time.Time, minServedShare float64) drainContext {
+	if !finitePositive(lambda) {
+		lambda = 0
+	}
+	return drainContext{lambda: lambda, startSeconds: startSeconds,
+		freshPending: freshPendingByRole(variants, startSeconds), grew: grew, now: now,
+		minServedShare: minServedShare}
 }
 
 // drainTerm is one role's floor term and demand, as applyThroughputFloor has
@@ -334,21 +385,23 @@ type drainPriced struct {
 
 // priceDrain is a role's demand under SwitchQueuePricedAsDrain, and what it
 // priced: max(resident, N x P, the floor's tokens) in a drain region, else
-// t.want; and, while a haircut price holds (noteDrainHold), at least that
-// price at this cycle's arrivals and queue.
+// t.want; and, while a haircut price holds (drainHoldStep) and a backlog
+// stands, at least that price at this cycle's arrivals and queue.
 //
 // The regions, on a role with a backlog:
 //
 //   - before two readings: no mu that may order (no reading, one, or held),
-//     and a first-read mu from a saturated row. mu = FirstReadHaircut x mu0,
-//     P the role's own.
+//     and a first read at the batch cap, this cycle's or the one a held
+//     haircut was taken at. mu = FirstReadHaircut x the read, P the role's
+//     own.
 //   - growing: a mu that may order, and the backlog grew (backlogGrew). mu =
-//     min(the floor's mu, mu0), P the floor's.
+//     the lowest of the floor's mu, this cycle's first read and what the
+//     queued replicas complete (drainRead.served), P the floor's.
 //
 // A mu that may order with the backlog standing is the floor's swap, as
 // before. The price may raise demand above occupancy's: on a load step the
-// arrivals outrun what is resident, and that raise is what puts the probe's
-// 463 s starts at need on the first saturated cycle.
+// arrivals outrun what is resident. With no backlog the hold prices nothing:
+// the queue its order was for has drained, and what remains is the floor's.
 func (a *SaturationAnalyzer) priceDrain(namespace, modelID, role string, d drainRead, c drainContext,
 	t drainTerm) (float64, drainPriced) {
 	queued := t.scheduler
@@ -359,32 +412,55 @@ func (a *SaturationAnalyzer) priceDrain(namespace, modelID, role string, d drain
 	out := drainPriced{mu0: d.mu0, horizon: floor.DrainHorizon(floor.BacklogDrainSeconds, c.startSeconds[role])}
 	out.growth = a.backlogGrowthRate(namespace, modelID, role)
 	out.arrival = max(c.lambda, d.throughput+out.growth)
-	// The first read this cycle, or, while a haircut price holds, the one it
-	// was taken at: the replicas that land under it start unsaturated, and
-	// a fleet whose majority is not yet saturated gives no read
-	// (drainReads). Without the held read, the 463 s load step fell back to
-	// occupancy's residency charge the cycle its first order landed, and
-	// peaked at 15 against a ceiling of 14.5.
-	firstRead := d.mu0
-	if prev, ok := a.drainHoldOf(namespace, modelID, role); ok && !(firstRead > 0) {
-		firstRead = prev.mu0
-	}
-	var p float64
-	haircut := false
-	switch {
-	case !(queued > 0):
-	case t.inFloor && t.term.MayOrder && !t.term.Held && !grew:
-		// The floor's swap.
-	case t.inFloor && t.term.MayOrder && grew:
-		out.region, out.mu, p = drainGrowing, t.term.Mu, t.term.PerReplica
-		if d.mu0 > 0 {
-			out.mu = min(out.mu, d.mu0)
-		}
-	case firstRead > 0:
-		out.region, out.mu, p, haircut = drainBeforeTwoReadings, a.drainHaircut*firstRead, d.perReplica, true
-	}
+	var p, holdMu float64
+	region := ""
+	_, held := a.drainHoldStep(namespace, modelID, role, c.freshPending[role], out.horizon, c.now,
+		func(prev drainHold, held bool) (bool, float64) {
+			// The first read this cycle, or, while a haircut price holds, the
+			// one it was taken at: the replicas that land under it start under
+			// their cap, and a fleet whose majority is not at it gives no read.
+			firstRead := d.mu0
+			if held && !(firstRead > 0) {
+				firstRead = prev.mu0
+			}
+			if held {
+				holdMu = prev.mu0
+				if d.mu0 > 0 {
+					holdMu = min(holdMu, d.mu0)
+				}
+			}
+			switch {
+			case !(queued > 0):
+			case t.inFloor && t.term.MayOrder && !t.term.Held && !grew:
+				// The floor's swap.
+			case t.inFloor && t.term.MayOrder && grew:
+				region, out.mu, p = drainGrowing, t.term.Mu, t.term.PerReplica
+				if d.mu0 > 0 {
+					out.mu = min(out.mu, d.mu0)
+				}
+				// A replica with a queue completes as much as it can, so
+				// what the queued replicas complete is the most a replica
+				// serves: a mu above it (a derived mu, a first read taken
+				// while the batch still climbed) prices them over what they
+				// do. Read from a majority only, as the first read is: one
+				// slow pod's queue is not the fleet's rate. And not under
+				// MinMeasuredOfDerived of the floor's mu, the bar mu's own
+				// choice sets a measurement: a one-minute rate that has
+				// just begun to queue reads a step late, and priced
+				// pd-restart's 12:45:05 at 18.9 replicas (one queued
+				// replica, mu 6.2) and e1-tuned's 16:24:13 at 35.
+				if d.served > 0 && d.served >= c.minServedShare*t.term.Mu {
+					out.mu = min(out.mu, d.served)
+				}
+			case firstRead > 0:
+				region, out.mu, p = drainBeforeTwoReadings, a.drainHaircut*firstRead, d.perReplica
+				return true, firstRead
+			}
+			return false, 0
+		})
 	want := t.want
-	if out.region != "" && out.mu > 0 && p > 0 {
+	if region != "" && finitePositive(out.mu) && finitePositive(p) {
+		out.region = region
 		out.backlog = cappedBacklog(d.queues, t.scheduler, out.mu, out.horizon)
 		out.replicas = drainReplicas(out.arrival, out.backlog, out.horizon, out.mu)
 		want = max(t.resident, out.replicas*p)
@@ -392,21 +468,19 @@ func (a *SaturationAnalyzer) priceDrain(namespace, modelID, role string, d drain
 			want = max(want, t.tokens)
 		}
 	} else {
-		out.region, out.mu = "", 0
+		out.mu = 0
 	}
-	hold, held := a.noteDrainHold(namespace, modelID, role, haircut, firstRead, c.freshPending[role], c.now)
-	if held && !haircut && d.perReplica > 0 {
-		mu := hold.mu0
-		if d.mu0 > 0 {
-			mu = min(mu, d.mu0)
-		}
-		mu *= a.drainHaircut
+	if held && region != drainBeforeTwoReadings && queued > 0 && finitePositive(holdMu) && finitePositive(d.perReplica) {
+		mu := holdMu * a.drainHaircut
 		b := cappedBacklog(d.queues, t.scheduler, mu, out.horizon)
 		n := drainReplicas(out.arrival, b, out.horizon, mu)
 		if n*d.perReplica > want {
 			want = n * d.perReplica
 			out.region, out.mu, out.backlog, out.replicas = drainHaircutHeld, mu, b, n
 		}
+	}
+	if math.IsNaN(want) || math.IsInf(want, 0) {
+		return t.want, drainPriced{}
 	}
 	return want, out
 }

@@ -54,11 +54,25 @@ func drainCycle(a *SaturationAnalyzer, lambda float64, rows []domain.ReplicaMetr
 		measured, nil, nil, 0, false, logr.Discard())
 }
 
+// drainBatchCap is the batch cap drainAnalyzer's variant states.
+const drainBatchCap = 16
+
+// drainStore holds variant "v" of test-ns/test-model with a stated batch cap
+// of drainBatchCap.
+func drainStore(now time.Time) *capacity.Store {
+	store := capacity.NewStore()
+	store.Update("test-ns", "test-model", "v", capacity.Record{EngineParams: &capacity.EngineParams{
+		Engine: "vllm", MaxNumSeqs: drainBatchCap, MaxNumSeqsSet: true}}, now)
+	return store
+}
+
 // drainAnalyzer is an analyzer with the switch set and a clock the test
 // moves.
+// Variant "v" states a batch cap of drainBatchCap (--max-num-seqs), so a row
+// running that many is at its cap and gives a first read.
 func drainAnalyzer(t *testing.T, on bool, clock *time.Time) *SaturationAnalyzer {
 	t.Helper()
-	a := NewSaturationAnalyzer(capacity.NewStore())
+	a := NewSaturationAnalyzer(drainStore(*clock))
 	require.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchQueuePricedAsDrain: on}))
 	a.now = func() time.Time { return *clock }
 	return a
@@ -90,24 +104,27 @@ func TestQueueDrain_BeforeTwoReadingsPricesTheQueueAsDrain(t *testing.T) {
 	}
 }
 
-// A queue alone is not saturation. On decode of a P/D model the requests
-// waiting for their KV from prefill read as a queue while the batch runs far
-// under its cap: pd-restart's new replicas at 12:28:32 read 3.0 req/s that
-// way against a true 6.2. With KV under k1 and no stated cap the row gives
-// no first-read mu, though it still counts in what the role completes; the
-// control is the same row at KV 0.9.
-func TestQueueDrain_AQueueAloneIsNotSaturated(t *testing.T) {
+// Only rows at their stated batch cap give a first read. A row saturated by
+// its KV under the cap is still growing its batch and reads high
+// (ttft-staircase-b-off, 02:06:23: batches of 126 and 128 under 256 read 31.3
+// req/s against 16.7 to 19.3 served), and a queue alone, on decode of a P/D
+// model, is requests waiting for their KV from prefill (pd-restart's new
+// replicas at 12:28:32 read 3.0 req/s that way against a true 6.2). Either
+// row still counts in what the role completes. The control is the row at its
+// cap.
+func TestQueueDrain_OnlyRowsAtTheBatchCapGiveAFirstRead(t *testing.T) {
 	roleOf := map[string]string{"v": domain.RoleDecode}
-	read := func(kv float64) drainRead {
-		in := makeAnalyzerInput([]domain.ReplicaMetrics{drainRow("a", 20, kv, 8, 2.6)}, nil)
+	read := func(kv float64, running int) drainRead {
+		in := makeAnalyzerInput([]domain.ReplicaMetrics{drainRow("a", 20, kv, running, 2.6)}, nil)
 		rcs := []capacity.ReplicaCapacity{{VariantName: "v", PodName: "a", QueueLength: 20}}
 		vcs := []domain.VariantCapacity{{VariantName: "v", Role: domain.RoleDecode, ReplicaCount: 1, PerReplicaCapacity: 1}}
-		return NewSaturationAnalyzer(capacity.NewStore()).drainReads(in, rcs, vcs, roleOf, 0.8)[domain.RoleDecode]
+		return NewSaturationAnalyzer(drainStore(propStart)).drainReads(in, rcs, vcs, roleOf)[domain.RoleDecode]
 	}
-	low := read(0.04)
-	assert.Zero(t, low.mu0, "a deferred queue under k1 is not a saturated row")
-	assert.InDelta(t, 8/2.6, low.throughput, 1e-9, "it still completes what it runs")
-	assert.InDelta(t, 8/2.6, read(0.9).mu0, 1e-9, "control: at k1 with a queue it is one")
+	deferred := read(0.04, 8)
+	assert.Zero(t, deferred.mu0, "a deferred queue under the cap is not a saturated row")
+	assert.InDelta(t, 8/2.6, deferred.throughput, 1e-9, "it still completes what it runs")
+	assert.Zero(t, read(0.95, 8).mu0, "KV full under the cap is no first read either")
+	assert.InDelta(t, drainBatchCap/2.6, read(0.95, drainBatchCap).mu0, 1e-9, "control: at the cap it is one")
 }
 
 // The growth added to the arrivals is the smaller of the slope over the last

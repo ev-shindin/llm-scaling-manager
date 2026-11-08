@@ -86,8 +86,8 @@
   class: liveness
   learner: floor
   expect: over-priced
-  finding: "At a 463 s start the decode step after a controller restart, with no mu yet, ends at 21, over the bound even at the backlog allowance (44m15s). Since the queue is priced by drain time (queue-priced-as-drain) the peak is 23, inside the 26.5 ceiling, and the fleet is under need 15 s; what stays over is the even split feeding the first replicas their start's queue, which then drain at mu less their share (#520 cause C)."
-  measured: "1/1 seed; even split, starting replicas shown: peak 23 (ceiling 26.5), final 21 at 44m15s against the 20.5 bound, under need 15s (bound 11m13s); switch off: peak 29, final 23, under need 8m0s"
+  finding: "At a 463 s start the decode step after a controller restart, with no mu yet, ends at 21, over the bound even at the backlog allowance (44m15s). Since the queue is priced by drain time (queue-priced-as-drain) the peak is 22, inside the 26.5 ceiling, and the fleet is under need 15 s; what stays over is the even split feeding the first replicas their start's queue, which then drain at mu less their share (#520 cause C)."
+  measured: "1/1 seed; even split, starting replicas shown: peak 22 (ceiling 26.5), final 21 at 44m15s against the 20.5 bound, under need 15s (bound 11m13s); switch off: peak 29, final 23, under need 8m0s"
   owner: "#520"
 - id: liveness/floor/closed-loop-restart-before-step-start-463s-jsq
   class: liveness

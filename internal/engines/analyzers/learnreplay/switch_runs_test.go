@@ -581,8 +581,8 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 	// 9.87 -> 3.51 replicas at the target at 12:28:02, never under the
 	// arrivals at the settled mu; down at most 70 % on ttft-staircase-b-off),
 	// and rises where the arrivals the replicas complete outrun what
-	// occupancy held (up to +20 % on e1-tuned; +93.6 % on one e1 cycle, a
-	// joiner taking 221 queued at once). The start fixtures fall by two orders
+	// occupancy held (up to +31 % on throughput-sweep-restart, +25 % on
+	// e1-tuned, +21 % on e1). The start fixtures fall by two orders
 	// of magnitude in tokens: their P is a few tokens, so the residency charge
 	// priced a queue of 50 at over a thousand replicas.
 	//
@@ -1352,7 +1352,11 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestQueueDrain_BeforeTwoReadingsPricesTheQueueAsDrain"},
 		{"../saturation", "TestQueueDrain_TheHaircutHoldsUntilTheOrderLands"},
 		{"../saturation", "TestQueueDrain_StartProbesOnAndOff"},
-		{"../saturation", "TestThroughputFloor_AGrowingQueueKeepsTheOccupancyDemand"},
+		// PR #533's review: each runs the switch on and off.
+		{"../saturation", "TestQueueDrain_ANonFiniteLambdaPricesNothing"},
+		{"../saturation", "TestQueueDrain_AHoldEndsWithAReplicaThatNeverLands"},
+		{"../saturation", "TestQueueDrain_StartingReplicasEarnNoCredit"},
+		{"../saturation", "TestThroughputFloor_AGrowingQueueIsPricedAtTheTrueArrivals"},
 	},
 }
 

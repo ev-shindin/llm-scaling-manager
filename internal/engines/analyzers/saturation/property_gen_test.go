@@ -302,7 +302,7 @@ func propertyCases() []propCase {
 	out := make([]propCase, 0, 192)
 	for _, part := range [][]propCase{itlCases(), k2Cases(), muCases(), floorCases(), otherCases(),
 		learnerCases(), edgeCases(), tierEdgeCases(), moreCases(), reviewEdgeCases(), batchCapCases(), specCases(), spreadCases(),
-		itlSettleCases(), startProbeCases(), arEdgeCases(), drainNoiseCases()} {
+		itlSettleCases(), startProbeCases(), arEdgeCases(), drainNoiseCases(), {firstReadKVSaturatedCase()}} {
 		out = append(out, part...)
 	}
 	return out

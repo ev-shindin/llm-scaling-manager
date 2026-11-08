@@ -23,6 +23,7 @@ edges/decode-memory/kv-threshold-nondefault
 edges/decode-memory/memory-1-min
 edges/decode-memory/queue-threshold
 edges/floor/backlog-grew
+edges/floor/drain-first-read-kv-saturated-1.45x
 edges/floor/growth-band
 edges/floor/growth-band-nondefault
 edges/floor/standing-queue-cap

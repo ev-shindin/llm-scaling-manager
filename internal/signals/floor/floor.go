@@ -717,7 +717,7 @@ func startingCredit(startSeconds float64, pending int, ages []float64) float64 {
 		// clear the queue because it has been told phantom replicas are about to
 		// serve. Between one and two starts is still plausibly a slow start and
 		// earns the window.
-		if age > StaleStartFactor*startSeconds {
+		if !startingFresh(age, startSeconds) {
 			continue
 		}
 		credit += min(age, startSeconds)
@@ -748,9 +748,35 @@ type startingReplicas struct {
 	ages  []float64
 }
 
-// StaleStartFactor is how many starts a Pod may have been starting for before it
+// staleStartFactor is how many starts a Pod may have been starting for before it
 // stops counting as one.
-const StaleStartFactor = 2.0
+const staleStartFactor = 2.0
+
+// startingFresh reports whether a Pod starting for age seconds is still
+// plausibly starting, with a start of startSeconds: within staleStartFactor
+// starts. With no start known every age is.
+func startingFresh(age, startSeconds float64) bool {
+	return !(startSeconds > 0) || age <= staleStartFactor*startSeconds
+}
+
+// FreshStarting is how many of a variant's pending replicas are still
+// plausibly starting: pending less stuck (never below zero), and where ages
+// are known, only those within staleStartFactor starts of startSeconds,
+// never more than pending less stuck. The rule startingCredit applies to
+// what it credits, for a reader that counts replicas instead.
+func FreshStarting(pending, stuck int, ages []float64, startSeconds float64) int {
+	starting := max(pending-max(stuck, 0), 0)
+	if len(ages) == 0 {
+		return starting
+	}
+	n := 0
+	for _, age := range ages {
+		if startingFresh(age, startSeconds) {
+			n++
+		}
+	}
+	return min(n, starting)
+}
 
 // queueJustifiedReplicas is how many replicas a standing queue of q requests is
 // worth: what it takes to clear it within the drain window at mu requests per
