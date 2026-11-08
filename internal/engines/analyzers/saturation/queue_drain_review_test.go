@@ -208,8 +208,9 @@ func firstReadKVSaturatedCase() propCase {
 		}}
 }
 
-// firstReadKVSaturated prices the case's cycle with the replicas running
-// running of a stated cap of drainBatchCap, and returns the demand and the
+// firstReadKVSaturated prices the case's cycle with each replica's batch at
+// the given running count, under a stated cap of drainBatchCap, and returns
+// the demand and the
 // need, in replicas at 100 %.
 func firstReadKVSaturated(running int) (got, need float64) {
 	const p = 20_000.0
