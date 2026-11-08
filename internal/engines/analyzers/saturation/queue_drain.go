@@ -300,17 +300,17 @@ func (a *SaturationAnalyzer) drainHoldStep(namespace, modelID, role string, fres
 	return h, true
 }
 
-// drainHoldOf is a role's haircut hold as the last cycle left it, and
-// whether one is held; it changes nothing.
-func (a *SaturationAnalyzer) drainHoldOf(namespace, modelID, role string) (drainHold, bool) {
+// drainHeld reports whether a role holds a haircut price as the last cycle
+// left it; it changes nothing.
+func (a *SaturationAnalyzer) drainHeld(namespace, modelID, role string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	memo := a.k2Settle[namespace+"|"+modelID]
 	if memo == nil {
-		return drainHold{}, false
+		return false
 	}
-	h, ok := memo.drainHolds[role]
-	return h, ok
+	_, ok := memo.drainHolds[role]
+	return ok
 }
 
 // clearDrainHolds drops every haircut hold of a model: a shape change

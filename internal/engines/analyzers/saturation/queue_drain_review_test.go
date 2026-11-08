@@ -106,7 +106,7 @@ func TestQueueDrain_AHoldEndsWithAReplicaThatNeverLands(t *testing.T) {
 				mu, samples = 1, 2
 			}
 			drainCycle(a, 6, rows, 1, mu, samples, p, 2*0.95*p)
-			if _, held := a.drainHoldOf("test-ns", "test-model", domain.RoleDecode); held {
+			if a.drainHeld("test-ns", "test-model", domain.RoleDecode) {
 				heldAt = append(heldAt, i)
 			}
 		}
@@ -307,7 +307,7 @@ func TestQueueDrain_AShapeChangeDropsTheHold(t *testing.T) {
 		drainCycle(a, 6, atCap, 0, 0, 0, p, 2*0.95*p)
 		clock = propStart.Add(propCycle)
 		drainCycleShape(a, 6, under, 9, 0, 0, p, 2*0.95*p, shapeChange)
-		_, held := a.drainHoldOf("test-ns", "test-model", domain.RoleDecode)
+		held := a.drainHeld("test-ns", "test-model", domain.RoleDecode)
 		clock = propStart.Add(2 * propCycle)
 		return drainCycle(a, 6, under, 9, 0, 0, p, 2*0.95*p), held
 	}
