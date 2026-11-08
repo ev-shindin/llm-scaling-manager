@@ -390,7 +390,9 @@ than everything the rank holds:
 
 ```
 joined   = later of Pod Ready and its first sight (else first sight) under
-           JoinedReplicaWindow (1m) ago, read from the settle tracker
+           JoinedReplicaWindow (1m) ago, read from the settle tracker,
+        || the first return of load after an idle run in its current
+           settle, under JoinedReplicaWindow ago (joined_served.go)
 suspect  = queue x (I [+ O unless prefill]) > tokens / ranks
 admitted = !joined && (!suspect
         || (rate >= K2SettleRateFraction x rateOnRecord             // 0.7
@@ -419,6 +421,52 @@ sighting. An analyzer given no view, as a unit test builds one, observes a
 tracker of its own and takes its first cycle's replicas as already watched.
 The two changes from the analyzer's own memo of Ready times are replay
 switches (`SwitchK2ReadsSettle`, `SwitchK2WaitsAfterRestart`).
+
+The joined clock also starts when a replica is first routed to
+(`joined_served.go`, #392, `SwitchJoinedFromFirstServed`). A replica Ready for
+longer than a minute but idle until a burst reaches it has a rate[1m] that
+covers only the part of the minute it served, and that reading read as a low
+mu. What the replica did is read from the settle tracker, by role
+(`settle.Row.Activity`): a row is idle only with its KV known and empty and no
+token generated (prefill: no request completed). A replica holding KV is never
+idle, so a full, queued replica with no completion yet is unknown, not idle.
+The first row of load after an idle run is a return (`settle.Replica.Returns`);
+the tracker keeps the returns of the current settle, which begins at the Pod's
+Ready time, a restart, a rejoin, a rollout or a lend. A saturated reading under
+`JoinedReplicaWindow` of the settle's FIRST return is refused as a joined one,
+with its own reason (`P1-obs-unsettled`). The analyzer keeps no per-pod state
+of its own for it.
+
+Only the first return of a settle holds, so a replica is protected once per
+settle. It is the replica first routed to after it became Ready, or after the
+controller first saw it idle: the case of the issue. A replica that idles every
+night and takes a morning burst is held on its first morning only; on later
+mornings its first partial rate[1m] is admitted, as before #392.
+
+The narrower-sounding rule, hold any return whose idle run left idle seconds in
+the reading's window, is the same as holding every return: a return is the
+first load row after an idle row, so unless rows were missed between them the
+minute after it holds idle seconds. Holding every return was measured on the
+pd-restart golden, whose decode Pods idle and return as the load steps.
+Decode's mu was unpriced from 12:27:02 to 12:28:32, then read 5.06 and 4.65
+req/s until 12:46:50 against the 6.21 the first-return rule prices (-25 %); its
+k2 was 48 005 against 55 212; e1-tuned and ttft-staircase-b-off moved too. The
+first attempt (f32a32ed7, reverted), which held every return for mu alone, left
+decode's mu 27 % low on the same golden. The first-return rule holds one of the
+two decode Pods there (the other had returned at 12:13:44) and moves decode's
+mu toward its steady figure a cycle sooner.
+
+k2 is refused with mu, not mu alone, and that costs valid k2 readings. Mu is
+written only beside a k2 write, and k2's settle rate test reads the mu on
+record: refusing mu alone left that test with no mu (f32a32ed7), and the k2
+readings it then admitted wrote ramp readings as mu. But a max_over_time[1m]
+KV peak is not lowered by the idle part of the minute, so the k2 reading of a
+full replica in that minute is right, and it is lost. On the e1 golden,
+model-02's variant-01 saturates only in the minute after its first return,
+holding 363 871 tokens, so it never records an observed k2 and prices from the
+derived figure (its capacity does not move). The cost in time is one rate
+window (4 cycles at 15 s) before a late-routed replica's first k2 and mu, and
+one cycle more for k2's first reading (`k2_confirm.go`).
 
 Each cycle k2 also fills a `learn.Report` per variant (`k2_learner.go`;
 `LearnerReports`), and logs `learner-write` at `--v=3` for a key whose figure
@@ -783,6 +831,7 @@ Add a row when you add such a threshold.
 | threshold | set | clear | dwell | safe side | after a restart |
 | --- | --- | --- | --- | --- | --- |
 | ITL tier: full fit or pinned fit (`itl/tier_latch.go`, on the saturation, slo and throughput lines) | 10 steady readings, spread 0.30 of `k` | under 8 steady readings or spread 0.18, or a pinned fit pricing 3 % more | 10 min after the last change, unless the new line prices 3 % more replicas | the line that prices more replicas, from either tier, judged by what the line sustains where the analyzer prices it | the latch is not kept: a key with a restored slope stands at the pinned fit |
+| Mu's stale latch: measured or derived mu (`measuredYield`, `muChoice`) | the ratio of measured to derived mu, smoothed over `MuLatchRatioSmoothing` (3 min), past `muChoice.maxRatio` (2.0), or one cycle's own ratio at or past `MuLatchRawSetFactor` times it (2.8x); under 1/2.0, smoothed only, once stale for `lowHoldFor` | the smoothed ratio back within `muChoice.returnRatio` (1.6) | none: the smoothing is the delay. A stale ratio stepping from 1x to 2.8x or more sets on the step, to 2.5x on the 14th cycle at 15 s, to 2.2x on the 22nd | the lower figure: latched over the derived one, unlatched under it | the latch is not kept, and restores to the safe side (`SwitchMuLatchRestoresSafe`); the smoothed ratio starts over with a restored, brought-back or new window |
 
 **Price.** A line's price is sequences over ITL at the fill the analyzer reads
 (`Admission.PricedRate`). At a fixed fill that is the ITL there. With a TPOT
@@ -1154,6 +1203,24 @@ replay switch (`mu_switches.go`):
   window with no sample time and no agreeing reading on record is stale over
   the derived figure, and under it holds for `MeasuredLowHoldFor` from its
   own last write (`lowHeldOut`, `TestMuUnknownAge_*`).
+- **The latch reads a smoothed ratio** (`SwitchMuLatchReadsSmoothedRatio`,
+  #526). The stale rule sets and releases on the ratio of measured to derived
+  mu smoothed exponentially over `MuLatchRatioSmoothing` (3 min), not on the
+  cycle's own ratio (`muChoice.smoothRatio`). The per-pod rate noise measured
+  on E1 is 7.5-18.9 % at lag-one 0.1-0.4, as wide as the 1.6-2.0 band, so on
+  one cycle's ratio a stale measurement coming back across 1.6 let go and was
+  set again several times in one excursion. Smoothed, it changes once on every
+  seed at 10 % and 15 % (`TestMuLatchBand_*`). The cost is reaction time when
+  the ratio moves while the measurement is already stale, and while the latch
+  waits to set it prices the higher, measured figure, the SLO side. So one
+  cycle's ratio at or past `MuLatchRawSetFactor` (1.4) times `maxRatio`, 2.8x,
+  sets it at once; a step to 2.5x waits 14 cycles at 15 s, to 2.2x 22. The
+  release always reads the smoothed ratio. At 1.25 (2.5x) the raw set re-set
+  a released latch on 6 of 1000 seeds at 15 % noise, at 1.4 on none. A ratio
+  already past 2x while the measurement was fresh latches on the cycle it goes
+  stale. The smoothed ratio starts over when the key's window does, and with a
+  restored or brought-back window. The served yield is new evidence and reads
+  the cycle's own ratio; its cycle still counts in the smoothed one.
 - **The latch restores to the safe side** (`SwitchMuLatchRestoresSafe`). The
   latch is not persisted. A window restored, or brought back, with no choice
   on record comes back latched over the derived figure and unlatched under

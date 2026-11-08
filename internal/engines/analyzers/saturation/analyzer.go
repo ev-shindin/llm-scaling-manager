@@ -360,6 +360,10 @@ type SaturationAnalyzer struct {
 	muRepeatIsUse       bool
 	muUnknownAgeSafe    bool
 	muLatchRestoresSafe bool
+	// muLatchSmoothed is SwitchMuLatchReadsSmoothedRatio
+	// (throughput_admission.go): on from the constructor; a replay turns it
+	// off (SetSwitchesForReplay).
+	muLatchSmoothed bool
 	// muWeighsFleet, muYieldCapped, muUnreadAtTarget and
 	// muMinorityExpires are the slow pod's replay switches (mu_slow_pod.go):
 	// SwitchMuWeighsFleet, SwitchMuYieldCappedAtMeasurement, SwitchMuUnreadAtTarget and
@@ -456,6 +460,9 @@ type SaturationAnalyzer struct {
 	// k2FirstReadingWaits is SwitchK2FirstReadingWaits (#392): on from the
 	// constructor; a replay turns it off (SetSwitchesForReplay).
 	k2FirstReadingWaits bool
+	// joinedFromFirstServed is SwitchJoinedFromFirstServed (#392): on from
+	// the constructor; a replay turns it off (SetSwitchesForReplay).
+	joinedFromFirstServed bool
 	// itlPerToken is SwitchITLPerToken (#274): on from the constructor; a
 	// replay turns it off (SetSwitchesForReplay).
 	itlPerToken bool
@@ -699,6 +706,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		muRepeatIsUse:          true,
 		muUnknownAgeSafe:       true,
 		muLatchRestoresSafe:    true,
+		muLatchSmoothed:        true,
 		muWeighsFleet:          true,
 		muYieldCapped:          true,
 		muUnreadAtTarget:       true,
@@ -733,6 +741,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		muSwapFreeze:           true,
 		muMarginClamp:          true,
 		k2FirstReadingWaits:    true,
+		joinedFromFirstServed:  true,
 		itlPerToken:            true,
 		itlWithheldLogged:      make(map[string]itlWithheldReasons),
 		k2Pending:              make(map[string]*k2PendingReadings),

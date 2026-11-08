@@ -66,10 +66,14 @@ func TestMuLatch_ARestoredMeasurementUnderDerivedComesBackUnlatched(t *testing.T
 
 // Once the restored latch has decided a cycle, it is known, and the
 // hysteresis runs as it does live: latched it holds past the return ratio,
-// and once out it needs the full ratio again.
+// and once out it needs the full ratio again. The first step is the
+// restored choice, on its first cycle; each later ratio is held for 10 min,
+// as the latch reads the ratio smoothed over MuLatchRatioSmoothing
+// (SwitchMuLatchReadsSmoothedRatio), and the choice is the one on its last
+// cycle.
 func TestMuLatch_TheRestoredLatchIsKnownAfterItsFirstChoice(t *testing.T) {
 	a, now := restoredMuRig(t, true, 1.8)
-	for _, step := range []struct {
+	for i, step := range []struct {
 		ratio  float64
 		yields bool
 	}{
@@ -79,8 +83,15 @@ func TestMuLatch_TheRestoredLatchIsKnownAfterItsFirstChoice(t *testing.T) {
 		{1.8, false}, // known unlatched: needs the full ratio
 		{2.1, true},
 	} {
-		*now = now.Add(15 * time.Second)
-		assert.Equal(t, step.yields, yields(a, *now, step.ratio, 0), "at %.1fx", step.ratio)
+		var got bool
+		for range 40 {
+			*now = now.Add(15 * time.Second)
+			got = yields(a, *now, step.ratio, 0)
+			if i == 0 {
+				break // the restored choice, on its first cycle
+			}
+		}
+		assert.Equal(t, step.yields, got, "at %.1fx", step.ratio)
 	}
 }
 

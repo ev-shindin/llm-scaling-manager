@@ -10,8 +10,8 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/whatif"
 )
 
 // The cases #389 listed as gaps on the classes it had: liveness for 8-GPU
@@ -44,6 +44,7 @@ func moreCases() []propCase {
 		{class: classScale, learner: "mu", name: "output-length", family: familyDirect, tuning: tunedDefault, seeds: cheapSeeds, check: checkMuScaleOutput},
 		// The time-base family.
 		{class: classFirstSample, learner: "mu", name: "joiner-rate-timebase", family: familyTimeBase, tuning: tunedDefault, seeds: cheapSeeds, check: checkMuFirstSampleTimeBase},
+		{class: classFirstSample, learner: "mu", name: "joiner-rate-timebase-line", family: familyTimeBase, tuning: tunedDefault, seeds: cheapSeeds, check: checkMuFirstSampleTimeBaseLine},
 		{class: classMissing, learner: "itl", name: "missed-row-timebase", family: familyTimeBase, tuning: tunedDefault, check: checkITLMissedRowTimeBase(def)},
 		{class: classHeterogeneity, learner: "mu", name: "one-slow-pod-n4-timebase", family: familyTimeBase, tuning: tunedDefault, seeds: cheapSeeds, check: checkMuSlowPodTimeBase(real)},
 		{class: classScale, learner: "k2", name: "block-size-timebase", family: familyTimeBase, tuning: tunedDefault, check: checkK2ScaleTimeBase},
@@ -230,27 +231,161 @@ func checkMuScaleOutput(seed uint64) error {
 
 // --- the time-base family ---
 
-// checkMuFirstSampleTimeBase: a fresh replica's first saturated cycle, its
-// completions a rate[1m] over a minute it served for only part of: the
-// guard against a low first reading refuses it, or a second minute's
-// reading moves it by no more than the band.
+// checkMuFirstSampleTimeBase: a replica Ready for an hour stands idle, then
+// is routed to: an idle fleet hit by a burst, or a release of the scheduler's
+// flow-control queue. A deep queue lands at a random second, its cache fills
+// at once, and it completes at the truth from then on. Its rows come from
+// the time base -- KV at its one-minute peak, tokens and completions as a
+// rate[1m] -- with every gauge known, so the idle rows read idle. The
+// rate[1m] of its first saturated cycles covers only the part of the minute
+// it served. Driven through Analyze, so every admission test the analyzer
+// applies is applied. The first mu on record is within the band of the
+// figure three minutes on: a reading that covers part of the minute moves
+// the figure by more.
 func checkMuFirstSampleTimeBase(seed uint64) error {
-	r := propRand(seed)
-	truth := 0.2 * (1 + 0.1*r.Float64())
-	served := 20 + r.IntN(20) // seconds of the first minute it served
-	path := make([]float64, 120)
-	for s := range path {
-		if s >= 60-served {
-			path[s] = truth
+	return checkMuFirstSampleTimeBaseOn(nil)(seed)
+}
+
+// checkMuFirstSampleTimeBaseOn is checkMuFirstSampleTimeBase with edit
+// applied to the rig's analyzer first (a mutant).
+func checkMuFirstSampleTimeBaseOn(edit func(*SaturationAnalyzer)) func(uint64) error {
+	return func(seed uint64) error {
+		r := propRand(seed)
+		truth := 0.2 * (1 + 0.1*r.Float64())
+		load := 120 + r.IntN(60) // the second the load lands
+		const secs = 8 * 60
+		rate := make([]float64, secs)
+		for s := load; s < secs; s++ {
+			rate[s] = truth
 		}
+		tb := sampleTimeBase(rate)
+		rig := newPropRig()
+		if edit != nil {
+			edit(rig.a)
+		}
+		ready := rig.clock.Add(-time.Hour)
+		full := int64(float64(propKv) * (0.9 + 0.03*r.Float64()))
+		first, firstAt := 0.0, 0
+		for i, rr := range tb.Rate1m {
+			tokens, queue := int64(0), 0
+			if 60+i*int(propCycle/time.Second) >= load {
+				tokens, queue = full, 10
+			}
+			rm := satRow("r0", tokens, queue, rr)
+			rm.ReadySince = ready
+			rm.KvCacheUsageKnown, rm.GenerationTokenRateKnown, rm.RequestRateKnown = true, true, true
+			if _, err := rig.analyze([]domain.ReplicaMetrics{rm}, decodeStates(1), truth, propCycle); err != nil {
+				return err
+			}
+			if got := rig.measuredMu(); first == 0 && got > 0 {
+				first, firstAt = got, 60+i*int(propCycle/time.Second)
+			}
+		}
+		final := rig.measuredMu()
+		if !(first > 0 && final > 0) {
+			return violation(kindNotLearned, "no measured mu after %d s at %.4f req/s", secs-load, truth)
+		}
+		return holds(relErr(first, final) <= propBand, kindAdoptedRaw,
+			"the load landed at %d s: the first mu on record %.4f at %d s, %.4f three minutes on (truth %.4f)", load, first, firstAt, final, truth)
 	}
-	first := sampleTimeBase(path).Rate1m[0]
-	t := tuning{AnalyzerTuning: tuningDefault.WithDefaults()}
-	if t.throughputRefusal(first, first, whatif.DerivedMu{Rate: truth, OK: true}, 0, false) != "" {
-		return nil
+}
+
+// checkMuFirstSampleTimeBaseLine is checkMuFirstSampleTimeBase with an ITL
+// line: the regime of the original finding, in which
+// muChoice.minMeasuredOfDerived refuses a reading under half the derived mu.
+// Ten siblings serve unsaturated at k from 0.20 to 0.65 for four minutes, and
+// the variant fits its line from them; r0 stands idle beside them. Its truth
+// is set at or above the derived mu the line prices, so a reading that served
+// 30-50 s of the minute (half the truth or more) passes the guard. Then the
+// load lands on r0 at a random second, and the case is the same: the first
+// mu on record is within the band of the figure three minutes on.
+func checkMuFirstSampleTimeBaseLine(seed uint64) error {
+	return checkMuFirstSampleTimeBaseLineOn(nil)(seed)
+}
+
+// checkMuFirstSampleTimeBaseLineOn is checkMuFirstSampleTimeBaseLine with
+// edit applied to the analyzer first (a mutant).
+func checkMuFirstSampleTimeBaseLineOn(edit func(*SaturationAnalyzer)) func(uint64) error {
+	return func(seed uint64) error {
+		r := propRand(seed)
+		store := capacity.NewStore()
+		store.Update("test-ns", "test-model", "v", capacity.Record{AcceleratorName: "H200", GpuCount: 1,
+			EngineParams: keyParams(256)}, propStart)
+		rig := newPropRig()
+		rig.a = NewSaturationAnalyzer(store)
+		rig.a.now = func() time.Time { return rig.clock }
+		if edit != nil {
+			edit(rig.a)
+		}
+		ready := rig.clock.Add(-time.Hour)
+		const siblings = 10
+		row := func(pod string, tokens int64, queue int, rate float64, k float64) domain.ReplicaMetrics {
+			rm := satRow(pod, tokens, queue, rate)
+			rm.ReadySince = ready
+			rm.KvCacheUsageKnown, rm.GenerationTokenRateKnown, rm.RequestRateKnown = true, true, true
+			if k > 0 {
+				rm.AvgITL, rm.AvgITLKnown = propITL(k)*(1+0.005*r.NormFloat64()), true
+			} else {
+				rm.AvgITLEmpty = true
+			}
+			return rm
+		}
+		fleet := func(r0 domain.ReplicaMetrics) []domain.ReplicaMetrics {
+			rows := make([]domain.ReplicaMetrics, 0, 1+siblings)
+			rows = append(rows, r0)
+			for i := range siblings {
+				k := 0.20 + 0.05*float64(i)
+				rows = append(rows, row(fmt.Sprintf("s%d", i), int64(k*float64(propKv)), 0, 0, k))
+			}
+			return rows
+		}
+		// Four minutes of siblings fitting the line, r0 idle.
+		derived := 0.0
+		for range 16 {
+			res, err := rig.analyze(fleet(row("r0", 0, 0, 0, 0)), decodeStates(siblings+1), 1, propCycle)
+			if err != nil {
+				return err
+			}
+			for _, vc := range res.VariantCapacities {
+				if vc.ServiceRate != nil && vc.ServiceRate.RateSource == domain.ServiceRateSourceDerived {
+					derived = vc.ServiceRate.Rate
+				}
+			}
+		}
+		if !(derived > 0) {
+			return violation(kindNotLearned, "no derived mu after four minutes of ten siblings")
+		}
+		truth := derived * (1 + 0.1*r.Float64())
+		load := 120 + r.IntN(60) // the second the load lands, past the line's four minutes
+		const secs = 8 * 60
+		rate := make([]float64, secs)
+		for s := load; s < secs; s++ {
+			rate[s] = truth
+		}
+		tb := sampleTimeBase(rate)
+		full := int64(float64(propKv) * (0.9 + 0.03*r.Float64()))
+		first, firstAt := 0.0, 0
+		for i, rr := range tb.Rate1m {
+			at := 60 + i*int(propCycle/time.Second)
+			r0 := row("r0", 0, 0, rr, 0)
+			if at >= load {
+				r0 = row("r0", full, 10, rr, float64(full)/float64(propKv))
+			}
+			if _, err := rig.analyze(fleet(r0), decodeStates(siblings+1), truth, propCycle); err != nil {
+				return err
+			}
+			if got := rig.measuredMu(); first == 0 && got > 0 {
+				first, firstAt = got, at
+			}
+		}
+		final := rig.measuredMu()
+		if !(first > 0 && final > 0) {
+			return violation(kindNotLearned, "no measured mu after %d s at %.4f req/s (derived %.4f)", secs-load, truth, derived)
+		}
+		return holds(relErr(first, final) <= propBand, kindAdoptedRaw,
+			"with a line (derived %.4f): the load landed at %d s: the first mu on record %.4f at %d s, %.4f three minutes on (truth %.4f)",
+			derived, load, first, firstAt, final, truth)
 	}
-	return holds(relErr((first+truth)/2, first) <= propBand, kindAdoptedRaw,
-		"a first rate[1m] of %.4f (served %d s of the minute) against %.4f was admitted", first, served, truth)
 }
 
 // checkITLMissedRowTimeBase is checkITLMissedRow on the time base: k the

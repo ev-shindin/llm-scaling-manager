@@ -1368,6 +1368,7 @@ itl|
 its
 itself
 joined
+joined-clock-starts-at-first-served
 joined-refused-ready-since
 joint
 judged
@@ -1691,6 +1692,7 @@ mu
 mu-exact-repeat-is-use
 mu-forget-reported
 mu-key-bucket-held
+mu-latch-reads-smoothed-ratio
 mu-latch-restores-safe-side
 mu-margin-clamp
 mu-minority-figure-expires
@@ -2124,6 +2126,7 @@ range
 rank
 rate
 rateRefused
+rates
 rather
 ratio
 raw

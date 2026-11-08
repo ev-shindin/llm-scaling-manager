@@ -444,11 +444,11 @@ func arHolds(t *testing.T, what string, check func(uint64) error, n int) {
 	t.Logf("%s: %s", what, run)
 }
 
-// The latch cases are ledger rows: at the measured rate noise the 1.6-2.0
-// band is narrower than the noise. With noise inside the band the same case
-// holds, and with returnRatio at maxRatio (an operator setting validation
-// admits) it fails: the case sees the band, and what fails at the measured
-// noise is the band's width, not the rig.
+// The latch cases hold at the measured rate noise since the latch reads a
+// smoothed ratio (#526, SwitchMuLatchReadsSmoothedRatio); with the switch
+// off they fail on the 1.6-2.0 band's width (TestMuLatchBand_*). With noise
+// inside the band the same case holds, and with returnRatio at maxRatio (an
+// operator setting validation admits) it fails: the case sees the band.
 func TestPropertyARLatchReturn_TheBandHoldsNoiseInsideIt(t *testing.T) {
 	arHolds(t, "noise inside the band", checkLatchReturnExcursion(tuningDefault, insideBand), 20)
 	noBand := tuningWith(func(t *config.AnalyzerTuning) { t.MuChoice.ReturnRatio = config.DefaultMeasuredDerivedMaxRatio })

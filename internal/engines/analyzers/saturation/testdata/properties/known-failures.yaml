@@ -12,34 +12,6 @@
 # measured is the fail rate over the case's seeds and the first failure, when
 # the row was written. owner is what clears the row: an issue ("#394"), or
 # "open". CheckLedger holds that form only, so a closed issue passes.
-- id: edges/mu/latch-return-excursion
-  class: edges
-  learner: mu
-  expect: flipped
-  finding: "The mu latch's band (returnRatio 1.6 to maxRatio 2.0 over the derived mu) is narrower than the per-pod rate noise measured on E1 (sigma 10 %, lag-one 0.3): a stale measurement coming back from 2.5x across 1.6 once lets go, is set again by a reading past 2.0, and lets go again, so the measured/derived choice reverses several times per excursion."
-  measured: "100/100 seeds; seed 1, high side, ramp 2.5x -> 1.2x: 7 reversals in 168 cycles, first at cycles 50, 53, 62, 65"
-  owner: "#495"
-- id: edges/mu/latch-return-excursion-nondefault
-  class: edges
-  learner: mu
-  expect: flipped
-  finding: "At returnRatio 1.3 the latch's band is 1.3 to 2.0 (0.5 to 0.77 on the low side), still within reach of the measured rate noise (sigma 10 %, lag-one 0.3): a tail reading past maxRatio after the latch let go sets it again for a cycle."
-  measured: "11/100 seeds; seed 9, low side, on 1/1.3: 3 reversals in 168 cycles, at cycles 8, 54, 55"
-  owner: "#495"
-- id: edges/mu/latch-return-excursion-nondefault-sigma15
-  class: edges
-  learner: mu
-  expect: flipped
-  finding: "At returnRatio 1.3 and the high end of the measured rate noise (sigma 15 %, lag-one 0.3; E1 reads 7.5-18.9 %), the 1.3-2.0 band is crossed by the noise on almost every excursion and the measured/derived choice reverses several times."
-  measured: "97/100 seeds; seed 1, high side, ramp 2.5x -> 0.975x: 7 reversals in 168 cycles, first at cycles 50, 53, 63, 65"
-  owner: "#495"
-- id: edges/mu/latch-return-excursion-sigma15
-  class: edges
-  learner: mu
-  expect: flipped
-  finding: "At the high end of the measured rate noise (sigma 15 %, lag-one 0.3) the default 1.6-2.0 band is crossed from the first minutes of the ramp: the latch lets go on noise while the noise-free ratio is still 2.4x, and the choice reverses over a dozen times."
-  measured: "100/100 seeds; seed 1, high side, ramp 2.5x -> 1.2x: 17 reversals in 168 cycles, first at cycles 16, 17, 32, 37"
-  owner: "#495"
 - id: edges/mu/sibling-tolerance-excursion
   class: edges
   learner: mu
@@ -61,13 +33,6 @@
   finding: "Under assumed stress noise on the output length (4 %, phi 0.9; E1 measures 0.5-0.9 %, where the main case passes) the shape tracker, which moves its anchor and the key on one reading past 20 % and anchors on that reading, is moved a second time by one tail reading and back by the next."
   measured: "5/1000 seeds (64, 247, 407, 901, 926); seed 64, down to 775: 1000 -> 792 at cycle 91 -> 630 at 171 -> 765 at 185"
   owner: "#495"
-- id: first-sample/mu/joiner-rate-timebase
-  class: first-sample
-  learner: mu
-  expect: adopted-raw
-  finding: "On the time base, a replica's first saturated rate[1m] covers only the part of the minute it served. Served for half the minute or more, the reading is at least half the derived mu and passes minMeasuredOfDerived, so a second reading moves the figure by up to half. The joined test refuses this for a replica Ready under a minute, not for one routed to late. Measured on throughputRefusal alone, so an upper bound: the analyzer's full path also applies tokensOutrunCompletions and the served bound, which may refuse some of these readings."
-  measured: "51/100 seeds; seed 3: served 30 s of its first minute, rate[1m] 0.1095 against a derived 0.2118, admitted"
-  owner: "#392"
 - id: liveness/floor/closed-loop-decode-step-start-463s
   class: liveness
   learner: floor

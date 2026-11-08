@@ -74,3 +74,13 @@ const SwitchMuUnreadAtTarget = "mu-unread-replica-at-target"
 // no saturated reading in agreement with it. Off, as before, with no line the
 // measurement stood for good.
 const SwitchMuMinorityFigureExpires = "mu-minority-figure-expires"
+
+// SwitchMuLatchReadsSmoothedRatio is the replay switch for the band of mu's
+// stale latch (#526; analyzer-learner.md, 3.5). On, a stale measurement is
+// set and released on its ratio to the derived figure smoothed over
+// MuLatchRatioSmoothing (muChoice.smoothRatio), so one excursion of the
+// ratio changes the choice at most once at the rate noise measured on the
+// gauges. Off, as before, each cycle's single ratio set and released it,
+// and at that noise the 1.6-2.0 band let go and set again several times in
+// one excursion.
+const SwitchMuLatchReadsSmoothedRatio = "mu-latch-reads-smoothed-ratio"

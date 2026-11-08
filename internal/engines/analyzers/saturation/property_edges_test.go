@@ -596,7 +596,9 @@ func probeStale(tn config.AnalyzerTuning, ratio float64) probe {
 }
 
 // probeLatch: a stale measurement latched at 2.5x the derived mu comes back
-// to x: still yielded above returnRatio.
+// to x: still yielded above returnRatio. The latch reads the ratio smoothed
+// over MuLatchRatioSmoothing (SwitchMuLatchReadsSmoothedRatio), so x is
+// read latchSettle later, when nothing of 2.5x is left in it.
 func probeLatch(tn config.AnalyzerTuning) probe {
 	return func(r *rand.Rand, x float64) (bool, error) {
 		a := NewSaturationAnalyzer(capacity.NewStore())
@@ -607,9 +609,14 @@ func probeLatch(tn config.AnalyzerTuning) probe {
 		if !a.measuredYieldsToDerived(propMuKey, throughputReading{rate: 2.5 * d.Rate}, d, 0, t, now) {
 			return false, errors.New("precondition: a stale measurement at 2.5x did not yield")
 		}
-		return a.measuredYieldsToDerived(propMuKey, throughputReading{rate: x * d.Rate}, d, 0, t, now.Add(propCycle)), nil
+		return a.measuredYieldsToDerived(propMuKey, throughputReading{rate: x * d.Rate}, d, 0, t, now.Add(latchSettle)), nil
 	}
 }
+
+// latchSettle is how long after a reading the latch's smoothed ratio
+// (muChoice.smoothRatio) is the next reading's exactly: 40 time constants,
+// e^-40 of the old ratio, which rounds the next reading's weight to 1.
+const latchSettle = 40 * MuLatchRatioSmoothing
 
 // probeAgreement: a saturated reading at x of the window's median refreshes
 // the measurement within 2x.

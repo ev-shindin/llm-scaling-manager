@@ -181,6 +181,8 @@ func (a *SaturationAnalyzer) recordSaturatedThroughputFrom(key, pod string, rate
 			c.saturatedAt, c.yielded, c.sibling = time.Time{}, false, 0
 			c.unread, c.unreadLast, c.minority, c.released = 0, 0, false, false
 			c.latchKnown = true // a new window has given way to nothing
+			// Nor is the old window's ratio to the derived figure its own.
+			c.ratio, c.ratioAt = 0, time.Time{}
 		}
 	}
 	lastRead, read := a.throughputLastRead[key]

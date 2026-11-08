@@ -262,6 +262,15 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 	if in.queue < int(in.threshold) || in.tokens <= 0 {
 		return "" // not a saturated reading; nothing to judge
 	}
+	// A replica whose first return of load in its current settle is under a
+	// rate window old is treated as joined: its rate window still holds idle
+	// seconds from before it was routed to, whenever its Pod became Ready
+	// (joined_served.go). Always read from the settle tracker (settleView:
+	// the engine's, or the analyzer's own), whichever source the joined test
+	// above used: with SwitchK2ReadsSettle off it is ORed into the memo's
+	// verdict.
+	routedLate := !joined && a.firstReturnUnderWindow(in, now)
+	joined = joined || routedLate
 	// A replica that joined under a window ago is filling, whatever its queue
 	// says: its one-minute gauges still hold the minute before it was routed
 	// to (throughput_admission.go).
@@ -269,6 +278,9 @@ func (a *SaturationAnalyzer) k2Unsettled(in k2SettleInput) string {
 		a.paths.add(pathK2UnsettledJoined, 1)
 		if byReadyAt {
 			a.paths.add(pathJoinedReady, 1)
+		}
+		if routedLate {
+			return k2UnsettledRoutedLate
 		}
 		return k2UnsettledJoined
 	}

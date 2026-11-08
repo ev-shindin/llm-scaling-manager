@@ -119,6 +119,7 @@ edges/start-time/zero-sample
 first-sample/itl/one-reading
 first-sample/k2/second-reading
 first-sample/mu/joiner-rate-timebase
+first-sample/mu/joiner-rate-timebase-line
 first-sample/mu/low-first-reading
 first-sample/shape-hold/first-shape-no-change
 first-sample/slo-itl/one-reading
