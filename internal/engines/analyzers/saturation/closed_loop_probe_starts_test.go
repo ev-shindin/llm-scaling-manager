@@ -212,45 +212,54 @@ func startViolation(kinds, msgs []string, summary string) error {
 // even split (queueBlind) or the shortest-queue limit.
 func checkStartProbe(sp startProbe, start time.Duration, queueBlind bool) func(uint64) error {
 	return func(uint64) error {
-		pc := sp.pc
-		pc.start, pc.queueBlind = start, queueBlind
-		pc.horizon = verdictHorizon(pc, sp.step, start)
-		r, err := tryProbe(pc)
-		if err != nil {
-			return err
-		}
-		summary := fmt.Sprintf("start %s (published %.1f s): need %d, final %d at %s (bound %.1f), peak %d (ceiling %.1f), under need for %s (bound %s); fleet %s",
-			start, r.startSeconds, r.need, r.final, pc.horizon, overBound(r.need), r.peak, peakCeiling(r.need), r.underFor,
-			underBound(start), traceSummary(r.trace))
-		var kinds, msgs []string
-		broke := func(kind, format string, args ...any) {
-			kinds, msgs = append(kinds, kind), append(msgs, fmt.Sprintf(format, args...))
-		}
-		if math.Abs(r.startSeconds-start.Seconds()) > 1 {
-			broke(kindBiased, "the start learner publishes %.1f s against a true start of %s", r.startSeconds, start)
-		}
-		if float64(r.peak) > peakCeiling(r.need) {
-			broke(kindOverPriced, "peak %d over the ceiling %.1f", r.peak, peakCeiling(r.need))
-		}
-		if float64(r.final) > overBound(r.need) {
-			broke(kindOverPriced, "over-ordered at the horizon: %d against %.1f", r.final, overBound(r.need))
-		}
-		if r.final < r.need-1 || r.underFor > underBound(start) {
-			broke(kindStale, "under-ordered: final %d, under need for %s", r.final, r.underFor)
-		}
-		if sp.sameAsUnrestarted {
-			control := pc
-			control.restartAt, control.snapshot = 0, false
-			c, err := tryProbe(control)
-			if err != nil {
-				return err
-			}
-			if c.underFor != r.underFor {
-				broke(kindMoved, "the restored snapshot under need for %s, %s without the restart", r.underFor, c.underFor)
-			}
-		}
-		return startViolation(kinds, msgs, summary)
+		_, err := judgeStartProbe(sp, start, queueBlind)
+		return err
 	}
+}
+
+// judgeStartProbe runs sp with its replicas starting in start, under the
+// even split (queueBlind) or the shortest-queue limit, and returns the run
+// and every check it broke as one violation (startViolation), nil when none.
+// sp.pc.switches are set on every process.
+func judgeStartProbe(sp startProbe, start time.Duration, queueBlind bool) (probeResult, error) {
+	pc := sp.pc
+	pc.start, pc.queueBlind = start, queueBlind
+	pc.horizon = verdictHorizon(pc, sp.step, start)
+	r, err := tryProbe(pc)
+	if err != nil {
+		return r, err
+	}
+	summary := fmt.Sprintf("start %s (published %.1f s): need %d, final %d at %s (bound %.1f), peak %d (ceiling %.1f), under need for %s (bound %s); fleet %s",
+		start, r.startSeconds, r.need, r.final, pc.horizon, overBound(r.need), r.peak, peakCeiling(r.need), r.underFor,
+		underBound(start), traceSummary(r.trace))
+	var kinds, msgs []string
+	broke := func(kind, format string, args ...any) {
+		kinds, msgs = append(kinds, kind), append(msgs, fmt.Sprintf(format, args...))
+	}
+	if math.Abs(r.startSeconds-start.Seconds()) > 1 {
+		broke(kindBiased, "the start learner publishes %.1f s against a true start of %s", r.startSeconds, start)
+	}
+	if float64(r.peak) > peakCeiling(r.need) {
+		broke(kindOverPriced, "peak %d over the ceiling %.1f", r.peak, peakCeiling(r.need))
+	}
+	if float64(r.final) > overBound(r.need) {
+		broke(kindOverPriced, "over-ordered at the horizon: %d against %.1f", r.final, overBound(r.need))
+	}
+	if r.final < r.need-1 || r.underFor > underBound(start) {
+		broke(kindStale, "under-ordered: final %d, under need for %s", r.final, r.underFor)
+	}
+	if sp.sameAsUnrestarted {
+		control := pc
+		control.restartAt, control.snapshot = 0, false
+		c, err := tryProbe(control)
+		if err != nil {
+			return r, err
+		}
+		if c.underFor != r.underFor {
+			broke(kindMoved, "the restored snapshot under need for %s, %s without the restart", r.underFor, c.underFor)
+		}
+	}
+	return r, startViolation(kinds, msgs, summary)
 }
 
 // tryProbe is runProbe outside a test: a require failure inside the probe

@@ -717,7 +717,7 @@ func startingCredit(startSeconds float64, pending int, ages []float64) float64 {
 		// clear the queue because it has been told phantom replicas are about to
 		// serve. Between one and two starts is still plausibly a slow start and
 		// earns the window.
-		if age > staleStartFactor*startSeconds {
+		if age > StaleStartFactor*startSeconds {
 			continue
 		}
 		credit += min(age, startSeconds)
@@ -748,9 +748,9 @@ type startingReplicas struct {
 	ages  []float64
 }
 
-// staleStartFactor is how many starts a Pod may have been starting for before it
+// StaleStartFactor is how many starts a Pod may have been starting for before it
 // stops counting as one.
-const staleStartFactor = 2.0
+const StaleStartFactor = 2.0
 
 // queueJustifiedReplicas is how many replicas a standing queue of q requests is
 // worth: what it takes to clear it within the drain window at mu requests per

@@ -130,14 +130,36 @@ so each must keep up with all of it), and on the total otherwise.
   arrivals above what the fleet drains. In review a step from 3 to 9 req/s on
   one replica of `mu` 6 read 319 763 before it and 280 704 / 354 736 under
   the occupancy (387 263 / 454 573) that held the queue for the cycles it
-  tripled; it now keeps the occupancy demand
-  (`TestThroughputFloor_AGrowingQueueKeepsTheOccupancyDemand`). The swap is
-  made on a queue that has stood a cycle, so its first cycle is priced at
-  `max(measured, floor)`, which only over-orders.
-- A role with no `mu` keeps the residency charge, except prefill's share of the
-  scheduler queue, which is dropped. A prefill replica holds a prompt for its
-  prefill time plus the hand-off. Only a saturated decode makes it hold longer,
-  and more prefill replicas do not fix that.
+  tripled. The swap is made on a queue that has stood a cycle. While the queue
+  grows, a role that generates output is priced by drain time instead (below):
+  on that step, 452 469 / 485 046 at 15 s and 30 s, the true 9 req/s plus the
+  queue over 60 s, never under the 390 933 the arrivals alone need. Occupancy's
+  387 263 was under them
+  (`TestThroughputFloor_AGrowingQueueKeepsTheOccupancyDemand`).
+- **Queued work priced by drain time** (`queue_drain.go`, switch
+  `queue-priced-as-drain`, #520). On a decode or aggregated role with a
+  backlog, where the swap above does not run, the queue is priced as
+  `max(resident, (arrivals + B / T) / mu x P, the floor's tokens)`. It applies
+  before the role has a `mu` that may order, and while its backlog grows.
+  - `arrivals` is `max(lambda, sum of RunningRequests / AvgServiceTime +
+    dB/dt)`: what the replicas complete now, plus the queue's signed growth.
+    `dB/dt` is the smaller of the slopes over the last cycle and over the
+    lookback.
+  - `B` is each replica's queue, capped at what it drains in `T`, plus the
+    scheduler's queue for its owner. `T` is `DrainHorizon`.
+  - Before two readings, `mu` is `FirstReadHaircut` (0.85) times the median
+    `RunningRequests / AvgServiceTime` of the role's saturated rows: at the
+    batch cap, or KV at or over k1 with a queue, read only when at least half
+    the role's replicas are. That price, and its read, hold until every
+    replica ordered under it is Ready.
+  - While the backlog grows, `mu` is the lower of the floor's `mu` and that
+    first read.
+  - The design and its measurements are in
+    [the proposal](../proposals/analyzer-learner.md#queued-work-priced-by-drain-time-as-built-520).
+- A role with no `mu` and no saturated row keeps the residency charge, except
+  prefill's share of the scheduler queue, which is dropped. A prefill replica
+  holds a prompt for its prefill time plus the hand-off. Only a saturated
+  decode makes it hold longer, and more prefill replicas do not fix that.
 
 The floor writes the role's figure (`RoleDemand`) and the model total. A role
 it raises also lifts that role's variants (`raiseVariantsToRoles`, the same

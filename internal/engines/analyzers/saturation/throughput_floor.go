@@ -720,17 +720,40 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			}
 		}
 	}
-	if len(tf.ByRole) == 0 {
+	// Queued work priced by drain time where the swap below does not run
+	// (queue_drain.go, SwitchQueuePricedAsDrain): read per generating role.
+	// Not under a shape change: the service-time window then mixes two
+	// shapes, an error the first-read haircut does not bound.
+	var drain map[string]drainRead
+	if a.queuePricedAsDrain && !staleShape {
+		drain = a.drainReads(input, replicas, variants, roleOf, cfg.KvCacheThreshold)
+	}
+	if len(tf.ByRole) == 0 && len(drain) == 0 {
 		return totalDemand
 	}
 	// Roles in a stable order, so a two-role fleet logs the same way each cycle.
-	roles := slices.Sorted(maps.Keys(tf.ByRole))
+	roleSet := make(map[string]bool, len(tf.ByRole)+len(drain))
+	for role := range tf.ByRole {
+		roleSet[role] = true
+	}
+	for role := range drain {
+		roleSet[role] = true
+	}
+	roles := slices.Sorted(maps.Keys(roleSet))
+	var drainCtx drainContext
+	if drain != nil {
+		drainCtx = drainContext{lambda: offeredArrivalRate(input), startSeconds: startSeconds,
+			freshPending: freshPendingByRole(variants, startSeconds), grew: grew}
+		if a.now != nil {
+			drainCtx.now = a.now()
+		}
+	}
 	modelTotalBefore := totalDemand
 	// Each role the floor raised, at its floored figure: its variants follow.
 	raised := make(map[string]float64)
 
 	for _, role := range roles {
-		tokens := tf.ByRole[role]
+		tokens, inFloor := tf.ByRole[role]
 		term := tf.Terms[role]
 		var measured float64
 		if roleDemand != nil {
@@ -786,8 +809,23 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		// one replica of mu 6 read 319 763 before it and 280 704, 354 736
 		// under occupancy's 387 263 and 454 573, for the three cycles the
 		// queue tripled.
-		want := tune.flooredDemand(measured, resident, tokens, term.ArrivalDemand,
-			term.MayOrder && !term.Held && !grew[role])
+		want := measured
+		if inFloor {
+			want = tune.flooredDemand(measured, resident, tokens, term.ArrivalDemand,
+				term.MayOrder && !term.Held && !grew[role])
+		}
+		var dp drainPriced
+		if d, ok := drain[role]; ok {
+			var sched float64
+			if queueOwner == "" || role == queueOwner {
+				if _, owns := eppByRole[role]; owns {
+					sched = eppQueued
+				}
+			}
+			want, dp = a.priceDrain(input.Namespace, input.ModelID, role, d, drainCtx, drainTerm{
+				term: term, inFloor: inFloor, tokens: tokens, want: want, resident: resident, scheduler: sched,
+			})
+		}
 		if want == measured {
 			continue
 		}
@@ -835,7 +873,13 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			// The backlog grew past the noise band over the last minute
 			// (noteBacklogGrowth), so the swap was not made: arrivals
 			// exceed what the fleet drains.
-			"backlogGrew", grew[role])
+			"backlogGrew", grew[role],
+			// The drain price (queue_drain.go): the region that priced the
+			// role's queue, none where the floor's own figure stood, and its
+			// terms.
+			"drainRegion", dp.region, "drainArrival", dp.arrival, "drainGrowth", dp.growth,
+			"drainMu", dp.mu, "drainFirstReadMu", dp.mu0, "drainBacklog", dp.backlog,
+			"drainHorizon", dp.horizon, "drainReplicas", dp.replicas)
 		if roleDemand != nil {
 			roleDemand[role] = want
 		}

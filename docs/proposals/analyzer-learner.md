@@ -1183,7 +1183,7 @@ restores, exact repeats and unknown ages. Two rules apply to all:
 | start time | **both** | too low under-orders a fleet that is behind (λ > mu · ready). Too high, in `internal/signals/floor/floor.go`: `DrainHorizon` under-prices the backlog whenever S exceeds 60 s, `startingCredit` credits a stuck pod for up to 2S, and a fleet with spare projects more drain and orders less. Share pacing errs the other way: too low moves GPUs for bursts that end first. PR 5 bounds both sides |
 | share need history (#14) | too low for the role, too high for its neighbours | `PeakNeed` is a max of adjacent-pair minima, low by design; trimming to the swing window ages a peak out with no new evidence |
 | share release time (#15) | too low | p90 over ≥ 3 releases is the max at n = 3 |
-| first-read mu, `RunningRequests / AvgServiceTime` at the batch cap (design, #520) | too high | its one-minute service-time window still holds completions from before the cap: +5 % to +15 % on the first saturated row of three recordings. Priced at 0.85 of the reading until two mu readings exist ([queued work priced by drain time](#queued-work-priced-by-drain-time-before-mu-design-520-cause-b)) |
+| first-read mu, `RunningRequests / AvgServiceTime` on a saturated row (#520) | too high | its one-minute service-time window still holds completions from before the cap: +5 % to +15 % on the first saturated row of three recordings. Priced at 0.85 of the reading before two mu readings, and that price held until every replica ordered under it is Ready; while the backlog grows, the lower of it and the floor's mu ([as built](#queued-work-priced-by-drain-time-as-built-520)) |
 
 A clamp that stops k2's fit from rising would turn it into a running minimum:
 one admitted low reading would then price the fleet for good.
@@ -3981,8 +3981,11 @@ stabilization), need 18, bound 21.7:
 
 #### Queued work priced by drain time before mu, design (#520 cause B)
 
-Design only, not built. One replay switch, `queue-priced-as-drain`
-(`SwitchQueuePricedAsDrain`), on from the constructor.
+Built on `fix/queue-priced-as-drain`, behind one replay switch,
+`queue-priced-as-drain` (`SwitchQueuePricedAsDrain`, `queue_drain.go`), on
+from the constructor. The design follows as written, with the decisions taken
+on it (at the end) and what the build changed and measured
+([as built](#queued-work-priced-by-drain-time-as-built-520)).
 
 **What goes wrong.** Occupancy charges each queued request as if it were
 resident: queue x (input + output) tokens (`waitingQueueDemand`,
@@ -4024,7 +4027,8 @@ demand   = max(resident KV, N x P, floor's tokens)    tokens; the engine divides
   priced at whatever batch the replica ran
   ([why it was retired](../developer-guide/saturation-demand-floor.md#why-the-littles-law-floor-was-retired)).
 - **`dB/dt`** is the positive growth rate of the role's uncapped backlog: the
-  larger of the slope over one cycle and the slope over `BacklogGrowthLookback`.
+  smaller of the slope over one cycle and the slope over `BacklogGrowthLookback`
+  (the design said the larger; the build measured why not, see as built).
   It counts only on cycles where `backlogGrew` is set, so jitter under the 10 %
   band adds nothing. `noteBacklogGrowth` already keeps the readings.
 - **The sum of `RunningRequests / AvgServiceTime`** is what the replicas
@@ -4036,7 +4040,9 @@ demand   = max(resident KV, N x P, floor's tokens)    tokens; the engine divides
   the role that owns it. The cap stays on while the queue grows. Growth is
   priced through `dB/dt` and no longer through an uncapped queue. On a decode
   role with `CapacityQueueKnown`, only the capacity part counts. The rest waits
-  for KV from prefill, and decode capacity does not drain it.
+  for KV from prefill, and decode capacity does not drain it. Main already
+  reads it so: `ReplicaCapacity.QueueLength` is the decode capacity view
+  (`decodeCapacityView`), the full count at the sequence cap.
 - **No starting-replica credit.** `B` is the queue that stands now, not
   `backlogAtLanding`. Each cycle prices the queue standing then, and the
   engine's anticipated-supply subtraction keeps an increment from being
@@ -4271,28 +4277,153 @@ The SLO-side guards, in the order the brief asked for:
 - **Prefill** (above), and k2 relearned during a step (23.9k to 55k on
   `pd-restart`). The drain term divides P out; the resident term does not.
 
-##### Open questions (need a decision)
+##### Decisions
 
-1. **How long the haircut lasts.** It is a fixed 0.85, lifted at the second mu
-   reading. The alternative is to keep it until the replicas ordered under it
-   have landed, so that a scale-down window shorter than the start cannot take
-   one back. The cost is spend for one start.
-2. **Relaxing the growing-queue test.** Its second assertion moves from "not
-   under occupancy" to "not under the drain price at the true arrival rate",
-   because the proposal sits 0.8 % and 6.6 % under occupancy at 45 s and 60 s.
-3. **Whether the price may raise demand.** On the probe's 463 s cases the
-   price orders 9 and 17 on the first saturated cycle, where occupancy orders
-   about 3 and 6. That raise is what keeps the time under need at about 8 min.
-   The alternative caps the price at today's measured demand, so it only
-   lowers. That brings back the 9m31s margin.
-4. **T.** Keep `DrainHorizon`, max(start, 60 s), which is cheap but leaves a
-   long TTFT breach at slow starts. The alternative is a shorter fixed T (60 s
-   after the landing), which orders more replicas for the same queue.
-5. **Decode `B` on the capacity queue.** Recommended. The effect on
-   `pd-restart` is small (about -0.07 replicas at 12:28:02).
-6. **The resident term while a queue drains.** Out of scope here. It is the
-   next term to look at if the build's shortest-queue probe still sits at the
-   peak ceiling.
+1. **The haircut holds until every replica ordered under it is Ready**, not
+   until the second mu reading. While one is starting, demand is at least the
+   haircut price at the cycle's arrivals and queue (`noteDrainHold`).
+2. **The price may raise demand** above occupancy's.
+3. **T stays `DrainHorizon`**: max(start, 60 s).
+4. **The growing-queue test's second assertion is relaxed** to "not under
+   the drain price at the true arrival rate". The price stays above the
+   arrivals.
+5. **Decode `B` is the capacity queue.** Main already reads it that way
+   (`decodeCapacityView`).
+6. **The resident spike on landing is the next step**, out of scope here.
+
+#### Queued work priced by drain time, as built (#520)
+
+Built on main 98ac6fc22 with #529 (the queue-aware probe router) merged in,
+behind `queue-priced-as-drain` (`D/queue_drain.go`, wired in
+`applyThroughputFloor`). The formula is the design's, with five changes
+the build measured:
+
+- **`dB/dt` is signed, and the smaller of the two slopes.** The design took
+  the larger, floored at zero. The larger read growth for a minute after it
+  stopped, because `backlogGrew` and the slope over its lookback both linger.
+  On the probe's 90 s load step the first replicas landed at 3m45s with the
+  queue down from 420 to 410, yet the arrivals read 9.38 for 6. The haircut
+  price then ordered 16 for a need of 9. Floored at zero, a draining queue
+  read its drain as arrivals: the replicas complete what arrives plus the
+  backlog they drain. On `pd-restart` at 12:47:36 they completed 25.4 req/s
+  against 20.7 arriving, and the same queue was priced twice, as arrivals and
+  as B / T. Signed, completions plus `dB/dt` is the arrivals whichever way the
+  queue moves. The max with lambda keeps a noisy negative slope from pricing
+  under the router's rate.
+- **The first read needs a majority.** `mu0` is read only when at least half
+  the role's replicas are saturated. Read from a minority, the probe's slow
+  pod (one replica at 0.3 of fifteen siblings) was the fleet's first read and
+  ordered 58 replicas for a need of 18.
+- **A held haircut keeps its first read.** While the hold lasts, a cycle with
+  no majority read prices at the read the hold was taken at. Replicas that
+  land under a hold start unsaturated, and without it the 463 s load step fell
+  back to the residency charge the cycle its first order landed, peaking at 15
+  against a ceiling of 14.5.
+- **The probe rig reports `RunningRequests` and `AvgServiceTime`.** The
+  service time is one minute's mean, and runs shorter on a smaller batch (0.6
+  of the limit's at no load). The first saturated row therefore reads mu
+  13.6 % high, inside the 5 % to 15 % the recordings showed.
+- **The haircut is a field (`drainHaircut`)**, so a test can take it out.
+
+**Probe, every start case, both routers, on against off** (peak / final /
+time under need; bounds: ceiling 14.5 for need 9 and 26.5 for need 17,
+under-need 3m45s, 5m0s and 11m13s at 15, 90 and 463 s;
+`TestQueueDrain_StartProbesOnAndOff`):
+
+| case | on | off |
+| --- | --- | --- |
+| load-step 15 s | 10 / 9 / 0s | 11 / 9 / 1m15s |
+| load-step 15 s jsq | 12 / 9 / 0s | 17 / 9 / 1m15s, over |
+| load-step 90 s | 11 / 9 / 0s | 12 / 9 / 3m30s |
+| load-step 90 s jsq | 12 / 9 / 0s | 19 / 9 / 3m30s, over |
+| load-step 463 s | 11 / 10 / 30s | 16 / 11 / 8m0s, over |
+| load-step 463 s jsq | 14 / 9 / 30s | 23 / 9 / 8m0s, over |
+| decode-step 15 s | 20 / 17 / 0s | 20 / 17 / 0s |
+| decode-step 15 s jsq | 23 / 17 / 0s | 23 / 17 / 0s |
+| decode-step 90 s | 24 / 17 / 0s | 24 / 17 / 0s |
+| decode-step 90 s jsq | 24 / 17 / 0s | 25 / 17 / 0s |
+| decode-step 463 s | 22 / 21 / 0s, over | 22 / 21 / 0s, over |
+| decode-step 463 s jsq | 31 / 23 / 0s, over | 31 / 23 / 0s, over |
+| restart-before-step 15 s | 21 / 17 / 0s | 22 / 17 / 1m15s |
+| restart-before-step 15 s jsq | 23 / 17 / 0s | 34 / 17 / 1m15s, over |
+| restart-before-step 90 s | 22 / 17 / 0s | 23 / 17 / 3m30s |
+| restart-before-step 90 s jsq | 24 / 17 / 0s | 37 / 17 / 3m30s, over |
+| restart-before-step 463 s | 23 / 21 / 15s, over | 29 / 23 / 8m0s, over |
+| restart-before-step 463 s jsq | 28 / 23 / 15s, over | 44 / 23 / 8m0s, over |
+| restored-snapshot 15 s | 20 / 17 / 0s | 20 / 17 / 0s |
+| restored-snapshot 15 s jsq | 23 / 17 / 0s | 23 / 17 / 0s |
+| restored-snapshot 90 s | 24 / 17 / 0s | 24 / 17 / 0s |
+| restored-snapshot 90 s jsq | 24 / 17 / 0s | 25 / 17 / 0s |
+| restored-snapshot 463 s | 22 / 21 / 0s, over | 22 / 21 / 0s, over |
+| restored-snapshot 463 s jsq | 31 / 23 / 0s, over | 31 / 23 / 0s, over |
+
+- **Six #520 ledger rows pass and are removed:** load-step 15 s jsq, 90 s
+  jsq, 463 s and 463 s jsq; restart-before-step 15 s jsq and 90 s jsq.
+- **No case breaks a kind it did not break off, and none is under need past
+  its bound.** The longest time under need is 30 s, against 8m0s off.
+- **The six rows left fail as they did, over-priced.** decode-step and
+  restored-snapshot at 463 s are unchanged: a derived mu prices them, so the
+  floor's swap runs and the queue charge was never theirs; the excess is the
+  even split's queue (#520 cause C) and the resident term. restart-before-step
+  at 463 s falls to 23 and 28 peaks but ends at 21 and 23, over the 20.5
+  bound, for the same reason. Their `measured` fields say so.
+- **What the haircut buys** (`TestQueueDrain_TheHaircutKeepsTheSlowStartsAtNeed`):
+  at 463 s, 30 s and 15 s under need with it, 1m30s without it. With AR(1)
+  noise on the service time (sigma 15 %, phi 0.9, eight seeds) the figures are
+  2m30s and 45 s with it, 3m15s and 2m15s without. The design's analytic
+  9m31s without the haircut did not show: the rig's first read is high, and
+  the arrival term orders on its own. The bound does not catch taking the
+  haircut out on these cases; what it buys is margin.
+- **Property cases** `liveness/floor/first-read-noise-*` (12 cases: sigma
+  10 % and 15 % at phi 0.3, and 15 % at phi 0.9; load-step and
+  restart-before-step at 463 s, both routers; 100 seeds each) hold that the
+  first read under noise never puts the fleet under need past its bound. All
+  pass.
+
+**`pd-restart` golden** (decode role demand, replicas at the target):
+
+| cycle | today | as built |
+| --- | --- | --- |
+| 12:26:47 | 2.28 | 1.99 |
+| 12:27:02 | 6.01 | 3.17 |
+| 12:27:17 | 5.25 | 3.10 |
+| 12:27:32 | 7.24 | 3.30 |
+| 12:27:47 | 7.66 | 3.26 |
+| 12:28:02 | 9.87 | 3.51 (haircut held) |
+| 12:28:17 | 10.65 | 4.32 (resident) |
+| 12:28:32 | 9.06 | 4.38 |
+
+The second step (12:45:05 to 12:47:36, about 4 to 25 req/s on a fleet capped
+at 4 with up to 1366 queued) moves too: 42.87 becomes 8.96 at 12:45:20, and
+17.38 becomes 6.21 at 12:46:20. One cycle goes up, 12:47:36, from 6.55 to
+7.10. The arrivals alone need at most 4.81 there, so no cycle prices under
+them. The rows that moved: decode demand down on 17 cycles (to -79 %) and up
+on 1 (+8.5 %).
+
+**Other goldens** (role demand, cycles moved): e1 down 13 (to -30 %) and
+up 22 (to +93.6 %); e1-tuned down 7 (to -26.5 %) and up 30 (to +20.1 %);
+throughput-sweep-restart down 5 (to -25.8 %) and up 1 (+9.2 %);
+ttft-staircase-b-off down 18 (to -70.2 %); ttft-staircase-c-on down 21 (to
+-50.2 %) and up 1 (+22.2 %). acceptance, engine and mu-paths do not move: a
+minority of their replicas queues. e1's +93.6 % is one cycle, 14:05:32,
+1.48 to 2.86 replicas: a joiner landed and took 221 queued at once, which reads
+as growth (the next cycle is 2.11). The four
+start-seed and start-restored goldens fall about 99 % in tokens: their P is
+6 tokens, so occupancy priced a queue of 50 at over a thousand replicas, and
+the drain price reads about 18 at mu 0.3.
+
+On the staircase the derived mu (26) reads over what the two saturated
+replicas served (about 18 to 21 each, lambda less the queue's growth). In the
+growing region the price takes the lower of the floor's mu and the first
+read, and never goes under the floor's own figure. Its lowest moved cycle, 1.78
+at 02:11:39, has lambda 14.3, which is 0.89 replicas at the served rate.
+
+Each new test runs the switch on and off: `TestQueueDrain_*`, and
+`TestThroughputFloor_AGrowingQueueKeepsTheOccupancyDemand` (on: not under
+the true arrivals plus the queue over T; off: not under occupancy, which at
+15 s is 387 263, under the arrivals alone at 390 933).
+
+Not run on a cluster.
 
 ## 8. Risks and limits
 

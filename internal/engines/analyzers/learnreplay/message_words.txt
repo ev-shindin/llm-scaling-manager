@@ -612,6 +612,7 @@ become
 becomes
 been
 before
+before-two-readings
 begins
 behavior
 behind
@@ -936,6 +937,14 @@ doubles
 down
 downstreamSaturated
 dp_size
+drainArrival
+drainBacklog
+drainFirstReadMu
+drainGrowth
+drainHorizon
+drainMu
+drainRegion
+drainReplicas
 drainSeconds
 drains
 drawn
@@ -1188,6 +1197,7 @@ guaranteed
 guaranteedGPUs
 had
 hadShape
+haircut-held
 half
 hand
 handed
@@ -2086,6 +2096,7 @@ queries
 query
 question
 queue
+queue-priced-as-drain
 queue-scorer
 queueJustifiedReplicas
 queueLength

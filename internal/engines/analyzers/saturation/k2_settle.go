@@ -139,7 +139,11 @@ type settleMemo struct {
 	// the newest one at least BacklogGrowthLookback ago, oldest first
 	// (noteBacklogGrowth); empty before the first.
 	backlogs []backlogReading
-	seen     time.Time
+	// drainHolds is each role's haircut price held while the replicas it
+	// ordered start (noteDrainHold, SwitchQueuePricedAsDrain). Not
+	// persisted: a restart comes back without one, on the first read again.
+	drainHolds map[string]drainHold
+	seen       time.Time
 }
 
 // readySighting is one replica's Pod Ready time (zero when unknown) and the

@@ -123,7 +123,8 @@ func (a *SaturationAnalyzer) WithRecorder(rec *learnrec.Recorder) *SaturationAna
 // SwitchITLFitsAggregated, SwitchITLAggregatedShapeTerm,
 // SwitchITLAggregatedSizes, SwitchPrefillCapacityObserve,
 // SwitchStartConfirmsByDistinctPod, SwitchPrefillBusyMinutes,
-// SwitchPrefillAQuadratic and SwitchITLOneSidedAtCap; a name it does not
+// SwitchPrefillAQuadratic, SwitchITLOneSidedAtCap and
+// SwitchQueuePricedAsDrain; a name it does not
 // know is an error, and sets nothing. Never called on a production path;
 // a test holds that.
 func (a *SaturationAnalyzer) SetSwitchesForReplay(switches map[string]bool) error {
@@ -237,6 +238,9 @@ func (a *SaturationAnalyzer) switchFields() map[string]*bool {
 		// Issue #495: the variants follow a role the throughput floor
 		// raises (throughput_floor.go).
 		SwitchThroughputFloorRaisesVariants: &a.floorRaisesVariants,
+		// Issue #520: queued work priced by drain time before mu, and
+		// while the backlog grows (queue_drain.go).
+		SwitchQueuePricedAsDrain: &a.queuePricedAsDrain,
 	}
 }
 

@@ -82,61 +82,19 @@
   finding: "At a 463 s start the decode step (need 17), with no restart, overshoots to 31 replicas when the first order lands and is still at 23 at the backlog allowance (44m15s): the first replicas hold their start's queue full while the joiners carry the arrivals, and occupancy counts both. At the shortest-queue limit (a bound on the EPP, not the observed router) each replica that joins a queued fleet fills to the fleet's queue at once, and occupancy reads every replica full while the queue drains (#520)."
   measured: "1/1 seed; shortest-queue limit: peak 31 at 23.25 min (ceiling 26.5), 24 from 39.25 min, 23 from 42.25 min, final 23 at 44m15s against the 20.5 bound, never under need"
   owner: "#520"
-- id: liveness/floor/closed-loop-load-step-start-15s-jsq
-  class: liveness
-  learner: floor
-  expect: over-priced
-  finding: "At a 15 s start the aggregated load step from 1.2 to 6 req/s (need 9) overshoots to 17 replicas, over the 14.5 ceiling, and ends at need. At the shortest-queue limit (a bound on the EPP, not the observed router) each replica that joins a queued fleet fills to the fleet's queue at once, and occupancy reads every replica full while the queue drains (#520)."
-  measured: "1/1 seed; shortest-queue limit: peak 17 at 4 min, 9 from 9.25 min, final 9, under need 1m15s (bound 3m45s); 11 on the even split"
-  owner: "#520"
-- id: liveness/floor/closed-loop-load-step-start-463s
-  class: liveness
-  learner: floor
-  expect: over-priced
-  finding: "At a 463 s start the aggregated load step from 1.2 to 6 req/s (need 9) overshoots to 16 replicas, over the 14.5 ceiling, and ends at 11, 0.35 replica inside the bound; showing the starting replicas does not change it (#520)."
-  measured: "1/1 seed; even split, starting replicas shown: peak 16 at 15.25 min, final 11 (bound 11.35), under need 8m0s (bound 11m13s)"
-  owner: "#520"
-- id: liveness/floor/closed-loop-load-step-start-463s-jsq
-  class: liveness
-  learner: floor
-  expect: over-priced
-  finding: "At a 463 s start the aggregated load step from 1.2 to 6 req/s (need 9) overshoots to 23 replicas, over the 14.5 ceiling, and ends at need. At the shortest-queue limit (a bound on the EPP, not the observed router) each replica that joins a queued fleet fills to the fleet's queue at once, and occupancy reads every replica full while the queue drains (#520)."
-  measured: "1/1 seed; shortest-queue limit: peak 23 at 21.5 min, 9 from 31 min, final 9, under need 8m0s (bound 11m13s)"
-  owner: "#520"
-- id: liveness/floor/closed-loop-load-step-start-90s-jsq
-  class: liveness
-  learner: floor
-  expect: over-priced
-  finding: "At a 90 s start the aggregated load step from 1.2 to 6 req/s (need 9) overshoots to 19 replicas, over the 14.5 ceiling, and ends at need. At the shortest-queue limit (a bound on the EPP, not the observed router) each replica that joins a queued fleet fills to the fleet's queue at once, and occupancy reads every replica full while the queue drains (#520)."
-  measured: "1/1 seed; shortest-queue limit: peak 19 at 8.25 min, 9 from 13.75 min, final 9, under need 3m30s (bound 5m0s); 12 on the even split"
-  owner: "#520"
-- id: liveness/floor/closed-loop-restart-before-step-start-15s-jsq
-  class: liveness
-  learner: floor
-  expect: over-priced
-  finding: "At a 15 s start the decode step after a controller restart, with no mu yet, overshoots to 34 replicas, over the 26.5 ceiling, and ends at need. At the shortest-queue limit (a bound on the EPP, not the observed router) each replica that joins a queued fleet fills to the fleet's queue at once, and occupancy reads every replica full while the queue drains, and with no mu the floor cannot order against it (#520)."
-  measured: "1/1 seed; shortest-queue limit: peak 34 at 17.25 min, 17 from 22.75 min, final 17, under need 1m15s (bound 3m45s); 22 on the even split"
-  owner: "#520"
 - id: liveness/floor/closed-loop-restart-before-step-start-463s
   class: liveness
   learner: floor
   expect: over-priced
-  finding: "At a 463 s start the decode step after a controller restart, with no mu yet, overshoots to 29 replicas and ends at 23, over the bound even at the backlog allowance (44m15s); showing the starting replicas does not change it (#520)."
-  measured: "1/1 seed; even split, starting replicas shown: peak 29 against the 26.5 ceiling, final 23 at 44m15s against the 20.5 bound, under need 8m0s (bound 11m13s)"
+  finding: "At a 463 s start the decode step after a controller restart, with no mu yet, ends at 21, over the bound even at the backlog allowance (44m15s). Since the queue is priced by drain time (queue-priced-as-drain) the peak is 23, inside the 26.5 ceiling, and the fleet is under need 15 s; what stays over is the even split feeding the first replicas their start's queue, which then drain at mu less their share (#520 cause C)."
+  measured: "1/1 seed; even split, starting replicas shown: peak 23 (ceiling 26.5), final 21 at 44m15s against the 20.5 bound, under need 15s (bound 11m13s); switch off: peak 29, final 23, under need 8m0s"
   owner: "#520"
 - id: liveness/floor/closed-loop-restart-before-step-start-463s-jsq
   class: liveness
   learner: floor
   expect: over-priced
-  finding: "At a 463 s start the decode step after a controller restart, with no mu yet, climbs to 44 replicas, over the 26.5 ceiling, and is at 23 at the backlog allowance (44m15s). At the shortest-queue limit (a bound on the EPP, not the observed router) each replica that joins a queued fleet fills to the fleet's queue at once, and occupancy reads every replica full while the queue drains, and with no mu the floor cannot order against it (#520)."
-  measured: "1/1 seed; shortest-queue limit: peak 44 from 34.75 min, 23 from 42.75 min, final 23 at 44m15s against the 20.5 bound, under need 8m0s (bound 11m13s)"
-  owner: "#520"
-- id: liveness/floor/closed-loop-restart-before-step-start-90s-jsq
-  class: liveness
-  learner: floor
-  expect: over-priced
-  finding: "At a 90 s start the decode step after a controller restart, with no mu yet, overshoots to 37 replicas, over the 26.5 ceiling, and ends at need. At the shortest-queue limit (a bound on the EPP, not the observed router) each replica that joins a queued fleet fills to the fleet's queue at once, and occupancy reads every replica full while the queue drains, and with no mu the floor cannot order against it (#520)."
-  measured: "1/1 seed; shortest-queue limit: peak 37 at 21.5 min, 17 from 27.5 min, final 17, under need 3m30s (bound 5m0s); 23 on the even split"
+  finding: "At a 463 s start the decode step after a controller restart, with no mu yet, climbs to 28 replicas, over the 26.5 ceiling (44 before the queue was priced by drain time), and is at 23 at the backlog allowance (44m15s). At the shortest-queue limit (a bound on the EPP, not the observed router) each replica that joins a queued fleet fills to the fleet's queue at once, and occupancy reads every replica full while the queue drains, and with no mu the floor cannot order against it (#520)."
+  measured: "1/1 seed; shortest-queue limit: peak 28, final 23 at 44m15s against the 20.5 bound, under need 15s (bound 11m13s); switch off: peak 44, final 23, under need 8m0s"
   owner: "#520"
 - id: liveness/floor/closed-loop-restored-snapshot-start-463s
   class: liveness

@@ -101,31 +101,61 @@ func TestFloorTrust(t *testing.T) {
 // test reads lambda against the resident KV, which a saturated replica holds
 // whatever the rate, so it trusted the ramping rate and priced the growing
 // queue as drain: 319 763 before the step, then 280 704 and 354 736 under the
-// occupancy that held it. A queue that grew since the last cycle keeps the
-// occupancy demand, and the order never dips under its pre-step value.
+// occupancy that held it. The order never dips under its pre-step value.
+//
+// With the queue priced by drain time (SwitchQueuePricedAsDrain, #520) the
+// replica's rows say what lambda does not: it completes 6 req/s
+// (RunningRequests / AvgServiceTime) and its queue grows 3 a second, so the
+// arrivals are 9, and a growing queue is priced at the true arrivals plus
+// the queue over the drain time: 452 469, 485 046, 517 624 and 550 202,
+// never under the 390 933 the arrivals alone need. That is under occupancy at
+// 45 s (-0.8 %) and 60 s (-6.6 %), which charged the queue as resident. Off,
+// as before, a queue that grew keeps the occupancy demand, which at 15 s is
+// 387 263: under the arrivals alone.
 func TestThroughputFloor_AGrowingQueueKeepsTheOccupancyDemand(t *testing.T) {
-	const mu, resident, perReq = 6.0, 260_123.0, 239_323.0 / 160
+	for _, on := range []bool{true, false} {
+		t.Run(fmt.Sprintf("queue-priced-as-drain=%v", on), func(t *testing.T) {
+			growingQueueKeepsDemand(t, on)
+		})
+	}
+}
+
+func growingQueueKeepsDemand(t *testing.T, on bool) {
+	const mu, resident, perReq, p = 6.0, 260_123.0, 239_323.0 / 160, 260_622.0
 	a := NewSaturationAnalyzer(capacity.NewStore())
+	assert.NoError(t, a.SetSwitchesForReplay(map[string]bool{SwitchQueuePricedAsDrain: on}))
+	clock := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return clock }
 	pre := 0.0
 	for ts := 0; ts <= 60; ts += 15 {
-		in := makeAnalyzerInput(nil, nil)
-		in.ArrivalRate = 3 + 6*min(float64(ts)/60, 1)
+		clock = time.Date(2026, 11, 8, 12, 0, ts, 0, time.UTC)
 		q := 40 + 3*ts
+		row := domain.ReplicaMetrics{PodName: "p", VariantName: "v", QueueLength: q, KvCacheUsage: 0.9,
+			RunningRequests: 16, AvgServiceTime: 16 / mu}
+		in := makeAnalyzerInput([]domain.ReplicaMetrics{row}, nil)
+		in.ArrivalRate = 3 + 6*min(float64(ts)/60, 1)
 		charge := perReq * float64(q)
 		rcs := []capacity.ReplicaCapacity{{
 			VariantName: "v", PodName: "p", QueueLength: q, LocalQueueDemand: int64(charge),
 			SaturatedThroughput: mu, SaturatedThroughputSamples: 2,
 		}}
-		vcs := []domain.VariantCapacity{{VariantName: "v", Role: domain.RoleDecode, ReplicaCount: 1, PerReplicaCapacity: 260_622}}
+		vcs := []domain.VariantCapacity{{VariantName: "v", Role: domain.RoleDecode, ReplicaCount: 1, PerReplicaCapacity: p}}
 		occupancy := resident + float64(int64(charge))
 		got := a.applyThroughputFloor(in, in.Config.(*config.ScalingPolicy), rcs, vcs,
 			occupancy, nil, nil, 0, false, logr.Discard())
-		t.Logf("t=%2ds lambda read %.1f, queue %3d: demand %7.0f, occupancy %7.0f", ts, in.ArrivalRate, q, got, occupancy)
+		drain := (9 + float64(q)/60) / mu * p
+		t.Logf("t=%2ds lambda read %.1f, queue %3d: demand %7.0f, occupancy %7.0f, drain at the true arrivals %7.0f",
+			ts, in.ArrivalRate, q, got, occupancy, drain)
 		if ts == 0 {
 			pre = got
 			continue
 		}
 		assert.GreaterOrEqual(t, got, pre, "t=%ds: demand fell under its pre-step %.0f while the queue grew", ts, pre)
+		if on {
+			assert.GreaterOrEqual(t, got, 9/mu*p, "t=%ds: demand under what the true arrivals alone need", ts)
+			assert.GreaterOrEqual(t, got, drain-1, "t=%ds: demand under the drain price at the true arrival rate", ts)
+			continue
+		}
 		assert.GreaterOrEqual(t, got, occupancy-1, "t=%ds: demand under the occupancy holding a growing queue", ts)
 	}
 }

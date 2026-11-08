@@ -569,6 +569,43 @@ var replaySwitches = withMoves(staircaseSwitchMoves, map[string][]string{
 		"start-restored/composite-results.csv", "start-restored/learned-state.csv", "start-restored/results.csv",
 	},
 	settle.SwitchFirstSightRestored: nil,
+	// Issue #520 cause B (saturation.SwitchQueuePricedAsDrain,
+	// queue_drain.go): on a generating role with a backlog, before its mu
+	// may order and while the backlog grows, the queue is priced by drain
+	// time, max(resident, (arrivals + B / T) / mu x P, the floor's tokens),
+	// not as resident KV. Base: main at 98ac6fc22 with #529 merged. Measured
+	// alone against all off, it moves the role and model demand outputs
+	// (results, composite-results, composite-roles) of the fixtures whose
+	// majority queues in those regions, and nothing else: the role demand
+	// falls on the cycles the residency charge priced (pd-restart's decode
+	// 9.87 -> 3.51 replicas at the target at 12:28:02, never under the
+	// arrivals at the settled mu; down at most 70 % on ttft-staircase-b-off),
+	// and rises where the arrivals the replicas complete outrun what
+	// occupancy held (up to +20 % on e1-tuned; +93.6 % on one e1 cycle, a
+	// joiner taking 221 queued at once). The start fixtures fall by two orders
+	// of magnitude in tokens: their P is a few tokens, so the residency charge
+	// priced a queue of 50 at over a thousand replicas.
+	//
+	// With SwitchThroughputFloorRaisesVariants on as well, the roles it
+	// raises lift their variants: all on also moves the variant outputs
+	// (variant-capacities, composite-variants, warm-pool-pressure) of
+	// e1, e1-tuned, pd-restart, throughput-sweep-restart and
+	// ttft-staircase-c-on, which that switch's row and base digests already
+	// name; neither alone moves them.
+	saturation.SwitchQueuePricedAsDrain: {
+		"e1-tuned/results.csv", "e1/results.csv",
+		"pd-restart/composite-results.csv", "pd-restart/composite-roles.csv", "pd-restart/results.csv",
+		"start-restored/composite-results.csv", "start-restored/results.csv",
+		"start-seed-restart-2/composite-results.csv", "start-seed-restart-2/results.csv",
+		"start-seed-restart/composite-results.csv", "start-seed-restart/results.csv",
+		"start-seed/composite-results.csv", "start-seed/results.csv",
+		"throughput-sweep-restart/composite-results.csv", "throughput-sweep-restart/composite-roles.csv",
+		"throughput-sweep-restart/results.csv",
+		"ttft-staircase-b-off/composite-results.csv", "ttft-staircase-b-off/composite-roles.csv",
+		"ttft-staircase-b-off/results.csv",
+		"ttft-staircase-c-on/composite-results.csv", "ttft-staircase-c-on/composite-roles.csv",
+		"ttft-staircase-c-on/results.csv",
+	},
 })
 
 // learner4b2Seams is learner PR 4b-2's switches, earlier seams now (merged
@@ -696,7 +733,7 @@ func switchPackage(name string) string {
 // in the PR, or cleanup PR, that deletes it with zero golden diff. Learner
 // PR 4a's rows are learner4aSeams, 4b-1's learner4b1Seams and 4b-2's
 // learner4b2Seams, merged in.
-var earlierSeams = withMoves(floorVariantsSeamMoves, withMoves(staircaseSeamMoves, withMoves(startSeedSeamMoves, withSeams(learner4b2Seams, withSeams(learner4b1Seams, withSeams(learner4aSeams, map[string][]string{
+var earlierSeams = withMoves(queueDrainSeamMoves, withMoves(floorVariantsSeamMoves, withMoves(staircaseSeamMoves, withMoves(startSeedSeamMoves, withSeams(learner4b2Seams, withSeams(learner4b1Seams, withSeams(learner4aSeams, map[string][]string{
 	// #275 (two switches) and #438, this file's own rows before learner PR
 	// 4b-1 (see replaySwitches).
 	saturation.SwitchZeroReplicaDataParallel: nil,
@@ -818,7 +855,15 @@ var earlierSeams = withMoves(floorVariantsSeamMoves, withMoves(staircaseSeamMove
 		"acceptance/learned-state.csv", "acceptance/lines.csv", "acceptance/variant-capacities.csv",
 		"engine/learned-state.csv", "engine/lines.csv", "engine/variant-capacities.csv",
 	},
-}))))))
+})))))))
+
+// queueDrainSeamMoves is what each earlier seam, off alone from all on,
+// moves since #520's SwitchQueuePricedAsDrain is on in all on: off,
+// k2's first reading prices pd-restart's decode P differently on the cycles
+// the drain price holds the role, and the role demand moves with it.
+var queueDrainSeamMoves = map[string][]string{
+	saturation.SwitchK2FirstReadingWaits: {"pd-restart/results.csv"},
+}
 
 // floorVariantsSeamMoves is what each earlier seam, off alone from all on,
 // moves since #495's SwitchThroughputFloorRaisesVariants is on in all on:
@@ -1302,6 +1347,13 @@ var heldBy = map[string][]heldTest{
 		{"../saturation", "TestStartBlend_TheMeasuredLineNamesTheBlend"},
 		{"../saturation", "TestStartSeed_TheGaugeNamesTheSource"},
 	},
+	// Issue #520: each runs the switch on and off and asserts both.
+	saturation.SwitchQueuePricedAsDrain: {
+		{"../saturation", "TestQueueDrain_BeforeTwoReadingsPricesTheQueueAsDrain"},
+		{"../saturation", "TestQueueDrain_TheHaircutHoldsUntilTheOrderLands"},
+		{"../saturation", "TestQueueDrain_StartProbesOnAndOff"},
+		{"../saturation", "TestThroughputFloor_AGrowingQueueKeepsTheOccupancyDemand"},
+	},
 }
 
 // Every switch the saturation and slo hooks accept has a row: this PR's, or
@@ -1497,6 +1549,12 @@ var switchBase = withDigests(staircaseBase, map[string]string{
 	"ttft-three-pods/composite-variants.csv":      "0c7aca65a555d5a39de684ee7db853956f386fb214f9c026113d437ec197db83",
 	"ttft-three-pods/variant-capacities.csv":      "7d68c9e1678b68410d5bf6a0915a37203e12ef265a14a0d742c5bb4dff78cf0a",
 	"ttft-three-pods/warm-pool-pressure.csv":      "56504bb5742a691393ebb6b33642a5d29fb3518f2bc70588376baee370a90fb4",
+	// Issue #520's outputs no earlier switch names, as main holds them at
+	// 98ac6fc22.
+	"pd-restart/composite-roles.csv":           "b6629b4b25d4b0d8d20246ec2319ce6e6c596482def6d1fe7634977798918e07",
+	"start-seed-restart/composite-results.csv": "fdd5b5d08bd3a1f00808059dd69ace8f2ea4663b8fb4644954466457201ad479",
+	"start-seed-restart/results.csv":           "bb9aa0f3e3c65b6238d347078e77f676b0177fa5cd4c1eff7f655a51c1810704",
+	"ttft-staircase-c-on/composite-roles.csv":  "15209adb30d085aa0a77ffd46b98c9ad3612732647c7b4992d57faecb3c22f92",
 })
 
 // The slow tests of this package run in parallel with each other (each
