@@ -151,7 +151,7 @@ func TestQueueDrain_TheHaircutHoldsUntilTheOrderLands(t *testing.T) {
 	run := func(on bool) []float64 {
 		clock := propStart
 		a := drainAnalyzer(t, on, &clock)
-		var out []float64
+		out := make([]float64, 0, 6)
 		for i, c := range []struct {
 			pending, samples int
 			mu               float64

@@ -245,11 +245,11 @@ func runProbe(t probeTB, pc probeCase) probeResult {
 			if pc.serviceNoise != nil {
 				svc *= 1 + pc.serviceNoise(r.Index, elapsed)
 			}
-			h := append(service[r.Name], svc)
-			if len(h) > probeServiceWindow {
-				h = h[len(h)-probeServiceWindow:]
+			service[r.Name] = append(service[r.Name], svc)
+			if n := len(service[r.Name]); n > probeServiceWindow {
+				service[r.Name] = service[r.Name][n-probeServiceWindow:]
 			}
-			service[r.Name] = h
+			h := service[r.Name]
 			var mean float64
 			for _, s := range h {
 				mean += s
