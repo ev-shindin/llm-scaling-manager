@@ -1722,16 +1722,60 @@ accounting.
 The replay is open loop: recorded inputs do not depend on what the analyzer
 ordered. Holds, latches, the sibling yield and a self-sealing low mu are
 closed-loop behaviours, and `closed_loop_probe_test.go` drives the
-saturation analyzer with a fleet simulator instead: arrivals split over the
-Ready replicas, each serves up to its true mu and queues the rest, the
-analyzer's order becomes replicas after a 90 s start time, and a release
-waits out a 5-minute stabilization. The verdict compares the fleet the loop
-settles at with need, the fleet a truthful analyzer orders once every
-replica serves the fleet's mean mu, within 15 % plus one replica. It also
-fails a fleet that sits below need at the arrival rate of the moment for
-more than 5 minutes in one run, an under-order mid-run. Each passing case
-asserts its premise from mu's reports: the load step measured mu and priced
-it `measured`, and the slow replica's rate was counted `refused-under-served`.
+saturation analyzer with a fleet simulator instead
+(`internal/engines/analyzers/internal/learnertest/fleet.go`): arrivals are
+routed over the Ready replicas, each serves up to its true mu and queues the
+rest, the analyzer's order becomes replicas after a 90 s start time, and a
+release waits out a 5-minute stabilization. The verdict compares the fleet
+the loop settles at with need, the fleet a truthful analyzer orders once
+every replica serves the fleet's mean mu, within 15 % plus one replica. It
+also fails a fleet that sits below need at the arrival rate of the moment
+for more than 5 minutes in one run, an under-order mid-run. Each passing
+case asserts its premise from mu's reports: the load step measured mu and
+priced it `measured`, and the slow replica's rate was counted
+`refused-under-served`.
+
+The simulator has two routers, and the real one lies between them.
+
+- **Shortest-queue limit** (the default). Each cycle's arrivals fill the
+  replicas with the fewest requests waiting up to a common level. A replica
+  whose queue is already above that level gets nothing. This is the fluid
+  limit of sending every request to the shortest queue.
+- **Even split** (`queueBlind`). Arrivals are split by weight alone, whatever
+  is queued, the way a Service's round robin splits them.
+
+The EPP is neither. Its queue scorer is one weighted scorer beside KV
+utilization and prefix affinity, and a slow replica has been seen to queue
+behind it (#282 H1). With no queue anywhere the two routers agree.
+
+The two bounds fail in opposite directions. The even split keeps feeding
+replicas that are already queued, so behind a slow start the backlog on
+the first replicas drains for most of an hour (#520, cause C). The
+shortest-queue limit fills every replica that joins a queued fleet to the
+same queue at once, so the analyzer reads the whole fleet as full and
+overshoots (#520, cause B). Cases whose premise is a replica that queues
+while its siblings do not (the slow replica, the steering router) set
+`queueBlind`, because the shortest-queue limit would never let that queue
+form.
+
+Every start-probe property case (`closed_loop_probe_starts_test.go`) runs
+under both routers. Case names that end in `-jsq` are the shortest-queue
+limit, so a ledger row says which bound it failed under; neither is a
+measurement of the observed router. A case is checked against every
+property, and one that breaks two kinds of check fails with both kinds
+joined by `+`. A row ledgered for one kind therefore still fails the build
+when its case breaks another.
+
+These cases judge the final fleet at the case's horizon or at
+`backlogClears`, whichever is later:
+`step + (start + cycle) * max(lambda1 / C, 1) + stabilization`. In that
+formula, lambda1 is the rate after the step and C is the summed mu of the
+replicas that were serving before it. The first replicas queue for
+`start + cycle`, and a queued request is served on its own replica at its
+mu at best, so the drain takes at least as long again times
+`lambda1 / C - 1`. The stabilization window is an allowance for a fleet that
+ordered over need during the drain to come back down; a fleet that ordered
+exactly need would not need it. A case with no load step keeps its horizon.
 
 `TestClosedLoopProbe_KnownFailing_*` is a case today's code fails: one slow
 replica at 0.55 of its siblings' rate passes the served bound, becomes mu,
